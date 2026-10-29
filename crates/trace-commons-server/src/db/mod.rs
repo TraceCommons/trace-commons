@@ -17,6 +17,10 @@ use crate::trace_invite_registry::InviteTenantMode;
 pub mod postgres;
 pub mod postgres_inference_connection;
 mod postgres_payout;
+mod postgres_referral;
+#[doc(hidden)]
+pub use postgres_referral::REFERRAL_RESOLVER_ASSUME_SQL;
+mod postgres_referral_bonus;
 
 mod trace_corpus_common;
 mod trace_corpus_pg;
@@ -3100,6 +3104,47 @@ impl PayoutLinkState {
     }
 }
 
+/// Which program of a link a line pays (V142; referral rewards spec
+/// section 5). `Earned` is the account's own credit on the link's program
+/// and every line written before V142; `Referral` is referral bonus on the
+/// link's referral program. A link has at most one pending line per stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+pub enum PayoutStream {
+    #[default]
+    Earned,
+    Referral,
+}
+
+impl PayoutStream {
+    pub const ALL: [Self; 2] = [Self::Earned, Self::Referral];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Earned => "earned",
+            Self::Referral => "referral",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "earned" => Self::Earned,
+            "referral" => Self::Referral,
+            _ => return None,
+        })
+    }
+}
+
+/// What a referrer is owed on a rail from referral bonus: the signed sum of
+/// `bonus_units` over its `trace_referral_bonus_accruals` rows (bonus,
+/// reversal and void), and how many rows that is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayoutReferralOwed {
+    /// `None` when the rows sum below zero, which bonus rows that take back
+    /// only what they gave cannot produce: the pass holds rather than guess.
+    pub net: Option<u128>,
+    pub bonus_count: i64,
+}
+
 /// A payout line's state. `Pending` until its outcome is recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PayoutLineState {
@@ -3353,6 +3398,9 @@ pub enum PayoutLinkClose {
     /// The named successor is not a `waiting` link of the same account and
     /// rail.
     SuccessorNotWaiting,
+    /// A referral total was given for a link with no referral program, or
+    /// none for a link that has one.
+    ReferralTotalMismatch,
 }
 
 /// A stored link. `Debug` redacts the recipient and the program.
@@ -3366,6 +3414,12 @@ pub struct PayoutLink {
     pub recipient: SealedRecipient,
     pub program: String,
     pub final_paid: Option<AtomicUnits>,
+    /// The link's referral program, set when its first referral line is
+    /// written; `None` on a link that never carried referral credit.
+    pub referral_program: Option<String>,
+    /// The referral program's total, recorded when a link that has one
+    /// closes.
+    pub final_paid_referral: Option<AtomicUnits>,
     pub unlink_requested_at: Option<chrono::DateTime<chrono::Utc>>,
     pub recipient_unavailable_at: Option<chrono::DateTime<chrono::Utc>>,
     pub version: i64,
@@ -3392,17 +3446,33 @@ pub struct PayoutLineWrite {
     pub rail_id: RailId,
     pub target_total: AtomicUnits,
     pub delta: AtomicUnits,
+    /// For an earned line, the account's accrual count; for a referral
+    /// line, its bonus row count.
     pub owed_through_accrual_count: i64,
+    pub stream: PayoutStream,
+    /// A referral line's program: the link's referral program, which the
+    /// insert sets on the link when it has none yet. Required for a
+    /// referral line and refused on an earned one.
+    pub referral_program: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingPayoutLineInsert {
     Inserted,
-    /// The link already has an unresolved line, which recovery handles first.
+    /// The link already has an unresolved line on this stream, which
+    /// recovery handles first.
     LinkHasPendingLine,
     /// The link is not `active` (or is not this account's on this rail): a
     /// line is never written to a waiting, closing or closed link.
     LinkNotActive,
+    /// A referral line names a program other than the referral program the
+    /// link already carries; nothing changed.
+    ReferralProgramMismatch,
+    /// A referral line's delta is more than the referrer's referral owed
+    /// less what is confirmed or pending, read under the account lock a
+    /// void takes: owed fell since the pass priced the line. Nothing
+    /// changed.
+    ReferralOwedChanged,
 }
 
 /// A stored line. `Debug` redacts the account.
@@ -3418,6 +3488,7 @@ pub struct PayoutLine {
     pub receipt_hash: Option<String>,
     pub attempts: i32,
     pub last_error_label: Option<String>,
+    pub stream: PayoutStream,
 }
 
 /// How a pending line is resolved. `Retry` keeps it pending and counts the
@@ -3595,6 +3666,7 @@ impl std::fmt::Debug for PayoutLineWrite {
         formatter
             .debug_struct("PayoutLineWrite")
             .field("rail_id", &self.rail_id)
+            .field("stream", &self.stream)
             .finish_non_exhaustive()
     }
 }
@@ -3604,6 +3676,7 @@ impl std::fmt::Debug for PayoutLine {
         formatter
             .debug_struct("PayoutLine")
             .field("rail_id", &self.rail_id)
+            .field("stream", &self.stream)
             .field("state", &self.state)
             .field("attempts", &self.attempts)
             .field("last_error_label", &self.last_error_label)
@@ -3838,12 +3911,46 @@ pub trait PayoutStore: Send + Sync {
     /// link has a `pending` line. Concurrent writers are excluded by the
     /// rail pass's single-flight lock; the V132 link trigger refuses a close
     /// over a pending line as a backstop.
+    ///
+    /// The earned stream only: a link that carries a referral program closes
+    /// through [`Self::close_payout_link_streams`], or V142's shape check
+    /// refuses it.
     #[allow(clippy::too_many_arguments)]
     async fn close_payout_link(
         &self,
         tenant: &str,
         link_id: Uuid,
         final_paid: AtomicUnits,
+        successor: Option<Uuid>,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<PayoutLinkClose, DatabaseError> {
+        self.close_payout_link_streams(
+            tenant,
+            link_id,
+            final_paid,
+            None,
+            successor,
+            actor_ref_hash,
+            label,
+        )
+        .await
+    }
+
+    /// [`Self::close_payout_link`], recording each stream's final total:
+    /// `final_paid` for the earned program and, for a link with a referral
+    /// program, `final_paid_referral` (referral rewards spec section 5,
+    /// "Closing a link reads both programs"). A link with a referral program
+    /// and no `final_paid_referral`, or the reverse, is refused by the
+    /// V142 shape check and changes nothing. Refuses while a line of either
+    /// stream is pending.
+    #[allow(clippy::too_many_arguments)]
+    async fn close_payout_link_streams(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        final_paid: AtomicUnits,
+        final_paid_referral: Option<AtomicUnits>,
         successor: Option<Uuid>,
         actor_ref_hash: &str,
         label: Option<&str>,
@@ -3857,10 +3964,22 @@ pub trait PayoutStore: Send + Sync {
         line: &PayoutLineWrite,
     ) -> Result<PendingPayoutLineInsert, DatabaseError>;
 
+    /// The link's pending earned line.
     async fn pending_payout_line_for_link(
         &self,
         tenant: &str,
         link_id: Uuid,
+    ) -> Result<Option<PayoutLine>, DatabaseError> {
+        self.pending_payout_line_for_stream(tenant, link_id, PayoutStream::Earned)
+            .await
+    }
+
+    /// The link's pending line on `stream`; at most one exists.
+    async fn pending_payout_line_for_stream(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        stream: PayoutStream,
     ) -> Result<Option<PayoutLine>, DatabaseError>;
 
     async fn resolve_payout_line(
@@ -4048,12 +4167,53 @@ pub trait PayoutStore: Send + Sync {
         account: Uuid,
     ) -> Result<PayoutAccountStanding, DatabaseError>;
 
-    /// The sum of `delta` over the link's `confirmed` lines: what the
+    /// The sum of `delta` over the link's `confirmed` earned lines: what the
     /// commons has confirmed landing on the link's program.
     async fn payout_link_confirmed_total(
         &self,
         tenant: &str,
         link_id: Uuid,
+    ) -> Result<u128, DatabaseError> {
+        self.payout_link_stream_confirmed_total(tenant, link_id, PayoutStream::Earned)
+            .await
+    }
+
+    /// The sum of `delta` over the link's `confirmed` lines on `stream`:
+    /// what has landed on that stream's program of the link.
+    async fn payout_link_stream_confirmed_total(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        stream: PayoutStream,
+    ) -> Result<u128, DatabaseError>;
+
+    /// The sum of `delta` over every `confirmed` line on `stream` of the
+    /// account on `rail`, across all its links: the status route's `sent`.
+    async fn payout_account_stream_sent(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        stream: PayoutStream,
+    ) -> Result<u128, DatabaseError>;
+
+    /// What `account` is owed on `rail` from referral bonus: the signed sum
+    /// of `bonus_units` over its `trace_referral_bonus_accruals` rows.
+    /// Refuses a sum whose magnitude exceeds `u128::MAX` rather than wrap.
+    async fn payout_referral_owed(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<PayoutReferralOwed, DatabaseError>;
+
+    /// The sum of `final_paid_referral` over the account's closed links on
+    /// `rail`.
+    async fn payout_closed_links_final_paid_referral(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
     ) -> Result<u128, DatabaseError>;
 
     /// Takes the rail's single-flight pass lock (spec section 4, "One pass,
@@ -4066,6 +4226,680 @@ pub trait PayoutStore: Send + Sync {
         &self,
         rail: &RailId,
     ) -> Result<Option<PayoutPassLock>, DatabaseError>;
+}
+
+// -- referral codes and attributions (V142) ---------------------------------
+//
+// docs/superpowers/specs/2026-10-29-referral-rewards-design.md, sections 2
+// and 3. Implemented for PostgreSQL in `postgres_referral`.
+
+/// Refused applies an account may make in [`REFERRAL_REFUSAL_WINDOW_HOURS`]
+/// before every further attempt is `referral_rate_limited`, counted from its
+/// own `referral_refused` audit rows.
+pub const REFERRAL_REFUSAL_LIMIT: i64 = 10;
+pub const REFERRAL_REFUSAL_WINDOW_HOURS: i64 = 24;
+
+/// A new code row: its index, its sealed text and the refs it was sealed
+/// under (`referral_code::seal_referral_code`). `Debug` prints the id only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralCodeWrite {
+    pub code_id: Uuid,
+    pub code_index: String,
+    pub sealed_code: serde_json::Value,
+    pub code_key_ref: String,
+    pub index_pepper_ref: String,
+}
+
+impl std::fmt::Debug for ReferralCodeWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralCodeWrite")
+            .field("code_id", &self.code_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The outcome of [`ReferralStore::create_referral_code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralCodeCreate {
+    Created {
+        created_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// The account already has the most live codes it may.
+    LimitReached,
+    /// Some code, in any tenant, already has this index: draw another code.
+    /// Nothing was written.
+    IndexTaken,
+    /// No open account row.
+    AccountIneligible,
+}
+
+/// One of an account's codes, with what it brought in.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralCodeRow {
+    pub code_id: Uuid,
+    pub code_index: String,
+    pub sealed_code: serde_json::Value,
+    pub code_key_ref: String,
+    pub index_pepper_ref: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub voided_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Referees of this code whose referral is not voided.
+    pub referee_count: u64,
+    /// The sum of `bonus_units` of the bonus rows of this code's referees on
+    /// the `near_ai` rail. Signed: reversals and voids are negative.
+    pub bonus_owed: i128,
+}
+
+impl std::fmt::Debug for ReferralCodeRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralCodeRow")
+            .field("code_id", &self.code_id)
+            .field("created_at", &self.created_at)
+            .field("referee_count", &self.referee_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReferralCodeRow {
+    /// Live while none of disabled, suspended and voided is set.
+    pub fn is_live(&self) -> bool {
+        self.disabled_at.is_none() && self.suspended_at.is_none() && self.voided_at.is_none()
+    }
+}
+
+/// An account's codes and its referral totals on the `near_ai` rail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralCodesView {
+    /// Oldest first.
+    pub codes: Vec<ReferralCodeRow>,
+    /// The sum of `bonus_units` of every bonus row of the account. Signed.
+    pub bonus_owed: i128,
+    /// The sum of `delta` over the account's `confirmed` lines on the
+    /// referral stream.
+    pub bonus_sent: u128,
+}
+
+/// The outcome of [`ReferralStore::disable_referral_code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralCodeDisable {
+    Disabled,
+    /// It was already disabled; nothing changed.
+    AlreadyDisabled,
+    NotFound,
+}
+
+/// What an apply is checked against: the program window and how late an
+/// account may apply (`referral_config::ReferralConfig::apply_policy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferralApplyPolicy {
+    /// `None`: the program has not started.
+    pub program_start: Option<chrono::DateTime<chrono::Utc>>,
+    pub program_end: Option<chrono::DateTime<chrono::Utc>>,
+    pub late_days: u32,
+    /// The earning period in force at apply time, stamped on the
+    /// attribution as its `earn_until`.
+    pub earn_days: u32,
+}
+
+/// Why an apply was refused (spec section 3), in the order the checks run.
+/// Recorded only on the referee's `referral_refused` audit row; the client
+/// is answered `referral_not_applied` whatever this is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralRefusal {
+    Unavailable,
+    RateLimited,
+    CodeUnknown,
+    AlreadyReferred,
+    AccountTooOld,
+    SelfReferral,
+}
+
+impl ReferralRefusal {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "referral_unavailable",
+            Self::RateLimited => "referral_rate_limited",
+            Self::CodeUnknown => "referral_code_unknown",
+            Self::AlreadyReferred => "referral_already_referred",
+            Self::AccountTooOld => "referral_account_too_old",
+            Self::SelfReferral => "referral_self",
+        }
+    }
+}
+
+/// The outcome of [`ReferralStore::apply_referral_code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralApply {
+    Applied {
+        applied_at: chrono::DateTime<chrono::Utc>,
+        referee_account_created_at: chrono::DateTime<chrono::Utc>,
+        /// The earning period's end stamped at apply time.
+        earn_until: chrono::DateTime<chrono::Utc>,
+    },
+    Refused(ReferralRefusal),
+}
+
+/// An account's own referral, as its referee sees it: never whose code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferralAttribution {
+    pub applied_at: chrono::DateTime<chrono::Utc>,
+    pub referee_account_created_at: chrono::DateTime<chrono::Utc>,
+    /// The earning period's end stamped at apply time.
+    pub earn_until: chrono::DateTime<chrono::Utc>,
+    pub applied_via: trace_commons_protocol::referral::ReferralAppliedVia,
+    pub voided: bool,
+}
+
+/// What `GET /v1/account/referral` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferralAccountStatus {
+    pub attribution: Option<ReferralAttribution>,
+    /// `None` without an account row.
+    pub account_created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The referral code store. Every call is scoped to the auth-derived tenant
+/// and account; the one cross-tenant read (which tenant owns a code index)
+/// happens inside [`ReferralStore::apply_referral_code`] under the narrow
+/// `trace_referral_resolver` role and is not offered on its own.
+#[async_trait]
+pub trait ReferralStore: Send + Sync {
+    /// Writes a code for `account`, under an advisory lock on the account
+    /// so two concurrent creates cannot both pass the live-code limit, with
+    /// a `code_created` audit row.
+    async fn create_referral_code(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        code: &ReferralCodeWrite,
+    ) -> Result<ReferralCodeCreate, DatabaseError>;
+
+    /// The account's codes, oldest first, with referee counts and bonus
+    /// totals.
+    async fn referral_codes(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<ReferralCodesView, DatabaseError>;
+
+    /// Turns one of the account's codes off, with a `code_disabled` audit
+    /// row. Existing referrals keep earning.
+    async fn disable_referral_code(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        code_id: Uuid,
+    ) -> Result<ReferralCodeDisable, DatabaseError>;
+
+    /// Applies the code whose index is `code_index` (`None`: the input was
+    /// not a code) to `account`, running the checks of spec section 3 in
+    /// order. A refusal writes one `referral_refused` row in the referee's
+    /// tenant with the precise label. Success writes, in one transaction,
+    /// the attribution and a `referral_applied` row under the referee's
+    /// tenant, and the referee mirror and a `referral_applied` row under the
+    /// referrer's.
+    async fn apply_referral_code(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        code_index: Option<&str>,
+        applied_via: trace_commons_protocol::referral::ReferralAppliedVia,
+        policy: &ReferralApplyPolicy,
+    ) -> Result<ReferralApply, DatabaseError>;
+
+    /// The account's own referral, if any, and its creation time.
+    async fn referral_status(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<ReferralAccountStatus, DatabaseError>;
+
+    /// Records `mark` (a keyed network mark, `crate::referral_network`) for
+    /// `account`, only while the account is in the referral program: it owns
+    /// a code or has an attribution. A known mark's `last_seen_at` moves at
+    /// most once an hour. In the same transaction, deletes the account's
+    /// marks last seen more than `retention_days` ago. True when a row was
+    /// inserted or refreshed.
+    async fn record_referral_network_mark(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        mark: &str,
+        retention_days: u32,
+    ) -> Result<bool, DatabaseError>;
+}
+
+// -- Referral bonus (docs/superpowers/specs/2026-10-29-referral-rewards-design.md,
+// sections 4, 6 and 7). Implemented for PostgreSQL in
+// `postgres_referral_bonus`. Every `Debug` below prints kinds, counts and
+// labels, never an account, tenant, index or hash.
+
+/// A `trace_referral_bonus_accruals` row's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReferralBonusKind {
+    Bonus,
+    Reversal,
+    Void,
+}
+
+impl ReferralBonusKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bonus => "bonus",
+            Self::Reversal => "reversal",
+            Self::Void => "void",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "bonus" => Self::Bonus,
+            "reversal" => Self::Reversal,
+            "void" => Self::Void,
+            _ => return None,
+        })
+    }
+}
+
+/// An attribution as the bonus pass reads it, in the referee's tenant.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralAttributionRecord {
+    pub account_id: Uuid,
+    pub code_index: String,
+    pub referrer_tenant_id: String,
+    pub referrer_account_id: Uuid,
+    pub referee_ref_hash: String,
+    pub referee_account_created_at: chrono::DateTime<chrono::Utc>,
+    pub applied_at: chrono::DateTime<chrono::Utc>,
+    /// The earning period's end stamped at apply time.
+    pub earn_until: chrono::DateTime<chrono::Utc>,
+    pub voided: bool,
+}
+
+impl std::fmt::Debug for ReferralAttributionRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralAttributionRecord")
+            .field("voided", &self.voided)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One of the referee's payout accruals on a rail, with its batch's
+/// creation time (the referral window is over batches). `rail_units` is a
+/// magnitude; `kind` gives the sign.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralRefereeAccrual {
+    pub accrual_id: Uuid,
+    pub kind: PayoutAccrualKind,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub account_id: Option<Uuid>,
+    pub rail_units: u128,
+    pub rate_version: String,
+    pub instrument_id: InstrumentId,
+    pub batch_created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl std::fmt::Debug for ReferralRefereeAccrual {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralRefereeAccrual")
+            .field("kind", &self.kind)
+            .field("owned", &self.account_id.is_some())
+            .field("rate_version", &self.rate_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A stored bonus row for one referee. Units are magnitudes; `kind` gives
+/// the sign.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralBonusRecord {
+    pub kind: ReferralBonusKind,
+    pub source_accrual_id: Option<Uuid>,
+    pub bps: u32,
+    pub base_units: u128,
+    pub bonus_units: u128,
+}
+
+/// One bonus row to write in the referrer's tenant. Units are magnitudes; a
+/// reversal or void is stored negated.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralBonusWrite {
+    pub rail_id: RailId,
+    /// The referrer's account.
+    pub account_id: Uuid,
+    pub referee_ref_hash: String,
+    pub kind: ReferralBonusKind,
+    pub source_accrual_id: Option<Uuid>,
+    pub bps: u32,
+    pub base_units: u128,
+    pub bonus_units: u128,
+    pub rate_version: String,
+    pub instrument_id: InstrumentId,
+}
+
+impl std::fmt::Debug for ReferralBonusWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralBonusWrite")
+            .field("rail_id", &self.rail_id)
+            .field("kind", &self.kind)
+            .field("bps", &self.bps)
+            .field("rate_version", &self.rate_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What the referee's tenant says about the referee, for the abuse signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReferralRefereeFactsRow {
+    pub submissions: u64,
+    pub refused: u64,
+    /// A reversal accrual on the rail against the account.
+    pub reversed: bool,
+    /// Any credit accrual on the rail for the account.
+    pub credited: bool,
+}
+
+/// What the bonus pass reads in the referrer's tenant for one referee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralReferrerView {
+    /// The referrer's account row exists. A missing tenant reads as false.
+    pub referrer_exists: bool,
+    /// The mirror row, when there is one.
+    pub mirror: Option<crate::referral_abuse::RefereeMirror>,
+    /// Every bonus row for this referee on the rail.
+    pub bonus_rows: Vec<ReferralBonusRecord>,
+}
+
+/// One referral code's state, in its owner's tenant.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralCodeState {
+    pub code_index: String,
+    pub account_id: Uuid,
+    pub disabled: bool,
+    pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub suspension_labels: Vec<String>,
+    pub voided: bool,
+    /// Signal labels an operator exempted when clearing a suspension.
+    pub exempt_labels: std::collections::BTreeSet<String>,
+}
+
+impl std::fmt::Debug for ReferralCodeState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralCodeState")
+            .field("disabled", &self.disabled)
+            .field("suspended", &self.suspended_at.is_some())
+            .field("suspension_labels", &self.suspension_labels)
+            .field("voided", &self.voided)
+            .field("exempt_labels", &self.exempt_labels)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReferralCodeState {
+    pub fn state_label(&self) -> &'static str {
+        if self.voided {
+            "voided"
+        } else if self.suspended_at.is_some() {
+            "suspended"
+        } else if self.disabled {
+            "disabled"
+        } else {
+            "live"
+        }
+    }
+}
+
+/// The referrer's referral stream on a rail: `owed` is the net of the
+/// account's bonus rows (floored at zero), `sent` the referral-stream
+/// lines confirmed or still pending (a pending line may have landed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReferralOwed {
+    pub owed: u128,
+    pub sent: u128,
+}
+
+impl ReferralOwed {
+    pub fn unsent(&self) -> u128 {
+        self.owed.saturating_sub(self.sent)
+    }
+}
+
+/// What a void wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReferralVoidOutcome {
+    /// The referrer's account, for holds.
+    pub account_id: Option<Uuid>,
+    pub referees_voided: u64,
+    /// Units taken back by the void rows.
+    pub taken_back: u128,
+}
+
+/// A suspended code, for the operator list. Hash-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralSuspendedCode {
+    pub code_index: String,
+    pub suspension_labels: Vec<String>,
+    pub suspended_at: chrono::DateTime<chrono::Utc>,
+    pub referees: u64,
+    /// Net bonus of the code's referees: what the suspension holds.
+    pub held_units: u128,
+}
+
+/// One tenant's part of the dry-run report. Counts and units only.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReferralTenantReport {
+    pub codes_by_state: std::collections::BTreeMap<String, u64>,
+    pub referees: u64,
+    pub referees_by_signal: std::collections::BTreeMap<String, u64>,
+    pub owed: u128,
+    /// Unsent bonus of accounts with no open hold on the rail.
+    pub sendable: u128,
+    /// Unsent bonus of accounts with an open hold on the rail.
+    pub held: u128,
+}
+
+/// The referral bonus store.
+#[async_trait]
+pub trait ReferralBonusStore: Send + Sync {
+    // -- the referee's tenant ------------------------------------------------
+
+    /// Every attribution in the tenant (at most one per account).
+    async fn referral_attributions(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<ReferralAttributionRecord>, DatabaseError>;
+
+    /// The account's accruals on `rail` whose batch is finalized, with the
+    /// batch's creation time, oldest batch first.
+    async fn referral_referee_accruals(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        account: Uuid,
+    ) -> Result<Vec<ReferralRefereeAccrual>, DatabaseError>;
+
+    /// Submission and accrual facts about the account, for its signals.
+    async fn referral_referee_facts(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        account: Uuid,
+    ) -> Result<ReferralRefereeFactsRow, DatabaseError>;
+
+    /// Voids the account's attribution, once, with a `referral_voided` audit
+    /// row in the tenant. False when it was already void or is missing.
+    async fn void_referral_attribution(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        label: &str,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    // -- either side's own tenant -------------------------------------------
+    //
+    // Server-observed signals (owner decision 2026-10-29): each side's rows
+    // are read under that side's tenant, and only compared in the pass.
+
+    /// The distinct near-duplicate clusters (`dedup_cluster_id`) of the
+    /// gate decisions on the account's own submissions: its most recent
+    /// `limit` submissions received at or after `since`.
+    async fn referral_trace_clusters(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+        limit: i64,
+    ) -> Result<Vec<Uuid>, DatabaseError>;
+
+    /// The account's network marks, most recently seen first, at most
+    /// `limit`, none last seen more than `retention_days` ago.
+    async fn referral_network_marks(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        retention_days: u32,
+        limit: i64,
+    ) -> Result<Vec<String>, DatabaseError>;
+
+    /// Deletes the tenant's network marks last seen more than
+    /// `retention_days` ago. Returns how many.
+    async fn prune_referral_network_marks(
+        &self,
+        tenant: &str,
+        retention_days: u32,
+    ) -> Result<u64, DatabaseError>;
+
+    // -- the referrer's tenant -----------------------------------------------
+
+    async fn referral_referrer_view(
+        &self,
+        tenant: &str,
+        referrer_account: Uuid,
+        referee_ref_hash: &str,
+        rail: &RailId,
+    ) -> Result<ReferralReferrerView, DatabaseError>;
+
+    /// Inserts each row once (`ON CONFLICT DO NOTHING` on the source or void
+    /// index); returns how many were new. Never re-prices a row. Under the
+    /// referrer's account lock, drops every bonus and reversal row of a
+    /// referee whose referral was voided (mirror row or void row) after the
+    /// rows were planned.
+    async fn insert_referral_bonus_rows(
+        &self,
+        tenant: &str,
+        rows: &[ReferralBonusWrite],
+    ) -> Result<u64, DatabaseError>;
+
+    /// Rewrites the mirror row's signal labels and the referee's link
+    /// indexes.
+    async fn refresh_referral_referee_signals(
+        &self,
+        tenant: &str,
+        referee_ref_hash: &str,
+        labels: &[String],
+        recipient_index: Option<&str>,
+        subject_index: Option<&str>,
+    ) -> Result<(), DatabaseError>;
+
+    /// Every mirror row of every code `account` owns.
+    async fn referral_mirror_rows(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<Vec<crate::referral_abuse::RefereeMirror>, DatabaseError>;
+
+    /// Every code in the tenant, with its exemptions.
+    async fn referral_codes(&self, tenant: &str) -> Result<Vec<ReferralCodeState>, DatabaseError>;
+
+    /// Suspends a code that is not suspended or voided, with a
+    /// `code_suspended` audit row per label. False when nothing changed.
+    async fn suspend_referral_code(
+        &self,
+        tenant: &str,
+        code_index: &str,
+        labels: &[String],
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Clears a suspension, with one `code_resumed` audit row per exempt
+    /// label (or one labelled `operator_clear`). The exempt labels never
+    /// trip the code again. The code's owner, or `None` when the code was not
+    /// suspended.
+    async fn resume_referral_code(
+        &self,
+        tenant: &str,
+        code_index: &str,
+        exempt_labels: &[String],
+        actor_ref_hash: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
+
+    /// Voids a code: sets `voided_at`, voids each referee's mirror row, and
+    /// writes one `void` bonus row per referee taking back their unsent
+    /// bonus. `None` when the code is missing or already void.
+    async fn void_referral_code(
+        &self,
+        tenant: &str,
+        code_index: &str,
+        label: &str,
+        rail: &RailId,
+        actor_ref_hash: &str,
+    ) -> Result<Option<ReferralVoidOutcome>, DatabaseError>;
+
+    /// Voids one referee's mirror row and writes its `void` bonus row, once.
+    /// `None` when the mirror row is missing or already void.
+    async fn void_referral_referee(
+        &self,
+        tenant: &str,
+        referee_ref_hash: &str,
+        label: &str,
+        rail: &RailId,
+        actor_ref_hash: &str,
+    ) -> Result<Option<ReferralVoidOutcome>, DatabaseError>;
+
+    /// The referrer's referral stream on `rail`.
+    async fn referral_bonus_owed(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<ReferralOwed, DatabaseError>;
+
+    async fn referral_suspended_codes(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<ReferralSuspendedCode>, DatabaseError>;
+
+    async fn referral_tenant_report(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<ReferralTenantReport, DatabaseError>;
+
+    // -- deployment-wide, through `trace_referral_resolver` -------------------
+
+    /// `(tenant, code_index)` of every suspended, unvoided code.
+    async fn referral_suspended_code_tenants(&self)
+    -> Result<Vec<(String, String)>, DatabaseError>;
+
+    /// Every tenant holding a code.
+    async fn referral_code_tenants(&self) -> Result<Vec<String>, DatabaseError>;
+
+    /// Codes whose suspension began at or after `since`.
+    async fn referral_codes_suspended_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DatabaseError>;
 }
 
 #[cfg(test)]
@@ -4153,6 +4987,8 @@ mod payout_debug_tests {
                 target_total: AtomicUnits::from_raw(1),
                 delta: AtomicUnits::from_raw(1),
                 owed_through_accrual_count: 1,
+                stream: PayoutStream::Referral,
+                referral_program: Some(PROGRAM.into()),
             }
         ));
         assert_redacted(format!(
@@ -4168,6 +5004,7 @@ mod payout_debug_tests {
                 receipt_hash: None,
                 attempts: 0,
                 last_error_label: None,
+                stream: PayoutStream::Referral,
             }
         ));
         assert_redacted(format!(

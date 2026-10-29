@@ -100,6 +100,11 @@ struct Finished {
     tenant_id: String,
     device_key_id: String,
     anchor_hash: String,
+    /// Whether the referral code the finish carried was applied (referral
+    /// spec section 3). Present only when one was sent, and never a reason
+    /// the enrollment failed.
+    #[serde(default)]
+    referral: Option<trace_commons_protocol::referral::ReferralOutcome>,
 }
 
 /// Shape check for a NEAR AI tenant id: the `nearai-` namespace plus 64
@@ -134,6 +139,9 @@ pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Respo
     let Ok(ingest_url) = enroll_origin(&shared.store, &req.params) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "near_ai_enroll_invalid");
     };
+    let Ok(referral) = SignupReferral::from_params(&req.params) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "referral_code");
+    };
     let ingest_url = ingest_url.as_str();
     let api = match CloudApi::live() {
         Ok(api) => api,
@@ -141,11 +149,66 @@ pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Respo
             return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_enroll_token_unavailable");
         }
     };
-    match enroll(shared, &api, ingest_url).await {
+    match enroll(shared, &api, ingest_url, referral).await {
         Ok(value) => Response::ok(req.id, value),
         // Label only. Every failure below already carries a control name, and
         // the errors underneath them can quote a remote body or a URL.
         Err(error) => Response::err(req.id, ERR_UNAVAILABLE, label(&error)),
+    }
+}
+
+/// The optional referral code a NEAR AI sign-up carries (referral spec
+/// section 3, "At sign-up"). It never fails the enrollment: a code is applied
+/// by the commons after the account is provisioned, and the answer says
+/// whether it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SignupReferral {
+    /// No code, or an empty field: the finish carries none and the answer
+    /// has no `referral`.
+    None,
+    /// A code in canonical form, sent with the finish.
+    Send(String),
+    /// Text that is not a code. Never sent; the answer says `not_applied`.
+    NotACode,
+}
+
+impl SignupReferral {
+    /// `referral_code` from the request. A value that is not a string (or
+    /// null) is refused, as any other malformed parameter is.
+    pub(super) fn from_params(params: &serde_json::Value) -> Result<Self, ()> {
+        match params.get("referral_code") {
+            None | Some(serde_json::Value::Null) => Ok(Self::None),
+            Some(serde_json::Value::String(typed)) if typed.trim().is_empty() => Ok(Self::None),
+            Some(serde_json::Value::String(typed)) => Ok(
+                match trace_commons_protocol::referral::normalize_referral_code(typed) {
+                    Some(code) => Self::Send(code),
+                    None => Self::NotACode,
+                },
+            ),
+            Some(_) => Err(()),
+        }
+    }
+
+    fn code(&self) -> Option<String> {
+        match self {
+            Self::Send(code) => Some(code.clone()),
+            Self::None | Self::NotACode => None,
+        }
+    }
+
+    /// The answer's `referral`, from what the commons said about the code
+    /// sent. A commons that said nothing about a code it was sent applied
+    /// none.
+    fn outcome(
+        &self,
+        answered: Option<trace_commons_protocol::referral::ReferralOutcome>,
+    ) -> Option<trace_commons_protocol::referral::ReferralOutcome> {
+        use trace_commons_protocol::referral::ReferralOutcome;
+        match self {
+            Self::None => None,
+            Self::NotACode => Some(ReferralOutcome::NotApplied),
+            Self::Send(_) => Some(answered.unwrap_or(ReferralOutcome::NotApplied)),
+        }
     }
 }
 
@@ -255,6 +318,7 @@ async fn enroll(
     shared: &DaemonShared,
     api: &CloudApi,
     ingest_url: &str,
+    referral: SignupReferral,
 ) -> Result<serde_json::Value> {
     let expected = super::commons_credentials::snapshot(
         &shared.store,
@@ -263,8 +327,28 @@ async fn enroll(
     if shared.store.load_config()?.is_some() {
         bail!("near_ai_enroll_already_enrolled")
     }
-    let prepared = prepare(shared, ingest_url).await?;
-    enroll_prepared(shared, api, ingest_url, prepared, expected).await
+    let prepared = prepare(shared, ingest_url)
+        .await?
+        .with_referral_code(referral.code());
+    let enrolled = enroll_prepared(shared, api, ingest_url, prepared, expected).await?;
+    Ok(enrolled.answer(&referral))
+}
+
+/// A published enrollment: the answer for the shell, and what the commons
+/// said about the referral code the finish carried.
+struct Enrolled {
+    value: serde_json::Value,
+    referral: Option<trace_commons_protocol::referral::ReferralOutcome>,
+}
+
+impl Enrolled {
+    /// The shell's answer, with `referral` when the request carried a code.
+    fn answer(mut self, referral: &SignupReferral) -> serde_json::Value {
+        if let Some(outcome) = referral.outcome(self.referral) {
+            self.value["referral"] = serde_json::json!(outcome.as_str());
+        }
+        self.value
+    }
 }
 
 /// [`enroll`] from a prepared ceremony on: the device key, the ceremony and
@@ -277,9 +361,10 @@ async fn enroll_prepared(
     ingest_url: &str,
     prepared: Prepared,
     expected: super::commons_credentials::Snapshot,
-) -> Result<serde_json::Value> {
+) -> Result<Enrolled> {
     let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
     let provisioned = provision(shared, api, prepared, &identity).await?;
+    let referral = provisioned.finished.referral;
 
     let store = shared.store.clone();
     let ingest_url = ingest_url.to_string();
@@ -300,6 +385,7 @@ async fn enroll_prepared(
     })
     .await
     .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
+    .map(|value| Enrolled { value, referral })
 }
 
 /// Everything checked before a device key is chosen or the refresh token is
@@ -319,6 +405,17 @@ pub(super) struct Prepared {
     /// [`super::account_onboarding::LoginCapability::witness`].
     witness: Option<crate::config::WitnessSettings>,
     receipt_endpoint: Option<String>,
+    /// A canonical referral code for the finish to carry: a first
+    /// enrollment's only ([`Prepared::with_referral_code`]). A renewal or a
+    /// migration carries none.
+    referral_code: Option<String>,
+}
+
+impl Prepared {
+    pub(super) fn with_referral_code(mut self, referral_code: Option<String>) -> Self {
+        self.referral_code = referral_code;
+        self
+    }
 }
 
 /// A finished ceremony and the commons facts it ran against. Not yet
@@ -401,6 +498,7 @@ async fn prepare_on(
         audience: capability.audience,
         witness: capability.witness,
         receipt_endpoint: capability.receipt_endpoint,
+        referral_code: None,
     })
 }
 
@@ -420,8 +518,18 @@ pub(super) async fn provision(
         audience,
         witness,
         receipt_endpoint,
+        referral_code,
     } = prepared;
-    let finished = ceremony(shared, api, &commons, &session, login.as_ref(), identity).await?;
+    let finished = ceremony(
+        shared,
+        api,
+        &commons,
+        &session,
+        login.as_ref(),
+        identity,
+        referral_code.as_deref(),
+    )
+    .await?;
     Ok(Provisioned {
         issuer_url,
         audience,
@@ -442,6 +550,7 @@ async fn ceremony(
     session: &super::settings::NearAiSession,
     login: Option<&Login>,
     identity: &DeviceIdentity,
+    referral_code: Option<&str>,
 ) -> Result<Finished> {
     let verifier = random()?;
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -483,24 +592,61 @@ async fn ceremony(
             _ => anyhow!("near_ai_enroll_token_unavailable"),
         })?;
 
-    commons
-        .call_json(
-            reqwest::Method::POST,
-            PROVISION_FINISH_PATH,
-            &[],
-            // The JWT rides in the body, never a header: we are not
-            // authenticating to the commons with it, we are handing it over to
-            // be introspected.
-            Some(&serde_json::json!({
-                "ceremony_id": started.ceremony_id,
-                "code_verifier": verifier,
-                "device_public_key": identity.public_key_b64,
-                "device_signature": device_signature,
-                "access_token": access_token.access_token,
-            })),
-        )
-        .await
-        .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"))
+    // The JWT rides in the body, never a header: we are not
+    // authenticating to the commons with it, we are handing it over to
+    // be introspected.
+    let body = serde_json::json!({
+        "ceremony_id": started.ceremony_id,
+        "code_verifier": verifier,
+        "device_public_key": identity.public_key_b64,
+        "device_signature": device_signature,
+        "access_token": access_token.access_token,
+    });
+    let finish = |body: serde_json::Value| async move {
+        commons
+            .call_json::<serde_json::Value, Finished>(
+                reqwest::Method::POST,
+                PROVISION_FINISH_PATH,
+                &[],
+                Some(&body),
+            )
+            .await
+    };
+    let Some(code) = referral_code else {
+        return finish(body)
+            .await
+            .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"));
+    };
+    // Only when there is one: a finish without a code is the body every
+    // shipped commons parses.
+    let mut with_code = body.clone();
+    with_code["referral_code"] = serde_json::Value::String(code.to_owned());
+    match finish(with_code).await {
+        // A commons from before referral codes parses the finish with
+        // `deny_unknown_fields` and answers the field with its uniform deny,
+        // before it takes the ceremony or spends the token. Sign-in never
+        // fails because of the code, so the finish goes once more without
+        // it, on the same ceremony and token; the answer then carries no
+        // `referral` and the code reads as not applied. A real refusal took
+        // the ceremony, so the retry is refused the same way.
+        Err(error) if is_uniform_finish_deny(&error) => finish(body).await,
+        other => other,
+    }
+    .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"))
+}
+
+/// The label of the 400 an ingest answers for any refused native finish,
+/// one whose body it could not parse included (`native_generic_deny`).
+const UNIFORM_FINISH_DENY: &str = "native sign-in could not be completed";
+
+/// That uniform deny, and nothing else: not a revoked key, not a 5xx, not
+/// a transport failure.
+fn is_uniform_finish_deny(error: &trace_commons_operator_client::Error) -> bool {
+    matches!(
+        error,
+        trace_commons_operator_client::Error::ServerLabel { status, label, .. }
+            if *status == reqwest::StatusCode::BAD_REQUEST && label == UNIFORM_FINISH_DENY
+    )
 }
 
 /// The commons's label when the device's key was revoked by its account
@@ -700,7 +846,16 @@ pub(super) async fn renew_account_session(
             Login::of(&settings),
         )
     };
-    let finished = ceremony(shared, api, commons, &session, login.as_ref(), identity).await?;
+    let finished = ceremony(
+        shared,
+        api,
+        commons,
+        &session,
+        login.as_ref(),
+        identity,
+        None,
+    )
+    .await?;
     store_renewed_session(
         shared, cfg, identity, previous, account_id, finished, expected,
     )
@@ -772,6 +927,7 @@ impl From<trace_commons_protocol::account_device_code::DeviceSignInResponse> for
             tenant_id: response.tenant_id,
             device_key_id: response.device_key_id,
             anchor_hash: response.anchor_hash,
+            referral: None,
         }
     }
 }
@@ -1133,7 +1289,9 @@ mod tests {
         ] {
             let shared = shared_with_session();
             let (api, hits) = counting_cloud_api().await;
-            let error = enroll(&shared, &api, address).await.unwrap_err();
+            let error = enroll(&shared, &api, address, SignupReferral::None)
+                .await
+                .unwrap_err();
             // The assertion that actually pins the ordering: the exchange was
             // never reached. Checking only that the stored token is unchanged
             // passes just as well when the exchange ran and failed.
@@ -1174,7 +1332,9 @@ mod tests {
         let other = "https://ingest.tracecommons.ai".to_string();
         let shared = shared_with_session();
         let (api, hits) = counting_cloud_api().await;
-        let error = enroll(&shared, &api, &other).await.unwrap_err();
+        let error = enroll(&shared, &api, &other, SignupReferral::None)
+            .await
+            .unwrap_err();
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(label(&error), "near_ai_enroll_endpoint_refused");
         assert_eq!(stored_refresh(&shared).as_deref(), Some(REFRESH));
@@ -1214,9 +1374,14 @@ mod tests {
         std::mem::forget(dir);
         let shared = DaemonShared::load(store).unwrap();
         let (api, hits) = counting_cloud_api().await;
-        let error = enroll(&shared, &api, "https://commons.example")
-            .await
-            .unwrap_err();
+        let error = enroll(
+            &shared,
+            &api,
+            "https://commons.example",
+            SignupReferral::Send("ABCDE12345".into()),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(label(&error), "near_ai_enroll_no_session");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(shared.store.load_config().unwrap().is_none());
@@ -1249,6 +1414,7 @@ mod tests {
             tenant_id: format!("nearai-{}", "3c".repeat(32)),
             device_key_id: String::new(),
             anchor_hash: format!("sha256:{}", "ab".repeat(32)),
+            referral: None,
         }
     }
 
@@ -1807,7 +1973,7 @@ mod native_bind_tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let origin = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let prepared=Prepared {commons:super::super::native_identity::client(&origin,"unauthenticated").unwrap(),session:near,login:None,issuer_url:"https://issuer.example".into(),audience:"trace-commons-upload".into(),witness:Some(serde_json::from_value(json!({"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true})).unwrap()),receipt_endpoint:None};
+            let prepared=Prepared {commons:super::super::native_identity::client(&origin,"unauthenticated").unwrap(),session:near,login:None,issuer_url:"https://issuer.example".into(),audience:"trace-commons-upload".into(),witness:Some(serde_json::from_value(json!({"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true})).unwrap()),receipt_endpoint:None,referral_code:None};
             let result = bind_prepared(
                 &shared,
                 &CloudApi::for_test(&origin).unwrap(),
@@ -1917,6 +2083,15 @@ mod route_tests {
         StagingLoginClosed,
         /// A staging commons whose v2 finish refuses (the uniform deny).
         StagingFinishRefused,
+        /// A production commons from before referral codes: its finish is
+        /// `deny_unknown_fields`, so a body carrying `referral_code` gets
+        /// the uniform deny, and one without it is served.
+        #[cfg_attr(feature = "near-ai-staging", allow(dead_code))]
+        ProductionWithoutReferrals,
+        /// A production commons whose finish answers the uniform deny to
+        /// every body: a real verification failure.
+        #[cfg_attr(feature = "near-ai-staging", allow(dead_code))]
+        ProductionFinishDenied,
     }
 
     struct Stub {
@@ -1925,6 +2100,11 @@ mod route_tests {
         /// The refresh token each exchange presented, in order. Fixture
         /// values, never a real credential.
         spent: Arc<Mutex<Vec<String>>>,
+        /// The `referral_code` each finish carried, in order: `None` for a
+        /// finish without the field. Read only by the production-route
+        /// referral test; a staging build records it unread.
+        #[cfg_attr(feature = "near-ai-staging", allow(dead_code))]
+        finish_codes: Arc<Mutex<Vec<Option<Value>>>>,
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -1955,6 +2135,7 @@ mod route_tests {
     async fn stub(commons: Commons, device: DeviceIdentity) -> Stub {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let spent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let finish_codes: Arc<Mutex<Vec<Option<Value>>>> = Arc::new(Mutex::new(Vec::new()));
         let challenge = Arc::new(Mutex::new(String::new()));
         let nonce = [7u8; 32];
         let expires = Utc::now().timestamp() + 300;
@@ -1971,7 +2152,10 @@ mod route_tests {
             .route(
                 LEGACY_CAPABILITIES,
                 axum::routing::get(move || async move {
-                    axum::Json(if commons == Commons::Production {
+                    axum::Json(if commons == Commons::Production
+                        || commons == Commons::ProductionWithoutReferrals
+                        || commons == Commons::ProductionFinishDenied
+                    {
                         json!({
                             "ready": false, "near_ai_login_ready": true, "network": null,
                             "witness": witness(), "issuer_url": "https://issuer.example",
@@ -2032,10 +2216,35 @@ mod route_tests {
         let finish = {
             let challenge = Arc::clone(&challenge);
             let device = Arc::new(device);
+            let finish_codes = Arc::clone(&finish_codes);
             move |axum::Json(body): axum::Json<Value>| {
                 let challenge = challenge.lock().unwrap().clone();
                 let device = Arc::clone(&device);
+                finish_codes
+                    .lock()
+                    .unwrap()
+                    .push(body.get("referral_code").cloned());
+                // The commons applies one code, and answers `referral` only
+                // when the finish carried one.
+                let referral = body.get("referral_code").map(|code| {
+                    if code == "ABCDE12345" {
+                        "applied"
+                    } else {
+                        "not_applied"
+                    }
+                });
+                // The 400 an ingest answers for any refused finish, a
+                // body it could not parse included (`native_generic_deny`).
+                let generic_deny = commons == Commons::ProductionFinishDenied
+                    || (commons == Commons::ProductionWithoutReferrals
+                        && body.get("referral_code").is_some());
                 async move {
+                    if generic_deny {
+                        return (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(json!({"error": "native sign-in could not be completed"})),
+                        );
+                    }
                     if commons == Commons::StagingFinishRefused {
                         return (
                             axum::http::StatusCode::FORBIDDEN,
@@ -2064,18 +2273,19 @@ mod route_tests {
                     assert_eq!(body["access_token"], "near-access");
                     assert!(body.get("account_id").is_none());
                     let tenant = format!("nearai-{}", "3c".repeat(32));
-                    (
-                        axum::http::StatusCode::OK,
-                        axum::Json(json!({
-                            "access_token": format!("tcn1_{}.secret", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&tenant)),
-                            "token_type": "Bearer",
-                            "expires_in_secs": 43200,
-                            "account_id": uuid::Uuid::new_v4().to_string(),
-                            "tenant_id": tenant,
-                            "device_key_id": device.device_key_id,
-                            "anchor_hash": format!("sha256:{}", "ab".repeat(32)),
-                        })),
-                    )
+                    let mut answer = json!({
+                        "access_token": format!("tcn1_{}.secret", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&tenant)),
+                        "token_type": "Bearer",
+                        "expires_in_secs": 43200,
+                        "account_id": uuid::Uuid::new_v4().to_string(),
+                        "tenant_id": tenant,
+                        "device_key_id": device.device_key_id,
+                        "anchor_hash": format!("sha256:{}", "ab".repeat(32)),
+                    });
+                    if let Some(referral) = referral {
+                        answer["referral"] = json!(referral);
+                    }
+                    (axum::http::StatusCode::OK, axum::Json(answer))
                 }
             }
         };
@@ -2130,6 +2340,7 @@ mod route_tests {
             origin,
             requests,
             spent,
+            finish_codes,
             server,
         }
     }
@@ -2161,6 +2372,14 @@ mod route_tests {
     async fn enroll_against(
         commons: Commons,
     ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
+        enroll_against_with(commons, SignupReferral::None).await
+    }
+
+    /// [`enroll_against`], with the referral code the request carried.
+    async fn enroll_against_with(
+        commons: Commons,
+        referral: SignupReferral,
+    ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
         let (dir, shared) = shared_with_session();
         let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
         let stub = stub(commons, identity).await;
@@ -2173,7 +2392,15 @@ mod route_tests {
             super::super::native_identity::client(&stub.origin, "unauthenticated").unwrap();
         let api = CloudApi::for_test(&stub.origin).unwrap();
         let result = match prepare_on(&shared, client, &stub.origin).await {
-            Ok(prepared) => enroll_prepared(&shared, &api, &stub.origin, prepared, expected).await,
+            Ok(prepared) => enroll_prepared(
+                &shared,
+                &api,
+                &stub.origin,
+                prepared.with_referral_code(referral.code()),
+                expected,
+            )
+            .await
+            .map(|enrolled| enrolled.answer(&referral)),
             Err(error) => Err(error),
         };
         (stub, shared, result, dir)
@@ -2218,6 +2445,131 @@ mod route_tests {
             Some(crate::config::WitnessOriginView::Recorded(
                 crate::config::WitnessOrigin::PublishedAtJoin
             ))
+        );
+    }
+
+    /// A referral code typed at sign-up rides in the finish, canonical, and
+    /// the answer says whether the commons applied it. Without one the
+    /// finish carries no field and the answer no `referral`, as before.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn a_sign_up_referral_code_rides_the_finish_and_is_answered() {
+        for (typed, sent, answered) in [
+            (json!(null), None, None),
+            (json!("   "), None, None),
+            (
+                json!("tc-abcde-12345"),
+                Some(json!("ABCDE12345")),
+                Some("applied"),
+            ),
+            (
+                json!("ZZZZZ99999"),
+                Some(json!("ZZZZZ99999")),
+                Some("not_applied"),
+            ),
+            // Not a code: never sent, and the answer says it was not applied.
+            (json!("not a code"), None, Some("not_applied")),
+        ] {
+            let referral = SignupReferral::from_params(&json!({ "referral_code": typed })).unwrap();
+            let (stub, _shared, result, _dir) =
+                enroll_against_with(Commons::Production, referral).await;
+            let reply = result.expect("enrolled, whatever the code");
+            assert_eq!(reply["enrolled"], true, "{typed}");
+            assert_eq!(
+                reply.get("referral").and_then(Value::as_str),
+                answered,
+                "{typed}"
+            );
+            assert_eq!(*stub.finish_codes.lock().unwrap(), vec![sent], "{typed}");
+        }
+    }
+
+    /// A commons from before referral codes refuses a finish carrying
+    /// `referral_code` (its finish is `deny_unknown_fields`, and the refusal
+    /// is the uniform deny). Sign-in never fails because of the code: the
+    /// finish is sent once more without it, on the same ceremony and the
+    /// same NEAR AI token, and the answer says the code was not applied.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn a_commons_without_referrals_still_signs_in_without_the_code() {
+        let referral =
+            SignupReferral::from_params(&json!({ "referral_code": "ABCDE12345" })).unwrap();
+        let (stub, shared, result, _dir) =
+            enroll_against_with(Commons::ProductionWithoutReferrals, referral).await;
+        let reply = result.expect("enrolled without the code");
+        assert_eq!(reply["enrolled"], true);
+        assert_eq!(reply["referral"], "not_applied");
+        assert_eq!(
+            *stub.finish_codes.lock().unwrap(),
+            vec![Some(json!("ABCDE12345")), None]
+        );
+        // One exchange: the retry reuses the token, never spends another.
+        assert_eq!(stub.spent(), vec!["rt_original".to_string()]);
+        assert!(shared.store.load_config().unwrap().is_some());
+    }
+
+    /// The retry is bounded to that one case: a finish without a code that
+    /// is refused, or one with a code refused twice, is the verification
+    /// failure it always was.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn a_refused_finish_is_retried_only_once_and_only_for_a_code() {
+        let (stub, _shared, result, _dir) = enroll_against(Commons::ProductionFinishDenied).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "near_ai_enroll_verification_failed"
+        );
+        assert_eq!(*stub.finish_codes.lock().unwrap(), vec![None]);
+
+        let referral =
+            SignupReferral::from_params(&json!({ "referral_code": "ABCDE12345" })).unwrap();
+        let (stub, _shared, result, _dir) =
+            enroll_against_with(Commons::ProductionFinishDenied, referral).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "near_ai_enroll_verification_failed"
+        );
+        assert_eq!(
+            *stub.finish_codes.lock().unwrap(),
+            vec![Some(json!("ABCDE12345")), None]
+        );
+    }
+
+    /// `referral_code` is a string or absent; anything else is a malformed
+    /// request, refused before anything is spent.
+    #[test]
+    fn a_referral_code_parameter_is_a_string_or_absent() {
+        assert_eq!(
+            SignupReferral::from_params(&json!({})),
+            Ok(SignupReferral::None)
+        );
+        assert_eq!(
+            SignupReferral::from_params(&json!({"referral_code": "TC-7K3M9-QX2RD"})),
+            Ok(SignupReferral::Send("7K3M9QX2RD".into()))
+        );
+        assert_eq!(
+            SignupReferral::from_params(&json!({"referral_code": "TC-7K3M9-QX2RU"})),
+            Ok(SignupReferral::NotACode)
+        );
+        for bad in [
+            json!(12),
+            json!(["ABCDE12345"]),
+            json!({"code": "ABCDE12345"}),
+            json!(true),
+        ] {
+            assert_eq!(
+                SignupReferral::from_params(&json!({ "referral_code": bad })),
+                Err(()),
+                "{bad}"
+            );
+        }
+        // A renewal never carries one, so only a first enrollment answers
+        // `referral`.
+        assert_eq!(SignupReferral::None.outcome(None), None);
+        assert_eq!(
+            SignupReferral::Send("ABCDE12345".into()).outcome(None),
+            Some(trace_commons_protocol::referral::ReferralOutcome::NotApplied),
+            "a commons that said nothing applied nothing"
         );
     }
 
@@ -2348,7 +2700,9 @@ mod route_tests {
         let api = CloudApi::for_test(&stub.origin).unwrap();
         let prepared = prepare_on(shared, client, &stub.origin).await.unwrap();
         between(shared, &api).await;
-        enroll_prepared(shared, &api, &stub.origin, prepared, expected).await
+        enroll_prepared(shared, &api, &stub.origin, prepared, expected)
+            .await
+            .map(|enrolled| enrolled.value)
     }
 
     /// The first click of "Sign in with near.ai" failed: start answered, the

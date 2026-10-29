@@ -420,6 +420,8 @@ pub(crate) mod test_support {
         pub started: Option<(String, Option<String>)>,
         /// Set on every response, when present.
         pub rotate_to: Option<String>,
+        /// The `near_ai` rail's `streams`, when the stub reports any.
+        pub streams: Option<serde_json::Value>,
     }
 
     impl Default for Stub {
@@ -433,6 +435,7 @@ pub(crate) mod test_support {
                 handle: "ab".repeat(32),
                 started: None,
                 rotate_to: None,
+                streams: None,
             }
         }
     }
@@ -478,7 +481,7 @@ pub(crate) mod test_support {
                             body: String::new(),
                         });
                         let stub = stub.lock().unwrap();
-                        let body = serde_json::json!({
+                        let mut body = serde_json::json!({
                             "contract_version": PAYOUT_LINK_CONTRACT_VERSION,
                             "rails": [{
                                 "rail_id": "near_ai",
@@ -492,6 +495,9 @@ pub(crate) mod test_support {
                                 "recipient_unavailable": false,
                             }],
                         });
+                        if let Some(streams) = &stub.streams {
+                            body["rails"][0]["streams"] = streams.clone();
+                        }
                         reply(&stub, StatusCode::OK, body)
                     }
                 }),

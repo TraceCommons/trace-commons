@@ -6171,6 +6171,50 @@ pub extern "C" fn tc_payout_link_copy_json() -> *mut c_char {
     })
 }
 
+/// The referral words (`referral_copy::referral_copy`): the Settings
+/// Referrals section, the code field on the NEAR AI sign-in step and the
+/// Insights credit split, as a JSON object of `ReferralCopy`'s fields. Every
+/// string is a draft for owner review; templates carry `{code}`, `{n}`,
+/// `{date}` or `{amount}`, which the shell fills.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_referral_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::referral_copy::referral_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// A typed referral code as it is shown, `TC-XXXXX-XXXXX`
+/// (`trace_commons_protocol::referral::normalize_referral_code`, then
+/// `format_referral_code`): the same reading the daemon applies before it
+/// sends one, so a shell can check a field before anything is sent. Case,
+/// `-` and spaces do not matter, `I` and `L` read as `1`, `O` as `0`, and the
+/// `TC` prefix is optional.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL for text
+/// that is not a code, for a NULL or non-UTF-8 `typed`, and on a caught
+/// panic.
+///
+/// # Safety
+/// `typed`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_referral_code_display(typed: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        // NULL and non-UTF-8 are not codes either.
+        let Ok(typed) = (unsafe { borrow_str(typed) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(
+            trace_commons_protocol::referral::normalize_referral_code(typed)
+                .and_then(|code| trace_commons_protocol::referral::format_referral_code(&code))
+                .map_or(std::ptr::null_mut(), |shown| to_owned_cstring(&shown)),
+        )
+    })
+}
+
 /// The Devices section's words (`consent_copy::account_devices_copy`), as
 /// a JSON object of `AccountDevicesCopy`'s fields. Every string is a draft
 /// for owner review; templates carry `{device}`, `{code}` or `{when}`.

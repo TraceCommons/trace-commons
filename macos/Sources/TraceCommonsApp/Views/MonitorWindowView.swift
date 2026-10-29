@@ -54,6 +54,20 @@ struct MonitorWindowView: View {
         requiresOnboarding ? .inference : tab
     }
 
+    /// The NEAR AI payout rail's streams for Insights' NEAR AI card, read
+    /// off the main actor. Any refusal (no account session, no rail, a
+    /// daemon that predates streams) reads as none, so the card is drawn
+    /// as before.
+    static func payoutStreams(_ client: DaemonClient?) -> (@Sendable () async -> [PayoutStreamStatus]?)? {
+        client.map { client in
+            { @Sendable in
+                await DaemonWork.run {
+                    (try? client.payoutLink.status()).flatMap { PayoutLinkSurface.nearAiRail(in: $0)?.streams }
+                }
+            }
+        }
+    }
+
     enum MapTab: String {
         case traces
         case privateAI
@@ -275,6 +289,7 @@ struct MonitorWindowView: View {
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
                                  subscriptions: model.subscriptionUsageModel,
                                  inspector: insightsInspector, home: home,
+                                 payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient),
                                  openTraces: {
                                      tab = .traces
                                      tracesPage = .tree

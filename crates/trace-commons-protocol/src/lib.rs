@@ -25,6 +25,7 @@ pub mod payout_link;
 pub mod privacy;
 pub mod public_run;
 mod redaction;
+pub mod referral;
 pub mod settlement_estimate;
 pub mod trace_contribution;
 pub mod upload_allowance;

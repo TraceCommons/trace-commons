@@ -27,6 +27,7 @@ final class MonitorHomeInsightsTests: XCTestCase {
         XCTAssertTrue(window.contains("InsightsView(storeSelection: insightsStoreSelection"))
         XCTAssertTrue(window.contains("daemon: home.client,"))
         XCTAssertTrue(window.contains("subscriptions: model.subscriptionUsageModel,\n                                 inspector: insightsInspector, home: home,"))
+        XCTAssertTrue(window.contains("payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient),"))
         // The get-started card's one link opens Traces' folder list; it no
         // longer offers Settings (product owner, 2026-10-29).
         XCTAssertTrue(window.contains("tracesPage = .tree"))

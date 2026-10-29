@@ -56,7 +56,7 @@ use trace_commons_server::db::{
     PayoutAuditAction, PayoutLinkState, PayoutLinkTransition, PayoutStore, payout_account_id_hash,
     payout_link_id_hash,
 };
-use trace_commons_server::near_ai_rail_config::NearAiRailConfig;
+use trace_commons_server::near_ai_rail_config::{NearAiRailConfig, NearAiReferralConfig};
 use trace_commons_server::payout_pass::{PayoutRecipientOpener, UnconfiguredRecipientOpener};
 use trace_commons_server::payout_rate::{
     NEAR_AI_PAYOUT_RAIL_LABEL, near_ai_rate_epoch_at_boot, near_ai_rate_version_in_force,
@@ -91,7 +91,17 @@ pub(crate) async fn payout_rails_from_env(
         Ok(None) => {}
         Err(error) => anyhow::bail!("near_ai payout refused to start: {}", error.label()),
     }
-    let rails = PayoutRails::from_config(&near_ai)
+    // The referral stream (referral rewards spec section 5): `disabled`
+    // unless set, and refused at boot when `live` without the rail `live`
+    // and its own credential (`near_ai_referral_config_missing`).
+    let referral = NearAiReferralConfig::from_env(&near_ai).map_err(|error| {
+        anyhow::anyhow!(
+            "near_ai referral payout refused to start: {} ({})",
+            error.label(),
+            error.setting()
+        )
+    })?;
+    let rails = PayoutRails::from_configs(&near_ai, &referral)
         .map_err(|error| anyhow::anyhow!("near_ai payout refused to start: {}", error.label()))?;
     // The version of the rate in force now, from the rate source this boot
     // recorded, for readiness and for the pass. Never the latest stored
@@ -115,6 +125,7 @@ pub(crate) async fn payout_rails_from_env(
         tracing::info!(
             rail = %entry.rail_id(),
             mode = entry.mode().as_label(),
+            referral_mode = entry.referral_mode().as_label(),
             qualified = entry.qualified(),
             "payout rail configured"
         );
@@ -240,7 +251,7 @@ fn same_digest(left: &str, right: &str) -> bool {
 /// tenant tokens, so a tenant admin is refused like anyone else. Unset
 /// refuses every caller (`payout_control_unconfigured`). Returns the
 /// operator's actor hash for audit rows: a hash of the token's hash.
-fn require_payout_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
+pub(crate) fn require_payout_operator(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
     let Some(expected) = state.payout_control_token_hash.as_deref() else {
         return Err(api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -293,6 +304,14 @@ async fn set_payout_rail_control(
     halted: bool,
 ) -> ApiResult<Json<PayoutRailControlResponse>> {
     let actor = require_payout_operator(state.as_ref(), &headers)?;
+    let label = if halted {
+        PAYOUT_HALT_LABEL
+    } else {
+        PAYOUT_RESUME_LABEL
+    };
+    if rail_id == trace_commons_server::referral_bonus::NEAR_AI_REFERRAL_CONTROL_RAIL {
+        return set_referral_stream_control(state, actor, halted, label).await;
+    }
     let entry = state
         .payout_rails
         .get(&rail_id)
@@ -301,11 +320,6 @@ async fn set_payout_rail_control(
         .payout_store
         .as_ref()
         .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_store_unavailable"))?;
-    let label = if halted {
-        PAYOUT_HALT_LABEL
-    } else {
-        PAYOUT_RESUME_LABEL
-    };
     store
         .set_payout_control(entry.rail_id(), halted, Some(label), &actor)
         .await
@@ -322,8 +336,39 @@ async fn set_payout_rail_control(
     }))
 }
 
+/// The referral stream's pseudo-rail (`near_ai.referral`, referral spec
+/// section 7): the bonus pass halts it when too many codes are suspended in
+/// a day, which runs the stream as `dry_run`, and this is how the operator
+/// resumes it (or halts it by hand). The same token and the same
+/// hash-only control row as a rail's halt and resume. Unknown, like any
+/// rail id, while the referral stream is not attached.
+async fn set_referral_stream_control(
+    state: Arc<AppState>,
+    actor: String,
+    halted: bool,
+    label: &'static str,
+) -> ApiResult<Json<PayoutRailControlResponse>> {
+    let hook = state.payout_rails.referral_bonus().ok_or_else(|| {
+        api_error(
+            StatusCode::NOT_FOUND,
+            trace_commons_server::payout_worker::PayoutRailsError::Unknown.label(),
+        )
+    })?;
+    let control = trace_commons_server::referral_bonus::near_ai_referral_control_rail();
+    hook.payouts()
+        .set_payout_control(&control, halted, Some(label), &actor)
+        .await
+        .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_control_unrecorded"))?;
+    hook.record_operator_control(halted);
+    tracing::info!(rail = %control, halted, label, "referral stream control set");
+    Ok(Json(PayoutRailControlResponse {
+        rail_id: control.as_str().to_owned(),
+        halted,
+    }))
+}
+
 /// The shape a tenant id takes in a hold route's path.
-fn is_tenant_id(value: &str) -> bool {
+pub(crate) fn is_tenant_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
@@ -487,7 +532,7 @@ pub(crate) struct PayoutLinkReleaseResponse {
     state: &'static str,
 }
 
-fn is_link_id_hash(value: &str) -> bool {
+pub(crate) fn is_link_id_hash(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64
             && hex
@@ -496,7 +541,7 @@ fn is_link_id_hash(value: &str) -> bool {
     })
 }
 
-fn is_reason_label(value: &str) -> bool {
+pub(crate) fn is_reason_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value

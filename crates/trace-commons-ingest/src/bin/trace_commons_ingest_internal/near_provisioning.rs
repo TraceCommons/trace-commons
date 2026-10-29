@@ -477,6 +477,11 @@ pub(super) struct FinishRequest {
     wallet_signature: String,
     device_signature: String,
     code_verifier: String,
+    /// A referral code as typed (referral spec section 3), applied once the
+    /// account is provisioned. It never fails provisioning: the answer then
+    /// carries `referral`, `applied` or `not_applied`.
+    #[serde(default)]
+    referral_code: Option<String>,
 }
 
 fn device_key(value: &str) -> Option<[u8; 32]> {
@@ -698,11 +703,51 @@ async fn finish(
         }
         Err(false) => return None,
     };
-    Some(response(serde_json::json!({
+    let referral = signup_referral_outcome(
+        &state,
+        &headers,
+        &provisioned,
+        body.referral_code.as_deref(),
+    )
+    .await;
+    let mut answer = serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
         "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash
-    })))
+    });
+    if let Some(referral) = referral {
+        answer["referral"] = serde_json::json!(referral.as_str());
+    }
+    Some(response(answer))
+}
+
+/// The `referral` field of a provisioning answer: `None` when the finish
+/// carried no code, so an answer without one is unchanged. Runs after the
+/// provisioning transaction committed and cannot fail it. A finish that
+/// carries a code also records the network mark the trusted edge observed,
+/// once the apply has put the account in the program.
+async fn signup_referral_outcome(
+    state: &AppState,
+    headers: &HeaderMap,
+    provisioned: &trace_commons_server::account_onboarding::ProvisionedNearAccount,
+    code: Option<&str>,
+) -> Option<trace_commons_protocol::referral::ReferralOutcome> {
+    let code = code?;
+    let outcome = super::referral_routes::signup_referral(
+        state,
+        &provisioned.tenant_id,
+        provisioned.account_id,
+        code,
+    )
+    .await;
+    super::referral_routes::record_network_mark(
+        state,
+        headers,
+        &provisioned.tenant_id,
+        provisioned.account_id,
+    )
+    .await;
+    Some(outcome)
 }
 
 pub(super) async fn wallet_page(State(state): State<Arc<AppState>>) -> axum::response::Response {
@@ -1122,6 +1167,11 @@ pub(super) struct NearAiFinishRequest {
     /// The NEAR AI access token, introspected and then dropped. Never logged,
     /// never stored, never returned.
     access_token: String,
+    /// A referral code as typed (referral spec section 3), applied once the
+    /// account is provisioned. It never fails provisioning: the answer then
+    /// carries `referral`, `applied` or `not_applied`.
+    #[serde(default)]
+    referral_code: Option<String>,
 }
 
 pub(super) async fn near_ai_provision_start_handler(
@@ -1393,11 +1443,22 @@ async fn near_ai_finish(
         }
         Err(_) => return None,
     };
-    Some(response(serde_json::json!({
+    let referral = signup_referral_outcome(
+        &state,
+        &headers,
+        &provisioned,
+        body.referral_code.as_deref(),
+    )
+    .await;
+    let mut answer = serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
         "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash
-    })))
+    });
+    if let Some(referral) = referral {
+        answer["referral"] = serde_json::json!(referral.as_str());
+    }
+    Some(response(answer))
 }
 
 // --- Connect near.ai: bind a passkey account (Z2 native passkey identity, S3) --

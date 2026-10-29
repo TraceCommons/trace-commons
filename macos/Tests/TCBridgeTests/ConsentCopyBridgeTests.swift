@@ -63,6 +63,39 @@ final class ConsentCopyBridgeTests: XCTestCase {
         XCTAssertTrue(copy.body.contains("{org_name}"))
     }
 
+    /// The Referrals section's live export is exactly the fields this shell
+    /// consumes, decodes whole, and fills only the holes the core names.
+    func testTheReferralCopyDecodesFromTheLiveExport() {
+        guard let json = TCConsentCopy.referralCopyJSON(),
+            let data = json.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let copy = ReferralCopy.decode(fromJSON: json)
+        else {
+            XCTFail("the live referral payload must decode")
+            return
+        }
+        XCTAssertEqual(object.keys.sorted(), ReferralCopy.consumedFields.sorted())
+        XCTAssertTrue(copy.joinedMany.contains("{n}"))
+        XCTAssertTrue(copy.copyAccessibilityName.contains("{code}"))
+        XCTAssertTrue(copy.enterScope.contains("{date}"))
+        XCTAssertTrue(copy.creditSent.contains("{amount}"))
+        let holes = try! NSRegularExpression(pattern: #"\{([a-z_]+)\}"#)
+        for sentence in copy.sentences {
+            for match in holes.matches(in: sentence, range: NSRange(sentence.startIndex..., in: sentence)) {
+                let name = (sentence as NSString).substring(with: match.range(at: 1))
+                XCTAssertTrue(["code", "n", "date", "amount"].contains(name), sentence)
+            }
+        }
+    }
+
+    /// The core reads a typed code, so the shell never parses one itself.
+    func testTheReferralCodeDisplayIsTheCoresReading() {
+        XCTAssertEqual(TCConsentCopy.referralCodeDisplay(" tc-7k3m9-qx2rd "), "TC-7K3M9-QX2RD")
+        XCTAssertEqual(TCConsentCopy.referralCodeDisplay("7K3M9QX2RD"), "TC-7K3M9-QX2RD")
+        XCTAssertNil(TCConsentCopy.referralCodeDisplay("hello"))
+        XCTAssertNil(TCConsentCopy.referralCodeDisplay(""))
+    }
+
     /// The Devices section's live export is exactly the fields this shell
     /// consumes and decodes whole.
     func testTheAccountDevicesCopyDecodesFromTheLiveExport() {

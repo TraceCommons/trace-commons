@@ -23,6 +23,10 @@ struct InsightsView: View {
     /// Details' drill-down view; a usage card's "By project" opens it on
     /// By project (product owner, 2026-10-28).
     @State private var detailsView: InsightsCreditWords.Dimension = .folder
+    /// The NEAR AI payout rail's streams, for the NEAR AI card's own-traces
+    /// and referrals rows (referral spec section 6); `nil` without a daemon.
+    private let payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)?
+    @State private var earnings: [NearAiEarningsSplit.Row] = []
     /// The Monitor window's inspector, which shows Breakdown's details
     /// while Breakdown is on screen (owner, 2026-10-29).
     private let inspector: InsightsBreakdownInspector
@@ -41,6 +45,7 @@ struct InsightsView: View {
                     subscriptions: SubscriptionUsageModel? = nil,
                     inspector: InsightsBreakdownInspector? = nil,
                     home: HomeStore? = nil,
+                    payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
                     openTraces: (() -> Void)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
@@ -83,7 +88,8 @@ struct InsightsView: View {
                   subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
                   benchmarks: InsightsBenchmarksModel(reader: benchmarks),
                   inspector: inspector,
-                  home: home, openTraces: openTraces)
+                  home: home,
+                  payoutStreams: payoutStreams, openTraces: openTraces)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -100,6 +106,7 @@ struct InsightsView: View {
                     benchmarks: InsightsBenchmarksModel? = nil,
                     inspector: InsightsBreakdownInspector? = nil,
                     home: HomeStore? = nil,
+                    payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
                     openTraces: (() -> Void)? = nil) {
         self.inspector = inspector ?? InsightsBreakdownInspector()
         self.openTraces = openTraces
@@ -115,6 +122,18 @@ struct InsightsView: View {
         _fallbackSubscriptionModel = State(initialValue: subscriptionFallback ?? SubscriptionUsageModel())
         _tab = State(initialValue: initialTab)
         self.turnOffRecapCard = turnOffRecapCard
+        self.payoutStreams = payoutStreams
+    }
+
+    /// The NEAR AI card's split, read each time Overview opens. A failed or
+    /// absent read draws no rows: the split adds to the card and is never
+    /// in place of it.
+    private func loadEarnings() async {
+        guard let payoutStreams,
+              let copy = TCConsentCopy.referralCopyJSON().flatMap(ReferralCopy.decode(fromJSON:))
+        else { return }
+        let streams = await payoutStreams()
+        earnings = NearAiEarningsSplit.rows(streams, copy: copy, money: ReferralMoney.format)
     }
 
     /// The tabs on the bar, in order: Overview, Breakdown, Benchmarks
@@ -218,6 +237,7 @@ struct InsightsView: View {
                     subscriptions: subscriptionModel,
                     nearAiCredit: model.counterWeek?.nearAiCredit,
                     usageByDay: model.counterWeek?.usageByDay,
+                    earnings: earnings,
                     showProjects: { detailsView = .folder; tab = .patterns },
                     work: model.counterWeek?.work,
                     weekChanges: model.counterWeek?.changeVsLastWeek,
@@ -229,6 +249,7 @@ struct InsightsView: View {
                         { Task { try? await turnOff(); await model.loadWeek() } }
                     })
                 .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe() }
+                .task { await loadEarnings() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek,
