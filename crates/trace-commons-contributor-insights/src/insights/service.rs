@@ -635,12 +635,12 @@ pub enum LocalInsightsOperation {
         snapshot_id: String,
         tz: i32,
     },
-    /// Feed T comparisons: each goal with its six weekly marks, the lever of
-    /// the week and the weekly summary card. `counter_weeks` is the daemon's
+    /// Feed T comparisons: the lever of the week and the weekly summary
+    /// card. `counter_weeks` is the daemon's
     /// `insights_week` `history`, passed through unchanged, and absent under
     /// feed S; `recap_card_enabled` is the daemon's
-    /// `insights_recap_card_enabled`, passed through. Goals and the lever's
-    /// feedback live here and the counter rows in the daemon, so neither side
+    /// `insights_recap_card_enabled`, passed through. The lever's feedback
+    /// lives here and the counter rows in the daemon, so neither side
     /// can compare alone. Measured figures only; no rate, path or assumption.
     /// A read: an absent store is not created.
     Comparisons {
@@ -651,15 +651,6 @@ pub enum LocalInsightsOperation {
         tz: i32,
         #[serde(default)]
         recap_card_enabled: bool,
-    },
-    /// Add a goal, or replace the one with `id`.
-    GoalSet {
-        #[serde(default)]
-        id: Option<String>,
-        goal: super::goals::Goal,
-    },
-    GoalDelete {
-        id: String,
     },
     /// "Not useful" on the lever's kind in the week shown (its Monday), or,
     /// with `action: reenable`, the kind turned back on. Stored as the kind
@@ -839,12 +830,6 @@ pub enum LocalInsightsResponse {
     },
     Comparisons {
         comparisons: Box<super::recap::WeekComparisons>,
-    },
-    GoalSet {
-        state: Box<super::goal_store::GoalState>,
-    },
-    GoalDelete {
-        state: Box<super::goal_store::GoalState>,
     },
     LeverFeedback {
         state: Box<super::goal_store::GoalState>,
@@ -1486,18 +1471,6 @@ fn execute_inner(
                 )),
             }
         }
-        LocalInsightsOperation::GoalSet { id, goal } => LocalInsightsResponse::GoalSet {
-            state: Box::new(store()?.goal_set(id.as_deref(), goal)?),
-        },
-        LocalInsightsOperation::GoalDelete { id } => {
-            let state = match existing_store(request.store_dir.as_deref())? {
-                Some(store) => store.goal_delete(&id)?,
-                None => return Err(super::goal_store::GoalStoreError::NotFound.into()),
-            };
-            LocalInsightsResponse::GoalDelete {
-                state: Box::new(state),
-            }
-        }
         LocalInsightsOperation::LeverFeedback {
             kind,
             week_start,
@@ -1848,8 +1821,6 @@ mod tests {
                 "Claude traces only: {k} of {n}.",
             ),
             ("analytics_see_sessions", "Show {n} traces"),
-            ("analytics_goal_cache_share", "Cache share at least {p}%"),
-            ("analytics_goal_delete", "Delete"),
             ("analytics_lever_show_reads", "Show reads"),
             (
                 "analytics_lever_off",
@@ -3070,7 +3041,7 @@ mod tests {
         assert_eq!(found["type"], "comparisons");
         let found = &found["comparisons"];
         assert_eq!(found["feed"], "saved");
-        assert_eq!(found["goals"], serde_json::json!([]));
+        assert!(found.get("goals").is_none());
         assert_eq!(found["lever"]["unavailable"], "needs_counter_pass");
         assert_eq!(found["recap"], serde_json::Value::Null);
         // Feed T figures over an absent store: compared, nothing created.
@@ -3101,9 +3072,16 @@ mod tests {
                 serde_json::json!({"type": "comparisons", "tz": 0, "rate": 3}),
                 "insights-request-invalid",
             ),
+            // The threshold goals left Insights: their writes are refused.
             (
                 serde_json::json!({"type": "goal_delete", "id": "goal-1"}),
-                "insights_goal_not_found",
+                "insights-request-invalid",
+            ),
+            (
+                serde_json::json!({"type": "goal_set", "goal": {
+                    "kind": "weekly_tokens_under", "source": "claude_code", "tokens": 900_000
+                }}),
+                "insights-request-invalid",
             ),
         ] {
             assert_eq!(
@@ -3174,18 +3152,9 @@ mod tests {
     }
 
     #[test]
-    fn goal_and_lever_writes_feed_the_comparisons() {
+    fn lever_writes_feed_the_comparisons() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("store");
-        let set = analytics_call(
-            &directory,
-            serde_json::json!({"type": "goal_set", "goal": {
-                "kind": "weekly_tokens_under", "source": "claude_code", "tokens": 900_000
-            }}),
-        )
-        .unwrap();
-        assert_eq!(set["type"], "goal_set");
-        let id = set["state"]["goals"][0]["id"].as_str().unwrap().to_string();
         let compared = analytics_call(
             &directory,
             serde_json::json!({
@@ -3194,22 +3163,10 @@ mod tests {
             }),
         )
         .unwrap();
-        let goal = &compared["comparisons"]["goals"][0];
-        assert_eq!(goal["id"], id.as_str());
-        assert_eq!(goal["figure"], 800_000);
-        assert_eq!(
-            goal["marks"]["marks"],
-            serde_json::json!(["not_met", "not_met", "not_met", "not_met", "not_met", "met"])
-        );
-        assert_eq!(
-            goal["marks"]["change"],
-            serde_json::json!({"direction": "down", "from": 1_000_000})
-        );
         let recap = &compared["comparisons"]["recap"];
         let closed = recap["week_start"].as_str().unwrap().to_string();
 
         for bad in [
-            serde_json::json!({"type": "goal_set", "goal": {"kind": "long_context_under", "tokens": 0}}),
             serde_json::json!({"type": "lever_feedback", "kind": "repeated_reads", "week_start": "2026-10-06"}),
             serde_json::json!({"type": "recap_opened", "week_start": "2026-10-06"}),
         ] {
@@ -3240,11 +3197,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(after["comparisons"]["recap"], serde_json::Value::Null);
-        let deleted = analytics_call(
-            &directory,
-            serde_json::json!({"type": "goal_delete", "id": id}),
-        )
-        .unwrap();
-        assert_eq!(deleted["state"]["goals"], serde_json::json!([]));
+        assert!(opened["state"].get("goals").is_none());
     }
 }

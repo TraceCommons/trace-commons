@@ -196,6 +196,7 @@ use crate::insights::model_answers::ModelRoute;
 use crate::insights::session_facts::{ClaudeFactsScan, InferredTask, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
 use crate::insights::session_labels::{LabelledTask, SessionLabel, SessionOutcome};
+use crate::insights::slash_goals::{ClaudeGoal, ClaudeGoalScan, GoalStatus, WeekGoal, WeekGoals};
 use crate::insights::task_classifier::{current_task, reclassify};
 use crate::insights::time_evidence::RecordedTimeScan;
 use crate::insights::turn_series::ClaudeTurnSeriesScan;
@@ -398,6 +399,15 @@ struct CounterRow {
     /// & save runs. Left out of the file while `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     not_analyzable: Option<NotAnalyzable>,
+    /// The goals set with `/goal` in a Claude session, each as its latest
+    /// `goal_status` record left it: status, checks, tokens, time and when
+    /// (`insights::slash_goals`). Never the goal's condition or the reason
+    /// Claude gave. Read with the facts, so a row made before goals were
+    /// kept is read again once (`SESSION_FACTS_VERSION`). Left out of the
+    /// file while empty. Codex goals are not stored: they are read from
+    /// Codex's own database when the week is answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    goals: Vec<ClaudeGoal>,
 }
 
 /// Why Analyze & save cannot analyze a listed session's file: the core's
@@ -1179,6 +1189,9 @@ pub struct CounterPass {
     /// A leaf lock, held across a label write, so two writes never
     /// interleave and a cached label is always one the file holds.
     labels: Mutex<Option<LabelsRead>>,
+    /// Codex's goals database (`insights_codex_goals`), read when the week
+    /// is answered; `None` reads no Codex goals.
+    codex_goals_db: Option<PathBuf>,
     /// Signalled when the worker goes idle.
     #[cfg(test)]
     idle: std::sync::Condvar,
@@ -1206,10 +1219,12 @@ impl CounterPass {
     /// The pass for a daemon over `store`, with the key custody owner
     /// decision D16 (open) names.
     pub fn for_store(store: &ConfigStore) -> Self {
-        Self::with_keys(
+        let mut pass = Self::with_keys(
             store.daemon_path(COUNTER_ROWS_FILE),
             default_counter_keys(store),
-        )
+        );
+        pass.codex_goals_db = super::insights_codex_goals::codex_goals_path();
+        pass
     }
 
     pub(crate) fn with_keys(
@@ -1229,11 +1244,18 @@ impl CounterPass {
             worker: Mutex::new(WorkerSlot::default()),
             never_sessions: Mutex::new(NeverSessions::default()),
             labels: Mutex::new(None),
+            codex_goals_db: None,
             #[cfg(test)]
             idle: std::sync::Condvar::new(),
             #[cfg(test)]
             test_seams: TestSeams::default(),
         }
+    }
+
+    /// Read Codex goals from `path` instead of Codex's home.
+    #[cfg(test)]
+    pub(crate) fn set_codex_goals_db_for_test(&mut self, path: Option<PathBuf>) {
+        self.codex_goals_db = path;
     }
 
     /// Run `hook` before every file the pass reads.
@@ -1658,6 +1680,7 @@ impl CounterPass {
                     automation: read.automation,
                     automation_read: true,
                     not_analyzable: read.not_analyzable,
+                    goals: read.goals,
                 },
             ));
         }
@@ -1953,6 +1976,19 @@ impl CounterPass {
             _ => Vec::new(),
         };
         let week_start = week.unwrap_or_else(|| local_week_start(&now, &tz));
+        let goals = match (&key, &store) {
+            (Some(key), Some(store)) if store.key_fingerprint == key_fingerprint(key) => {
+                week_goals(
+                    store,
+                    key,
+                    &never_digests(key, never_project_keys),
+                    &folder_labels_by_digest(key, folders),
+                    self.codex_goals_db.as_deref(),
+                    (week_start, tz),
+                )
+            }
+            _ => WeekGoals::default(),
+        };
         let credit = match (&key, &store) {
             (Some(key), Some(store))
                 if routing_unavailable.is_none()
@@ -2086,6 +2122,7 @@ impl CounterPass {
             "patterns": patterns,
             "history": history,
             "recap_card_enabled": options.recap_card_enabled,
+            "goals": goals,
         })
     }
 
@@ -3027,6 +3064,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             facts: None,
             automation: Automation::Unknown,
             not_analyzable: NotAnalyzable::of(source, bytes, None),
+            goals: Vec::new(),
         };
     };
     let mut facts = scanned.facts;
@@ -3091,6 +3129,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
         span: scanned.span,
         automation: scanned.automation,
         not_analyzable: NotAnalyzable::of(source, bytes, Some(scanned.session_metas)),
+        goals: scanned.goals,
     }
 }
 
@@ -3107,6 +3146,8 @@ struct ReadBody {
     facts: Option<SessionFacts>,
     automation: Automation,
     not_analyzable: Option<NotAnalyzable>,
+    /// Claude's `/goal` goals, status and counters only.
+    goals: Vec<ClaudeGoal>,
 }
 
 /// The extractors' results for one transcript, from one pass over its lines.
@@ -3126,6 +3167,8 @@ struct ScannedSession {
     /// Lines longer than the bound, passed over unread (an inlined image,
     /// say). Nonzero, the caller marks the session partial.
     long_lines_skipped: u32,
+    /// Claude's `/goal` goals (`insights::slash_goals`); empty for Codex.
+    goals: Vec<ClaudeGoal>,
 }
 
 /// Tells a Codex session its harness started from one the person started,
@@ -3236,6 +3279,8 @@ fn scan_session(
         (source == AnalyticsSource::Codex).then(|| CodexTurnSeriesScan::new(key));
     let mut time = Some(RecordedTimeScan::new(format));
     let mut automation = (source == AnalyticsSource::Codex).then(CodexAutomationScan::default);
+    // Lenient: it never fails, and sees every record that parses.
+    let mut goals = (source == AnalyticsSource::ClaudeCode).then(ClaudeGoalScan::new);
     let mut session_metas = 0usize;
     let mut line: Vec<u8> = Vec::new();
     // One-based physical line number, blank lines counted.
@@ -3293,6 +3338,9 @@ fn scan_session(
         };
         identity.observe(&record);
         if let Some(scan) = automation.as_mut() {
+            scan.observe(&record);
+        }
+        if let Some(scan) = goals.as_mut() {
             scan.observe(&record);
         }
         if source == AnalyticsSource::Codex && record["type"] == "session_meta" {
@@ -3371,6 +3419,7 @@ fn scan_session(
         automation: automation.map_or(Automation::Unknown, CodexAutomationScan::finish),
         session_metas,
         long_lines_skipped,
+        goals: goals.map(ClaudeGoalScan::finish).unwrap_or_default(),
     })
 }
 
@@ -3918,6 +3967,111 @@ fn session_row_value(
         // whole-file analysis refuses its file, so a shell does not offer it.
         "analyzable": row.not_analyzable.is_none(),
     })
+}
+
+/// The week's `/goal` goals (product owner, 2026-10-29): each goal whose
+/// last update falls in the local week starting `week_start`, on a row the
+/// Sessions list shows (not automated, not in a Never folder), with that
+/// row's folder label and listed reference, so the Sessions drill opens it.
+///
+/// Claude's goals are the row's stored ones. Codex's are read now from its
+/// goals database and joined to a Codex row by the keyed digest of the
+/// thread ID, which is the session ID the row's `harness_session` names; a
+/// goal no listed row matches (its rollout aged out, was archived or is in
+/// a Never folder) is left out. Only status, tokens, time, checks and the
+/// time of the update are answered, never a goal's text.
+///
+/// A goal is counted once however many rows hold it: a resumed Claude
+/// transcript repeats the goal records of the one it continues, told apart
+/// by when the goal was set, and a Codex thread is one goal by its digest.
+/// Of the copies, the one updated last is answered.
+fn week_goals(
+    store: &CounterStore,
+    key: &DigestKey,
+    never: &NeverDigests,
+    folders: &BTreeMap<KeyedDigest, &str>,
+    codex_goals_db: Option<&std::path::Path>,
+    (week_start, tz): (NaiveDate, FixedOffset),
+) -> WeekGoals {
+    let listed = || store.rows.values().filter(|row| is_listed(row, never));
+    let any_codex = listed()
+        .any(|row| row.harness_session.is_some() && matches!(row.body, RowBody::Codex { .. }));
+    let codex = match codex_goals_db {
+        Some(path) if any_codex => super::insights_codex_goals::read_codex_goals(path, key),
+        _ => BTreeMap::new(),
+    };
+    let in_week =
+        |at: Option<DateTime<Utc>>| at.filter(|at| local_week_start(at, &tz) == week_start);
+    let tag = store_tag_of(key, store);
+    let mut goals = Vec::new();
+    // One per Claude goal set time and per Codex thread, the latest update.
+    let mut claude_once: BTreeMap<DateTime<Utc>, WeekGoal> = BTreeMap::new();
+    // A Codex goal is one database row: on two rows, the reference is the
+    // one written last.
+    let mut codex_once: BTreeMap<KeyedDigest, (DateTime<Utc>, WeekGoal)> = BTreeMap::new();
+    let keep_latest = |slot: Option<&WeekGoal>, goal: &WeekGoal| {
+        slot.is_none_or(|kept| goal.updated_at > kept.updated_at)
+    };
+    for row in listed() {
+        let folder = folders.get(&row.project).map(|label| (*label).to_owned());
+        for goal in &row.goals {
+            let Some(updated_at) = in_week(goal.updated_at) else {
+                continue;
+            };
+            let status = GoalStatus::from(goal.status);
+            let answered = WeekGoal {
+                tool: AnalyticsSource::ClaudeCode,
+                status,
+                met: status.met(),
+                tokens: goal.tokens,
+                time_secs: goal.duration_ms.map(|ms| ms / 1_000),
+                iterations: goal.iterations,
+                folder: folder.clone(),
+                session_ref: row.listed_reference(tag),
+                updated_at,
+            };
+            match goal.set_at {
+                Some(set_at) => {
+                    if keep_latest(claude_once.get(&set_at), &answered) {
+                        claude_once.insert(set_at, answered);
+                    }
+                }
+                None => goals.push(answered),
+            }
+        }
+        if !matches!(row.body, RowBody::Codex { .. }) {
+            continue;
+        }
+        let Some((digest, goal)) = row
+            .harness_session
+            .and_then(|digest| codex.get(&digest).map(|goal| (digest, goal)))
+        else {
+            continue;
+        };
+        let Some(updated_at) = in_week(goal.updated_at) else {
+            continue;
+        };
+        let answered = WeekGoal {
+            tool: AnalyticsSource::Codex,
+            status: goal.status,
+            met: goal.status.met(),
+            tokens: goal.tokens_used,
+            time_secs: goal.time_used_secs,
+            iterations: None,
+            folder,
+            session_ref: row.listed_reference(tag),
+            updated_at,
+        };
+        if codex_once
+            .get(&digest)
+            .is_none_or(|(written, _)| row.modified_at > *written)
+        {
+            codex_once.insert(digest, (row.modified_at, answered));
+        }
+    }
+    goals.extend(claude_once.into_values());
+    goals.extend(codex_once.into_values().map(|(_, goal)| goal));
+    WeekGoals::new(goals)
 }
 
 /// What the answer joins to one engine row, by its `t{seq}` reference.
@@ -5049,6 +5203,7 @@ mod tests {
             span,
             facts: None,
             automation: Automation::Unknown,
+            goals: Vec::new(),
             not_analyzable: NotAnalyzable::of(
                 source,
                 Some(bytes.len() as u64),
@@ -5068,6 +5223,7 @@ mod tests {
     /// automation class, which the automated-session tests cover.
     fn without_facts(mut read: ReadBody) -> ReadBody {
         read.facts = None;
+        read.goals = Vec::new();
         read.automation = Automation::Unknown;
         if let RowBody::Codex { series, .. } = &mut read.body {
             *series = None;
@@ -5410,6 +5566,7 @@ mod tests {
                     automation: Automation::Unknown,
                     automation_read: true,
                     not_analyzable: None,
+                    goals: Vec::new(),
                 },
             );
         }
@@ -5484,6 +5641,7 @@ mod tests {
                     automation: Automation::Unknown,
                     automation_read: true,
                     not_analyzable: None,
+                    goals: Vec::new(),
                 },
             );
         }
@@ -5570,6 +5728,7 @@ mod tests {
             automation: Automation::Unknown,
             automation_read: true,
             not_analyzable: None,
+            goals: Vec::new(),
         }
     }
 
@@ -8734,6 +8893,234 @@ mod tests {
                 assert_eq!(located.unwrap().unwrap().index, 0);
             }
         }
+    }
+
+    /// The text a `/goal` carries in the fixtures: Claude's condition, the
+    /// command's arguments and the reason, and Codex's objective. None of it
+    /// may reach the store, the week's answer or the Sessions answers.
+    fn assert_no_goal_text(text: &str) {
+        for secret in [
+            "PRIVATE-GOAL",
+            super::super::insights_codex_goals::tests::OBJECTIVE,
+            "make the tests pass",
+            "all green",
+        ] {
+            assert!(!text.contains(secret), "{secret} leaked: {text}");
+        }
+    }
+
+    #[test]
+    fn claude_goals_are_kept_per_session_and_answered_without_their_text() {
+        let f = Fixture::new();
+        let path = f.write("goals.jsonl", &fixture("claude-slash-goals/session.jsonl"));
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let row = only_row(&f.pass);
+        assert_eq!(
+            row.goals,
+            vec![
+                ClaudeGoal {
+                    status: crate::insights::slash_goals::ClaudeGoalStatus::Met,
+                    set_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 8, 59, 59).unwrap()),
+                    updated_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 9, 8, 30).unwrap()),
+                    iterations: Some(2),
+                    duration_ms: Some(30_065),
+                    tokens: Some(5_926),
+                },
+                ClaudeGoal {
+                    status: crate::insights::slash_goals::ClaudeGoalStatus::Open,
+                    set_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 9, 9, 0).unwrap()),
+                    updated_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 9, 9, 0).unwrap()),
+                    iterations: None,
+                    duration_ms: None,
+                    tokens: None,
+                },
+            ]
+        );
+        // The goals sit beside the counters; the series still reads.
+        assert!(matches!(row.body, RowBody::Claude { .. }), "{:?}", row.body);
+        assert_no_goal_text(&f.rows_text());
+
+        let value = f.week(&[]);
+        let goals = &value["goals"];
+        assert_eq!(goals["met"], 1, "{goals}");
+        assert_eq!(goals["total"], 2);
+        assert_eq!(
+            goals["by_tool"],
+            serde_json::json!({"claude_code": {"met": 1, "total": 2}})
+        );
+        let reference = row.listed_reference(f.pass.store_tag());
+        // Newest update first: the goal set last, not checked yet.
+        assert_eq!(goals["goals"][0]["status"], "open");
+        assert_eq!(goals["goals"][0]["met"], false);
+        assert_eq!(
+            goals["goals"][1],
+            serde_json::json!({
+                "tool": "claude_code",
+                "status": "met",
+                "met": true,
+                "tokens": 5_926,
+                "time_secs": 30,
+                "iterations": 2,
+                "folder": null,
+                "session_ref": reference,
+                "updated_at": "2026-09-14T09:08:30Z",
+            })
+        );
+        assert_no_goal_text(&value.to_string());
+        // The reference is the one the Sessions drill takes.
+        let drill = f
+            .pass
+            .drill_value(true, &reference, &NeverFolders::NONE, utc())
+            .unwrap();
+        assert_eq!(drill["readable"], true, "{drill}");
+        assert_no_goal_text(&drill.to_string());
+        assert_no_goal_text(
+            &f.pass
+                .sessions_value(true, &NeverFolders::NONE, &[], 10)
+                .to_string(),
+        );
+
+        // Another week has none, and a Never folder's session shows none.
+        let other = f.week_with(
+            Some(monday() + Duration::weeks(1)),
+            &[],
+            WeekOptions::default(),
+        );
+        assert_eq!(other["goals"]["total"], 0, "{}", other["goals"]);
+        assert_eq!(other["goals"]["goals"], serde_json::json!([]));
+        let never = f.week(&[PROJECT.to_string()]);
+        assert_eq!(never["goals"]["total"], 0);
+    }
+
+    /// A resumed Claude transcript repeats the goal records of the one it
+    /// continues: each goal is counted once, as last updated.
+    #[test]
+    fn a_goal_repeated_in_a_resumed_transcript_counts_once() {
+        let f = Fixture::new();
+        let bytes = fixture("claude-slash-goals/session.jsonl");
+        let first = f.write("first.jsonl", &bytes);
+        // The resumed transcript: the same records, and the open goal met.
+        let mut resumed = bytes.clone();
+        resumed.extend_from_slice(
+            serde_json::json!({
+                "type": "attachment",
+                "timestamp": "2026-09-14T11:00:00.000Z",
+                "sessionId": "11111111-2222-4333-8444-PRIVATESESS2",
+                "attachment": {"type": "goal_status", "met": true,
+                    "condition": "PRIVATE-GOAL-CONDITION-TWO ship the release",
+                    "reason": "PRIVATE-GOAL-REASON done", "iterations": 1,
+                    "durationMs": 1_000, "tokens": 10},
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        resumed.push(b'\n');
+        let second = f.write("second.jsonl", &resumed);
+        let mut later = candidate(SOURCE_CLAUDE_CODE, &second);
+        later.size_bytes = resumed.len() as u64;
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &first), later]);
+        assert_eq!(stored_rows(&f.pass).len(), 2);
+        let value = f.week(&[]);
+        let goals = &value["goals"];
+        assert_eq!(goals["total"], 2, "{goals}");
+        assert_eq!(goals["met"], 2, "the later check wins: {goals}");
+        assert_no_goal_text(&value.to_string());
+    }
+
+    #[test]
+    fn a_row_made_before_goals_were_kept_loads_and_is_read_again() {
+        let f = Fixture::new();
+        let path = f.write("goals.jsonl", &fixture("claude-slash-goals/session.jsonl"));
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        // As a daemon before goals wrote it: no `goals`, an older version.
+        edit_stored_rows(&f, |row| {
+            assert!(row.remove("goals").is_some());
+            row.insert("facts_version".into(), serde_json::json!(2));
+        });
+        let reopened = f.reopened();
+        let before = reopened.week_value(
+            true,
+            Some(monday()),
+            utc(),
+            now(),
+            &NeverFolders::NONE,
+            WeekOptions::default(),
+        );
+        assert_eq!(before["readable"], true, "{before}");
+        assert_eq!(before["goals"]["total"], 0);
+        run_with(
+            &reopened,
+            &[candidate(SOURCE_CLAUDE_CODE, &path)],
+            &[],
+            false,
+        );
+        assert_eq!(only_row(&reopened).goals.len(), 2);
+    }
+
+    #[test]
+    fn codex_goals_join_their_session_by_thread_and_carry_no_text() {
+        let mut f = Fixture::new();
+        let thread = "019e4769-7501-7bf3-bf74-b8b5d8e33a9b";
+        let path = f.write("codex.jsonl", &codex_bytes_for(thread));
+        f.run(&[candidate(SOURCE_CODEX, &path)]);
+        let db = f.dir.path().join("goals_1.sqlite");
+        let at = |hour| {
+            Utc.with_ymd_and_hms(2026, 9, 14, hour, 30, 0)
+                .unwrap()
+                .timestamp_millis()
+        };
+        super::super::insights_codex_goals::tests::write_goals_db(
+            &db,
+            &[
+                (thread, "complete", 42_000, 600, at(11)),
+                // A thread no row matches: its rollout is gone.
+                (
+                    "019e0000-0000-7000-8000-000000000000",
+                    "paused",
+                    1,
+                    1,
+                    at(11),
+                ),
+            ],
+        );
+        // No database configured: no Codex goals.
+        assert_eq!(f.week(&[])["goals"]["total"], 0);
+        f.pass.set_codex_goals_db_for_test(Some(db.clone()));
+        let value = f.week(&[]);
+        let goals = &value["goals"];
+        assert_eq!(goals["total"], 1, "{goals}");
+        assert_eq!(goals["met"], 1);
+        let row = only_row(&f.pass);
+        assert_eq!(
+            goals["goals"][0],
+            serde_json::json!({
+                "tool": "codex",
+                "status": "complete",
+                "met": true,
+                "tokens": 42_000,
+                "time_secs": 600,
+                "iterations": null,
+                "folder": null,
+                "session_ref": row.listed_reference(f.pass.store_tag()),
+                "updated_at": "2026-09-14T11:30:00Z",
+            })
+        );
+        assert_no_goal_text(&value.to_string());
+        assert_no_goal_text(&f.rows_text());
+        assert!(!f.rows_text().contains(thread));
+        // A goal last updated in another week is not this week's.
+        let next = f.week_with(
+            Some(monday() + Duration::weeks(1)),
+            &[],
+            WeekOptions::default(),
+        );
+        assert_eq!(next["goals"]["total"], 0);
+        // Never written: the database is only read.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM thread_goals", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
     }
 
     #[test]

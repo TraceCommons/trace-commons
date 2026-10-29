@@ -67,6 +67,15 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         XCTAssertTrue(week.showsCounterPass)
         XCTAssertEqual(week.rollup?.sessions.count, 37)
         XCTAssertEqual(week.usageByDay?.count, 7)
+        // Goals are /goal goals with each tool's own status, and add up.
+        let goals = try XCTUnwrap(week.goals)
+        XCTAssertEqual(goals.total, goals.goals.count)
+        XCTAssertEqual(goals.met, goals.goals.filter(\.met).count)
+        XCTAssertEqual(goals.byTool?.values.reduce(0) { $0 + $1.total }, goals.total)
+        for goal in goals.goals {
+            XCTAssertTrue(InsightsGoalsWords.statuses.contains(goal.status), goal.status)
+            XCTAssertTrue(["claude_code", "codex"].contains(goal.tool), goal.tool)
+        }
     }
 
     func testEveryGetStartedWordIsTheCores() throws {
@@ -209,6 +218,14 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         object["overview"] = overview
         object["change_vs_last_week"] = (object["change_vs_last_week"] as? [[String: Any]] ?? [])
             .filter { keep($0["source"]) }
+        // Only this user's tools' goals.
+        var goals = object["goals"] as? [String: Any] ?? [:]
+        let kept = (goals["goals"] as? [[String: Any]] ?? []).filter { keep($0["tool"]) }
+        goals["goals"] = kept
+        goals["total"] = kept.count
+        goals["met"] = kept.filter { $0["met"] as? Bool == true }.count
+        goals["by_tool"] = (goals["by_tool"] as? [String: Any] ?? [:]).filter { tools.contains($0.key) }
+        object["goals"] = goals
         object["usage_by_day"] = (object["usage_by_day"] as? [[String: Any]] ?? []).map { day -> [String: Any] in
             var day = day
             if !tools.contains("codex") { day["codex"] = 0 }

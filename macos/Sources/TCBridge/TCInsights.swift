@@ -99,9 +99,8 @@ public struct InsightsRequest: Encodable, Sendable {
         /// unchanged (absent under feed S), and its summary-card switch.
         public var counter_weeks: [InsightsWeekFigures]?
         public var recap_card_enabled: Bool?
-        /// `goal_set`: the goal. `lever_feedback`: the lever's kind and
-        /// `not_useful` or `reenable`.
-        public var goal: InsightsGoal?
+        /// `lever_feedback`: the lever's kind and `not_useful` or
+        /// `reenable`.
         public var kind: String?
         public var action: String?
         /// `lever_card`: the Settings switch for the lever's card.
@@ -118,7 +117,7 @@ public struct InsightsRequest: Encodable, Sendable {
                     weekStart: String? = nil, tz: Int32? = nil, card: String? = nil,
                     weeks: Int? = nil, pattern: String? = nil,
                     counterWeeks: [InsightsWeekFigures]? = nil, recapCardEnabled: Bool? = nil,
-                    goal: InsightsGoal? = nil, kind: String? = nil, action: String? = nil,
+                    kind: String? = nil, action: String? = nil,
                     enabled: Bool? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
@@ -132,7 +131,7 @@ public struct InsightsRequest: Encodable, Sendable {
             self.week_start = weekStart; self.tz = tz; self.card = card
             self.weeks = weeks; self.pattern = pattern
             self.counter_weeks = counterWeeks; self.recap_card_enabled = recapCardEnabled
-            self.goal = goal; self.kind = kind; self.action = action
+            self.kind = kind; self.action = action
             self.enabled = enabled
         }
     }
