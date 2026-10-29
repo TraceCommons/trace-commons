@@ -25,6 +25,13 @@ Builds on the NEAR AI payout rail,
   for their own traces vs referrals." Section 5.
 - **(R8) Abuse per code.** 2026-10-29: "Referral codes that are associated
   with a lot of abuse also needs to be detected." Section 7.
+- **(R9) Server-observed signals only.** 2026-10-29, chosen on a decision
+  card ("Server-observed signals"): the client is open source, so nothing
+  it sends counts as abuse evidence. A self-referral (one person, two NEAR
+  AI logins) is caught only by what the server observes: a shared payout
+  org or subject, near-duplicate traces, or a shared network prefix. A
+  match holds the referral stream; it never voids and never pays by
+  itself. Section 7, "Client is untrusted".
 
 Defaults the owner has not overridden (section 9 lists them): the bonus is
 on top and funded by the commons (R2); a launch-time setting opens the
@@ -142,6 +149,22 @@ referrer tenant or account voids the attribution (`referral_referrer_gone`).
 The pass also refreshes, under the referrer's tenant, the mirror row's
 `signal_labels`, `recipient_index` and `subject_index` (section 7).
 
+It also compares, for each referee, two server-observed facts about the
+referee with the same facts about the referrer, each read under its own
+side's tenant and compared only in the pass (section 7, "Client is
+untrusted"):
+
+- **Traces.** The distinct `trace_gate_decisions.dedup_cluster_id` values
+  of each side's own submissions (through `trace_account_owned_principals`),
+  the most recent 500 received since 30 days before the referee's account
+  was created. Clusters come from the cross-tenant simhash scan
+  (`dedup_assign`), so one cluster id means near-duplicate content in any
+  tenant. V142 grants the runtime `SELECT (tenant_id, submission_id,
+  dedup_cluster_id)` on `trace_gate_decisions` for this read and no other
+  column.
+- **Network.** Each side's `trace_referral_network_marks`, the 256 most
+  recently seen within retention.
+
 ### Holds on the referral stream
 
 Recorded in `trace_payout_holds` (rail `near_ai`) on the referrer's account,
@@ -150,6 +173,12 @@ holding only the referral stream:
 - `referral_same_payout_org`: the referee's live link `recipient_index`
   equals the referrer's.
 - `referral_same_payout_subject`: same `subject_index`.
+- `referral_same_traces`: one of the referee's traces is in the same
+  near-duplicate cluster as one of the referrer's. The referee's mirror row
+  carries `referral_duplicate_traces`, which counts toward the code's score.
+- `referral_same_network`: the referee and the referrer share a network
+  mark. The mirror row carries `referral_same_network` as evidence for the
+  operator; it never counts toward a code's or a referrer's score.
 - `referral_code_suspended`: the code that referred them is suspended.
 - `referral_over_ceiling`: the referrer's referral owed exceeds
   `TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO` (default $250).
@@ -158,6 +187,13 @@ holding only the referral stream:
 
 A hold on the referee's own account (credit hold, closed) stops new bonus
 rows from that referee until it clears.
+
+`referral_same_traces` and `referral_same_network` open when a referee
+first shows the match (its mirror row does not yet carry the label), so an
+operator who clears one is not overruled by the next pass; another referee
+with the same match opens it again. Every referral hold is cleared through
+the payout hold route (`POST .../holds/clear`) or ended by a void through
+the referral admin routes (section 6).
 
 ## 5. Paying it: the referral stream
 
@@ -231,8 +267,9 @@ the referrer's tenant.
 | `referral_refused_share` | most of the referee's submissions refused by scoring or the gates | over 40% of referees |
 | `referral_credit_hold_share` | open credit hold or an operator reversal | over 20% |
 | `referral_advance_forfeit_share` | starter advance forfeited (once advances exist) | over 20% |
-| `referral_shared_identity` | referee shares `recipient_index`, `subject_index` or a device key with another referee of the same code | 3 or more referees in one cluster |
-| `referral_duplicate_traces` | referee's traces duplicate another referee's (content hash or simhash) | over 20% |
+| `referral_shared_identity` | referee shares `recipient_index` or `subject_index` with another referee of the same code | 3 or more referees in one cluster |
+| `referral_duplicate_traces` | one of the referee's traces is in the same near-duplicate (simhash) cluster as one of the referrer's | over 20% |
+| `referral_same_network` | referee and referrer share a network mark | never: evidence only |
 | `referral_burst` | applied times | more than 20 referees in 24 hours |
 | `referral_never_settles` | uploads but no settled credit 30 days after joining | over 60% |
 
@@ -244,6 +281,60 @@ by itself, with an audit row, and readiness reports `referral_tripped`.
 An operator clears (optionally exempting a label) or voids. A void writes
 one `void` bonus row per affected referee taking back their unsent bonus.
 Thresholds are settings, tuned from the dry-run report before `live`.
+
+### Client is untrusted (R9)
+
+The contributor client is open source, so anything it sends can be forged:
+no device hash, install id or client-reported field is abuse evidence, and
+none is collected for it. Self-referral, one person with two NEAR AI logins
+(two `nearai-` tenants), is caught only by signals the server observes
+itself, and each one holds the referrer's referral stream for an operator:
+
+- **Same payout org or subject** (`referral_same_payout_org`,
+  `referral_same_payout_subject`), from the payout link blind indexes.
+- **Near-duplicate traces** (`referral_same_traces`; mirror label
+  `referral_duplicate_traces`, scored): the strong signal, since a second
+  login uploading the first's traces is the cheap way to farm the bonus.
+  Bounded per side to the most recent 500 submissions since 30 days before
+  the referee's account was created.
+- **Same network prefix** (`referral_same_network`; mirror label
+  `referral_same_network`, not scored). Recorded in
+  `trace_referral_network_marks(tenant_id, account_id, mark, first_seen_at,
+  last_seen_at)`, in each account's own tenant under forced RLS. The mark
+  is `sha256:` + hex of HMAC-SHA256 under the operator secret
+  `TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY` (base64, at least 32 bytes)
+  over a domain tag and the canonical prefix: IPv4 /24, IPv6 /48, an
+  IPv4-mapped address as its IPv4. It is keyed because there are only 2^24
+  IPv4 /24s, so an unkeyed hash is reversed by enumeration. The address is
+  the rightmost `X-Forwarded-For` hop, which the Caddy edge overwrites (the
+  source the rate limiter uses); a client-set hop to its left, an
+  unattributed or malformed value, or an address that is not public
+  unicast (loopback, private, link-local, unique-local, multicast) records
+  nothing. Marks are recorded only for accounts in the program (they own a
+  code or have an attribution): on the code create, list, apply and status
+  routes and on a NEAR AI or wallet sign-up that carries a code, refreshed
+  at most hourly. Trace submission does not record one: the upload path
+  authenticates a device principal, not an account, and resolving it on
+  every upload for every contributor costs more than the signal adds.
+
+**The coworker case.** Colleagues on one office, campus or carrier-NAT
+network refer each other legitimately, and that is the main way a network
+match happens. So `referral_same_network` holds the stream for an operator
+to look at and is never counted toward a code's or a referrer's
+suspension, however many referees carry it.
+
+**Retention.** A mark is kept for the earning period plus 30 days
+(`TRACE_COMMONS_REFERRAL_EARN_DAYS` + 30, 122 by default) after it was last
+seen. Recording deletes the account's older marks, the pass deletes the
+tenant's when it visits it, and reads ignore older marks, so a missed
+delete never matches.
+
+**Key.** With the program configured (`TRACE_COMMONS_REFERRAL_PROGRAM_START`
+set) or the bonus mode not `disabled`, ingest refuses to start without the
+key (`referral_network_mark_key_missing`); a present but malformed key
+refuses whatever the configuration (`referral_network_mark_key_invalid`).
+Rotating the key makes earlier marks incomparable with new ones until they
+expire. Nothing logs an address, a prefix, a mark or a cluster id.
 
 ## 8. Delivery plan
 
