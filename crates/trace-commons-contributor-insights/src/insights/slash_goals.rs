@@ -48,6 +48,12 @@ pub enum ClaudeGoalStatus {
 #[serde(deny_unknown_fields)]
 pub struct ClaudeGoal {
     pub status: ClaudeGoalStatus,
+    /// The sentinel record's `timestamp`: when the goal was set. A resumed
+    /// transcript repeats the records of the one it continues, so the same
+    /// goal is told apart across sessions by it. `None` when the sentinel
+    /// was not read or carries no valid time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_at: Option<DateTime<Utc>>,
     /// The latest record's `timestamp`: when the goal was set, or last
     /// checked. `None` when that record carries no valid time.
     pub updated_at: Option<DateTime<Utc>>,
@@ -104,6 +110,7 @@ impl ClaudeGoalScan {
             }
             self.goals.push(ClaudeGoal {
                 status: ClaudeGoalStatus::Open,
+                set_at: None,
                 updated_at: None,
                 iterations: None,
                 duration_ms: None,
@@ -119,6 +126,7 @@ impl ClaudeGoalScan {
             .map(|at| at.with_timezone(&Utc));
         if sentinel {
             goal.status = ClaudeGoalStatus::Open;
+            goal.set_at = goal.updated_at;
             return;
         }
         goal.status = if attachment.get("met").and_then(Value::as_bool) == Some(true) {
@@ -288,6 +296,7 @@ mod tests {
             goals[0].updated_at.unwrap().to_rfc3339(),
             "2026-10-29T14:36:55.256+00:00"
         );
+        assert_eq!(goals[0].set_at, goals[0].updated_at);
     }
 
     #[test]
@@ -305,6 +314,11 @@ mod tests {
         assert_eq!(
             goals[0].updated_at.unwrap().to_rfc3339(),
             "2026-10-29T14:37:09+00:00"
+        );
+        assert_eq!(
+            goals[0].set_at.unwrap().to_rfc3339(),
+            "2026-10-29T14:36:55+00:00",
+            "set when the sentinel was written"
         );
     }
 

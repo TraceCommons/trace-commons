@@ -3993,6 +3993,11 @@ fn session_row_value(
 /// goal no listed row matches (its rollout aged out, was archived or is in
 /// a Never folder) is left out. Only status, tokens, time, checks and the
 /// time of the update are answered, never a goal's text.
+///
+/// A goal is counted once however many rows hold it: a resumed Claude
+/// transcript repeats the goal records of the one it continues, told apart
+/// by when the goal was set, and a Codex thread is one goal by its digest.
+/// Of the copies, the one updated last is answered.
 fn week_goals(
     store: &CounterStore,
     key: &DigestKey,
@@ -4012,6 +4017,14 @@ fn week_goals(
         |at: Option<DateTime<Utc>>| at.filter(|at| local_week_start(at, &tz) == week_start);
     let tag = store_tag_of(key, store);
     let mut goals = Vec::new();
+    // One per Claude goal set time and per Codex thread, the latest update.
+    let mut claude_once: BTreeMap<DateTime<Utc>, WeekGoal> = BTreeMap::new();
+    // A Codex goal is one database row: on two rows, the reference is the
+    // one written last.
+    let mut codex_once: BTreeMap<KeyedDigest, (DateTime<Utc>, WeekGoal)> = BTreeMap::new();
+    let keep_latest = |slot: Option<&WeekGoal>, goal: &WeekGoal| {
+        slot.is_none_or(|kept| goal.updated_at > kept.updated_at)
+    };
     for row in listed() {
         let folder = folders.get(&row.project).map(|label| (*label).to_owned());
         for goal in &row.goals {
@@ -4019,7 +4032,7 @@ fn week_goals(
                 continue;
             };
             let status = GoalStatus::from(goal.status);
-            goals.push(WeekGoal {
+            let answered = WeekGoal {
                 tool: AnalyticsSource::ClaudeCode,
                 status,
                 met: status.met(),
@@ -4029,18 +4042,29 @@ fn week_goals(
                 folder: folder.clone(),
                 session_ref: row.listed_reference(tag),
                 updated_at,
-            });
+            };
+            match goal.set_at {
+                Some(set_at) => {
+                    if keep_latest(claude_once.get(&set_at), &answered) {
+                        claude_once.insert(set_at, answered);
+                    }
+                }
+                None => goals.push(answered),
+            }
         }
         if !matches!(row.body, RowBody::Codex { .. }) {
             continue;
         }
-        let Some(goal) = row.harness_session.and_then(|digest| codex.get(&digest)) else {
+        let Some((digest, goal)) = row
+            .harness_session
+            .and_then(|digest| codex.get(&digest).map(|goal| (digest, goal)))
+        else {
             continue;
         };
         let Some(updated_at) = in_week(goal.updated_at) else {
             continue;
         };
-        goals.push(WeekGoal {
+        let answered = WeekGoal {
             tool: AnalyticsSource::Codex,
             status: goal.status,
             met: goal.status.met(),
@@ -4050,8 +4074,16 @@ fn week_goals(
             folder,
             session_ref: row.listed_reference(tag),
             updated_at,
-        });
+        };
+        if codex_once
+            .get(&digest)
+            .is_none_or(|(written, _)| row.modified_at > *written)
+        {
+            codex_once.insert(digest, (row.modified_at, answered));
+        }
     }
+    goals.extend(claude_once.into_values());
+    goals.extend(codex_once.into_values().map(|(_, goal)| goal));
     WeekGoals::new(goals)
 }
 
@@ -8931,6 +8963,7 @@ mod tests {
             vec![
                 ClaudeGoal {
                     status: crate::insights::slash_goals::ClaudeGoalStatus::Met,
+                    set_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 8, 59, 59).unwrap()),
                     updated_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 9, 8, 30).unwrap()),
                     iterations: Some(2),
                     duration_ms: Some(30_065),
@@ -8938,6 +8971,7 @@ mod tests {
                 },
                 ClaudeGoal {
                     status: crate::insights::slash_goals::ClaudeGoalStatus::Open,
+                    set_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 9, 9, 0).unwrap()),
                     updated_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 9, 9, 0).unwrap()),
                     iterations: None,
                     duration_ms: None,
@@ -8999,6 +9033,41 @@ mod tests {
         assert_eq!(other["goals"]["goals"], serde_json::json!([]));
         let never = f.week(&[PROJECT.to_string()]);
         assert_eq!(never["goals"]["total"], 0);
+    }
+
+    /// A resumed Claude transcript repeats the goal records of the one it
+    /// continues: each goal is counted once, as last updated.
+    #[test]
+    fn a_goal_repeated_in_a_resumed_transcript_counts_once() {
+        let f = Fixture::new();
+        let bytes = fixture("claude-slash-goals/session.jsonl");
+        let first = f.write("first.jsonl", &bytes);
+        // The resumed transcript: the same records, and the open goal met.
+        let mut resumed = bytes.clone();
+        resumed.extend_from_slice(
+            serde_json::json!({
+                "type": "attachment",
+                "timestamp": "2026-09-14T11:00:00.000Z",
+                "sessionId": "11111111-2222-4333-8444-PRIVATESESS2",
+                "attachment": {"type": "goal_status", "met": true,
+                    "condition": "PRIVATE-GOAL-CONDITION-TWO ship the release",
+                    "reason": "PRIVATE-GOAL-REASON done", "iterations": 1,
+                    "durationMs": 1_000, "tokens": 10},
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        resumed.push(b'\n');
+        let second = f.write("second.jsonl", &resumed);
+        let mut later = candidate(SOURCE_CLAUDE_CODE, &second);
+        later.size_bytes = resumed.len() as u64;
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &first), later]);
+        assert_eq!(stored_rows(&f.pass).len(), 2);
+        let value = f.week(&[]);
+        let goals = &value["goals"];
+        assert_eq!(goals["total"], 2, "{goals}");
+        assert_eq!(goals["met"], 2, "the later check wins: {goals}");
+        assert_no_goal_text(&value.to_string());
     }
 
     #[test]
