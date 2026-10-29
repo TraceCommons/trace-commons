@@ -188,10 +188,13 @@ holding only the referral stream:
 A hold on the referee's own account (credit hold, closed) stops new bonus
 rows from that referee until it clears.
 
+`referral_same_payout_org`, `referral_same_payout_subject`,
 `referral_same_traces` and `referral_same_network` open when a referee
-first shows the match (its mirror row does not yet carry the label), so an
-operator who clears one is not overruled by the next pass; another referee
-with the same match opens it again. Every referral hold is cleared through
+first shows the match (its mirror row does not yet carry the label:
+`referral_duplicate_traces` for traces, the hold's own label otherwise), so
+an operator who clears one is not overruled by the next pass; another
+referee with the same match opens it again. The payout org, subject and
+network labels on the mirror are evidence only and never scored. Every referral hold is cleared through
 the payout hold route (`POST .../holds/clear`) or ended by a void through
 the referral admin routes (section 6).
 
@@ -270,6 +273,7 @@ the referrer's tenant.
 | `referral_shared_identity` | referee shares `recipient_index` or `subject_index` with another referee of the same code | 3 or more referees in one cluster |
 | `referral_duplicate_traces` | one of the referee's traces is in the same near-duplicate (simhash) cluster as one of the referrer's | over 20% |
 | `referral_same_network` | referee and referrer share a network mark | never: evidence only |
+| `referral_same_payout_org`, `referral_same_payout_subject` | referee's live link has the referrer's `recipient_index` or `subject_index` | never: evidence only (the hold does the work) |
 | `referral_burst` | applied times | more than 20 referees in 24 hours |
 | `referral_never_settles` | uploads but no settled credit 30 days after joining | over 60% |
 

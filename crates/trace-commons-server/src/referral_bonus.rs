@@ -42,9 +42,11 @@
 //! on the mirror, which counts toward the code's score), and their keyed
 //! network marks (`referral_same_network`, on the mirror as evidence only,
 //! never scored). A match holds; it never voids and never pays. Each of
-//! these two holds opens when the referee first shows the match, so an
-//! operator who clears it is not overruled by the next pass; a new referee
-//! with the same match opens it again. It sends nothing: the referral stream's sends are
+//! these holds, and the payout org and subject holds, opens when the
+//! referee first shows the match (its label is not yet on the mirror; the
+//! org and subject labels are evidence only, never scored), so an operator
+//! who clears it is not overruled by the next pass; a new referee with the
+//! same match opens it again. It sends nothing: the referral stream's sends are
 //! a later change, and this pass runs in `dry_run` only.
 //!
 //! Logs carry counts and labels only.
@@ -718,32 +720,58 @@ impl ReferralBonusHook {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        // Evidence for an operator; `score_rows` never counts it.
-        if same_network {
-            labels.push(REFERRAL_SAME_NETWORK.to_owned());
-        }
-        // The two holds open when this referee first shows the match (the
-        // mirror does not carry its label yet), before the mirror is
-        // refreshed, so a failed refresh retries the hold too, and an
-        // operator's clear stands until another referee matches.
-        let shown = |label: &str| {
-            view.mirror
-                .as_ref()
-                .is_some_and(|mirror| mirror.signal_labels.iter().any(|held| held == label))
-        };
-        if same_traces && !shown(REFERRAL_DUPLICATE_TRACES) {
-            self.hold(referrer_tenant, referrer, REFERRAL_SAME_TRACES, report)
-                .await?;
-        }
-        if same_network && !shown(REFERRAL_SAME_NETWORK) {
-            self.hold(referrer_tenant, referrer, REFERRAL_SAME_NETWORK, report)
-                .await?;
-        }
+        // Same payout org or subject as the referrer, from the two live
+        // links' blind indexes.
         let referee_link = store(
             self.payouts
                 .payout_live_link(tenant, referee, &self.rail)
                 .await,
         )?;
+        let referrer_link = store(
+            self.payouts
+                .payout_live_link(referrer_tenant, referrer, &self.rail)
+                .await,
+        )?;
+        let (same_org, same_subject) = match (&referrer_link, &referee_link) {
+            (Some(mine), Some(theirs)) => (
+                mine.recipient.recipient_index == theirs.recipient.recipient_index,
+                mine.recipient.subject_index == theirs.recipient.subject_index,
+            ),
+            _ => (false, false),
+        };
+        // Evidence for an operator; `score_rows` never counts these.
+        for (matched, label) in [
+            (same_org, REFERRAL_SAME_PAYOUT_ORG),
+            (same_subject, REFERRAL_SAME_PAYOUT_SUBJECT),
+            (same_network, REFERRAL_SAME_NETWORK),
+        ] {
+            if matched {
+                labels.push(label.to_owned());
+            }
+        }
+        // Each server-observed hold opens when this referee first shows the
+        // match (the mirror does not carry its label yet), before the
+        // mirror is refreshed, so a failed refresh retries the hold too, and
+        // an operator's clear stands until another referee matches.
+        let shown = |label: &str| {
+            view.mirror
+                .as_ref()
+                .is_some_and(|mirror| mirror.signal_labels.iter().any(|held| held == label))
+        };
+        for (matched, evidence, hold) in [
+            (same_org, REFERRAL_SAME_PAYOUT_ORG, REFERRAL_SAME_PAYOUT_ORG),
+            (
+                same_subject,
+                REFERRAL_SAME_PAYOUT_SUBJECT,
+                REFERRAL_SAME_PAYOUT_SUBJECT,
+            ),
+            (same_traces, REFERRAL_DUPLICATE_TRACES, REFERRAL_SAME_TRACES),
+            (same_network, REFERRAL_SAME_NETWORK, REFERRAL_SAME_NETWORK),
+        ] {
+            if matched && !shown(evidence) {
+                self.hold(referrer_tenant, referrer, hold, report).await?;
+            }
+        }
         let (recipient_index, subject_index) = match &referee_link {
             Some(link) => (
                 Some(link.recipient.recipient_index.as_str()),
@@ -762,28 +790,6 @@ impl ReferralBonusHook {
                 )
                 .await,
         )?;
-
-        // Same payout org or subject as the referrer.
-        let referrer_link = store(
-            self.payouts
-                .payout_live_link(referrer_tenant, referrer, &self.rail)
-                .await,
-        )?;
-        if let (Some(mine), Some(theirs)) = (&referrer_link, &referee_link) {
-            if mine.recipient.recipient_index == theirs.recipient.recipient_index {
-                self.hold(referrer_tenant, referrer, REFERRAL_SAME_PAYOUT_ORG, report)
-                    .await?;
-            }
-            if mine.recipient.subject_index == theirs.recipient.subject_index {
-                self.hold(
-                    referrer_tenant,
-                    referrer,
-                    REFERRAL_SAME_PAYOUT_SUBJECT,
-                    report,
-                )
-                .await?;
-            }
-        }
 
         self.score(
             referrer_tenant,
