@@ -727,6 +727,80 @@ fn codex_split<Tz: TimeZone>(
     }
 }
 
+/// How one keyed Claude snapshot relates to the others by the turns they
+/// share. A resumed Claude transcript repeats the turns of the one it
+/// continues, so its session facts (lines, edits) hold that one's too.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClaudeResume {
+    /// The snapshot this one continues: the largest other snapshot whose
+    /// every turn it repeats (of two equal ones, the earlier import).
+    pub continues: Option<usize>,
+    /// Another snapshot repeats every turn of this one: a later transcript
+    /// continues it, or it is the earlier import of two equal ones.
+    pub continued: bool,
+    /// It shares turns with an earlier import without either holding all
+    /// the other's, so which of its facts are new cannot be told.
+    pub tangled: bool,
+}
+
+/// Per session, in input order. Default for a session that is not a keyed
+/// Claude snapshot.
+pub fn claude_resumes(sessions: &[SessionInput]) -> Vec<ClaudeResume> {
+    let keys: Vec<Option<BTreeSet<KeyedDigest>>> = sessions
+        .iter()
+        .map(|input| match &input.body {
+            SessionBody::Claude { series, .. } if input.keyed() => Some(
+                series
+                    .turns
+                    .iter()
+                    .filter_map(|turn| turn.msg_key)
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect();
+    let mut holders: BTreeMap<KeyedDigest, Vec<usize>> = BTreeMap::new();
+    for (index, keys) in keys.iter().enumerate() {
+        for key in keys.iter().flatten() {
+            holders.entry(*key).or_default().push(index);
+        }
+    }
+    let rank = |index: usize| (sessions[index].import_seq, index);
+    let mut out = vec![ClaudeResume::default(); sessions.len()];
+    for (x, x_keys) in keys.iter().enumerate() {
+        let Some(x_keys) = x_keys else {
+            continue;
+        };
+        let mut shared: BTreeMap<usize, usize> = BTreeMap::new();
+        for key in x_keys {
+            for &y in &holders[key] {
+                if y != x {
+                    *shared.entry(y).or_default() += 1;
+                }
+            }
+        }
+        let mut best: Option<(usize, usize)> = None;
+        for (y, count) in shared {
+            let y_len = keys[y].as_ref().map_or(0, BTreeSet::len);
+            let y_in_x = count == y_len;
+            let x_in_y = count == x_keys.len();
+            if y_in_x && (!x_in_y || rank(y) < rank(x)) {
+                if best.is_none_or(|(_, len)| y_len > len) {
+                    best = Some((y, y_len));
+                }
+            }
+            if x_in_y && (!y_in_x || rank(x) < rank(y)) {
+                out[x].continued = true;
+            }
+            if !y_in_x && !x_in_y && rank(y) < rank(x) {
+                out[x].tangled = true;
+            }
+        }
+        out[x].continues = best.map(|(y, _)| y);
+    }
+    out
+}
+
 /// Per session, in input order: for a Claude session the ordinals of the
 /// turns this week counts, which are its turns dated in the week and not
 /// already counted in an earlier snapshot. `None` for any other session, and
@@ -1116,6 +1190,52 @@ mod tests {
         let mut t = turn(ordinal, Some(when), None);
         t.msg_key = Some(KeyedDigest([key; 32]));
         t
+    }
+
+    #[test]
+    fn a_resumed_transcript_continues_the_largest_one_it_repeats() {
+        let first = claude("first", 1, vec![keyed(0, at(6, 9), 1)]);
+        let second = claude(
+            "second",
+            2,
+            vec![keyed(0, at(6, 9), 1), keyed(1, at(6, 10), 2)],
+        );
+        let third = claude(
+            "third",
+            3,
+            vec![
+                keyed(0, at(6, 9), 1),
+                keyed(1, at(6, 10), 2),
+                keyed(2, at(7, 9), 3),
+            ],
+        );
+        // Shares turn 2 with `second` but lacks turn 1: neither holds the other.
+        let tangled = claude(
+            "tangled",
+            4,
+            vec![keyed(0, at(6, 10), 2), keyed(1, at(8, 9), 9)],
+        );
+        let unkeyed = claude("unkeyed", 5, vec![turn(0, Some(at(6, 9)), None)]);
+        let resumes = claude_resumes(&[third, first, second, tangled, unkeyed]);
+        assert_eq!(resumes[0].continues, Some(2));
+        assert!(!resumes[0].continued);
+        assert_eq!(resumes[1].continues, None);
+        assert!(resumes[1].continued);
+        assert_eq!(resumes[2].continues, Some(1));
+        assert!(resumes[2].continued);
+        assert!(resumes[3].tangled);
+        assert_eq!(resumes[3].continues, None);
+        assert_eq!(resumes[4], ClaudeResume::default());
+    }
+
+    #[test]
+    fn of_two_equal_transcripts_the_later_import_continues_the_earlier() {
+        let turns = vec![keyed(0, at(6, 9), 1)];
+        let resumes = claude_resumes(&[claude("b", 2, turns.clone()), claude("a", 1, turns)]);
+        assert_eq!(resumes[0].continues, Some(1));
+        assert!(!resumes[0].continued);
+        assert_eq!(resumes[1].continues, None);
+        assert!(resumes[1].continued);
     }
 
     #[test]
