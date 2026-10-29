@@ -530,3 +530,108 @@ async fn the_operator_voids_one_referral_in_both_tenants() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert_eq!(body["error"], "referral_code_not_found");
 }
+
+/// A tripped referral stream (spec section 7) runs as `dry_run` until the
+/// operator resumes it through the payout rail control route, with the
+/// payout control token and an audit row, as a rail's halt is lifted.
+#[tokio::test]
+async fn the_operator_resumes_a_tripped_referral_stream() {
+    use trace_commons_server::referral_bonus::{
+        NEAR_AI_REFERRAL_CONTROL_RAIL, near_ai_referral_control_rail,
+    };
+    let Some(backend) = required_postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let state = referral_state(dir.path(), &backend);
+    let seeded = seed(&backend).await;
+    let control = near_ai_referral_control_rail();
+    let uri = format!("/v1/admin/payout-rails/{NEAR_AI_REFERRAL_CONTROL_RAIL}/resume");
+    let referral_readiness = |state: &Arc<AppState>| {
+        state
+            .payout_rails
+            .readiness()
+            .into_iter()
+            .find(|entry| entry.rail_id == NEAR_AI_REFERRAL_CONTROL_RAIL)
+            .expect("the referral stream's readiness entry")
+    };
+
+    // The pass trips it, and readiness reports the trip.
+    backend
+        .set_payout_control(
+            &control,
+            true,
+            Some(trace_commons_server::referral_abuse::REFERRAL_TRIPPED),
+            &hash(9),
+        )
+        .await
+        .unwrap();
+    let hook = state.payout_rails.referral_bonus().unwrap().clone();
+    hook.run_tenant(&seeded.referrer_tenant, hook.rail_id())
+        .await;
+    assert!(referral_readiness(&state).halted);
+
+    // Tenant tokens never reach it.
+    for bearer in [None, Some("admin-token-a")] {
+        let (status, _) = call(state.clone(), "POST", &uri, bearer, None).await;
+        assert!(
+            status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN,
+            "{status}"
+        );
+    }
+    assert!(backend.payout_control(&control).await.unwrap().halted);
+
+    let (status, body) = call(state.clone(), "POST", &uri, Some(OPERATOR_TOKEN), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rail_id"], NEAR_AI_REFERRAL_CONTROL_RAIL);
+    assert_eq!(body["halted"], false);
+    let now = backend.payout_control(&control).await.unwrap();
+    assert!(!now.halted);
+    assert!(!referral_readiness(&state).halted, "readiness at once");
+
+    // The control row carries the operator's hash and a label, nothing else.
+    let client = backend.trace_pool_for_test().get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT label, actor_ref_hash FROM trace_payout_control
+              WHERE rail_id = $1 ORDER BY seq DESC LIMIT 1",
+            &[&control.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<_, Option<String>>(0).as_deref(),
+        Some("operator_resume")
+    );
+    assert!(row.get::<_, String>(1).starts_with("sha256:"));
+
+    let (status, body) = call(
+        state.clone(),
+        "POST",
+        &format!("/v1/admin/payout-rails/{NEAR_AI_REFERRAL_CONTROL_RAIL}/halt"),
+        Some(OPERATOR_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(backend.payout_control(&control).await.unwrap().halted);
+    let (status, _) = call(state, "POST", &uri, Some(OPERATOR_TOKEN), None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// Without the referral stream attached there is nothing to resume.
+#[tokio::test]
+async fn the_referral_control_is_unknown_without_the_referral_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = with_operator_token(test_state(dir.path().to_path_buf()));
+    let (status, body) = call(
+        state,
+        "POST",
+        "/v1/admin/payout-rails/near_ai.referral/resume",
+        Some(OPERATOR_TOKEN),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"], "payout_rail_unknown");
+}

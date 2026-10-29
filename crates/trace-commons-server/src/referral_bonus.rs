@@ -429,6 +429,13 @@ impl ReferralBonusHook {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Records an operator's halt or resume of the referral stream, which
+    /// the control route has just written, so readiness reports it at once
+    /// rather than at the next pass.
+    pub fn record_operator_control(&self, halted: bool) {
+        self.record_tripped(halted);
+    }
+
     fn record_tripped(&self, tripped: bool) {
         *self
             .tripped

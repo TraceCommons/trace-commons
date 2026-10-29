@@ -135,6 +135,8 @@ pub const REFERRAL_ABUSE_NEVER_SETTLES_SHARE_BPS_ENV: &str =
 pub const REFERRAL_ABUSE_NEVER_SETTLES_DAYS_ENV: &str =
     "TRACE_COMMONS_REFERRAL_ABUSE_NEVER_SETTLES_DAYS";
 pub const REFERRAL_ABUSE_TRIP_CODES_ENV: &str = "TRACE_COMMONS_REFERRAL_ABUSE_TRIP_CODES";
+pub const REFERRAL_ABUSE_REFUSED_MIN_SUBMISSIONS_ENV: &str =
+    "TRACE_COMMONS_REFERRAL_ABUSE_REFUSED_MIN_SUBMISSIONS";
 
 /// The thresholds of section 7. Shares are in basis points of a code's
 /// referees, and a share trips when it is strictly over its threshold.
@@ -144,6 +146,10 @@ pub struct ReferralAbuseSettings {
     pub min_referees: u32,
     /// Over 40%.
     pub refused_share_bps: u32,
+    /// A referee counts toward the refused share only once they have made
+    /// at least this many submissions (5), so one rejected upload by a
+    /// stranger who used a public code is not evidence against its owner.
+    pub refused_min_submissions: u32,
     /// Over 20%.
     pub credit_hold_share_bps: u32,
     /// Over 20%.
@@ -167,6 +173,7 @@ impl Default for ReferralAbuseSettings {
         Self {
             min_referees: 5,
             refused_share_bps: 4_000,
+            refused_min_submissions: 5,
             credit_hold_share_bps: 2_000,
             advance_forfeit_share_bps: 2_000,
             shared_identity_cluster: 3,
@@ -210,6 +217,12 @@ impl ReferralAbuseSettings {
                 defaults.refused_share_bps,
                 0,
                 10_000,
+            )?,
+            refused_min_submissions: read(
+                REFERRAL_ABUSE_REFUSED_MIN_SUBMISSIONS_ENV,
+                defaults.refused_min_submissions,
+                1,
+                100_000,
             )?,
             credit_hold_share_bps: read(
                 REFERRAL_ABUSE_CREDIT_HOLD_SHARE_BPS_ENV,
@@ -294,8 +307,11 @@ pub fn referee_signal_labels(
     settings: &ReferralAbuseSettings,
 ) -> Vec<&'static str> {
     let mut labels = Vec::new();
-    // "Most": strictly more than half.
-    if facts.submissions > 0 && facts.refused.saturating_mul(2) > facts.submissions {
+    // "Most": strictly more than half, of enough submissions that one bad
+    // upload by a stranger with a public code is not evidence.
+    if facts.submissions >= u64::from(settings.refused_min_submissions)
+        && facts.refused.saturating_mul(2) > facts.submissions
+    {
         labels.push(REFERRAL_REFUSED_SHARE);
     }
     if facts.credit_hold_or_reversal {
@@ -560,7 +576,62 @@ mod tests {
         assert_eq!(s.never_settles_share_bps, 6_000);
         assert_eq!(s.never_settles_days, 30);
         assert_eq!(s.trip_codes, 2);
+        assert_eq!(s.refused_min_submissions, 5);
         assert_eq!(ReferralAbuseSettings::from_vars(|_| None), Ok(s));
+    }
+
+    /// One rejected upload is not evidence against the referrer: a
+    /// stranger who signs up with a public code and uploads one bad trace
+    /// must not count toward suspending it. The refused share counts only
+    /// once the referee has made `refused_min_submissions` submissions.
+    #[test]
+    fn a_refused_share_needs_enough_of_the_referee_s_own_submissions() {
+        for (submissions, refused) in [(1, 1), (2, 2), (4, 4)] {
+            let few = RefereeFacts {
+                submissions,
+                refused,
+                ..facts()
+            };
+            assert!(
+                referee_signal_labels(&few, now(), &settings()).is_empty(),
+                "{submissions} submissions, {refused} refused"
+            );
+        }
+        let enough = RefereeFacts {
+            submissions: 5,
+            refused: 3,
+            ..facts()
+        };
+        assert_eq!(
+            referee_signal_labels(&enough, now(), &settings()),
+            vec![REFERRAL_REFUSED_SHARE]
+        );
+        let tuned = ReferralAbuseSettings::from_vars(|name| {
+            (name == REFERRAL_ABUSE_REFUSED_MIN_SUBMISSIONS_ENV).then(|| "1".to_owned())
+        })
+        .unwrap();
+        assert_eq!(
+            referee_signal_labels(
+                &RefereeFacts {
+                    submissions: 1,
+                    refused: 1,
+                    ..facts()
+                },
+                now(),
+                &tuned
+            ),
+            vec![REFERRAL_REFUSED_SHARE]
+        );
+        for bad in ["0", "", "x", "100001"] {
+            let error = ReferralAbuseSettings::from_vars(|name| {
+                (name == REFERRAL_ABUSE_REFUSED_MIN_SUBMISSIONS_ENV).then(|| bad.to_owned())
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.setting, REFERRAL_ABUSE_REFUSED_MIN_SUBMISSIONS_ENV,
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

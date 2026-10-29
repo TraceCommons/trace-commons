@@ -304,6 +304,14 @@ async fn set_payout_rail_control(
     halted: bool,
 ) -> ApiResult<Json<PayoutRailControlResponse>> {
     let actor = require_payout_operator(state.as_ref(), &headers)?;
+    let label = if halted {
+        PAYOUT_HALT_LABEL
+    } else {
+        PAYOUT_RESUME_LABEL
+    };
+    if rail_id == trace_commons_server::referral_bonus::NEAR_AI_REFERRAL_CONTROL_RAIL {
+        return set_referral_stream_control(state, actor, halted, label).await;
+    }
     let entry = state
         .payout_rails
         .get(&rail_id)
@@ -312,11 +320,6 @@ async fn set_payout_rail_control(
         .payout_store
         .as_ref()
         .ok_or_else(|| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_store_unavailable"))?;
-    let label = if halted {
-        PAYOUT_HALT_LABEL
-    } else {
-        PAYOUT_RESUME_LABEL
-    };
     store
         .set_payout_control(entry.rail_id(), halted, Some(label), &actor)
         .await
@@ -329,6 +332,37 @@ async fn set_payout_rail_control(
     }
     Ok(Json(PayoutRailControlResponse {
         rail_id: entry.rail_id().as_str().to_owned(),
+        halted,
+    }))
+}
+
+/// The referral stream's pseudo-rail (`near_ai.referral`, referral spec
+/// section 7): the bonus pass halts it when too many codes are suspended in
+/// a day, which runs the stream as `dry_run`, and this is how the operator
+/// resumes it (or halts it by hand). The same token and the same
+/// hash-only control row as a rail's halt and resume. Unknown, like any
+/// rail id, while the referral stream is not attached.
+async fn set_referral_stream_control(
+    state: Arc<AppState>,
+    actor: String,
+    halted: bool,
+    label: &'static str,
+) -> ApiResult<Json<PayoutRailControlResponse>> {
+    let hook = state.payout_rails.referral_bonus().ok_or_else(|| {
+        api_error(
+            StatusCode::NOT_FOUND,
+            trace_commons_server::payout_worker::PayoutRailsError::Unknown.label(),
+        )
+    })?;
+    let control = trace_commons_server::referral_bonus::near_ai_referral_control_rail();
+    hook.payouts()
+        .set_payout_control(&control, halted, Some(label), &actor)
+        .await
+        .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "payout_control_unrecorded"))?;
+    hook.record_operator_control(halted);
+    tracing::info!(rail = %control, halted, label, "referral stream control set");
+    Ok(Json(PayoutRailControlResponse {
+        rail_id: control.as_str().to_owned(),
         halted,
     }))
 }

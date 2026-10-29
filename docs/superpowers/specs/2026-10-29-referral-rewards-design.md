@@ -289,7 +289,7 @@ the referrer's tenant.
 
 | Signal label | Referee fact | Code trips when |
 | --- | --- | --- |
-| `referral_refused_share` | most of the referee's submissions refused by scoring or the gates | over 40% of referees |
+| `referral_refused_share` | most of the referee's submissions refused by scoring or the gates, once the referee has made at least 5 (`TRACE_COMMONS_REFERRAL_ABUSE_REFUSED_MIN_SUBMISSIONS`, 1 to 100000) | over 40% of referees |
 | `referral_credit_hold_share` | open credit hold or an operator reversal | over 20% |
 | `referral_advance_forfeit_share` | starter advance forfeited (once advances exist) | over 20% |
 | `referral_shared_identity` | referee shares `recipient_index` or `subject_index` with another referee of the same code | 3 or more referees in one cluster |
@@ -304,6 +304,16 @@ referees is held `referral_code_suspended`. The same rates over all of a
 referrer's codes trip a referrer-level hold, `referral_referrer_suspended`.
 More than 2 codes suspended in 24 hours switches referral mode to `dry_run`
 by itself, with an audit row, and readiness reports `referral_tripped`.
+The switch is the halt of the pseudo-rail `near_ai.referral`, and the
+operator lifts it with `POST /v1/admin/payout-rails/near_ai.referral/resume`
+(or sets it by hand with `.../halt`): the payout control token, and a
+control row with the operator's hash, as for a rail. The route is unknown
+while the referral stream is not attached.
+
+A referee's refused share counts only past a minimum of their own
+submissions because a code is public: a stranger who signs up with it and
+uploads one bad trace is not evidence against its owner.
+
 An operator clears (optionally exempting a label) or voids. A void writes
 one `void` bonus row per affected referee taking back their unsent bonus.
 Thresholds are settings, tuned from the dry-run report before `live`.

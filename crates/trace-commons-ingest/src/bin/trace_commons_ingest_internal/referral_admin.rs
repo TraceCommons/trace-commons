@@ -30,6 +30,9 @@
 //!   signal, total bonus owed, sendable and held, and whether the stream
 //!   tripped.
 //!
+//! A tripped stream is resumed through the payout rail control route,
+//! `POST /v1/admin/payout-rails/near_ai.referral/resume` (`payout_rails`).
+//!
 //! The token is deployment-wide, so a tenant is named in the body; every
 //! read and write still runs in that tenant's RLS context, and the list
 //! and report enumerate tenants through `trace_referral_resolver` only.
