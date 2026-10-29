@@ -307,8 +307,10 @@ pub const CODEX_REVIEWER_MODEL: &str = "codex-auto-review";
 /// section 5).
 pub const CLASSIFIER_VERSION: u32 = 1;
 /// Version of the stored session facts. A bump that changes what a scan
-/// collects re-reads each row once.
-pub const SESSION_FACTS_VERSION: u32 = 1;
+/// collects re-reads each row once, its automation included. 2: Codex
+/// `FileChange` items are read as edits, and a spawned Codex thread is
+/// automated whatever `session_meta` follows its own.
+pub const SESSION_FACTS_VERSION: u32 = 2;
 
 /// Sessions a (task type, model) cell needs before its figure is compared
 /// (spec section 6).
@@ -503,7 +505,7 @@ mod tests {
     #[test]
     fn task_classifier_constants() {
         assert_eq!(CLASSIFIER_VERSION, 1);
-        assert_eq!(SESSION_FACTS_VERSION, 1);
+        assert_eq!(SESSION_FACTS_VERSION, 2);
         assert_eq!(DOC_EXTENSIONS, ["md", "mdx", "rst", "adoc"]);
         assert_eq!(DOC_DIRS, ["docs", "doc"]);
         assert_eq!(TEST_DIRS, ["tests", "test", "__tests__", "spec"]);
