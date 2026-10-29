@@ -34,11 +34,11 @@ use trace_commons_gate_api::{NEAR_AI_RAIL_ID, PayoutRail, RailId, TRACE_CREDIT_R
 use crate::db::{Database, PayoutStore};
 use crate::near_ai_api::near_ai_staging;
 use crate::near_ai_rail::NearAiRail;
-use crate::near_ai_rail_config::NearAiRailConfig;
-use crate::near_ai_transfer::NearAiTransferClient;
+use crate::near_ai_rail_config::{NearAiRailConfig, NearAiReferralConfig};
+use crate::near_ai_transfer::{NearAiTransferClient, NearAiTransferCredentials};
 use crate::payout_pass::{
     PAYOUT_LOCAL_SEND_LIMIT, PayoutPass, PayoutPassOutcome, PayoutPassReport, PayoutPassSettings,
-    PayoutRecipientOpener,
+    PayoutRecipientOpener, ReferralStreamSettings,
 };
 use crate::payout_rate::PayoutMode;
 use crate::referral_bonus::ReferralBonusHook;
@@ -92,18 +92,27 @@ fn build_rail_at(
     match near_ai {
         NearAiRailConfig::Disabled => Ok(None),
         NearAiRailConfig::Enabled(settings) => {
-            let client = match loopback {
-                None => NearAiTransferClient::new(settings.credentials.clone()),
-                Some(base) => NearAiTransferClient::at_loopback(
-                    base,
-                    settings.credentials.clone(),
-                    std::time::Duration::from_secs(5),
-                ),
-            }
-            .map_err(|_| PayoutRailsError::ClientInvalid)?;
-            Ok(Some(Arc::new(NearAiRail::new(client))))
+            near_ai_rail_from(&settings.credentials, loopback).map(Some)
         }
     }
+}
+
+/// One `near_ai` rail object over `credentials`: the rail's own, or the
+/// referral stream's dedicated one.
+fn near_ai_rail_from(
+    credentials: &NearAiTransferCredentials,
+    loopback: Option<&str>,
+) -> Result<Arc<dyn PayoutRail>, PayoutRailsError> {
+    let client = match loopback {
+        None => NearAiTransferClient::new(credentials.clone()),
+        Some(base) => NearAiTransferClient::at_loopback(
+            base,
+            credentials.clone(),
+            std::time::Duration::from_secs(5),
+        ),
+    }
+    .map_err(|_| PayoutRailsError::ClientInvalid)?;
+    Ok(Arc::new(NearAiRail::new(client)))
 }
 
 /// Wakes every enabled rail's worker. No payload, no tenant. Cheap to
@@ -154,12 +163,21 @@ pub struct PayoutRailStatus {
     pub close_blocked: bool,
 }
 
+/// A rail's referral stream (referral rewards spec section 5).
+struct ReferralEntry {
+    /// The rail over the referral credential; `None` in a `dry_run` with
+    /// no credential configured.
+    rail: Option<Arc<dyn PayoutRail>>,
+    settings: ReferralStreamSettings,
+}
+
 /// One configured rail.
 pub struct PayoutRailEntry {
     rail_id: RailId,
     mode: PayoutMode,
     rail: Option<Arc<dyn PayoutRail>>,
     settings: Option<PayoutPassSettings>,
+    referral: Option<ReferralEntry>,
     notify: Arc<Notify>,
     status: Mutex<PayoutRailStatus>,
 }
@@ -171,6 +189,14 @@ impl PayoutRailEntry {
 
     pub fn mode(&self) -> PayoutMode {
         self.mode
+    }
+
+    /// The referral stream's mode as configured: `disabled` without one.
+    /// The pass runs it at no more than the rail's own mode.
+    pub fn referral_mode(&self) -> PayoutMode {
+        self.referral
+            .as_ref()
+            .map_or(PayoutMode::Disabled, |referral| referral.settings.mode)
     }
 
     pub fn status(&self) -> PayoutRailStatus {
@@ -289,9 +315,20 @@ impl PayoutRails {
         Self::from_config(&NearAiRailConfig::Disabled).expect("a disabled rail builds nothing")
     }
 
-    /// Builds each known rail from its configuration.
+    /// Builds each known rail from its configuration, with no referral
+    /// stream.
     pub fn from_config(near_ai: &NearAiRailConfig) -> Result<Self, PayoutRailsError> {
-        Self::from_config_at(near_ai, None)
+        Self::from_configs(near_ai, &NearAiReferralConfig::Disabled)
+    }
+
+    /// Builds each known rail and the `near_ai` referral stream from their
+    /// configurations. A referral stream on a disabled rail builds nothing
+    /// (configuration already refuses one).
+    pub fn from_configs(
+        near_ai: &NearAiRailConfig,
+        referral: &NearAiReferralConfig,
+    ) -> Result<Self, PayoutRailsError> {
+        Self::from_config_at(near_ai, referral, None)
     }
 
     /// [`Self::from_config`] with the `near_ai` client at a loopback mock
@@ -301,14 +338,40 @@ impl PayoutRails {
         near_ai: &NearAiRailConfig,
         base: &str,
     ) -> Result<Self, PayoutRailsError> {
-        Self::from_config_at(near_ai, Some(base))
+        Self::from_config_at(near_ai, &NearAiReferralConfig::Disabled, Some(base))
+    }
+
+    /// [`Self::from_configs`] at a loopback mock, for tests.
+    pub fn from_configs_at_loopback(
+        near_ai: &NearAiRailConfig,
+        referral: &NearAiReferralConfig,
+        base: &str,
+    ) -> Result<Self, PayoutRailsError> {
+        Self::from_config_at(near_ai, referral, Some(base))
     }
 
     fn from_config_at(
         near_ai: &NearAiRailConfig,
+        referral: &NearAiReferralConfig,
         loopback: Option<&str>,
     ) -> Result<Self, PayoutRailsError> {
         let rail = build_rail_at(NEAR_AI_RAIL_ID, near_ai, loopback)?;
+        let referral = match (near_ai, referral) {
+            (NearAiRailConfig::Enabled(_), NearAiReferralConfig::Enabled(settings)) => {
+                Some(ReferralEntry {
+                    rail: settings
+                        .credentials
+                        .as_ref()
+                        .map(|credentials| near_ai_rail_from(credentials, loopback))
+                        .transpose()?,
+                    settings: ReferralStreamSettings {
+                        mode: settings.mode,
+                        account_ceiling: settings.account_ceiling,
+                    },
+                })
+            }
+            _ => None,
+        };
         let settings = match near_ai {
             NearAiRailConfig::Disabled => None,
             NearAiRailConfig::Enabled(settings) => Some(PayoutPassSettings {
@@ -327,6 +390,7 @@ impl PayoutRails {
                 mode: near_ai.mode(),
                 rail,
                 settings,
+                referral,
                 notify: Arc::new(Notify::new()),
                 status: Mutex::new(PayoutRailStatus::default()),
             })],
@@ -404,6 +468,29 @@ impl PayoutRails {
                 }
             };
             entry.update(|status| status.startup_probe_ok = ok);
+            // The referral credential's capacity, logged only: a refusal
+            // stops the referral stream's sends pass by pass, never the
+            // rail's, and readiness stays the rail's.
+            if let Some(referral) = entry
+                .referral
+                .as_ref()
+                .filter(|referral| referral.settings.mode == PayoutMode::Live)
+                .and_then(|referral| referral.rail.as_ref())
+            {
+                match referral.preflight().await {
+                    Ok(capacity) if capacity.sending_enabled => {}
+                    Ok(_) => tracing::warn!(
+                        rail = %entry.rail_id,
+                        label = "referral_sending_disabled",
+                        "payout referral stream startup capacity probe: sending off"
+                    ),
+                    Err(refusal) => tracing::warn!(
+                        rail = %entry.rail_id,
+                        label = refusal.safe_label(),
+                        "payout referral stream startup capacity probe refused"
+                    ),
+                }
+            }
         }
     }
 
@@ -485,6 +572,9 @@ impl PayoutRails {
                     && referral.rail_id() == entry.rail_id()
                 {
                     pass = pass.with_referral_bonus(referral.clone());
+                }
+                if let Some(referral) = entry.referral.as_ref() {
+                    pass = pass.with_referral_stream(referral.rail.clone(), referral.settings);
                 }
                 let runner = Arc::new(EntryPass {
                     pass,
@@ -730,6 +820,66 @@ mod tests {
         notifier.notify_all();
         assert_eq!(done.recv().await, Some(3));
         worker.abort();
+    }
+
+    fn referral(mode: PayoutMode, with_credential: bool) -> NearAiReferralConfig {
+        NearAiReferralConfig::Enabled(crate::near_ai_rail_config::NearAiReferralSettings {
+            mode,
+            credentials: with_credential.then(|| NearAiTransferCredentials {
+                token: SecretString::from(format!("oc_{}", "cd".repeat(32))),
+                credential_id: Uuid::from_u128(3),
+                sender_org: Uuid::from_u128(1),
+                source: NearAiCreditSource::Payment,
+            }),
+            account_ceiling: AtomicUnits::from_raw(500),
+        })
+    }
+
+    #[test]
+    fn the_referral_stream_rides_on_its_rail_and_defaults_to_disabled() {
+        // No referral configuration: disabled.
+        let rails = PayoutRails::from_config(&enabled(PayoutMode::Live)).unwrap();
+        assert_eq!(
+            rails.get("near_ai").unwrap().referral_mode(),
+            PayoutMode::Disabled
+        );
+        // A referral stream on a disabled rail builds nothing.
+        let rails = PayoutRails::from_configs(
+            &NearAiRailConfig::Disabled,
+            &referral(PayoutMode::Live, true),
+        )
+        .unwrap();
+        assert_eq!(
+            rails.get("near_ai").unwrap().referral_mode(),
+            PayoutMode::Disabled
+        );
+        for (mode, with_credential) in [
+            (PayoutMode::DryRun, false),
+            (PayoutMode::DryRun, true),
+            (PayoutMode::Live, true),
+        ] {
+            let rails = PayoutRails::from_configs(
+                &enabled(PayoutMode::Live),
+                &referral(mode, with_credential),
+            )
+            .unwrap();
+            let entry = rails.get("near_ai").unwrap();
+            assert_eq!(entry.referral_mode(), mode);
+            let referral = entry.referral.as_ref().unwrap();
+            assert_eq!(referral.rail.is_some(), with_credential);
+            assert_eq!(
+                referral.settings.account_ceiling,
+                AtomicUnits::from_raw(500)
+            );
+            if let Some(rail) = referral.rail.as_ref() {
+                assert_eq!(rail.descriptor().rail_id.as_str(), "near_ai");
+                // Its own rail object, not the rail's.
+                assert!(!Arc::ptr_eq(rail, entry.rail().unwrap()));
+            }
+            // The referral credential never shows in Debug.
+            let rendered = format!("{rails:?}");
+            assert!(!rendered.contains("cdcd"), "{rendered}");
+        }
     }
 
     #[test]

@@ -1008,6 +1008,181 @@ async fn every_request_and_confirmation_writes_an_audit_row() {
     }
 }
 
+/// Own and referral credit apart (referral rewards spec, R7): once the rail
+/// runs a referral stream, status carries one entry per stream with owed,
+/// sent, waiting and the hold that stops that stream alone.
+#[tokio::test]
+async fn status_splits_own_and_referral_credit_once_the_referral_stream_runs() {
+    use trace_commons_server::db::{PayoutLineResolution, PayoutLineWrite, PayoutStream};
+    use trace_commons_server::near_ai_rail::{
+        near_ai_program_for_link, near_ai_referral_program_for_link,
+    };
+    use trace_commons_server::near_ai_rail_config::{NearAiReferralConfig, NearAiReferralSettings};
+
+    let Some(mut h) = harness().await else { return };
+    // The harness's rail, with a referral stream in `dry_run` and no
+    // credential.
+    let rails = PayoutRails::from_configs_at_loopback(
+        &NearAiRailConfig::Enabled(NearAiRailSettings {
+            mode: PayoutMode::DryRun,
+            credentials: NearAiTransferCredentials {
+                token: SecretString::from(CREDENTIAL),
+                credential_id: Uuid::from_u128(2),
+                sender_org: Uuid::from_u128(3),
+                source: NearAiCreditSource::Payment,
+            },
+            account_ceiling: trace_commons_gate_api::pipeline::AtomicUnits::from_raw(
+                1_000_000_000_000,
+            ),
+        }),
+        &NearAiReferralConfig::Enabled(NearAiReferralSettings {
+            mode: PayoutMode::DryRun,
+            credentials: None,
+            account_ceiling: trace_commons_gate_api::pipeline::AtomicUnits::from_raw(1_000_000),
+        }),
+        "http://127.0.0.1:9",
+    )
+    .unwrap();
+    Arc::get_mut(&mut h.state).unwrap().payout_rails = Arc::new(rails);
+
+    let account = h.account().await;
+    let digest = |value: &str| sha256_prefixed(value);
+    let link_id = Uuid::new_v4();
+    assert_eq!(
+        h.backend
+            .insert_payout_link(
+                &account.tenant,
+                &PayoutLinkWrite {
+                    account_id: account.id,
+                    rail_id: RailId::near_ai(),
+                    link_id,
+                    recipient_kind: RecipientKind::near_ai_org(),
+                    recipient: SealedRecipient {
+                        sealed: serde_json::json!({"v": 1}),
+                        recipient_index: digest("index"),
+                        recipient_key_ref: "key-test-1".into(),
+                        index_pepper_ref: "pepper-test-1".into(),
+                        subject_index: digest("subject"),
+                        recipient_ref: None,
+                    },
+                    program: near_ai_program_for_link(link_id),
+                    state: PayoutLinkState::Active,
+                    actor_ref_hash: digest("actor"),
+                },
+            )
+            .await
+            .unwrap(),
+        PayoutLinkInsert::Inserted
+    );
+    // Bonus of 500 owed, 200 of it sent on the referral program.
+    {
+        let mut client = h.backend.trace_pool_for_test().get().await.unwrap();
+        let tx = client.transaction().await.unwrap();
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&account.tenant],
+        )
+        .await
+        .unwrap();
+        tx.execute(
+            "INSERT INTO trace_payout_rate_epochs (rail_id, version, numerator, denominator)
+             VALUES ('near_ai', 'v1', 1, 1) ON CONFLICT DO NOTHING",
+            &[],
+        )
+        .await
+        .unwrap();
+        let referee = digest(&format!("referee:{}", Uuid::new_v4()));
+        tx.execute(
+            "INSERT INTO trace_referral_referees
+                 (tenant_id, referee_ref_hash, account_id, code_index,
+                  referee_account_created_at, applied_at)
+             VALUES ($1, $2, $3, $4, clock_timestamp(), clock_timestamp())",
+            &[&account.tenant, &referee, &account.id, &digest("code")],
+        )
+        .await
+        .unwrap();
+        tx.execute(
+            "INSERT INTO trace_referral_bonus_accruals
+                 (tenant_id, bonus_id, rail_id, account_id, referee_ref_hash, kind,
+                  source_accrual_id, bps, base_units, bonus_units, rate_version, instrument_id)
+             VALUES ($1, $2, 'near_ai', $3, $4, 'bonus', $5, 1000, 5000, 500, 'v1',
+                     'near_ai_usd')",
+            &[
+                &account.tenant,
+                &Uuid::new_v4(),
+                &account.id,
+                &referee,
+                &Uuid::new_v4(),
+            ],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let line = PayoutLineWrite {
+        line_id: Uuid::new_v4(),
+        link_id,
+        account_id: account.id,
+        rail_id: RailId::near_ai(),
+        target_total: trace_commons_gate_api::pipeline::AtomicUnits::from_raw(200),
+        delta: trace_commons_gate_api::pipeline::AtomicUnits::from_raw(200),
+        owed_through_accrual_count: 1,
+        stream: PayoutStream::Referral,
+        referral_program: Some(near_ai_referral_program_for_link(link_id)),
+    };
+    h.backend
+        .insert_pending_payout_line(&account.tenant, &line)
+        .await
+        .unwrap();
+    h.backend
+        .resolve_payout_line(
+            &account.tenant,
+            line.line_id,
+            &PayoutLineResolution::Confirmed {
+                receipt_hash: digest(&format!("receipt:{}", line.line_id)),
+                delta: trace_commons_gate_api::pipeline::AtomicUnits::from_raw(200),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = h.status(&account).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["rails"][0]["streams"],
+        serde_json::json!([
+            {"stream": "earned", "owed": "0", "sent": "0", "waiting": "0"},
+            {"stream": "referral", "owed": "500", "sent": "200", "waiting": "300"},
+        ])
+    );
+
+    // A referral-stream hold shows on the referral stream alone.
+    h.backend
+        .open_payout_hold(
+            &account.tenant,
+            account.id,
+            &RailId::near_ai(),
+            "referral_code_suspended",
+            &digest("actor"),
+        )
+        .await
+        .unwrap();
+    let (_, body) = h.status(&account).await;
+    let streams = &body["rails"][0]["streams"];
+    assert!(streams[0].get("hold_label").is_none(), "{body}");
+    assert_eq!(
+        streams[1]["hold_label"], "referral_code_suspended",
+        "{body}"
+    );
+    // Amounts and labels only: no account, program or recipient.
+    let rendered = body.to_string();
+    assert!(!rendered.contains(&account.id.to_string()), "{rendered}");
+    assert!(
+        !rendered.contains(&near_ai_referral_program_for_link(link_id)),
+        "{rendered}"
+    );
+}
+
 #[tokio::test]
 async fn an_enabled_rail_without_the_recipient_key_refuses_the_start() {
     let root = tempfile::tempdir().unwrap();

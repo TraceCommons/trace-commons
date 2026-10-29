@@ -157,6 +157,7 @@ jobs:
         admission_test_referral_rewards
         admission_test_referral_codes
         admission_test_referral_bonus
+        admission_test_referral_stream
         admission_test_walletv2
         admission_test_legacy_invite_link
         admission_test_device_invite_subject
@@ -403,6 +404,15 @@ jobs:
         run: cargo test -p trace-commons-server --test payout_pass_pg -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_pass
+      # The referral payout stream (V142 lines and links): the second
+      # program per link, one pending line per stream, per-stream crash
+      # recovery, close with both totals, referral-only holds and ceiling,
+      # and the referral mode. Bonus rows seeded by the migrator; the pass
+      # runs as a real LOGIN role against the #1271 loopback mock.
+      - name: referral_stream_pg
+        run: cargo test --locked -p trace-commons-server --test referral_stream_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_stream
       - name: inference connection HTTP session selection
         run: cargo test -p trace-commons-ingest --lib inference_connection_requires_explicit_account_session_selection -- --test-threads=1
         env:

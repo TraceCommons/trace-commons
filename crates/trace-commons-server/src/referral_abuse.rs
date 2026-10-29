@@ -74,9 +74,10 @@ pub const REFERRAL_TRIPPED: &str = "referral_tripped";
 /// Whether a `trace_payout_holds` label holds the referral stream only.
 /// Every referral-stream hold is `referral_*`, and no earned-stream hold is,
 /// so the earned stream's pass passes over these labels and the referral
-/// stream (a later slice) reads them.
+/// stream reads them. The same test as
+/// [`crate::payout_pass::is_referral_stream_hold`].
 pub fn hold_holds_referral_stream_only(label: &str) -> bool {
-    label.starts_with("referral_")
+    crate::payout_pass::is_referral_stream_hold(label)
 }
 
 /// Why the abuse settings were refused. Names the setting, never its value.
