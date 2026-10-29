@@ -1137,7 +1137,8 @@ pub struct DaemonShared {
     /// the daemon process.
     pub(crate) skill_loop: Mutex<super::skill_loop::SkillLoopState>,
     /// The Insights counter pass (feed T) and its store. Inert while the
-    /// `insights_counter_pass` setting is off (owner decision D4, open). See
+    /// `insights_counter_pass` setting is off (it is on by default; product
+    /// owner, 2026-10-29). See
     /// `daemon::insights_week`.
     pub(crate) insights_counter: super::insights_week::CounterPass,
     /// The contribution-mission catalogue behind `list_pending`'s

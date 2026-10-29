@@ -207,7 +207,7 @@ mod tests {
                 "2026-09-14T09:00:05.000Z",
                 "u2",
                 serde_json::json!({
-                    "id": "msg_PRIVATE_1",
+                    "id": format!("msg_PRIVATE_{id}"),
                     "model": model,
                     "role": "assistant",
                     "content": [{"type": "tool_use", "id": "toolu_PRIVATE_A", "name": "Edit",
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn off_by_default_without_opening_the_store_or_making_a_key() {
+    fn switched_off_without_opening_the_store_or_making_a_key() {
         let f = Fixture::new();
         let off = f
             .pass
@@ -290,6 +290,7 @@ mod tests {
         assert!(f.pass.key_is_absent_for_test(), "no key made");
         assert!(!f.dir.path().join(COUNTER_ROWS_FILE).exists());
         let (_dir, s) = shared();
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let r = handle_benchmarks(&s, &call(serde_json::json!({})));
         assert_eq!(
             r.result.unwrap(),
@@ -316,6 +317,7 @@ mod tests {
         assert!(super::super::ipc::DEV_DRY_RUN_LOCAL_METHODS.contains(&method));
         let (_dir, mut s) = shared();
         s.dev_dry_run = true;
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let r = super::super::ipc::handle_request(&s, &call(serde_json::json!({"weeks": 13})));
         assert_eq!(r.result.unwrap()["enabled"], false);
     }

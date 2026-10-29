@@ -56,7 +56,7 @@ use super::session_facts::{InferredTask, SessionFacts, SessionShape};
 use super::session_labels::{LabelledTask, SessionLabel};
 use super::session_pricing::{ModelPrice, PricingTableRef, price_session};
 use super::task_classifier::reclassify;
-use super::week_rollup::{SessionBody, SessionInput};
+use super::week_rollup::{SessionBody, SessionInput, claude_resumes};
 
 /// Sessions with a known figure a model needs in a category before it is
 /// compared there: the Models answers' floor.
@@ -293,7 +293,15 @@ fn entries(
     window_start: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> (Vec<Entry>, BenchLeftOut, u32) {
-    let mut ordered: Vec<&SessionInput> = sessions.iter().collect();
+    // A Claude transcript a later one resumes is that one's start: the
+    // conversation is one trace, read from its fullest transcript.
+    let resumes = claude_resumes(sessions);
+    let mut ordered: Vec<&SessionInput> = sessions
+        .iter()
+        .zip(&resumes)
+        .filter(|(_, resume)| !resume.continued)
+        .map(|(session, _)| session)
+        .collect();
     ordered.sort_by(|a, b| {
         a.session_ref
             .as_bytes()
