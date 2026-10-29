@@ -1340,7 +1340,8 @@ pub struct MonitorHomeHistoryCopy {
     /// MVP is "contribute traces, earn credit", so it is the first and
     /// largest card, over Private AI): its title, one line on what
     /// contributing is and what it earns, and the way into Traces.
-    /// Approved by the product owner 2026-10-28.
+    /// Approved by the product owner 2026-10-28; the title gained ", use
+    /// Private AI" on 2026-10-29 (product owner).
     pub traces_hero_title: &'static str,
     pub traces_hero_body: &'static str,
     pub traces_hero_action: &'static str,
@@ -1677,7 +1678,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             section_traces: "Traces",
             section_account: "Account",
             private_ai_sign_in: "Sign in to NEAR AI to get started.",
-            traces_hero_title: "Contribute traces, earn credit",
+            traces_hero_title: "Contribute traces, earn credit, use Private AI",
             traces_hero_body: "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.",
             traces_hero_action: "Start earning",
             credit_delta: "{amount} since yesterday",
