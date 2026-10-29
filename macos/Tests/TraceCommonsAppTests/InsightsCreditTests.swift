@@ -43,15 +43,16 @@ final class InsightsCreditTests: XCTestCase {
     /// last 31 days, and its 7 bars leave an unknown day without a bar.
     func testTheNearAiCardShowsOnlyWithSpendAndItsUnknownDaysAreDashes() {
         XCTAssertFalse(InsightsUsageWords.showsNearAi(credit(week: empty())))
-        let days = (0..<7).map { index in
-            Window(date: "2026-10-\(22 + index)", usdMicros: index == 3 ? nil : Int64(index) * 100_000,
-                   sessions: 1, calls: 1, callsWithoutCharge: index == 3 ? 1 : 0)
+        let days: [Window] = (0..<7).map { (index: Int) -> Window in
+            let usdMicros: Int64? = index == 3 ? nil : Int64(index) * 100_000
+            return Window(date: "2026-10-\(22 + index)", usdMicros: usdMicros,
+                          sessions: 1, calls: 1, callsWithoutCharge: index == 3 ? 1 : 0)
         }
         let shown = credit(week: Window(usdMicros: 5, sessions: 1, calls: 1, callsWithoutCharge: 0), byDay: days)
         XCTAssertTrue(InsightsUsageWords.showsNearAi(shown))
         let bars = InsightsUsageWords.days(shown, copy: copy)
         XCTAssertEqual(bars.count, 7)
-        XCTAssertEqual(bars.map(\.id).first, "2026-10-22")
+        XCTAssertEqual(bars.first?.id, "2026-10-22")
         XCTAssertNil(bars[3].value, "an unknown day draws no bar")
         XCTAssertEqual(bars[3].amount, "—")
         XCTAssertEqual(bars[1].amount, "$0.10")
