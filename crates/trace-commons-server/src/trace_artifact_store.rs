@@ -8,7 +8,6 @@
 //! redacted artifact, encrypt it with the existing IronClaw secrets crypto, and
 //! persist only ciphertext plus non-sensitive routing metadata.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -866,7 +865,9 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> ServiceOwnedTraceArtifact
         object_id: &str,
         serialized_json: &[u8],
     ) -> anyhow::Result<TraceArtifactPutReceipt> {
-        serde_json::from_slice::<serde_json::Value>(serialized_json)
+        // Validates without building a tree: the tree of a whole envelope is
+        // larger than the envelope, and nothing here reads it.
+        serde_json::from_slice::<serde::de::IgnoredAny>(serialized_json)
             .context("failed to parse serialized trace artifact")?;
         self.put_scoped_bytes(scope, artifact_kind, object_id, serialized_json)
     }
@@ -1195,7 +1196,9 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> TraceArtifactStore
         object_id: &str,
         serialized_json: &[u8],
     ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
-        serde_json::from_slice::<serde_json::Value>(serialized_json)
+        // Validates without building a tree: the tree of a whole envelope is
+        // larger than the envelope, and nothing here reads it.
+        serde_json::from_slice::<serde::de::IgnoredAny>(serialized_json)
             .context("failed to parse serialized trace artifact")?;
         let scope = legacy_trace_artifact_scope(tenant_storage_ref);
         let prepared =
@@ -1416,7 +1419,9 @@ impl LocalEncryptedTraceArtifactStore {
         object_id: &str,
         serialized_json: &[u8],
     ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
-        serde_json::from_slice::<serde_json::Value>(serialized_json)
+        // Validates without building a tree: the tree of a whole envelope is
+        // larger than the envelope, and nothing here reads it.
+        serde_json::from_slice::<serde::de::IgnoredAny>(serialized_json)
             .context("failed to parse serialized trace artifact")?;
         let (ciphertext, salt) = self
             .crypto
@@ -1792,11 +1797,10 @@ pub(crate) fn verify_encrypted_artifact(
         artifact.receipt.ciphertext_sha256 == expected_ciphertext_sha256,
         "encrypted trace artifact receipt hash mismatch"
     );
-    let ciphertext = base64::engine::general_purpose::STANDARD
-        .decode(artifact.ciphertext_base64.as_bytes())
+    let ciphertext_sha256 = base64_decoded_sha256_hex(artifact.ciphertext_base64.as_bytes())
         .context("failed to decode trace artifact ciphertext for hash check")?;
     anyhow::ensure!(
-        sha256_hex(&ciphertext) == expected_ciphertext_sha256,
+        ciphertext_sha256 == expected_ciphertext_sha256,
         "trace artifact ciphertext hash mismatch"
     );
     verify_kek_binding(
@@ -2200,6 +2204,41 @@ fn sha256_hex(input: &[u8]) -> String {
     hex::encode(digest)
 }
 
+/// `sha256_hex` of what `encoded` decodes to under standard padded base64,
+/// decoded a bounded window at a time instead of into one buffer: the
+/// ciphertext of a whole envelope is hundreds of MB at the envelope cap, and
+/// a check that only needs its hash should not hold a second copy of it.
+///
+/// Accepts and refuses exactly what `STANDARD.decode` does. Windows are a
+/// multiple of four characters, so padding can only appear in the last one,
+/// which is where the one-shot decode accepts it too.
+fn base64_decoded_sha256_hex(encoded: &[u8]) -> Result<String, base64::DecodeError> {
+    const WINDOW: usize = 64 * 1024;
+    const _: () = assert!(WINDOW.is_multiple_of(4));
+    if !encoded.len().is_multiple_of(4) {
+        // Unpadded or truncated input: let the one-shot decoder name it.
+        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+        return Ok(sha256_hex(&decoded));
+    }
+    let mut hasher = Sha256::new();
+    let mut decoded = Vec::with_capacity(WINDOW / 4 * 3);
+    let windows = encoded.len().div_ceil(WINDOW);
+    for (index, window) in encoded.chunks(WINDOW).enumerate() {
+        // Padding ends the encoding. A window may end in padding only if it
+        // is the last: the one-shot decoder refuses padding anywhere else.
+        if index + 1 < windows && window.last() == Some(&b'=') {
+            return Err(base64::DecodeError::InvalidByte(
+                (index + 1) * WINDOW - 1,
+                b'=',
+            ));
+        }
+        decoded.clear();
+        base64::engine::general_purpose::STANDARD.decode_vec(window, &mut decoded)?;
+        hasher.update(&decoded);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 fn write_json_file<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -2207,8 +2246,10 @@ fn write_json_file<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Res
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)
         .with_context(|| format!("failed to create trace artifact dir {}", parent.display()))?;
-    let body =
-        serde_json::to_vec_pretty(value).context("failed to serialize encrypted trace artifact")?;
+    // Serialized straight into the temp file rather than into a buffer first:
+    // an artifact holds a whole envelope's ciphertext, and a second in-memory
+    // copy of it is the largest single allocation on the submit path at the
+    // envelope cap. Same bytes as `to_vec_pretty`.
     for _ in 0..32 {
         let temp_path = trace_artifact_temp_path(parent, path)?;
         match std::fs::OpenOptions::new()
@@ -2216,17 +2257,29 @@ fn write_json_file<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Res
             .create_new(true)
             .open(&temp_path)
         {
-            Ok(mut file) => {
-                if let Err(error) = file
-                    .write_all(&body)
-                    .and_then(|()| file.sync_all())
-                    .with_context(|| {
-                        format!(
-                            "failed to write encrypted trace artifact temp file {}",
-                            temp_path.display()
-                        )
-                    })
-                {
+            Ok(file) => {
+                let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+                let written = serde_json::to_writer_pretty(&mut writer, value)
+                    .context("failed to serialize encrypted trace artifact")
+                    .and_then(|()| {
+                        writer
+                            .into_inner()
+                            .map_err(|error| error.into_error())
+                            .context("failed to flush encrypted trace artifact")
+                    });
+                let file = match written {
+                    Ok(file) => file,
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&temp_path);
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = file.sync_all().with_context(|| {
+                    format!(
+                        "failed to write encrypted trace artifact temp file {}",
+                        temp_path.display()
+                    )
+                }) {
                     let _ = std::fs::remove_file(&temp_path);
                     return Err(error);
                 }
@@ -2415,6 +2468,55 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// The windowed hash accepts and refuses exactly what the one-shot
+    /// decode does, across window boundaries, padding, and bad input.
+    #[test]
+    fn windowed_base64_hash_matches_the_one_shot_decode() {
+        let engine = base64::engine::general_purpose::STANDARD;
+        let one_shot = |encoded: &[u8]| engine.decode(encoded).map(|bytes| sha256_hex(&bytes));
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for len in [
+            0usize,
+            1,
+            2,
+            3,
+            48 * 1024 - 1,
+            48 * 1024,
+            48 * 1024 + 1,
+            200_001,
+        ] {
+            let bytes: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
+            cases.push(engine.encode(&bytes).into_bytes());
+        }
+        // Padding exactly at a window boundary, mid-stream.
+        let mut padded_mid = engine.encode([1u8; 2]).into_bytes();
+        padded_mid.splice(0..0, std::iter::repeat_n(b'A', 64 * 1024 - 4));
+        padded_mid.extend(std::iter::repeat_n(b'A', 8));
+        cases.push(padded_mid);
+        // Invalid characters, early and late; truncated input.
+        let mut invalid = cases[6].clone();
+        invalid[10] = b'*';
+        cases.push(invalid);
+        let mut late = cases[7].clone();
+        let at = late.len() - 3;
+        late[at] = b'-';
+        cases.push(late);
+        let mut truncated = cases[7].clone();
+        truncated.pop();
+        cases.push(truncated);
+        for encoded in &cases {
+            assert_eq!(
+                base64_decoded_sha256_hex(encoded).is_ok(),
+                one_shot(encoded).is_ok(),
+                "accept/refuse differs for a {} byte input",
+                encoded.len()
+            );
+            if let Ok(hash) = one_shot(encoded) {
+                assert_eq!(base64_decoded_sha256_hex(encoded).unwrap(), hash);
+            }
+        }
+    }
 
     fn test_store(temp: &tempfile::TempDir) -> LocalEncryptedTraceArtifactStore {
         let key = crate::secrets::keychain::generate_master_key_hex();

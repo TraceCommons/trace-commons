@@ -7552,8 +7552,10 @@ pub(super) async fn approve_as_a_person(
                 // re-check below would otherwise give it -- this one is
                 // permanent, and retrying the same session can never
                 // succeed, which `not-pinned`'s other causes do not imply.
-                if summary.would_send_bytes > crate::envelope::MAX_ENVELOPE_BYTES {
-                    skipped.push((id, super::queue::REASON_TOO_LARGE));
+                if let Some(too_large_label) =
+                    super::preview::size_refusal(summary.would_send_bytes)
+                {
+                    skipped.push((id, too_large_label));
                     // Reported *and* recorded. Reporting alone left the
                     // entry `Pending`, which is the state that means "still
                     // waiting on the contributor" -- so the watcher kept
@@ -8223,7 +8225,7 @@ pub(crate) fn preview_card_value(
 }
 
 fn preview_card_fields(summary: &super::preview::PreviewCardSummary) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "would_send_bytes": summary.would_send_bytes,
         "raw_session_bytes": summary.raw_session_bytes,
         "title": summary.title,
@@ -8246,7 +8248,14 @@ fn preview_card_fields(summary: &super::preview::PreviewCardSummary) -> serde_js
         // placeholder-identity, deterministic-only build, and the
         // fingerprint above is not bindable to a later approval.
         "enrolled": summary.enrolled,
-    })
+    });
+    // `envelope-too-large`, only when the envelope is over the upload
+    // limit: the preview says what approval would refuse it for. Absent
+    // otherwise, as on the full summary.
+    if let Some(label) = summary.reason_label {
+        value["reason_label"] = serde_json::Value::from(label);
+    }
+    value
 }
 
 /// The fingerprint of every input other than the session bytes that decides
@@ -11354,6 +11363,7 @@ mod tests {
             enrolled: true,
             subagent_count: 0,
             subagents_dropped: 0,
+            reason_label: None,
             scrub_counts: super::super::second_look::ScrubCounts::default(),
         };
         let value = preview_card_value(&summary);
@@ -11363,6 +11373,38 @@ mod tests {
             "the card summary must carry redactions_distinct, a count only, \
              the same way the full summary does"
         );
+    }
+
+    /// An envelope over the size limit says so on the preview, with the
+    /// word approval would refuse it under, instead of the contributor
+    /// learning it only when they approve. An envelope within the limit
+    /// carries no `reason_label` at all.
+    #[test]
+    fn preview_card_value_says_up_front_when_the_envelope_is_too_large() {
+        let card = |would_send_bytes: usize| super::super::preview::PreviewCardSummary {
+            would_send_bytes,
+            raw_session_bytes: 200,
+            event_count: 3,
+            opening_prompt: "hello".to_string(),
+            title: None,
+            redactions: Default::default(),
+            redactions_distinct: Default::default(),
+            pii_labels_present: Vec::new(),
+            consent_scopes: Vec::new(),
+            residual_risk: "none".to_string(),
+            input_fingerprint: "fp".to_string(),
+            enrolled: true,
+            subagent_count: 0,
+            subagents_dropped: 0,
+            reason_label: super::super::preview::size_refusal(would_send_bytes),
+            scrub_counts: super::super::second_look::ScrubCounts::default(),
+        };
+        let max = crate::envelope::MAX_ENVELOPE_BYTES;
+        let over = preview_card_value(&card(max + 1));
+        assert_eq!(over["reason_label"], "envelope-too-large", "{over}");
+        assert_eq!(over["reason_label"], super::super::queue::REASON_TOO_LARGE);
+        let at_limit = preview_card_value(&card(max));
+        assert!(at_limit.get("reason_label").is_none(), "{at_limit}");
     }
 
     use crate::daemon::test_support::at;

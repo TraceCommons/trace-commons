@@ -595,6 +595,15 @@ impl Uploader<'_, '_> {
         // non-yielding work with no `.await` of its own, run once per approved
         // entry from inside the supervisor's task. Off-worker for the same
         // reason `watcher::tick`'s scan is; see `super::run_blocking`'s doc.
+        //
+        // A large session takes the process-wide gate before the read and
+        // keeps it through the build in `submit_loaded`, which releases it
+        // before the upload. A preview of another large session waits
+        // meanwhile; a small one never does. See `crate::large_session_gate`.
+        // The larger of the queued and the freshly discovered size, so a
+        // session that grew since it was queued is still judged large.
+        let large_session =
+            crate::large_session_gate::admit(entry.size_bytes.max(session_ref.size_bytes)).await;
         let transcript = match super::run_blocking(|| source.load(session_ref)) {
             Ok(t) => t,
             Err(_) => {
@@ -754,6 +763,7 @@ impl Uploader<'_, '_> {
         // apply to a submission this context runs later.
         self.ctx
             .set_upload_provenance(entry.approved_unattended, entry.approved_verdict.clone());
+        self.ctx.hold_large_session_permit(large_session);
         let outcome = match self.ctx.submit_loaded(transcript).await {
             Ok(o) => o,
             Err(e) => {
@@ -1886,6 +1896,123 @@ mod tests {
             Some(true),
             "the entry was sent by an armed folder, not a person"
         );
+    }
+
+    /// A large session waits for the process-wide gate before it is read,
+    /// and lets go of it before the upload: the stub ingest takes the gate
+    /// itself when the envelope arrives, which it could not do if the
+    /// uploader were still holding it across the network transfer.
+    #[tokio::test]
+    async fn a_large_upload_takes_the_gate_to_build_and_releases_it_to_send() {
+        use crate::large_session_gate::{LARGE_SESSION_BYTES, admit};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+
+        // How many uploads found the gate free when they arrived, and how
+        // many found it held.
+        let free_at_upload = Arc::new(AtomicU32::new(0));
+        let held_at_upload = Arc::new(AtomicU32::new(0));
+        let ingest_router = {
+            let free = free_at_upload.clone();
+            let held = held_at_upload.clone();
+            axum::Router::new().route(
+                "/v1/traces",
+                axum::routing::post(move || {
+                    let free = free.clone();
+                    let held = held.clone();
+                    async move {
+                        match tokio::time::timeout(
+                            Duration::from_secs(10),
+                            admit(LARGE_SESSION_BYTES + 1),
+                        )
+                        .await
+                        {
+                            Ok(_permit) => free.fetch_add(1, Ordering::SeqCst),
+                            Err(_) => held.fetch_add(1, Ordering::SeqCst),
+                        };
+                        axum::Json(serde_json::json!({
+                            "status": "accepted",
+                            "credit_points_pending": 0.0,
+                            "explanation": []
+                        }))
+                    }
+                }),
+            )
+        };
+        let issuer = spawn_stub(stub_claim_issuer()).await;
+        let ingest = spawn_stub(ingest_router).await;
+        let session = session_saying(ONE_EMAIL);
+        let (_d, store) = temp_store();
+        let mut cfg = fixture_cfg(&store);
+        cfg.issuer_url = issuer;
+        cfg.ingest_url = ingest;
+        store.save_config(&cfg).unwrap();
+
+        // Only the size the gate reads is large; the file itself is tiny.
+        let mut entry = session.entry_for(&session.current_hash(), &cfg);
+        entry.size_bytes = LARGE_SESSION_BYTES + 1;
+
+        let opts = crate::submit::SubmitOptions {
+            dry_run: false,
+            pii_filter: None,
+            no_reasoning: false,
+            machine_readable: true,
+            unenrolled_preview: false,
+            remediate_quarantined: false,
+            verdict: None,
+        };
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+
+        // Another large build holds the gate: this one waits its turn.
+        let other = admit(LARGE_SESSION_BYTES + 1).await;
+        let waited = tokio::time::timeout(
+            Duration::from_millis(200),
+            up.upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            ),
+        )
+        .await;
+        assert!(
+            waited.is_err(),
+            "a large upload must wait while another large build holds the gate"
+        );
+        assert_eq!(free_at_upload.load(Ordering::SeqCst), 0);
+        assert_eq!(held_at_upload.load(Ordering::SeqCst), 0);
+        drop(other);
+
+        let decision = up
+            .upload_entry(
+                &session.source(),
+                &session.session_ref(),
+                &entry,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, UploadDecision::Uploaded { .. }),
+            "got {decision:?}"
+        );
+        assert_eq!(
+            free_at_upload.load(Ordering::SeqCst),
+            1,
+            "the gate must be free by the time the envelope is on the wire"
+        );
+        assert_eq!(held_at_upload.load(Ordering::SeqCst), 0);
     }
 
     /// The config the fixture sessions above are approved and uploaded

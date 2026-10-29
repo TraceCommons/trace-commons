@@ -739,6 +739,8 @@ const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
 /// See `SubmitPrincipalLimits`.
 const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN: &str =
     "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN";
+/// Deployment-wide upload byte budget; see [`parse_large_body_byte_budget`].
+const TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET: &str = "TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET";
 /// `POST /v1/traces` submissions one principal may have in flight at once.
 const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY: &str =
     "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY";
@@ -1970,6 +1972,10 @@ struct AppState {
     max_export_items_per_request: usize,
     /// Per-principal `POST /v1/traces` rate and in-flight caps.
     submit_principal_limits: SubmitPrincipalLimits,
+    /// Deployment-wide budget of upload body bytes in flight, taken by
+    /// [`authenticate_large_body_request`] for each upload by its declared
+    /// size. Shared by every clone of the state.
+    large_body_bytes: Arc<tokio::sync::Semaphore>,
     analytics_min_cell_count: usize,
     analytics_broad_release_noise: Option<TraceAnalyticsNoiseConfig>,
     analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
@@ -4246,6 +4252,11 @@ impl AppState {
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let submit_principal_limits = parse_submit_principal_limits_from_env()?;
+        let large_body_byte_budget = parse_large_body_byte_budget(
+            std::env::var(TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET)
+                .ok()
+                .as_deref(),
+        )?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
         let community_tenant_ids =
             parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_COMMUNITY_TENANT_IDS)?
@@ -5181,6 +5192,7 @@ impl AppState {
             tenant_rollout_gates,
             max_export_items_per_request,
             submit_principal_limits,
+            large_body_bytes: Arc::new(tokio::sync::Semaphore::new(large_body_byte_budget)),
             analytics_min_cell_count,
             analytics_broad_release_noise,
             analytics_broad_release_privacy_accounting,
@@ -8894,8 +8906,16 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 }
 
 fn app(state: Arc<AppState>) -> Router {
-    let large_body_auth =
-        axum::middleware::from_fn_with_state(state.clone(), authenticate_large_body_request);
+    // One gate per body ceiling, so a declared length over the route's own
+    // ceiling is refused before any bytes are budgeted or read.
+    let large_body_auth = axum::middleware::from_fn_with_state(
+        state.clone(),
+        authenticate_large_body_request::<MAX_INGEST_BODY_BYTES>,
+    );
+    let large_attachment_auth = axum::middleware::from_fn_with_state(
+        state.clone(),
+        authenticate_large_body_request::<MAX_TOKEN_BUNDLE_BODY_BYTES>,
+    );
     Router::new()
         .route("/v1/reward-offers/{program_id}", get(rewards::offer))
         .route("/v1/missions", get(rewards::mission_catalog))
@@ -8918,7 +8938,7 @@ fn app(state: Arc<AppState>) -> Router {
             get(token_bundles::capabilities).merge(
                 post(token_bundles::begin)
                     .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
-                    .layer(large_body_auth.clone()),
+                    .layer(large_attachment_auth.clone()),
             ),
         )
         .route(
@@ -8934,7 +8954,7 @@ fn app(state: Arc<AppState>) -> Router {
             get(token_bundles::read).merge(
                 axum::routing::put(token_bundles::put)
                     .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
-                    .layer(large_body_auth.clone()),
+                    .layer(large_attachment_auth),
             ),
         )
         .route("/health", get(health_handler))
@@ -9797,7 +9817,11 @@ fn app(state: Arc<AppState>) -> Router {
 /// `MAX_ATTACHMENTS` attachments, uploaded one `put` at a time, so any rate a
 /// legitimate bundle fits under bounds nothing. Memory is what an in-flight
 /// cap bounds.
-async fn authenticate_large_body_request(
+///
+/// `LIMIT` is the route's body ceiling (its `DefaultBodyLimit`). A declared
+/// `Content-Length` over it is refused here with 413, before any budget is
+/// taken: axum's own limit only trips once that many bytes have been read.
+async fn authenticate_large_body_request<const LIMIT: usize>(
     State(state): State<Arc<AppState>>,
     request: Request,
     next: Next,
@@ -9814,17 +9838,80 @@ async fn authenticate_large_body_request(
     let Some(_slots) = large_body_slots_for(&ACCOUNT_RATE_LIMITER, &principal_key) else {
         return large_body_concurrency_refusal();
     };
+    // Bytes, not just requests: at the envelope cap one upload is hundreds of
+    // MB and ingest holds several copies of it, so a count of 32 bounds
+    // nothing. Weighed from `Content-Length` before the body is polled.
+    let exact_length = axum::body::HttpBody::size_hint(request.body()).exact();
+    let Some(weight) = large_body_weight(request.headers(), exact_length, LIMIT) else {
+        return api_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+    };
+    let Some(_bytes) = large_body_byte_permit(&state.large_body_bytes, weight) else {
+        return large_body_concurrency_refusal();
+    };
+    // The handler authenticates again, after the body is buffered. A large
+    // upload can outlive a five-minute upload claim, and the claim was valid
+    // when this request began, so the handler is handed the context
+    // established here rather than refusing the same request it admitted.
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(PreBodyAuthenticated(tenant));
     next.run(request).await
+}
+
+/// The context [`authenticate_large_body_request`] authenticated before the
+/// body was read. Only that middleware inserts it.
+#[derive(Clone)]
+struct PreBodyAuthenticated(TenantCtx);
+
+/// What one upload weighs against [`AppState::large_body_bytes`]: its
+/// declared `Content-Length`, else the body's exact length when it knows one
+/// (`exact_length`, its size hint), else the route's ceiling `limit`, since a
+/// body of unknown length can be that large. `None` when the length is over
+/// `limit`: that request is refused outright rather than buffered up to the
+/// limit first.
+fn large_body_weight(headers: &HeaderMap, exact_length: Option<u64>, limit: usize) -> Option<u32> {
+    // Every upload ceiling fits a u32 (asserted at compile time).
+    let limit = limit.min(MAX_INGEST_BODY_BYTES) as u64;
+    let declared = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or(exact_length)
+        .unwrap_or(limit);
+    (declared <= limit).then_some(declared.max(1) as u32)
+}
+
+/// Take `weight` bytes from the deployment-wide upload budget, or `None` when
+/// that many are not free right now. Never waits: the caller is refused with
+/// `Retry-After` and keeps the upload queued.
+fn large_body_byte_permit(
+    budget: &Arc<tokio::sync::Semaphore>,
+    weight: u32,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    budget.clone().try_acquire_many_owned(weight).ok()
 }
 
 /// Most upload bodies one principal may have in flight at once, across every
 /// large-body route. Above the submit handler's own concurrency of 2, so a
 /// contributor submitting while a bundle uploads is never refused here first.
 const LARGE_BODY_PER_PRINCIPAL_CONCURRENCY: u32 = 4;
-/// Most upload bodies in flight across the deployment. Bounds what uploads can
-/// make ingest buffer to about this many times `MAX_INGEST_BODY_BYTES`
-/// (~650 MB), whatever the number of valid tokens.
+/// Most upload bodies in flight across the deployment, whatever their size.
+/// Memory is bounded by [`LARGE_BODY_GLOBAL_BYTES`], not by this count.
 const LARGE_BODY_GLOBAL_CONCURRENCY: u32 = 32;
+/// Default deployment-wide budget of upload body bytes in flight, by declared
+/// `Content-Length` (`TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET` overrides it).
+///
+/// One maximal upload plus 128 MiB for everything else. Ingest holds several
+/// copies of a body while it is processed (parsed envelope, serialized and
+/// encrypted artifact), so resident memory for uploads is a multiple of this
+/// budget, not the budget itself; size it against the host's memory with that
+/// multiple, measured in `large_envelope_tests`.
+const LARGE_BODY_GLOBAL_BYTES: usize = MAX_INGEST_BODY_BYTES + 128 * 1024 * 1024;
+/// A budget below one maximal body would refuse that upload forever.
+const _: () = assert!(LARGE_BODY_GLOBAL_BYTES >= MAX_INGEST_BODY_BYTES);
+/// Upload weights are `u32` permits.
+const _: () = assert!(MAX_INGEST_BODY_BYTES <= u32::MAX as usize);
 const LARGE_BODY_GLOBAL_KEY: &str = "large-body-global";
 
 fn large_body_principal_key(
@@ -16070,25 +16157,46 @@ async fn claim_legacy_receipt(
 /// The handler keeps `ApiResult` so its tests can call it directly.
 async fn submit_trace_route(
     state: State<Arc<AppState>>,
+    pre_body: Option<axum::Extension<PreBodyAuthenticated>>,
     headers: HeaderMap,
     body: SubmitBody,
 ) -> axum::response::Response {
-    match submit_trace_handler(state, headers, body).await {
+    let pre_body = pre_body.map(|axum::Extension(PreBodyAuthenticated(tenant))| tenant);
+    match submit_trace_handler_authenticated(state, headers, body, pre_body).await {
         Ok(receipt) => receipt.into_response(),
         Err(error) => api_error_response_with_retry_after(error),
     }
 }
 
+/// [`submit_trace_handler_authenticated`] that authenticates the request
+/// itself: tests, and bundle `finalize`, which calls it in-process.
 async fn submit_trace_handler(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: SubmitBody,
+) -> ApiResult<Json<TraceSubmissionReceipt>> {
+    submit_trace_handler_authenticated(state, headers, body, None).await
+}
+
+/// `pre_body` is the context the large-body middleware authenticated before
+/// the body was read, when it ran. A credential that expired while the body
+/// was uploading is still the credential this request began with, so the
+/// handler uses that context instead of re-checking expiry after the fact;
+/// without one (a direct call) it authenticates here.
+async fn submit_trace_handler_authenticated(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: SubmitBody,
+    pre_body: Option<TenantCtx>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
     let SubmitBody {
         mut envelope,
         raw: raw_body,
     } = body;
-    let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
+    let authenticated_tenant = match pre_body {
+        Some(tenant) => tenant,
+        None => authenticate_ctx(state.as_ref(), &headers)?,
+    };
 
     // Submission work includes the server re-scrub and gate preparation, so
     // bound it before the tenant-access-grant query, envelope validation, or any
@@ -16386,7 +16494,17 @@ async fn submit_trace_handler(
                 )
                 .await?;
         }
-        let residual_risk_basis = rescrub_trace_envelope(&mut envelope)
+        // CPU-bound and linear in the envelope, which at the cap is hundreds
+        // of MB: on a blocking thread, so it cannot hold a runtime worker
+        // (and every request queued behind it) for the duration.
+        let (rescrubbed, residual_risk_basis) = tokio::task::spawn_blocking(move || {
+            let basis = rescrub_trace_envelope(&mut envelope);
+            (envelope, basis)
+        })
+        .await
+        .map_err(|_| internal_error("rescrub task failed"))?;
+        let mut envelope = rescrubbed;
+        let residual_risk_basis = residual_risk_basis
             .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
         bind_envelope_server_tenant_scope_for_storage(&mut envelope, tenant.tenant_id());
         let existing_revocations = read_revocations_for_submit(state.as_ref(), tenant.tenant_id())
@@ -16496,14 +16614,19 @@ async fn submit_trace_handler(
             .as_ref()
             .filter(|_| db_first)
             .map(|prior| quarantine_remediation_prior_snapshot(state.as_ref(), prior));
-        let stored_envelope = store_envelope(
-            &state,
-            tenant.tenant_id(),
-            corpus_status,
-            artifact_label,
-            &envelope,
-        )
-        .map_err(internal_error)?;
+        // Serialize, encrypt and write: as the rescrub, off the runtime.
+        let (stored_envelope, envelope) = {
+            let state = state.clone();
+            let tenant_id = tenant.tenant_id().to_string();
+            tokio::task::spawn_blocking(move || {
+                let stored =
+                    store_envelope(&state, &tenant_id, corpus_status, artifact_label, &envelope);
+                (stored, envelope)
+            })
+            .await
+            .map_err(|_| internal_error("envelope store task failed"))?
+        };
+        let stored_envelope = stored_envelope.map_err(internal_error)?;
         let derived_record = build_derived_record(
             tenant.tenant_id(),
             corpus_status,
@@ -22164,6 +22287,28 @@ impl Default for SubmitPrincipalLimits {
             concurrency: SUBMIT_PER_PRINCIPAL_CONCURRENCY,
         }
     }
+}
+
+/// `TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET`: the deployment-wide upload byte
+/// budget, from [`MAX_INGEST_BODY_BYTES`] (one maximal upload) to
+/// `u32::MAX`. Unset is [`LARGE_BODY_GLOBAL_BYTES`]. Anything else refuses
+/// startup, naming the variable: a budget under one maximal body would turn
+/// the largest accepted upload into a permanent 429.
+fn parse_large_body_byte_budget(configured: Option<&str>) -> anyhow::Result<usize> {
+    let Some(configured) = configured else {
+        return Ok(LARGE_BODY_GLOBAL_BYTES);
+    };
+    let min = MAX_INGEST_BODY_BYTES;
+    let max = u32::MAX as usize;
+    let parsed = configured.trim().parse::<usize>().with_context(|| {
+        format!("{TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET} must be an integer from {min} to {max}")
+    })?;
+    if !(min..=max).contains(&parsed) {
+        anyhow::bail!(
+            "{TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET} must be an integer from {min} to {max}"
+        );
+    }
+    Ok(parsed)
 }
 
 fn parse_submit_principal_limits_from_env() -> anyhow::Result<SubmitPrincipalLimits> {
@@ -66536,9 +66681,9 @@ fn trace_object_ref_write_from_record(
     record: &TraceCommonsSubmissionRecord,
     envelope: &TraceContributionEnvelope,
 ) -> anyhow::Result<(StorageTraceObjectRefWrite, String)> {
-    let envelope_json = serde_json::to_string_pretty(envelope)
+    // Hashed and measured as it is serialized; the pretty JSON is never held.
+    let (plaintext_sha256, envelope_json_len) = pretty_json_sha256_prefixed_and_len(envelope)
         .context("failed to serialize trace envelope for DB mirror hashing")?;
-    let plaintext_sha256 = sha256_prefixed(&envelope_json);
     let (object_store, object_key, content_sha256) =
         if let Some(receipt) = record.artifact_receipt.as_ref() {
             (
@@ -66563,7 +66708,7 @@ fn trace_object_ref_write_from_record(
             object_key,
             content_sha256: content_sha256.clone(),
             encryption_key_ref: format!("tenant:{}", tenant_storage_ref(&record.tenant_id)),
-            size_bytes: i64::try_from(envelope_json.len()).unwrap_or(i64::MAX),
+            size_bytes: i64::try_from(envelope_json_len).unwrap_or(i64::MAX),
             compression: None,
             created_by_job_id: None,
         },
@@ -79839,10 +79984,51 @@ fn write_json_file<T: Serialize + ?Sized>(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {} dir {}", label, parent.display()))?;
     }
-    let body = serde_json::to_string_pretty(value)
+    // Serialized straight into the file: a body file can be a whole
+    // envelope, and buffering it first would be one more copy of it in
+    // memory. Same bytes as `to_string_pretty`.
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("failed to write {} {}", label, path.display()))?;
+    let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+    serde_json::to_writer_pretty(&mut writer, value)
         .with_context(|| format!("failed to serialize {label}"))?;
-    std::fs::write(path, body)
+    writer
+        .flush()
         .with_context(|| format!("failed to write {} {}", label, path.display()))
+}
+
+/// A `Write` that keeps only a SHA-256 and a byte count of what passes
+/// through it, so a hash and length of a serialization can be taken without
+/// materializing the serialization.
+#[derive(Default)]
+struct Sha256CountingWriter {
+    hasher: Sha256,
+    bytes: u64,
+}
+
+impl std::io::Write for Sha256CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.hasher.update(buf);
+        self.bytes += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `sha256_prefixed` and the length of `serde_json::to_string_pretty(value)`,
+/// without building that string.
+fn pretty_json_sha256_prefixed_and_len<T: Serialize + ?Sized>(
+    value: &T,
+) -> serde_json::Result<(String, u64)> {
+    let mut writer = Sha256CountingWriter::default();
+    serde_json::to_writer_pretty(&mut writer, value)?;
+    Ok((
+        format!("sha256:{}", hex::encode(writer.hasher.finalize())),
+        writer.bytes,
+    ))
 }
 
 fn tenant_storage_key(tenant_id: &str) -> String {

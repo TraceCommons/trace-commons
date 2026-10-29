@@ -135,15 +135,19 @@ envsubst < deploy/pilot-gcp/systemd/cloud-sql-proxy.service > /tmp/cloud-sql-pro
 ```
 
 The Caddy template contains three load-bearing security controls. Its global
-`read_body 300s` deadline prevents a slow request body from holding an ingest
+`read_body 2300s` deadline prevents a slow request body from holding an ingest
 connection indefinitely. It is one deadline for the whole body on every route,
-so it is sized for the largest upload ingest accepts (~20.2 MB, about
-0.55 Mbit/s of sustained upstream); do not shorten it without shrinking that
-ceiling. The ingest site's `request_body { max_size 21MB }` is the matching
-edge ceiling: Caddy's `MB` is decimal, so 21MB sits just above ingest's
-20,194,304-byte maximum and refuses anything larger with 413 before ingest
-reads it. Ingest enforces its own per-route limits and in-flight caps behind
-it; this is defence in depth, so raise both together. Separately, the
+so it is sized for the largest upload ingest accepts (272,629,760 bytes: a
+256 MiB envelope plus 4 MiB of framing, about 0.95 Mbit/s of sustained
+upstream, just above the contributor's upload timeout for that body); do not
+shorten it without shrinking that ceiling. The ingest site's
+`request_body { max_size 273MB }` is the matching edge ceiling: Caddy's `MB`
+is decimal, so 273MB sits just above ingest's maximum and refuses anything
+larger with 413 before ingest reads it. Ingest enforces its own per-route
+limits, in-flight caps and upload byte budget
+(`TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET`) behind it; this is defence in depth,
+so raise both together. A slow upload holds its share of the byte budget for
+as long as its body takes, up to this deadline. Separately, the
 default/error logger plus both access-log encoders replace the `code` query
 value before JSON is written. Error-log filtering is necessary because a
 reverse-proxy 502 includes the request URI in stderr/journald even when the

@@ -471,16 +471,16 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     use trace_commons_contributor::source::TraceSource as _;
 
     let fixture_dir = tempfile::tempdir().unwrap();
-    // Sized with headroom rather than tuned to the byte. The claim under test
-    // is that the preview and enrolled paths agree on canonical size; sitting
-    // a handful of bytes above MAX_ENVELOPE_BYTES made the precondition break
-    // on any change to serialized length, including a consent boolean
-    // flipping between `true` and `false`.
-    let trajectory = write_trajectory_with_source(
-        fixture_dir.path(),
-        &"x".repeat(trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES + 8_000),
-        "boundary-test",
-    );
+    // The claim under test is that the preview and enrolled paths agree on
+    // canonical size, so they agree on which side of the refusal boundary
+    // any session falls. With `MAX_ENVELOPE_BYTES` at 512 MiB a fixture
+    // above it cannot be built (the trajectory adapter's read budget is far
+    // below the cap, and materialising one would cost gigabytes per run), so
+    // the fixture is several megabytes -- big enough that its size is
+    // dominated by content -- and the boundary is checked through the same
+    // `envelope_size_ok` predicate both paths are refused under.
+    let trajectory =
+        write_trajectory_with_source(fixture_dir.path(), &"x".repeat(8_000_000), "boundary-test");
     let source = trace_commons_contributor::source::trajectory::TrajectorySource::new(trajectory);
     let session_ref = source.discover().unwrap().remove(0);
     let transcript = source.load(&session_ref).unwrap();
@@ -508,10 +508,14 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     let enrolled_size = envelope_size(&enrolled).unwrap();
 
     assert!(
-        preview_size > trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES,
-        "fixture must remain above the refusal boundary: {preview_size}"
+        preview_size > 8_000_000,
+        "fixture must be dominated by its content: {preview_size}"
     );
     assert_eq!(preview_size, enrolled_size);
+    assert_eq!(
+        trace_commons_contributor::envelope::envelope_size_ok(&preview).is_ok(),
+        trace_commons_contributor::envelope::envelope_size_ok(&enrolled).is_ok(),
+    );
 }
 
 #[test]
@@ -668,50 +672,13 @@ fn unenrolled_real_submit_still_requires_login() {
     );
 }
 
-#[test]
-fn refusal_reports_session_and_size_and_only_fails_real_submit() {
-    let fixture_dir = tempfile::tempdir().unwrap();
-    // Sized off the cap, not a literal: a fixture pinned to a hardcoded byte
-    // count silently stops testing the refusal path the moment the cap moves.
-    let over_cap = trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES + 100_000;
-    let trajectory = write_trajectory(fixture_dir.path(), &"x".repeat(over_cap));
-
-    let dry_config_dir = tempfile::tempdir().unwrap();
-    let dry = run_submit(dry_config_dir.path(), &trajectory, false, true);
-    let dry_stdout = String::from_utf8(dry.stdout).unwrap();
-    let dry_stderr = String::from_utf8(dry.stderr).unwrap();
-    assert!(
-        dry.status.success(),
-        "stdout={dry_stdout}\nstderr={dry_stderr}"
-    );
-    assert!(
-        dry_stdout.contains("refused (session-too-large)"),
-        "stdout={dry_stdout}"
-    );
-    assert!(
-        dry_stdout.contains("session=sha256:"),
-        "stdout={dry_stdout}"
-    );
-    assert!(dry_stdout.contains("size="), "stdout={dry_stdout}");
-    assert!(
-        dry_stdout.contains(&format!(
-            "limit={}",
-            trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES
-        )),
-        "stdout={dry_stdout}"
-    );
-
-    let real_config_dir = tempfile::tempdir().unwrap();
-    write_enrolled_config(real_config_dir.path());
-    let real = run_submit(real_config_dir.path(), &trajectory, false, false);
-    let real_stdout = String::from_utf8(real.stdout).unwrap();
-    let real_stderr = String::from_utf8(real.stderr).unwrap();
-    assert!(!real.status.success());
-    assert!(
-        real_stdout.contains("refused (session-too-large)"),
-        "stdout={real_stdout}\nstderr={real_stderr}"
-    );
-}
+// `refusal_reports_session_and_size_and_only_fails_real_submit` drove the
+// CLI with a trajectory over `MAX_ENVELOPE_BYTES`. At 256 MiB no trajectory
+// can be (the adapter refuses past its read budget first, as
+// `parse-failed`), so its parts moved to unit tests in `submit.rs`:
+// `refused_for_size_names_the_session_the_size_and_the_limit` for the
+// fields the CLI prints, and `only_size_refusal_is_non_fatal_in_dry_run`
+// for the exit status.
 
 #[test]
 fn noninteractive_bulk_submit_requires_yes_and_uploads_nothing() {

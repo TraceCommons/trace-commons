@@ -10,6 +10,8 @@ mod multitenant_settlement_tests;
 mod account_binding_gate_tests;
 #[path = "tests/activity_missions_tests.rs"]
 mod activity_missions_tests;
+#[path = "tests/large_envelope_tests.rs"]
+mod large_envelope_tests;
 #[path = "tests/legacy_invite_link_tests.rs"]
 mod legacy_invite_link_tests;
 #[path = "tests/mission_catalog_tests.rs"]
@@ -6923,6 +6925,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         submit_principal_limits: SubmitPrincipalLimits::default(),
+        large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -31079,6 +31082,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         submit_principal_limits: SubmitPrincipalLimits::default(),
+        large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -81557,10 +81561,17 @@ async fn large_upload_routes_retain_the_upload_body_ceiling() {
 }
 
 /// The documented maximum is admitted and one byte more is refused, per
-/// route.
+/// route, with real bodies, so this is the route's `DefaultBodyLimit` and not
+/// only the gate's declared-length check
+/// (`upload_routes_admit_their_ceiling_by_declared_length` covers every route
+/// that way). Attachment-sized routes only: an envelope route's ceiling is
+/// hundreds of MB, too much to allocate twice in a default test run.
 #[tokio::test]
 async fn large_upload_routes_admit_exactly_their_ceiling() {
-    for (method, path, ceiling) in large_upload_route_ceilings() {
+    for (method, path, ceiling) in large_upload_route_ceilings()
+        .into_iter()
+        .filter(|(_, _, ceiling)| *ceiling <= 64 * 1024 * 1024)
+    {
         let at_ceiling = authenticated_upload_status(method, path, ceiling).await;
         assert!(
             ![

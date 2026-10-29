@@ -17305,3 +17305,84 @@ async fn the_operator_route_resolves_a_held_run() {
         "one row per resolution the route made"
     );
 }
+
+/// Manual memory probe for the pipeline receipt path, the one a tenant routed
+/// to the pipeline takes: as `large_envelope_tests::large_envelope_submit_probe`
+/// (run it the same way, under `/usr/bin/time -l`), against this suite's
+/// pilot-shaped database.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual memory probe; set TC_LARGE_ENVELOPE_BYTES and a PG test URL"]
+async fn large_envelope_pipeline_receipt_probe() {
+    let backend = runtime_backend(4)
+        .await
+        .expect("this probe needs TRACE_COMMONS_PG_TEST_DATABASE_URL");
+    cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+    reset_account_rate_limiter_for_test();
+    let target: u64 = std::env::var("TC_LARGE_ENVELOPE_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(200_000_000);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("envelope.json");
+    let written = super::large_envelope_tests::write_synthetic_envelope(&fixture, target).await;
+    let artifacts = local_artifacts(&dir);
+    let adapters: Vec<Arc<dyn SettlementAdapter>> = vec![
+        RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_http_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>,
+        RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_http_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>,
+    ];
+    let service = assemble_test_pipeline_service(
+        backend.clone(),
+        artifacts.clone(),
+        IsolatedPipelineIndex::new(),
+        adapters,
+        None,
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(backend.clone() as Arc<dyn Database>),
+        Some(artifacts.clone()),
+        true,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &["tenant-a"],
+    );
+    // `run_pipeline_app`, as `main` runs it: it activates the tenant's bundle
+    // before serving. Its worker starts too; it is stopped as soon as the
+    // receipt is answered, so the peak includes at most its first steps.
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let addr: std::net::SocketAddr = base
+        .trim_start_matches("http://")
+        .parse()
+        .expect("loopback address");
+    let started = std::time::Instant::now();
+    let (status, body) =
+        super::large_envelope_tests::post_envelope_file(addr, "token-a", &fixture).await;
+    let elapsed = started.elapsed();
+    let _ = stop.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), server).await;
+    assert_eq!(status, 200, "accepted: {body}");
+    let receipt: serde_json::Value = serde_json::from_str(&body).expect("receipt");
+    eprintln!(
+        "large-envelope-pipeline-probe bytes={} events={} submit_secs={:.1} status={}",
+        written.bytes,
+        written.events,
+        elapsed.as_secs_f64(),
+        receipt["status"].as_str().unwrap_or_default()
+    );
+    cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+}
