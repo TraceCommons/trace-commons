@@ -29,7 +29,8 @@
 //! counts of edits, declined, undone and interrupted calls, the task shape
 //! and inferred task, active time, and fixed labels, never a path, a
 //! command or a text. The store holds no list price: the Models answers
-//! price stored tokens when they are built. Its one money figure is the
+//! and `insights_week`'s `work` (`insights_week_work`) price stored tokens
+//! when they are built. Its one stored money figure is the
 //! actual NEAR AI charge per session, folded from the proxy ledger's
 //! `cost_usd` into the session's route tally (owner decision D5, settled
 //! 2026-10-20; `insights_route_tally`), in integer USD micros, because the
@@ -2022,6 +2023,25 @@ impl CounterPass {
             })
             .filter(|week| week.coverage.sessions() > 0)
             .collect();
+        // Claude and Codex spend at API list prices, lines and edits
+        // (product owner, 2026-10-29); `null` with no row, as
+        // `near_ai_credit` is with no store.
+        let work = if inputs.is_empty() {
+            serde_json::Value::Null
+        } else {
+            let folders: BTreeMap<String, Option<String>> = joined
+                .iter()
+                .map(|(reference, join)| (reference.clone(), join.folder.map(str::to_owned)))
+                .collect();
+            super::insights_week_work::work_value(
+                &inputs,
+                &folders,
+                &crate::insights::pricing_catalog::production_pricing_catalog(),
+                this.week_start,
+                tz,
+                current - Duration::weeks(COUNTER_STORE_KEEP_WEEKS - 1),
+            )
+        };
         let picker = dated_weeks(&inputs, &tz);
         let overview = counter_overview(&this, &earlier, tz.local_minus_utc(), picker.clone());
         // The Patterns cards describe how the person works: automated
@@ -2066,6 +2086,7 @@ impl CounterPass {
             "routing_available": routing_unavailable.is_none(),
             "routing_unavailable": routing_unavailable,
             "near_ai_credit": credit,
+            "work": work,
             "usage_by_day": usage_by_day_value(&inputs, now, tz),
             "overview": overview,
             "patterns": patterns,
@@ -6072,6 +6093,27 @@ mod tests {
     }
 
     #[test]
+    fn the_week_carries_work_at_list_prices_once_there_are_rows() {
+        let f = Fixture::new();
+        assert_eq!(f.week(&[])["work"], serde_json::Value::Null);
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let value = f.week(&[]);
+        let work = &value["work"];
+        assert_eq!(work["basis"], "api_list");
+        assert_eq!(work["week"]["sessions"], 1);
+        assert_eq!(work["by_tool"][0]["key"], "claude_code");
+        assert_eq!(work["by_day"].as_array().unwrap().len(), 7);
+        assert_eq!(work["by_day"][0]["date"], "2026-09-14");
+        assert!(work["last_week"].is_object());
+        // Every row in a Never folder: no row, no figure.
+        assert_eq!(
+            f.week(&[PROJECT.to_string()])["work"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn nothing_identifying_crosses() {
         let f = Fixture::new();
         let path = f.write("PRIVATE-SESSION.jsonl", &claude_bytes());
@@ -7934,6 +7976,9 @@ mod tests {
                 WeekOptions::default(),
             );
             value.as_object_mut().unwrap().remove("updated_at");
+            // `work` prices the per-turn series and counts the facts, so it
+            // moves with them by design; every other figure must not.
+            value.as_object_mut().unwrap().remove("work");
             value
         };
         let weeks = [Some(monday()), NaiveDate::from_ymd_opt(2026, 1, 5)];

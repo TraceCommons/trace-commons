@@ -374,6 +374,200 @@
       "tokens_partial": false
     }
   },
+  "work": {
+    "basis": "api_list",
+    "tables": [],
+    "prices_as_of": null,
+    "week": {
+      "sessions": 2,
+      "priced_sessions": 0,
+      "unpriced_sessions": 2,
+      "usd_micros_known": 0,
+      "usd_partial": true,
+      "cache_savings_usd_micros_known": 0,
+      "lines_added_known": 1,
+      "lines_removed_known": 1,
+      "lines_partial": false,
+      "edits_known": 1,
+      "edits_undone_known": 0,
+      "edits_denied_known": 0,
+      "edits_partial": true,
+      "edits_count_partial": false,
+      "edits_undone_partial": false,
+      "edits_denied_partial": true
+    },
+    "last_week": {
+      "sessions": 0,
+      "priced_sessions": 0,
+      "unpriced_sessions": 0,
+      "usd_micros_known": 0,
+      "usd_partial": false,
+      "cache_savings_usd_micros_known": 0,
+      "lines_added_known": 0,
+      "lines_removed_known": 0,
+      "lines_partial": false,
+      "edits_known": 0,
+      "edits_undone_known": 0,
+      "edits_denied_known": 0,
+      "edits_partial": false,
+      "edits_count_partial": false,
+      "edits_undone_partial": false,
+      "edits_denied_partial": false
+    },
+    "by_tool": [
+      {
+        "sessions": 1,
+        "priced_sessions": 0,
+        "unpriced_sessions": 1,
+        "usd_micros_known": 0,
+        "usd_partial": true,
+        "cache_savings_usd_micros_known": 0,
+        "lines_added_known": 1,
+        "lines_removed_known": 1,
+        "lines_partial": false,
+        "edits_known": 1,
+        "edits_undone_known": 0,
+        "edits_denied_known": 0,
+        "edits_partial": true,
+        "edits_count_partial": false,
+        "edits_undone_partial": false,
+        "edits_denied_partial": true,
+        "key": "claude_code"
+      },
+      {
+        "sessions": 1,
+        "priced_sessions": 0,
+        "unpriced_sessions": 1,
+        "usd_micros_known": 0,
+        "usd_partial": true,
+        "cache_savings_usd_micros_known": 0,
+        "lines_added_known": 0,
+        "lines_removed_known": 0,
+        "lines_partial": false,
+        "edits_known": 0,
+        "edits_undone_known": 0,
+        "edits_denied_known": 0,
+        "edits_partial": true,
+        "edits_count_partial": false,
+        "edits_undone_partial": false,
+        "edits_denied_partial": true,
+        "key": "codex"
+      }
+    ],
+    "by_model": [
+      {
+        "key": "claude-fixture-model",
+        "tool": "claude_code",
+        "sessions": 1,
+        "tokens": 37235,
+        "usd_micros_known": 0,
+        "usd_partial": true
+      },
+      {
+        "key": "gpt-6",
+        "tool": "codex",
+        "sessions": 1,
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": true
+      }
+    ],
+    "by_folder": [
+      {
+        "sessions": 2,
+        "priced_sessions": 0,
+        "unpriced_sessions": 2,
+        "usd_micros_known": 0,
+        "usd_partial": true,
+        "cache_savings_usd_micros_known": 0,
+        "lines_added_known": 1,
+        "lines_removed_known": 1,
+        "lines_partial": false,
+        "edits_known": 1,
+        "edits_undone_known": 0,
+        "edits_denied_known": 0,
+        "edits_partial": true,
+        "edits_count_partial": false,
+        "edits_undone_partial": false,
+        "edits_denied_partial": true,
+        "key": null
+      }
+    ],
+    "by_day": [
+      {
+        "date": "2026-09-14",
+        "usd_micros_known": 0,
+        "usd_partial": true
+      },
+      {
+        "date": "2026-09-15",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-16",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-17",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-18",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-19",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-20",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      }
+    ],
+    "last_week_by_day": [
+      {
+        "date": "2026-09-07",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-08",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-09",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-10",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-11",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-12",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-13",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      }
+    ]
+  },
   "overview": {
     "feed": "counter_pass",
     "generation": 0,

@@ -614,7 +614,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `usage_by_day[]`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `work`, `usage_by_day[]`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome, analyzable}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
@@ -5016,6 +5016,58 @@ sessions on disk. Otherwise:
   one, or an undated or uncounted turn); a week with no session of that tool
   is a true 0. `rollup.codex_by_day` (additive) is the same split for the
   week on screen, Monday first, `null` when the week has no Codex session.
+- `work` (additive; the product owner approved showing Claude Code and
+  Codex spend at API list prices on 2026-10-29) is the week's Claude Code
+  and Codex work: spend at published API list prices, lines and edits.
+  NEAR AI money stays in `near_ai_credit`. `null` when the feed has no row
+  (no store, rows under another key, or every row in a Never folder).
+  `{basis: "api_list", tables[], prices_as_of, week, last_week, by_tool[],
+  by_model[], by_folder[], by_day[], last_week_by_day[]}`. `tables[]` is
+  `{table_id, version}` for every pricing table a priced turn in either
+  week used, as `insights_model_answers`' `pricing.tables`; `prices_as_of`
+  is the oldest of their fetch times (RFC 3339), `null` when no turn
+  priced. `week` and `last_week` are Totals: `{sessions, priced_sessions,
+  unpriced_sessions, usd_micros_known, usd_partial,
+  cache_savings_usd_micros_known, lines_added_known, lines_removed_known,
+  lines_partial, edits_known, edits_undone_known, edits_denied_known,
+  edits_partial, edits_count_partial, edits_undone_partial,
+  edits_denied_partial}`. Spend is priced turn by turn from the stored
+  per-turn series, each turn on its own local day, so a session crossing
+  midnight or a week is split by its turns; Claude Code turns are the ones
+  the rollup counts, so a turn a resumed transcript repeats is priced once.
+  A session is unpriced when any of its turns in the scope is unpriced
+  (no known counters, no date, no usable label, no list price) or it has
+  no per-turn series (a Codex session read before the per-turn reader, or
+  trimmed by the Codex budget; an unknown row); `usd_partial` is true
+  when any session in the scope is unpriced, and `usd_micros_known` is
+  then the priced turns' sum, a minimum, never a fabricated 0.
+  `cache_savings_usd_micros_known` is, over priced turns, what their
+  cache-read tokens would have cost at the model's uncached-input rate
+  less what they cost at its cache-read rate. Lines (`SessionShape`'s
+  lines added and removed) and edits (summed over each model's facts:
+  edit calls, undone, declined) are counted once per session, in the week
+  holding its first recorded activity; a session with no facts, or an
+  unknown count, sets the matching `*_partial` (`edits_partial` is true
+  when any of `edits_count_partial`, `edits_undone_partial`,
+  `edits_denied_partial` is). Automated sessions are counted, as the
+  token figures count them. `last_week` (and `last_week_by_day[]`) is
+  `null` when the week before the one on screen is older than the store
+  keeps. `by_tool[]` is Totals plus `key` (`claude_code`, `codex`), only
+  the tools with a session in the week, in that order. `by_model[]` is
+  `{key, tool, sessions, tokens, usd_micros_known, usd_partial}` per
+  normalized model label (`insights_model_answers`' rule) and tool, the
+  sessions with a turn under it and those turns' known tokens, ordered by
+  `usd_micros_known` largest first, ties by key then tool; a turn with no
+  usable label is in no model and leaves the totals partial. `by_folder[]`
+  is Totals plus `key`, the folder's label as `rollup` and
+  `near_ai_credit` show it, `null` when unknown, ordered by known spend
+  largest first, ties by label, `null` last. `by_day[]` and
+  `last_week_by_day[]` are the 7 local days of the week on screen (and
+  the week before), Monday first, each `{date, usd_micros_known,
+  usd_partial}`; a day is partial when an unpriced turn is dated on it, or
+  an unpriced session's first activity in the week is. A daemon that
+  predates it omits it; a shell reads that as no spend figure, never as
+  zero.
 - `started_at`, `routing`, `routing_available` and `routing_unavailable`
   are additive: a daemon that predates them omits all four. A shell reads
   an absent `routing_available` as false and draws no route, and an absent
@@ -5521,9 +5573,11 @@ ledger feed off, or no proxy ledger declared, every session is treated as
 unobserved and no stored route tally is read. No label or field name is a
 ranking word.
 
-`insights_week` carries no list price, whatever facts the rows store; its
-one money figure is `near_ai_credit`, the NEAR AI ledger's own charge
-(product owner, 2026-10-28).
+`insights_week` carries two money figures: `near_ai_credit`, the NEAR AI
+ledger's own charge (product owner, 2026-10-28), and `work`, Claude Code
+and Codex spend at published API list prices, priced from stored tokens
+when the answer is built (the product owner approved list-price figures
+on 2026-10-29). The store holds no list price.
 
 ### `insights_benchmarks`
 

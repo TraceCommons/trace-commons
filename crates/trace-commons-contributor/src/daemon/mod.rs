@@ -66,6 +66,7 @@ pub mod insights_model_answers;
 pub(crate) mod insights_route_tally;
 pub mod insights_sessions;
 pub mod insights_week;
+mod insights_week_work;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;

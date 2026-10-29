@@ -348,6 +348,104 @@ fn billable_counts(
     })
 }
 
+/// One turn priced on its own, for figures that sum turns across sessions,
+/// days and folders (`insights_week`'s `work`). The figure is the exact
+/// numerator (tokens times USD nanos per million tokens), so a caller sums
+/// numerators and rounds once with [`exact_to_micros`], as
+/// [`price_session`] does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnPrice {
+    /// The `<synthetic>` shape (no usable label, known usage totalling
+    /// zero): no model, no tokens, neither priced nor unpriced.
+    Skipped,
+    Priced {
+        /// The normalized model label.
+        model: String,
+        exact: u128,
+        /// What the turn's cache-read tokens would have cost at the model's
+        /// uncached-input rate, less what they cost at its cache-read rate,
+        /// as an exact numerator. `None` when that cannot be priced, or the
+        /// cache-read rate is not below the uncached one.
+        cache_savings_exact: Option<u128>,
+        table: PricingTableRef,
+    },
+    Unpriced {
+        /// The normalized model label, `None` for a turn with no usable
+        /// label.
+        model: Option<String>,
+        reason: UnpricedReason,
+    },
+}
+
+/// Price one turn by the rules of [`price_session`]: a turn is priced or
+/// unpriced, never zero.
+pub fn price_turn_exact(
+    catalog: &PricingCatalog,
+    accounting: PricingAccounting,
+    model_labels: &[String],
+    turn: &TurnRecord,
+) -> TurnPrice {
+    let label = turn
+        .model_label_ix
+        .and_then(|ix| model_labels.get(usize::from(ix)));
+    let zero_usage = turn.known_usage().is_some_and(|usage| usage.total() == 0);
+    let Some(label) = label else {
+        return if zero_usage {
+            TurnPrice::Skipped
+        } else {
+            TurnPrice::Unpriced {
+                model: None,
+                reason: UnpricedReason::NoLabel,
+            }
+        };
+    };
+    let Some(model) = normalize_model_label(label) else {
+        return if zero_usage && is_synthetic(label) {
+            TurnPrice::Skipped
+        } else {
+            TurnPrice::Unpriced {
+                model: None,
+                reason: UnpricedReason::NoLabel,
+            }
+        };
+    };
+    match price_turn(catalog, accounting, &model, turn) {
+        Ok((exact, table)) => {
+            // The same turn with its cache reads sent uncached.
+            let uncached = turn
+                .uncached_input
+                .zip(turn.cache_read)
+                .and_then(|(uncached, read)| uncached.checked_add(read));
+            let cache_savings_exact = uncached.and_then(|uncached| {
+                let counterfactual = TurnRecord {
+                    uncached_input: Some(uncached),
+                    cache_read: Some(0),
+                    ..turn.clone()
+                };
+                let (without_cache, _) =
+                    price_turn(catalog, accounting, &model, &counterfactual).ok()?;
+                without_cache.checked_sub(exact)
+            });
+            TurnPrice::Priced {
+                model,
+                exact,
+                cache_savings_exact,
+                table,
+            }
+        }
+        Err(reason) => TurnPrice::Unpriced {
+            model: Some(model),
+            reason,
+        },
+    }
+}
+
+/// An exact numerator summed from [`TurnPrice::Priced`] turns, rounded
+/// half-up to USD micros once. `None` when it does not fit `u64`.
+pub fn exact_to_micros(exact: u128) -> Option<u64> {
+    round_to_micros(exact)
+}
+
 fn round_to_micros(numerator: u128) -> Option<u64> {
     let rounded =
         numerator.checked_add(MICROS_ROUNDING_DENOMINATOR / 2)? / MICROS_ROUNDING_DENOMINATOR;
@@ -1470,5 +1568,137 @@ mod tests {
             claude_label_on_codex.by_model["claude-opus-5-5"].unpriced_turns as usize,
             turns.len()
         );
+    }
+
+    #[test]
+    fn turns_priced_one_by_one_sum_to_the_session_total() {
+        let catalog = claude_catalog(&["test-model-a"]);
+        let model_labels = labels(&["test-model-a", "<synthetic>"]);
+        let turns = vec![
+            priced_claude_turn(0, 0),
+            priced_claude_turn(1, 0),
+            turn(
+                2,
+                Some(10),
+                Some(1),
+                [Some(0), Some(0), Some(0)],
+                Some(CacheWrite::Split { m5: 0, h1: 0 }),
+            ),
+        ];
+        let session = price_session(
+            &catalog,
+            PricingAccounting::ClaudeCode,
+            &model_labels,
+            &turns,
+        );
+        let mut exact = 0u128;
+        let mut skipped = 0;
+        for turn in &turns {
+            match price_turn_exact(&catalog, PricingAccounting::ClaudeCode, &model_labels, turn) {
+                TurnPrice::Priced {
+                    model, exact: e, ..
+                } => {
+                    assert_eq!(model, "test-model-a");
+                    exact += e;
+                }
+                TurnPrice::Skipped => skipped += 1,
+                TurnPrice::Unpriced { .. } => panic!("every turn prices"),
+            }
+        }
+        assert_eq!(skipped, 1);
+        assert_eq!(exact_to_micros(exact), session.total_usd_micros);
+        assert_eq!(exact_to_micros(exact), Some(46_000_000));
+    }
+
+    #[test]
+    fn a_turn_without_usage_or_label_is_unpriced_never_zero() {
+        let catalog = claude_catalog(&["test-model-a"]);
+        let model_labels = labels(&["test-model-a"]);
+        let unknown = turn(0, Some(10), Some(0), [Some(1), None, Some(1)], None);
+        assert_eq!(
+            price_turn_exact(
+                &catalog,
+                PricingAccounting::ClaudeCode,
+                &model_labels,
+                &unknown
+            ),
+            TurnPrice::Unpriced {
+                model: Some("test-model-a".to_owned()),
+                reason: UnpricedReason::UsageUnknown,
+            }
+        );
+        let mut unlabelled = priced_claude_turn(1, 0);
+        unlabelled.model_label_ix = None;
+        assert_eq!(
+            price_turn_exact(
+                &catalog,
+                PricingAccounting::ClaudeCode,
+                &model_labels,
+                &unlabelled
+            ),
+            TurnPrice::Unpriced {
+                model: None,
+                reason: UnpricedReason::NoLabel,
+            }
+        );
+    }
+
+    #[test]
+    fn cache_savings_price_cache_reads_at_the_uncached_rate() {
+        use BillableTokenCategory::*;
+        // Reads at a tenth of the uncached rate.
+        let rate = |category| match category {
+            UncachedInput => 3_000_000_000,
+            CacheReadInput => 300_000_000,
+            CacheWriteFiveMinuteInput => 3_750_000_000,
+            CacheWriteOneHourInput => 6_000_000_000,
+            _ => 15_000_000_000,
+        };
+        let catalog = catalog(vec![table(
+            1,
+            vec![entry(
+                PricingAccounting::ClaudeCode,
+                "test-model-a",
+                0,
+                None,
+                rate,
+            )],
+        )]);
+        let model_labels = labels(&["test-model-a"]);
+        let read = turn(
+            0,
+            Some(10),
+            Some(0),
+            [Some(0), Some(MILLION), Some(0)],
+            Some(CacheWrite::Split { m5: 0, h1: 0 }),
+        );
+        let TurnPrice::Priced {
+            exact,
+            cache_savings_exact,
+            ..
+        } = price_turn_exact(
+            &catalog,
+            PricingAccounting::ClaudeCode,
+            &model_labels,
+            &read,
+        )
+        else {
+            panic!("priced");
+        };
+        assert_eq!(exact_to_micros(exact), Some(300_000));
+        assert_eq!(
+            cache_savings_exact.and_then(exact_to_micros),
+            Some(2_700_000)
+        );
+        // Where reads cost more than uncached input there is no saving.
+        let dearer = claude_catalog(&["test-model-a"]);
+        let TurnPrice::Priced {
+            cache_savings_exact,
+            ..
+        } = price_turn_exact(&dearer, PricingAccounting::ClaudeCode, &model_labels, &read)
+        else {
+            panic!("priced");
+        };
+        assert_eq!(cache_savings_exact, None);
     }
 }
