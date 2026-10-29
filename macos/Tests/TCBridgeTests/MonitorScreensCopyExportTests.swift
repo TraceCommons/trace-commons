@@ -33,6 +33,23 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         XCTAssertTrue(link.label.hasSuffix("Near.ai"))
     }
 
+    /// The command-line tool's words: each status line names the link path,
+    /// and each action has its button, accessible name and menu item.
+    func testTheCliToolWordsDecode() throws {
+        let words = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())).cliTool
+        let json = try XCTUnwrap(TCCliTool.json(bundlePath: "/nowhere/Near.ai.app"))
+        let unavailable = try XCTUnwrap(CliToolStatus.decode(fromJSON: json))
+        XCTAssertEqual(unavailable.state, .unavailable)
+        XCTAssertNil(words.statusLine(unavailable))
+        XCTAssertTrue(unavailable.linkPath.hasPrefix("/usr/local/bin/near-ai"))
+        XCTAssertTrue(words.failedLine(path: "/x").contains("/x"))
+        for action in CliToolStatus.Action.allCases {
+            XCTAssertFalse(words.button(action).isEmpty)
+            XCTAssertNotEqual(words.button(action), words.label(action))
+            XCTAssertNotEqual(words.button(action), words.menuItem(action))
+        }
+    }
+
     /// Ron's #1146 Settings modal over the Monitor (#1241 Task 10): its
     /// title, subtitle, section list name and close button, from the core.
     func testTheSettingsModalWordsDecode() throws {
