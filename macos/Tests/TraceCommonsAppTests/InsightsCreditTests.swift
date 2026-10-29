@@ -14,9 +14,8 @@ final class InsightsCreditTests: XCTestCase {
         "analytics_unavailable": "—", "analytics_task_bug_fix": "Bug fix", "analytics_task_docs": "Docs",
         "analytics_task_other": "Other", "analytics_unknown_label": "Unknown",
         "analytics_folder_unknown": "Unknown folder", "analytics_credit_tool_codex": "Codex",
-        "analytics_credit_tool_claude_code": "Claude Code",
-        "analytics_credit_unknown_note": "Some calls had no charge, so their totals are unknown.",
-        "analytics_projects_traces": "{n} traces",
+        "analytics_credit_tool_claude_code": "Claude",
+        "analytics_projects_traces": "{n} traces", "analytics_projects_traces_one": "{n} trace",
     ]
 
     private func empty() -> Window { Window(usdMicros: 0, sessions: 0, calls: 0, callsWithoutCharge: 0) }
@@ -36,12 +35,7 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertEqual(lines[1].amount, "—", "unknown is the dash, never $0.00")
         let tools = InsightsCreditWords.lines([Group(key: "codex", usdMicros: 10), Group(key: "claude_code", usdMicros: 5)],
                                               dimension: .tool, copy: copy)
-        XCTAssertEqual(tools.map(\.label), ["Codex", "Claude Code"])
-        XCTAssertEqual(InsightsCreditWords.unknownNote(
-            Window(usdMicros: nil, sessions: 1, calls: 2, callsWithoutCharge: 1), copy: copy),
-            "Some calls had no charge, so their totals are unknown.")
-        XCTAssertNil(InsightsCreditWords.unknownNote(Window(usdMicros: 10, sessions: 1, calls: 1, callsWithoutCharge: 0),
-                                                     copy: copy))
+        XCTAssertEqual(tools.map(\.label), ["Codex", "Claude"])
     }
 
     /// The NEAR AI card shows only while there was NEAR AI spend in the
@@ -97,6 +91,7 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertEqual(app.nearAi, "—", "no NEAR AI spend there")
         let unknown = table[2]
         XCTAssertEqual(unknown.codex, .init(traces: 1, tokens: 110))
+        XCTAssertEqual(InsightsProjectRows.traces(unknown.codex, copy: copy), "1 trace", "one, not \"1 traces\"")
         XCTAssertEqual(unknown.nearAi, "$0.0125")
         XCTAssertEqual(table[0].nearAi, "$0.0009")
     }
@@ -122,6 +117,13 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertFalse(monitor.contains(".creditLeft("))
         let cards = try GlassSurfaceRulesTests.text("Views/InsightsUsageCards.swift")
         XCTAssertTrue(cards.contains("Button(text(\"analytics_usage_by_project\")) { showProjects() }"))
+        // Owner, 2026-10-28: no unknown, empty or folders-stay notes.
+        let drill = try GlassSurfaceRulesTests.text("Views/InsightsCreditViews.swift")
+        for gone in ["analytics_credit_unknown_note", "analytics_credit_empty", "analytics_credit_folders_local"] {
+            XCTAssertFalse(cards.contains(gone), gone)
+            XCTAssertFalse(drill.contains(gone), gone)
+        }
+        XCTAssertTrue(cards.contains("if !row.measured { Text(text(\"analytics_limits_refresh_to_see\")).insightsCaption() }"))
         XCTAssertEqual(cards.components(separatedBy: "InsightsUsageCard(title:").count - 1, 2,
                        "the login cards and the NEAR AI card are the one component")
     }

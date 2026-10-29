@@ -206,6 +206,10 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_limits_pace", "Pace"),
     ("analytics_limits_on_pace", "On pace"),
     ("analytics_limits_runs_out", "Runs out in {time}"),
+    // A login found with no measured window keeps its card, its rows the
+    // dash, over this line and its Refresh (approved by the owner,
+    // 2026-10-28).
+    ("analytics_limits_refresh_to_see", "Refresh to see limits"),
     // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): the usage cards
     // that lead Overview. The NEAR AI card shows this week, today and the
     // last 31 days of NEAR AI calls from this Mac, and the last 7 days as
@@ -223,7 +227,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): Details'
     // drill-down, by project (Claude Code and Codex tokens beside NEAR AI
     // spend), by task or by tool (NEAR AI spend). By tool and By project
-    // reuse the breakdown card's words. Folder names stay on this Mac.
+    // reuse the breakdown card's words.
     ("analytics_credit_title", "Where usage went"),
     (
         "analytics_credit_scope",
@@ -231,19 +235,12 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     ("analytics_projects_project", "Project"),
     ("analytics_projects_traces", "{n} traces"),
-    (
-        "analytics_credit_unknown_note",
-        "Some calls had no charge, so their totals are unknown.",
-    ),
-    ("analytics_credit_empty", "No NEAR AI calls this week."),
+    ("analytics_projects_traces_one", "{n} trace"),
     ("analytics_credit_by_task", "By task"),
     ("analytics_credit_spent", "Spent"),
     ("analytics_credit_traces", "Traces"),
-    (
-        "analytics_credit_folders_local",
-        "Folder names stay on this Mac.",
-    ),
-    ("analytics_credit_tool_claude_code", "Claude Code"),
+    // "Claude" everywhere, never "Claude Code" (owner, 2026-10-28).
+    ("analytics_credit_tool_claude_code", "Claude"),
     ("analytics_credit_tool_codex", "Codex"),
     ("analytics_subscriptions_default_login", "Default login"),
     ("analytics_subscriptions_session", "Session"),

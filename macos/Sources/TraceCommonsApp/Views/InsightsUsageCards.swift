@@ -8,8 +8,10 @@ import TCShellCore
 /// every card the same component and the same rhythm of rows, side by side
 /// and wrapping when the pane is narrow:
 ///
-/// - a Claude or Codex card per measured login: session left, weekly left,
-///   next reset and pace, each with its Refresh;
+/// - a Claude or Codex card per login found: session left, weekly left,
+///   next reset and pace, each with its Refresh; a login with no measured
+///   window keeps its card, its rows the dash, over "Refresh to see
+///   limits" (owner, 2026-10-28), so the account never leaves Overview;
 /// - a NEAR AI card while NEAR AI calls from this Mac were charged in the
 ///   last 31 days: this week, today, the last 31 days, and the last 7 days
 ///   as bars.
@@ -58,6 +60,7 @@ struct InsightsUsageCards: View {
                                 InsightsUsageRow(label: text("analytics_limits_weekly_left"), value: row.weekly)
                                 InsightsUsageRow(label: text("analytics_limits_next_reset"), value: row.reset)
                                 InsightsUsageRow(label: text("analytics_limits_pace"), value: row.pace, warns: row.paceWarns)
+                                if !row.measured { Text(text("analytics_limits_refresh_to_see")).insightsCaption() }
                                 if let freshness = row.freshness { Text(freshness).insightsCaption() }
                             })
                         }
@@ -108,9 +111,6 @@ struct InsightsUsageCards: View {
                     .chartYAxis(.hidden)
                     .frame(height: 56)
                 }
-            }
-            if let note = InsightsCreditWords.unknownNote(credit.last31Days, copy: copy) {
-                Text(note).insightsCaption()
             }
         })
     }
@@ -212,6 +212,9 @@ enum InsightsLimitsRows {
         let paceWarns: Bool
         /// Said when the reading is an earlier one kept after a refusal.
         var freshness: String?
+        /// Whether a window was measured; an unmeasured login's figures are
+        /// all the dash.
+        var measured = true
     }
 
     enum Pace: Equatable {
@@ -219,20 +222,22 @@ enum InsightsLimitsRows {
         case runsOut(Date)
     }
 
-    /// Only logins with a measured window: an unmeasured one has no card.
+    /// One per login found. A login with no measured window (not read yet,
+    /// signed out, refused) keeps its row with every figure the dash
+    /// (owner, 2026-10-28).
     static func rows(_ providers: [DaemonData.SubscriptionUsageProvider], now: Date,
                      copy: [String: String]) -> [Row] {
         func text(_ key: String) -> String { copy[key] ?? "" }
         let unknown = text("analytics_unavailable")
         return providers.flatMap { provider -> [Row] in
             let name = text("analytics_subscriptions_provider_" + provider.provider)
-            let measured = provider.logins.filter { $0.state == "observed" && !$0.windows.isEmpty }
-            return measured.map { login in
-                let account = measured.count > 1 && !login.defaultLogin ? "\(name) · \(login.label)" : name
+            return provider.logins.map { login in
+                let account = provider.logins.count > 1 && !login.defaultLogin ? "\(name) · \(login.label)" : name
+                let measured = login.state == "observed" && !login.windows.isEmpty
                 let words = InsightsSubscriptionWords.login(login, provider: provider.provider, now: now, copy: copy)
-                let live = login.windows.filter { window in
+                let live = measured ? login.windows.filter { window in
                     window.usedPermille != nil && (window.resetsAt.map { $0 > now } ?? true)
-                }
+                } : []
                 let session = live.first(where: isSession)
                 let weekly = live.first(where: isWeekly)
                 let reset = live.compactMap(\.resetsAt).min().map { duration(from: now, to: $0) } ?? unknown
@@ -250,7 +255,8 @@ enum InsightsLimitsRows {
                 return Row(id: provider.provider + ":" + login.id, provider: provider.provider, loginId: login.id,
                            loginLabel: words.label, account: account,
                            session: session.map(left) ?? unknown, weekly: weekly.map(left) ?? unknown,
-                           reset: reset, pace: paceWords, paceWarns: warns, freshness: words.freshness)
+                           reset: reset, pace: paceWords, paceWarns: warns, freshness: words.freshness,
+                           measured: measured)
             }
         }
     }

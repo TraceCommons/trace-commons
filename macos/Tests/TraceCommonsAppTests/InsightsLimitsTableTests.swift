@@ -36,7 +36,9 @@ final class InsightsLimitsTableTests: XCTestCase {
         XCTAssertEqual(InsightsLimitsRows.pace(weekly(used: 1_000, hoursLeft: 10), now: now), .runsOut(now))
     }
 
-    /// One row per measured login; unmeasured logins and lanes are the dash.
+    /// One row per login found (owner, 2026-10-28): an unmeasured login
+    /// keeps its row with every figure the dash; unmeasured lanes are the
+    /// dash too.
     func testRowsFillOnlyMeasuredCells() {
         let codex = DaemonData.SubscriptionUsageProvider(provider: "codex", enabled: true, logins: [
             .init(id: "a", label: "me@example.com", defaultLogin: true, state: "observed", windows: [
@@ -48,8 +50,15 @@ final class InsightsLimitsTableTests: XCTestCase {
         let claude = DaemonData.SubscriptionUsageProvider(provider: "claude", enabled: true, logins: [
             .init(id: "c", label: "c", state: "observed", windows: [weekly(used: 500, hoursLeft: 126)]),
         ])
-        let rows = InsightsLimitsRows.rows([codex, claude], now: now, copy: copy)
-        XCTAssertEqual(rows.map(\.account), ["Codex", "Claude"])
+        let all = InsightsLimitsRows.rows([codex, claude], now: now, copy: copy)
+        XCTAssertEqual(all.map(\.account), ["Codex", "Codex · other", "Claude"])
+        let unmeasured = all[1]
+        XCTAssertFalse(unmeasured.measured)
+        XCTAssertEqual([unmeasured.session, unmeasured.weekly, unmeasured.reset, unmeasured.pace], ["—", "—", "—", "—"])
+        XCTAssertFalse(unmeasured.paceWarns)
+        XCTAssertEqual(unmeasured.loginId, "b")
+        XCTAssertTrue(all[0].measured)
+        let rows = [all[0], all[2]]
         XCTAssertEqual(rows[0].session, "60%")
         XCTAssertEqual(rows[0].weekly, "75%")
         XCTAssertEqual(rows[0].pace, "On pace")

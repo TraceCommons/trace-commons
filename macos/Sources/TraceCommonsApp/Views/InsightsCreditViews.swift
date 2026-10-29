@@ -51,11 +51,6 @@ enum InsightsCreditWords {
         }
     }
 
-    /// Said whenever a call in the window carried no charge.
-    static func unknownNote(_ window: DaemonData.InsightsCreditWindow, copy: [String: String]) -> String? {
-        window.callsWithoutCharge > 0 ? text("analytics_credit_unknown_note", copy) : nil
-    }
-
     /// No NEAR AI call in the window: a sentence, never a list of zeros.
     static func isEmpty(_ window: DaemonData.InsightsCreditWindow) -> Bool { window.calls == 0 }
 }
@@ -129,9 +124,13 @@ enum InsightsProjectRows {
         return InsightsOverviewWords.figure(usage.tokens.map { UInt64(max(0, $0)) }, copy: copy)
     }
 
-    /// A tool's trace count under its tokens; `nil` without traces.
+    /// A tool's trace count under its tokens, "1 trace" or "{n} traces";
+    /// `nil` without traces.
     static func traces(_ usage: Usage?, copy: [String: String]) -> String? {
-        usage.map { InsightsOverviewWords.fill(copy["analytics_projects_traces"] ?? "", ["n": String($0.traces)]) }
+        usage.map { usage in
+            let key = usage.traces == 1 ? "analytics_projects_traces_one" : "analytics_projects_traces"
+            return InsightsOverviewWords.fill(copy[key] ?? "", ["n": String(usage.traces)])
+        }
     }
 }
 
@@ -189,10 +188,6 @@ struct InsightsDetailsTable: View {
                     .accessibilityElement(children: .combine)
                 }
             }
-            if let credit = week.nearAiCredit, let note = InsightsCreditWords.unknownNote(credit.week, copy: copy) {
-                Text(note).insightsCaption()
-            }
-            Text(text("analytics_credit_folders_local")).insightsCaption()
         }
     }
 
@@ -229,11 +224,9 @@ struct InsightsDetailsTable: View {
                     }
                 }
             }
-            if let note = InsightsCreditWords.unknownNote(credit.week, copy: copy) {
-                Text(note).insightsCaption()
-            }
         } else {
-            Text(text("analytics_credit_empty")).insightsNote()
+            // No NEAR AI call this week: the dash, as an empty By project.
+            Text(text("analytics_unavailable")).insightsNote()
         }
     }
 }

@@ -1903,6 +1903,12 @@ mod tests {
                 "analytics_setting_counter_pass",
                 "Count tokens in watched folders",
             ),
+            // Owner, 2026-10-28: "Claude", never "Claude Code", in the
+            // drill-down; one trace is singular; an unmeasured login's
+            // card says this.
+            ("analytics_credit_tool_claude_code", "Claude"),
+            ("analytics_projects_traces_one", "{n} trace"),
+            ("analytics_limits_refresh_to_see", "Refresh to see limits"),
         ] {
             assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
         }
