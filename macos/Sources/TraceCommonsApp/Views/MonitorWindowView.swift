@@ -276,10 +276,6 @@ struct MonitorWindowView: View {
                                      tab = .traces
                                      tracesPage = .tree
                                  },
-                                 openSettings: {
-                                     navigation.requestSettings(at: .projects)
-                                     openWindow(id: WindowID.settings)
-                                 },
                                  // Submitted's "Add Train consent in
                                  // History" (product owner, 2026-10-29).
                                  openHistory: {

@@ -23,10 +23,9 @@ struct InsightsView: View {
     /// Details' drill-down view; a usage card's "By project" opens it on
     /// By project (product owner, 2026-10-28).
     @State private var detailsView: InsightsCreditWords.Dimension = .folder
-    /// The get-started card's buttons: Traces, on its folder list, and
-    /// Settings, at Projects. `nil` draws no button.
+    /// The get-started card's one action: Traces, on its folder list.
+    /// `nil` draws no link.
     private let openTraces: (() -> Void)?
-    private let openSettings: (() -> Void)?
     /// Traces' History page, where Train consent is added; `nil` draws no
     /// button on Submitted.
     private let openHistory: (() -> Void)?
@@ -46,7 +45,6 @@ struct InsightsView: View {
                     home: HomeStore? = nil,
                     historyLabels: PublicRunCopy? = nil,
                     openTraces: (() -> Void)? = nil,
-                    openSettings: (() -> Void)? = nil,
                     openHistory: (() -> Void)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
@@ -88,7 +86,7 @@ struct InsightsView: View {
                   subscriptionModel: subscriptions,
                   subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
                   submitted: InsightsSubmittedStore(reader: submitted),
-                  home: home, historyLabels: historyLabels, openTraces: openTraces, openSettings: openSettings,
+                  home: home, historyLabels: historyLabels, openTraces: openTraces,
                   openHistory: openHistory)
     }
 
@@ -107,10 +105,8 @@ struct InsightsView: View {
                     home: HomeStore? = nil,
                     historyLabels: PublicRunCopy? = nil,
                     openTraces: (() -> Void)? = nil,
-                    openSettings: (() -> Void)? = nil,
                     openHistory: (() -> Void)? = nil) {
         self.openTraces = openTraces
-        self.openSettings = openSettings
         self.openHistory = openHistory
         self.historyLabels = historyLabels ?? PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? "")
         self.storeSelection = storeSelection
@@ -163,12 +159,12 @@ struct InsightsView: View {
     }
 
     private var getStarted: InsightsGetStarted {
-        InsightsGetStarted(copy: model.copy, openTraces: openTraces, openSettings: openSettings)
+        InsightsGetStarted(copy: model.copy, openTraces: openTraces)
     }
 
     /// Submitted's get-started card: its steps lead to the first trace sent.
     private var submittedGetStarted: InsightsGetStarted {
-        InsightsGetStarted(copy: model.copy, openTraces: openTraces, openSettings: openSettings, words: .submitted)
+        InsightsGetStarted(copy: model.copy, openTraces: openTraces, words: .submitted)
     }
 
     @ViewBuilder

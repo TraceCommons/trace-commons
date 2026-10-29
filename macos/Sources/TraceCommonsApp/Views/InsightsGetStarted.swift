@@ -8,9 +8,6 @@ import TCShellCore
 /// Submitted, no trace ever sent (`InsightsSubmittedWords.isEmpty`). Kept
 /// pure for tests.
 enum InsightsEmptyState {
-    /// The two folders the app watches for Claude and Codex traces.
-    static let watchedFolders = (claude: "~/.claude/projects", codex: "~/.codex/sessions")
-
     /// Whether the week on screen, or any week the picker or the daemon
     /// keeps, has a counted trace.
     static func weekHasData(_ overview: InsightsWeekOverview?, history: [InsightsWeekFigures]?) -> Bool {
@@ -20,23 +17,24 @@ enum InsightsEmptyState {
 }
 
 /// What a tab draws above its sample: the get-started card's words and
-/// where its buttons go. A tab given one draws the card, the sample
+/// where its one action goes. A tab given one draws the card, the sample
 /// banner, and its own content dimmed and inert under them.
 struct InsightsGetStarted {
     let copy: [String: String]
-    /// Traces, on its folder list; `nil` draws no button.
+    /// Traces, on its folder list, where each folder is set to Automatic
+    /// or Ask; `nil` draws no link.
     var openTraces: (() -> Void)?
-    /// Settings, at Projects; `nil` draws no button.
-    var openSettings: (() -> Void)?
     /// The card's words: Overview and Breakdown's, or Submitted's.
     var words: Words = .week
 
     /// The copy keys of a card: its title, why, three steps (a title and
-    /// a detail each), and the sample banner's detail.
+    /// a detail each), the step the one link sits under, and the sample
+    /// banner's detail.
     struct Words {
         let title: String
         let why: String
         let steps: [(title: String, detail: String)]
+        let linkStep: Int
         let bannerDetail: String
 
         static let week = Words(
@@ -44,15 +42,16 @@ struct InsightsGetStarted {
             steps: [("analytics_start_step_use", "analytics_start_step_use_detail"),
                     ("analytics_start_step_share", "analytics_start_step_share_detail"),
                     ("analytics_start_step_fill", "analytics_start_step_fill_detail")],
-            bannerDetail: "analytics_sample_banner_detail")
+            linkStep: 1, bannerDetail: "analytics_sample_banner_detail")
 
-        /// Submitted: every step leads to the first trace sent.
+        /// Submitted (product owner, 2026-10-29): every step leads to the
+        /// first trace sent, and the link sits under choosing a folder.
         static let submitted = Words(
             title: "analytics_sub_start_title", why: "analytics_sub_start_why",
             steps: [("analytics_sub_start_step_folder", "analytics_sub_start_step_folder_detail"),
                     ("analytics_sub_start_step_send", "analytics_sub_start_step_send_detail"),
                     ("analytics_sub_start_step_see", "analytics_sub_start_step_see_detail")],
-            bannerDetail: "analytics_sub_sample_banner_detail")
+            linkStep: 0, bannerDetail: "analytics_sub_sample_banner_detail")
 
         var keys: [String] { [title, why, bannerDetail] + steps.flatMap { [$0.title, $0.detail] } }
     }
@@ -70,16 +69,17 @@ struct InsightsGetStartedHeader: View {
     }
 }
 
-/// "Your Insights fill in from your own traces": why it is worth it, then
-/// three numbered steps naming the app's own screens, with a button where
-/// the app can open the screen.
+/// "Your Insights grow with your traces": why it is worth it, then
+/// three numbered steps, and one action: a text link under step 2 to the
+/// folder list (product owner, 2026-10-29: one clear action, small step
+/// numbers, room between the steps, not a setup wizard).
 struct InsightsGetStartedCard: View {
     let start: InsightsGetStarted
 
     private func text(_ key: String) -> String { start.copy[key] ?? "" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
             HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
                 Image(systemName: "chart.bar.xaxis")
                     .glassGlyph(18, weight: .semibold)
@@ -95,30 +95,12 @@ struct InsightsGetStartedCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
-                step(1, title: text(start.words.steps[0].title),
-                     detail: InsightsOverviewWords.fill(text(start.words.steps[0].detail), [
-                         "first": InsightsEmptyState.watchedFolders.claude,
-                         "second": InsightsEmptyState.watchedFolders.codex,
-                     ])) { EmptyView() }
-                step(2, title: text(start.words.steps[1].title),
-                     detail: text(start.words.steps[1].detail)) {
-                    if start.openTraces != nil || start.openSettings != nil {
-                        HStack(spacing: GlassTokens.Space.s4) {
-                            if let openTraces = start.openTraces {
-                                Button(text("analytics_start_open_traces")) { openTraces() }
-                                    .buttonStyle(GlassButtonStyle(.primary, small: true))
-                            }
-                            if let showSettings = start.openSettings {
-                                Button(text("analytics_start_open_settings")) { showSettings() }
-                                    .buttonStyle(GlassButtonStyle(.link))
-                            }
-                        }
-                        .padding(.top, GlassTokens.Space.s2)
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
+                ForEach(Array(start.words.steps.enumerated()), id: \.offset) { index, keys in
+                    step(index + 1, title: text(keys.title), detail: text(keys.detail)) {
+                        if index == start.words.linkStep { link }
                     }
                 }
-                step(3, title: text(start.words.steps[2].title),
-                     detail: text(start.words.steps[2].detail)) { EmptyView() }
             }
             .insightsCardBody()
         }
@@ -126,16 +108,30 @@ struct InsightsGetStartedCard: View {
         .insightsSection()
     }
 
+    /// The card's one action: a text link with an arrow to the folder list.
+    @ViewBuilder private var link: some View {
+        if let openTraces = start.openTraces {
+            Button(action: openTraces) {
+                HStack(spacing: GlassTokens.Space.s2) {
+                    Text(text("analytics_start_choose"))
+                    Image(systemName: "arrow.right").accessibilityHidden(true)
+                }
+            }
+            .buttonStyle(GlassButtonStyle(.link))
+            .padding(.top, GlassTokens.Space.s3)
+        }
+    }
+
     /// One numbered step: its number in a disc, its title and its detail,
     /// and what the step can open under them.
     private func step<Action: View>(_ number: Int, title: String, detail: String,
                                     @ViewBuilder action: () -> Action) -> some View {
-        HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
             Text(String(number))
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                .glassType(GlassTokens.TypeScale.micro)
                 .monospacedDigit()
                 .foregroundStyle(GlassTokens.Color.chartSeries1.color)
-                .frame(width: 24, height: 24)
+                .frame(width: 18, height: 18)
                 .background(Circle().fill(GlassTokens.Color.chartSeries1.color.opacity(0.14)))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
