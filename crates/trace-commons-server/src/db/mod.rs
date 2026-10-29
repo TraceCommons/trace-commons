@@ -4340,6 +4340,9 @@ pub struct ReferralApplyPolicy {
     pub program_start: Option<chrono::DateTime<chrono::Utc>>,
     pub program_end: Option<chrono::DateTime<chrono::Utc>>,
     pub late_days: u32,
+    /// The earning period in force at apply time, stamped on the
+    /// attribution as its `earn_until`.
+    pub earn_days: u32,
 }
 
 /// Why an apply was refused (spec section 3), in the order the checks run.
@@ -4374,6 +4377,8 @@ pub enum ReferralApply {
     Applied {
         applied_at: chrono::DateTime<chrono::Utc>,
         referee_account_created_at: chrono::DateTime<chrono::Utc>,
+        /// The earning period's end stamped at apply time.
+        earn_until: chrono::DateTime<chrono::Utc>,
     },
     Refused(ReferralRefusal),
 }
@@ -4383,6 +4388,8 @@ pub enum ReferralApply {
 pub struct ReferralAttribution {
     pub applied_at: chrono::DateTime<chrono::Utc>,
     pub referee_account_created_at: chrono::DateTime<chrono::Utc>,
+    /// The earning period's end stamped at apply time.
+    pub earn_until: chrono::DateTime<chrono::Utc>,
     pub applied_via: trace_commons_protocol::referral::ReferralAppliedVia,
     pub voided: bool,
 }
@@ -4508,6 +4515,8 @@ pub struct ReferralAttributionRecord {
     pub referee_ref_hash: String,
     pub referee_account_created_at: chrono::DateTime<chrono::Utc>,
     pub applied_at: chrono::DateTime<chrono::Utc>,
+    /// The earning period's end stamped at apply time.
+    pub earn_until: chrono::DateTime<chrono::Utc>,
     pub voided: bool,
 }
 

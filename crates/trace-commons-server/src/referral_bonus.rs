@@ -109,10 +109,21 @@ pub fn referral_bonus_actor(rail: &RailId) -> String {
     )
 }
 
-/// `earn_until = referee_account_created_at + earn_days`, read when priced,
-/// so raising the setting extends every live referral.
+/// `earn_until = referee_account_created_at + earn_days`.
 pub fn earn_until(referee_account_created_at: DateTime<Utc>, earn_days: u32) -> DateTime<Utc> {
     referee_account_created_at + Duration::days(i64::from(earn_days))
+}
+
+/// A referral's earning period end: the later of the end `stamped` on its
+/// attribution at apply time and the end under the current `earn_days`.
+/// Raising the setting extends every live referral without a data change;
+/// lowering it never shortens one already applied.
+pub fn effective_earn_until(
+    referee_account_created_at: DateTime<Utc>,
+    stamped: DateTime<Utc>,
+    earn_days: u32,
+) -> DateTime<Utc> {
+    stamped.max(earn_until(referee_account_created_at, earn_days))
 }
 
 /// `floor(base * bps / 10000)` in `u128`, exact for every `base` and every
@@ -678,8 +689,9 @@ impl ReferralBonusHook {
                 accruals: &accruals,
                 existing: &view.bonus_rows,
                 bps: self.settings.bps,
-                earn_until: earn_until(
+                earn_until: effective_earn_until(
                     attribution.referee_account_created_at,
+                    attribution.earn_until,
                     self.settings.earn_days,
                 ),
                 referee_held: standing.hold_label().is_some(),
@@ -1031,6 +1043,7 @@ mod tests {
             referee_ref_hash: format!("sha256:{}", "e".repeat(64)),
             referee_account_created_at: at(0),
             applied_at: at(1),
+            earn_until: at(92),
             voided: false,
         }
     }
@@ -1102,8 +1115,9 @@ mod tests {
                     accruals: &self.accruals,
                     existing: &self.existing,
                     bps: self.bps,
-                    earn_until: earn_until(
+                    earn_until: effective_earn_until(
                         self.attribution.referee_account_created_at,
+                        self.attribution.earn_until,
                         self.earn_days,
                     ),
                     referee_held: self.referee_held,
@@ -1153,6 +1167,22 @@ mod tests {
     fn earn_until_is_creation_plus_the_setting() {
         assert_eq!(earn_until(at(0), 92), at(92));
         assert_eq!(earn_until(at(0), 180), at(180));
+    }
+
+    #[test]
+    fn a_lower_setting_never_shortens_a_stamped_period_and_a_higher_one_extends_it() {
+        // Applied under 120 days; the setting is now 92.
+        assert_eq!(effective_earn_until(at(0), at(120), 92), at(120));
+        // Applied under 92 days; the setting is now 180.
+        assert_eq!(effective_earn_until(at(0), at(92), 180), at(180));
+    }
+
+    #[test]
+    fn a_batch_inside_the_stamped_period_earns_after_the_setting_drops() {
+        let mut case = Case::new(vec![credit(1, 1_000, 100)]);
+        assert!(case.plan().writes.is_empty(), "day 100 is past 92 days");
+        case.attribution.earn_until = at(120);
+        assert_eq!(case.plan().writes.len(), 1, "stamped under 120 days");
     }
 
     #[test]

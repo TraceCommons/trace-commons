@@ -121,10 +121,12 @@ CREATE INDEX trace_referral_codes_pepper_ref ON trace_referral_codes (index_pepp
 
 -- Attributions, in the referee's tenant: at most one referrer per account,
 -- ever. referee_account_created_at is copied from trace_accounts when the
--- code is applied; the earning period runs from it, and its length is a
--- setting (at least 92 days) read when the bonus is priced, so an extension
--- needs no data change. A referral within one tenant is refused here as
--- well as in the store.
+-- code is applied; the earning period runs from it. earn_until stamps the
+-- period's end under the setting in force at apply time (at least 92 days,
+-- checked here too), and the period is the later of that and the current
+-- setting: raising the setting extends every live referral without a data
+-- change, and lowering it never shortens one already applied. A referral
+-- within one tenant is refused here as well as in the store.
 CREATE TABLE trace_referral_attributions (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     account_id UUID NOT NULL,
@@ -133,6 +135,7 @@ CREATE TABLE trace_referral_attributions (
     referrer_account_id UUID NOT NULL,
     referee_ref_hash TEXT NOT NULL CHECK (referee_ref_hash ~ '^sha256:[0-9a-f]{64}$'),
     referee_account_created_at TIMESTAMPTZ NOT NULL,
+    earn_until TIMESTAMPTZ NOT NULL,
     applied_via TEXT NOT NULL CHECK (applied_via IN ('signup', 'later')),
     applied_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     voided_at TIMESTAMPTZ,
@@ -144,6 +147,9 @@ CREATE TABLE trace_referral_attributions (
     ),
     CONSTRAINT trace_referral_attributions_applied_after_creation CHECK (
         applied_at >= referee_account_created_at
+    ),
+    CONSTRAINT trace_referral_attributions_earn_promise CHECK (
+        earn_until >= referee_account_created_at + interval '92 days'
     ),
     FOREIGN KEY (tenant_id, account_id) REFERENCES trace_accounts(tenant_id, account_id)
         ON DELETE NO ACTION

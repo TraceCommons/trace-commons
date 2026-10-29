@@ -226,7 +226,21 @@ async fn referee(
     age_days: i64,
     applied_days: i64,
 ) -> Referee {
+    referee_stamped(fixture, referrer, code_index, age_days, applied_days, 92).await
+}
+
+/// [`referee`], applied while the earning period was `earn_days`: the
+/// attribution's stamped `earn_until`.
+async fn referee_stamped(
+    fixture: &Fixture,
+    referrer: &Referrer,
+    code_index: &str,
+    age_days: i64,
+    applied_days: i64,
+    earn_days: i64,
+) -> Referee {
     let created = Utc::now() - Duration::days(age_days);
+    let earn_until = created + Duration::days(earn_days);
     let applied = created + Duration::days(applied_days);
     let (tenant, account) = tenant_with_account(fixture, created).await;
     let referee_ref = sha(&format!("tc-referral-referee-v1:{tenant}:{account}"));
@@ -235,8 +249,9 @@ async fn referee(
         &tenant,
         "INSERT INTO trace_referral_attributions
              (tenant_id, account_id, code_index, referrer_tenant_id, referrer_account_id,
-              referee_ref_hash, referee_account_created_at, applied_via, applied_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'later', $8)",
+              referee_ref_hash, referee_account_created_at, applied_via, applied_at,
+              earn_until)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'later', $8, $9)",
         &[
             &tenant,
             &account,
@@ -246,6 +261,7 @@ async fn referee(
             &referee_ref,
             &created,
             &applied,
+            &earn_until,
         ],
     )
     .await;
@@ -510,6 +526,66 @@ async fn only_batches_inside_the_window_earn_and_raising_the_days_extends_it() {
     assert_eq!(rows[1], ("bonus".into(), 1000, "4000".into(), "400".into()));
 }
 
+/// The earning period is stamped on the attribution when the code is
+/// applied, so lowering the setting later (here from 120 to 92 days) never
+/// shortens a referral already made; only new attributions get the lower
+/// period.
+#[tokio::test]
+async fn lowering_the_days_never_shortens_a_referral_already_applied() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let referrer = referrer(&fixture).await;
+    // Created 130 days ago, applied the next day while the setting was 120.
+    let applied = referee_stamped(&fixture, &referrer, &referrer.code_index.clone(), 130, 1, 120).await;
+    let created = Utc::now() - Duration::days(130);
+    // Past 92 days, inside the 120 promised.
+    credit(
+        &fixture,
+        &applied.tenant,
+        applied.account,
+        2_000,
+        created + Duration::days(100),
+    )
+    .await;
+    // Past 120 days.
+    credit(
+        &fixture,
+        &applied.tenant,
+        applied.account,
+        4_000,
+        created + Duration::days(125),
+    )
+    .await;
+
+    // The setting is now 92.
+    let report = hook(&fixture, settings())
+        .run_tenant(&applied.tenant, &near_ai())
+        .await;
+    assert_eq!(report.bonus_rows, 1, "{report:?}");
+    assert_eq!(report.skipped["referral_outside_window"], 1);
+    assert_eq!(
+        bonus_rows(&fixture, &referrer, &applied).await,
+        vec![("bonus".into(), 1000, "2000".into(), "200".into())]
+    );
+
+    // A referral applied under 92 days earns nothing from the same day.
+    let later = referee(&fixture, &referrer, &referrer.code_index.clone(), 130, 1).await;
+    credit(
+        &fixture,
+        &later.tenant,
+        later.account,
+        2_000,
+        created + Duration::days(100),
+    )
+    .await;
+    let report = hook(&fixture, settings())
+        .run_tenant(&later.tenant, &near_ai())
+        .await;
+    assert_eq!(report.bonus_rows, 0, "{report:?}");
+    assert_eq!(report.skipped["referral_outside_window"], 1);
+}
+
 #[tokio::test]
 async fn a_reversal_is_mirrored_only_when_its_credit_earned_a_bonus() {
     let Some(fixture) = fixture().await else {
@@ -636,8 +712,9 @@ async fn a_missing_referrer_voids_the_attribution() {
         &referee.tenant,
         "INSERT INTO trace_referral_attributions
              (tenant_id, account_id, code_index, referrer_tenant_id, referrer_account_id,
-              referee_ref_hash, referee_account_created_at, applied_via, applied_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'later', $8)",
+              referee_ref_hash, referee_account_created_at, applied_via, applied_at,
+              earn_until)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'later', $8, $7::TIMESTAMPTZ + interval '92 days')",
         &[
             &referee.tenant,
             &referee.account,

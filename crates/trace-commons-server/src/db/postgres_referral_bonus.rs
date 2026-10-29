@@ -268,7 +268,7 @@ impl ReferralBonusStore for PgBackend {
             .query(
                 "SELECT account_id, code_index, referrer_tenant_id, referrer_account_id,
                         referee_ref_hash, referee_account_created_at, applied_at,
-                        voided_at IS NOT NULL
+                        voided_at IS NOT NULL, earn_until
                    FROM trace_referral_attributions
                   WHERE tenant_id = $1
                   ORDER BY applied_at, account_id",
@@ -286,6 +286,7 @@ impl ReferralBonusStore for PgBackend {
                 referee_ref_hash: row.get(4),
                 referee_account_created_at: row.get(5),
                 applied_at: row.get(6),
+                earn_until: row.get(8),
                 voided: row.get(7),
             })
             .collect())

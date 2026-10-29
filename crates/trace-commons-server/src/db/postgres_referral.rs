@@ -592,14 +592,17 @@ impl ReferralStore for PgBackend {
         // Applied: the attribution under the referee's tenant, then the
         // mirror under the referrer's, in this one transaction.
         let referee_ref = referee_ref_hash(tenant, account);
+        // The promise is stamped now, so a later lower setting never
+        // shortens it (a higher one still extends it when read).
+        let earn_until = crate::referral_bonus::earn_until(created_at, policy.earn_days);
         set_tenant(&tx, tenant).await?;
         let applied_at: DateTime<Utc> = tx
             .query_one(
                 "INSERT INTO trace_referral_attributions (
                      tenant_id, account_id, code_index, referrer_tenant_id,
                      referrer_account_id, referee_ref_hash, referee_account_created_at,
-                     applied_via
-                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     applied_via, earn_until
+                 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  RETURNING applied_at",
                 &[
                     &tenant,
@@ -610,6 +613,7 @@ impl ReferralStore for PgBackend {
                     &referee_ref,
                     &created_at,
                     &applied_via.as_str(),
+                    &earn_until,
                 ],
             )
             .await?
@@ -655,6 +659,7 @@ impl ReferralStore for PgBackend {
         Ok(ReferralApply::Applied {
             applied_at,
             referee_account_created_at: created_at,
+            earn_until,
         })
     }
 
@@ -668,7 +673,7 @@ impl ReferralStore for PgBackend {
         let attribution = tx
             .query_opt(
                 "SELECT applied_at, referee_account_created_at, applied_via,
-                        voided_at IS NOT NULL
+                        voided_at IS NOT NULL, earn_until
                    FROM trace_referral_attributions
                   WHERE tenant_id = $1 AND account_id = $2",
                 &[&tenant, &account],
@@ -679,6 +684,7 @@ impl ReferralStore for PgBackend {
                 Ok::<_, DatabaseError>(ReferralAttribution {
                     applied_at: row.get(0),
                     referee_account_created_at: row.get(1),
+                    earn_until: row.get(4),
                     applied_via: ReferralAppliedVia::parse(&via).ok_or_else(|| {
                         DatabaseError::Query("referral_applied_via_unknown".into())
                     })?,

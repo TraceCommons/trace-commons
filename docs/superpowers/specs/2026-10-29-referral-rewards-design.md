@@ -144,8 +144,12 @@ before `earn_until`, and whose referral is not voided:
   in the window.
 
 `earn_until = referee_account_created_at + TRACE_COMMONS_REFERRAL_EARN_DAYS
-days`. It is computed when read, so raising the setting extends every live
-referral without a data change. Boot refuses a value below 92
+days`, stamped on the attribution when the code is applied (V142 checks it
+is at least 92 days after creation). The period in force is the later of
+the stamped end and the end under the current setting, so raising the
+setting extends every live referral without a data change, and lowering it
+affects only referrals applied afterwards: a promise already made is never
+shortened. Boot refuses a value below 92
 (`referral_earn_days_below_promise`).
 
 Rows are written with `ON CONFLICT DO NOTHING` on the unique source index,

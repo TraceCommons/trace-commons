@@ -177,8 +177,9 @@ async fn code(backend: &PgBackend, tenant: &str, account: Uuid) -> String {
 
 const INSERT_ATTRIBUTION: &str = "INSERT INTO trace_referral_attributions
        (tenant_id, account_id, code_index, referrer_tenant_id, referrer_account_id,
-        referee_ref_hash, referee_account_created_at, applied_via)
-     SELECT trace_current_tenant_id(), $1, $2, $3, $4, $5, a.created_at, 'later'
+        referee_ref_hash, referee_account_created_at, applied_via, earn_until)
+     SELECT trace_current_tenant_id(), $1, $2, $3, $4, $5, a.created_at, 'later',
+            a.created_at + interval '92 days'
        FROM trace_accounts a
       WHERE a.tenant_id = trace_current_tenant_id() AND a.account_id = $1";
 

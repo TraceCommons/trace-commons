@@ -167,6 +167,7 @@ fn open_policy() -> ReferralApplyPolicy {
         program_start: Some(Utc::now() - Duration::days(1)),
         program_end: None,
         late_days: 30,
+        earn_days: 92,
     }
 }
 
@@ -614,11 +615,14 @@ async fn applying_a_code_writes_both_tenants_in_one_go() {
     let ReferralApply::Applied {
         applied_at,
         referee_account_created_at,
+        earn_until,
     } = applied
     else {
         panic!("{applied:?}");
     };
     assert!(applied_at >= referee_account_created_at);
+    // The policy's earning period is stamped on the attribution.
+    assert_eq!(earn_until, referee_account_created_at + Duration::days(92));
 
     let referee_ref = referee_ref_hash(&referee_tenant, referee);
     let attribution = owner_texts(
@@ -754,16 +758,19 @@ async fn nothing_is_applied_while_the_program_is_closed() {
             program_start: None,
             program_end: None,
             late_days: 30,
+            earn_days: 92,
         },
         ReferralApplyPolicy {
             program_start: Some(now + Duration::hours(1)),
             program_end: None,
             late_days: 30,
+            earn_days: 92,
         },
         ReferralApplyPolicy {
             program_start: Some(now - Duration::days(10)),
             program_end: Some(now - Duration::hours(1)),
             late_days: 30,
+            earn_days: 92,
         },
     ] {
         for typed in [Some(code.as_str()), Some("0000000000"), None] {
@@ -863,6 +870,7 @@ async fn an_account_too_old_for_the_program_is_refused() {
         program_start: Some(Utc::now() - Duration::days(100)),
         program_end: None,
         late_days: 30,
+        earn_days: 92,
     };
     assert_eq!(
         fixture
@@ -896,6 +904,7 @@ async fn an_account_too_old_for_the_program_is_refused() {
         program_start: Some(Utc::now() - Duration::hours(1)),
         program_end: None,
         late_days: 30,
+        earn_days: 92,
     };
     assert_eq!(
         fixture
@@ -972,6 +981,7 @@ async fn the_checks_run_in_the_spec_order() {
         program_start: Some(Utc::now() - Duration::hours(1)),
         program_end: None,
         late_days: 30,
+        earn_days: 92,
     };
     assert_eq!(
         fixture

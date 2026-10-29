@@ -391,13 +391,16 @@ pub(super) async fn apply_handler(
         ReferralApply::Applied {
             applied_at,
             referee_account_created_at,
+            earn_until,
         } => Ok((
             no_store(),
             Json(ReferralApplied {
                 contract_version: REFERRAL_CONTRACT_VERSION.to_owned(),
                 outcome: ReferralOutcome::Applied,
                 applied_at,
-                earn_until: state.referral_config.earn_until(referee_account_created_at),
+                earn_until: state
+                    .referral_config
+                    .earn_until(referee_account_created_at, earn_until),
             }),
         )),
         ReferralApply::Refused(_) => Err(api_error(
@@ -429,7 +432,7 @@ pub(super) async fn status_handler(
             earn_until: (!attribution.voided).then(|| {
                 state
                     .referral_config
-                    .earn_until(attribution.referee_account_created_at)
+                    .earn_until(attribution.referee_account_created_at, attribution.earn_until)
             }),
             apply_until: None,
         },

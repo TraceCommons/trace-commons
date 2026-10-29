@@ -12,7 +12,10 @@
 //! - `TRACE_COMMONS_REFERRAL_LATE_DAYS`, how long after its creation an
 //!   account may still apply a code: default 30, 1 to 365.
 //! - `TRACE_COMMONS_REFERRAL_EARN_DAYS`, how long after a referee's account
-//!   creation the referrer earns from it: default 92. Boot refuses a value
+//!   creation the referrer earns from it: default 92. It is stamped on each
+//!   attribution when applied, and a referral earns until the later of that
+//!   and the current setting, so lowering it never shortens a referral
+//!   already made. Boot refuses a value
 //!   below 92 (`referral_earn_days_below_promise`, owner decision R1: "3
 //!   months promised but it can be extended"), and above 3650.
 //! - `TRACE_COMMONS_REFERRAL_BONUS_BPS`, the bonus in basis points of each
@@ -226,10 +229,20 @@ impl ReferralConfig {
             && self.program_end.is_none_or(|end| now < end)
     }
 
-    /// The end of a referee's earning period. Computed when read, so raising
-    /// the setting extends every live referral without a data change.
-    pub fn earn_until(&self, referee_account_created_at: DateTime<Utc>) -> DateTime<Utc> {
-        crate::referral_bonus::earn_until(referee_account_created_at, self.earn_days)
+    /// The end of a referee's earning period: the later of the end stamped
+    /// on the attribution at apply time and the end under this setting, so
+    /// raising the setting extends every live referral without a data
+    /// change and lowering it never shortens one already applied.
+    pub fn earn_until(
+        &self,
+        referee_account_created_at: DateTime<Utc>,
+        stamped: DateTime<Utc>,
+    ) -> DateTime<Utc> {
+        crate::referral_bonus::effective_earn_until(
+            referee_account_created_at,
+            stamped,
+            self.earn_days,
+        )
     }
 
     /// The last moment an account created at `account_created_at` may apply
@@ -253,6 +266,7 @@ impl ReferralConfig {
             program_start: self.program_start,
             program_end: self.program_end,
             late_days: self.late_days,
+            earn_days: self.earn_days,
         }
     }
 }
@@ -517,9 +531,15 @@ mod tests {
             })
         );
         let config = config(&[(REFERRAL_EARN_DAYS_ENV, "100")]).unwrap();
+        // Stamped at apply under 92 days: the higher setting extends it.
         assert_eq!(
-            config.earn_until(at("2026-11-01T00:00:00Z")),
+            config.earn_until(at("2026-11-01T00:00:00Z"), at("2027-02-01T00:00:00Z")),
             at("2027-02-09T00:00:00Z")
+        );
+        // Stamped under 120 days: the lower setting never shortens it.
+        assert_eq!(
+            config.earn_until(at("2026-11-01T00:00:00Z"), at("2027-03-01T00:00:00Z")),
+            at("2027-03-01T00:00:00Z")
         );
     }
 
