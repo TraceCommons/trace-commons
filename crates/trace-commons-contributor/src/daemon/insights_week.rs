@@ -43,9 +43,23 @@
 //! own rule or a global Never override, are not read, and rows already
 //! stored for one are dropped (owner decision D4). Nor do they keep a route
 //! tally: the pass names them from their file names, and both the pass and
-//! the ledger fold drop their tallies (`NeverSessions`). A Claude session's delegated transcripts are not read; a
-//! session that has any is marked truncated, so it counts as partial
-//! coverage and never as complete.
+//! the ledger fold drop their tallies (`NeverSessions`). A Claude session's
+//! delegated transcripts (its sub-agents', workflow ones included) are not
+//! read as part of it; a session that has any is marked truncated, so it
+//! counts as partial coverage and never as complete.
+//!
+//! Those sub-agent transcripts are read on their own (product owner,
+//! 2026-10-29), after the person's sessions and within the same per-poll
+//! budget, into `CounterStore::spawned`: rows apart from the person's, under
+//! their own allowance (`COUNTER_STORE_MAX_SPAWNED_SESSIONS`), with no
+//! harness session (a sub-agent records its parent's session ID), no goals
+//! and no `placed_at`. Only Benchmarks' sub-agent population reads them.
+//! The parent's own transcript holds only its own model calls (on the
+//! owner's machine, 2026-10-29: 1 message ID shared between 34 parents and
+//! their sub-agents), so a week's tokens and spend, which stay the person's
+//! sessions alone, never count a sub-agent's call twice, and leave its
+//! calls out. A sub-agent of a session passed over for its managed-profile
+//! copy is passed over with it; one in a Never folder is not read.
 //!
 //! A pass reads a bounded number of files and bytes, newest first, so a first
 //! pass over a large corpus catches up across polls. The first file a pass
@@ -186,9 +200,10 @@ use crate::insights::analytics_constants::{
     CODEX_PER_TURN_SERIES, COUNTER_PASS_EXCLUDES_NEVER_FOLDERS, COUNTER_PASS_MAX_BYTES_PER_TICK,
     COUNTER_PASS_MAX_LINE_BYTES, COUNTER_PASS_MAX_READS_PER_TICK, COUNTER_STORE_KEEP_WEEKS,
     COUNTER_STORE_MAX_AUTOMATED_SESSIONS, COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS,
-    COUNTER_STORE_MAX_CODEX_SERIES_TURNS, COUNTER_STORE_MAX_SESSIONS, COUNTER_STORE_MAX_TOOL_CALLS,
-    COUNTER_STORE_MAX_TURNS, DIGEST_KEY_CUSTODY, DigestKeyCustody, LEDGER_MONEY_IN_INSIGHTS,
-    SESSION_FACTS_VERSION,
+    COUNTER_STORE_MAX_CODEX_SERIES_TURNS, COUNTER_STORE_MAX_SESSIONS,
+    COUNTER_STORE_MAX_SPAWNED_SESSIONS, COUNTER_STORE_MAX_SPAWNED_TOOL_CALLS,
+    COUNTER_STORE_MAX_SPAWNED_TURNS, COUNTER_STORE_MAX_TOOL_CALLS, COUNTER_STORE_MAX_TURNS,
+    DIGEST_KEY_CUSTODY, DigestKeyCustody, LEDGER_MONEY_IN_INSIGHTS, SESSION_FACTS_VERSION,
 };
 use crate::insights::codex_series::{CodexTurnSeriesEvidence, CodexTurnSeriesScan};
 use crate::insights::goals::WeekFigures;
@@ -451,6 +466,11 @@ fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 
+/// For `skip_serializing_if`.
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 impl Automation {
     /// For `skip_serializing_if`.
     fn is_unknown(&self) -> bool {
@@ -692,6 +712,20 @@ struct CounterStore {
     /// written before it.
     #[serde(default)]
     generation: u32,
+    /// Claude sub-agent transcripts' rows ([`SpawnedRow`]), keyed by the
+    /// same keyed digest of the harness and the transcript's address as
+    /// `rows`, apart from them so no answer over the person's sessions can
+    /// count one. Left out of the file while empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    spawned: BTreeMap<KeyedDigest, SpawnedRow>,
+    /// The order the next sub-agent row is made in.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    spawned_next_seq: u64,
+    /// The newest last write of a sub-agent transcript the allowance
+    /// evicted: one with no row no newer than it is not read, or it would
+    /// be read and evicted on every poll. Aged out with the rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spawned_floor: Option<DateTime<Utc>>,
 }
 
 /// The fold rules `loose_charge` is kept under (`CounterStore::loose_epoch`).
@@ -772,6 +806,9 @@ impl CounterStore {
             loose_epoch: LOOSE_EPOCH,
             evicted: BTreeMap::new(),
             generation: new_generation(),
+            spawned: BTreeMap::new(),
+            spawned_next_seq: 0,
+            spawned_floor: None,
         }
     }
 }
@@ -870,7 +907,10 @@ pub(crate) struct CounterCandidate {
     pub size_bytes: u64,
     pub modified_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
-    /// Delegated transcripts beside the session file, which are not read.
+    /// Transcripts the session spawned (Claude's sub-agents, its
+    /// workflows' included), not read as part of it: nonzero marks its
+    /// facts as having delegated (`delegated_unread`). They are read, if at
+    /// all, as rows of their own ([`SpawnedCandidate`]).
     pub group_member_count: u32,
     /// Where the watcher found it.
     pub role: CandidateRole,
@@ -888,10 +928,62 @@ pub(crate) enum CandidateRole {
     ManagedProfile,
 }
 
+/// How a Claude sub-agent transcript was started: the session delegated to
+/// it (`<session>/subagents/*.jsonl`), or a workflow the session ran did
+/// (`<session>/subagents/workflows/<run>/agent-*.jsonl`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SpawnedBy {
+    Agent,
+    Workflow,
+}
+
+impl From<crate::source::claude_code::SpawnedKind> for SpawnedBy {
+    fn from(kind: crate::source::claude_code::SpawnedKind) -> Self {
+        match kind {
+            crate::source::claude_code::SpawnedKind::Agent => SpawnedBy::Agent,
+            crate::source::claude_code::SpawnedKind::Workflow => SpawnedBy::Workflow,
+        }
+    }
+}
+
+/// One Claude sub-agent transcript the watcher found beside a candidate.
+#[derive(Debug, Clone)]
+pub(crate) struct SpawnedCandidate {
+    /// Index into the job's candidates of the session that spawned it: a
+    /// sub-agent of a session this pass passes over (a managed profile's
+    /// copy counts instead) is passed over with it.
+    pub parent: usize,
+    pub kind: SpawnedBy,
+    /// The transcript as a candidate. Its `origin` is the parent's, so its
+    /// folder, and whether that folder is Never, are the parent's.
+    pub candidate: CounterCandidate,
+}
+
+/// A Claude sub-agent transcript's row: kept apart from the person's rows
+/// (`CounterStore::spawned`), under its own allowance
+/// (`COUNTER_STORE_MAX_SPAWNED_SESSIONS`), and read by Benchmarks' sub-agent
+/// population only. Never in a week's totals or spend, the Sessions list,
+/// the Models answers, Patterns or goals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnedRow {
+    /// The row key of the session that spawned it.
+    parent: KeyedDigest,
+    kind: SpawnedBy,
+    /// Its counters and facts, as a session's row holds them, with no
+    /// harness session (a sub-agent records its parent's session ID, so it
+    /// would join the parent's route tally), no goals and no `placed_at`.
+    row: CounterRow,
+}
+
 /// What one pass did. Counts only.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct PassSummary {
     pub read: usize,
+    /// Claude sub-agent transcripts read, after the person's own sessions
+    /// and within the same per-poll budget.
+    pub spawned_read: usize,
     /// Left for a later poll by the per-poll budget.
     pub deferred: usize,
     pub dropped: usize,
@@ -941,6 +1033,9 @@ pub(crate) type ProjectOf =
 /// borrows from the tick.
 pub(crate) struct CounterJob {
     pub candidates: Vec<CounterCandidate>,
+    /// The Claude sub-agent transcripts the candidates' sessions spawned,
+    /// read as rows of their own ([`SpawnedRow`]).
+    pub spawned: Vec<SpawnedCandidate>,
     pub never_project_keys: NeverFolders,
     pub now: DateTime<Utc>,
     pub quiescence_secs: u64,
@@ -1098,6 +1193,7 @@ fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
     }
     let CounterJob {
         candidates,
+        spawned,
         never_project_keys,
         now,
         quiescence_secs,
@@ -1106,6 +1202,7 @@ fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
     let mut project_of = |candidate: &CounterCandidate| project_of(shared, candidate);
     let _ = counter.run_pass_from(
         &candidates,
+        &spawned,
         &never_project_keys,
         now,
         quiescence_secs,
@@ -1384,6 +1481,9 @@ struct TestSeams {
     writes_under_cache_lock: std::sync::atomic::AtomicUsize,
     /// The thread the last ledger fold ran on.
     fold_thread: Mutex<Option<std::thread::ThreadId>>,
+    /// The sub-agent allowance in place of the constants: sessions, turns,
+    /// tool calls.
+    spawned_caps: Mutex<Option<(usize, usize, usize)>>,
 }
 
 impl CounterPass {
@@ -1421,6 +1521,34 @@ impl CounterPass {
             #[cfg(test)]
             test_seams: TestSeams::default(),
         }
+    }
+
+    /// The sub-agent allowance: sessions, turns, tool calls.
+    fn spawned_caps(&self) -> (usize, usize, usize) {
+        #[cfg(test)]
+        if let Some(caps) = *self
+            .test_seams
+            .spawned_caps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            return caps;
+        }
+        (
+            COUNTER_STORE_MAX_SPAWNED_SESSIONS,
+            COUNTER_STORE_MAX_SPAWNED_TURNS,
+            COUNTER_STORE_MAX_SPAWNED_TOOL_CALLS,
+        )
+    }
+
+    /// A sub-agent allowance in place of the constants.
+    #[cfg(test)]
+    pub(crate) fn set_spawned_caps_for_test(&self, sessions: usize, turns: usize, tools: usize) {
+        *self
+            .test_seams
+            .spawned_caps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((sessions, turns, tools));
     }
 
     /// Read Codex goals from `path` instead of Codex's home.
@@ -1500,6 +1628,33 @@ impl CounterPass {
         let cleared = self.cleared.load(Ordering::SeqCst);
         self.run_pass_from(
             candidates,
+            &[],
+            never_project_keys,
+            now,
+            quiescence_secs,
+            project_of,
+            cleared,
+            &|| false,
+        )
+        .map(Option::unwrap_or_default)
+    }
+
+    /// [`Self::run_pass`], with the Claude sub-agent transcripts the
+    /// candidates spawned, as the watcher's job carries them.
+    #[cfg(test)]
+    pub(crate) fn run_pass_spawned(
+        &self,
+        candidates: &[CounterCandidate],
+        spawned: &[SpawnedCandidate],
+        never_project_keys: &NeverFolders,
+        now: DateTime<Utc>,
+        quiescence_secs: u64,
+        project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
+    ) -> Result<PassSummary, &'static str> {
+        let cleared = self.cleared.load(Ordering::SeqCst);
+        self.run_pass_from(
+            candidates,
+            spawned,
             never_project_keys,
             now,
             quiescence_secs,
@@ -1526,6 +1681,7 @@ impl CounterPass {
     fn run_pass_from(
         &self,
         candidates: &[CounterCandidate],
+        spawned: &[SpawnedCandidate],
         never_project_keys: &NeverFolders,
         now: DateTime<Utc>,
         quiescence_secs: u64,
@@ -1539,6 +1695,7 @@ impl CounterPass {
             .fetch_add(1, Ordering::SeqCst);
         let result = self.pass_inner(
             candidates,
+            spawned,
             never_project_keys,
             now,
             quiescence_secs,
@@ -1605,6 +1762,7 @@ impl CounterPass {
     fn pass_inner(
         &self,
         candidates: &[CounterCandidate],
+        spawned: &[SpawnedCandidate],
         never_project_keys: &NeverFolders,
         now: DateTime<Utc>,
         quiescence_secs: u64,
@@ -1864,6 +2022,114 @@ impl CounterPass {
             ));
         }
         summary.read = reads.len();
+
+        // Claude's sub-agent transcripts, after the person's own sessions and
+        // within what is left of the same budget, into their own rows.
+        let parent_keys: Vec<KeyedDigest> = candidates
+            .iter()
+            .map(|candidate| row_key(&key, candidate.source, &candidate.path))
+            .collect();
+        let passed_over: BTreeSet<KeyedDigest> =
+            skip.iter().map(|index| parent_keys[*index]).collect();
+        let mut spawned_removals: BTreeSet<KeyedDigest> = current
+            .spawned
+            .iter()
+            .filter(|(_, spawned)| {
+                never.contains(&spawned.row.project)
+                    || spawned.row.modified_at < cutoff
+                    || passed_over.contains(&spawned.parent)
+            })
+            .map(|(session, _)| *session)
+            .collect();
+        let spawned_floor = current.spawned_floor.filter(|floor| *floor >= cutoff);
+        let mut spawned_order: Vec<&SpawnedCandidate> = spawned
+            .iter()
+            .filter(|spawned| spawned.parent < candidates.len() && !skip.contains(&spawned.parent))
+            .collect();
+        spawned_order.sort_by_key(|spawned| std::cmp::Reverse(spawned.candidate.modified_at));
+        let mut spawned_reads: Vec<(KeyedDigest, SpawnedRow)> = Vec::new();
+        // Each parent's folder, resolved once.
+        let mut parent_folders: BTreeMap<usize, (String, bool)> = BTreeMap::new();
+        for spawned in spawned_order {
+            let candidate = &spawned.candidate;
+            if analytics_source(candidate.source) != Some(AnalyticsSource::ClaudeCode)
+                || candidate.modified_at < cutoff
+                || now
+                    .signed_duration_since(candidate.modified_at)
+                    .num_seconds()
+                    < i64::try_from(quiescence_secs).unwrap_or(i64::MAX)
+            {
+                continue;
+            }
+            let session = row_key(&key, candidate.source, &candidate.path);
+            let stored = current.spawned.get(&session);
+            let unchanged = stored.is_some_and(|stored| {
+                stored.row.size_bytes == candidate.size_bytes
+                    && stored.row.modified_at == candidate.modified_at
+                    && stored.row.facts_version == SESSION_FACTS_VERSION
+            });
+            if unchanged && !spawned_removals.contains(&session) {
+                continue;
+            }
+            if stored.is_none() && spawned_floor.is_some_and(|floor| candidate.modified_at <= floor)
+            {
+                continue;
+            }
+            let (project_key, never_folder) = parent_folders
+                .entry(spawned.parent)
+                .or_insert_with(|| project_of(candidate))
+                .clone();
+            if never_folder && COUNTER_PASS_EXCLUDES_NEVER_FOLDERS {
+                if stored.is_some() {
+                    spawned_removals.insert(session);
+                }
+                continue;
+            }
+            let cost = read_cost(candidate);
+            let read_so_far = reads.len() + spawned_reads.len();
+            if read_so_far >= COUNTER_PASS_MAX_READS_PER_TICK
+                || (read_so_far > 0
+                    && bytes_budgeted.saturating_add(cost) > COUNTER_PASS_MAX_BYTES_PER_TICK)
+            {
+                summary.deferred += 1;
+                continue;
+            }
+            if should_stop() {
+                return Ok(None);
+            }
+            bytes_budgeted = bytes_budgeted.saturating_add(cost);
+            spawned_removals.remove(&session);
+            let read = read_body(AnalyticsSource::ClaudeCode, candidate, &key);
+            spawned_reads.push((
+                session,
+                SpawnedRow {
+                    parent: parent_keys[spawned.parent],
+                    kind: spawned.kind,
+                    row: CounterRow {
+                        size_bytes: candidate.size_bytes,
+                        modified_at: candidate.modified_at,
+                        placed_at: None,
+                        first_event_at: read.first_event_at,
+                        project: project_digest(&key, &project_key),
+                        seq: 0,
+                        body: read.body,
+                        harness_session: None,
+                        harness_session_read: true,
+                        earliest_event_at: read.span.map(|(earliest, _)| earliest),
+                        latest_event_at: read.span.map(|(_, latest)| latest),
+                        event_span_read: true,
+                        streamed: true,
+                        facts: read.facts,
+                        facts_version: SESSION_FACTS_VERSION,
+                        automation: Automation::Unknown,
+                        automation_read: true,
+                        not_analyzable: None,
+                        goals: Vec::new(),
+                    },
+                },
+            ));
+        }
+        summary.spawned_read = spawned_reads.len();
         if summary.compressed_unreadable + summary.compressed_too_large > 0 {
             // Counts only: never a path or a session.
             tracing::warn!(
@@ -1885,7 +2151,13 @@ impl CounterPass {
         // A v1 store is written back as v2 even when nothing else changed.
         let upgrade = current.schema != COUNTER_STORE_SCHEMA;
         let purge = never_sessions.touches(&current.routing);
-        let unchanged = reads.is_empty() && removals.is_empty() && !restart && !upgrade && !purge;
+        let unchanged = reads.is_empty()
+            && removals.is_empty()
+            && spawned_reads.is_empty()
+            && spawned_removals.is_empty()
+            && !restart
+            && !upgrade
+            && !purge;
         // Asked with no lock of this pass held: it reads the settings.
         if should_stop() {
             return Ok(None);
@@ -1944,6 +2216,22 @@ impl CounterPass {
             COUNTER_STORE_MAX_CODEX_SERIES_TURNS,
             COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS,
         );
+        for session in &spawned_removals {
+            store.spawned.remove(session);
+        }
+        for (session, mut spawned) in spawned_reads {
+            spawned.row.seq = store.spawned_next_seq;
+            store.spawned_next_seq += 1;
+            store.spawned.insert(session, spawned);
+        }
+        let (max_spawned, max_spawned_turns, max_spawned_tools) = self.spawned_caps();
+        enforce_spawned_caps(
+            &mut store,
+            max_spawned,
+            max_spawned_turns,
+            max_spawned_tools,
+        );
+        store.spawned_floor = store.spawned_floor.filter(|floor| *floor >= cutoff);
         never_sessions.purge(&mut store.routing);
         prune_routing(&mut store, &gone, cutoff);
         self.stage_into(&mut cached, store);
@@ -4066,6 +4354,40 @@ fn enforce_caps(
 /// is unchanged, because the pass's unchanged test does not look at the
 /// series. A file that changes is read again whole, series and all, as the
 /// newest Codex row, and the budget then trims older ones.
+/// Holds the sub-agent rows to their allowance: past any of the three
+/// bounds the oldest (by last write, then order made) go first, and the
+/// newest last write evicted becomes the floor below which a transcript with
+/// no row is not read. Never touches the person's rows.
+fn enforce_spawned_caps(
+    store: &mut CounterStore,
+    max_sessions: usize,
+    max_turns: usize,
+    max_tools: usize,
+) {
+    let mut oldest_first: Vec<(DateTime<Utc>, u64, KeyedDigest)> = store
+        .spawned
+        .iter()
+        .map(|(session, spawned)| (spawned.row.modified_at, spawned.row.seq, *session))
+        .collect();
+    oldest_first.sort();
+    let mut turns: usize = store.spawned.values().map(|s| s.row.turns()).sum();
+    let mut tools: usize = store.spawned.values().map(|s| s.row.tool_calls()).sum();
+    for (modified_at, _, session) in oldest_first {
+        if store.spawned.len() <= max_sessions && turns <= max_turns && tools <= max_tools {
+            break;
+        }
+        if let Some(evicted) = store.spawned.remove(&session) {
+            turns -= evicted.row.turns();
+            tools -= evicted.row.tool_calls();
+            store.spawned_floor = Some(
+                store
+                    .spawned_floor
+                    .map_or(modified_at, |f| f.max(modified_at)),
+            );
+        }
+    }
+}
+
 fn trim_codex_series(store: &mut CounterStore, max_turns: usize, max_tools: usize) {
     let mut turns: usize = store
         .rows
@@ -4756,6 +5078,9 @@ mod tests {
     // `insights_week/tests/compressed_tests.rs`: compressed Codex rollouts
     // and managed-profile sessions, over this module's fixture.
     mod compressed_tests;
+    // `insights_week/tests/spawned_tests.rs`: Claude sub-agent transcripts
+    // as rows of their own.
+    mod spawned_tests;
 
     const QUIET: u64 = 1_800;
     const PROJECT: &str = "/Users/PRIVATE_USER/code/PRIVATE_REPO";

@@ -308,11 +308,21 @@ enum InsightsOverviewWords {
         return text(source, copy)
     }
 
+    /// The trace count alone (owner, 2026-10-29); what is known of them is
+    /// `coverageInfo`, behind the line's "i".
     static func coverageLine(_ coverage: InsightsWeekCoverage, copy: [String: String]) -> String {
-        fill(text("analytics_coverage_line", copy), [
-            "k": String(coverage.known), "n": String(coverage.sessions),
-            "p": String(coverage.partial), "u": String(coverage.unknown),
-        ])
+        fill(text("analytics_coverage_line", copy), ["n": String(coverage.sessions)])
+    }
+
+    /// One sentence per count that is not 0: full details, some missing,
+    /// none (not counted as zero).
+    static func coverageInfo(_ coverage: InsightsWeekCoverage, copy: [String: String]) -> String? {
+        let sentences = [
+            ("analytics_coverage_info_known", "k", coverage.known),
+            ("analytics_coverage_info_partial", "p", coverage.partial),
+            ("analytics_coverage_info_unknown", "u", coverage.unknown),
+        ].filter { $0.2 > 0 }.map { fill(text($0.0, copy), [$0.1: String($0.2)]) }
+        return sentences.isEmpty ? nil : sentences.joined(separator: " ")
     }
 
     /// Which feed is showing. Feed S also says that weeks are not compared.

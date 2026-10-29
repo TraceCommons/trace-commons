@@ -1,6 +1,7 @@
-# Build and publish the internal staging macOS app: the near-ai-staging
-# channel, installed beside the production app and sharing nothing with it
-# (staging design 4 and 6.1).
+# Build and publish the internal staging builds: the macOS app and the
+# Linux contributor CLI for x86_64 and arm64 servers, all on the
+# near-ai-staging channel, installed beside the production ones and sharing
+# nothing with them (staging design 4 and 6.1).
 #
 # Manual only. scripts/ci/check-release-staging-feature.sh requires this
 # file's `on:` to be exactly `workflow_dispatch`, any job environment to be
@@ -17,6 +18,15 @@
 #     staging identity), notarized and stapled;
 #   - the staging appcast, signed with the staging Sparkle key, beside the DMG
 #     in the staging bucket the channel file's feed URL names;
+#   - the staging contributor CLI for Linux, x86_64 and aarch64
+#     (trace-commons-contributor-staging-<target>, with a .sha256), built
+#     with near-ai-staging, so a headless server signs in to NEAR AI staging,
+#     enrolls with the staging issuer (an invite, a one-time device code or
+#     the NEAR AI sign-in) and uploads to the staging server only. It keeps
+#     its own state directory, credential namespace and systemd unit. Its
+#     self-update stays off: no update key is compiled in, so it refuses
+#     every update and a new build is installed with
+#     `scripts/install.sh --staging`;
 #   - a GitHub pre-release tagged staging-<date>-<short sha>-<run>, never
 #     marked latest. No release workflow runs on a `staging-` tag (the
 #     release check holds that), and a tag created with the job token starts
@@ -45,10 +55,11 @@
 # Main's copy of the release check runs against that commit's tree, so a
 # chosen ref cannot bring its own check.
 #
-# Three jobs. preflight checks and fixes the version; macos builds, signs,
-# notarizes and writes the signed appcast with no write token and no OIDC
-# token in reach of the build; publish, which builds nothing, attests,
-# uploads to the bucket and creates the pre-release.
+# Four jobs. preflight checks and fixes the version; macos builds, signs,
+# notarizes and writes the signed appcast, and linux builds the two Linux
+# CLIs, each with no write token and no OIDC token in reach of the build;
+# publish, which builds nothing, attests, uploads to the bucket and creates
+# the pre-release with every build attached.
 #
 # The feed and DMGs live in a public bucket of their own, the one the channel
 # file's feed URL names (S15). Never grant public read on the staging
@@ -397,12 +408,80 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The staging contributor CLI for Linux servers, built natively on each
+  # architecture. Ubuntu 22.04 rather than 24.04, so the binary needs only
+  # glibc 2.35 and runs on the older server releases still common on
+  # rented machines. No secret and no write token: the Linux build is not
+  # code-signed, and the publish job attests it.
+  linux:
+    name: staging Linux CLI (${{ matrix.target }})
+    needs: [preflight]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+          persist-credentials: false
+      # The pinned toolchain the macOS staging build uses.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master@2026-05-27
+        with:
+          toolchain: "1.96"
+          targets: ${{ matrix.target }}
+      # No build cache, as in the macOS job.
+
+      # By binary name, so the test-only pipe probe is not built. No update
+      # key is set: the staging CLI refuses every self-update (staging
+      # design, the bundled CLI self-update row).
+      - name: Build
+        run: cargo build --locked --release --bin trace-commons-contributor --features near-ai-staging --target "$TARGET"
+
+      # The binary must say it is staging before it is published, the same
+      # check the macOS bundle makes of its bundled CLI.
+      - name: Check the CLI reports the staging channel
+        run: |
+          set -euo pipefail
+          BIN="target/$TARGET/release/trace-commons-contributor"
+          LINE="$("$BIN" --version)"
+          echo "$LINE"
+          case "$LINE" in
+            *" channel staging") ;;
+            *) echo "refusing to publish: the CLI does not report the staging channel" >&2; exit 1 ;;
+          esac
+
+      - name: Name and checksum the CLI
+        run: |
+          set -euo pipefail
+          OUT="trace-commons-contributor-staging-$TARGET"
+          mkdir -p dist
+          cp "target/$TARGET/release/trace-commons-contributor" "dist/$OUT"
+          ( cd dist && sha256sum "$OUT" > "$OUT.sha256" )
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: staging-linux-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
   # Builds nothing: it takes the signed DMG and the signed appcast from the
-  # macos job, so the write token and the OIDC token never share a job with
-  # the build.
+  # macos job and the Linux CLIs from the linux job, so the write token and
+  # the OIDC token never share a job with a build.
   publish:
     name: staging publish
-    needs: [preflight, macos]
+    needs: [preflight, macos, linux]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -421,18 +500,28 @@ jobs:
         with:
           name: staging-macos-dist
           path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: staging-linux-*
+          path: dist/linux
+          merge-multiple: true
 
-      - name: The DMG matches its checksum
+      - name: The DMG and the Linux CLIs match their checksums
         run: |
           set -euo pipefail
           test -f "dist/$DMG" && test -f dist/updates/appcast.xml
           ( cd dist && sha256sum -c "$DMG.sha256" )
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            test -f "dist/linux/trace-commons-contributor-staging-$target"
+          done
+          ( cd dist/linux && sha256sum -c ./*.sha256 )
 
       - uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4
         with:
           subject-path: |
             dist/*.dmg
             dist/*.dmg.sha256
+            dist/linux/trace-commons-contributor-staging-*
 
       - name: Authenticate to GCP (workload identity federation; no key on the runner)
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
@@ -464,14 +553,17 @@ jobs:
         run: |
           set -euo pipefail
           cat > "$RUNNER_TEMP/notes.md" <<EOF
-          Internal staging build of the macOS app, version $SHORT_VERSION, from $SHA.
+          Internal staging build of the macOS app and the Linux contributor CLI, version $SHORT_VERSION, from $SHA.
 
-          It talks only to the staging servers and NEAR AI staging, installs beside the released app and shares nothing with it. It is not a release: use the released app unless you were asked to test staging.
+          They talk only to the staging servers and NEAR AI staging, install beside the released app and CLI and share nothing with them. This is not a release: use the released app unless you were asked to test staging.
 
-          Signed with Developer ID and notarized. Updates come from the staging feed only.
+          macOS: signed with Developer ID and notarized. Updates come from the staging feed only.
+
+          Linux (x86_64 and arm64 servers): install with \`sh install.sh --staging\` from scripts/install.sh, which checks the SHA-256 and installs \`near-ai-staging\` beside any released CLI. The Linux build is not code-signed; it carries a GitHub build attestation. It does not update itself; run the installer again for a new build. See docs/operator/staging-tester-guide.md.
           EOF
           gh release create "$TAG" \
             "dist/$DMG" "dist/$DMG.sha256" \
+            dist/linux/trace-commons-contributor-staging-* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$SHA" \
             --title "Staging $SHORT_VERSION" \
@@ -479,7 +571,8 @@ jobs:
             --prerelease \
             --latest=false
           {
-            echo "### Staging macOS build $SHORT_VERSION"
+            echo "### Staging build $SHORT_VERSION"
             echo "- pre-release: $TAG"
             echo "- feed: $FEED_URL"
+            echo "- Linux CLI: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu"
           } >> "$GITHUB_STEP_SUMMARY"

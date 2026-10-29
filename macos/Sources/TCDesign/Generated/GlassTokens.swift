@@ -70,6 +70,8 @@ public enum GlassTokens {
         public static let heroButtonFill: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1)
         /// The label on heroButtonFill: 18:1.
         public static let heroButtonInk: GlassRGBA = GlassRGBA(0x16161A, alpha: 1)
+        /// A bright blue on a hero's ground, in both appearances: the Traces hero's step discs (behind heroInk) and step icons (owner, 2026-10-29, from the owner's mock-up).
+        public static let heroAccent: GlassRGBA = GlassRGBA(0x2E95FF, alpha: 1)
         /// A count badge that is not owed a decision (a tab's count): ink at 16%. The flat Light theme draws it in the well's slate, as the legend pills are.
         public static var badgeFillSubtle: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0x000000, alpha: 0.16)), flat: GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0x8A93A5, alpha: 0.28))) }
         /// The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.
@@ -277,6 +279,7 @@ public enum GlassTokens {
             "heroInk": heroInk,
             "heroButtonFill": heroButtonFill,
             "heroButtonInk": heroButtonInk,
+            "heroAccent": heroAccent,
             "badgeFillSubtle": badgeFillSubtle,
             "badgeFill": badgeFill,
             "dataShared": dataShared,

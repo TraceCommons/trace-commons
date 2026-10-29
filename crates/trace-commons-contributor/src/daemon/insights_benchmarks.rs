@@ -14,18 +14,23 @@
 
 use super::insights_sessions::gate;
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
-use crate::insights::benchmarks::{BENCHMARK_DEFAULT_WEEKS, BENCHMARK_WEEKS, BenchTool};
+use crate::insights::benchmarks::{
+    BENCHMARK_DEFAULT_WEEKS, BENCHMARK_WEEKS, BenchPopulation, BenchTool,
+};
 
 /// `weeks` that is not 4 or 13.
 pub const ERR_BENCHMARKS_WEEKS_INVALID: &str = "weeks_invalid";
 /// `tool` that is not `claude_code`, `codex` or null.
 pub const ERR_BENCHMARKS_TOOL_INVALID: &str = "tool_invalid";
+/// `population` that is not `own`, `spawned` or null.
+pub const ERR_BENCHMARKS_POPULATION_INVALID: &str = "population_invalid";
 
-/// The params: `weeks` (4 or 13, default 4) and `tool` (a tool word or
-/// null, default both). Absent and `null` read as the default.
+/// The params: `weeks` (4 or 13, default 4), `tool` (a tool word or null,
+/// default both) and `population` (`own`, the default, or `spawned`:
+/// Claude's sub-agent transcripts). Absent and `null` read as the default.
 pub(crate) fn benchmark_params(
     params: &serde_json::Value,
-) -> Result<(u32, Option<BenchTool>), &'static str> {
+) -> Result<(u32, Option<BenchTool>, BenchPopulation), &'static str> {
     let weeks = match params.get("weeks") {
         None | Some(serde_json::Value::Null) => BENCHMARK_DEFAULT_WEEKS,
         Some(value) => value
@@ -43,12 +48,19 @@ pub(crate) fn benchmark_params(
                 .ok_or(ERR_BENCHMARKS_TOOL_INVALID)?,
         ),
     };
-    Ok((weeks, tool))
+    let population = match params.get("population") {
+        None | Some(serde_json::Value::Null) => BenchPopulation::Own,
+        Some(value) => value
+            .as_str()
+            .and_then(BenchPopulation::from_wire)
+            .ok_or(ERR_BENCHMARKS_POPULATION_INVALID)?,
+    };
+    Ok((weeks, tool, population))
 }
 
 /// `insights_benchmarks`.
 pub fn handle_benchmarks(shared: &DaemonShared, req: &Request) -> Response {
-    let (weeks, tool) = match benchmark_params(&req.params) {
+    let (weeks, tool, population) = match benchmark_params(&req.params) {
         Ok(params) => params,
         Err(label) => return Response::err(req.id, ERR_BAD_PARAMS, label),
     };
@@ -71,6 +83,7 @@ pub fn handle_benchmarks(shared: &DaemonShared, req: &Request) -> Response {
             routing_available,
             weeks,
             tool,
+            population,
             chrono::Utc::now(),
         ),
     )
@@ -165,6 +178,7 @@ mod tests {
                 false,
                 weeks,
                 tool,
+                BenchPopulation::Own,
                 now(),
             )
         }
@@ -245,19 +259,25 @@ mod tests {
     #[test]
     fn params_default_to_four_weeks_and_both_tools_and_refuse_bad_values() {
         let ok = |params| benchmark_params(&params);
-        assert_eq!(ok(serde_json::json!({})), Ok((4, None)));
-        assert_eq!(ok(serde_json::Value::Null), Ok((4, None)));
+        assert_eq!(
+            ok(serde_json::json!({})),
+            Ok((4, None, BenchPopulation::Own))
+        );
+        assert_eq!(
+            ok(serde_json::Value::Null),
+            Ok((4, None, BenchPopulation::Own))
+        );
         assert_eq!(
             ok(serde_json::json!({"weeks": null, "tool": null})),
-            Ok((4, None))
+            Ok((4, None, BenchPopulation::Own))
         );
         assert_eq!(
             ok(serde_json::json!({"weeks": 13, "tool": "codex"})),
-            Ok((13, Some(BenchTool::Codex)))
+            Ok((13, Some(BenchTool::Codex), BenchPopulation::Own))
         );
         assert_eq!(
             ok(serde_json::json!({"weeks": 4, "tool": "claude_code"})),
-            Ok((4, Some(BenchTool::ClaudeCode)))
+            Ok((4, Some(BenchTool::ClaudeCode), BenchPopulation::Own))
         );
         for bad in [
             serde_json::json!({"weeks": 5}),
@@ -279,11 +299,70 @@ mod tests {
     }
 
     #[test]
+    fn population_defaults_to_the_persons_own_and_refuses_other_words() {
+        let ok = |params| benchmark_params(&params);
+        assert_eq!(
+            ok(serde_json::json!({"population": null})),
+            Ok((4, None, BenchPopulation::Own))
+        );
+        assert_eq!(
+            ok(serde_json::json!({"population": "own"})),
+            Ok((4, None, BenchPopulation::Own))
+        );
+        assert_eq!(
+            ok(serde_json::json!({"population": "spawned", "weeks": 13})),
+            Ok((13, None, BenchPopulation::Spawned))
+        );
+        for bad in [
+            serde_json::json!({"population": "subagents"}),
+            serde_json::json!({"population": 1}),
+            serde_json::json!({"population": "Own"}),
+        ] {
+            assert_eq!(
+                ok(bad.clone()),
+                Err(ERR_BENCHMARKS_POPULATION_INVALID),
+                "{bad}"
+            );
+        }
+        let (_dir, s) = shared();
+        let r = handle_benchmarks(&s, &call(serde_json::json!({"population": "all"})));
+        let error = r.error.unwrap();
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(error.message, ERR_BENCHMARKS_POPULATION_INVALID);
+    }
+
+    #[test]
+    fn the_sub_agent_population_is_empty_with_no_sub_agents_read() {
+        let f = Fixture::docs_priced();
+        let v = f.pass.benchmarks_value(
+            true,
+            &NeverFolders::NONE,
+            false,
+            4,
+            None,
+            BenchPopulation::Spawned,
+            now(),
+        );
+        assert_eq!(v["population"], "spawned");
+        assert_eq!(v["sessions"], 0);
+        let own = f.answer(&[], 4, None);
+        assert_eq!(own["population"], "own");
+        assert_eq!(own["sessions"], 10);
+        assert_eq!(own["delegated"], 0);
+    }
+
+    #[test]
     fn switched_off_without_opening_the_store_or_making_a_key() {
         let f = Fixture::new();
-        let off = f
-            .pass
-            .benchmarks_value(false, &NeverFolders::NONE, false, 4, None, now());
+        let off = f.pass.benchmarks_value(
+            false,
+            &NeverFolders::NONE,
+            false,
+            4,
+            None,
+            BenchPopulation::Own,
+            now(),
+        );
         assert_eq!(
             off,
             serde_json::json!({"enabled": false, "feed": "counter_pass"})

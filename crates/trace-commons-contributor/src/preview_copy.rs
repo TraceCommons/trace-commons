@@ -1340,10 +1340,20 @@ pub struct MonitorHomeHistoryCopy {
     /// MVP is "contribute traces, earn credit", so it is the first and
     /// largest card, over Private AI): its title, one line on what
     /// contributing is and what it earns, and the way into Traces.
-    /// Approved by the product owner 2026-10-28.
+    /// Approved by the product owner 2026-10-28; the title gained ", use
+    /// Private AI" on 2026-10-29 (product owner).
     pub traces_hero_title: &'static str,
     pub traces_hero_body: &'static str,
     pub traces_hero_action: &'static str,
+    /// The hero's three steps, left to right, each a title over one line
+    /// (owner, 2026-10-29, from the owner's mock-up): contribute, earn,
+    /// spend on Private AI.
+    pub traces_hero_step_contribute: &'static str,
+    pub traces_hero_step_contribute_detail: &'static str,
+    pub traces_hero_step_earn: &'static str,
+    pub traces_hero_step_earn_detail: &'static str,
+    pub traces_hero_step_use: &'static str,
+    pub traces_hero_step_use_detail: &'static str,
     /// Home's Credit tile: the change in total credit since the last day
     /// this Mac saw, `{amount}` signed. No change says nothing (owner,
     /// 2026-10-16). DRAFT, NEEDS APPROVAL.
@@ -1677,9 +1687,15 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             section_traces: "Traces",
             section_account: "Account",
             private_ai_sign_in: "Sign in to NEAR AI to get started.",
-            traces_hero_title: "Contribute traces, earn credit",
+            traces_hero_title: "Contribute traces, earn credit, use Private AI",
             traces_hero_body: "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.",
             traces_hero_action: "Start earning",
+            traces_hero_step_contribute: "Contribute traces",
+            traces_hero_step_contribute_detail: "Share the sessions from your AI coding tools",
+            traces_hero_step_earn: "Earn credit",
+            traces_hero_step_earn_detail: "Each accepted trace earns you credit",
+            traces_hero_step_use: "Use Private AI",
+            traces_hero_step_use_detail: "Spend your credit on Private AI",
             credit_delta: "{amount} since yesterday",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",

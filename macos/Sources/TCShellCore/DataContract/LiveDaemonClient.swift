@@ -305,8 +305,12 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("insights_model_answers", as: DaemonData.InsightsModelAnswers.self)
     }
 
-    public func insightsBenchmarks(weeks: Int) async throws -> DaemonData.InsightsBenchmarks {
-        try await call("insights_benchmarks", params: ["weeks": weeks], as: DaemonData.InsightsBenchmarks.self)
+    public func insightsBenchmarks(weeks: Int, population: String) async throws -> DaemonData.InsightsBenchmarks {
+        // The person's own is the daemon's default, so an older daemon that
+        // knows no `population` is still asked as before.
+        var params: [String: Any] = ["weeks": weeks]
+        if population != "own" { params["population"] = population }
+        return try await call("insights_benchmarks", params: params, as: DaemonData.InsightsBenchmarks.self)
     }
 
     public func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted {

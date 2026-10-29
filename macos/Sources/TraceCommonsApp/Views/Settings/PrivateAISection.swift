@@ -74,6 +74,12 @@ struct PrivateAISection: View {
             store.attach(MonitorWindowView.sampleClient() ?? model.daemonData, awaiting: attachment.awaiting)
             await store.run()
         }
+        // The switch card's dot follows the app's settings read the moment
+        // it sees Private AI move (a NEAR AI sign-in or sign-out landed), as
+        // the Monitor window's does.
+        .onChange(of: model.daemonSettings?.privateInferenceState) { _, _ in
+            Task { await store.reloadPrivateAI() }
+        }
     }
 }
 
