@@ -1,11 +1,12 @@
-#if DEBUG
 import Foundation
 import TCBridge
 import TCShellCore
 
-/// Debug builds only: `TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from a
-/// fixed sample week, so a design review can see every chart and section in
-/// a dev build. A dev build is ad-hoc signed and cannot read the team
+/// A fixed sample week. Every build draws it under the get-started card,
+/// dimmed and labelled as sample data (`InsightsSample`), while Insights has
+/// no trace of the person's own. Debug builds only:
+/// `TRACE_COMMONS_INSIGHTS_SAMPLE=1` also draws Insights from it, so a
+/// design review can see every chart and section in a dev build. A dev build is ad-hoc signed and cannot read the team
 /// keychain group that holds the Insights digest keys, so its watched-folder
 /// counting and saved analyses stay empty. A release build never reads the
 /// variable.
@@ -19,7 +20,11 @@ import TCShellCore
 /// nowhere, or refused. No write reaches the store.
 enum InsightsSampleWeek {
     static var enabled: Bool {
-        ProcessInfo.processInfo.environment["TRACE_COMMONS_INSIGHTS_SAMPLE"] == "1"
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["TRACE_COMMONS_INSIGHTS_SAMPLE"] == "1"
+        #else
+        return false
+        #endif
     }
 
     static let weekStart = "2026-10-05"
@@ -243,4 +248,3 @@ enum InsightsSampleWeek {
         ]
     }
 }
-#endif

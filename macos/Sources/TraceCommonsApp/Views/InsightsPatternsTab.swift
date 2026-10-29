@@ -31,23 +31,29 @@ struct InsightsPatternsTab: View {
     var overview: InsightsOverviewModel?
     /// Saved snapshots, so a picked day's rows read as their labels.
     var snapshots: [LocalInsight] = []
+    /// The get-started card over this tab drawn from the sample (product
+    /// owner, 2026-10-29); `nil` for the person's own week.
+    var getStarted: InsightsGetStarted?
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
     private func figure(_ value: UInt64?) -> String { InsightsOverviewWords.figure(value, copy: copy) }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-                if let patterns = model.shown {
-                    header(patterns)
-                    // Details leads with the drill-down, by project, task or
-                    // tool (product owner, 2026-10-28). The pattern cards
-                    // stay under it, and the goals live only here.
-                    if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }
-                    // Tokens by day moved here from Overview, a picked day's
-                    // sessions with it (product owner, 2026-10-28).
-                    if let overview { InsightsTokensByDay(model: overview, copy: copy, snapshots: snapshots) }
-                    LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+        InsightsTabPage(getStarted: getStarted) {
+            if let patterns = model.shown {
+                header(patterns)
+                // Details leads with the drill-down, by project, task or
+                // tool (product owner, 2026-10-28). The pattern cards
+                // stay under it, and the goals live only here.
+                if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }
+                // Tokens by day moved here from Overview, a picked day's
+                // sessions with it (product owner, 2026-10-28).
+                if let overview { InsightsTokensByDay(model: overview, copy: copy, snapshots: snapshots) }
+                // The patterns are read from Claude's tool calls: a week
+                // with no Claude trace (a Codex user) draws none of
+                // them, rather than cards of zeros and dashes.
+                if patterns.claude_sessions > 0 {
+                    InsightsCardFlow(minimum: 380) {
                         ForEach(InsightsPatternsWords.shown(patterns.cards)) { card in
                             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                                 patternCard(card)
@@ -57,17 +63,16 @@ struct InsightsPatternsTab: View {
                             }
                         }
                     }
-                    if patterns.feed == "counter_pass", let goals = week?.goals, goals.total > 0 {
-                        self.goals(goals)
-                    }
-                } else if model.failed {
-                    Text(text("analytics_unavailable")).insightsError()
                 }
-                if model.busy { GlassSpinner() }
+                // Goals set with /goal in Claude or Codex, outside the
+                // Claude-only patterns, so a Codex user sees theirs too.
+                if patterns.feed == "counter_pass", let goals = week?.goals, goals.total > 0 {
+                    self.goals(goals)
+                }
+            } else if model.failed {
+                Text(text("analytics_unavailable")).insightsError()
             }
-            .padding(.vertical, GlassTokens.Space.s7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .insightsSurface()
+            if model.busy { GlassSpinner() }
         }
     }
 

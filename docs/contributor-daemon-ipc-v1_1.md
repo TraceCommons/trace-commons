@@ -4638,9 +4638,9 @@ from the contributor's own. A Codex session is automated when the first
 `subagent` key: Codex writes that shape when it starts the thread itself
 (its automatic approvals reviewer, or a thread an agent spawned), and a
 plain label (`cli`, `vscode`, `exec`, `mcp`) otherwise. Only that shape is
-read. A transcript with no `session_meta` or no `source`, `source:
-"unknown"`, a spawned thread that carries a later `session_meta` not
-spawned too (a fork of the person's session), and every Claude Code
+read, and a later `session_meta` does not change it: a thread an agent
+spawned carries a copy of its parent's after its own. A transcript with no
+`session_meta` or no `source`, `source: "unknown"`, and every Claude Code
 session are unknown, and unknown counts as the person's: no guess sets the
 contributor's work aside. `exec` and `mcp` sessions count as the person's,
 since a person can start either. Automated rows do not count toward the
@@ -4652,8 +4652,10 @@ keeps two busy weeks of a heavy Codex user's automated sessions, so the
 current week and the one before stay whole). `insights_model_answers` leaves
 them out (`left_out.automated`), and `insights_week`'s `patterns` and
 `insights_sessions` leave them out with no switch to bring them back. A
-Codex row stored before the classification is read once more, within the
-per-poll limits, even when its file is unchanged.
+Codex row stored before the classification, or under an older facts
+version, is read once more, within the per-poll limits, even when its file
+is unchanged; facts version 2 re-reads every row once, so a spawned thread
+stored as unknown before this rule is automated after it.
 
 A session the caps evict is marked by its keyed digest and the size and last
 write its row was made from, and by which allowance evicted it; the marks
@@ -5150,7 +5152,7 @@ for a failed read:
     sentinel is read, else `met` or `not_met`, with `iterations`,
     `time_secs` (from `durationMs`) and `tokens` from that check. A session
     keeps its latest 16 goals. Rows made before goals were kept are read
-    again once (`SESSION_FACTS_VERSION` 2).
+    again once (`SESSION_FACTS_VERSION` 3).
   - `met` is `true` for Codex `complete` and Claude `met`; every other
     status counts as not met. `tokens`, `time_secs` and `iterations` are
     `null` when the tool did not report them, never zero. `folder` and

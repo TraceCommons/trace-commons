@@ -31,6 +31,10 @@ final class InsightsModel {
     /// saved-imports line; `nil` when it is off or the daemon predates it.
     private(set) var counterPassNoticeKey: String?
     var feedLineKey: String { weekFeed == .counterPass ? FeedLineKey.counterPass : FeedLineKey.saved }
+    /// Whether the daemon has answered for the week at least once (or there
+    /// is no daemon to ask), so the get-started card is not drawn while the
+    /// first answer is on its way.
+    private(set) var weekSettled = false
     private var task: Task<Void, Never>?
     private var generation = UUID()
     private var active = false
@@ -56,10 +60,11 @@ final class InsightsModel {
     /// A later failure drops an earlier T week whole.
     func loadWeek(isoWeek: String? = nil) async {
         let generation = UUID(); weekGeneration = generation
-        guard let weekReader else { showSavedFeed(notice: false); return }
+        guard let weekReader else { showSavedFeed(notice: false); weekSettled = true; return }
         let outcome: Result<DaemonData.InsightsWeek, Error>
         do { outcome = .success(try await weekReader(isoWeek)) } catch { outcome = .failure(error) }
         guard weekGeneration == generation else { return }
+        weekSettled = true
         switch outcome {
         case .success(let week) where week.showsCounterPass:
             weekFeed = .counterPass; counterWeek = week; counterPassNoticeKey = nil
@@ -78,7 +83,7 @@ final class InsightsModel {
     func open() {
         active = true
         load()
-        if weekReader != nil { Task { [weak self] in await self?.loadWeek() } }
+        if weekReader != nil { Task { [weak self] in await self?.loadWeek() } } else { weekSettled = true }
     }
     func close() {
         active = false; generation = UUID(); task?.cancel(); task = nil; error = nil

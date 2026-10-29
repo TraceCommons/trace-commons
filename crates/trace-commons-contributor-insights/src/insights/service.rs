@@ -1906,6 +1906,10 @@ mod tests {
             // The quota's Session window again, on the usage cards.
             "analytics_limits_session_left",
             "analytics_usage_session_resets",
+            // The get-started steps, in the owner's words (2026-10-29):
+            // what Claude Code and Codex record on this Mac.
+            "analytics_start_step_use_detail",
+            "analytics_start_step_fill_detail",
         ];
         assert_eq!(copy["analytics_subscriptions_session"], "Session");
         for (key, words) in ANALYTICS_COPY {
