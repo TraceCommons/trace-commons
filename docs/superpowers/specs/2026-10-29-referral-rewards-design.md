@@ -108,6 +108,16 @@ account is created, and the response carries `referral: "applied"` or
 `referral: "not_applied"`. The code is applied after the provisioning
 transaction commits, with `applied_via = 'signup'`.
 
+A commons from before this change parses the finish with
+`deny_unknown_fields`, so it answers a finish carrying `referral_code` with
+its uniform deny (400, `native sign-in could not be completed`), before it
+takes the ceremony or spends the token. The daemon then sends the finish
+once more without the field, on the same ceremony and token, and answers
+`referral: "not_applied"`; the code is dropped, since that commons has no
+`POST /v1/account/referral` either. Only that deny, and only for a finish
+that carried a code, is retried, and only once: a real refusal already
+took the ceremony, so its retry is refused the same way.
+
 **Later.** `POST /v1/account/referral` with `{ "code": "..." }`,
 `applied_via = 'later'`.
 

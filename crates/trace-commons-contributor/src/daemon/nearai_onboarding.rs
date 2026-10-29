@@ -595,27 +595,58 @@ async fn ceremony(
     // The JWT rides in the body, never a header: we are not
     // authenticating to the commons with it, we are handing it over to
     // be introspected.
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "ceremony_id": started.ceremony_id,
         "code_verifier": verifier,
         "device_public_key": identity.public_key_b64,
         "device_signature": device_signature,
         "access_token": access_token.access_token,
     });
+    let finish = |body: serde_json::Value| async move {
+        commons
+            .call_json::<serde_json::Value, Finished>(
+                reqwest::Method::POST,
+                PROVISION_FINISH_PATH,
+                &[],
+                Some(&body),
+            )
+            .await
+    };
+    let Some(code) = referral_code else {
+        return finish(body)
+            .await
+            .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"));
+    };
     // Only when there is one: a finish without a code is the body every
     // shipped commons parses.
-    if let Some(code) = referral_code {
-        body["referral_code"] = serde_json::Value::String(code.to_owned());
+    let mut with_code = body.clone();
+    with_code["referral_code"] = serde_json::Value::String(code.to_owned());
+    match finish(with_code).await {
+        // A commons from before referral codes parses the finish with
+        // `deny_unknown_fields` and answers the field with its uniform deny,
+        // before it takes the ceremony or spends the token. Sign-in never
+        // fails because of the code, so the finish goes once more without
+        // it, on the same ceremony and token; the answer then carries no
+        // `referral` and the code reads as not applied. A real refusal took
+        // the ceremony, so the retry is refused the same way.
+        Err(error) if is_uniform_finish_deny(&error) => finish(body).await,
+        other => other,
     }
-    commons
-        .call_json(
-            reqwest::Method::POST,
-            PROVISION_FINISH_PATH,
-            &[],
-            Some(&body),
-        )
-        .await
-        .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"))
+    .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"))
+}
+
+/// The label of the 400 an ingest answers for any refused native finish,
+/// one whose body it could not parse included (`native_generic_deny`).
+const UNIFORM_FINISH_DENY: &str = "native sign-in could not be completed";
+
+/// That uniform deny, and nothing else: not a revoked key, not a 5xx, not
+/// a transport failure.
+fn is_uniform_finish_deny(error: &trace_commons_operator_client::Error) -> bool {
+    matches!(
+        error,
+        trace_commons_operator_client::Error::ServerLabel { status, label, .. }
+            if *status == reqwest::StatusCode::BAD_REQUEST && label == UNIFORM_FINISH_DENY
+    )
 }
 
 /// The commons's label when the device's key was revoked by its account
@@ -2052,6 +2083,15 @@ mod route_tests {
         StagingLoginClosed,
         /// A staging commons whose v2 finish refuses (the uniform deny).
         StagingFinishRefused,
+        /// A production commons from before referral codes: its finish is
+        /// `deny_unknown_fields`, so a body carrying `referral_code` gets
+        /// the uniform deny, and one without it is served.
+        #[cfg_attr(feature = "near-ai-staging", allow(dead_code))]
+        ProductionWithoutReferrals,
+        /// A production commons whose finish answers the uniform deny to
+        /// every body: a real verification failure.
+        #[cfg_attr(feature = "near-ai-staging", allow(dead_code))]
+        ProductionFinishDenied,
     }
 
     struct Stub {
@@ -2112,7 +2152,10 @@ mod route_tests {
             .route(
                 LEGACY_CAPABILITIES,
                 axum::routing::get(move || async move {
-                    axum::Json(if commons == Commons::Production {
+                    axum::Json(if commons == Commons::Production
+                        || commons == Commons::ProductionWithoutReferrals
+                        || commons == Commons::ProductionFinishDenied
+                    {
                         json!({
                             "ready": false, "near_ai_login_ready": true, "network": null,
                             "witness": witness(), "issuer_url": "https://issuer.example",
@@ -2190,7 +2233,18 @@ mod route_tests {
                         "not_applied"
                     }
                 });
+                // The 400 an ingest answers for any refused finish, a
+                // body it could not parse included (`native_generic_deny`).
+                let generic_deny = commons == Commons::ProductionFinishDenied
+                    || (commons == Commons::ProductionWithoutReferrals
+                        && body.get("referral_code").is_some());
                 async move {
+                    if generic_deny {
+                        return (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            axum::Json(json!({"error": "native sign-in could not be completed"})),
+                        );
+                    }
                     if commons == Commons::StagingFinishRefused {
                         return (
                             axum::http::StatusCode::FORBIDDEN,
@@ -2428,6 +2482,57 @@ mod route_tests {
             );
             assert_eq!(*stub.finish_codes.lock().unwrap(), vec![sent], "{typed}");
         }
+    }
+
+    /// A commons from before referral codes refuses a finish carrying
+    /// `referral_code` (its finish is `deny_unknown_fields`, and the refusal
+    /// is the uniform deny). Sign-in never fails because of the code: the
+    /// finish is sent once more without it, on the same ceremony and the
+    /// same NEAR AI token, and the answer says the code was not applied.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn a_commons_without_referrals_still_signs_in_without_the_code() {
+        let referral =
+            SignupReferral::from_params(&json!({ "referral_code": "ABCDE12345" })).unwrap();
+        let (stub, shared, result, _dir) =
+            enroll_against_with(Commons::ProductionWithoutReferrals, referral).await;
+        let reply = result.expect("enrolled without the code");
+        assert_eq!(reply["enrolled"], true);
+        assert_eq!(reply["referral"], "not_applied");
+        assert_eq!(
+            *stub.finish_codes.lock().unwrap(),
+            vec![Some(json!("ABCDE12345")), None]
+        );
+        // One exchange: the retry reuses the token, never spends another.
+        assert_eq!(stub.spent(), vec!["rt_original".to_string()]);
+        assert!(shared.store.load_config().unwrap().is_some());
+    }
+
+    /// The retry is bounded to that one case: a finish without a code that
+    /// is refused, or one with a code refused twice, is the verification
+    /// failure it always was.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn a_refused_finish_is_retried_only_once_and_only_for_a_code() {
+        let (stub, _shared, result, _dir) = enroll_against(Commons::ProductionFinishDenied).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "near_ai_enroll_verification_failed"
+        );
+        assert_eq!(*stub.finish_codes.lock().unwrap(), vec![None]);
+
+        let referral =
+            SignupReferral::from_params(&json!({ "referral_code": "ABCDE12345" })).unwrap();
+        let (stub, _shared, result, _dir) =
+            enroll_against_with(Commons::ProductionFinishDenied, referral).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "near_ai_enroll_verification_failed"
+        );
+        assert_eq!(
+            *stub.finish_codes.lock().unwrap(),
+            vec![Some(json!("ABCDE12345")), None]
+        );
     }
 
     /// `referral_code` is a string or absent; anything else is a malformed
