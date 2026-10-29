@@ -3680,8 +3680,10 @@ mod tests {
     #[test]
     fn a_saved_off_after_the_marker_stays_off() {
         let (_d, store) = temp_store();
-        let mut s = DaemonSettings::default();
-        s.insights_counter_pass = false;
+        let s = DaemonSettings {
+            insights_counter_pass: false,
+            ..DaemonSettings::default()
+        };
         s.save(&store).unwrap();
         let loaded = DaemonSettings::load(&store).expect("a saved file loads");
         assert!(!loaded.insights_counter_pass);
