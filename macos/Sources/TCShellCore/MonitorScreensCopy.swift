@@ -58,6 +58,9 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let flagged: String
     /// Raises the main window from the menu bar ("Open Near.ai").
     public let openApp: String
+    /// The popover's manual update check (owner, 2026-10-29); `nil` from a
+    /// core that predates it.
+    public let checkForUpdates: String?
     public let manageRules: String
     public let settings: String
     /// The Settings modal's title, subtitle, section list name and close
@@ -171,6 +174,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case recentActivity = "recent_activity"
         case flagged
         case openApp = "open_app"
+        case checkForUpdates = "check_for_updates"
         case manageRules = "manage_rules"
         case settings
         case settingsTitle = "settings_title"
@@ -263,6 +267,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "recent_activity",
         "flagged",
         "open_app",
+        "check_for_updates",
         "manage_rules",
         "settings",
         "settings_title",

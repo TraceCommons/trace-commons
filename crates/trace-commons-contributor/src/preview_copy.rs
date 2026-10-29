@@ -850,6 +850,10 @@ pub struct MonitorScreensCopy {
     pub flagged: &'static str,
     /// Raises the app's main window from the menu bar.
     pub open_app: &'static str,
+    /// The menu-bar popover's manual update check, the standard macOS label
+    /// with the ellipsis of a command that opens a window. Approved by the
+    /// owner on 2026-10-29.
+    pub check_for_updates: &'static str,
     /// Opens the folders' rules.
     pub manage_rules: &'static str,
     /// Opens Settings.
@@ -1457,6 +1461,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         recent_activity: "Recent activity",
         flagged: SECOND_LOOK_HEADING,
         open_app: concat!("Open ", crate::app_name!()),
+        check_for_updates: "Check for Updates\u{2026}",
         manage_rules: "Manage rules…",
         // #1146 tray word (`tray.rs`), with the ellipsis of a command that
         // opens a window; the modal it opens is titled bare "Settings".
