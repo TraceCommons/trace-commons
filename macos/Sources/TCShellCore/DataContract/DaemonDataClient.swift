@@ -239,25 +239,11 @@ public protocol DaemonDataClient: Sendable {
     // MARK: Insights
 
     /// `insights_week`: one local ISO week (`YYYY-Www`; `nil` is the current
-    /// week) from the daemon's counter pass, Insights feed T (owner decision
-    /// D4, open). Answers `enabled: false` while the setting is off; an older
+    /// week) from the daemon's counter pass, Insights feed T (on by default;
+    /// product owner, 2026-10-29). Answers `enabled: false` while the setting is off; an older
     /// daemon refuses it as `unknown_method`. Either way, and on any failed
     /// read, the window shows the saved-imports feed instead, never both.
     func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek
-    /// `insights_sessions`: the watched traces the counter pass stored,
-    /// newest first, for the Sessions tab while feed T shows. Answers
-    /// `enabled: false` while the setting is off; an older daemon refuses it
-    /// as `unknown_method`. Either way, and on any failed read, the tab shows
-    /// saved snapshots instead.
-    ///
-    /// Paged: `before` is the `next` cursor of the page before (`nil` for
-    /// the first page) and `limit` the most rows a page lists (`nil` for the
-    /// daemon's bound). A daemon that predates paging ignores both and
-    /// answers its one page with no `next`.
-    func insightsSessions(before: String?, limit: Int?) async throws -> DaemonData.InsightsSessions
-    /// `insights_session_drill`: one listed watched trace turn by turn, by
-    /// its `sessionRef`, at the local UTC offset.
-    func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer
     /// `insights_model_answers`: the Models card's six answers over the
     /// counter pass's last 13 weeks, while feed T shows. Answers `enabled:
     /// false` while the setting is off; an older daemon refuses it as
@@ -269,6 +255,11 @@ public protocol DaemonDataClient: Sendable {
     /// (4 or 13), from the counter pass. An older daemon refuses it as
     /// `unknown_method`, and Benchmarks shows nothing.
     func insightsBenchmarks(weeks: Int) async throws -> DaemonData.InsightsBenchmarks
+    /// `insights_submitted`: every trace the person has submitted, whatever
+    /// became of it, joined to what the counter pass stored about its
+    /// session, over the last `weeks` local weeks (4 or 13) or all time
+    /// (`nil`). An older daemon refuses it as `unknown_method`.
+    func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted
 
     /// Current native subscription usage, independent of the selected analytics week.
     /// A refresh schedules provider reads and returns the held snapshot at once.
@@ -278,23 +269,6 @@ public protocol DaemonDataClient: Sendable {
     /// Turn native subscription usage reads on or off for `codex` or `claude`.
     func setSubscriptionUsage(provider: String, on: Bool) async throws
 
-    /// `insights_session_label`: set or clear the person's own task and
-    /// outcome on one listed watched trace, by its `sessionRef`. Kept in
-    /// the daemon's counter store only; never sent anywhere. Answers the
-    /// row as the list now gives it. An older daemon refuses it as
-    /// `unknown_method`.
-    func insightsSessionLabel(sessionRef: String, task: DaemonData.InsightsLabelChange,
-                              outcome: DaemonData.InsightsLabelChange) async throws
-        -> DaemonData.InsightsSessionLabelAnswer
-    /// `insights_analyze_session`: analyze one listed watched trace by its
-    /// `sessionRef`, from the file the daemon's watcher finds (the app never
-    /// names one), and with `save` store it as a dated snapshot in the
-    /// standard Insights store. Read and written on this Mac only. An
-    /// unknown or remade reference is refused as `insights-session-unknown`,
-    /// a file that has gone as `insights-session-file-gone`; an older daemon
-    /// refuses it as `unknown_method`.
-    func insightsAnalyzeSession(sessionRef: String, save: Bool) async throws
-        -> DaemonData.InsightsAnalyzeSessionAnswer
     /// `insights_glance`: today's routed calls per tool from the proxy
     /// ledger (on by default; owner decision D3, settled 2026-10-09). `tzSeconds` is the local UTC offset
     /// (`TimeZone.current.secondsFromGMT()`). `enabled: false`, an older
@@ -367,6 +341,11 @@ extension DaemonDataClient {
         throw DaemonDataError.notAvailableYet(method: "insights_benchmarks")
     }
 
+    /// Clients that predate `insights_submitted` have none to read.
+    public func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted {
+        throw DaemonDataError.notAvailableYet(method: "insights_submitted")
+    }
+
     public func subscriptionUsage(refresh: Bool, interactive: Bool) async throws -> DaemonData.SubscriptionUsage {
         try await subscriptionUsage(refresh: refresh, interactive: interactive, provider: nil)
     }
@@ -413,11 +392,6 @@ extension DaemonDataClient {
         try await networkMissionCatalogue(limit: nil, before: nil)
     }
 
-    /// The first page of `insights_sessions`, at the daemon's bound: the
-    /// request an unpaged daemon answered.
-    public func insightsSessions() async throws -> DaemonData.InsightsSessions {
-        try await insightsSessions(before: nil, limit: nil)
-    }
 }
 
 /// What the event stream carries: the contract's events, plus a

@@ -40,6 +40,8 @@ struct StartupSection: View {
                 if let loginItemActionError = model.loginItemActionError {
                     GlassAlert(loginItemActionError)
                 }
+                // The command-line tool (owner, 2026-10-29).
+                CliToolRow()
             }
         }
         .onAppear { loginItemState = LoginItemManager.currentState }

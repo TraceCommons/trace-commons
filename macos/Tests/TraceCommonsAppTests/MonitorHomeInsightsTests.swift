@@ -26,8 +26,7 @@ final class MonitorHomeInsightsTests: XCTestCase {
         let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("InsightsView(storeSelection: insightsStoreSelection"))
         XCTAssertTrue(window.contains("daemon: home.client,"))
-        XCTAssertTrue(window.contains("subscriptions: model.subscriptionUsageModel,"))
-        XCTAssertTrue(window.contains("inspector: insightsInspector, home: home,\n"))
+        XCTAssertTrue(window.contains("subscriptions: model.subscriptionUsageModel, home: home,\n"))
         XCTAssertTrue(window.contains("payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient))"))
         XCTAssertTrue(window.contains("openInsights: { tab = .insights }"))
         XCTAssertTrue(window.contains("insightsStoreSelection: insightsStoreSelection"))
@@ -58,21 +57,15 @@ final class MonitorHomeInsightsTests: XCTestCase {
 
     func test_insightsAreOnTheGlassRules() {
         let rules = Set(GlassSurfaceRulesTests.files)
-        for path in ["Views/InsightsView.swift", "Views/InsightsSummaryView.swift", "Views/InsightsEpisodesView.swift",
-                     "Views/InsightCardsView.swift", "Views/InsightEvidenceView.swift", "Views/ComparisonTasksView.swift",
-                     "Views/ComparisonSpecificationsView.swift", "Views/MissionDraftsView.swift"] {
+        for path in ["Views/InsightsView.swift", "Views/MissionDraftsView.swift"] {
             XCTAssertTrue(rules.contains(path), "\(path) is not on the glass rules")
         }
     }
 
-    /// Error lines in the hosted screens draw in the status text token and
-    /// success notices in the on token, never a system colour.
+    /// Error lines in the hosted screens draw in the status text token,
+    /// never a system colour.
     func test_hostedErrorsUseTheStatusTextTokens() throws {
-        let errorSites: [(String, Int)] = [
-            ("Views/InsightsView.swift", 2), ("Views/InsightCardsView.swift", 1),
-            ("Views/InsightsEpisodesView.swift", 1), ("Views/ComparisonTasksView.swift", 1),
-            ("Views/ComparisonSpecificationsView.swift", 1), ("Views/MissionDraftsView.swift", 1),
-        ]
+        let errorSites: [(String, Int)] = [("Views/MissionDraftsView.swift", 1)]
         for (path, count) in errorSites {
             let source = try MonitorNavigationTests.text(path)
             // Ron's rebuilds (#1241) say the status text token through
@@ -80,11 +73,6 @@ final class MonitorHomeInsightsTests: XCTestCase {
             XCTAssertEqual(source.components(separatedBy: ".foregroundStyle(GlassStatus.outside.textColor)").count - 1,
                            count, path)
             XCTAssertFalse(source.contains(".foregroundStyle(GlassColor.textPrimary)"), path)
-        }
-        for path in ["Views/InsightsEpisodesView.swift", "Views/ComparisonTasksView.swift",
-                     "Views/ComparisonSpecificationsView.swift"] {
-            let source = try MonitorNavigationTests.text(path)
-            XCTAssertEqual(source.components(separatedBy: ".foregroundStyle(GlassStatus.on.textColor)").count - 1, 1, path)
         }
     }
 

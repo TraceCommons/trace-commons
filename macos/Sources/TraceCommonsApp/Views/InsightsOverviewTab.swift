@@ -37,7 +37,7 @@ struct InsightsOverviewTab: View {
     var earnings: [NearAiEarningsSplit.Row] = []
     /// A usage card's "By project": Details, on its By project view.
     var showProjects: () -> Void = {}
-    /// Spend at API prices, lines, edits and trends (product owner,
+    /// Spend at API prices and trends (product owner,
     /// 2026-10-29); `nil` from a daemon that predates `work`.
     var work: DaemonData.InsightsWork?
     /// The week's token change per tool, for Trends.
@@ -59,7 +59,7 @@ struct InsightsOverviewTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-                // The week at a glance, then limits, spend by model, lines
+                // The week at a glance, then limits, spend by model
                 // and trends (product owner, 2026-10-29). The harness
                 // cards, lever, "Where tokens went" and the By model / By
                 // tool tokens left Overview with that review.
@@ -83,12 +83,7 @@ struct InsightsOverviewTab: View {
                     }
                 }
                 if let work {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: GlassTokens.Space.cardGap,
-                                                 alignment: .top)],
-                              alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        InsightsSpendByModelCard(work: work, copy: copy, showBenchmarks: showBenchmarks)
-                        InsightsLinesCard(work: work, copy: copy)
-                    }
+                    InsightsSpendByModelCard(work: work, copy: copy, showBenchmarks: showBenchmarks)
                     InsightsTrendsCard(work: work, tokenChanges: weekChanges, copy: copy)
                 }
                 if model.shown == nil, model.failed {

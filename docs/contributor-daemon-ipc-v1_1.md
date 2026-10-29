@@ -614,13 +614,14 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `work`, `usage_by_day[]`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `work`, `usage_by_day[]`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (on by default; product owner, 2026-10-29); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome, analyzable}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
 | `insights_analyze_session` | `session_ref` (**required**), `save` (optional bool, default `false`) | `enabled`, `feed`, and while enabled `readable`, then `analysis` (the core's `analyze` response: `type`, `insight`, `mutation_effects`) | additive; reads one watched session file, with `save` writes the standard Insights store, no network; refused in a dry-run daemon; gated on `insights_counter_pass`; see "`insights_analyze_session`" below |
 | `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question; the rejection rows carry `kept_by_model[]` and their figures `kept`) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
 | `insights_benchmarks` | `weeks` (optional: `4` or `13`, default `4`), `tool` (optional: `claude_code`, `codex`, or `null` for both) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `weeks`, `tool`, `pricing` (`{basis, tables[]}`), `sessions`, `min_sessions`, `categories[]` (eight, one per kind of work), `left_out` | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; list-price figures owner-approved 2026-10-29; see "`insights_benchmarks`" below |
+| `insights_submitted` | `weeks` (optional: `4`, `13`, or `null`/absent for all time), `tz` (optional UTC offset in seconds) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `weeks`, `window_start`, `window_end`, `pricing`, `totals`, `by_model`, `by_model_left_out`, `by_task`, `by_task_unknown`, `code`, `by_week`, `by_project`, `left_out`, `traces_total`, `traces[]` | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; every submitted trace joined to its counter row through the upload queue (product owner, 2026-10-29); see "`insights_submitted`" below |
 | `subscription_usage` | `refresh` (optional bool), `interactive` (optional bool; needs refresh), `provider` (optional `codex`/`claude`), `login` (optional local login ID; required for Claude Refresh) | versioned provider/login snapshots with current windows and banked reset inventory | display only; off answers without reading credentials. Explicit Refresh schedules bounded selected-login work and returns immediately; background ticks never acquire credentials. Each provider's `enabled` follows its setting: `subscription_usage_codex_enabled` and `subscription_usage_claude_on`, both on by default. See “Subscription usage” below. |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
@@ -4576,8 +4577,8 @@ read-only: it reads the daemon's own counter store, never a session file,
 never the Insights service, and makes no network call, so it answers under
 the developer dry run too.
 
-**The pass.** Gated on the `insights_counter_pass` setting (owner decision
-D4, open; off by default). While it is on, each full watcher poll hands the
+**The pass.** Gated on the `insights_counter_pass` setting (on by default;
+product owner, 2026-10-29, settling owner decision D4). While it is on, each full watcher poll hands the
 Claude Code and Codex sessions it discovered to the pass, which reads a
 session only once it has been quiet for `quiescence_secs`, only when its size
 or last write changed since its row was made, and at most 16 files and 64 MB
@@ -5023,7 +5024,7 @@ sessions on disk. Otherwise:
   week on screen, Monday first, `null` when the week has no Codex session.
 - `work` (additive; the product owner approved showing Claude Code and
   Codex spend at API list prices on 2026-10-29) is the week's Claude Code
-  and Codex work: spend at published API list prices, lines and edits.
+  and Codex work: spend at published API list prices and edits.
   NEAR AI money stays in `near_ai_credit`. `null` when the feed has no row
   (no store, rows under another key, or every row in a Never folder).
   `{basis: "api_list", tables[], prices_as_of, week, last_week, by_tool[],
@@ -5032,14 +5033,22 @@ sessions on disk. Otherwise:
   week used, as `insights_model_answers`' `pricing.tables`; `prices_as_of`
   is the oldest of their fetch times (RFC 3339), `null` when no turn
   priced. `week` and `last_week` are Totals: `{sessions, priced_sessions,
-  unpriced_sessions, usd_micros_known, usd_partial,
-  cache_savings_usd_micros_known, lines_added_known, lines_removed_known,
-  lines_partial, edits_known, edits_undone_known, edits_denied_known,
+  unpriced_sessions, near_ai_sessions, usd_micros_known, usd_partial,
+  cache_savings_usd_micros_known, edits_known, edits_undone_known, edits_denied_known,
   edits_partial, edits_count_partial, edits_undone_partial,
   edits_denied_partial}`. Spend is priced turn by turn from the stored
   per-turn series, each turn on its own local day, so a session crossing
   midnight or a week is split by its turns; Claude Code turns are the ones
   the rollup counts, so a turn a resumed transcript repeats is priced once.
+  A session sent through NEAR AI is never list-priced here (owner decision
+  D5): sent wholly through the route (routed verified or unverified, or
+  check failed) it is left out of the spend and counted in
+  `near_ai_sessions` (additive; its charge is in `near_ai_credit`); sent
+  partly through it (mixed) it is unpriced. While routing is unavailable
+  no tally is read, and every session is list-priced as before. A resumed
+  Claude Code transcript's lines and edits count only beyond the
+  transcript it continues, in the week of its first new turn; when the
+  repeated part is not fully known they are partial, never doubled.
   A session is unpriced when any of its turns in the scope is unpriced
   (no known counters, no date, no usable label, no list price) or it has
   no per-turn series (a Codex session read before the per-turn reader, or
@@ -5048,11 +5057,11 @@ sessions on disk. Otherwise:
   then the priced turns' sum, a minimum, never a fabricated 0.
   `cache_savings_usd_micros_known` is, over priced turns, what their
   cache-read tokens would have cost at the model's uncached-input rate
-  less what they cost at its cache-read rate. Lines (`SessionShape`'s
-  lines added and removed) and edits (summed over each model's facts:
-  edit calls, undone, declined) are counted once per session, in the week
-  holding its first recorded activity; a session with no facts, or an
-  unknown count, sets the matching `*_partial` (`edits_partial` is true
+  less what they cost at its cache-read rate. Edits (summed over each
+  model's facts: edit calls, undone, declined) are counted once per
+  session, in the week holding its first recorded activity; a session with
+  no facts, or an unknown count, sets the matching `*_partial`
+  (`edits_partial` is true
   when any of `edits_count_partial`, `edits_undone_partial`,
   `edits_denied_partial` is). Automated sessions are counted, as the
   token figures count them. `last_week` (and `last_week_by_day[]`) is
@@ -5662,9 +5671,6 @@ min_sessions, categories, left_out}`:
     - `{kind: "fewer_undos", better, worse, ratio_permille}`: of the models
       with `min_sessions` known kept counts and at least 30 edits, the
       highest undone rate is at least twice the lowest nonzero one.
-    - `{kind: "rereads", sessions_with, sessions, files}` on `understand`:
-      of at least `min_sessions` Claude Code sessions there, at least half
-      read a file again (`files` is the distinct files re-read).
 - `left_out`: `{automated, no_facts, no_model, reviewer, unknown_task,
   mixed_models, routed, capped, delegated}`, each a count of sessions,
   counted under the first that holds: started by a tool; stored without
@@ -5676,6 +5682,104 @@ min_sessions, categories, left_out}`:
 
 No session reference, path, folder name or backend crosses; the one digest
 is a price table's `table_id`. No NEAR AI charge is read.
+
+### `insights_submitted`
+
+Takes `weeks` (`4`, `13`, or `null` for all time; absent is all time) and
+`tz` (optional UTC offset in seconds, as `insights_week` takes it; the
+daemon's own offset when absent). Any other `weeks` is refused with
+`bad_params` and the label `weeks_invalid`, a bad `tz` with `tz-invalid`.
+Every trace the contributor has submitted, whatever became of it
+(accepted, quarantined, rejected, withdrawn or still pending), from the
+history cache, joined to what the counter pass stored about its session
+(product owner, 2026-10-29). Gated as `insights_benchmarks` is: off answers
+`{"enabled": false, "feed": "counter_pass"}` without opening the store or
+making the key; an unreadable store, key or folder-rule read answers
+`readable: false` with its fixed reason, and an unreadable history cache
+with `history_unreadable`. Read-only, no network, local in a dry-run daemon.
+
+**The join.** A history row's `session_hash` hashes the bytes uploaded,
+which the counter store does not keep. The upload queue entry the trace was
+uploaded from carries its `submission_id`, adapter and session file, and an
+`uploaded` entry is never expired or compacted, so the join outlives
+`queue_ttl_days`: history row, then queue entry by `submission_id` (else by
+`session_hash` and adapter), then the counter row stored under that
+adapter and file. Nothing is guessed: a submission with no queue entry
+(`no_queue_entry`), of an adapter the pass does not read
+(`source_not_read`), or whose row is gone, aged out of the store's 13
+weeks, evicted or not read yet (`no_session_row`), is unmatched, and it is
+still counted in every history figure. A row describes the session file as
+the pass last read it, so a session continued after upload holds more than
+was sent.
+
+A submission from a Never folder, by the history row's project id, its
+queue entry's folder or its row's folder, enters no figure; it is counted
+in `left_out.never_folder` only. There is no minimum anywhere: one
+submitted trace answers every part, with the counts behind each figure.
+
+While enabled and readable the answer is `{enabled, feed, readable,
+updated_at, weeks, window_start, window_end, pricing, totals, by_model,
+by_model_left_out, by_task, by_task_unknown, code, by_week, by_project,
+left_out, traces_total, traces}`:
+
+- `window_start`: RFC 3339, local midnight on the Monday `weeks` local weeks
+  back, this week included; `null` for all time. A submission is in the
+  window by its `submitted_at`. `window_end` is now.
+- `pricing`: `{basis: "api_list", tables: [{table_id, version}]}`.
+- Credit is in points as the history stores them, summed and rounded to
+  0.001. By History's rule a row with a final figure (0 included) adds it
+  to `credit_final` and nothing to `credit_pending`; a row with none adds
+  its pending figure.
+- A *tally* is `{submitted, accepted, credit_final, credit_pending,
+  matched}`.
+- `totals`: a tally plus `unmatched`, `by_status` (`accepted`, `pending`,
+  `quarantined`, `rejected`, `withdrawn`, `other`, each always present;
+  `pending` is the server's `submitted` or `processing`, `withdrawn` is any
+  row taken back here or on the web), `by_outcome_reason` (the server's
+  credit outcome label to its count, e.g. `policy_mismatch`,
+  `novelty_failed`, `duplicate`), and `unmatched_by_reason`
+  (`no_queue_entry`, `source_not_read`, `no_session_row`).
+- *Edit counts* are `edits_known`, `edits_kept_known`,
+  `edits_undone_known`, `edits_denied_known`, each beside its own
+  `*_partial`, then `lines_added_known`, `lines_removed_known` and
+  `lines_partial`. Kept is edits less undone and declined, per session; an
+  unknown declined count reads as none declined (as in Benchmarks), so a
+  session whose edits were never put to the person leaves
+  `edits_denied_partial` true but kept known. *Spend* is
+  `usd_micros_known`, `usd_partial`, `priced_sessions`,
+  `unpriced_sessions` and `near_ai_sessions`: API list prices over the
+  session's per-turn series; a session any of whose usage went through
+  NEAR AI (a route tally, with the ledger feed on) is not list-priced and
+  counts in `near_ai_sessions`.
+- `by_model`: matched sessions by the normalized declared label serving a
+  strict majority of the session's turns, most submitted first: `{label,
+  tool}`, a tally, spend, edit counts and `tasks` (task key to count).
+  `by_model_left_out`: `{unmatched, mixed_models, no_model}`.
+- `by_task`: always eight tallies, in Benchmarks' order and by its
+  `bench_category` rule (`bug_fix`, `feature`, `refactor`, `tests`,
+  `docs`, `understand`, `review`, `setup`), each with its `key`; the
+  person's own task label wins. `by_task_unknown`: the tally of submissions
+  with no task (unmatched, or stored without facts).
+- `code`: over matched sessions: `sessions`, `sessions_with_files`,
+  `files` (`{source, test, doc, config, total}`, distinct edited files per
+  extension class, summed), `files_partial`, edit counts and spend. Never a
+  path or a file name.
+- `by_week`: a tally per local week, `{week_start}` a `YYYY-MM-DD` Monday,
+  oldest first, every week from the window's first (all time: the earliest
+  submission's, at most 520 weeks) to this one, empty weeks included.
+- `by_project`: a tally per History project label, `{label}`, most
+  submitted first.
+- `traces_total` and `traces`: one row per submission, newest first, at most
+  500: `{submission_id, submitted_at, project_label, source, status,
+  credit_points_pending, credit_points_final, credit_outcome_reason,
+  matched, unmatched_reason, tool, model, mixed_models, task, files, edits,
+  edits_kept, edits_undone, edits_denied, usd_micros, near_ai}`.
+  `submission_id` is the reference History rows already carry; `source` is
+  the adapter name History shows; every session figure is `null` when
+  unmatched or unknown, never zero.
+
+No path, file name, session ID or hash, project key or id, prompt or
+command crosses; the one digest is a price table's `table_id`.
 
 ### `set_settings`
 
@@ -6744,9 +6848,13 @@ decision is open.
 #### `insights_counter_pass`
 
 Additive; a daemon that predates it refuses it as `settings-unknown-field`,
-and `get_settings` from it omits it. Takes a boolean and defaults to `false`
-(owner decision D4, open), and a settings file written before the key existed
-loads it as `false`. It is the one gate on the Insights counter pass (feed T):
+and `get_settings` from it omits it. Takes a boolean and defaults to `true`
+(product owner, 2026-10-29: counting is on by default and always on, which
+settles owner decision D4). A settings file written before that change -- one
+without `insights_counter_pass_defaulted_on: true` -- is turned on once when
+loaded, whatever it held, and the marker is saved with it; after that a saved
+`false` stays off. A settings file written before the key existed loads it as
+`true`. The macOS shell no longer draws a switch for it. It is the one gate on the Insights counter pass (feed T):
 while it is `false` the watcher runs no pass, nothing is read for Insights,
 and `insights_week` answers `enabled: false` without opening the store or its
 key. Turning it off does not remove rows already stored; `unenroll` does,

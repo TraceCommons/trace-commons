@@ -68,31 +68,6 @@ extension View {
     }
 }
 
-/// A disclosure: `GlassExpander` and, while open, its content indented
-/// under it. The replacement for a stock `DisclosureGroup`.
-struct InsightsDisclosure<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: () -> Content
-    @State private var isOpen = false
-
-    init(_ title: String, @ViewBuilder content: @escaping () -> Content) {
-        self.title = title
-        self.content = content
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            GlassExpander(title, isOpen: $isOpen)
-            if isOpen {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    content()
-                }
-                .padding(.leading, GlassTokens.Space.s8)
-            }
-        }
-    }
-}
-
 /// The hairline between a screen's sections.
 struct InsightsRule: View {
     var body: some View {
@@ -243,23 +218,6 @@ struct InsightsSectionTitle<Trailing: View>: View {
 extension InsightsSectionTitle where Trailing == EmptyView {
     init(_ title: String, info: [String] = []) {
         self.init(title: title, info: info, trailing: { EmptyView() })
-    }
-}
-
-/// A group's heading at the body-strong step, with its info.
-struct InsightsGroupHeading: View {
-    let title: String
-    var info: [String] = []
-
-    init(_ title: String, info: [String] = []) {
-        self.title = title
-        self.info = info
-    }
-
-    var body: some View {
-        InsightsTextWithInfo(title, style: GlassTokens.TypeScale.bodyStrong, infoTitle: title, info: info)
-            .foregroundStyle(GlassColor.textPrimary)
-            .accessibilityAddTraits(.isHeader)
     }
 }
 

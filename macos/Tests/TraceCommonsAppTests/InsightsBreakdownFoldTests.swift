@@ -17,10 +17,4 @@ final class InsightsBreakdownFoldTests: XCTestCase {
         XCTAssertTrue(overview.contains("ForEach(InsightsBreakdownFold.shown(sessions.rows, all: showAll))"))
         XCTAssertTrue(overview.contains("ForEach(InsightsBreakdownFold.shown(inputs.sessions, all: showAll))"))
     }
-
-    func testSessionsSaysWhatItShows() throws {
-        let sessions = try GlassSurfaceRulesTests.text("Views/InsightsSessionsTab.swift")
-        XCTAssertTrue(sessions.contains("\"analytics_sessions_explainer_saved\""))
-        XCTAssertTrue(sessions.contains("\"analytics_sessions_explainer_watched\""))
-    }
 }

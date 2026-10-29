@@ -750,8 +750,8 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// nobody set.
     var insightsLedgerFeed: Bool? = nil
     /// Whether the daemon counts tokens in the watched folders for
-    /// Insights (`insights_counter_pass`; owner decision D4, off by
-    /// default). Absent from an older daemon: no switch, never an "off".
+    /// Insights (`insights_counter_pass`; on by default, product owner,
+    /// 2026-10-29). Absent from an older daemon: no switch, never an "off".
     var insightsCounterPass: Bool? = nil
     /// The weekly summary card's switch (`insights_recap_card_enabled`, on
     /// by default); "Hide" on the card turns it off. Absent from an older

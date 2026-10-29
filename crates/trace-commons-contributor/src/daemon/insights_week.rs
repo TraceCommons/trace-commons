@@ -1,9 +1,11 @@
 //! The Insights counter pass (feed T) and `insights_week`.
 //!
-//! Gated on owner decision D4 (open), through the `insights_counter_pass`
-//! setting, off by default. While it is off the watcher runs no pass, nothing
-//! is read for Insights, and `insights_week` answers `enabled: false` without
-//! opening the store or the key.
+//! Gated through the `insights_counter_pass` setting, on by default (product
+//! owner, 2026-10-29, settling owner decision D4; an install saved before
+//! then is turned on once). While it is off -- after unenroll, or an agent
+//! turning it off -- the watcher runs no pass, nothing is read for Insights,
+//! and `insights_week` answers `enabled: false` without opening the store or
+//! the key.
 //!
 //! # The pass
 //!
@@ -2040,6 +2042,7 @@ impl CounterPass {
                 this.week_start,
                 tz,
                 current - Duration::weeks(COUNTER_STORE_KEEP_WEEKS - 1),
+                &near_ai_routes(&joined, routing_unavailable.is_none()),
             )
         };
         let picker = dated_weeks(&inputs, &tz);
@@ -3597,7 +3600,8 @@ fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff:
 
 /// After the routing ledger's refresh: fold its new calls into the route
 /// tallies, only while both `insights_ledger_feed` (owner decision D3, on by
-/// default) and `insights_counter_pass` (D4, open) are on. Gated on the pass too
+/// default) and `insights_counter_pass` (on by default; product owner,
+/// 2026-10-29) are on. Gated on the pass too
 /// because the tallies live in its store: unenroll turns the pass off and
 /// clears the store, and a fold gated on the feed alone would write it back.
 /// A poisoned settings lock reads as off. Failures are logged inside, by
@@ -4048,6 +4052,35 @@ pub(crate) fn never_folders(policy: &super::policy::ProjectPolicy) -> NeverFolde
     )
 }
 
+/// The sessions sent through NEAR AI, by the engine's session reference,
+/// for `work` to leave their list estimate out of the spend (D5). None
+/// while routing is unavailable: no tally is read then (D3).
+fn near_ai_routes(
+    joined: &BTreeMap<String, RowJoin<'_>>,
+    routing_available: bool,
+) -> BTreeMap<String, super::insights_week_work::NearAiRoute> {
+    use super::insights_route_tally::{RouteCategory, route_category};
+    use super::insights_week_work::NearAiRoute;
+    if !routing_available {
+        return BTreeMap::new();
+    }
+    joined
+        .iter()
+        .filter_map(|(reference, join)| {
+            let route = match route_category(join.tally).0 {
+                RouteCategory::RoutedVerified
+                | RouteCategory::RoutedUnverified
+                | RouteCategory::CheckFailed => NearAiRoute::Wholly,
+                RouteCategory::Mixed => NearAiRoute::Partly,
+                RouteCategory::Unobserved | RouteCategory::Unrecorded | RouteCategory::Outside => {
+                    return None;
+                }
+            };
+            Some((reference.clone(), route))
+        })
+        .collect()
+}
+
 /// Each row's route for the Models answers, by the engine's session
 /// reference: the category of its session's tally. While routing is
 /// unavailable (the ledger feed off, or no proxy ledger declared) every row
@@ -4107,8 +4140,8 @@ fn charge_map(
 
 /// `insights_week`'s `near_ai_credit`: where NEAR AI credit went
 /// (product owner, 2026-10-28), from every route tally's charge
-/// (`insights_credit`). `week` is the selected local week, by task, tool
-/// and folder; `today`, `by_day` (the last 7 local days, oldest first) and
+/// (`insights_credit`). `week` is the selected local week, by task, tool,
+/// folder and served model; `today`, `by_day` (the last 7 local days, oldest first) and
 /// `last_31_days` (today and the 30 local days before it) are sums only,
 /// and do not move with the selected week.
 ///
@@ -4383,6 +4416,7 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 mod benchmarks;
+pub(crate) mod submitted;
 
 #[cfg(test)]
 mod tests {
@@ -6512,11 +6546,16 @@ mod tests {
         outside.proof = Some(crate::routing::ProofStatus::Outside);
         outside.output_tokens = None;
         // A charged call through NEAR AI, so `near_ai_credit` has a known
-        // figure; the outside call adds no charge.
+        // figure, by model too; the outside call adds no charge.
         let mut charged = ledger_call(1, 30, "PRIVATE-CODEX-ID");
         charged.cost_usd = Some(0.0125);
+        charged.served_model = Some("zai-org/GLM-4.6".to_string());
         fold_with(&f.pass, true, vec![charged, outside]).unwrap();
         let value = f.week_routed();
+        assert_eq!(
+            value["near_ai_credit"]["week"]["by_model"][0]["key"],
+            "zai-org/glm-4.6"
+        );
         let mut categories: Vec<String> = sessions_of(&value)
             .iter()
             .map(|row| row["routing"]["category"].as_str().unwrap().to_string())
@@ -6868,8 +6907,9 @@ mod tests {
     }
 
     #[test]
-    fn the_method_answers_off_by_default_and_refuses_bad_params() {
+    fn the_method_answers_off_when_switched_off_and_refuses_bad_params() {
         let (_dir, s) = shared();
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let r = handle_week(&s, &call(serde_json::json!({})));
         assert_eq!(
             r.result.unwrap(),
@@ -7587,6 +7627,7 @@ mod tests {
         assert!(super::super::ipc::DEV_DRY_RUN_LOCAL_METHODS.contains(&"insights_week"));
         let (_dir, mut s) = shared();
         s.dev_dry_run = true;
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let r = super::super::ipc::handle_request(&s, &call(serde_json::json!({})));
         assert_eq!(r.result.unwrap()["enabled"], false);
     }

@@ -1,7 +1,7 @@
 //! Where NEAR AI credit went, from the route tallies' charges (product
 //! owner, 2026-10-28, CodexBar-style): one window's sum, and for the
-//! selected week the same sum by inferred task, by tool and by project
-//! folder.
+//! selected week the same sum by inferred task, by tool, by project
+//! folder and by the model that served the calls.
 //!
 //! - Owner decision 2026-10-28 (overrides D5 for Insights): Insights may
 //!   show money. Only the NEAR AI charge the ledger recorded is summed
@@ -15,6 +15,11 @@
 //! - A call with no charge makes its session's figure, and every group and
 //!   sum that session is in, unknown (`usd_micros: null`), never zero.
 //!   `calls_without_charge` says how many calls did it.
+//! - By model (product owner, 2026-10-29): each call goes to the model the
+//!   ledger says served it (`NearAiCharge::within_by_model`), so a session
+//!   that used two models is in both groups, and the groups' `sessions` add
+//!   up to more than the window's. A call that named no served model is the
+//!   unknown group, `key: null`; the requested model is never used.
 //! - A window takes the calls that started in it, by clock hour
 //!   (`NearAiCharge::within`), so a session that crossed midnight is split
 //!   across the two days. A session with no call in the window is in no
@@ -79,9 +84,12 @@ impl Sum {
 
 /// One window's NEAR AI charge as it crosses the socket: `from` and `to`
 /// (RFC 3339), `usd_micros` (`null` when unknown), `sessions`, `calls`,
-/// `calls_without_charge` and `tokens` (`null` when unknown); with `groups`, also `by_task[]`, `by_tool[]` and
-/// `by_folder[]`, each `{key, usd_micros, sessions, calls,
-/// calls_without_charge}`.
+/// `calls_without_charge` and `tokens` (`null` when unknown), and the
+/// `*_known` and `*_partial` figures; with `groups`, also `by_task[]`,
+/// `by_tool[]`, `by_folder[]` and `by_model[]` (the served model, as the
+/// ledger names it, lowercased), each `{key, usd_micros, sessions, calls,
+/// calls_without_charge, tokens}` with the same `*_known` and `*_partial`
+/// figures. A session is in each `by_model` group it had a call in.
 ///
 /// Groups are in order of known charge, largest first, then the unknown
 /// ones; ties by key, the unknown key (`null`) last.
@@ -96,6 +104,7 @@ pub(crate) fn window_value(
     let mut by_task: BTreeMap<Option<&str>, Sum> = BTreeMap::new();
     let mut by_tool: BTreeMap<Option<&str>, Sum> = BTreeMap::new();
     let mut by_folder: BTreeMap<Option<&str>, Sum> = BTreeMap::new();
+    let mut by_model: BTreeMap<Option<&str>, Sum> = BTreeMap::new();
     for session in sessions {
         let Some(charge) = session.charge.within(session.last_call_at, from, to) else {
             continue;
@@ -114,6 +123,14 @@ pub(crate) fn window_value(
             .entry(session.folder)
             .or_default()
             .add(&charge, counts);
+        if groups {
+            for (model, part) in session
+                .charge
+                .within_by_model(session.last_call_at, from, to)
+            {
+                by_model.entry(model).or_default().add(&part, counts);
+            }
+        }
     }
     let mut value = total.value();
     value["from"] = serde_json::json!(from.to_rfc3339());
@@ -122,6 +139,7 @@ pub(crate) fn window_value(
         value["by_task"] = groups_value(by_task);
         value["by_tool"] = groups_value(by_tool);
         value["by_folder"] = groups_value(by_folder);
+        value["by_model"] = groups_value(by_model);
     }
     value
 }
@@ -152,6 +170,7 @@ fn groups_value(groups: BTreeMap<Option<&str>, Sum>) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    use super::super::insights_route_tally::ModelCharge;
     use super::*;
     use chrono::{Duration, TimeZone};
 
@@ -258,6 +277,66 @@ mod tests {
         let only_unknown = window_value(&[session(&none, None, None, None)], at(0), at(24), false);
         assert_eq!(only_unknown["usd_micros_known"], serde_json::Value::Null);
         assert_eq!(only_unknown["usd_partial"], false);
+    }
+
+    /// NEAR AI credit by model (product owner, 2026-10-29): each session's
+    /// calls go to the model that served them, so a session that used two
+    /// models is in both groups, and the groups add up to the week.
+    #[test]
+    fn by_model_takes_each_calls_served_model() {
+        let mut mixed = charge(&[(1, Some(300)), (2, Some(40)), (3, None)]);
+        // glm-4.6 served hour 1, Haiku hour 2, and the call in hour 3
+        // named no model.
+        let names = [Some("glm-4.6"), Some("claude-haiku-4-5"), None];
+        mixed.by_model = mixed
+            .by_hour
+            .iter()
+            .zip(names)
+            .map(|((hour, slot), model)| ModelCharge {
+                model: model.map(str::to_owned),
+                by_hour: BTreeMap::from([(*hour, *slot)]),
+            })
+            .collect();
+        // A charge kept before models were, all served by one model.
+        let mut single = charge(&[(1, Some(500))]);
+        single.served_model = Some("glm-4.6".to_string());
+        let sessions = [
+            session(&mixed, Some("bug_fix"), Some("claude_code"), Some("app")),
+            session(&single, Some("docs"), Some("codex"), Some("site")),
+        ];
+        let week = window_value(&sessions, at(0), at(24 * 7), true);
+        let groups = week["by_model"].as_array().unwrap();
+        let keys: Vec<serde_json::Value> = groups.iter().map(|g| g["key"].clone()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                serde_json::json!("glm-4.6"),
+                serde_json::json!("claude-haiku-4-5"),
+                serde_json::Value::Null,
+            ]
+        );
+        assert_eq!(groups[0]["usd_micros"], 800);
+        assert_eq!(groups[0]["sessions"], 2);
+        assert_eq!(groups[0]["calls"], 2);
+        assert_eq!(groups[1]["usd_micros"], 40);
+        assert_eq!(groups[1]["sessions"], 1);
+        // The unnamed call carried no charge: unknown, never zero.
+        assert_eq!(groups[2]["usd_micros"], serde_json::Value::Null);
+        assert_eq!(groups[2]["usd_micros_known"], serde_json::Value::Null);
+        assert_eq!(groups[2]["calls_without_charge"], 1);
+        let calls: u64 = groups.iter().map(|g| g["calls"].as_u64().unwrap()).sum();
+        assert_eq!(calls, week["calls"].as_u64().unwrap());
+        let known: u64 = groups
+            .iter()
+            .filter_map(|g| g["usd_micros_known"].as_u64())
+            .sum();
+        assert_eq!(known, week["usd_micros_known"].as_u64().unwrap());
+        // Only the week carries groups.
+        assert!(
+            window_value(&sessions, at(0), at(24), false)
+                .get("by_model")
+                .is_none()
+        );
     }
 
     #[test]
