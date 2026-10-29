@@ -325,6 +325,11 @@ uploads one bad trace is not evidence against its owner.
 
 An operator clears (optionally exempting a label) or voids. A void writes
 one `void` bonus row per affected referee taking back their unsent bonus.
+The referral stream sends one amount per account, so what was sent is
+allotted to the account's referees in the order each first earned, each
+up to their net bonus; a referee's unsent bonus is their net less that
+share. A void never takes back what was sent and never another
+referee's unsent bonus.
 Thresholds are settings, tuned from the dry-run report before `live`.
 
 ### Client is untrusted (R9)

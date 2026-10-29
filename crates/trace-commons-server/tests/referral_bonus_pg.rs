@@ -1037,6 +1037,148 @@ async fn a_void_takes_back_only_unsent_bonus_and_stops_new_bonus() {
     assert_eq!((again.voided, again.bonus_rows), (0, 0), "{again:?}");
 }
 
+/// Records `units` sent on the referrer's referral stream: an active link
+/// and one confirmed referral line.
+async fn sent_on_referral_stream(fixture: &Fixture, referrer: &Referrer, units: i64) {
+    let link = Uuid::new_v4();
+    owner_exec(
+        fixture,
+        &referrer.tenant,
+        "INSERT INTO trace_payout_links
+           (tenant_id, account_id, rail_id, link_id, recipient_kind, state, sealed_recipient,
+            recipient_index, recipient_key_ref, index_pepper_ref, subject_index, program)
+         VALUES ($1, $2, 'near_ai', $3, 'near_ai_org', 'active',
+                 '{\"v\":1}'::jsonb, $4, 'key-test-1', 'pepper-test-1', $5, $6)",
+        &[
+            &referrer.tenant,
+            &referrer.account,
+            &link,
+            &sha(&format!("index:{link}")),
+            &sha(&format!("subject:{link}")),
+            &format!("tc1-{}", &sha(&link.to_string())[7..39]),
+        ],
+    )
+    .await;
+    let units = units.to_string();
+    owner_exec(
+        fixture,
+        &referrer.tenant,
+        "INSERT INTO trace_payout_lines
+           (tenant_id, line_id, account_id, rail_id, link_id, target_total, delta,
+            owed_through_accrual_count, state, stream, receipt_hash, resolved_at)
+         VALUES ($1, $2, $3, 'near_ai', $4, $5::TEXT::NUMERIC, $5::TEXT::NUMERIC, 1,
+                 'confirmed', 'referral', $6, now())",
+        &[
+            &referrer.tenant,
+            &Uuid::new_v4(),
+            &referrer.account,
+            &link,
+            &units,
+            &sha(&format!("receipt:{link}")),
+        ],
+    )
+    .await;
+}
+
+/// A referrer whose first referee earned 100 and was sent 60 of it, and
+/// whose second referee then earned 100 that nothing has sent.
+async fn one_partly_sent_one_unsent(
+    fixture: &Fixture,
+    hook: &ReferralBonusHook,
+) -> (Referrer, Referee, Referee) {
+    let referrer = referrer(fixture).await;
+    let code_index = referrer.code_index.clone();
+    let partly = referee(fixture, &referrer, &code_index, 10, 1).await;
+    let unsent = referee(fixture, &referrer, &code_index, 10, 1).await;
+    credit(
+        fixture,
+        &partly.tenant,
+        partly.account,
+        1_000,
+        Utc::now() - Duration::days(3),
+    )
+    .await;
+    hook.run_tenant(&partly.tenant, &near_ai()).await;
+    sent_on_referral_stream(fixture, &referrer, 60).await;
+    credit(
+        fixture,
+        &unsent.tenant,
+        unsent.account,
+        1_000,
+        Utc::now() - Duration::days(2),
+    )
+    .await;
+    hook.run_tenant(&unsent.tenant, &near_ai()).await;
+    let owed = fixture
+        .runtime
+        .referral_bonus_owed(&referrer.tenant, referrer.account, &near_ai())
+        .await
+        .unwrap();
+    assert_eq!((owed.owed, owed.sent, owed.unsent()), (200, 60, 140));
+    (referrer, partly, unsent)
+}
+
+async fn void_one(fixture: &Fixture, referrer: &Referrer, referee: &Referee) -> u128 {
+    fixture
+        .runtime
+        .void_referral_referee(
+            &referrer.tenant,
+            &referee.referee_ref,
+            "operator_void",
+            &near_ai(),
+            ACTOR,
+        )
+        .await
+        .unwrap()
+        .expect("a live referee is voided")
+        .taken_back
+}
+
+/// What was sent is allotted to the referee who earned first, so a void
+/// takes back only the voided referee's unsent bonus: never what was sent
+/// for them, and never another referee's unsent bonus.
+#[tokio::test]
+async fn a_void_takes_back_only_that_referees_unsent_bonus() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let hook = hook(&fixture, settings());
+
+    // Voiding the referee nothing was sent for takes back all of theirs,
+    // and leaves the partly-sent referee's 40 owed.
+    let (referrer, partly, unsent) = one_partly_sent_one_unsent(&fixture, &hook).await;
+    assert_eq!(void_one(&fixture, &referrer, &unsent).await, 100);
+    let owed = fixture
+        .runtime
+        .referral_bonus_owed(&referrer.tenant, referrer.account, &near_ai())
+        .await
+        .unwrap();
+    assert_eq!(owed.unsent(), 40);
+    assert_eq!(void_one(&fixture, &referrer, &partly).await, 40);
+
+    // The reverse: voiding the partly-sent referee takes back only their
+    // unsent 40, not the other referee's 100.
+    let (referrer, partly, unsent) = one_partly_sent_one_unsent(&fixture, &hook).await;
+    assert_eq!(void_one(&fixture, &referrer, &partly).await, 40);
+    let owed = fixture
+        .runtime
+        .referral_bonus_owed(&referrer.tenant, referrer.account, &near_ai())
+        .await
+        .unwrap();
+    assert_eq!(
+        (owed.owed, owed.unsent()),
+        (160, 100),
+        "the other referee's bonus is still owed"
+    );
+    assert_eq!(void_one(&fixture, &referrer, &unsent).await, 100);
+    let owed = fixture
+        .runtime
+        .referral_bonus_owed(&referrer.tenant, referrer.account, &near_ai())
+        .await
+        .unwrap();
+    assert_eq!((owed.owed, owed.unsent()), (60, 0), "what was sent stays");
+}
+
 /// A bonus row planned from a view read before an operator void commits
 /// is dropped when it reaches the store after it: the void took back only
 /// the bonus that existed, and nothing later takes back a row written

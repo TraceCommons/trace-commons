@@ -144,20 +144,57 @@ pub(super) async fn owed_on_tx(
     })
 }
 
-/// Writes one referee's void row, taking back the smaller of their net
-/// bonus and what is left of `unsent`. Returns the units taken back.
+/// What `referee` is owed and not yet sent on `rail`, inside `tx`.
+///
+/// The referral stream sends one account-wide amount, so what was sent is
+/// allotted to the account's referees in the order each first earned
+/// (oldest first, ties by referee hash), each up to their net bonus. A void
+/// then takes back only the voided referee's unsent share: never what was
+/// sent, and never another referee's unsent bonus. The order is stable
+/// under voids (a void row is never a referee's first row), so voiding one
+/// referee leaves every other referee's share where it was.
+async fn referee_unsent_on_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    tenant: &str,
+    account: Uuid,
+    rail: &str,
+    referee_ref_hash: &str,
+) -> Result<u128, DatabaseError> {
+    let mut sent = owed_on_tx(tx, tenant, account, rail).await?.sent;
+    let rows = tx
+        .query(
+            "SELECT referee_ref_hash, COALESCE(SUM(bonus_units), 0)::TEXT
+               FROM trace_referral_bonus_accruals
+              WHERE tenant_id = $1 AND account_id = $2 AND rail_id = $3
+              GROUP BY referee_ref_hash
+              ORDER BY MIN(created_at), referee_ref_hash",
+            &[&tenant, &account, &rail],
+        )
+        .await?;
+    for row in &rows {
+        let hash: String = row.get(0);
+        let net = parse_floor_zero(&row.get::<_, String>(1))?;
+        let covered = net.min(sent);
+        sent -= covered;
+        if hash == referee_ref_hash {
+            return Ok(net - covered);
+        }
+    }
+    Ok(0)
+}
+
+/// Writes one referee's void row, taking back that referee's unsent bonus
+/// (`referee_unsent_on_tx`). Returns the units taken back.
 async fn write_void_row(
     tx: &deadpool_postgres::Transaction<'_>,
     tenant: &str,
     account: Uuid,
     referee_ref_hash: &str,
     rail: &str,
-    unsent: &mut u128,
 ) -> Result<u128, DatabaseError> {
     let row = tx
         .query_one(
-            "SELECT COALESCE(SUM(bonus_units), 0)::TEXT,
-                    (SELECT rate_version FROM trace_referral_bonus_accruals
+            "SELECT (SELECT rate_version FROM trace_referral_bonus_accruals
                       WHERE tenant_id = $1 AND rail_id = $2 AND referee_ref_hash = $3
                       ORDER BY created_at DESC, bonus_id LIMIT 1),
                     (SELECT instrument_id FROM trace_referral_bonus_accruals
@@ -165,16 +202,13 @@ async fn write_void_row(
                       ORDER BY created_at DESC, bonus_id LIMIT 1),
                     EXISTS (SELECT 1 FROM trace_referral_bonus_accruals
                              WHERE tenant_id = $1 AND rail_id = $2 AND referee_ref_hash = $3
-                               AND kind = 'void')
-               FROM trace_referral_bonus_accruals
-              WHERE tenant_id = $1 AND rail_id = $2 AND referee_ref_hash = $3",
+                               AND kind = 'void')",
             &[&tenant, &rail, &referee_ref_hash],
         )
         .await?;
-    let net: String = row.get(0);
-    let rate_version: Option<String> = row.get(1);
-    let instrument: Option<String> = row.get(2);
-    let already: bool = row.get(3);
+    let rate_version: Option<String> = row.get(0);
+    let instrument: Option<String> = row.get(1);
+    let already: bool = row.get(2);
     // A referee who never earned has nothing to take back, and no rate
     // version to name; the voided mirror row alone stops new bonus.
     let Some(rate_version) = rate_version else {
@@ -183,8 +217,7 @@ async fn write_void_row(
     if already {
         return Ok(0);
     }
-    let take = parse_floor_zero(&net)?.min(*unsent);
-    *unsent -= take;
+    let take = referee_unsent_on_tx(tx, tenant, account, rail, referee_ref_hash).await?;
     let bonus = format!("-{take}");
     tx.execute(
         "INSERT INTO trace_referral_bonus_accruals (
@@ -833,16 +866,13 @@ impl ReferralBonusStore for PgBackend {
             .collect::<BTreeSet<String>>()
             .into_iter()
             .collect();
-        let mut unsent = owed_on_tx(&tx, tenant, account, rail.as_str())
-            .await?
-            .unsent();
         let mut outcome = ReferralVoidOutcome {
             account_id: Some(account),
             ..ReferralVoidOutcome::default()
         };
         for referee in &referees {
             outcome.taken_back +=
-                write_void_row(&tx, tenant, account, referee, rail.as_str(), &mut unsent).await?;
+                write_void_row(&tx, tenant, account, referee, rail.as_str()).await?;
             outcome.referees_voided += 1;
             insert_referral_audit(
                 &tx,
@@ -907,18 +937,8 @@ impl ReferralBonusStore for PgBackend {
             )
             .await?;
         }
-        let mut unsent = owed_on_tx(&tx, tenant, account, rail.as_str())
-            .await?
-            .unsent();
-        outcome.taken_back = write_void_row(
-            &tx,
-            tenant,
-            account,
-            referee_ref_hash,
-            rail.as_str(),
-            &mut unsent,
-        )
-        .await?;
+        outcome.taken_back =
+            write_void_row(&tx, tenant, account, referee_ref_hash, rail.as_str()).await?;
         tx.commit().await?;
         Ok(Some(outcome))
     }
