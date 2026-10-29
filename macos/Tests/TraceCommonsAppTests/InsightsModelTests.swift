@@ -43,8 +43,7 @@ final class InsightsModelTests: XCTestCase {
         let recorder = Recorder()
         let model = InsightsModel(service: { request in try await recorder.call(request) })
         model.open()
-        for _ in 0..<500 where await recorder.operations.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
-        for _ in 0..<20 { await Task.yield() }
+        await model.loading?.value
         XCTAssertEqual(model.text("title"), "Insights")
         let operations = await recorder.operations
         XCTAssertEqual(operations, ["copy", "list"])

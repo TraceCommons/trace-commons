@@ -81,6 +81,9 @@ final class InsightsModel {
         active = false; generation = UUID(); task?.cancel(); task = nil
         weekGeneration = UUID()
     }
+    /// The copy-and-list read in flight, so a caller can wait for it to
+    /// land rather than poll.
+    var loading: Task<Void, Never>? { task }
     private func load() {
         task?.cancel()
         let token = generation
