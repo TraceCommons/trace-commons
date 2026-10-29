@@ -207,7 +207,7 @@ mod tests {
                 "2026-09-14T09:00:05.000Z",
                 "u2",
                 serde_json::json!({
-                    "id": "msg_PRIVATE_1",
+                    "id": format!("msg_PRIVATE_{id}"),
                     "model": model,
                     "role": "assistant",
                     "content": [{"type": "tool_use", "id": "toolu_PRIVATE_A", "name": "Edit",

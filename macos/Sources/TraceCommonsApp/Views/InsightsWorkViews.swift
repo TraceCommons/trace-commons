@@ -37,7 +37,7 @@ enum InsightsWorkWords {
 
     /// Spend at list prices: exact, or the known part as "at least".
     static func spend(_ totals: DaemonData.InsightsWorkTotals?, copy: [String: String]) -> String {
-        guard let totals, totals.pricedSessions > 0 || totals.usdMicrosKnown > 0 else {
+        guard let totals, totals.pricedSessions + (totals.nearAiSessions ?? 0) > 0 || totals.usdMicrosKnown > 0 else {
             return text("analytics_unavailable", copy)
         }
         return InsightsCreditWords.spend(totals.usdPartial ? nil : totals.usdMicrosKnown,

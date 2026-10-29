@@ -2040,6 +2040,7 @@ impl CounterPass {
                 this.week_start,
                 tz,
                 current - Duration::weeks(COUNTER_STORE_KEEP_WEEKS - 1),
+                &near_ai_routes(&joined, routing_unavailable.is_none()),
             )
         };
         let picker = dated_weeks(&inputs, &tz);
@@ -4046,6 +4047,35 @@ pub(crate) fn never_folders(policy: &super::policy::ProjectPolicy) -> NeverFolde
             .cloned()
             .collect(),
     )
+}
+
+/// The sessions sent through NEAR AI, by the engine's session reference,
+/// for `work` to leave their list estimate out of the spend (D5). None
+/// while routing is unavailable: no tally is read then (D3).
+fn near_ai_routes(
+    joined: &BTreeMap<String, RowJoin<'_>>,
+    routing_available: bool,
+) -> BTreeMap<String, super::insights_week_work::NearAiRoute> {
+    use super::insights_route_tally::{RouteCategory, route_category};
+    use super::insights_week_work::NearAiRoute;
+    if !routing_available {
+        return BTreeMap::new();
+    }
+    joined
+        .iter()
+        .filter_map(|(reference, join)| {
+            let route = match route_category(join.tally).0 {
+                RouteCategory::RoutedVerified
+                | RouteCategory::RoutedUnverified
+                | RouteCategory::CheckFailed => NearAiRoute::Wholly,
+                RouteCategory::Mixed => NearAiRoute::Partly,
+                RouteCategory::Unobserved | RouteCategory::Unrecorded | RouteCategory::Outside => {
+                    return None;
+                }
+            };
+            Some((reference.clone(), route))
+        })
+        .collect()
 }
 
 /// Each row's route for the Models answers, by the engine's session

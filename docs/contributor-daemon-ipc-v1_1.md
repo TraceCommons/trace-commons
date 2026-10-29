@@ -5027,7 +5027,7 @@ sessions on disk. Otherwise:
   week used, as `insights_model_answers`' `pricing.tables`; `prices_as_of`
   is the oldest of their fetch times (RFC 3339), `null` when no turn
   priced. `week` and `last_week` are Totals: `{sessions, priced_sessions,
-  unpriced_sessions, usd_micros_known, usd_partial,
+  unpriced_sessions, near_ai_sessions, usd_micros_known, usd_partial,
   cache_savings_usd_micros_known, lines_added_known, lines_removed_known,
   lines_partial, edits_known, edits_undone_known, edits_denied_known,
   edits_partial, edits_count_partial, edits_undone_partial,
@@ -5035,6 +5035,15 @@ sessions on disk. Otherwise:
   per-turn series, each turn on its own local day, so a session crossing
   midnight or a week is split by its turns; Claude Code turns are the ones
   the rollup counts, so a turn a resumed transcript repeats is priced once.
+  A session sent through NEAR AI is never list-priced here (owner decision
+  D5): sent wholly through the route (routed verified or unverified, or
+  check failed) it is left out of the spend and counted in
+  `near_ai_sessions` (additive; its charge is in `near_ai_credit`); sent
+  partly through it (mixed) it is unpriced. While routing is unavailable
+  no tally is read, and every session is list-priced as before. A resumed
+  Claude Code transcript's lines and edits count only beyond the
+  transcript it continues, in the week of its first new turn; when the
+  repeated part is not fully known they are partial, never doubled.
   A session is unpriced when any of its turns in the scope is unpriced
   (no known counters, no date, no usable label, no list price) or it has
   no per-turn series (a Codex session read before the per-turn reader, or
