@@ -422,7 +422,9 @@ final class SubscriptionUsageTests: XCTestCase {
             XCTAssertFalse(words.state?.isEmpty ?? true)
         }
         let expired = try XCTUnwrap(copy["analytics_subscriptions_claude_expired"])
-        XCTAssertTrue(expired.contains("Open Claude Code"))
+        // "Claude", not "Claude Code", in usage strings (owner, 2026-10-28).
+        XCTAssertTrue(expired.contains("Open Claude,"))
+        XCTAssertFalse(expired.contains("Claude Code"))
         XCTAssertTrue(expired.contains("Refresh"))
         XCTAssertFalse(expired.lowercased().contains("sign in"))
     }
@@ -488,7 +490,9 @@ final class SubscriptionUsageTests: XCTestCase {
 
     func testCodexConsentStaysInSettingsAndClaudeDisclosurePrecedesScopedOverviewActions() throws {
         let settings = try SettingsParityTests.text("Views/Settings/SubscriptionUsageSettingsSection.swift")
-        let overview = try SettingsParityTests.text("Views/InsightsSubscriptionsCard.swift")
+        // The usage cards replaced the limits card on Overview (product
+        // owner, 2026-10-28); each measured login is a card there.
+        let overview = try SettingsParityTests.text("Views/InsightsUsageCards.swift")
         let content = try SettingsParityTests.text("Views/Settings/GlassSettingsContent.swift")
         let disclosure = try XCTUnwrap(settings.range(of: "detail(\"analytics_subscriptions_codex_detail\")"))
         let permission = try XCTUnwrap(settings.range(of: "Toggle(text(\"analytics_subscriptions_setting_codex\")"))
@@ -497,12 +501,11 @@ final class SubscriptionUsageTests: XCTestCase {
         let claudeSwitch = try XCTUnwrap(settings.range(of: "Toggle(text(\"analytics_subscriptions_setting_claude\")"))
         XCTAssertLessThan(claudeDisclosure.lowerBound, claudeSwitch.lowerBound)
         XCTAssertTrue(content.contains("SubscriptionUsageSettingsSection()"))
-        XCTAssertTrue(overview.contains("ForEach(model.supportedProviders)"))
-        XCTAssertTrue(overview.contains("InsightsOverviewWords.fill(text(\"analytics_subscriptions_no_logins\"), [\"harness\": name])"))
+        XCTAssertTrue(overview.contains("InsightsLimitsRows.rows(subscriptions?.supportedProviders ?? []"))
         XCTAssertFalse(overview.contains("setEnabled"))
-        XCTAssertTrue(overview.contains("InsightsInfo(name, [text(\"analytics_subscriptions_claude_detail\")])"))
+        XCTAssertTrue(overview.contains("InsightsInfo(row.account, [text(\"analytics_subscriptions_claude_detail\")])"))
         XCTAssertFalse(overview.contains("Text(text(\"analytics_subscriptions_claude_detail\"))"))
-        XCTAssertTrue(overview.contains("model.refresh(provider: provider, login: login)"))
+        XCTAssertTrue(overview.contains("subscriptions?.refresh(provider: row.provider, login: row.loginId)"))
         XCTAssertTrue(overview.contains("analytics_subscriptions_refresh_login_accessibility"))
         XCTAssertFalse(overview.contains("model.refresh()"))
         XCTAssertTrue(settings.contains("Toggle(text(\"analytics_subscriptions_setting_claude\")"))
@@ -517,14 +520,15 @@ final class SubscriptionUsageTests: XCTestCase {
     /// 2026-10-27 owner review: the Insights card drops its title and the
     /// Claude paragraphs, keeps the keychain note behind an info button, and
     /// asks people to Refresh. Settings keeps the title on its own card.
+    /// The usage cards (product owner, 2026-10-28) keep all of it.
     func testInsightsCardHasNoTitleOrClaudeParagraphsAndAsksForRefresh() throws {
-        let overview = try SettingsParityTests.text("Views/InsightsSubscriptionsCard.swift")
+        let overview = try SettingsParityTests.text("Views/InsightsUsageCards.swift")
         let settings = try SettingsParityTests.text("Views/Settings/SubscriptionUsageSettingsSection.swift")
         XCTAssertFalse(overview.contains("analytics_subscriptions_title"))
         XCTAssertFalse(overview.contains("analytics_subscriptions_claude_captured"))
         XCTAssertTrue(overview.contains("Text(text(\"analytics_subscriptions_refresh_hint\"))"))
         // Kristi's #1687 review: no "Refresh..." line without a Refresh button.
-        let gate = try XCTUnwrap(overview.range(of: "if !model.supportedProviders.isEmpty, !model.isRefreshing {"))
+        let gate = try XCTUnwrap(overview.range(of: "if let subscriptions, !logins.isEmpty, !subscriptions.isRefreshing {"))
         let hint = try XCTUnwrap(overview.range(of: "Text(text(\"analytics_subscriptions_refresh_hint\"))"))
         XCTAssertLessThan(gate.lowerBound, hint.lowerBound)
         XCTAssertTrue(settings.contains("analytics_subscriptions_title"))
@@ -569,7 +573,7 @@ final class SubscriptionUsageTests: XCTestCase {
         let sharedCopy = try uiCopy()
         XCTAssertFalse(sharedCopy["analytics_subscriptions_title"]?.isEmpty ?? true)
         _ = NSApplication.shared
-        try render(InsightsSubscriptionsCard(model: model, copy: sharedCopy),
+        try render(InsightsUsageCards(subscriptions: model, nearAiCredit: nil, copy: sharedCopy),
                    to: target, name: "insights-subscription-limits.png")
         try render(SubscriptionUsageSettingsCard(model: model, copy: sharedCopy),
                    to: target, name: "settings-subscription-usage.png")

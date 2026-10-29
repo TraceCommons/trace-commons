@@ -177,6 +177,24 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         }
     }
 
+    /// `insights_week`'s `near_ai_credit` (product owner, 2026-10-28),
+    /// which the throwaway store above never reaches: the daemon's own
+    /// recorded routed answer. A key the model drops fails here, by path.
+    func testEveryNearAiCreditKeyIsDeclared() throws {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("tests/fixtures/insights-analytics/insights_week_routed.json")
+        let recorded = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any])
+        let credit = try XCTUnwrap(recorded["near_ai_credit"] as? [String: Any])
+        assertDeclared(DaemonData.InsightsNearAiCredit.self, credit, method: "insights_week.near_ai_credit")
+        let paths = KeyRecorder.keyPaths(in: credit)
+        for path in ["week.by_task[].key", "week.by_folder[].usd_micros", "last_31_days.calls_without_charge"] {
+            XCTAssertTrue(paths.contains(path), "the recorded answer carries \(path): \(paths)")
+        }
+    }
+
     func testEveryKeyTheDaemonSendsIsDeclared() throws {
         let daemon = try startDaemonWithOneSession()
         let frames = OSAllocatedUnfairLock(initialState: [String]())

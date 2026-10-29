@@ -19,7 +19,7 @@ The goal is that Insights answers the questions developers actually ask:
 
 The answers come from the user's own sessions, on their own machine.
 
-1. **Models card on Overview** (new).
+1. **Models card on Overview** (new; removed again by the product owner on 2026-10-28).
    - **What:** shows the six answers from the #1510 engine (`insights_model_answers`). Each row shows a leader and a runner-up, their session counts, and the basis (for example "undone edits we could see"). When there isn't enough evidence it shows "Not enough traces yet" or "No clear difference", and an (i) explains which sessions were left out and why. Money is labelled "at API prices".
    - **Why:** #1510 computed the answers, but no screen showed them.
 

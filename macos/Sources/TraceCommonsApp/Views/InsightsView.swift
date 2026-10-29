@@ -25,6 +25,9 @@ struct InsightsView: View {
     /// (`InsightsInspector`); `nil` opens it under its row instead.
     private let inspector: InsightsInspector?
     @State private var source = "codex"
+    /// Details' drill-down view; a usage card's "By project" opens it on
+    /// By project (product owner, 2026-10-28).
+    @State private var detailsView: InsightsCreditWords.Dimension = .folder
 
     /// `daemon` is the app's live client, for the week from the daemon's
     /// counter pass (feed T); without one the window shows saved imports.
@@ -52,9 +55,6 @@ struct InsightsView: View {
         }
         let watchedDrill: InsightsSessionsModel.WatchedDrillReader? = daemon.map { client in
             { @Sendable reference in try await client.insightsSessionDrill(sessionRef: reference) }
-        }
-        let modelAnswersReader: InsightsModel.ModelAnswersReader? = daemon.map { client in
-            { @Sendable in try await client.insightsModelAnswers() }
         }
         let watchedLabel: InsightsSessionsModel.WatchedLabelWriter? = daemon.map { client in
             { @Sendable reference, task, outcome in
@@ -88,7 +88,6 @@ struct InsightsView: View {
         }
         self.init(storeSelection: storeSelection, storeCopy: storeCopy,
                   model: InsightsModel(service: service, weekReader: weekReader,
-                                       modelAnswersReader: modelAnswersReader,
                                        sessionAnalyzer: sessionAnalyzer),
                   comparisonModel: ComparisonTasksModel(service: service),
                   specificationModel: ComparisonSpecificationsModel(service: service),
@@ -153,9 +152,11 @@ struct InsightsView: View {
     }
 
     /// The tab container. No Spend tab: a tab that cannot be used is
-    /// hidden, not drawn greyed, and Insights shows no money (owner
-    /// decision D5). The models open and close with the container, not with
-    /// a tab.
+    /// hidden, not drawn greyed. Insights may show money (product owner,
+    /// 2026-10-28, over owner decision D5): NEAR AI spend on Overview and
+    /// Details, from the NEAR AI ledger's own charge. The NEAR AI balance
+    /// stays on the Private AI tab. The models open and
+    /// close with the container, not with a tab.
     private var tabs: some View {
         // The page is in the main pane, whose insets it shares: no inset of
         // its own across, so its cards get the pane's whole 408pt.
@@ -175,8 +176,10 @@ struct InsightsView: View {
                     snapshots: model.snapshots,
                     notice: model.counterPassNoticeKey.map(model.text),
                     patterns: patternsModel.shown,
-                    models: model.modelAnswers,
                     subscriptions: subscriptionModel,
+                    nearAiCredit: model.counterWeek?.nearAiCredit,
+                    usageByDay: model.counterWeek?.usageByDay,
+                    showProjects: { detailsView = .folder; tab = .patterns },
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
@@ -184,13 +187,12 @@ struct InsightsView: View {
                     },
                     showReads: { tab = .patterns },
                     showPatterns: { tab = .patterns })
-                // Each time, so labels set on Sessions since show, and one
-                // failed read hides the card only until the next.
-                .onAppear { model.refreshModelAnswers() }
                 .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
-                                    selectWeek: selectWeek)
+                                    selectWeek: selectWeek,
+                                    week: model.counterWeek, detailsView: $detailsView,
+                                    overview: overviewModel, snapshots: model.snapshots)
             case .sessions:
                 InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy,
                                     notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text),
@@ -207,12 +209,16 @@ struct InsightsView: View {
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
         .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
-        // A saved label changes the Models answers.
+        // A saved task label moves NEAR AI spend by task: read the week on
+        // screen again.
         .onAppear {
             // Bound first, so the callback's weak capture is of this local and
             // not of the closure's implicit strong one (Swift 6.4 refuses that).
             let model = model
-            sessionsModel.labelSaved = { [weak model] in model?.refreshModelAnswers() }
+            sessionsModel.labelSaved = { [weak model] in
+                guard let model, let week = model.counterWeek?.isoWeek else { return }
+                Task { await model.loadWeek(isoWeek: week) }
+            }
         }
         .onAppear { showSampleWeekIfAsked() }
         // The open Sessions trace is the inspector's while Sessions is shown.

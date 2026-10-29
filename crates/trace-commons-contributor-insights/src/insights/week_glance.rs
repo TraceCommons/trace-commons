@@ -599,6 +599,7 @@ pub fn counter_overview(
         sources: Vec::new(),
         by_day: None,
         codex_interval_tokens: None,
+        codex_by_day: None,
         by_model: Vec::new(),
         sessions: Vec::new(),
     };
@@ -1048,6 +1049,7 @@ mod tests {
             }],
             by_day: None,
             codex_interval_tokens: Some(tokens),
+            codex_by_day: None,
             by_model: Vec::new(),
             sessions: vec![super::super::week_rollup::SessionWeek {
                 session_ref: String::new(),

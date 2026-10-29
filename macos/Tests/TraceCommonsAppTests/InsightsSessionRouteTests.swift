@@ -442,7 +442,10 @@ final class InsightsSessionRouteTests: XCTestCase {
         // A figure drills only when `drills` says so; one that does not is
         // drawn plain, not as a disabled button.
         XCTAssertTrue(source.contains("if model.drills(inputs) {"))
-        XCTAssertTrue(source.contains("InsightsCounterSessionsView("))
+        // A picked day's sessions are drawn under Tokens by day, on Details
+        // since the owner's 2026-10-28 review.
+        XCTAssertTrue(try InsightsGlassConventionsTests.text("Views/InsightsTokensByDay.swift")
+            .contains("InsightsCounterSessionsView("))
         for key in ["analytics_drill_private", "analytics_route_measure_note"] {
             XCTAssertTrue(source.contains("\"\(key)\""), key)
         }

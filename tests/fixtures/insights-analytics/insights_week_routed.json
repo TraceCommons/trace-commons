@@ -177,10 +177,203 @@
           "calls_without_counts": 1
         }
       }
+    ],
+    "codex_by_day": [
+      null,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
     ]
   },
   "routing_available": true,
   "routing_unavailable": null,
+  "near_ai_credit": {
+    "basis": "near_ai_ledger",
+    "week": {
+      "usd_micros": 12500,
+      "sessions": 1,
+      "calls": 1,
+      "calls_without_charge": 0,
+      "from": "2026-09-14T00:00:00+00:00",
+      "to": "2026-09-21T00:00:00+00:00",
+      "by_task": [
+        {
+          "usd_micros": 12500,
+          "sessions": 1,
+          "calls": 1,
+          "calls_without_charge": 0,
+          "key": "other",
+          "tokens": 110,
+          "usd_micros_known": 12500,
+          "usd_partial": false,
+          "tokens_known": 110,
+          "tokens_partial": false
+        }
+      ],
+      "by_tool": [
+        {
+          "usd_micros": 12500,
+          "sessions": 1,
+          "calls": 1,
+          "calls_without_charge": 0,
+          "key": "codex",
+          "tokens": 110,
+          "usd_micros_known": 12500,
+          "usd_partial": false,
+          "tokens_known": 110,
+          "tokens_partial": false
+        }
+      ],
+      "by_folder": [
+        {
+          "usd_micros": 12500,
+          "sessions": 1,
+          "calls": 1,
+          "calls_without_charge": 0,
+          "key": null,
+          "tokens": 110,
+          "usd_micros_known": 12500,
+          "usd_partial": false,
+          "tokens_known": 110,
+          "tokens_partial": false
+        }
+      ],
+      "tokens": 110,
+      "usd_micros_known": 12500,
+      "usd_partial": false,
+      "tokens_known": 110,
+      "tokens_partial": false
+    },
+    "today": {
+      "usd_micros": 12500,
+      "sessions": 1,
+      "calls": 1,
+      "calls_without_charge": 0,
+      "from": "2026-09-14T00:00:00+00:00",
+      "to": "2026-09-15T00:00:00+00:00",
+      "tokens": 110,
+      "usd_micros_known": 12500,
+      "usd_partial": false,
+      "tokens_known": 110,
+      "tokens_partial": false
+    },
+    "by_day": [
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-08T00:00:00+00:00",
+        "to": "2026-09-09T00:00:00+00:00",
+        "date": "2026-09-08",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-09T00:00:00+00:00",
+        "to": "2026-09-10T00:00:00+00:00",
+        "date": "2026-09-09",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-10T00:00:00+00:00",
+        "to": "2026-09-11T00:00:00+00:00",
+        "date": "2026-09-10",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-11T00:00:00+00:00",
+        "to": "2026-09-12T00:00:00+00:00",
+        "date": "2026-09-11",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-12T00:00:00+00:00",
+        "to": "2026-09-13T00:00:00+00:00",
+        "date": "2026-09-12",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-13T00:00:00+00:00",
+        "to": "2026-09-14T00:00:00+00:00",
+        "date": "2026-09-13",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 12500,
+        "sessions": 1,
+        "calls": 1,
+        "calls_without_charge": 0,
+        "from": "2026-09-14T00:00:00+00:00",
+        "to": "2026-09-15T00:00:00+00:00",
+        "date": "2026-09-14",
+        "tokens": 110,
+        "usd_micros_known": 12500,
+        "usd_partial": false,
+        "tokens_known": 110,
+        "tokens_partial": false
+      }
+    ],
+    "last_31_days": {
+      "usd_micros": 12500,
+      "sessions": 1,
+      "calls": 1,
+      "calls_without_charge": 0,
+      "from": "2026-08-15T00:00:00+00:00",
+      "to": "2026-09-15T00:00:00+00:00",
+      "tokens": 110,
+      "usd_micros_known": 12500,
+      "usd_partial": false,
+      "tokens_known": 110,
+      "tokens_partial": false
+    }
+  },
   "overview": {
     "feed": "counter_pass",
     "generation": 0,
@@ -645,5 +838,42 @@
       "past_threshold": null
     }
   ],
-  "recap_card_enabled": true
+  "recap_card_enabled": true,
+  "usage_by_day": [
+    {
+      "date": "2026-09-08",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-09",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-10",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-11",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-12",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-13",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-14",
+      "claude_code": 37235,
+      "codex": null
+    }
+  ]
 }

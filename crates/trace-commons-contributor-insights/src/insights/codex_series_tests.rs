@@ -701,9 +701,17 @@ fn weekly_codex_figures_ignore_the_series() {
     let without = [input(None)];
     let monday = chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
     let tz = chrono::FixedOffset::east_opt(0).unwrap();
-    assert_eq!(
-        week_rollup(Feed::Saved, &with, monday, &tz),
-        week_rollup(Feed::Saved, &without, monday, &tz)
+    // Every weekly figure but `codex_by_day`, which is the series split by
+    // day (product owner, 2026-10-28) and so reads it by design.
+    let figures = |sessions: &[SessionInput]| {
+        let mut rollup = week_rollup(Feed::Saved, sessions, monday, &tz);
+        rollup.codex_by_day = None;
+        rollup
+    };
+    assert_eq!(figures(&with), figures(&without));
+    assert_ne!(
+        week_rollup(Feed::Saved, &with, monday, &tz).codex_by_day,
+        week_rollup(Feed::Saved, &without, monday, &tz).codex_by_day
     );
     assert_eq!(
         week_patterns(Feed::Saved, &with, monday, tz, 6),

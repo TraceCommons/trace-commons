@@ -2213,6 +2213,14 @@ extension DaemonData {
         /// Why not, while `routingAvailable` is false: `ledger_feed_off`
         /// (the contributor turned the ledger feed off) or `no_ledger`.
         public let routingUnavailable: String?
+        /// Where NEAR AI credit went (product owner, 2026-10-28): `nil`
+        /// while routing is unavailable and from a daemon that predates it,
+        /// which is no figure, never zero.
+        public let nearAiCredit: InsightsNearAiCredit?
+        /// Claude and Codex tokens on each of the last 7 local days, oldest
+        /// first (product owner, 2026-10-28); `nil` from a daemon that
+        /// predates it.
+        public let usageByDay: [InsightsUsageDay]?
 
         /// Enabled, readable, from the counter pass, and carrying a rollup and
         /// the core's Overview for it.
@@ -2231,6 +2239,134 @@ extension DaemonData {
             case changeVsLastWeek = "change_vs_last_week"
             case routingAvailable = "routing_available"
             case routingUnavailable = "routing_unavailable"
+            case nearAiCredit = "near_ai_credit"
+            case usageByDay = "usage_by_day"
+        }
+    }
+
+    /// One local day's tokens for the usage cards' bars. `nil` is unknown,
+    /// never zero; a day with no session of that tool is a true 0.
+    public struct InsightsUsageDay: Codable, Equatable, Sendable {
+        public let date: String
+        public let claudeCode: Int64?
+        public let codex: Int64?
+
+        public init(date: String, claudeCode: Int64?, codex: Int64?) {
+            self.date = date; self.claudeCode = claudeCode; self.codex = codex
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case date, codex
+            case claudeCode = "claude_code"
+        }
+    }
+
+    /// `insights_week`'s `near_ai_credit`: the NEAR AI ledger's own charge
+    /// (`basis` `near_ai_ledger`), never a list price. `week` is the week
+    /// on screen; `today` and `last31Days` do not move with it.
+    public struct InsightsNearAiCredit: Codable, Equatable, Sendable {
+        public let basis: String
+        public let week: InsightsCreditWindow
+        public let today: InsightsCreditWindow
+        /// The last 7 local days, oldest first, today last, each with its
+        /// `date`; `nil` from a daemon that predates it.
+        public let byDay: [InsightsCreditWindow]?
+        public let last31Days: InsightsCreditWindow
+
+        public init(basis: String = "near_ai_ledger", week: InsightsCreditWindow,
+                    today: InsightsCreditWindow, byDay: [InsightsCreditWindow]? = nil,
+                    last31Days: InsightsCreditWindow) {
+            self.basis = basis; self.week = week; self.today = today; self.byDay = byDay
+            self.last31Days = last31Days
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case basis, week, today
+            case byDay = "by_day"
+            case last31Days = "last_31_days"
+        }
+    }
+
+    /// One window's NEAR AI charge: the calls through the NEAR AI route
+    /// that started in it. `usdMicros` is `nil` when any call had no
+    /// charge, never zero; a window with no call is a true 0. Only `week`
+    /// carries the groups.
+    public struct InsightsCreditWindow: Codable, Equatable, Sendable {
+        public let from: String
+        public let to: String
+        /// `YYYY-MM-DD`, on a `byDay` window only.
+        public let date: String?
+        public let usdMicros: Int64?
+        public let sessions: Int
+        public let calls: Int
+        public let callsWithoutCharge: Int
+        /// The calls' tokens; `nil` when any call's are unknown, and from a
+        /// daemon that predates them.
+        public let tokens: Int64?
+        /// The charge and tokens as far as they are known (product owner,
+        /// 2026-10-28): a minimum while the matching `*Partial` is true;
+        /// `nil` when nothing is known, and from a daemon that predates them.
+        public var usdMicrosKnown: Int64? = nil
+        public var usdPartial: Bool? = nil
+        public var tokensKnown: Int64? = nil
+        public var tokensPartial: Bool? = nil
+        public let byTask: [InsightsCreditGroup]?
+        public let byTool: [InsightsCreditGroup]?
+        public let byFolder: [InsightsCreditGroup]?
+
+        public init(from: String = "", to: String = "", date: String? = nil, usdMicros: Int64?, sessions: Int,
+                    calls: Int, callsWithoutCharge: Int, tokens: Int64? = nil, byTask: [InsightsCreditGroup]? = nil,
+                    byTool: [InsightsCreditGroup]? = nil, byFolder: [InsightsCreditGroup]? = nil) {
+            self.from = from; self.to = to; self.date = date; self.usdMicros = usdMicros; self.sessions = sessions
+            self.calls = calls; self.callsWithoutCharge = callsWithoutCharge; self.tokens = tokens
+            self.byTask = byTask; self.byTool = byTool; self.byFolder = byFolder
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case from, to, date, sessions, calls, tokens
+            case usdMicros = "usd_micros"
+            case usdMicrosKnown = "usd_micros_known"
+            case usdPartial = "usd_partial"
+            case tokensKnown = "tokens_known"
+            case tokensPartial = "tokens_partial"
+            case callsWithoutCharge = "calls_without_charge"
+            case byTask = "by_task"
+            case byTool = "by_tool"
+            case byFolder = "by_folder"
+        }
+    }
+
+    /// One group of a week's charge. `key` is the inferred task, the tool
+    /// (`claude_code`, `codex`) or the folder's local label; `nil` is the
+    /// unknown group. Largest known charge first, unknown ones after.
+    public struct InsightsCreditGroup: Codable, Equatable, Sendable {
+        public let key: String?
+        public let usdMicros: Int64?
+        public let sessions: Int
+        public let calls: Int
+        public let callsWithoutCharge: Int
+        /// The group's tokens; `nil` when unknown.
+        public let tokens: Int64?
+        /// As far as known, as on a window.
+        public var usdMicrosKnown: Int64? = nil
+        public var usdPartial: Bool? = nil
+        public var tokensKnown: Int64? = nil
+        public var tokensPartial: Bool? = nil
+
+        public init(key: String?, usdMicros: Int64?, sessions: Int = 1, calls: Int = 1, callsWithoutCharge: Int = 0,
+                    tokens: Int64? = nil) {
+            self.key = key; self.usdMicros = usdMicros; self.sessions = sessions
+            self.calls = calls; self.callsWithoutCharge = callsWithoutCharge; self.tokens = tokens
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case key, sessions, calls, tokens
+            case usdMicros = "usd_micros"
+            case usdMicrosKnown = "usd_micros_known"
+            case usdPartial = "usd_partial"
+            case tokensKnown = "tokens_known"
+            case tokensPartial = "tokens_partial"
+            case callsWithoutCharge = "calls_without_charge"
         }
     }
 

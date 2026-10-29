@@ -328,7 +328,8 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("outcome", "Outcome"), ("recorded_at", "Recorded at"),
         ("unknown", "Unknown"), ("working", "Working…"),
         ("no_file", "No file selected"), ("cost", "Estimated cost"),
-        ("codex", "Codex rollout"), ("claude_code", "Claude Code trace"), ("trajectory", "Trajectory"),
+        // "Claude", not "Claude Code", in Insights (owner, approved 2026-10-28).
+        ("codex", "Codex rollout"), ("claude_code", "Claude trace"), ("trajectory", "Trajectory"),
         ("metric_sessions", "Traces"), ("metric_events", "Events"),
         ("metric_input_tokens", "Input tokens"), ("metric_output_tokens", "Output tokens"),
         ("metric_tool_calls", "Tool calls"), ("metric_tool_failures", "Reported tool failures"),
@@ -1844,7 +1845,7 @@ mod tests {
             ("analytics_from_counters", "from token counts"),
             (
                 "analytics_claude_sessions_only",
-                "Claude Code traces only: {k} of {n}.",
+                "Claude traces only: {k} of {n}.",
             ),
             ("analytics_see_sessions", "Show {n} traces"),
             ("analytics_goal_cache_share", "Cache share at least {p}%"),
@@ -1903,6 +1904,12 @@ mod tests {
                 "analytics_setting_counter_pass",
                 "Count tokens in watched folders",
             ),
+            // Owner, 2026-10-28: "Claude", never "Claude Code", in the
+            // drill-down; one trace is singular; an unmeasured login's
+            // card says this.
+            ("analytics_credit_tool_claude_code", "Claude"),
+            ("analytics_projects_traces_one", "{n} trace"),
+            ("analytics_limits_refresh_to_see", "Refresh to see limits"),
         ] {
             assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
         }
@@ -1925,6 +1932,9 @@ mod tests {
             "analytics_analyze_how",
             "analytics_tip_context",
             "analytics_subscriptions_session",
+            // The quota's Session window again, on the usage cards.
+            "analytics_limits_session_left",
+            "analytics_usage_session_resets",
         ];
         assert_eq!(copy["analytics_subscriptions_session"], "Session");
         for (key, words) in ANALYTICS_COPY {
@@ -2018,77 +2028,6 @@ mod tests {
             ("analytics_pattern_long_context_headline_other", "{n} turns"),
         ] {
             assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
-        }
-    }
-
-    /// The Models card (model answers spec section 8): a row name and a
-    /// fact for every question the engine answers, on either basis; a word
-    /// for every left-out reason it counts; and no ranking word anywhere
-    /// on the card.
-    #[test]
-    fn the_models_card_has_words_for_every_answer_and_no_ranking_word() {
-        use super::super::model_answers::{LeftOut, ModelQuestion};
-        let copy = ui_copy();
-        for question in ModelQuestion::ALL {
-            let wire = serde_json::to_value(question).unwrap();
-            let name = wire.as_str().unwrap();
-            for key in [
-                format!("analytics_models_row_{name}"),
-                format!("analytics_models_lead_{name}"),
-            ] {
-                assert!(copy.contains_key(&key), "missing {key}");
-            }
-            if name.contains("rejected") {
-                let key = format!("analytics_models_lead_{name}_undone");
-                assert!(copy[&key].contains("undone"), "{key}");
-                // The figure is a share of the model's edits, so the
-                // model with the lowest share can still have the most
-                // rejected edits: the fact names a share, never a count.
-                for key in [format!("analytics_models_lead_{name}"), key] {
-                    let words = &copy[&key];
-                    assert!(words.starts_with("Lowest share of edits"), "{key}");
-                    assert!(!words.to_lowercase().contains("fewest"), "{key}");
-                }
-            }
-        }
-        let left_out = serde_json::to_value(LeftOut::default()).unwrap();
-        for reason in left_out.as_object().unwrap().keys() {
-            let key = format!("analytics_models_left_out_{reason}");
-            assert!(copy.get(&key).is_some_and(|w| w.contains("{n}")), "{key}");
-        }
-        for (key, words) in [
-            ("analytics_card_models", "Models"),
-            (
-                "analytics_models_scope",
-                "In your traces \u{b7} labels as recorded \u{b7} task type yours, else inferred",
-            ),
-            ("analytics_models_cost", "{x} at API prices"),
-            ("analytics_models_basis_undone", "Undone edits we could see"),
-            ("analytics_models_not_enough", "Not enough traces yet"),
-            (
-                "analytics_models_no_clear_difference",
-                "No clear difference",
-            ),
-            ("analytics_models_not_priced", "Not priced"),
-        ] {
-            assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
-        }
-        for (key, words) in &copy {
-            if key.starts_with("analytics_models_") || key == "analytics_card_models" {
-                let lower = words.to_lowercase();
-                for banned in ["best", "better", "fastest", "winner", "benchmark"] {
-                    assert!(!lower.contains(banned), "{key} says {banned}");
-                }
-            }
-        }
-        // Money is never a figure on its own: each `{x}` that holds an
-        // amount sits in a sentence naming which price it is.
-        for key in ["analytics_models_cost", "analytics_models_charge"] {
-            let words = &copy[key];
-            assert!(
-                words.contains("API prices") || words.contains("Charged through Private AI"),
-                "{key}"
-            );
         }
     }
 

@@ -184,6 +184,14 @@ impl ManagedHistory {
         }
         Ok(found.then_some(Self { entries, from }))
     }
+    /// A snapshot of `rows` under each home, for tests elsewhere.
+    #[cfg(test)]
+    pub(crate) fn from_entries(entries: Vec<(PathBuf, RoutedExchange)>) -> Self {
+        Self {
+            entries,
+            from: DateTime::UNIX_EPOCH,
+        }
+    }
     #[cfg(test)]
     pub(crate) fn rows(&self) -> Vec<RoutedExchange> {
         self.rows_since(self.from)
@@ -207,6 +215,19 @@ impl ManagedHistory {
                 .entries
                 .iter()
                 .filter(|(_, row)| row.started_at >= other_from))
+    }
+
+    /// Each managed route's rows by its home's name (the route's UUID),
+    /// in id order, without copying them. Row ids are the home's own, so a
+    /// fold keeps one cursor per home (`insights_week`'s ledger fold).
+    pub(crate) fn rows_by_home(&self) -> BTreeMap<String, Vec<&RoutedExchange>> {
+        let mut homes: BTreeMap<String, Vec<&RoutedExchange>> = BTreeMap::new();
+        for (home, row) in &self.entries {
+            if let Some(name) = home.file_name().and_then(|name| name.to_str()) {
+                homes.entry(name.to_string()).or_default().push(row);
+            }
+        }
+        homes
     }
 
     /// Check source membership without copying the snapshot's metadata.

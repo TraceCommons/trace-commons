@@ -138,10 +138,14 @@ final class DesignRulings20261022Tests: XCTestCase {
         let overview = try GlassSurfaceRulesTests.text("Views/InsightsOverviewTab.swift")
         XCTAssertFalse(overview.contains("drillButton(\"sessions\")"), "the Sessions figure drills again")
         XCTAssertFalse(overview.contains("if model.drills(\"sessions\") { GlassChevron() }"))
-        XCTAssertTrue(overview.contains("header(overview)\n                    sessionsBreakdown(overview)\n"))
+        // Off Overview (product owner, 2026-10-28), with Tokens by day: on
+        // Details a picked day shows that day's sessions.
+        XCTAssertFalse(overview.contains("sessionsBreakdown"))
         XCTAssertFalse(overview.contains("model.counterInputs"))
+        let byDay = try GlassSurfaceRulesTests.text("Views/InsightsTokensByDay.swift")
+        XCTAssertTrue(byDay.contains("if pickedDay != nil { sessionsBreakdown(overview) }"))
         let breakdown = try Self.section("    private func sessionsBreakdown(_ overview: InsightsWeekOverview) -> some View {",
-                                         in: overview)
+                                         in: byDay)
         XCTAssertTrue(breakdown.contains("if !sessions.rows.isEmpty {"))
         XCTAssertTrue(breakdown.contains("let inputs = model.sessionsInputs, !inputs.sessions.isEmpty"))
     }
