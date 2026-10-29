@@ -606,7 +606,8 @@ final class FirstRunRunnerTests: XCTestCase {
         let runner = FirstRunRunner(state: state, daemon: daemon)
         runner.referralCode = "  tc-7k3m9-qx2rd "
         await runner.commit(.signIn)
-        XCTAssertEqual(daemon.log, [.nearAILogin, .enrollNearAI])
+        XCTAssertEqual(
+            daemon.log, [.startDaemon(settingsJSON: state.sessionRoots.settingsJSON()!), .nearAILogin, .enrollNearAI])
         XCTAssertEqual(daemon.referralCodes, ["tc-7k3m9-qx2rd"])
 
         XCTAssertNil(FirstRunRunner.sentReferralCode(""))
