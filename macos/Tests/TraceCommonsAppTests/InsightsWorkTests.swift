@@ -87,6 +87,124 @@ final class InsightsWorkTests: XCTestCase {
         XCTAssertNil(InsightsBenchmarkWords.tip(.init(kind: "from_a_newer_daemon"), copy: copy))
     }
 
+    /// Benchmarks' population picker (product owner, 2026-10-29): the
+    /// person's own traces, or Claude's sub-agent transcripts, in the core's
+    /// words; the intro names which.
+    func testBenchmarkPopulationsReadInTheCoresWords() throws {
+        let copy = try words()
+        XCTAssertEqual(InsightsBenchmarkWords.populations, ["own", "spawned"])
+        XCTAssertEqual(InsightsBenchmarkWords.population("own", copy: copy), "Your traces")
+        XCTAssertEqual(InsightsBenchmarkWords.population("spawned", copy: copy), "Sub-agents")
+        XCTAssertEqual(InsightsBenchmarkWords.intro(12, population: "own", copy: copy), "Compared on 12 of your traces")
+        XCTAssertEqual(InsightsBenchmarkWords.intro(40, population: "spawned", copy: copy),
+                       "Compared on 40 Claude sub-agent traces")
+    }
+
+    func testBenchmarksDecodeTheirPopulationAndDelegatedCount() throws {
+        let json = #"""
+        {"enabled":true,"readable":true,"weeks":4,"population":"spawned","sessions":3,"min_sessions":5,
+         "categories":[],"delegated":0}
+        """#
+        let answer = try JSONDecoder().decode(DaemonData.InsightsBenchmarks.self, from: Data(json.utf8))
+        XCTAssertEqual(answer.population, "spawned")
+        XCTAssertEqual(answer.delegated, 0)
+        let older = try JSONDecoder().decode(DaemonData.InsightsBenchmarks.self,
+                                             from: Data(#"{"enabled":true,"categories":[]}"#.utf8))
+        XCTAssertNil(older.population, "an older daemon answers the person's own only")
+    }
+
+    /// The model asks for the population chosen, and a sample model (the
+    /// get-started card's) has no reader to ask.
+    func testTheBenchmarksModelAsksForTheChosenPopulation() async throws {
+        let asked = AskedLog()
+        let model = InsightsBenchmarksModel(reader: { weeks, population in
+            await asked.add("\(weeks) \(population)")
+            return DaemonData.InsightsBenchmarks(categories: [])
+        })
+        XCTAssertEqual(model.population, "own", "the person's own by default")
+        await model.load()
+        model.population = "spawned"
+        model.weeks = 13
+        await model.load()
+        let log = await asked.items
+        XCTAssertEqual(log, ["4 own", "13 spawned"])
+        let sample = InsightsBenchmarksModel(sample: DaemonData.InsightsBenchmarks(categories: []))
+        sample.population = "spawned"
+        await sample.load()
+        XCTAssertNotNil(sample.answer, "the sample stays drawn")
+    }
+
+    /// One model is enough (product owner, 2026-10-29): its own figures on
+    /// each kind of work, and the share of its traces that went to each.
+    func testOneModelShowsItsOwnFiguresAndWorkMix() throws {
+        let copy = try words()
+        let opus = DaemonData.InsightsBenchmarkModel(label: "claude-opus-5-5", tool: "claude_code", sessions: 6,
+                                                     keptPermille: 1000, usdMicrosMedian: 4_785_380,
+                                                     activeSecsMedian: 1_436)
+        let docs = DaemonData.InsightsBenchmarkModel(label: "claude-opus-5-5", tool: "claude_code", sessions: 2)
+        let answer = DaemonData.InsightsBenchmarks(weeks: 4, sessions: 8, minSessions: 5, categories: [
+            .init(key: "docs", sessions: 2, models: [docs]),
+            .init(key: "feature", sessions: 6, models: [opus]),
+        ])
+        let rows = InsightsBenchmarkWords.rows(try XCTUnwrap(answer.categories?.last), copy: copy)
+        XCTAssertEqual(rows.map(\.kept), ["100%"])
+        XCTAssertEqual(rows.map(\.cost), ["$4.79"])
+        XCTAssertEqual(rows.map(\.traces), ["6 traces"])
+        let docsRows = InsightsBenchmarkWords.rows(try XCTUnwrap(answer.categories?.first), copy: copy)
+        XCTAssertEqual(docsRows.map(\.kept), [copy["analytics_unavailable"]], "an unknown figure is the dash")
+
+        let mix = InsightsBenchmarkWords.mix(answer, copy: copy)
+        XCTAssertEqual(mix.map(\.model), ["claude-opus-5-5"])
+        XCTAssertEqual(mix[0].traces, "8 traces")
+        XCTAssertEqual(mix[0].shares.map(\.task), ["Build a feature", "Docs & writing"], "most first")
+        XCTAssertEqual(mix[0].shares.map(\.label), ["75% · 6 traces", "25% · 2 traces"])
+    }
+
+    /// The header counts the traces compared, not the window: 1,382 in the
+    /// window with 1,360 left out (automated and the rest) is 22 compared.
+    func testBenchmarksHeaderCountsTheTracesActuallyCompared() throws {
+        let copy = try words()
+        let categories = [
+            DaemonData.InsightsBenchmarkCategory(key: "bug_fix", sessions: 14),
+            DaemonData.InsightsBenchmarkCategory(key: "feature", sessions: 8),
+            DaemonData.InsightsBenchmarkCategory(key: "tests", sessions: 0),
+        ]
+        let answer = DaemonData.InsightsBenchmarks(sessions: 1_382, categories: categories)
+        XCTAssertEqual(InsightsBenchmarkWords.compared(answer), 22)
+        XCTAssertEqual(InsightsOverviewWords.fill(copy["analytics_bench_intro"] ?? "",
+                                                  ["n": String(InsightsBenchmarkWords.compared(answer))]),
+                       "Compared on 22 of your traces")
+        XCTAssertEqual(InsightsBenchmarkWords.compared(.init(sessions: 5, categories: nil)), 0)
+    }
+
+    func testBenchmarkLabelsAreShortAndTheirDetailsAreBehindAnI() throws {
+        let copy = try words()
+        XCTAssertEqual(copy["analytics_bench_quality"], "Quality")
+        XCTAssertEqual(copy["analytics_bench_value"], "Value")
+        XCTAssertEqual(copy["analytics_bench_speed"], "Speed")
+        XCTAssertEqual(copy["analytics_bench_quality_detail"], "Share of edits you kept")
+        XCTAssertEqual(copy["analytics_bench_value_detail"], "Cost per trace at API prices")
+        XCTAssertEqual(copy["analytics_bench_speed_detail"], "Time per trace")
+        XCTAssertEqual(copy["analytics_bench_not_enough"], "Waiting for more data")
+        XCTAssertNil(copy["analytics_bench_min"])
+        XCTAssertNil(copy["analytics_bench_empty"])
+        let category = DaemonData.InsightsBenchmarkCategory(
+            key: "bug_fix", sessions: 9,
+            quality: .init(leader: .init(label: "a", tool: "codex", figure: 900),
+                           next: .init(label: "b", tool: "codex", figure: 800)))
+        XCTAssertEqual(InsightsBenchmarkWords.picks(category, copy: copy).map(\.info), ["Share of edits you kept"])
+    }
+
+    /// The header is the title and the picker alone; each card carries its
+    /// own labels with an "i".
+    func testBenchmarksHeaderHasNoLegend() throws {
+        let source = try InsightsGlassConventionsTests.text("Views/InsightsBenchmarksTab.swift")
+        XCTAssertFalse(source.contains("analytics_bench_min"))
+        XCTAssertFalse(source.contains("insightsCaption()\n                }\n            }\n            Text(InsightsOverviewWords.fill(text(\"analytics_bench_min"), "the legend left the header")
+        XCTAssertFalse(source.contains(" · "), "no joined title and detail")
+        XCTAssertTrue(source.contains("InsightsInfo(pick.title, [pick.info])"))
+    }
+
     func testEveryBenchmarkCategoryHasAName() throws {
         let copy = try words()
         for key in InsightsBenchmarkWords.categories {
@@ -158,4 +276,9 @@ final class InsightsWorkTests: XCTestCase {
         XCTAssertEqual(table.first?.label, "site", "the largest spend leads")
         XCTAssertEqual(table.first?.spend, "$2.00")
     }
+}
+
+private actor AskedLog {
+    private(set) var items: [String] = []
+    func add(_ item: String) { items.append(item) }
 }

@@ -113,16 +113,18 @@ final class InferenceParityTests: XCTestCase {
         stateTone: { TCPrivateInference.stateTone(state: $0) },
         servingLine: { TCPrivateInference.servingLine(port: $0) },
         shouldOffer: { TCPrivateInference.shouldOffer(answered: $0, on: $1) },
-        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) })
+        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) },
+        menuWord: { TCPrivateInference.menuWord(state: $0) },
+        menuTone: { TCPrivateInference.menuTone(state: $0) })
 
-    /// The state label reads the listener's report alone: a refusal asks,
+    /// The state label reads the listener's report alone: a refusal is red,
     /// an unreported state is never on, and a line the core could not give
     /// falls back to its unknown sentence.
     func test_theStateLabelReadsTheReportNeverTheSwitch() throws {
         let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
         let refused = PrivateAISwitchCard.stateLabel(
             state: PrivateInferenceState(label: "port_in_use", port: nil), copy: copy, calls: Self.coreCalls)
-        XCTAssertEqual(refused.status, .ask)
+        XCTAssertEqual(refused.status, .outside)
         XCTAssertEqual(refused.line, TCPrivateInference.stateLine(state: "port_in_use"))
         let unreported = PrivateAISwitchCard.stateLabel(
             state: PrivateInferenceState(label: "", port: nil), copy: copy, calls: Self.coreCalls)
@@ -287,24 +289,26 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(source.contains("wallet?.commons ?? \"\""), "an absent word must not draw an unlabelled field")
     }
 
-    /// The window's Inference dot and the map's Private AI segment take
-    /// #1146's rule: on while working, outside (red) for every other tone,
-    /// never grey. The inspector's Status row is the menu bar's word and
-    /// dot instead (`PrivateInferenceMenuBarTests`).
+    /// Every Private AI dot takes one rule (owner, 2026-10-29): the tab,
+    /// the map, the heading and the menu bar paint one state one colour.
     func test_theDotReadsTheIndicator() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains(
-            "return PrivateInferenceIndicator.dotStatus(PrivateInferenceSurface.tone(state, calls: calls))"))
-        XCTAssertEqual(PrivateInferenceIndicator.dotStatus(.clear), .on)
-        for tone: PrivateInferenceTone in [.neutral, .held, .attention, .refused] {
-            XCTAssertEqual(PrivateInferenceIndicator.dotStatus(tone), .outside, "\(tone)")
+        XCTAssertTrue(window.contains("return PrivateInferenceIndicator.dot(state, calls: calls)"))
+        XCTAssertFalse(window.contains("PrivateInferenceSurface.tone("),
+                       "the tab's dot reads the listener tone table again, not the heading's")
+        let expected: [(PrivateInferenceTone, GlassStatus)] = [
+            (.clear, .on), (.attention, .ask), (.refused, .outside), (.neutral, .off), (.held, .off),
+        ]
+        for (tone, status) in expected {
+            XCTAssertEqual(PrivateInferenceIndicator.status(tone), status, "\(tone)")
+            XCTAssertEqual(MenuPanelStatus.privateAIDot(tone), status, "\(tone)")
         }
         let inspector = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(inspector.contains(
             "Self.statusRow(store.privateAI?.state, copy: copy, calls: model.privateInferenceCalls)"))
         XCTAssertTrue(inspector.contains("MenuPanelStatus.privateAIDot(menu.tone)"))
-        XCTAssertFalse(inspector.contains("PrivateInferenceIndicator.dotStatus("),
-                       "the Status row paints attention red again")
+        XCTAssertFalse(inspector.contains("PrivateInferenceSurface.tone("),
+                       "the Status row reads a second tone table")
     }
 
     /// No write without the preview, and a first connect asks the exposure

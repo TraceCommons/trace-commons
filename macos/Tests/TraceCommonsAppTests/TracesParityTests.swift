@@ -241,13 +241,13 @@ final class TracesParityTests: XCTestCase {
         XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/SessionSendDisclosureView.swift"))
     }
 
-    /// The private-inference tone onto a glass status, as the window's
-    /// Inference dot maps it: only clear is on.
+    /// The private-inference tone onto a glass status, the one rule every
+    /// Private AI dot draws (owner, 2026-10-29): only clear is on.
     func test_thePrivateInferenceToneMapsOntoAGlassStatus() {
         XCTAssertEqual(PrivateInferenceIndicator.status(.clear), .on)
-        XCTAssertEqual(PrivateInferenceIndicator.status(.held), .ask)
+        XCTAssertEqual(PrivateInferenceIndicator.status(.held), .off)
         XCTAssertEqual(PrivateInferenceIndicator.status(.attention), .ask)
-        XCTAssertEqual(PrivateInferenceIndicator.status(.refused), .ask)
+        XCTAssertEqual(PrivateInferenceIndicator.status(.refused), .outside)
         XCTAssertEqual(PrivateInferenceIndicator.status(.neutral), .off)
     }
 

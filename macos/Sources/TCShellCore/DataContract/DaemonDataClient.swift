@@ -252,9 +252,11 @@ public protocol DaemonDataClient: Sendable {
     func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers
     /// `insights_benchmarks`: per kind of work, which of the person's
     /// models is best on quality, value and speed over the last `weeks`
-    /// (4 or 13), from the counter pass. An older daemon refuses it as
-    /// `unknown_method`, and Benchmarks shows nothing.
-    func insightsBenchmarks(weeks: Int) async throws -> DaemonData.InsightsBenchmarks
+    /// (4 or 13), from the counter pass, over `population`: `own` (the
+    /// person's traces) or `spawned` (Claude's sub-agent transcripts). An
+    /// older daemon refuses it as `unknown_method`, and Benchmarks shows
+    /// nothing.
+    func insightsBenchmarks(weeks: Int, population: String) async throws -> DaemonData.InsightsBenchmarks
     /// `insights_submitted`: every trace the person has submitted, whatever
     /// became of it, joined to what the counter pass stored about its
     /// session, over the last `weeks` local weeks (4 or 13) or all time
@@ -337,7 +339,7 @@ public protocol DaemonDataClient: Sendable {
 
 extension DaemonDataClient {
     /// Clients that predate Benchmarks have none to read.
-    public func insightsBenchmarks(weeks: Int) async throws -> DaemonData.InsightsBenchmarks {
+    public func insightsBenchmarks(weeks: Int, population: String) async throws -> DaemonData.InsightsBenchmarks {
         throw DaemonDataError.notAvailableYet(method: "insights_benchmarks")
     }
 

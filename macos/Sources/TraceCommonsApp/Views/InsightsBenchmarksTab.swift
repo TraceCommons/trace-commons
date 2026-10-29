@@ -11,7 +11,8 @@ import TCShellCore
 @MainActor
 @Observable
 final class InsightsBenchmarksModel {
-    typealias Reader = @Sendable (Int) async throws -> DaemonData.InsightsBenchmarks
+    /// Weeks, then population (`own` or `spawned`).
+    typealias Reader = @Sendable (Int, String) async throws -> DaemonData.InsightsBenchmarks
 
     private let reader: Reader?
     private(set) var answer: DaemonData.InsightsBenchmarks?
@@ -19,6 +20,9 @@ final class InsightsBenchmarksModel {
     private(set) var busy = false
     /// 4 or 13 weeks.
     var weeks = 4
+    /// `own`, the person's traces, or `spawned`, Claude's sub-agent
+    /// transcripts as their own population (product owner, 2026-10-29).
+    var population = "own"
 
     /// Whether a read has finished at least once, or there is nothing to
     /// read: until then the get-started card is not drawn.
@@ -40,10 +44,10 @@ final class InsightsBenchmarksModel {
     func load() async {
         guard let reader else { settled = true; return }
         generation += 1
-        let mine = generation, asked = weeks
+        let mine = generation, asked = weeks, among = population
         busy = true
         do {
-            let reply = try await reader(asked)
+            let reply = try await reader(asked, among)
             guard mine == generation else { return }
             answer = reply
             failed = false
@@ -65,9 +69,80 @@ enum InsightsBenchmarkWords {
     struct Pick: Equatable, Identifiable {
         let id: String
         let title: String
+        /// What the label measures, behind its "i".
+        let info: String
         let model: String
         let figure: String
         let next: String
+    }
+
+    /// One model's own figures on a kind of work, shown from its first
+    /// trace (product owner, 2026-10-29); a figure the daemon could not
+    /// make is the dash.
+    struct ModelRow: Equatable, Identifiable {
+        let id: String
+        let model: String
+        let traces: String
+        let kept: String
+        let cost: String
+        let time: String
+    }
+
+    static func rows(_ category: DaemonData.InsightsBenchmarkCategory, copy: [String: String]) -> [ModelRow] {
+        let dash = text("analytics_unavailable", copy)
+        return category.models
+            .sorted { $0.sessions != $1.sessions ? $0.sessions > $1.sessions : $0.label < $1.label }
+            .map { model in
+                ModelRow(id: model.label + "/" + model.tool, model: model.label,
+                         traces: traces(model.sessions, copy: copy),
+                         kept: model.keptPermille.map { String(Int((Double($0) / 10).rounded())) + "%" } ?? dash,
+                         cost: model.usdMicrosMedian.map { InsightsCreditWords.amount($0, copy: copy) } ?? dash,
+                         time: model.activeSecsMedian.map { duration($0) } ?? dash)
+            }
+    }
+
+    /// One model's work mix: each kind of work it was used for, with its
+    /// share of that model's traces, most first (product owner, 2026-10-29:
+    /// with one model, show what share went to what task).
+    struct Mix: Equatable, Identifiable {
+        struct Share: Equatable, Identifiable {
+            let id: String
+            let task: String
+            let fraction: Double
+            let label: String
+        }
+        let id: String
+        let model: String
+        let traces: String
+        let shares: [Share]
+    }
+
+    static func mix(_ answer: DaemonData.InsightsBenchmarks, copy: [String: String]) -> [Mix] {
+        var byModel: [String: (label: String, tasks: [(key: String, sessions: Int)])] = [:]
+        for category in ordered(answer) {
+            for model in category.models where model.sessions > 0 {
+                let id = model.label + "/" + model.tool
+                byModel[id, default: (model.label, [])].tasks.append((category.key, model.sessions))
+            }
+        }
+        return byModel.sorted { lhs, rhs in
+            let l = lhs.value.tasks.reduce(0) { $0 + $1.sessions }, r = rhs.value.tasks.reduce(0) { $0 + $1.sessions }
+            return l != r ? l > r : lhs.value.label < rhs.value.label
+        }
+        .map { id, entry in
+            let total = entry.tasks.reduce(0) { $0 + $1.sessions }
+            let shares = entry.tasks
+                .sorted { $0.sessions != $1.sessions ? $0.sessions > $1.sessions : $0.key < $1.key }
+                .map { task -> Mix.Share in
+                    let fraction = Double(task.sessions) / Double(max(total, 1))
+                    return Mix.Share(id: task.key, task: name(task.key, copy: copy), fraction: fraction,
+                                     label: InsightsOverviewWords.fill(text("analytics_bench_mix_share", copy), [
+                                         "p": String(Int((fraction * 100).rounded())),
+                                         "n": traces(task.sessions, copy: copy),
+                                     ]))
+                }
+            return Mix(id: id, model: entry.label, traces: traces(total, copy: copy), shares: shares)
+        }
     }
 
     static let categories = ["bug_fix", "feature", "refactor", "tests", "docs", "understand", "review", "setup"]
@@ -103,6 +178,26 @@ enum InsightsBenchmarkWords {
         }
     }
 
+    /// The traces actually compared: those on a kind of work, which is the
+    /// window's total less everything in `left_out` (automated, no model,
+    /// routed, ...). Not the window total (owner, 2026-10-29).
+    static func compared(_ answer: DaemonData.InsightsBenchmarks) -> Int {
+        (answer.categories ?? []).reduce(0) { $0 + $1.sessions }
+    }
+
+    /// The populations the picker offers, in its order.
+    static let populations = ["own", "spawned"]
+
+    static func population(_ key: String, copy: [String: String]) -> String {
+        text("analytics_bench_population_" + key, copy)
+    }
+
+    /// The heading over the cards: how many traces were compared, and whose.
+    static func intro(_ count: Int, population: String, copy: [String: String]) -> String {
+        let key = population == "spawned" ? "analytics_bench_intro_spawned" : "analytics_bench_intro"
+        return InsightsOverviewWords.fill(text(key, copy), ["n": String(count)])
+    }
+
     /// Quality, value and speed, each present only when two models qualify.
     static func picks(_ category: DaemonData.InsightsBenchmarkCategory, copy: [String: String]) -> [Pick] {
         [("quality", category.quality), ("value", category.value), ("speed", category.speed)]
@@ -111,7 +206,8 @@ enum InsightsBenchmarkWords {
                 let next = InsightsOverviewWords.fill(text("analytics_bench_next", copy), [
                     "label": pick.next.label, "x": figure(kind, pick.next.figure, copy: copy),
                 ])
-                return Pick(id: kind, title: text("analytics_bench_" + kind, copy), model: pick.leader.label,
+                return Pick(id: kind, title: text("analytics_bench_" + kind, copy),
+                            info: text("analytics_bench_" + kind + "_detail", copy), model: pick.leader.label,
                             figure: figure(kind, pick.leader.figure, copy: copy), next: next)
             }
     }
@@ -164,8 +260,9 @@ struct InsightsBenchmarksTab: View {
                 // A kind of work with no trace has no card.
                 let categories = InsightsBenchmarkWords.ordered(answer).filter { $0.sessions > 0 }
                 if categories.isEmpty {
-                    Text(text("analytics_bench_empty")).insightsNote()
+                    Text(text("analytics_bench_not_enough")).insightsNote()
                 } else {
+                    mixCard(answer)
                     InsightsCardFlow(minimum: 420) {
                         ForEach(categories) { category in
                             card(category, minimum: answer.minSessions ?? 5)
@@ -177,32 +274,28 @@ struct InsightsBenchmarksTab: View {
             }
             if model.busy { GlassSpinner() }
         }
-        .task(id: model.weeks) { await model.load() }
+        .task(id: "\(model.weeks) \(model.population)") { await model.load() }
     }
 
     @ViewBuilder private var header: some View {
         @Bindable var model = model
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-            HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-                if getStarted == nil, let sessions = model.answer?.sessions {
-                    Text(InsightsOverviewWords.fill(text("analytics_bench_intro"), ["n": String(sessions)]))
-                        .insightsHeading()
-                }
-                Spacer(minLength: 0)
-                GlassSelect(text("analytics_tab_benchmarks"), selection: $model.weeks, options: [4, 13].map {
-                    GlassPickerOption(InsightsOverviewWords.fill(text("analytics_bench_weeks"), ["n": String($0)]),
-                                      value: $0)
-                })
-                .fixedSize()
+        HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+            if getStarted == nil, let answer = model.answer {
+                Text(InsightsBenchmarkWords.intro(InsightsBenchmarkWords.compared(answer),
+                                                  population: answer.population ?? "own", copy: copy))
+                    .insightsHeading()
             }
-            HStack(spacing: GlassTokens.Space.s5) {
-                ForEach(["quality", "value", "speed"], id: \.self) { kind in
-                    Text(text("analytics_bench_" + kind) + " · " + text("analytics_bench_" + kind + "_detail"))
-                        .insightsCaption()
-                }
-            }
-            Text(InsightsOverviewWords.fill(text("analytics_bench_min"),
-                                            ["n": String(model.answer?.minSessions ?? 5)])).insightsCaption()
+            Spacer(minLength: 0)
+            GlassSelect(text("analytics_bench_population"), selection: $model.population,
+                        options: InsightsBenchmarkWords.populations.map {
+                GlassPickerOption(InsightsBenchmarkWords.population($0, copy: copy), value: $0)
+            })
+            .fixedSize()
+            GlassSelect(text("analytics_tab_benchmarks"), selection: $model.weeks, options: [4, 13].map {
+                GlassPickerOption(InsightsOverviewWords.fill(text("analytics_bench_weeks"), ["n": String($0)]),
+                                  value: $0)
+            })
+            .fixedSize()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
@@ -216,26 +309,32 @@ struct InsightsBenchmarksTab: View {
                 Spacer(minLength: GlassTokens.Space.s3)
                 Text(InsightsBenchmarkWords.traces(category.sessions, copy: copy)).insightsCaption()
             }
-            if picks.isEmpty {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                    Text(text("analytics_bench_not_enough")).glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    Text(InsightsOverviewWords.fill(text("analytics_bench_not_enough_detail"), ["n": String(minimum)]))
-                        .insightsCaption()
-                }
-            } else {
-                HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
+            if !picks.isEmpty {
+                // One row per metric: its label and "i", the leading model
+                // (the runner-up under it), the figure on the right.
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                     ForEach(picks) { pick in
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                            Text(pick.title).insightsEyebrow()
-                            Text(pick.model).glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                            HStack(spacing: GlassTokens.Space.s2) {
+                                Text(pick.title).insightsEyebrow().lineLimit(1)
+                                InsightsInfo(pick.title, [pick.info])
+                            }
+                            .frame(width: 84, alignment: .leading)
+                            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                                Text(pick.model).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                                Text(pick.next).insightsCaption()
+                            }
+                            Spacer(minLength: GlassTokens.Space.s3)
                             Text(pick.figure).insightsMono()
-                            Text(pick.next).insightsCaption()
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityElement(children: .combine)
                     }
                 }
+            }
+            ownFigures(category)
+            if picks.isEmpty {
+                Text(InsightsOverviewWords.fill(text("analytics_bench_compare_later"), ["n": String(minimum)]))
+                    .insightsCaption()
             }
             if let tip = InsightsBenchmarkWords.tip(category.tip, copy: copy) {
                 HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
@@ -246,5 +345,80 @@ struct InsightsBenchmarksTab: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .insightsSection()
+    }
+
+    /// What share of each model's traces went to each kind of work: the
+    /// one-model view (owner, 2026-10-29).
+    @ViewBuilder private func mixCard(_ answer: DaemonData.InsightsBenchmarks) -> some View {
+        let mixes = InsightsBenchmarkWords.mix(answer, copy: copy)
+        if !mixes.isEmpty {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                Text(text("analytics_bench_mix_title")).insightsHeading()
+                ForEach(mixes) { mix in
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(mix.model).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                            Spacer(minLength: GlassTokens.Space.s3)
+                            Text(mix.traces).insightsCaption()
+                        }
+                        ForEach(mix.shares) { share in
+                            HStack(spacing: GlassTokens.Space.s3) {
+                                Text(share.task).insightsCaption()
+                                    .frame(width: 170, alignment: .leading)
+                                GeometryReader { proxy in
+                                    Capsule().fill(GlassTokens.Color.chartGrid.color)
+                                        .overlay(alignment: .leading) {
+                                            Capsule().fill(GlassTokens.Color.chartSeries1.color)
+                                                .frame(width: max(4, proxy.size.width * share.fraction))
+                                        }
+                                }
+                                .frame(height: 8)
+                                Text(share.label).insightsMono()
+                                    .frame(width: 110, alignment: .trailing)
+                            }
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .insightsSection()
+        }
+    }
+
+    /// Every model used on this kind of work, with its own figures: edits
+    /// kept, cost per trace and time per trace (typical, the median).
+    @ViewBuilder private func ownFigures(_ category: DaemonData.InsightsBenchmarkCategory) -> some View {
+        let rows = InsightsBenchmarkWords.rows(category, copy: copy)
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                Text(text("analytics_bench_yours")).insightsEyebrow()
+                Grid(alignment: .leading, horizontalSpacing: GlassTokens.Space.s4,
+                     verticalSpacing: GlassTokens.Space.s2) {
+                    GridRow {
+                        Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                        ForEach(["kept", "cost", "time"], id: \.self) { column in
+                            Text(text("analytics_bench_col_" + column)).insightsCaption()
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                                .gridColumnAlignment(.trailing)
+                        }
+                    }
+                    ForEach(rows) { row in
+                        GridRow {
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(row.model).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                                    .lineLimit(1).truncationMode(.middle)
+                                Text(row.traces).insightsCaption()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            ForEach([row.kept, row.cost, row.time], id: \.self) { figure in
+                                Text(figure).insightsMono().frame(maxWidth: .infinity, alignment: .trailing)
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+        }
     }
 }

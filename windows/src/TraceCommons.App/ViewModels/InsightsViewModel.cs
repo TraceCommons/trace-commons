@@ -1017,6 +1017,7 @@ public sealed class InsightsOverviewViewModel : AnalyticsTabViewModel
         var weeks = InsightsAnalyticsWords.WeekChoices(week.Weeks, week.WeekStart)
             .Select(start => new AnalyticsChoice(start, InsightsAnalyticsWords.WeekRange(start))).ToArray();
         var notes = new List<string>();
+        if (InsightsAnalyticsWords.CoverageInfo(copy, week.Coverage) is { } coverageInfo) notes.Add(coverageInfo);
         if (week.UndatedSessions > 0)
             notes.Add(InsightsAnalyticsWords.Fill(Text("analytics_coverage_undated"), ("d", Figure(week.UndatedSessions))));
         if (week.Coverage.Reasons.TryGetValue("reimport_overlap", out uint overlap) && overlap > 0)
@@ -1169,6 +1170,7 @@ public sealed class InsightsPatternsViewModel : AnalyticsTabViewModel
             .Select(start => new AnalyticsChoice(start, InsightsAnalyticsWords.WeekRange(start))).ToArray();
         var notes = new List<string> { Text("analytics_patterns_intro"), Text("analytics_patterns_overlap"),
             InsightsAnalyticsWords.CoverageLine(copy, week.Coverage) };
+        if (InsightsAnalyticsWords.CoverageInfo(copy, week.Coverage) is { } coverageInfo) notes.Add(coverageInfo);
         notes.AddRange(InsightsAnalyticsWords.FeedLines(copy, week.Feed));
         var cards = week.Cards.Select(card =>
         {

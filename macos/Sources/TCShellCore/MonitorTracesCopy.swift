@@ -731,6 +731,14 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let tracesHeroTitle: String
     public let tracesHeroBody: String
     public let tracesHeroAction: String
+    /// The hero's three steps, each a title over one line (owner,
+    /// 2026-10-29).
+    public let tracesHeroStepContribute: String
+    public let tracesHeroStepContributeDetail: String
+    public let tracesHeroStepEarn: String
+    public let tracesHeroStepEarnDetail: String
+    public let tracesHeroStepUse: String
+    public let tracesHeroStepUseDetail: String
     public let creditDelta: String
     public let insightsToday: String
     public let insightsTeaser: String
@@ -787,6 +795,12 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case tracesHeroTitle = "traces_hero_title"
         case tracesHeroBody = "traces_hero_body"
         case tracesHeroAction = "traces_hero_action"
+        case tracesHeroStepContribute = "traces_hero_step_contribute"
+        case tracesHeroStepContributeDetail = "traces_hero_step_contribute_detail"
+        case tracesHeroStepEarn = "traces_hero_step_earn"
+        case tracesHeroStepEarnDetail = "traces_hero_step_earn_detail"
+        case tracesHeroStepUse = "traces_hero_step_use"
+        case tracesHeroStepUseDetail = "traces_hero_step_use_detail"
         case creditDelta = "credit_delta"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"

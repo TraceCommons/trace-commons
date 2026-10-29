@@ -380,14 +380,55 @@ fn eight_categories_in_wire_order_and_every_session_accounted_for() {
         + left.unknown_task
         + left.mixed_models
         + left.routed
-        + left.capped
-        + left.delegated;
+        + left.capped;
     assert_eq!(in_rows + left_sum, answer.sessions);
 
     // Thirteen weeks takes the old session in.
     let answer = run_with(&sessions, &BTreeMap::new(), 13, None);
     assert_eq!(answer.sessions, 7);
     assert_eq!(row(&answer, BenchCategory::BugFix).sessions, 3);
+}
+
+#[test]
+fn a_session_that_delegated_is_counted_on_its_own_work_and_marked_partial() {
+    // Five sessions on each model; three of model-b's delegated to
+    // sub-agents whose transcripts are not in their facts.
+    let mut sessions = pair(5, 5);
+    let mut marked = 0;
+    for session in sessions.iter_mut() {
+        if marked < 3 && session.session_ref.starts_with('b') {
+            session.facts.as_mut().unwrap().delegated_unread = true;
+            marked += 1;
+        }
+    }
+    assert_eq!(marked, 3);
+    let answer = run(&sessions);
+    assert_eq!(answer.sessions, 10);
+    assert_eq!(answer.left_out, BenchLeftOut::default());
+    // Counted, on the parent's own figures, and said to be partial.
+    assert_eq!(answer.delegated, 3);
+    let fixes = row(&answer, BenchCategory::BugFix);
+    assert_eq!(fixes.sessions, 10);
+    assert_eq!(model(fixes, "model-b").sessions, 5);
+    // The same figures as without the mark: nothing of the sub-agents' is
+    // added to the parent's.
+    let unmarked = run(&pair(5, 5));
+    assert_eq!(row(&unmarked, BenchCategory::BugFix), fixes);
+    assert_eq!(unmarked.delegated, 0);
+    let wire = serde_json::to_value(&answer).unwrap();
+    assert_eq!(wire["delegated"], 3);
+    assert!(wire["left_out"].get("delegated").is_none());
+}
+
+#[test]
+fn a_capped_session_that_delegated_is_still_left_out_as_capped() {
+    let mut sessions = pair(5, 5);
+    let facts = sessions[0].facts.as_mut().unwrap();
+    facts.delegated_unread = true;
+    facts.capped = true;
+    let answer = run(&sessions);
+    assert_eq!(answer.left_out.capped, 1);
+    assert_eq!(answer.delegated, 0);
 }
 
 #[test]
