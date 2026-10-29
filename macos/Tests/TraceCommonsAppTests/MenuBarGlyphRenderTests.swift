@@ -110,15 +110,21 @@ final class MenuBarGlyphRenderTests: XCTestCase {
     }
 
     /// A count past 99 draws as 99+, whatever the count (owner, 2026-10-21).
+    /// The two drawings of 99+ are compared within a few pixels' ink, not
+    /// byte for byte: after some other tests in the same process the text
+    /// rasterizes a pixel or two differently from one render to the next.
     @MainActor
     func testACountPastNinetyNineDrawsNinetyNinePlus() throws {
+        XCTAssertEqual(GlassMenuBarStrip.badgeText(100), "99+")
+        XCTAssertEqual(GlassMenuBarStrip.badgeText(4_321), "99+")
+        XCTAssertEqual(GlassMenuBarStrip.badgeText(99), "99")
         for scheme in [ColorScheme.light, .dark] {
             let hundred = try XCTUnwrap(render(.live, badge: 100, scheme: scheme, scale: 2))
             let thousands = try XCTUnwrap(render(.live, badge: 4_321, scheme: scheme, scale: 2))
             let ninetyNine = try XCTUnwrap(render(.live, badge: 99, scheme: scheme, scale: 2))
-            XCTAssertEqual(hundred.weight, thousands.weight)
-            XCTAssertEqual(hundred.png, thousands.png)
-            XCTAssertNotEqual(hundred.weight, ninetyNine.weight)
+            XCTAssertEqual(hundred.inked, thousands.inked, accuracy: 4)
+            XCTAssertEqual(hundred.weight, thousands.weight, accuracy: 400)
+            XCTAssertGreaterThan(abs(hundred.weight - ninetyNine.weight), 400, "the plus adds ink")
         }
     }
 

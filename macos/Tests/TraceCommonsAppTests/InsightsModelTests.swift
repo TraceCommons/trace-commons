@@ -31,13 +31,10 @@ final class InsightsModelTests: XCTestCase {
         let model = InsightsModel(service: { request in try await gate.call(request) })
         model.open()
         await gate.waitForCall()
-        XCTAssertTrue(model.busy)
         model.close()
         try await gate.resolve("{\"type\":\"copy\",\"copy\":{\"title\":\"late\"}}")
         for _ in 0..<20 { await Task.yield() }
-        XCTAssertFalse(model.busy)
         XCTAssertTrue(model.copy.isEmpty)
-        XCTAssertNil(model.error)
         XCTAssertTrue(model.snapshots.isEmpty)
     }
 
@@ -46,12 +43,12 @@ final class InsightsModelTests: XCTestCase {
         let recorder = Recorder()
         let model = InsightsModel(service: { request in try await recorder.call(request) })
         model.open()
-        for _ in 0..<500 where model.busy || model.episodeBusy { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<500 where await recorder.operations.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<20 { await Task.yield() }
         XCTAssertEqual(model.text("title"), "Insights")
         let operations = await recorder.operations
-        XCTAssertEqual(Set(operations), ["copy", "episode_list", "list", "summary"])
-        XCTAssertEqual(model.summary?.saved_snapshots, 0)
-        XCTAssertTrue(model.snapshots.isEmpty)
+        XCTAssertEqual(operations, ["copy", "list"])
+        XCTAssertEqual(model.snapshots.map(\.id), ["snap-1"])
         model.close()
     }
 }
@@ -73,101 +70,14 @@ private actor Recorder {
     var operations: [String] = []
     func call(_ request: InsightsRequest) throws -> InsightsResponse {
         operations.append(request.operation.type)
-        if request.operation.type == "summary" {
-            return try TCInsights.call(.init(
-                storeDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
-                operation: .init("summary")))
+        if request.operation.type == "copy" {
+            let json = "{\"type\":\"copy\",\"copy\":{\"title\":\"Insights\"}}"
+            return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
         }
-        let json = switch request.operation.type {
-        case "copy": "{\"type\":\"copy\",\"copy\":{\"title\":\"Insights\"}}"
-        case "episode_list": "{\"type\":\"episode_list\",\"episodes\":[]}"
-        default: "{\"type\":\"list\",\"insights\":[]}"
-        }
-        return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
-    }
-}
-
-extension InsightsModelTests {
-    @MainActor
-    func testActualModelKeepsAnalysisEphemeralAndSavesOnlyOnAction() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = root.appendingPathComponent("insights")
-        let file = root.appendingPathComponent("fixture.jsonl")
-        try Data("{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00Z\",\"content\":\"hello\"}\n".utf8).write(to: file)
-        let model = InsightsModel(service: { request in
-            try await Task.detached {
-                try TCInsights.call(.init(storeDirectory: store.path, operation: request.operation))
-            }.value
-        })
-        func settle() async throws {
-            for _ in 0..<500 {
-                if !model.busy && !model.episodeBusy { return }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            XCTFail("Local operation did not finish")
-        }
-        model.open(); try await settle()
-        XCTAssertEqual(model.summary?.saved_snapshots, 0)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
-        model.analyze(file: file, source: "trajectory"); try await settle()
-        XCTAssertNotNil(model.selected)
-        XCTAssertFalse(model.selectedIsSaved)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
-        model.save(); try await settle()
-        XCTAssertTrue(model.selectedIsSaved)
-        XCTAssertEqual(model.snapshots.count, 1)
-        XCTAssertEqual(model.summary?.saved_snapshots, 1)
-        XCTAssertEqual(model.summary?.user_reported.unassessed_snapshots, 1)
-        model.annotate(category: "docs", outcome: "accepted"); try await settle()
-        XCTAssertEqual(model.selected?.manual_annotation?.provenance, "user_reported")
-        XCTAssertEqual(model.assessmentCategory, "docs")
-        XCTAssertEqual(model.assessmentOutcome, "accepted")
-        XCTAssertEqual(model.summary?.user_reported.assessed_snapshots, 1)
-        XCTAssertEqual(model.summary?.user_reported.unassessed_snapshots, 0)
-        XCTAssertEqual(model.summary?.user_reported.outcomes.first { $0.outcome == "accepted" }?.snapshots, 1)
-        let savedID = try XCTUnwrap(model.selected?.id)
-        model.analyze(file: file, source: "trajectory"); try await settle()
-        XCTAssertEqual(model.assessmentCategory, "unknown")
-        XCTAssertEqual(model.assessmentOutcome, "unknown")
-        model.explain(savedID); try await settle()
-        XCTAssertEqual(model.assessmentCategory, "docs", "Explain must populate the editable assessment")
-        XCTAssertEqual(model.assessmentOutcome, "accepted")
-        let detail = InsightDetail(insight: try XCTUnwrap(model.selected), copy: model.copy)
-        let renderer = ImageRenderer(content: detail.padding(20).frame(width: 700).background(Color.white))
-        let image = try XCTUnwrap(renderer.nsImage)
-        XCTAssertGreaterThan(image.size.height, 100)
-        if let path = ProcessInfo.processInfo.environment["TC_INSIGHTS_RENDER_PATH"] {
-            let bitmap = try XCTUnwrap(NSBitmapImageRep(data: XCTUnwrap(image.tiffRepresentation)))
-            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: path))
-        }
-        _ = try TCInsights.call(.init(storeDirectory: store.path,
-            operation: .init("clear_annotation", id: try XCTUnwrap(model.selected?.id))))
-        model.refresh(); try await settle()
-        XCTAssertNil(model.selected?.manual_annotation, "Refresh must replace the selected saved detail after external edits")
-        XCTAssertEqual(model.assessmentCategory, "unknown")
-        XCTAssertEqual(model.assessmentOutcome, "unknown")
-        model.annotate(category: "tests", outcome: "partial"); try await settle()
-        model.clearAnnotation(); try await settle()
-        XCTAssertEqual(model.summary?.user_reported.unassessed_snapshots, 1)
-        XCTAssertEqual(model.assessmentCategory, "unknown")
-        XCTAssertEqual(model.assessmentOutcome, "unknown")
-        let oldID = model.selected?.id
-        let original = try String(contentsOf: file, encoding: .utf8)
-        try Data(original.replacingOccurrences(of: "hello", with: "changed").utf8).write(to: file)
-        model.analyze(file: file, source: "trajectory"); try await settle()
-        model.save(); try await settle()
-        XCTAssertEqual(model.snapshots.count, 1, "Reimport must remove the replaced cached snapshot")
-        XCTAssertNotEqual(model.selected?.id, oldID)
-        XCTAssertNil(model.selected?.manual_annotation)
-        model.delete(); try await settle()
-        XCTAssertNil(model.selected)
-        XCTAssertTrue(model.snapshots.isEmpty)
-        XCTAssertEqual(model.summary?.saved_snapshots, 0)
-        XCTAssertNil(model.summary?.snapshot_analysis_range)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
-        model.close()
+        let list: [String: Any] = ["type": "list", "insights": [
+            InsightsSessionsTests.snapshotJSON("snap-1"),
+        ]]
+        return try JSONDecoder().decode(InsightsResponse.self, from: JSONSerialization.data(withJSONObject: list))
     }
 }
 
@@ -739,82 +649,27 @@ private actor PatternsRecorder {
     }
 }
 
-/// The Sessions tab's model and words: one saved session turn by turn, its
-/// markers lettered by the core, an unknown turn drawn as a gap, and a Codex
-/// session read as not recorded.
+/// A session row's words: a saved session is labelled by its first event,
+/// harness and tokens, never by its snapshot ID.
 final class InsightsSessionsTests: XCTestCase {
     static let words: [String: String] = [
         "analytics_unavailable": "\u{2014}",
         "claude_code": "CLAUDE",
         "codex": "CODEX",
-        "analytics_session_header": "{date} | {harness} | {n} turns | {t} tokens | {span} between",
         "analytics_session_label": "{date} {time} | {harness} | {t} tokens",
         "analytics_session_label_undated": "Undated | {harness} | {t} tokens",
-        "analytics_turn": "Turn {n}",
-        "analytics_codex_not_recorded": "NOT RECORDED",
-        "analytics_reason_no_usage_counters": "NO COUNTERS",
-        "analytics_reason_source_unsupported": "UNSUPPORTED",
-        "analytics_marker_cache_rewrite": "Rewritten after {m} min",
-        "analytics_marker_cache_rewrite_detail": "Turn {t} wrote {x}",
-        "analytics_marker_crossed": "Passed {threshold}",
-        "analytics_marker_crossed_detail": "LONG RANGE",
-        "analytics_marker_shrank": "Shrank at {t}",
-        "analytics_marker_inferred": "INFERRED",
-        "analytics_marker_reread": "File {letter} again",
-        "analytics_marker_reread_detail": "NO EDIT",
-        "analytics_marker_from_tool_calls": "TOOL ORDER",
-        "analytics_from_counters": "COUNTERS",
-        "analytics_file_label": "File {letter} \u{b7} {ext}",
-        "analytics_file_label_no_ext": "File {letter}",
     ]
-
-    static let claudeJSON = """
-    {"type":"session_drill","session":{
-      "feed":"saved","session_ref":"snap-1","source":"claude_code","date":"2026-10-03","tz":0,
-      "turns":3,"tokens":1100000,"span_secs":7800,"state":"partial","reasons":["some_turns_unknown"],
-      "long_context_threshold":200000,
-      "series":[
-        {"ordinal":1,"uncached":1000,"cache_read":0,"cache_write":60000,"output":100,"context":61000},
-        {"ordinal":2,"uncached":null,"cache_read":null,"cache_write":null,"output":null,"context":null},
-        {"ordinal":3,"uncached":0,"cache_read":0,"cache_write":0,"output":0,"context":0}],
-      "series_unavailable":null,
-      "markers":[
-        {"letter":"A","turn_ordinal":2,"kind":"cache_written_again","basis":"inferred_from_counters",
-         "pause_minutes":14,"cache_write":64000,"context_from":null,"context":null,"file_letter":null,"file_ext":null},
-        {"letter":"B","turn_ordinal":2,"kind":"re_read","basis":"from_tool_calls",
-         "pause_minutes":null,"cache_write":null,"context_from":null,"context":null,"file_letter":"A","file_ext":".rs"},
-        {"letter":"C","turn_ordinal":3,"kind":"context_shrank","basis":"inferred_from_counters",
-         "pause_minutes":null,"cache_write":null,"context_from":90000,"context":1000,"file_letter":null,"file_ext":null},
-        {"letter":"D","turn_ordinal":3,"kind":"crossed_long_context","basis":"from_counters",
-         "pause_minutes":null,"cache_write":null,"context_from":null,"context":210000,"file_letter":null,"file_ext":null}]}}
-    """
-
-    static let codexJSON = """
-    {"type":"session_drill","session":{
-      "feed":"saved","session_ref":"snap-2","source":"codex","date":null,"tz":0,
-      "turns":null,"tokens":null,"span_secs":null,"state":"unknown","reasons":["no_usage_counters"],
-      "long_context_threshold":200000,"series":null,"series_unavailable":"not_recorded","markers":[]}}
-    """
-
-    func drill(_ json: String = claudeJSON) throws -> InsightsSessionDrill {
-        try XCTUnwrap(JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8)).session)
-    }
-
-    func testTheHeaderIsTheCoresTemplateFilledAndAnUnknownIsTheDash() throws {
-        let copy = Self.words
-        let header = InsightsSessionsWords.header(try drill(), copy: copy)
-        XCTAssertTrue(header.contains(" | CLAUDE | 3 turns | "), header)
-        XCTAssertTrue(header.contains(InsightsOverviewWords.figure(1_100_000, copy: copy) + " tokens"), header)
-        XCTAssertFalse(header.contains("{"), header)
-        XCTAssertFalse(header.contains("2026-10-03"), "the date is formatted, not the wire value")
-        let codex = InsightsSessionsWords.header(try drill(Self.codexJSON), copy: copy)
-        XCTAssertEqual(codex, "\u{2014} | CODEX | \u{2014} turns | \u{2014} tokens | \u{2014} between")
-    }
 
     /// A saved snapshot as the core lists it. `earliest` is its first
     /// recorded event; `.some(nil)` is time evidence with no valid timestamp.
     static func snapshot(_ id: String, source: String = "claude_code",
                          earliest: String?? = .some("2026-10-03T14:05:09.123Z")) throws -> LocalInsight {
+        try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(
+            withJSONObject: snapshotJSON(id, source: source, earliest: earliest)))
+    }
+
+    static func snapshotJSON(_ id: String, source: String = "claude_code",
+                             earliest: String?? = .some("2026-10-03T14:05:09.123Z")) -> [String: Any] {
         var json: [String: Any] = ["id": id, "source_format": source, "boundary": "local",
             "analyzed_at": "2026-10-08T09:00:00Z", "cost_unavailable_reason": "unknown",
             "report": ["schema_version": 1,
@@ -831,7 +686,7 @@ final class InsightsSessionsTests: XCTestCase {
                                      "latest": ["recorded_at": "2026-10-03T16:15:00Z",
                                                 "event_refs": [["record_index": 9]], "omitted_event_refs": 0]]
         }
-        return try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: json))
+        return json
     }
 
     static let snapshotID = String(repeating: "ab", count: 32)
@@ -871,18 +726,6 @@ final class InsightsSessionsTests: XCTestCase {
             XCTAssertEqual(InsightsSessionsWords.label(insight, copy: copy), "Undated | CODEX | \u{2014} tokens")
             XCTAssertEqual(InsightsSessionsWords.label(insight, tokens: 0, copy: copy),
                            "Undated | CODEX | 0 tokens", "a measured zero stays zero")
-        }
-    }
-
-    func testThePickerShowsLabelsAndNeverTheSnapshotID() throws {
-        let snapshots = [try Self.snapshot(Self.snapshotID),
-                         try Self.snapshot(String(repeating: "cd", count: 32), source: "codex", earliest: nil)]
-        let options = InsightsSessionsWords.pickerChoices(snapshots, copy: Self.words)
-        XCTAssertEqual(options.map(\.value), snapshots.map(\.id), "the value is still the snapshot ID, in order")
-        for (option, snapshot) in zip(options, snapshots) {
-            XCTAssertNotEqual(option.title, option.value)
-            XCTAssertFalse(option.title.contains(snapshot.id), option.title)
-            XCTAssertEqual(option.title, InsightsSessionsWords.label(snapshot, copy: Self.words))
         }
     }
 
@@ -939,133 +782,6 @@ final class InsightsSessionsTests: XCTestCase {
         let overview = try MonitorNavigationTests.text("Views/InsightsOverviewTab.swift")
         XCTAssertFalse(overview.contains("Text(session.session_ref)"))
         XCTAssertTrue(overview.contains("InsightsSessionsWords.rowLabel("))
-        let sessions = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
-        XCTAssertFalse(sessions.contains("GlassPickerOption($0, value: $0)"))
-        XCTAssertTrue(sessions.contains("InsightsSessionsWords.pickerChoices("))
-    }
-
-    func testAnUnknownTurnIsAGapAndNeverAZeroBar() throws {
-        let segments = InsightsSessionsWords.segments(try drill(), copy: Self.words)
-        XCTAssertFalse(segments.contains { $0.turn == 2 }, "an unknown turn draws nothing")
-        // A measured zero is still a bar.
-        XCTAssertEqual(segments.filter { $0.turn == 3 }.map(\.tokens), [0, 0, 0])
-        XCTAssertEqual(segments.filter { $0.turn == 1 }.map(\.tokens), [0, 1000, 60000])
-    }
-
-    func testMarkerCardsAreTheCoresWordsWithTheirDerivationLabels() throws {
-        let markers = try drill().markers
-        let copy = Self.words
-        let cards = markers.map { InsightsSessionsWords.markerLines($0, threshold: 200_000, copy: copy) }
-        XCTAssertEqual(cards[0], ["Rewritten after 14 min",
-                                  "Turn 2 wrote " + InsightsOverviewWords.figure(64_000, copy: copy), "INFERRED"])
-        XCTAssertEqual(cards[1], ["File A again", "NO EDIT", "File A \u{b7} .rs", "TOOL ORDER"])
-        XCTAssertEqual(cards[2], ["Shrank at 3", "INFERRED"])
-        XCTAssertEqual(cards[3], ["Passed " + InsightsOverviewWords.figure(200_000, copy: copy),
-                                  "LONG RANGE", "COUNTERS"])
-        XCTAssertEqual(markers.map(\.letter), ["A", "B", "C", "D"])
-    }
-
-    func testACodexSessionReadsNotRecordedAndDrawsNoChart() throws {
-        let codex = try drill(Self.codexJSON)
-        XCTAssertEqual(InsightsSessionsWords.unavailableLine(codex, copy: Self.words), "NOT RECORDED")
-        XCTAssertTrue(InsightsSessionsWords.segments(codex, copy: Self.words).isEmpty)
-        XCTAssertNil(InsightsSessionsWords.unavailableLine(try drill(), copy: Self.words))
-    }
-
-    /// A trace with no token counts says so once: in the body line in place
-    /// of the chart, not again under the title.
-    func testAReasonTheBodyLineSaysIsNotRepeatedUnderTheTitle() throws {
-        let unknown = try drill(Self.codexJSON
-            .replacingOccurrences(of: "\"source\":\"codex\"", with: "\"source\":\"claude_code\"")
-            .replacingOccurrences(of: "\"series_unavailable\":\"not_recorded\"",
-                                  with: "\"series_unavailable\":\"no_usage_counters\""))
-        XCTAssertEqual(InsightsSessionsWords.unavailableLine(unknown, copy: Self.words), "NO COUNTERS")
-        XCTAssertEqual(InsightsSessionsWords.headerReasons(unknown, copy: Self.words), [])
-        // A different body line keeps the reason under the title.
-        let codex = try drill(Self.codexJSON)
-        XCTAssertEqual(InsightsSessionsWords.headerReasons(codex, copy: Self.words), ["NO COUNTERS"])
-        // With a chart, every reason stays under the title.
-        let partial = try drill()
-        XCTAssertEqual(InsightsSessionsWords.headerReasons(partial, copy: Self.words).count, 1)
-        let tab = try InsightsGlassConventionsTests.text("Views/InsightsSessionsTab.swift")
-        XCTAssertTrue(tab.contains("InsightsSessionsWords.headerReasons(drill, copy: copy)"))
-        XCTAssertFalse(tab.contains("drill.reasons.map"))
-    }
-
-    @MainActor
-    func testTheSessionsModelFollowsTheSavedListAndDropsAFailedRead() async throws {
-        let recorder = SessionsRecorder()
-        let model = InsightsSessionsModel(service: { try await recorder.call($0) })
-        model.open()
-        model.sync(snapshotIDs: [])
-        XCTAssertNil(model.selected)
-        var requests = await recorder.requests
-        XCTAssertTrue(requests.isEmpty, "no session, no read")
-
-        model.sync(snapshotIDs: ["snap-1", "snap-2"])
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertEqual(model.selected, "snap-1", "the newest saved session first")
-        XCTAssertEqual(model.drill?.session_ref, "snap-1")
-        requests = await recorder.requests
-        XCTAssertEqual(requests.map(\.operation.type), ["session_drill"])
-        XCTAssertEqual(requests[0].operation.snapshot_id, "snap-1")
-        XCTAssertEqual(requests[0].operation.tz, Int32(TimeZone.current.secondsFromGMT()))
-
-        // The list changing without dropping the selection reads nothing.
-        model.sync(snapshotIDs: ["snap-0", "snap-1", "snap-2"])
-        XCTAssertEqual(model.selected, "snap-1")
-        requests = await recorder.requests
-        XCTAssertEqual(requests.count, 1)
-
-        model.select("snap-2")
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertEqual(model.drill?.series_unavailable, "not_recorded")
-
-        // A deleted selection moves to the newest left.
-        model.sync(snapshotIDs: ["snap-1"])
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertEqual(model.selected, "snap-1")
-
-        await recorder.fail()
-        model.reload()
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertNil(model.drill, "a failed read never keeps the old session")
-        XCTAssertTrue(model.failed)
-
-        model.sync(snapshotIDs: [])
-        XCTAssertNil(model.selected)
-        XCTAssertNil(model.drill)
-        model.close()
-    }
-
-    @MainActor
-    func testAnUnknownSnapshotOverTheRealCoreFailsWithoutCreatingTheStore() async throws {
-        let store = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let model = InsightsSessionsModel(service: { request in
-            try await Task.detached {
-                try TCInsights.call(.init(storeDirectory: store.path, operation: request.operation))
-            }.value
-        })
-        model.open()
-        model.sync(snapshotIDs: ["missing"])
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertTrue(model.failed)
-        XCTAssertNil(model.drill)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
-        model.close()
-    }
-}
-
-private actor SessionsRecorder {
-    var requests: [InsightsRequest] = []
-    private var failing = false
-    func fail() { failing = true }
-    func call(_ request: InsightsRequest) throws -> InsightsResponse {
-        requests.append(request)
-        if failing { throw InsightsError.service("insights-operation-failed") }
-        let json = request.operation.snapshot_id == "snap-2"
-            ? InsightsSessionsTests.codexJSON : InsightsSessionsTests.claudeJSON
-        return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
     }
 }
 

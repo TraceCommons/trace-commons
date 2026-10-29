@@ -2,7 +2,6 @@ import AppKit
 import SwiftUI
 import XCTest
 import TCBridge
-import TCShellCore
 @testable import TraceCommonsApp
 
 /// A bounded viewport must not instantiate selectable platform text views
@@ -34,45 +33,6 @@ final class InsightsResponderScaleTests: XCTestCase {
         XCTAssertLessThanOrEqual(b, a + 100, "Offscreen sessions must not grow the platform responder tree with the dataset")
     }
 
-    /// The Sessions tab's watched feed, every row with its Task and Outcome
-    /// menus and Confirm: a page of 1,061 rows builds no more than a
-    /// page of 20 does, and every row stays reachable by scrolling.
-    func testWatchedFeedKeepsPlatformViewsBounded() async throws {
-        let copy = try InsightsSessionRouteTests.coreCopy()
-        let small = try await watchedModel(20)
-        let large = try await watchedModel(1061)
-        defer { small.close(); large.close() }
-        XCTAssertTrue(small.canLabel)
-        let a = measure(InsightsSessionsTab(model: small, snapshots: [], copy: copy),
-                        collection: "insightsWatchedFeed", first: "w-0", scrolls: true)
-        let b = measure(InsightsSessionsTab(model: large, snapshots: [], copy: copy),
-                        collection: "insightsWatchedFeed", first: "w-0", scrolls: true,
-                        scrollTargets: [(0.5, "w-530"), (1, "w-1060"), (0, "w-0")])
-        print("INSIGHTS_RESPONDERS watched small=\(a) large=\(b)")
-        XCTAssertGreaterThan(a, 0)
-        XCTAssertLessThanOrEqual(b, a + 100, "Offscreen watched rows must not grow the platform responder tree with the feed")
-    }
-
-    /// A Sessions model showing one page of `count` watched rows, newest
-    /// first, each with an inferred task to confirm.
-    private func watchedModel(_ count: Int) async throws -> InsightsSessionsModel {
-        let rows = (0..<count).map { index in
-            #"{"session_ref":"w-\#(index)","source":"claude_code","started_at":"2026-10-19T10:00:00+00:00","turns":3,"tokens":\#(100 + index),"sparkline":{"points":[10,40,20],"peak_tokens":40,"peak_turn":2},"folder":"f","inferred_task":"bug_fix","user_task":null,"user_outcome":null}"#
-        }
-        let json = #"{"enabled":true,"feed":"counter_pass","readable":true,"sessions_stored":\#(count),"truncated":false,"next":null,"sessions":["#
-            + rows.joined(separator: ",") + "]}"
-        let page = try JSONDecoder().decode(DaemonData.InsightsSessions.self, from: Data(json.utf8))
-        let model = InsightsSessionsModel(
-            service: { _ in throw InsightsError.invalidResponse },
-            watchedReader: { _ in page },
-            watchedLabel: { _, _, _ in throw DaemonDataError.unreachable })
-        model.open()
-        model.showWatched(true)
-        for _ in 0..<300 where model.watched?.count != count { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertEqual(model.watched?.count, count)
-        return model
-    }
-
     private func counterSessions(_ count: Int) throws -> InsightsCounterSessions {
         var object = try InsightsSessionRouteTests.recorded()
         var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
@@ -100,9 +60,7 @@ final class InsightsResponderScaleTests: XCTestCase {
         return try JSONDecoder().decode(InsightsCardInputs.self, from: JSONSerialization.data(withJSONObject: object))
     }
 
-    /// `scrolls`: the content brings its own scroll view (a whole tab),
-    /// so it is not put in another.
-    private func measure(_ content: some View, collection: String, first: String, scrolls: Bool = false,
+    private func measure(_ content: some View, collection: String, first: String,
                          scrollTargets: [(CGFloat, String)] = []) -> Int {
         OtherCollectionRowBodies.startRecording()
         defer { OtherCollectionRowBodies.stopRecording() }
@@ -111,8 +69,7 @@ final class InsightsResponderScaleTests: XCTestCase {
         NSApp.setValue(true, forKey: "accessibilityEnhancedUserInterface")
         defer { NSApp.setValue(previous, forKey: "accessibilityEnhancedUserInterface") }
         let bounds = NSRect(x: 0, y: 0, width: 408, height: 760)
-        let root = scrolls ? AnyView(content) : AnyView(ScrollView { content })
-        let hosting = NSHostingView(rootView: root.frame(width: 408, height: 760))
+        let hosting = NSHostingView(rootView: ScrollView { content }.frame(width: 408, height: 760))
         hosting.frame = bounds
         let window = NSWindow(contentRect: bounds, styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
