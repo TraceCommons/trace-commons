@@ -100,12 +100,6 @@ pub enum Goal {
         source: AnalyticsSource,
         permille: u64,
     },
-    RepeatedReadsUnder {
-        tokens: u64,
-    },
-    LongContextUnder {
-        tokens: u64,
-    },
     WeeklyTokensUnder {
         source: AnalyticsSource,
         tokens: u64,
@@ -119,10 +113,6 @@ impl Goal {
             Self::CacheShareAtLeast { source, .. } => {
                 week.cache_share_permille.get(source).copied()
             }
-            Self::RepeatedReadsUnder { .. } => {
-                week.patterns.get(&PatternKind::RepeatedReads).copied()
-            }
-            Self::LongContextUnder { .. } => week.patterns.get(&PatternKind::LongContext).copied(),
             Self::WeeklyTokensUnder { source, .. } => week.tokens.get(source).copied(),
         }
     }
@@ -130,9 +120,7 @@ impl Goal {
     pub fn met(&self, figure: u64) -> bool {
         match self {
             Self::CacheShareAtLeast { permille, .. } => figure >= *permille,
-            Self::RepeatedReadsUnder { tokens }
-            | Self::LongContextUnder { tokens }
-            | Self::WeeklyTokensUnder { tokens, .. } => figure < *tokens,
+            Self::WeeklyTokensUnder { tokens, .. } => figure < *tokens,
         }
     }
 }
@@ -314,13 +302,6 @@ mod tests {
         let equal =
             goal_marks(Feed::CounterPass, &under(100), &[week(0, true, Some(100))]).unwrap();
         assert_eq!(equal.marks[5], WeekMark::NotMet);
-        for goal in [
-            Goal::RepeatedReadsUnder { tokens: 101 },
-            Goal::LongContextUnder { tokens: 101 },
-        ] {
-            let marks = goal_marks(Feed::CounterPass, &goal, &[week(0, true, Some(100))]).unwrap();
-            assert_eq!(marks.marks[5], WeekMark::Met, "{goal:?}");
-        }
     }
 
     #[test]

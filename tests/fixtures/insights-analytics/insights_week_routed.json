@@ -213,6 +213,20 @@
           "tokens_partial": false
         }
       ],
+      "by_model": [
+        {
+          "usd_micros": 12500,
+          "sessions": 1,
+          "calls": 1,
+          "calls_without_charge": 0,
+          "tokens": 110,
+          "usd_micros_known": 12500,
+          "usd_partial": false,
+          "tokens_known": 110,
+          "tokens_partial": false,
+          "key": "zai-org/glm-4.6"
+        }
+      ],
       "tokens": 110,
       "usd_micros_known": 12500,
       "usd_partial": false,
@@ -357,16 +371,14 @@
       "usd_micros_known": 0,
       "usd_partial": true,
       "cache_savings_usd_micros_known": 0,
-      "lines_added_known": 1,
-      "lines_removed_known": 1,
-      "lines_partial": false,
       "edits_known": 1,
       "edits_undone_known": 0,
       "edits_denied_known": 0,
       "edits_partial": true,
       "edits_count_partial": false,
       "edits_undone_partial": false,
-      "edits_denied_partial": true
+      "edits_denied_partial": true,
+      "near_ai_sessions": 0
     },
     "last_week": {
       "sessions": 0,
@@ -375,16 +387,14 @@
       "usd_micros_known": 0,
       "usd_partial": false,
       "cache_savings_usd_micros_known": 0,
-      "lines_added_known": 0,
-      "lines_removed_known": 0,
-      "lines_partial": false,
       "edits_known": 0,
       "edits_undone_known": 0,
       "edits_denied_known": 0,
       "edits_partial": false,
       "edits_count_partial": false,
       "edits_undone_partial": false,
-      "edits_denied_partial": false
+      "edits_denied_partial": false,
+      "near_ai_sessions": 0
     },
     "by_tool": [
       {
@@ -394,9 +404,6 @@
         "usd_micros_known": 0,
         "usd_partial": true,
         "cache_savings_usd_micros_known": 0,
-        "lines_added_known": 1,
-        "lines_removed_known": 1,
-        "lines_partial": false,
         "edits_known": 1,
         "edits_undone_known": 0,
         "edits_denied_known": 0,
@@ -404,7 +411,8 @@
         "edits_count_partial": false,
         "edits_undone_partial": false,
         "edits_denied_partial": true,
-        "key": "claude_code"
+        "key": "claude_code",
+        "near_ai_sessions": 0
       },
       {
         "sessions": 1,
@@ -413,9 +421,6 @@
         "usd_micros_known": 0,
         "usd_partial": true,
         "cache_savings_usd_micros_known": 0,
-        "lines_added_known": 0,
-        "lines_removed_known": 0,
-        "lines_partial": false,
         "edits_known": 0,
         "edits_undone_known": 0,
         "edits_denied_known": 0,
@@ -423,7 +428,8 @@
         "edits_count_partial": false,
         "edits_undone_partial": false,
         "edits_denied_partial": true,
-        "key": "codex"
+        "key": "codex",
+        "near_ai_sessions": 0
       }
     ],
     "by_model": [
@@ -432,14 +438,6 @@
         "tool": "claude_code",
         "sessions": 1,
         "tokens": 37235,
-        "usd_micros_known": 0,
-        "usd_partial": true
-      },
-      {
-        "key": "gpt-6",
-        "tool": "codex",
-        "sessions": 1,
-        "tokens": 0,
         "usd_micros_known": 0,
         "usd_partial": true
       }
@@ -452,9 +450,6 @@
         "usd_micros_known": 0,
         "usd_partial": true,
         "cache_savings_usd_micros_known": 0,
-        "lines_added_known": 1,
-        "lines_removed_known": 1,
-        "lines_partial": false,
         "edits_known": 1,
         "edits_undone_known": 0,
         "edits_denied_known": 0,
@@ -462,7 +457,8 @@
         "edits_count_partial": false,
         "edits_undone_partial": false,
         "edits_denied_partial": true,
-        "key": null
+        "key": null,
+        "near_ai_sessions": 0
       }
     ],
     "by_day": [

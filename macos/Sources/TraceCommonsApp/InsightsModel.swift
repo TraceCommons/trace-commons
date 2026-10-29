@@ -527,14 +527,12 @@ final class InsightsPatternsModel {
     /// The daemon's week (feed T), in the same shape; while it is set it is
     /// the only week shown.
     private(set) var counter: InsightsWeekPatterns?
-    /// The sessions behind one card, while its list is open.
-    private(set) var sessions: InsightsPatternSessions?
 
     /// The week on screen: feed T when the daemon sent one, feed S otherwise.
     var shown: InsightsWeekPatterns? { counter ?? patterns }
 
     func showCounter(_ week: InsightsWeekPatterns?) {
-        counter = week; sessions = nil
+        counter = week
     }
     /// The week asked for; `nil` is the current week.
     private(set) var requestedWeek: String?
@@ -542,23 +540,12 @@ final class InsightsPatternsModel {
     init(service: @escaping InsightsModel.Service) { self.service = service }
 
     func open() { active = true; load() }
-    func close() { active = false; token = UUID(); task?.cancel(); task = nil; busy = false; sessions = nil }
+    func close() { active = false; token = UUID(); task?.cancel(); task = nil; busy = false }
     func reload() { load() }
     func selectWeek(_ weekStart: String) { requestedWeek = weekStart; load() }
 
-    /// Read the sessions behind the card of `kind` in the week on screen.
-    func showSessions(_ kind: String) {
-        guard active, counter == nil, let week = patterns?.week_start else { return }
-        run(.init("pattern_sessions", weekStart: week, tz: InsightsOverviewModel.offset, pattern: kind)) { model, response in
-            guard let found = response.pattern_sessions, found.pattern == kind else { throw InsightsError.invalidResponse }
-            model.sessions = found
-        }
-    }
-    func hideSessions() { sessions = nil }
-
     private func load() {
         guard active else { return }
-        sessions = nil
         run(.init("patterns", weekStart: requestedWeek, tz: InsightsOverviewModel.offset)) { model, response in
             guard let patterns = response.patterns else { throw InsightsError.invalidResponse }
             model.patterns = patterns
@@ -570,8 +557,7 @@ final class InsightsPatternsModel {
         task?.cancel()
         token = UUID(); let current = token
         busy = true
-        let listing = operation.type == "pattern_sessions"
-        if !listing { failed = false }
+        failed = false
         let service = service
         task = Task { [weak self] in
             do {
@@ -582,10 +568,8 @@ final class InsightsPatternsModel {
                 self.busy = false
             } catch {
                 guard let self, self.active, self.token == current, !Task.isCancelled else { return }
-                // A failed session list closes only itself; a failed week
-                // read never keeps the old figures.
-                if !listing { self.patterns = nil; self.failed = true }
-                self.sessions = nil; self.busy = false
+                // A failed week read never keeps the old figures.
+                self.patterns = nil; self.failed = true; self.busy = false
             }
         }
     }
@@ -595,129 +579,10 @@ final class InsightsPatternsModel {
 /// composes a sentence.
 enum InsightsPatternsWords {
     private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
-    private static func dash(_ copy: [String: String]) -> String { text("analytics_unavailable", copy) }
-    private static func count(_ value: UInt32?, _ copy: [String: String]) -> String {
-        value.map(String.init) ?? dash(copy)
-    }
-
-    /// The pattern kinds this app does not show (owner, 2026-10-29: Retried
-    /// tool calls is removed from macOS Insights). The core still sends
-    /// them for the other shells.
-    static let removedKinds: Set<String> = ["retried_calls"]
-
-    /// The week's cards this app shows, in the core's order.
-    static func shownCards(_ cards: [InsightsPatternCard]) -> [InsightsPatternCard] {
-        cards.filter { !removedKinds.contains($0.kind) }
-    }
 
     /// The card's name, by its wire kind.
     static func title(_ kind: String, copy: [String: String]) -> String {
         text("analytics_pattern_" + kind, copy)
-    }
-
-    /// Whether the core says the card leads with its count: its estimate
-    /// rounds to 0 while it found something (owner decision 2026-10-20).
-    /// An older core, or a word this build does not know, leads with tokens.
-    static func leadsWithCount(_ card: InsightsPatternCard) -> Bool {
-        card.headline == "count" && card.count != nil
-    }
-
-    /// Each card's hole for its count in the headline words.
-    private static let countHole = [
-        "repeated_reads": "r", "edit_fail_edit": "l", "long_context": "n",
-    ]
-
-    /// The card's headline: the token figure, or the count with its unit
-    /// ("2 reads", "1 call") when the core leads with the count.
-    static func headline(_ card: InsightsPatternCard, copy: [String: String]) -> String {
-        guard leadsWithCount(card), let found = card.count, let hole = countHole[card.kind] else {
-            return InsightsOverviewWords.figure(card.tokens, copy: copy)
-        }
-        let key = "analytics_pattern_" + card.kind + (found == 1 ? "_headline_one" : "_headline_other")
-        return InsightsOverviewWords.fill(text(key, copy), [hole: String(found)])
-    }
-
-    /// The line under the headline: the core's count sentence, or the
-    /// long-context threshold line. Under a count headline the sentence
-    /// without the count, so the count is not said twice.
-    static func countLine(_ card: InsightsPatternCard, threshold: UInt64, copy: [String: String]) -> String {
-        let fill = InsightsOverviewWords.fill
-        let underCount = leadsWithCount(card)
-        switch card.kind {
-        case "repeated_reads" where underCount:
-            let key = "analytics_pattern_repeated_reads_count_under_count"
-                + (card.files == 1 ? "_one" : "_other")
-            return fill(text(key, copy), ["f": count(card.files, copy)])
-        case "edit_fail_edit" where underCount:
-            return text("analytics_pattern_edit_fail_edit_count_under_count", copy)
-        case "repeated_reads":
-            return fill(text("analytics_pattern_repeated_reads_count", copy),
-                        ["r": count(card.count, copy), "f": count(card.files, copy)])
-        case "edit_fail_edit":
-            return fill(text("analytics_pattern_edit_fail_edit_count", copy), ["l": count(card.count, copy)])
-        case "long_context":
-            return fill(text("analytics_pattern_long_context_line", copy),
-                        ["threshold": InsightsOverviewWords.figure(threshold, copy: copy)])
-        default:
-            return dash(copy)
-        }
-    }
-
-    /// How the figure was arrived at: the inferred label first, then the basis.
-    static func basisLines(_ card: InsightsPatternCard, copy: [String: String]) -> [String] {
-        var lines: [String] = []
-        if card.inferred { lines.append(text("analytics_inferred_from_order", copy)) }
-        switch card.basis {
-        case "estimate_from_result_size": lines.append(text("analytics_estimate_from_result_size", copy))
-        case "from_counters": lines.append(text("analytics_from_counters", copy))
-        default: break
-        }
-        return lines
-    }
-
-    /// "vs last week". Only feed T sends a figure; anything else is the dash.
-    static func change(_ card: InsightsPatternCard, copy: [String: String]) -> String {
-        guard let permille = card.change else { return dash(copy) }
-        let percent = String((abs(permille) + 5) / 10)
-        let key = permille < 0 ? "analytics_change_down" : "analytics_change_up"
-        return InsightsOverviewWords.fill(text(key, copy), ["p": percent])
-    }
-
-    struct Bar: Identifiable, Equatable {
-        let week: String
-        /// `nil` is a gap: no bar is drawn, never a zero.
-        let tokens: UInt64?
-        var id: String { week }
-    }
-
-    /// Every week the card covers, oldest first, gaps included.
-    static func bars(_ card: InsightsPatternCard) -> [Bar] {
-        card.weeks.map { Bar(week: $0.week_start, tokens: $0.tokens) }
-    }
-
-    /// The figure above the current week's bar. A card that leads with its
-    /// count draws none: its estimate rounds to 0 and a "0" would contradict
-    /// the headline. `nil` also when the week has no figure.
-    static func currentWeekFigure(_ card: InsightsPatternCard, copy: [String: String]) -> String? {
-        guard !leadsWithCount(card), let tokens = bars(card).last?.tokens else { return nil }
-        return InsightsOverviewWords.figure(tokens, copy: copy)
-    }
-
-    /// The bars to draw: weeks with a figure only.
-    static func drawnBars(_ card: InsightsPatternCard) -> [Bar] {
-        bars(card).filter { $0.tokens != nil }
-    }
-
-    static func seeSessions(_ card: InsightsPatternCard, copy: [String: String]) -> String {
-        InsightsOverviewWords.fill(text("analytics_see_sessions", copy), ["n": String(card.sessions)])
-    }
-
-    /// "File B · .rs", or "File B" with no extension.
-    static func fileLabel(_ row: InsightsRereadRow, copy: [String: String]) -> String {
-        guard let ext = row.ext else {
-            return InsightsOverviewWords.fill(text("analytics_file_label_no_ext", copy), ["letter": row.letter])
-        }
-        return InsightsOverviewWords.fill(text("analytics_file_label", copy), ["letter": row.letter, "ext": ext])
     }
 
     /// "Claude Code sessions only: {k} of {n}." when another harness is in
@@ -942,11 +807,9 @@ enum InsightsComparisonsWords {
     private static let fill = InsightsOverviewWords.fill
 
     /// The goal kinds, in the core's order, and their words.
-    static let goalKinds = ["cache_share_at_least", "repeated_reads_under", "long_context_under", "weekly_tokens_under"]
+    static let goalKinds = ["cache_share_at_least", "weekly_tokens_under"]
     private static let goalKeys = [
         "cache_share_at_least": "analytics_goal_cache_share",
-        "repeated_reads_under": "analytics_goal_repeated_reads",
-        "long_context_under": "analytics_goal_long_context",
         "weekly_tokens_under": "analytics_goal_weekly_tokens",
     ]
 
@@ -1006,18 +869,10 @@ enum InsightsComparisonsWords {
         }
     }
 
-    /// The lever's observation. Repeated reads have their own line; any
-    /// other kind shows its card's name and figure. No advice (owner
+    /// The lever's observation: its card's name and figure. No advice (owner
     /// decision D2, open).
     static func leverLines(_ pick: InsightsLeverView, copy: [String: String]) -> [String] {
         let tokens = InsightsOverviewWords.figure(pick.tokens, copy: copy)
-        if pick.kind == "repeated_reads" {
-            return [fill(text("analytics_lever_line", copy), [
-                "f": pick.files.map(String.init) ?? dash(copy),
-                "r": pick.count.map(String.init) ?? dash(copy),
-                "t": tokens,
-            ])]
-        }
         return [InsightsPatternsWords.title(pick.kind, copy: copy), tokens]
     }
 
@@ -1048,12 +903,8 @@ enum InsightsComparisonsWords {
             guard let goal = item.goal, let met = item.met else { return nil }
             return fill(text(met ? "analytics_recap_goal_met" : "analytics_recap_goal_not_met", copy),
                         ["goal": Self.goal(goal, copy: copy)])
-        case "pattern_up":
-            guard let pattern = item.pattern, let up = item.up_permille,
-                  !InsightsPatternsWords.removedKinds.contains(pattern) else { return nil }
-            return fill(text("analytics_recap_pattern_up", copy), [
-                "pattern": InsightsPatternsWords.title(pattern, copy: copy), "p": InsightsOverviewWords.percent(up),
-            ])
+        // No pattern is shown on macOS any more (owner, 2026-10-29: Retried
+        // tool calls, the last, removed), so `pattern_up` says nothing.
         default:
             return nil
         }

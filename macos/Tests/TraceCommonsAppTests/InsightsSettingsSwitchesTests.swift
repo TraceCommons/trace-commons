@@ -6,9 +6,10 @@ import XCTest
 @testable import TraceCommonsApp
 
 /// The Insights switches in Settings (Ron's #1287 review, adopted by the
-/// owner): "Count tokens in watched folders" (`insights_counter_pass`, off
-/// by default, D4) and "Weekly summary" (`insights_recap_card_enabled`) are
-/// daemon settings; the "Higher-than-usual card" is the core's `lever_card`
+/// owner): "Count tokens in watched folders" (`insights_counter_pass`, on
+/// by default and always on since 2026-10-29, so Settings no longer draws
+/// it) and "Weekly summary" (`insights_recap_card_enabled`) are daemon
+/// settings; the "Higher-than-usual card" is the core's `lever_card`
 /// switch. Each reads its confirmed value, moves only on a confirmed echo,
 /// and says the core's request-failed words when a write is refused.
 @MainActor
@@ -222,30 +223,28 @@ final class InsightsSettingsSwitchesTests: XCTestCase {
     /// labelled in the core's words, and taking no second write in flight.
     func test_theCardDrawsEachSwitchFromItsConfirmedValue() throws {
         let card = try Self.card()
-        XCTAssertTrue(card.contains("if let on = settings.insightsCounterPass {"))
+        // Counting is always on (product owner, 2026-10-29): no switch.
+        XCTAssertFalse(card.contains("insightsCounterPass"))
+        XCTAssertFalse(card.contains("analytics_setting_counter_pass"))
         XCTAssertTrue(card.contains("if let on = settings.insightsRecapCardEnabled {"))
         XCTAssertTrue(card.contains("if let on = lever.enabled {"))
-        for key in ["analytics_setting_counter_pass", "analytics_setting_recap_card", "analytics_setting_lever"] {
+        for key in ["analytics_setting_recap_card", "analytics_setting_lever"] {
             XCTAssertTrue(card.contains("text(\"\(key)\")"), "\(key) is not the label")
         }
-        XCTAssertTrue(card.contains("Task { await model.setInsightsSwitch(.counterPass, on) }"))
         XCTAssertTrue(card.contains("Task { await model.setInsightsSwitch(.recapCard, on) }"))
         XCTAssertTrue(card.contains("Task { await lever.set(on) }"))
-        XCTAssertTrue(card.contains(".disabled(model.insightsSwitchBusy.contains(.counterPass))"))
         XCTAssertTrue(card.contains(".disabled(model.insightsSwitchBusy.contains(.recapCard))"))
         XCTAssertTrue(card.contains(".disabled(lever.busy)"))
-        XCTAssertTrue(card.contains("model.insightsSwitchRefusal[.counterPass]"))
         XCTAssertTrue(card.contains("model.insightsSwitchRefusal[.recapCard]"))
         XCTAssertTrue(card.contains("lever.refusal"))
         // "Hide" on the summary card writes the daemon directly, so the
         // card re-reads both owners whenever it appears.
         XCTAssertTrue(card.contains("model.refreshSettings()"))
         XCTAssertTrue(card.contains("await lever.load()"))
-        XCTAssertEqual(card.components(separatedBy: "GlassToggleStyle(.settings)").count - 1, 3)
+        XCTAssertEqual(card.components(separatedBy: "GlassToggleStyle(.settings)").count - 1, 2)
         // No headed card without a switch in it (an older daemon and core).
         XCTAssertTrue(card.contains(
-            "if model.daemonSettings?.insightsCounterPass != nil\n"
-                + "                || model.daemonSettings?.insightsRecapCardEnabled != nil\n"
+            "if model.daemonSettings?.insightsRecapCardEnabled != nil\n"
                 + "                || lever.enabled != nil {"))
 
         // Drawn under Tools, after its card, inside the modal's gate.

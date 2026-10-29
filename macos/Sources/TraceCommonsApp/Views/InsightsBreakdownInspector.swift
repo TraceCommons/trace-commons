@@ -4,9 +4,8 @@ import TCDesign
 
 /// Where Breakdown hands the Monitor window's inspector its details (owner,
 /// 2026-10-29: "details for breakdown should appear in the right details
-/// panel"): a day picked on Tokens by day shows that day's sessions there,
-/// and a pattern card's "See sessions" the sessions behind the card.
-/// Breakdown keeps its charts and tables and marks what is picked.
+/// panel"): a day picked on Tokens by day shows that day's sessions there.
+/// Breakdown keeps its chart and marks the picked day.
 ///
 /// Filled while Breakdown is on screen, empty otherwise. As for a Traces
 /// session, the inspector opens when the person picks something
@@ -27,25 +26,11 @@ final class InsightsBreakdownInspector {
 
     func clear() { detail = nil }
 
-    /// A day picked on Tokens by day, or `nil` for the week again. A day
-    /// replaces a card's sessions in the inspector; the week asks nothing.
-    func pick(day: String?, patterns: InsightsPatternsModel?) {
+    /// A day picked on Tokens by day, or `nil` for the week again; the
+    /// week asks nothing.
+    func pick(day: String?) {
         pickedDay = day
-        guard day != nil else { return }
-        patterns?.hideSessions()
-        opens += 1
-    }
-
-    /// A card's "See sessions": shows the card's sessions, replacing a
-    /// picked day; on the card already shown, hides them.
-    func toggleSessions(_ kind: String, patterns: InsightsPatternsModel) {
-        if patterns.sessions?.pattern == kind {
-            patterns.hideSessions()
-            return
-        }
-        pickedDay = nil
-        patterns.showSessions(kind)
-        opens += 1
+        if day != nil { opens += 1 }
     }
 
     /// The inspector's demand (`InspectorDemand`): a new key for each pick,
@@ -53,11 +38,10 @@ final class InsightsBreakdownInspector {
     var demandKey: String? { opens > 0 ? "insights-breakdown-open:\(opens)" : nil }
 }
 
-/// Breakdown's details in the inspector: a card's sessions, else the picked
-/// day's sessions, else Breakdown's title over the dash.
+/// Breakdown's details in the inspector: the picked day's sessions, else
+/// Breakdown's title over the dash.
 struct InsightsBreakdownDetail: View {
     let inspector: InsightsBreakdownInspector
-    let patterns: InsightsPatternsModel
     let overview: InsightsOverviewModel?
     let copy: [String: String]
     /// Saved snapshots, so a picked day's rows read as their labels.
@@ -67,17 +51,14 @@ struct InsightsBreakdownDetail: View {
 
     /// What the inspector shows.
     enum Shown: Equatable {
-        case pattern
         case day
         case empty
     }
 
-    /// A card's sessions first, then a picked day of the week on screen
-    /// with sessions to show; otherwise the empty state. Kept pure for tests.
-    static func shown(patternSessions: Bool, day: InsightsDayPick?, daySessions: Bool) -> Shown {
-        if patternSessions { return .pattern }
-        if day != nil, daySessions { return .day }
-        return .empty
+    /// A picked day of the week on screen with sessions to show; otherwise
+    /// the empty state. Kept pure for tests.
+    static func shown(day: InsightsDayPick?, daySessions: Bool) -> Shown {
+        day != nil && daySessions ? .day : .empty
     }
 
     /// The picked day among the week on screen; `nil` for none, or for a
@@ -94,9 +75,7 @@ struct InsightsBreakdownDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-            switch Self.shown(patternSessions: patterns.sessions != nil, day: day, daySessions: hasDaySessions) {
-            case .pattern:
-                if let found = patterns.sessions { InsightsPatternSessionsView(found: found, copy: copy) }
+            switch Self.shown(day: day, daySessions: hasDaySessions) {
             case .day:
                 daySessions
             case .empty:
@@ -118,7 +97,7 @@ struct InsightsBreakdownDetail: View {
     @ViewBuilder
     private var daySessions: some View {
         if let overview, let day {
-            let showWeek = { inspector.pick(day: nil, patterns: patterns) }
+            let showWeek = { inspector.pick(day: nil) }
             if let sessions = overview.counterSessions {
                 InsightsCounterSessionsView(sessions: sessions, copy: copy, day: day, showWeek: showWeek)
             } else if let inputs = overview.sessionsInputs {

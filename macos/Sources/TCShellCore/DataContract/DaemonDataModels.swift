@@ -978,10 +978,13 @@ extension DaemonData {
         /// Decode-only until the Insights settings draw it: the user's own
         /// context-tip threshold in tokens; `nil` is unset, never a default.
         public let insightsContextThreshold: Int?
-        /// Decode-only until the Insights settings draw it: whether the
-        /// daemon runs the counter pass for `insights_week` (owner decision
-        /// D4, open; off by default).
+        /// Decode-only (Settings draws no switch for it): whether the
+        /// daemon runs the counter pass for `insights_week` (on by default
+        /// and always on; product owner, 2026-10-29).
         public let insightsCounterPass: Bool?
+        /// Decode-only: whether the 2026-10-29 default change turned the
+        /// counter pass on; `nil` from a daemon that predates it.
+        public let insightsCounterPassDefaultedOn: Bool?
         /// Native subscription readers, on by default since 2026-10-27; nil
         /// means an older daemon. The Overview usage snapshot remains
         /// authoritative for its controls. `subscriptionUsageClaudeEnabled` is
@@ -1036,6 +1039,7 @@ extension DaemonData {
             case insightsLedgerFeed = "insights_ledger_feed"
             case insightsContextThreshold = "insights_context_threshold"
             case insightsCounterPass = "insights_counter_pass"
+            case insightsCounterPassDefaultedOn = "insights_counter_pass_defaulted_on"
             case subscriptionUsageCodexEnabled = "subscription_usage_codex_enabled"
             case subscriptionUsageClaudeEnabled = "subscription_usage_claude_enabled"
             case subscriptionUsageClaudeOn = "subscription_usage_claude_on"
@@ -2179,7 +2183,7 @@ extension DaemonData {
     // MARK: Insights feed T
 
     /// `insights_week`: one local ISO week from the daemon's counter pass
-    /// (owner decision D4, open; off by default). Use it only when
+    /// (on by default; product owner, 2026-10-29). Use it only when
     /// `showsCounterPass`; anything else is drawn as the saved-imports feed.
     /// Labels and counts only: no path, digest or session id crosses.
     public struct InsightsWeek: Codable, Equatable, Sendable {
@@ -2316,13 +2320,17 @@ extension DaemonData {
         public var tokensKnown: Int64? = nil
         public var tokensPartial: Bool? = nil
         public let byFolder: [InsightsCreditGroup]?
+        /// By the model that served each call, lowercased as the ledger
+        /// names it; a trace that used two models is in both. `nil` from a
+        /// daemon that predates it.
+        public let byModel: [InsightsCreditGroup]?
 
         public init(from: String = "", to: String = "", date: String? = nil, usdMicros: Int64?, sessions: Int,
                     calls: Int, callsWithoutCharge: Int, tokens: Int64? = nil,
-                    byFolder: [InsightsCreditGroup]? = nil) {
+                    byFolder: [InsightsCreditGroup]? = nil, byModel: [InsightsCreditGroup]? = nil) {
             self.from = from; self.to = to; self.date = date; self.usdMicros = usdMicros; self.sessions = sessions
             self.calls = calls; self.callsWithoutCharge = callsWithoutCharge; self.tokens = tokens
-            self.byFolder = byFolder
+            self.byFolder = byFolder; self.byModel = byModel
         }
 
         public enum CodingKeys: String, CodingKey {
@@ -2334,11 +2342,13 @@ extension DaemonData {
             case tokensPartial = "tokens_partial"
             case callsWithoutCharge = "calls_without_charge"
             case byFolder = "by_folder"
+            case byModel = "by_model"
         }
     }
 
-    /// One group of a week's charge. `key` is the folder's local label;
-    /// `nil` is the unknown group. Largest known charge first, unknown ones after.
+    /// One group of a week's charge. `key` is the folder's local label or
+    /// the served model; `nil` is the unknown group. Largest known charge
+    /// first, unknown ones after.
     public struct InsightsCreditGroup: Codable, Equatable, Sendable {
         public let key: String?
         public let usdMicros: Int64?

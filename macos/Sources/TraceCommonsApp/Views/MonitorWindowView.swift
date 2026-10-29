@@ -479,7 +479,7 @@ struct MonitorWindowView: View {
         if !model.onboardingKnown || !inspectorAvailable {
             Color.clear
         } else if shownTab == .insights, let detail = insightsInspector.detail {
-            // Insights' Breakdown: the picked day's or card's sessions.
+            // Insights' Breakdown: the picked day's sessions.
             detail()
         } else {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -556,7 +556,7 @@ struct MonitorWindowView: View {
             // may open: on Home's page they head the main pane.
             .union(Self.promptsInInspector(shownTab, tracesPage: tracesPage) && inspectorAvailable
                 ? InspectorDemand.offerKeys(model: model) : [])
-            // A day or a card the person picked on Insights' Breakdown: its
+            // A day the person picked on Insights' Breakdown: its
             // sessions live in the inspector, as a selected Traces session's
             // card does. On every tab, so showing a tab again is no new key.
             .union(insightsInspector.demandKey.map { [$0] } ?? [])

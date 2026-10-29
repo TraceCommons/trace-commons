@@ -206,8 +206,8 @@ struct InsightsView: View {
     /// and takes them back on any other tab.
     private func showBreakdownDetail(_ shown: InsightsTab) {
         guard shown == .patterns else { inspector.clear(); return }
-        inspector.show { [inspector, patternsModel, overviewModel, model] in
-            InsightsBreakdownDetail(inspector: inspector, patterns: patternsModel, overview: overviewModel,
+        inspector.show { [inspector, overviewModel, model] in
+            InsightsBreakdownDetail(inspector: inspector, overview: overviewModel,
                                     copy: model.copy, snapshots: model.snapshots)
         }
     }

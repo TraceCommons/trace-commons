@@ -190,7 +190,8 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         let credit = try XCTUnwrap(recorded["near_ai_credit"] as? [String: Any])
         assertDeclared(DaemonData.InsightsNearAiCredit.self, credit, method: "insights_week.near_ai_credit")
         let paths = KeyRecorder.keyPaths(in: credit)
-        for path in ["week.by_folder[].key", "week.by_folder[].usd_micros", "last_31_days.calls_without_charge"] {
+        for path in ["week.by_folder[].key", "week.by_folder[].usd_micros", "week.by_model[].usd_micros_known",
+                     "last_31_days.calls_without_charge"] {
             XCTAssertTrue(paths.contains(path), "the recorded answer carries \(path): \(paths)")
         }
     }
@@ -301,12 +302,12 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         XCTAssertEqual((off as? [String: Any])?["enabled"] as? Bool, false)
         assertDeclared(DaemonData.InsightsGlance.self, off, method: "insights_glance")
 
-        // The Models card's answers: off by default, so the real daemon
-        // answers the off shape without opening the store. The answered
-        // shape is pinned by `InsightsModelAnswersWireTests`, from the
-        // daemon's own recorded answer.
+        // The Models card's answers: the counter pass is on by default
+        // (product owner, 2026-10-29), so the real daemon answers enabled.
+        // The answered shape is pinned by `InsightsModelAnswersWireTests`,
+        // from the daemon's own recorded answer.
         let models = try result(daemon, "insights_model_answers")
-        XCTAssertEqual((models as? [String: Any])?["enabled"] as? Bool, false)
+        XCTAssertEqual((models as? [String: Any])?["enabled"] as? Bool, true)
         assertDeclared(DaemonData.InsightsModelAnswers.self, models, method: "insights_model_answers")
 
         // Approve last: it moves the entry out of the queue when it acts.

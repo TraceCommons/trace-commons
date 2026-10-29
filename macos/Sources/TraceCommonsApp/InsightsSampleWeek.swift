@@ -196,45 +196,14 @@ enum InsightsSampleWeek {
         return rows.enumerated().map { index, row in row.merging(["session_ref": "t\(index + 1)"]) { $1 } }
     }
 
-    /// Six weeks, oldest first; `nil` is a week with no figure.
-    private static func patternWeeks(_ values: [Int?]) -> [[String: Any]] {
-        let starts = ["2026-08-31", "2026-09-07", "2026-09-14", "2026-09-21", "2026-09-28", "2026-10-05"]
-        return zip(starts, values).map { start, value in ["week_start": start, "tokens": value ?? NSNull()] }
-    }
-
-    private static func card(_ kind: String, tokens: Int, count: Int?, files: Int? = nil, sessions: Int,
-                             basis: String, inferred: Bool, change: Int, weeks: [Int?]) -> [String: Any] {
-        var card: [String: Any] = ["kind": kind, "tokens": tokens, "sessions": sessions, "basis": basis,
-                                   "inferred": inferred, "change": change, "weeks": patternWeeks(weeks)]
-        if let count { card["count"] = count }
-        if let files { card["files"] = files }
-        return card
-    }
-
-    private static func reread(_ letter: String, _ ext: String?, _ reads: Int, _ shrink: Int, _ tokens: Int) -> [String: Any] {
-        ["letter": letter, "ext": ext ?? NSNull(), "reads": reads, "after_shrink": shrink, "tokens": tokens]
-    }
-
     static var patterns: [String: Any] {
         [
             "feed": "counter_pass", "week_start": "2026-10-05", "week_end": "2026-10-11", "tz": 0,
             "coverage": coverage, "sessions": 37, "claude_sessions": 31, "claude_only": true,
             "long_context_threshold": 150_000,
-            "cards": [
-                card("repeated_reads", tokens: 2_300_000, count: 41, files: 6, sessions: 9,
-                     basis: "estimate_from_result_size", inferred: false, change: 180,
-                     weeks: [1_100_000, 1_600_000, nil, 1_900_000, 1_500_000, 2_300_000]),
-                card("edit_fail_edit", tokens: 180_000, count: 12, sessions: 5,
-                     basis: "estimate_from_result_size", inferred: true, change: 90,
-                     weeks: [120_000, 200_000, nil, 150_000, 165_000, 180_000]),
-                card("long_context", tokens: 9_800_000, count: nil, sessions: 6,
-                     basis: "from_counters", inferred: false, change: 310,
-                     weeks: [4_100_000, 6_300_000, nil, 5_200_000, 7_500_000, 9_800_000]),
-            ],
-            "reread_files": [
-                reread("A", "ts", 9, 2, 640_000), reread("B", "rs", 8, 0, 510_000), reread("C", "md", 7, 3, 420_000),
-                reread("D", "json", 6, 0, 300_000), reread("E", nil, 5, 0, 150_000),
-            ],
+            // No pattern card is shown on macOS any more (owner, 2026-10-29).
+            "cards": [Any](),
+            "reread_files": [Any](),
             "weeks": weeks,
         ]
     }
@@ -253,10 +222,8 @@ enum InsightsSampleWeek {
             "goals": [
                 ["id": "g1", "goal": cacheGoal, "figure": 872,
                  "marks": marks(["not_met", "not_met", "no_figure", "met", "not_met", "met"], "up", from: 830)],
-                ["id": "g2", "goal": ["kind": "repeated_reads_under", "tokens": 2_000_000], "figure": 2_300_000,
-                 "marks": marks(["met", "met", "no_figure", "met", "met", "not_met"], "up", from: 1_500_000)],
             ],
-            "lever": ["pick": ["kind": "repeated_reads", "tokens": 2_300_000, "count": 41, "files": 6, "ratio_permille": 1500],
+            "lever": ["pick": ["kind": "retried_calls", "tokens": 410_000, "count": 37, "ratio_permille": 1500],
                       "disabled": [String](), "card_enabled": true],
             "recap": [
                 "week_start": "2026-10-05", "week_end": "2026-10-11", "sessions": 37,
@@ -265,7 +232,7 @@ enum InsightsSampleWeek {
                 "items": [
                     ["kind": "best_cache_week", "source": "claude_code", "permille": 872, "previous_best_permille": 840],
                     ["kind": "goal", "id": "g1", "goal": cacheGoal, "met": true],
-                    ["kind": "pattern_up", "pattern": "long_context", "up_permille": 310],
+                    ["kind": "pattern_up", "pattern": "retried_calls", "up_permille": 310],
                 ],
             ],
         ]

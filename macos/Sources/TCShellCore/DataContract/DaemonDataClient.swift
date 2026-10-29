@@ -239,8 +239,8 @@ public protocol DaemonDataClient: Sendable {
     // MARK: Insights
 
     /// `insights_week`: one local ISO week (`YYYY-Www`; `nil` is the current
-    /// week) from the daemon's counter pass, Insights feed T (owner decision
-    /// D4, open). Answers `enabled: false` while the setting is off; an older
+    /// week) from the daemon's counter pass, Insights feed T (on by default;
+    /// product owner, 2026-10-29). Answers `enabled: false` while the setting is off; an older
     /// daemon refuses it as `unknown_method`. Either way, and on any failed
     /// read, the window shows the saved-imports feed instead, never both.
     func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek

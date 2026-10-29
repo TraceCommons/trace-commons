@@ -1,20 +1,17 @@
-import Charts
 import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
 
-/// Patterns ("Where tokens went") over one feed at a time: the daemon's
-/// counter pass (feed T) when it sent a week, the saved snapshots (feed S)
-/// otherwise. Every word is the core's analytics copy, every figure the
-/// core's. A week with no figure is a gap marked with the dash, never a
-/// zero bar; files are letters with an extension, never a path. Only feed T
-/// compares weeks and carries "Your goals"; under feed S the change is left
-/// out.
+/// Breakdown over one feed at a time: the daemon's counter pass (feed T)
+/// when it sent a week, the saved snapshots (feed S) otherwise. Every word
+/// is the core's analytics copy, every figure the core's. Only feed T
+/// compares weeks and carries "Your goals".
 ///
-/// Laid out for the main pane (direction B, 2026-10-15): one card per
-/// pattern in a single column, each with six labelled weeks on the chart
-/// surface and, when a goal covers it, the goal as a dashed line.
+/// Laid out for the main pane (direction B, 2026-10-15): the week's scope,
+/// the drill-down, Tokens by day and the goals, in a single column. No
+/// pattern card is drawn (owner, 2026-10-29); a picked day's sessions are
+/// the window's inspector's (`InsightsBreakdownInspector`).
 struct InsightsPatternsTab: View {
     let model: InsightsPatternsModel
     let comparisons: InsightsComparisonsModel
@@ -37,37 +34,27 @@ struct InsightsPatternsTab: View {
     @State private var goalNumber = ""
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
-    private func figure(_ value: UInt64?) -> String { InsightsOverviewWords.figure(value, copy: copy) }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
                 if let patterns = model.shown {
                     header(patterns)
-                    // Details leads with the drill-down, by project, task or
-                    // tool (product owner, 2026-10-28). The pattern cards
-                    // stay under it: Overview's "Where tokens went" and the
-                    // lever's "Show the reads" open them here, and the goals
-                    // and re-read files live only here.
+                    // Details leads with the drill-down, by project or by
+                    // model (product owner, 2026-10-28; By task and By tool
+                    // removed 2026-10-29). No pattern card is shown any more
+                    // (owner, 2026-10-29: Retried tool calls, the last, was
+                    // removed); the goals live only here.
                     if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }
                     // Tokens by day moved here from Overview (product owner,
                     // 2026-10-28); a picked day's sessions are the
                     // inspector's (owner, 2026-10-29).
                     if let overview {
                         InsightsTokensByDay(model: overview, copy: copy, pickedDay: inspector.pickedDay,
-                                            pick: { inspector.pick(day: $0, patterns: model) })
+                                            pick: { inspector.pick(day: $0) })
                     }
-                    // A card's sessions are the inspector's too.
-                    LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        ForEach(InsightsPatternsWords.shownCards(patterns.cards)) { card in
-                            patternCard(card, threshold: patterns.long_context_threshold)
-                        }
-                    }
-                    LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                        rereadTable(patterns)
-                        if patterns.feed == "counter_pass", let found = comparisons.comparisons {
-                            goals(found)
-                        }
+                    if patterns.feed == "counter_pass", let found = comparisons.comparisons {
+                        goals(found)
                     }
                 } else if model.failed {
                     Text(text("analytics_unavailable")).insightsError()
@@ -109,105 +96,6 @@ struct InsightsPatternsTab: View {
         }
     }
 
-    private func patternCard(_ card: InsightsPatternCard, threshold: UInt64) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            // How the figure was arrived at, behind the title's "i".
-            InsightsSectionTitle(InsightsPatternsWords.title(card.kind, copy: copy),
-                                 info: InsightsPatternsWords.basisLines(card, copy: copy))
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                // The token figure is the headline and the count sits beneath
-                // it; an estimate that rounds to 0 leads with the count, and
-                // the token change is not drawn beside a count.
-                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
-                    Text(InsightsPatternsWords.headline(card, copy: copy)).insightsFigure()
-                    if card.change != nil, !InsightsPatternsWords.leadsWithCount(card) {
-                        Text(InsightsPatternsWords.change(card, copy: copy)).insightsCaption()
-                    }
-                }
-                Text(InsightsPatternsWords.countLine(card, threshold: threshold, copy: copy)).insightsNote()
-                    .fixedSize(horizontal: false, vertical: true)
-                weeklyBars(card)
-            }
-            .insightsCardBody()
-            if card.sessions > 0, model.counter == nil {
-                Button(InsightsPatternsWords.seeSessions(card, copy: copy)) {
-                    inspector.toggleSessions(card.kind, patterns: model)
-                }
-                .buttonStyle(GlassButtonStyle(.link))
-                .accessibilityAddTraits(model.sessions?.pattern == card.kind ? .isSelected : [])
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .insightsSection()
-    }
-
-    /// A goal's tokens on the card it covers (feed T only).
-    private func goalTokens(_ kind: String) -> UInt64? {
-        let goalKind = ["repeated_reads": "repeated_reads_under", "long_context": "long_context_under"][kind]
-        return comparisons.comparisons?.goals.first { $0.goal.kind == goalKind }?.goal.tokens
-    }
-
-    /// The week's short date on the axis.
-    static func weekLabel(_ weekStart: String) -> String {
-        let parse = Date.ISO8601FormatStyle().year().month().day()
-        guard let day = try? Date(weekStart, strategy: parse) else { return weekStart }
-        return day.formatted(Date.FormatStyle(timeZone: TimeZone(secondsFromGMT: 0) ?? .current).month(.abbreviated).day())
-    }
-
-    /// Six weekly bars on a fixed axis of every week, so an absent week is a
-    /// visible gap, marked with the dash. The week on screen is the last and
-    /// carries its figure. A bar, not a ring; no run of weeks is counted
-    /// (owner decision D1, open).
-    private func weeklyBars(_ card: InsightsPatternCard) -> some View {
-        let bars = InsightsPatternsWords.bars(card)
-        let current = bars.last?.week
-        let goal = goalTokens(card.kind)
-        return Chart {
-            ForEach(bars) { bar in
-                if let tokens = bar.tokens {
-                    BarMark(x: .value(text("analytics_this_week"), Self.weekLabel(bar.week)),
-                            y: .value(text("analytics_card_tokens"), tokens), width: .ratio(0.6))
-                    .foregroundStyle(GlassTokens.Color.purpleSoft.color)
-                    .annotation(position: .top, spacing: GlassTokens.Space.s1) {
-                        if bar.week == current,
-                           let label = InsightsPatternsWords.currentWeekFigure(card, copy: copy) {
-                            Text(label).insightsTick(current: true)
-                        }
-                    }
-                } else {
-                    PointMark(x: .value(text("analytics_this_week"), Self.weekLabel(bar.week)),
-                              y: .value(text("analytics_card_tokens"), 0))
-                    .symbolSize(0)
-                    .annotation(position: .top, spacing: 0) {
-                        Text(text("analytics_unavailable")).insightsTick()
-                    }
-                }
-            }
-            if let goal {
-                RuleMark(y: .value(text("analytics_goals_title"), goal))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .annotation(position: .top, alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text(figure(goal)).insightsTick()
-                    }
-            }
-        }
-        .chartXScale(domain: bars.map { Self.weekLabel($0.week) })
-        .chartYAxis(.hidden)
-        .chartXAxis {
-            AxisMarks { value in
-                AxisValueLabel {
-                    if let label = value.as(String.self) {
-                        Text(label).insightsTick(current: current.map(Self.weekLabel) == label)
-                    }
-                }
-            }
-        }
-        .frame(height: 76)
-        .insightsPlot()
-        .accessibilityHidden(true)
-    }
-
     /// "Your goals" (feed T only): each goal with six weekly marks, oldest
     /// first, and the change from last week. A met week is a filled square,
     /// a missed one an outlined square, a week with no figure the dash: shape,
@@ -217,7 +105,7 @@ struct InsightsPatternsTab: View {
             InsightsSectionTitle(text("analytics_goals_title"), info: [text("analytics_goals_note")])
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 VStack(spacing: 0) {
-                    ForEach(Array(found.goals.enumerated()), id: \.element.id) { index, goal in
+                    ForEach(Array(found.goals.filter { InsightsComparisonsWords.goalKinds.contains($0.goal.kind) }.enumerated()), id: \.element.id) { index, goal in
                         GlassTableRow(first: index == 0) {
                             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                                 HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
@@ -282,49 +170,6 @@ struct InsightsPatternsTab: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
     }
-
-    /// The re-read files in four columns sized for the main pane; the long
-    /// column title wraps rather than widening the table.
-    private func rereadTable(_ patterns: InsightsWeekPatterns) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            Text(text("analytics_reread_title")).insightsTitle()
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                if patterns.reread_files.isEmpty {
-                    Text(text("analytics_unavailable")).insightsNote()
-                } else {
-                    VStack(spacing: 0) {
-                        GlassTableHead {
-                            HStack(alignment: .bottom, spacing: GlassTokens.Space.s4) {
-                                Text(text("analytics_reread_file")).frame(maxWidth: .infinity, alignment: .leading)
-                                Text(text("analytics_reread_reads")).frame(width: 44, alignment: .trailing)
-                                Text(text("analytics_reread_after_shrink"))
-                                    .multilineTextAlignment(.trailing)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(width: 120, alignment: .trailing)
-                                Text(text("analytics_reread_tokens")).frame(width: 56, alignment: .trailing)
-                            }
-                        }
-                        ForEach(patterns.reread_files) { row in
-                            GlassTableRow {
-                                HStack(spacing: GlassTokens.Space.s4) {
-                                    Text(InsightsPatternsWords.fileLabel(row, copy: copy)).insightsMono()
-                                        .foregroundStyle(GlassColor.textPrimary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    Text(String(row.reads)).insightsMono().frame(width: 44, alignment: .trailing)
-                                    Text(String(row.after_shrink)).insightsMono().frame(width: 120, alignment: .trailing)
-                                    Text(figure(row.tokens)).insightsMono().foregroundStyle(GlassColor.textPrimary)
-                                        .frame(width: 56, alignment: .trailing)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .insightsCardBody()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
-    }
 }
 
 /// One week of a goal: a filled square when met, an outlined one when not,
@@ -351,39 +196,5 @@ struct InsightsGoalMark: View {
         .frame(width: Self.side, height: Self.side)
         .accessibilityElement()
         .accessibilityLabel(InsightsComparisonsWords.mark(wire, copy: copy))
-    }
-}
-
-/// The sessions behind one card, in the core's order, under the card.
-struct InsightsPatternSessionsView: View {
-    let found: InsightsPatternSessions
-    let copy: [String: String]
-
-    private func text(_ key: String) -> String { copy[key] ?? "" }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            Text(InsightsPatternsWords.title(found.pattern, copy: copy)).insightsTitle()
-            VStack(alignment: .leading, spacing: 0) {
-                LazyVStack(spacing: 0) {
-                    ForEach(found.sessions) { session in
-                        #if DEBUG
-                        let _ = OtherCollectionRowBodies.record("insightsPatternSessions", session.id)
-                        #endif
-                        InsightsDrillRow(
-                            title: session.session_ref,
-                            figure: InsightsOverviewWords.figure(session.tokens, copy: copy),
-                            label: nil,
-                            state: InsightsOverviewWords.state(session.state, copy: copy),
-                            reasons: session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
-                                .joined(separator: " \u{b7} "))
-                    }
-                }
-            }
-            .insightsCardBody()
-        }
-        .textSelection(.enabled)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsDetailSection()
     }
 }
