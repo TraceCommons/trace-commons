@@ -40,6 +40,7 @@
     "heroInk": { "hex": "#ffffff", "note": "Text and graphics on a hero promotion's ground, in both appearances." },
     "heroButtonFill": { "hex": "#ffffff", "note": "A hero promotion's call to action: a white pill (owner, 2026-10-12)." },
     "heroButtonInk": { "hex": "#16161a", "note": "The label on heroButtonFill: 18:1." },
+    "heroAccent": { "hex": "#2e95ff", "note": "A bright blue on a hero's ground, in both appearances: the Traces hero's step discs (behind heroInk) and step icons (owner, 2026-10-29, from the owner's mock-up)." },
     "badgeFillSubtle": { "hex": "#ffffff", "alpha": 0.16, "note": "A count badge that is not owed a decision (a tab's count): ink at 16%. The flat Light theme draws it in the well's slate, as the legend pills are.", "light": { "hex": "#000000", "alpha": 0.16 } },
     "badgeFill": { "hex": "#ff6b6b", "note": "The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.", "light": { "hex": "#e04a42" } },
     "dataShared": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
