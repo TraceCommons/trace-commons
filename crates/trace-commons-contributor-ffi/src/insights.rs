@@ -526,7 +526,7 @@ mod tests {
         assert!(!store.exists());
         let set = json_call(
             &store,
-            serde_json::json!({"type":"goal_set","goal":{"kind":"repeated_reads_under","tokens":50000}}),
+            serde_json::json!({"type":"goal_set","goal":{"kind":"weekly_tokens_under","source":"claude_code","tokens":50000}}),
         )
         .unwrap();
         let id = set["state"]["goals"][0]["id"].clone();

@@ -1164,7 +1164,7 @@ enum InsightsPatternsWords {
 
     /// Each card's hole for its count in the headline words.
     private static let countHole = [
-        "repeated_reads": "r", "retried_calls": "c", "edit_fail_edit": "l", "long_context": "n",
+        "retried_calls": "c",
     ]
 
     /// The card's headline: the token figure, or the count with its unit
@@ -1177,31 +1177,16 @@ enum InsightsPatternsWords {
         return InsightsOverviewWords.fill(text(key, copy), [hole: String(found)])
     }
 
-    /// The line under the headline: the core's count sentence, or the
-    /// long-context threshold line. Under a count headline the sentence
+    /// The line under the headline: the core's count sentence. Under a count headline the sentence
     /// without the count, so the count is not said twice.
-    static func countLine(_ card: InsightsPatternCard, threshold: UInt64, copy: [String: String]) -> String {
+    static func countLine(_ card: InsightsPatternCard, copy: [String: String]) -> String {
         let fill = InsightsOverviewWords.fill
         let underCount = leadsWithCount(card)
         switch card.kind {
-        case "repeated_reads" where underCount:
-            let key = "analytics_pattern_repeated_reads_count_under_count"
-                + (card.files == 1 ? "_one" : "_other")
-            return fill(text(key, copy), ["f": count(card.files, copy)])
         case "retried_calls" where underCount:
             return text("analytics_pattern_retried_calls_count_under_count", copy)
-        case "edit_fail_edit" where underCount:
-            return text("analytics_pattern_edit_fail_edit_count_under_count", copy)
-        case "repeated_reads":
-            return fill(text("analytics_pattern_repeated_reads_count", copy),
-                        ["r": count(card.count, copy), "f": count(card.files, copy)])
         case "retried_calls":
             return fill(text("analytics_pattern_retried_calls_count", copy), ["c": count(card.count, copy)])
-        case "edit_fail_edit":
-            return fill(text("analytics_pattern_edit_fail_edit_count", copy), ["l": count(card.count, copy)])
-        case "long_context":
-            return fill(text("analytics_pattern_long_context_line", copy),
-                        ["threshold": InsightsOverviewWords.figure(threshold, copy: copy)])
         default:
             return dash(copy)
         }
@@ -1256,12 +1241,12 @@ enum InsightsPatternsWords {
         InsightsOverviewWords.fill(text("analytics_see_sessions", copy), ["n": String(card.sessions)])
     }
 
-    /// "File B · .rs", or "File B" with no extension.
-    static func fileLabel(_ row: InsightsRereadRow, copy: [String: String]) -> String {
-        guard let ext = row.ext else {
-            return InsightsOverviewWords.fill(text("analytics_file_label_no_ext", copy), ["letter": row.letter])
-        }
-        return InsightsOverviewWords.fill(text("analytics_file_label", copy), ["letter": row.letter, "ext": ext])
+    /// The cards Breakdown shows. Repeated reads, edit after a failed
+    /// command and long context left Insights (product owner, 2026-10-29).
+    static let shownKinds: Set<String> = ["retried_calls"]
+
+    static func shown(_ cards: [InsightsPatternCard]) -> [InsightsPatternCard] {
+        cards.filter { shownKinds.contains($0.kind) }
     }
 
     /// "Claude Code sessions only: {k} of {n}." when another harness is in
@@ -2121,10 +2106,16 @@ enum InsightsSessionsWords {
         }
     }
 
-    /// A marker card: its title, its detail, a re-read's file label, and
-    /// last the derivation label.
-    static func markerLines(_ marker: InsightsDrillMarker, threshold: UInt64,
-                            copy: [String: String]) -> [String] {
+    /// The markers the drill shows. A turn that crossed the long-context
+    /// line and a file read again left Insights (product owner, 2026-10-29).
+    static let shownMarkerKinds: Set<String> = ["cache_written_again", "context_shrank"]
+
+    static func shownMarkers(_ drill: InsightsSessionDrill) -> [InsightsDrillMarker] {
+        drill.markers.filter { shownMarkerKinds.contains($0.kind) }
+    }
+
+    /// A marker card: its title, its detail, and last the derivation label.
+    static func markerLines(_ marker: InsightsDrillMarker, copy: [String: String]) -> [String] {
         let fill = InsightsOverviewWords.fill
         let figure = { (value: UInt64?) in InsightsOverviewWords.figure(value, copy: copy) }
         var lines: [String]
@@ -2138,16 +2129,6 @@ enum InsightsSessionsWords {
             ]
         case "context_shrank":
             lines = [fill(text("analytics_marker_shrank", copy), ["t": String(marker.turn_ordinal)])]
-        case "crossed_long_context":
-            lines = [fill(text("analytics_marker_crossed", copy), ["threshold": figure(threshold)]),
-                     text("analytics_marker_crossed_detail", copy)]
-        case "re_read":
-            let letter = marker.file_letter ?? dash(copy)
-            let label = marker.file_ext.map {
-                fill(text("analytics_file_label", copy), ["letter": letter, "ext": $0])
-            } ?? fill(text("analytics_file_label_no_ext", copy), ["letter": letter])
-            lines = [fill(text("analytics_marker_reread", copy), ["letter": letter]),
-                     text("analytics_marker_reread_detail", copy), label]
         default:
             return [dash(copy)]
         }
@@ -2277,11 +2258,9 @@ enum InsightsComparisonsWords {
     private static let fill = InsightsOverviewWords.fill
 
     /// The goal kinds, in the core's order, and their words.
-    static let goalKinds = ["cache_share_at_least", "repeated_reads_under", "long_context_under", "weekly_tokens_under"]
+    static let goalKinds = ["cache_share_at_least", "weekly_tokens_under"]
     private static let goalKeys = [
         "cache_share_at_least": "analytics_goal_cache_share",
-        "repeated_reads_under": "analytics_goal_repeated_reads",
-        "long_context_under": "analytics_goal_long_context",
         "weekly_tokens_under": "analytics_goal_weekly_tokens",
     ]
 
@@ -2341,18 +2320,10 @@ enum InsightsComparisonsWords {
         }
     }
 
-    /// The lever's observation. Repeated reads have their own line; any
-    /// other kind shows its card's name and figure. No advice (owner
+    /// The lever's observation: its card's name and figure. No advice (owner
     /// decision D2, open).
     static func leverLines(_ pick: InsightsLeverView, copy: [String: String]) -> [String] {
         let tokens = InsightsOverviewWords.figure(pick.tokens, copy: copy)
-        if pick.kind == "repeated_reads" {
-            return [fill(text("analytics_lever_line", copy), [
-                "f": pick.files.map(String.init) ?? dash(copy),
-                "r": pick.count.map(String.init) ?? dash(copy),
-                "t": tokens,
-            ])]
-        }
         return [InsightsPatternsWords.title(pick.kind, copy: copy), tokens]
     }
 
@@ -2384,7 +2355,8 @@ enum InsightsComparisonsWords {
             return fill(text(met ? "analytics_recap_goal_met" : "analytics_recap_goal_not_met", copy),
                         ["goal": Self.goal(goal, copy: copy)])
         case "pattern_up":
-            guard let pattern = item.pattern, let up = item.up_permille else { return nil }
+            guard let pattern = item.pattern, InsightsPatternsWords.shownKinds.contains(pattern),
+                  let up = item.up_permille else { return nil }
             return fill(text("analytics_recap_pattern_up", copy), [
                 "pattern": InsightsPatternsWords.title(pattern, copy: copy), "p": InsightsOverviewWords.percent(up),
             ])

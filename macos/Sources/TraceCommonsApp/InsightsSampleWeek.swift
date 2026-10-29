@@ -208,33 +208,17 @@ enum InsightsSampleWeek {
         return card
     }
 
-    private static func reread(_ letter: String, _ ext: String?, _ reads: Int, _ shrink: Int, _ tokens: Int) -> [String: Any] {
-        ["letter": letter, "ext": ext ?? NSNull(), "reads": reads, "after_shrink": shrink, "tokens": tokens]
-    }
-
     static var patterns: [String: Any] {
         [
             "feed": "counter_pass", "week_start": "2026-10-05", "week_end": "2026-10-11", "tz": 0,
             "coverage": coverage, "sessions": 37, "claude_sessions": 31, "claude_only": true,
             "long_context_threshold": 150_000,
             "cards": [
-                card("repeated_reads", tokens: 2_300_000, count: 41, files: 6, sessions: 9,
-                     basis: "estimate_from_result_size", inferred: false, change: 180,
-                     weeks: [1_100_000, 1_600_000, nil, 1_900_000, 1_500_000, 2_300_000]),
                 card("retried_calls", tokens: 410_000, count: 37, sessions: 7,
                      basis: "estimate_from_result_size", inferred: false, change: -60,
                      weeks: [520_000, 470_000, nil, 390_000, 440_000, 410_000]),
-                card("edit_fail_edit", tokens: 180_000, count: 12, sessions: 5,
-                     basis: "estimate_from_result_size", inferred: true, change: 90,
-                     weeks: [120_000, 200_000, nil, 150_000, 165_000, 180_000]),
-                card("long_context", tokens: 9_800_000, count: nil, sessions: 6,
-                     basis: "from_counters", inferred: false, change: 310,
-                     weeks: [4_100_000, 6_300_000, nil, 5_200_000, 7_500_000, 9_800_000]),
             ],
-            "reread_files": [
-                reread("A", "ts", 9, 2, 640_000), reread("B", "rs", 8, 0, 510_000), reread("C", "md", 7, 3, 420_000),
-                reread("D", "json", 6, 0, 300_000), reread("E", nil, 5, 0, 150_000),
-            ],
+            "reread_files": [Any](),
             "weeks": weeks,
         ]
     }
@@ -253,10 +237,8 @@ enum InsightsSampleWeek {
             "goals": [
                 ["id": "g1", "goal": cacheGoal, "figure": 872,
                  "marks": marks(["not_met", "not_met", "no_figure", "met", "not_met", "met"], "up", from: 830)],
-                ["id": "g2", "goal": ["kind": "repeated_reads_under", "tokens": 2_000_000], "figure": 2_300_000,
-                 "marks": marks(["met", "met", "no_figure", "met", "met", "not_met"], "up", from: 1_500_000)],
             ],
-            "lever": ["pick": ["kind": "repeated_reads", "tokens": 2_300_000, "count": 41, "files": 6, "ratio_permille": 1500],
+            "lever": ["pick": ["kind": "retried_calls", "tokens": 410_000, "count": 37, "ratio_permille": 1500],
                       "disabled": [String](), "card_enabled": true],
             "recap": [
                 "week_start": "2026-10-05", "week_end": "2026-10-11", "sessions": 37,
@@ -265,7 +247,7 @@ enum InsightsSampleWeek {
                 "items": [
                     ["kind": "best_cache_week", "source": "claude_code", "permille": 872, "previous_best_permille": 840],
                     ["kind": "goal", "id": "g1", "goal": cacheGoal, "met": true],
-                    ["kind": "pattern_up", "pattern": "long_context", "up_permille": 310],
+                    ["kind": "pattern_up", "pattern": "retried_calls", "up_permille": 310],
                 ],
             ],
         ]
@@ -273,7 +255,7 @@ enum InsightsSampleWeek {
 
     /// One trace, 52 turns, dated and sourced as the saved trace asked for
     /// (Claude Code otherwise): context grows to the threshold, the cache is
-    /// written again after a pause, a file is read again, and context shrinks.
+    /// written again after a pause, and context shrinks.
     /// A saved Codex trace is drawn as the core draws one: no per-turn
     /// series ("not recorded"), no turns and no markers.
     static func session(_ snapshotID: String) -> [String: Any] {
@@ -302,11 +284,7 @@ enum InsightsSampleWeek {
             "markers": [
                 ["letter": "A", "turn_ordinal": 31, "kind": "cache_written_again", "basis": "inferred_from_counters",
                  "pause_minutes": 7, "cache_write": 96_000],
-                ["letter": "B", "turn_ordinal": 37, "kind": "re_read", "basis": "from_tool_calls",
-                 "file_letter": "A", "file_ext": "ts"],
-                ["letter": "C", "turn_ordinal": 46, "kind": "crossed_long_context", "basis": "from_counters",
-                 "context_from": 149_000, "context": 152_000],
-                ["letter": "D", "turn_ordinal": 48, "kind": "context_shrank", "basis": "inferred_from_counters",
+                ["letter": "B", "turn_ordinal": 48, "kind": "context_shrank", "basis": "inferred_from_counters",
                  "context_from": 155_000, "context": 60_000],
             ],
         ]

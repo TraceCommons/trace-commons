@@ -1,5 +1,5 @@
 //! `insights_week`'s `work`: Claude Code and Codex spend at API list
-//! prices, lines and edits, for the week on screen and the week before
+//! prices and edits, for the week on screen and the week before
 //! (product owner, 2026-10-29: Claude and Codex spend shown at API list
 //! prices). NEAR AI money stays in `near_ai_credit`.
 //!
@@ -57,9 +57,6 @@ struct Totals {
     near_ai_sessions: u64,
     exact: u128,
     cache_savings_exact: u128,
-    lines_added: u64,
-    lines_removed: u64,
-    lines_partial: bool,
     edits: u64,
     edits_undone: u64,
     edits_denied: u64,
@@ -125,11 +122,9 @@ impl Count {
     }
 }
 
-/// A session's lines and edits, summed over its models.
+/// A session's edits, summed over its models.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct FactCounts {
-    lines_added: Count,
-    lines_removed: Count,
     edits: Count,
     edits_undone: Count,
     edits_denied: Count,
@@ -140,20 +135,7 @@ impl FactCounts {
         let Some(facts) = facts else {
             return FactCounts::unknown();
         };
-        // Lines are known only as a pair.
-        let lines_partial =
-            facts.shape.lines_added.is_none() || facts.shape.lines_removed.is_none();
-        let mut counts = FactCounts {
-            lines_added: Count {
-                partial: lines_partial,
-                ..Count::of(facts.shape.lines_added)
-            },
-            lines_removed: Count {
-                partial: lines_partial,
-                ..Count::of(facts.shape.lines_removed)
-            },
-            ..FactCounts::default()
-        };
+        let mut counts = FactCounts::default();
         for model in &facts.models {
             counts.edits.add(Count::of(model.edits));
             counts.edits_undone.add(Count::of(model.undone));
@@ -164,8 +146,6 @@ impl FactCounts {
 
     fn unknown() -> Self {
         FactCounts {
-            lines_added: Count::unknown(),
-            lines_removed: Count::unknown(),
             edits: Count::unknown(),
             edits_undone: Count::unknown(),
             edits_denied: Count::unknown(),
@@ -174,8 +154,6 @@ impl FactCounts {
 
     fn beyond(self, earlier: FactCounts) -> Self {
         FactCounts {
-            lines_added: self.lines_added.beyond(earlier.lines_added),
-            lines_removed: self.lines_removed.beyond(earlier.lines_removed),
             edits: self.edits.beyond(earlier.edits),
             edits_undone: self.edits_undone.beyond(earlier.edits_undone),
             edits_denied: self.edits_denied.beyond(earlier.edits_denied),
@@ -183,7 +161,7 @@ impl FactCounts {
     }
 }
 
-/// The lines and edits a session adds, net of the transcript it resumes
+/// The edits a session adds, net of the transcript it resumes
 /// (`claude_resumes`), so work a resumed transcript repeats counts once.
 fn own_counts(inputs: &[SessionInput], resumes: &[ClaudeResume], index: usize) -> FactCounts {
     let own = FactCounts::of(inputs[index].facts.as_ref());
@@ -197,7 +175,7 @@ fn own_counts(inputs: &[SessionInput], resumes: &[ClaudeResume], index: usize) -
     }
 }
 
-/// When a session's lines and edits are dated: its first activity, or for
+/// When a session's edits are dated: its first activity, or for
 /// a resumed transcript its first dated turn the resumed one lacks.
 fn facts_at(
     inputs: &[SessionInput],
@@ -242,7 +220,7 @@ struct SessionWork {
     near_ai: bool,
     exact: u128,
     cache_savings_exact: u128,
-    /// The session's own lines and edits, when they are dated in the week.
+    /// The session's own edits, when they are dated in the week.
     facts: Option<FactCounts>,
 }
 
@@ -261,9 +239,6 @@ impl Totals {
         let Some(facts) = session.facts else {
             return;
         };
-        self.lines_added += facts.lines_added.known;
-        self.lines_removed += facts.lines_removed.known;
-        self.lines_partial |= facts.lines_added.partial || facts.lines_removed.partial;
         self.edits += facts.edits.known;
         self.edits_count_partial |= facts.edits.partial;
         self.edits_undone += facts.edits_undone.known;
@@ -282,9 +257,6 @@ impl Totals {
             "usd_micros_known": micros(self.exact),
             "usd_partial": unpriced > 0,
             "cache_savings_usd_micros_known": micros(self.cache_savings_exact),
-            "lines_added_known": self.lines_added,
-            "lines_removed_known": self.lines_removed,
-            "lines_partial": self.lines_partial,
             "edits_known": self.edits,
             "edits_undone_known": self.edits_undone,
             "edits_denied_known": self.edits_denied,
@@ -916,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_lines_and_edits_are_partial_never_zero() {
+    fn unknown_edits_are_partial_never_zero() {
         let value = work(
             &[
                 claude(
@@ -933,9 +905,6 @@ mod tests {
             &[],
         );
         let week = &value["week"];
-        assert_eq!(week["lines_added_known"], 40);
-        assert_eq!(week["lines_removed_known"], 20);
-        assert_eq!(week["lines_partial"], true);
         assert_eq!(week["edits_known"], 3);
         assert_eq!(week["edits_denied_known"], 2);
         assert_eq!(week["edits_undone_known"], 0);
@@ -950,12 +919,9 @@ mod tests {
             )],
             &[],
         );
-        assert_eq!(known["week"]["lines_partial"], false);
         assert_eq!(known["week"]["edits_partial"], false);
         // No facts at all: unknown, not none.
         let none = work(&[claude("t1", vec![claude_turn(0, at(26, 9))], None)], &[]);
-        assert_eq!(none["week"]["lines_added_known"], 0);
-        assert_eq!(none["week"]["lines_partial"], true);
         assert_eq!(none["week"]["edits_partial"], true);
     }
 
@@ -1008,11 +974,9 @@ mod tests {
             &[],
         );
         assert_eq!(value["week"]["sessions"], 1);
-        assert_eq!(value["week"]["lines_added_known"], 10);
         let last = &value["last_week"];
         assert_eq!(last["sessions"], 1);
         assert_eq!(last["usd_micros_known"], 2 * HAIKU_TURN_MICROS);
-        assert_eq!(last["lines_added_known"], 30);
         assert_eq!(last["edits_known"], 2);
         let last_days = value["last_week_by_day"].as_array().unwrap();
         assert_eq!(last_days.len(), 7);
@@ -1020,7 +984,7 @@ mod tests {
         assert_eq!(last_days[1]["usd_micros_known"], HAIKU_TURN_MICROS);
         assert_eq!(last_days[2]["usd_micros_known"], HAIKU_TURN_MICROS);
         // A session across the week boundary: its spend by its turns, its
-        // lines once, in the week it began.
+        // edits once, in the week it began.
         let across = work(
             &[claude(
                 "t1",
@@ -1031,9 +995,6 @@ mod tests {
         );
         assert_eq!(across["week"]["usd_micros_known"], HAIKU_TURN_MICROS);
         assert_eq!(across["last_week"]["usd_micros_known"], HAIKU_TURN_MICROS);
-        assert_eq!(across["week"]["lines_added_known"], 0);
-        assert_eq!(across["week"]["lines_partial"], false);
-        assert_eq!(across["last_week"]["lines_added_known"], 8);
         // The oldest kept week has no week before it in the store.
         let folders = BTreeMap::new();
         let oldest = work_value(
@@ -1088,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn a_resumed_transcript_counts_only_its_new_lines_and_edits() {
+    fn a_resumed_transcript_counts_only_its_new_edits() {
         let key = |byte: u8| {
             Some(trace_commons_protocol::insights_usage_series::KeyedDigest(
                 [byte; 32],
@@ -1103,12 +1064,8 @@ mod tests {
         let mut resumed = claude("t2", vec![old, new], Some(facts(Some(16), Some(3))));
         resumed.import_seq = 1;
         let value = work(&[first, resumed], &[]);
-        assert_eq!(value["last_week"]["lines_added_known"], 10);
         assert_eq!(value["last_week"]["edits_known"], 2);
-        assert_eq!(value["week"]["lines_added_known"], 6);
-        assert_eq!(value["week"]["lines_removed_known"], 3);
         assert_eq!(value["week"]["edits_known"], 1);
-        assert_eq!(value["week"]["lines_partial"], false);
         assert_eq!(value["week"]["edits_partial"], false);
     }
 
@@ -1127,8 +1084,6 @@ mod tests {
         let mut resumed = claude("t2", vec![old, new], Some(facts(Some(16), Some(3))));
         resumed.import_seq = 1;
         let value = work(&[first, resumed], &[]);
-        assert_eq!(value["week"]["lines_added_known"], 0);
-        assert_eq!(value["week"]["lines_partial"], true);
         assert_eq!(value["week"]["edits_known"], 0);
         assert_eq!(value["week"]["edits_count_partial"], true);
     }
