@@ -106,13 +106,24 @@ pub(super) fn coverage_line(coverage: &WeekCoverage) -> String {
     let sessions = coverage.known + coverage.partial + coverage.unknown;
     fill(
         &text("analytics_coverage_line"),
-        &[
-            ("k", &coverage.known.to_string()),
-            ("n", &sessions.to_string()),
-            ("p", &coverage.partial.to_string()),
-            ("u", &coverage.unknown.to_string()),
-        ],
+        &[("n", &sessions.to_string())],
     )
+}
+
+/// What is known of the traces, one sentence per count that is not 0
+/// (full details, some missing, none). This shell has no "i", so it is a
+/// small line under the count.
+pub(super) fn coverage_info(coverage: &WeekCoverage) -> Option<String> {
+    let sentences: Vec<String> = [
+        ("analytics_coverage_info_known", "k", coverage.known),
+        ("analytics_coverage_info_partial", "p", coverage.partial),
+        ("analytics_coverage_info_unknown", "u", coverage.unknown),
+    ]
+    .into_iter()
+    .filter(|(_, _, count)| *count > 0)
+    .map(|(key, hole, count)| fill(&text(key), &[(hole, &count.to_string())]))
+    .collect();
+    (!sentences.is_empty()).then(|| sentences.join(" "))
 }
 
 /// Which feed is showing. Feed S also says that weeks are not compared.
@@ -828,6 +839,9 @@ impl AnalyticsTabs {
         heading.append(&self.week_picker(&overview.weeks, overview.week_start, Tab::Overview));
         body.append(&heading);
         body.append(&label(&coverage_line(&overview.coverage)));
+        if let Some(info) = coverage_info(&overview.coverage) {
+            body.append(&small(&info));
+        }
         if overview.undated_sessions > 0 {
             body.append(&small(&fill(
                 &text("analytics_coverage_undated"),
@@ -1015,6 +1029,9 @@ impl AnalyticsTabs {
         body.append(&label(&text("analytics_patterns_intro")));
         body.append(&label(&text("analytics_patterns_overlap")));
         body.append(&small(&coverage_line(&patterns.coverage)));
+        if let Some(info) = coverage_info(&patterns.coverage) {
+            body.append(&small(&info));
+        }
         for line in feed_lines(patterns.feed) {
             body.append(&small(&line));
         }
@@ -1427,7 +1444,19 @@ mod tests {
             coverage_line(&week.coverage),
             fill(
                 &words("analytics_coverage_line"),
-                &[("k", "1"), ("n", "2"), ("p", "1"), ("u", "0")]
+                &[("n", "2")]
+            )
+        );
+        // The breakdown names only the counts that are not 0.
+        assert_eq!(
+            coverage_info(&week.coverage).as_deref(),
+            Some(
+                format!(
+                    "{} {}",
+                    fill(&words("analytics_coverage_info_known"), &[("k", "1")]),
+                    fill(&words("analytics_coverage_info_partial"), &[("p", "1")])
+                )
+                .as_str()
             )
         );
         // Feed S says which feed it is and that weeks are not compared.
@@ -1509,9 +1538,10 @@ mod tests {
             coverage_line(&week.coverage),
             fill(
                 &words("analytics_coverage_line"),
-                &[("k", "0"), ("n", "0"), ("p", "0"), ("u", "0")]
+                &[("n", "0")]
             )
         );
+        assert_eq!(coverage_info(&week.coverage), None);
         let empty = patterns("patterns_empty.json");
         for card in &empty.cards {
             assert_eq!(figure(card.tokens), dash());

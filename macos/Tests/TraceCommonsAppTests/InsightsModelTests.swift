@@ -160,7 +160,10 @@ private actor Recorder {
 final class InsightsOverviewTests: XCTestCase {
     static let words: [String: String] = [
         "analytics_unavailable": "\u{2014}",
-        "analytics_coverage_line": "Counts known for {k} of {n} traces \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
+        "analytics_coverage_line": "{n} traces",
+        "analytics_coverage_info_known": "Full details for {k}.",
+        "analytics_coverage_info_partial": "Some missing for {p}.",
+        "analytics_coverage_info_unknown": "None for {u}; these aren't counted as zero.",
         "analytics_feed_saved": "FEED_SAVED",
         "analytics_feed_comparisons_need_counter_pass": "NEEDS_T",
         "analytics_unknown_label": "UNKNOWN_LABEL",
@@ -190,6 +193,11 @@ final class InsightsOverviewTests: XCTestCase {
       "weeks":["2026-09-07"]}}
     """
 
+    static func coverage(_ known: Int, _ partial: Int, _ unknown: Int) throws -> InsightsWeekCoverage {
+        let json = "{\"known\":\(known),\"partial\":\(partial),\"unknown\":\(unknown),\"reasons\":{}}"
+        return try JSONDecoder().decode(InsightsWeekCoverage.self, from: Data(json.utf8))
+    }
+
     func overview() throws -> InsightsWeekOverview {
         try XCTUnwrap(JSONDecoder().decode(InsightsResponse.self, from: Data(Self.overviewJSON.utf8)).overview)
     }
@@ -210,7 +218,18 @@ final class InsightsOverviewTests: XCTestCase {
     func testCoverageAndFeedLinesAreTheCoresWordsFilled() throws {
         let week = try overview()
         XCTAssertEqual(InsightsOverviewWords.coverageLine(week.coverage, copy: Self.words),
-                       "Counts known for 1 of 4 traces \u{b7} 1 partial \u{b7} 2 unknown, not counted as zero")
+                       "4 traces")
+        XCTAssertEqual(InsightsOverviewWords.coverageInfo(week.coverage, copy: Self.words),
+                       "Full details for 1. Some missing for 1. None for 2; these aren't counted as zero.")
+        // Only the counts that are not 0 get a sentence; nothing known of nothing is no "i".
+        let some = try Self.coverage(3, 0, 1)
+        XCTAssertEqual(InsightsOverviewWords.coverageLine(some, copy: Self.words), "4 traces")
+        XCTAssertEqual(InsightsOverviewWords.coverageInfo(some, copy: Self.words),
+                       "Full details for 3. None for 1; these aren't counted as zero.")
+        let all = try Self.coverage(5, 0, 0)
+        XCTAssertEqual(InsightsOverviewWords.coverageInfo(all, copy: Self.words), "Full details for 5.")
+        let none = try Self.coverage(0, 0, 0)
+        XCTAssertNil(InsightsOverviewWords.coverageInfo(none, copy: Self.words))
         XCTAssertEqual(InsightsOverviewWords.feedLines(week.feed, copy: Self.words), ["FEED_SAVED", "NEEDS_T"])
         XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: Self.words), [""])
         XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: ["analytics_feed_counter_pass": "FEED_T"]),
