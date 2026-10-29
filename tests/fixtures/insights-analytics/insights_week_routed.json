@@ -394,7 +394,8 @@
       "edits_partial": true,
       "edits_count_partial": false,
       "edits_undone_partial": false,
-      "edits_denied_partial": true
+      "edits_denied_partial": true,
+      "near_ai_sessions": 0
     },
     "last_week": {
       "sessions": 0,
@@ -412,7 +413,8 @@
       "edits_partial": false,
       "edits_count_partial": false,
       "edits_undone_partial": false,
-      "edits_denied_partial": false
+      "edits_denied_partial": false,
+      "near_ai_sessions": 0
     },
     "by_tool": [
       {
@@ -432,7 +434,8 @@
         "edits_count_partial": false,
         "edits_undone_partial": false,
         "edits_denied_partial": true,
-        "key": "claude_code"
+        "key": "claude_code",
+        "near_ai_sessions": 0
       },
       {
         "sessions": 1,
@@ -451,7 +454,8 @@
         "edits_count_partial": false,
         "edits_undone_partial": false,
         "edits_denied_partial": true,
-        "key": "codex"
+        "key": "codex",
+        "near_ai_sessions": 0
       }
     ],
     "by_model": [
@@ -460,14 +464,6 @@
         "tool": "claude_code",
         "sessions": 1,
         "tokens": 37235,
-        "usd_micros_known": 0,
-        "usd_partial": true
-      },
-      {
-        "key": "gpt-6",
-        "tool": "codex",
-        "sessions": 1,
-        "tokens": 0,
         "usd_micros_known": 0,
         "usd_partial": true
       }
@@ -490,7 +486,8 @@
         "edits_count_partial": false,
         "edits_undone_partial": false,
         "edits_denied_partial": true,
-        "key": null
+        "key": null,
+        "near_ai_sessions": 0
       }
     ],
     "by_day": [

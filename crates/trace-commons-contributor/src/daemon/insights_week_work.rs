@@ -19,6 +19,13 @@
 //! turn (`claude_resumes`); one whose overlap cannot be untangled counts as
 //! unknown, never twice.
 //!
+//! A session sent through NEAR AI is charged by NEAR AI, in
+//! `near_ai_credit`; its list estimate is never added to the spend here
+//! (owner decision D5: a session's charge and its list estimate never meet
+//! in one figure). One sent wholly through the route is left out of the
+//! spend and counted in `near_ai_sessions`; one sent partly through it has
+//! a list-priced part that cannot be told apart, so it is unpriced.
+//!
 //! Every figure is a sum of what is known (`*_known`) beside a `*_partial`
 //! flag: an unknown is never read as zero. Automated sessions are counted,
 //! as the weekly token figures count them: they cost tokens.
@@ -47,6 +54,7 @@ const TOOL_CODEX: &str = "codex";
 struct Totals {
     sessions: u64,
     priced_sessions: u64,
+    near_ai_sessions: u64,
     exact: u128,
     cache_savings_exact: u128,
     lines_added: u64,
@@ -230,6 +238,8 @@ fn facts_at(
 #[derive(Debug, Default)]
 struct SessionWork {
     priced: bool,
+    /// Sent wholly through NEAR AI: its spend is NEAR AI's charge.
+    near_ai: bool,
     exact: u128,
     cache_savings_exact: u128,
     /// The session's own lines and edits, when they are dated in the week.
@@ -239,7 +249,9 @@ struct SessionWork {
 impl Totals {
     fn add(&mut self, session: &SessionWork) {
         self.sessions += 1;
-        if session.priced {
+        if session.near_ai {
+            self.near_ai_sessions += 1;
+        } else if session.priced {
             self.priced_sessions += 1;
         }
         self.exact = self.exact.saturating_add(session.exact);
@@ -261,10 +273,11 @@ impl Totals {
     }
 
     fn value(&self) -> serde_json::Value {
-        let unpriced = self.sessions - self.priced_sessions;
+        let unpriced = self.sessions - self.priced_sessions - self.near_ai_sessions;
         serde_json::json!({
             "sessions": self.sessions,
             "priced_sessions": self.priced_sessions,
+            "near_ai_sessions": self.near_ai_sessions,
             "unpriced_sessions": unpriced,
             "usd_micros_known": micros(self.exact),
             "usd_partial": unpriced > 0,
@@ -450,6 +463,15 @@ fn in_week<'a>(
     }
 }
 
+/// How a session went through NEAR AI, by its route tally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NearAiRoute {
+    /// Every labelled call through the route.
+    Wholly,
+    /// Labelled calls both through the route and outside it.
+    Partly,
+}
+
 /// Roll up the week starting `week_start`.
 fn week_work(
     inputs: &[SessionInput],
@@ -458,6 +480,7 @@ fn week_work(
     week_start: NaiveDate,
     tz: &FixedOffset,
     resumes: &[ClaudeResume],
+    routed: &BTreeMap<String, NearAiRoute>,
     tables: &mut BTreeSet<PricingTableRef>,
 ) -> WeekWork {
     let counted = counted_claude_turns(Feed::CounterPass, inputs, week_start, tz);
@@ -476,7 +499,7 @@ fn week_work(
         let Some(tool) = tool_of(input) else {
             continue;
         };
-        let Some(scope) = in_week(
+        let Some(mut scope) = in_week(
             input,
             counted.get(index).and_then(Option::as_ref),
             week_start,
@@ -484,8 +507,15 @@ fn week_work(
         ) else {
             continue;
         };
+        let route = routed.get(&input.session_ref).copied();
+        if route.is_some() {
+            // NEAR AI's charge, not a list estimate (D5).
+            scope.turns.clear();
+            scope.unpriceable = route == Some(NearAiRoute::Partly);
+        }
         let mut session = SessionWork {
             priced: !scope.unpriceable && !scope.turns.is_empty(),
+            near_ai: route == Some(NearAiRoute::Wholly),
             ..SessionWork::default()
         };
         let mut models: BTreeSet<String> = BTreeSet::new();
@@ -532,7 +562,7 @@ fn week_work(
                 spend.sessions += 1;
             }
         }
-        if !session.priced {
+        if !session.priced && !session.near_ai {
             // The day the unpriced usage is marked on: its first dated turn
             // in the week, else its first activity, else the week's first
             // day.
@@ -562,7 +592,8 @@ fn week_work(
 /// is each session's folder label by its engine reference (`None`: the
 /// folder is unknown). `oldest_kept` is the first day of the oldest week
 /// the store keeps: a week before it has no figures, so `last_week` is
-/// `null` rather than zero.
+/// `null` rather than zero. `routed` is each session sent through NEAR AI,
+/// by its engine reference.
 pub(crate) fn work_value(
     inputs: &[SessionInput],
     folders: &BTreeMap<String, Option<String>>,
@@ -570,6 +601,7 @@ pub(crate) fn work_value(
     week_start: NaiveDate,
     tz: FixedOffset,
     oldest_kept: NaiveDate,
+    routed: &BTreeMap<String, NearAiRoute>,
 ) -> serde_json::Value {
     let mut tables = BTreeSet::new();
     let resumes = claude_resumes(inputs);
@@ -580,6 +612,7 @@ pub(crate) fn work_value(
         week_start,
         &tz,
         &resumes,
+        routed,
         &mut tables,
     );
     let last_start = week_start - Duration::days(7);
@@ -591,6 +624,7 @@ pub(crate) fn work_value(
             last_start,
             &tz,
             &resumes,
+            routed,
             &mut tables,
         )
     });
@@ -813,6 +847,7 @@ mod tests {
             monday(),
             tz,
             monday() - Duration::weeks(12),
+            &BTreeMap::new(),
         )
     }
 
@@ -1011,6 +1046,7 @@ mod tests {
             monday(),
             utc(),
             monday(),
+            &BTreeMap::new(),
         );
         assert_eq!(oldest["last_week"], serde_json::Value::Null);
         assert_eq!(oldest["last_week_by_day"], serde_json::Value::Null);
@@ -1098,5 +1134,41 @@ mod tests {
         assert_eq!(value["week"]["lines_partial"], true);
         assert_eq!(value["week"]["edits_known"], 0);
         assert_eq!(value["week"]["edits_count_partial"], true);
+    }
+
+    #[test]
+    fn a_session_sent_through_near_ai_is_never_list_priced() {
+        let inputs = [
+            claude("own", vec![claude_turn(0, at(26, 9))], None),
+            claude("routed", vec![claude_turn(0, at(27, 9))], None),
+            claude("mixed", vec![claude_turn(0, at(28, 9))], None),
+        ];
+        let routed = BTreeMap::from([
+            ("routed".to_owned(), NearAiRoute::Wholly),
+            ("mixed".to_owned(), NearAiRoute::Partly),
+        ]);
+        let value = work_value(
+            &inputs,
+            &BTreeMap::new(),
+            &production_pricing_catalog(),
+            monday(),
+            utc(),
+            monday() - Duration::weeks(12),
+            &routed,
+        );
+        let week = &value["week"];
+        assert_eq!(week["usd_micros_known"], HAIKU_TURN_MICROS);
+        assert_eq!(week["sessions"], 3);
+        assert_eq!(week["priced_sessions"], 1);
+        assert_eq!(week["near_ai_sessions"], 1);
+        assert_eq!(week["unpriced_sessions"], 1);
+        assert_eq!(week["usd_partial"], true);
+        let days: Vec<bool> = value["by_day"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|day| day["usd_partial"] == true)
+            .collect();
+        assert_eq!(days, [false, false, true, false, false, false, false]);
     }
 }

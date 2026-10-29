@@ -43,6 +43,10 @@ extension DaemonData {
         public let sessions: Int
         public let pricedSessions: Int
         public let unpricedSessions: Int
+        /// Sent wholly through NEAR AI: their spend is NEAR AI's charge, so
+        /// they are neither priced nor unpriced here. `nil` from a daemon that
+        /// predates it.
+        public var nearAiSessions: Int? = nil
         public let usdMicrosKnown: Int64
         public let usdPartial: Bool
         public let cacheSavingsUsdMicrosKnown: Int64
@@ -74,6 +78,7 @@ extension DaemonData {
             case key, sessions
             case pricedSessions = "priced_sessions"
             case unpricedSessions = "unpriced_sessions"
+            case nearAiSessions = "near_ai_sessions"
             case usdMicrosKnown = "usd_micros_known"
             case usdPartial = "usd_partial"
             case cacheSavingsUsdMicrosKnown = "cache_savings_usd_micros_known"
