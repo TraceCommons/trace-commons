@@ -29,8 +29,9 @@ struct InsightsPatternsTab: View {
     /// The week's Overview model, for Tokens by day beside the drill-down
     /// (product owner, 2026-10-28); `nil` hides it.
     var overview: InsightsOverviewModel?
-    /// Saved snapshots, so a picked day's rows read as their labels.
-    var snapshots: [LocalInsight] = []
+    /// The window's inspector, where a picked day's sessions and a card's
+    /// sessions are shown (owner, 2026-10-29).
+    var inspector = InsightsBreakdownInspector()
     @State private var goalKind = InsightsComparisonsWords.goalKinds[0]
     @State private var goalSource = "claude_code"
     @State private var goalNumber = ""
@@ -49,17 +50,17 @@ struct InsightsPatternsTab: View {
                     // lever's "Show the reads" open them here, and the goals
                     // and re-read files live only here.
                     if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }
-                    // Tokens by day moved here from Overview, a picked day's
-                    // sessions with it (product owner, 2026-10-28).
-                    if let overview { InsightsTokensByDay(model: overview, copy: copy, snapshots: snapshots) }
+                    // Tokens by day moved here from Overview (product owner,
+                    // 2026-10-28); a picked day's sessions are the
+                    // inspector's (owner, 2026-10-29).
+                    if let overview {
+                        InsightsTokensByDay(model: overview, copy: copy, pickedDay: inspector.pickedDay,
+                                            pick: { inspector.pick(day: $0, patterns: model) })
+                    }
+                    // A card's sessions are the inspector's too.
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         ForEach(patterns.cards) { card in
-                            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                                patternCard(card, threshold: patterns.long_context_threshold)
-                                if let sessions = model.sessions, sessions.pattern == card.kind {
-                                    InsightsPatternSessionsView(found: sessions, copy: copy)
-                                }
-                            }
+                            patternCard(card, threshold: patterns.long_context_threshold)
                         }
                     }
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -130,9 +131,10 @@ struct InsightsPatternsTab: View {
             .insightsCardBody()
             if card.sessions > 0, model.counter == nil {
                 Button(InsightsPatternsWords.seeSessions(card, copy: copy)) {
-                    if model.sessions?.pattern == card.kind { model.hideSessions() } else { model.showSessions(card.kind) }
+                    inspector.toggleSessions(card.kind, patterns: model)
                 }
                 .buttonStyle(GlassButtonStyle(.link))
+                .accessibilityAddTraits(model.sessions?.pattern == card.kind ? .isSelected : [])
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -382,6 +384,6 @@ struct InsightsPatternSessionsView: View {
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
+        .insightsDetailSection()
     }
 }

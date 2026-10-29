@@ -34,7 +34,7 @@ final class InsightsGlassConventionsTests: XCTestCase {
     func test_seeSessionsIsAGlassLink() throws {
         let source = try Self.text("Views/InsightsPatternsTab.swift")
         XCTAssertTrue(source.contains(
-            "if model.sessions?.pattern == card.kind { model.hideSessions() } else { model.showSessions(card.kind) }\n"
+            "inspector.toggleSessions(card.kind, patterns: model)\n"
                 + "                }\n"
                 + "                .buttonStyle(GlassButtonStyle(.link))"))
     }

@@ -169,7 +169,7 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertFalse(window.contains("Insights shows no money"), "owner, 2026-10-28: Insights may show money")
         let details = try GlassSurfaceRulesTests.text("Views/InsightsPatternsTab.swift")
         XCTAssertTrue(details.contains("if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }"))
-        XCTAssertTrue(details.contains("if let overview { InsightsTokensByDay(model: overview, copy: copy, snapshots: snapshots) }"))
+        XCTAssertTrue(details.contains("InsightsTokensByDay(model: overview, copy: copy, pickedDay: inspector.pickedDay,"))
         XCTAssertFalse(window.contains("modelAnswers"))
         let monitor = try GlassSurfaceRulesTests.text("Views/MonitorWindowView.swift")
         XCTAssertFalse(monitor.contains(".credit(AnyView(InferenceBalanceSection()))"))

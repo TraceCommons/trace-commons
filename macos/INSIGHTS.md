@@ -30,6 +30,12 @@ project is not available for saved snapshots. Every word is the core's
 `ui_copy()` analytics table, marked DRAFT pending approval; every figure is
 the core's. Advice, what-if estimates and costs are not shown.
 
+Breakdown's details are drawn in the Monitor window's inspector, not under
+the chart or card that asked for them: a day picked on Tokens by day shows
+that day's sessions there, and a card's "See sessions" the sessions behind
+the card. Picking either opens the inspector; with nothing picked it shows
+"Breakdown" over the dash.
+
 Patterns reads `patterns` and, for each card's "See sessions", the
 `pattern_sessions` list, over the same saved snapshots. Its four cards are
 repeated reads, retried tool calls, "Edit, failed command, edit" (inferred
