@@ -30,10 +30,13 @@ pub const REFERRAL_REFUSED_SHARE: &str = "referral_refused_share";
 pub const REFERRAL_CREDIT_HOLD_SHARE: &str = "referral_credit_hold_share";
 /// The referee's starter advance was forfeited.
 pub const REFERRAL_ADVANCE_FORFEIT_SHARE: &str = "referral_advance_forfeit_share";
-/// The referee shares a payout recipient or subject (or a device key) with
-/// another referee of the same code.
+/// The referee shares a payout recipient or subject with another referee of
+/// the same code. Nothing the client reports (a device key, an install id)
+/// counts: the client is open source.
 pub const REFERRAL_SHARED_IDENTITY: &str = "referral_shared_identity";
-/// The referee's traces duplicate another referee's.
+/// The referee's traces fall in the same near-duplicate cluster as the
+/// referrer's (`trace_gate_decisions.dedup_cluster_id`, assigned from the
+/// cross-tenant simhash scan).
 pub const REFERRAL_DUPLICATE_TRACES: &str = "referral_duplicate_traces";
 /// Many referees applied the code within 24 hours.
 pub const REFERRAL_BURST: &str = "referral_burst";
@@ -54,18 +57,32 @@ pub const REFERRAL_SIGNAL_LABELS: [&str; 7] = [
 /// Referral-stream holds on the referrer's account (spec section 4).
 pub const REFERRAL_SAME_PAYOUT_ORG: &str = "referral_same_payout_org";
 pub const REFERRAL_SAME_PAYOUT_SUBJECT: &str = "referral_same_payout_subject";
+/// The referee's and the referrer's traces share a near-duplicate cluster.
+pub const REFERRAL_SAME_TRACES: &str = "referral_same_traces";
+/// The referee and the referrer were seen on one network prefix (a keyed
+/// mark of the /24 or /48 the trusted edge observed). Also written on the
+/// referee's mirror row as operator evidence, where it never counts toward
+/// a code's suspension: colleagues on one office network refer each other.
+pub const REFERRAL_SAME_NETWORK: &str = "referral_same_network";
 pub const REFERRAL_CODE_SUSPENDED: &str = "referral_code_suspended";
 pub const REFERRAL_OVER_CEILING: &str = "referral_over_ceiling";
 pub const REFERRAL_REFERRER_SUSPENDED: &str = "referral_referrer_suspended";
 
 /// Every hold label the referral stream opens.
-pub const REFERRAL_HOLD_LABELS: [&str; 5] = [
+pub const REFERRAL_HOLD_LABELS: [&str; 7] = [
     REFERRAL_SAME_PAYOUT_ORG,
     REFERRAL_SAME_PAYOUT_SUBJECT,
+    REFERRAL_SAME_TRACES,
+    REFERRAL_SAME_NETWORK,
     REFERRAL_CODE_SUSPENDED,
     REFERRAL_OVER_CEILING,
     REFERRAL_REFERRER_SUSPENDED,
 ];
+
+/// Mirror-row labels that are evidence for an operator only: written with
+/// the signal labels, shown in the dry-run report, and never counted by
+/// [`score_rows`], so they can never suspend a code or a referrer.
+pub const REFERRAL_EVIDENCE_LABELS: [&str; 1] = [REFERRAL_SAME_NETWORK];
 
 /// The label recorded when too many codes were suspended at once and the
 /// referral stream switched itself to `dry_run`; readiness reports it.
@@ -252,8 +269,8 @@ pub struct RefereeFacts {
     /// The referee's starter advance was forfeited. Always false until the
     /// advance exists.
     pub advance_forfeited: bool,
-    /// The referee's traces duplicate another referee's. See the slice
-    /// notes: no source computes this yet, so it is false.
+    /// The referee's traces share a near-duplicate cluster with the
+    /// referrer's.
     pub duplicate_traces: bool,
     /// Any credit accrual on the rail.
     pub settled_credit: bool,
@@ -776,8 +793,10 @@ mod tests {
         for label in REFERRAL_SIGNAL_LABELS
             .iter()
             .chain(REFERRAL_HOLD_LABELS.iter())
+            .chain(REFERRAL_EVIDENCE_LABELS.iter())
             .chain([REFERRAL_TRIPPED].iter())
         {
+            assert!(label.starts_with("referral_"), "{label}");
             assert!(label.len() <= 64);
             assert!(
                 label
@@ -796,6 +815,31 @@ mod tests {
         ] {
             assert!(!hold_holds_referral_stream_only(earned));
         }
+    }
+
+    /// Owner decision 2026-10-29: a shared network holds the referral
+    /// stream, but colleagues on one office network are the main
+    /// legitimate case, so it never trips a code or a referrer, however
+    /// many referees carry it.
+    #[test]
+    fn a_shared_network_never_trips_a_code_or_a_referrer() {
+        let rows: Vec<RefereeMirror> = (0..10).map(|n| row(n, &[REFERRAL_SAME_NETWORK])).collect();
+        let code = score_code("sha256:code", &rows, &settings(), &BTreeSet::new());
+        assert!(!code.is_tripped(), "{code:?}");
+        assert!(!code.counts.contains_key(REFERRAL_SAME_NETWORK));
+        assert!(!score_referrer(&rows, &settings()).is_tripped());
+        for label in REFERRAL_EVIDENCE_LABELS {
+            assert!(!REFERRAL_SIGNAL_LABELS.contains(&label), "{label}");
+        }
+        // Duplicate traces, the strong signal, still trips over 20%.
+        let mut rows = rows;
+        for row in rows.iter_mut().take(3) {
+            row.signal_labels.push(REFERRAL_DUPLICATE_TRACES.to_owned());
+        }
+        assert_eq!(
+            score_code("sha256:code", &rows, &settings(), &BTreeSet::new()).tripped,
+            vec![REFERRAL_DUPLICATE_TRACES]
+        );
     }
 
     #[test]

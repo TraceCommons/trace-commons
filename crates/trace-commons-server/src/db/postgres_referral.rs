@@ -675,4 +675,45 @@ impl ReferralStore for PgBackend {
             account_created_at,
         })
     }
+
+    async fn record_referral_network_mark(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        mark: &str,
+        retention_days: u32,
+    ) -> Result<bool, DatabaseError> {
+        let retention_days = i32::try_from(retention_days).unwrap_or(i32::MAX);
+        let refresh_minutes =
+            i32::try_from(crate::referral_network::REFERRAL_NETWORK_MARK_REFRESH_MINUTES)
+                .unwrap_or(i32::MAX);
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        tx.execute(
+            "DELETE FROM trace_referral_network_marks
+              WHERE tenant_id = $1 AND account_id = $2
+                AND last_seen_at < clock_timestamp() - make_interval(days => $3)",
+            &[&tenant, &account, &retention_days],
+        )
+        .await?;
+        // Only an account in the program: it owns a code, or a code was
+        // applied to it. Everyone else leaves no mark.
+        let written = tx
+            .execute(
+                "INSERT INTO trace_referral_network_marks (tenant_id, account_id, mark)
+                 SELECT $1, $2, $3
+                  WHERE EXISTS (SELECT 1 FROM trace_referral_codes
+                                 WHERE tenant_id = $1 AND account_id = $2)
+                     OR EXISTS (SELECT 1 FROM trace_referral_attributions
+                                 WHERE tenant_id = $1 AND account_id = $2)
+                 ON CONFLICT (tenant_id, account_id, mark) DO UPDATE
+                    SET last_seen_at = clock_timestamp()
+                  WHERE trace_referral_network_marks.last_seen_at
+                        < clock_timestamp() - make_interval(mins => $4)",
+                &[&tenant, &account, &mark, &refresh_minutes],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(written > 0)
+    }
 }

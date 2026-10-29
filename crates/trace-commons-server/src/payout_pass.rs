@@ -99,7 +99,8 @@ const PAYOUT_OWED_INCONSISTENT: &str = "payout_owed_inconsistent";
 /// Every hold that holds the referral stream alone starts with this
 /// (referral rewards spec section 4, "Holds on the referral stream"): the
 /// ones the bonus pass opens (`referral_same_payout_org`,
-/// `referral_same_payout_subject`, `referral_code_suspended`,
+/// `referral_same_payout_subject`, `referral_same_traces`,
+/// `referral_same_network`, `referral_code_suspended`,
 /// `referral_referrer_suspended`), the per-referrer ceiling, and every hold
 /// the referral stream's own sends raise. The earned stream ignores them.
 pub const REFERRAL_HOLD_PREFIX: &str = "referral_";
@@ -2162,6 +2163,8 @@ mod tests {
         let spec_labels = [
             "referral_same_payout_org",
             "referral_same_payout_subject",
+            "referral_same_traces",
+            "referral_same_network",
             "referral_code_suspended",
             "referral_referrer_suspended",
             REFERRAL_OVER_CEILING,

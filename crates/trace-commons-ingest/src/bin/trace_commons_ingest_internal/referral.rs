@@ -28,8 +28,17 @@
 //! `referral_not_applied`, whatever the reason; the precise label goes only
 //! to the referee's `trace_referral_audit` row, so codes cannot be probed.
 //!
+//! **Network marks.** Each of these routes, and a sign-up that carries a
+//! code, records a keyed mark of the network prefix the trusted edge saw
+//! (`trace_commons_server::referral_network`), for an account in the
+//! program only, so the bonus pass can hold a referral whose two accounts
+//! share a network. The address comes from the edge's hop of
+//! `X-Forwarded-For`, never from the body; an unattributed or malformed
+//! address records nothing. Recording never fails a route.
+//!
 //! Hash-only: responses and logs carry labels, counts and code ids, never a
-//! code's text in a log, a code index, a tenant or an account id.
+//! code's text in a log, a code index, a tenant or an account id, and never
+//! an address, a prefix or a mark.
 
 use super::*;
 use trace_commons_protocol::referral::{
@@ -110,6 +119,41 @@ fn referral_identity(state: &AppState) -> ApiResult<&Arc<NearAccountIdentity>> {
     state.near_account_identity.as_ref().ok_or_else(unavailable)
 }
 
+/// Records the network mark of the address the trusted edge observed for
+/// `account`, when a key is configured and the account is in the program.
+/// Never fails the caller: a store fault is logged as a label.
+pub(super) async fn record_network_mark(
+    state: &AppState,
+    headers: &HeaderMap,
+    tenant: &str,
+    account: Uuid,
+) {
+    let (Some(store), Some(key)) = (
+        state.referral_store.as_ref(),
+        state.referral_network_mark_key.as_ref(),
+    ) else {
+        return;
+    };
+    let Some(mark) = client_ip_for_referral_mark(headers).and_then(|ip| key.mark_for_address(ip))
+    else {
+        return;
+    };
+    let retention = trace_commons_server::referral_network::network_mark_retention_days(
+        state.referral_config.earn_days,
+    );
+    if let Err(error) = store
+        .record_referral_network_mark(tenant, account, &mark, retention)
+        .await
+    {
+        tracing::warn!(
+            outcome = "referral_network_mark_unrecorded",
+            error_class = "ReferralStoreFailed",
+            error_hash = %safe_display_error_hash(&error),
+            "referral network mark not recorded"
+        );
+    }
+}
+
 fn code_state(row: &ReferralCodeRow) -> ReferralCodeState {
     if row.voided_at.is_some() {
         ReferralCodeState::Voided
@@ -152,6 +196,7 @@ pub(super) async fn create_handler(
         {
             ReferralCodeCreate::Created { created_at } => {
                 tracing::info!(outcome = "code_created", "referral code created");
+                record_network_mark(&state, &headers, tenant, account).await;
                 let shown = format_referral_code(&code).ok_or_else(unavailable)?;
                 return Ok((
                     no_store(),
@@ -195,6 +240,7 @@ pub(super) async fn list_handler(
         .referral_codes(&ctx.tenant_id, ctx.account_id.as_uuid())
         .await
         .map_err(store_failed)?;
+    record_network_mark(&state, &headers, &ctx.tenant_id, ctx.account_id.as_uuid()).await;
     let codes = view
         .codes
         .iter()
@@ -328,7 +374,7 @@ pub(super) async fn apply_handler(
     let Ok(Json(body)) = body else {
         return Err(api_error(StatusCode::BAD_REQUEST, INVALID_REFERRAL_REQUEST));
     };
-    match apply(
+    let outcome = apply(
         &state,
         store,
         identity,
@@ -338,8 +384,10 @@ pub(super) async fn apply_handler(
         ReferralAppliedVia::Later,
     )
     .await
-    .map_err(store_failed)?
-    {
+    .map_err(store_failed)?;
+    // After the apply, so a referee is in the program by now.
+    record_network_mark(&state, &headers, &ctx.tenant_id, ctx.account_id.as_uuid()).await;
+    match outcome {
         ReferralApply::Applied {
             applied_at,
             referee_account_created_at,
@@ -370,6 +418,7 @@ pub(super) async fn status_handler(
         .referral_status(&ctx.tenant_id, ctx.account_id.as_uuid())
         .await
         .map_err(store_failed)?;
+    record_network_mark(&state, &headers, &ctx.tenant_id, ctx.account_id.as_uuid()).await;
     let now = Utc::now();
     let body = match status.attribution {
         Some(attribution) => ReferralStatus {

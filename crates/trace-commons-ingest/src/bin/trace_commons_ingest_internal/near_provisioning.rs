@@ -703,8 +703,13 @@ async fn finish(
         }
         Err(false) => return None,
     };
-    let referral =
-        signup_referral_outcome(&state, &provisioned, body.referral_code.as_deref()).await;
+    let referral = signup_referral_outcome(
+        &state,
+        &headers,
+        &provisioned,
+        body.referral_code.as_deref(),
+    )
+    .await;
     let mut answer = serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
@@ -718,22 +723,31 @@ async fn finish(
 
 /// The `referral` field of a provisioning answer: `None` when the finish
 /// carried no code, so an answer without one is unchanged. Runs after the
-/// provisioning transaction committed and cannot fail it.
+/// provisioning transaction committed and cannot fail it. A finish that
+/// carries a code also records the network mark the trusted edge observed,
+/// once the apply has put the account in the program.
 async fn signup_referral_outcome(
     state: &AppState,
+    headers: &HeaderMap,
     provisioned: &trace_commons_server::account_onboarding::ProvisionedNearAccount,
     code: Option<&str>,
 ) -> Option<trace_commons_protocol::referral::ReferralOutcome> {
     let code = code?;
-    Some(
-        super::referral_routes::signup_referral(
-            state,
-            &provisioned.tenant_id,
-            provisioned.account_id,
-            code,
-        )
-        .await,
+    let outcome = super::referral_routes::signup_referral(
+        state,
+        &provisioned.tenant_id,
+        provisioned.account_id,
+        code,
     )
+    .await;
+    super::referral_routes::record_network_mark(
+        state,
+        headers,
+        &provisioned.tenant_id,
+        provisioned.account_id,
+    )
+    .await;
+    Some(outcome)
 }
 
 pub(super) async fn wallet_page(State(state): State<Arc<AppState>>) -> axum::response::Response {
@@ -1429,8 +1443,13 @@ async fn near_ai_finish(
         }
         Err(_) => return None,
     };
-    let referral =
-        signup_referral_outcome(&state, &provisioned, body.referral_code.as_deref()).await;
+    let referral = signup_referral_outcome(
+        &state,
+        &headers,
+        &provisioned,
+        body.referral_code.as_deref(),
+    )
+    .await;
     let mut answer = serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,

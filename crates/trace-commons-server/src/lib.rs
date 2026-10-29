@@ -59,6 +59,7 @@ pub mod referral_abuse;
 pub mod referral_bonus;
 pub mod referral_code;
 pub mod referral_config;
+pub mod referral_network;
 pub mod register_stats;
 pub mod rescore_distribution;
 pub mod reward_participant;

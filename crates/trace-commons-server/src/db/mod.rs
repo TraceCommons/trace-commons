@@ -4443,6 +4443,20 @@ pub trait ReferralStore: Send + Sync {
         tenant: &str,
         account: Uuid,
     ) -> Result<ReferralAccountStatus, DatabaseError>;
+
+    /// Records `mark` (a keyed network mark, `crate::referral_network`) for
+    /// `account`, only while the account is in the referral program: it owns
+    /// a code or has an attribution. A known mark's `last_seen_at` moves at
+    /// most once an hour. In the same transaction, deletes the account's
+    /// marks last seen more than `retention_days` ago. True when a row was
+    /// inserted or refreshed.
+    async fn record_referral_network_mark(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        mark: &str,
+        retention_days: u32,
+    ) -> Result<bool, DatabaseError>;
 }
 
 // -- Referral bonus (docs/superpowers/specs/2026-10-29-referral-rewards-design.md,
@@ -4714,6 +4728,40 @@ pub trait ReferralBonusStore: Send + Sync {
         label: &str,
         actor_ref_hash: &str,
     ) -> Result<bool, DatabaseError>;
+
+    // -- either side's own tenant -------------------------------------------
+    //
+    // Server-observed signals (owner decision 2026-10-29): each side's rows
+    // are read under that side's tenant, and only compared in the pass.
+
+    /// The distinct near-duplicate clusters (`dedup_cluster_id`) of the
+    /// gate decisions on the account's own submissions: its most recent
+    /// `limit` submissions received at or after `since`.
+    async fn referral_trace_clusters(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+        limit: i64,
+    ) -> Result<Vec<Uuid>, DatabaseError>;
+
+    /// The account's network marks, most recently seen first, at most
+    /// `limit`, none last seen more than `retention_days` ago.
+    async fn referral_network_marks(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        retention_days: u32,
+        limit: i64,
+    ) -> Result<Vec<String>, DatabaseError>;
+
+    /// Deletes the tenant's network marks last seen more than
+    /// `retention_days` ago. Returns how many.
+    async fn prune_referral_network_marks(
+        &self,
+        tenant: &str,
+        retention_days: u32,
+    ) -> Result<u64, DatabaseError>;
 
     // -- the referrer's tenant -----------------------------------------------
 

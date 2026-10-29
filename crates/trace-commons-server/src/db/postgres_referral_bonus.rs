@@ -343,6 +343,83 @@ impl ReferralBonusStore for PgBackend {
         })
     }
 
+    async fn referral_trace_clusters(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+        limit: i64,
+    ) -> Result<Vec<Uuid>, DatabaseError> {
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let rows = tx
+            .query(
+                "WITH owned AS (
+                     SELECT principal_ref FROM trace_account_owned_principals
+                      WHERE tenant_id = $1 AND account_id = $2
+                 ), recent AS (
+                     SELECT s.submission_id FROM trace_submissions s
+                      WHERE s.tenant_id = $1
+                        AND s.auth_principal_ref IN (SELECT principal_ref FROM owned)
+                        AND s.received_at >= $3
+                      ORDER BY s.received_at DESC, s.submission_id
+                      LIMIT $4
+                 )
+                 SELECT DISTINCT g.dedup_cluster_id FROM trace_gate_decisions g
+                  WHERE g.tenant_id = $1
+                    AND g.submission_id IN (SELECT submission_id FROM recent)
+                    AND g.dedup_cluster_id IS NOT NULL",
+                &[&tenant, &account, &since, &limit.max(0)],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn referral_network_marks(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        retention_days: u32,
+        limit: i64,
+    ) -> Result<Vec<String>, DatabaseError> {
+        let retention_days = i32::try_from(retention_days).unwrap_or(i32::MAX);
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let rows = tx
+            .query(
+                "SELECT mark FROM trace_referral_network_marks
+                  WHERE tenant_id = $1 AND account_id = $2
+                    AND last_seen_at >= clock_timestamp() - make_interval(days => $3)
+                  ORDER BY last_seen_at DESC, mark
+                  LIMIT $4",
+                &[&tenant, &account, &retention_days, &limit.max(0)],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
+    async fn prune_referral_network_marks(
+        &self,
+        tenant: &str,
+        retention_days: u32,
+    ) -> Result<u64, DatabaseError> {
+        let retention_days = i32::try_from(retention_days).unwrap_or(i32::MAX);
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let deleted = tx
+            .execute(
+                "DELETE FROM trace_referral_network_marks
+                  WHERE tenant_id = $1
+                    AND last_seen_at < clock_timestamp() - make_interval(days => $2)",
+                &[&tenant, &retention_days],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
     async fn void_referral_attribution(
         &self,
         tenant: &str,

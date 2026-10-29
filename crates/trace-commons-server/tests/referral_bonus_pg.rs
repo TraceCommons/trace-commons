@@ -1193,3 +1193,348 @@ async fn the_ceiling_hold_opens_over_it_and_lifts_once_it_fits() {
             .is_empty()
     );
 }
+
+// -- Server-observed signals (owner decision 2026-10-29) ---------------------
+//
+// The client is open source, so nothing it sends counts. The pass compares
+// what the server observed itself, each side read under its own tenant:
+// near-duplicate trace clusters and keyed network marks.
+
+/// One accepted submission by `account` (through a principal it owns) with
+/// a gate decision in duplicate cluster `cluster`.
+async fn trace_in_cluster(fixture: &Fixture, tenant: &str, account: Uuid, cluster: Uuid) {
+    let principal = format!("principal:{}", Uuid::new_v4());
+    let submission = Uuid::new_v4();
+    owner_exec(
+        fixture,
+        tenant,
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES ($1, $2, $3)",
+        &[&tenant, &account, &principal],
+    )
+    .await;
+    owner_exec(
+        fixture,
+        tenant,
+        "INSERT INTO trace_submissions (tenant_id, submission_id, trace_id, auth_principal_ref,
+             schema_version, consent_policy_version, retention_policy_id, status,
+             privacy_risk, redaction_pipeline_version, redaction_hash)
+         VALUES ($1, $2, $3, $4, 'v1', 'v1', 'test', 'accepted', 'low', 'test', $5)",
+        &[
+            &tenant,
+            &submission,
+            &Uuid::new_v4(),
+            &principal,
+            &"a".repeat(64),
+        ],
+    )
+    .await;
+    owner_exec(
+        fixture,
+        tenant,
+        "INSERT INTO trace_gate_decisions (tenant_id, decision_id, submission_id,
+             gate_policy_version, gate_version_hash, perplexity_micros, tail_fraction_micros,
+             perplexity_passed, novelty_score_micros, nearest_neighbor_hash, novelty_passed,
+             embedding_evidence_hash, attestation_chain_hash, dedup_cluster_id,
+             dedup_signal_version, credit_quality_micros, credit_quality_calibration_version,
+             decided_at)
+         VALUES ($1, $2, $3, 'gate-fixture', $4, 1, 1, TRUE, 1, $4, TRUE, $4, $4, $5,
+                 'signal-fixture', 200, 1, clock_timestamp())",
+        &[
+            &tenant,
+            &Uuid::new_v4(),
+            &submission,
+            &"a".repeat(64),
+            &cluster,
+        ],
+    )
+    .await;
+}
+
+async fn mirror_labels(fixture: &Fixture, referrer: &Referrer, referee: &Referee) -> Vec<String> {
+    runtime_query(
+        fixture,
+        &referrer.tenant,
+        "SELECT signal_labels FROM trace_referral_referees WHERE referee_ref_hash = $1",
+        &[&referee.referee_ref],
+    )
+    .await[0]
+        .get(0)
+}
+
+fn mark_key() -> trace_commons_server::referral_network::ReferralNetworkMarkKey {
+    trace_commons_server::referral_network::ReferralNetworkMarkKey::from_bytes(&[3u8; 32]).unwrap()
+}
+
+/// Records the mark of `address` for `account` through the runtime store.
+async fn seen_at(fixture: &Fixture, tenant: &str, account: Uuid, address: &str) -> bool {
+    use trace_commons_server::db::ReferralStore;
+    let mark = mark_key()
+        .mark_for_address(address.parse().unwrap())
+        .expect("a public address");
+    fixture
+        .runtime
+        .record_referral_network_mark(tenant, account, &mark, 122)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_shared_trace_cluster_holds_the_referrer_and_labels_the_referee() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let referrer = referrer(&fixture).await;
+    let code_index = referrer.code_index.clone();
+    let copier = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    let honest = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    let shared = Uuid::new_v4();
+    trace_in_cluster(&fixture, &referrer.tenant, referrer.account, shared).await;
+    trace_in_cluster(&fixture, &copier.tenant, copier.account, shared).await;
+    trace_in_cluster(&fixture, &honest.tenant, honest.account, Uuid::new_v4()).await;
+
+    let hook = hook(&fixture, settings());
+    let report = hook.run_tenant(&honest.tenant, &near_ai()).await;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert!(
+        !mirror_labels(&fixture, &referrer, &honest)
+            .await
+            .contains(&"referral_duplicate_traces".to_owned())
+    );
+
+    let report = hook.run_tenant(&copier.tenant, &near_ai()).await;
+    assert_eq!(report.held["referral_same_traces"], 1, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(
+        open_holds(&fixture, &referrer.tenant, referrer.account).await,
+        vec!["referral_same_traces".to_owned()]
+    );
+    assert_eq!(
+        mirror_labels(&fixture, &referrer, &copier).await,
+        vec!["referral_duplicate_traces".to_owned()]
+    );
+    // A hold, not a void: the referral stands, and the referee is not held.
+    let voided: bool = runtime_query(
+        &fixture,
+        &copier.tenant,
+        "SELECT voided_at IS NOT NULL FROM trace_referral_attributions",
+        &[],
+    )
+    .await[0]
+        .get(0);
+    assert!(!voided);
+    assert!(
+        open_holds(&fixture, &copier.tenant, copier.account)
+            .await
+            .is_empty()
+    );
+
+    // An operator who clears the hold is not overruled by the next pass.
+    fixture
+        .runtime
+        .clear_payout_hold(
+            &referrer.tenant,
+            referrer.account,
+            &near_ai(),
+            "referral_same_traces",
+            ACTOR,
+        )
+        .await
+        .unwrap();
+    let report = hook.run_tenant(&copier.tenant, &near_ai()).await;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert!(
+        open_holds(&fixture, &referrer.tenant, referrer.account)
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        mirror_labels(&fixture, &referrer, &copier).await,
+        vec!["referral_duplicate_traces".to_owned()],
+        "the evidence stays on the mirror"
+    );
+}
+
+#[tokio::test]
+async fn a_shared_network_mark_holds_the_referrer_and_labels_the_referee() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let referrer = referrer(&fixture).await;
+    let code_index = referrer.code_index.clone();
+    let neighbour = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    let stranger = referee(&fixture, &referrer, &code_index, 10, 1).await;
+    // One /24, two hosts.
+    assert!(seen_at(&fixture, &referrer.tenant, referrer.account, "203.0.113.10").await);
+    assert!(
+        seen_at(
+            &fixture,
+            &neighbour.tenant,
+            neighbour.account,
+            "203.0.113.200"
+        )
+        .await
+    );
+    assert!(seen_at(&fixture, &stranger.tenant, stranger.account, "198.51.100.7").await);
+
+    let hook = hook(&fixture, settings());
+    let report = hook.run_tenant(&stranger.tenant, &near_ai()).await;
+    assert!(report.held.is_empty(), "{report:?}");
+    let report = hook.run_tenant(&neighbour.tenant, &near_ai()).await;
+    assert_eq!(report.held["referral_same_network"], 1, "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(
+        open_holds(&fixture, &referrer.tenant, referrer.account).await,
+        vec!["referral_same_network".to_owned()]
+    );
+    assert_eq!(
+        mirror_labels(&fixture, &referrer, &neighbour).await,
+        vec!["referral_same_network".to_owned()]
+    );
+    assert!(
+        mirror_labels(&fixture, &referrer, &stranger)
+            .await
+            .is_empty()
+    );
+}
+
+/// Colleagues on one office network are the main legitimate case: however
+/// many of a code's referees share the referrer's network, the code is
+/// never suspended for it. The referral stream is held for an operator.
+#[tokio::test]
+async fn a_shared_network_never_suspends_a_code() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let referrer = referrer(&fixture).await;
+    let code_index = referrer.code_index.clone();
+    assert!(seen_at(&fixture, &referrer.tenant, referrer.account, "203.0.113.1").await);
+    let mut referees = Vec::new();
+    for host in 2..8 {
+        let referee = referee(&fixture, &referrer, &code_index, 40, 1).await;
+        assert!(
+            seen_at(
+                &fixture,
+                &referee.tenant,
+                referee.account,
+                &format!("203.0.113.{host}")
+            )
+            .await
+        );
+        referees.push(referee);
+    }
+    let hook = hook(&fixture, settings());
+    for referee in &referees {
+        let report = hook.run_tenant(&referee.tenant, &near_ai()).await;
+        assert_eq!(report.suspended, 0, "{report:?}");
+    }
+    for referee in &referees {
+        assert!(
+            mirror_labels(&fixture, &referrer, referee)
+                .await
+                .contains(&"referral_same_network".to_owned())
+        );
+    }
+    let codes = fixture
+        .runtime
+        .referral_codes(&referrer.tenant)
+        .await
+        .unwrap();
+    assert!(codes[0].suspended_at.is_none(), "never suspended");
+    assert_eq!(
+        open_holds(&fixture, &referrer.tenant, referrer.account).await,
+        vec!["referral_same_network".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn network_marks_stay_in_their_tenant_and_program_and_expire() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let referrer = referrer(&fixture).await;
+    let referee = referee(&fixture, &referrer, &referrer.code_index.clone(), 10, 1).await;
+    // An account outside the program leaves no mark.
+    let (outsider_tenant, outsider) =
+        tenant_with_account(&fixture, Utc::now() - Duration::days(10)).await;
+    assert!(!seen_at(&fixture, &outsider_tenant, outsider, "203.0.113.9").await);
+    assert!(
+        fixture
+            .runtime
+            .referral_network_marks(&outsider_tenant, outsider, 122, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // A program account's mark is recorded once and refreshed at most
+    // hourly.
+    assert!(seen_at(&fixture, &referee.tenant, referee.account, "203.0.113.9").await);
+    assert!(!seen_at(&fixture, &referee.tenant, referee.account, "203.0.113.10").await);
+    let marks = fixture
+        .runtime
+        .referral_network_marks(&referee.tenant, referee.account, 122, 10)
+        .await
+        .unwrap();
+    assert_eq!(marks.len(), 1);
+    assert!(marks[0].starts_with("sha256:") && !marks[0].contains("203"));
+    // Under the referrer's tenant the referee's marks are invisible, even
+    // named by the referee's account id: forced RLS.
+    assert!(
+        fixture
+            .runtime
+            .referral_network_marks(&referrer.tenant, referee.account, 122, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let seen: i64 = runtime_query(
+        &fixture,
+        &referrer.tenant,
+        "SELECT count(*) FROM trace_referral_network_marks",
+        &[],
+    )
+    .await[0]
+        .get(0);
+    assert_eq!(seen, 0);
+    // Retention: a mark last seen past the earning period plus 30 days is
+    // never read, and the pass deletes it.
+    owner_exec(
+        &fixture,
+        &referee.tenant,
+        "UPDATE trace_referral_network_marks
+            SET first_seen_at = now() - interval '200 days',
+                last_seen_at = now() - interval '123 days'",
+        &[],
+    )
+    .await;
+    assert!(
+        fixture
+            .runtime
+            .referral_network_marks(&referee.tenant, referee.account, 122, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let report = hook(&fixture, settings())
+        .run_tenant(&referee.tenant, &near_ai())
+        .await;
+    assert!(report.skipped.is_empty(), "{report:?}");
+    let left: i64 = runtime_query(
+        &fixture,
+        &referee.tenant,
+        "SELECT count(*) FROM trace_referral_network_marks",
+        &[],
+    )
+    .await[0]
+        .get(0);
+    assert_eq!(left, 0, "pruned");
+    // A tenant with nothing stale prunes nothing.
+    assert_eq!(
+        fixture
+            .runtime
+            .prune_referral_network_marks(&outsider_tenant, 122)
+            .await
+            .unwrap(),
+        0
+    );
+}

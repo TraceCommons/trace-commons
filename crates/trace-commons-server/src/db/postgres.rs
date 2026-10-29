@@ -319,6 +319,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_referral_referees",
     "trace_referral_bonus_accruals",
     "trace_referral_audit",
+    "trace_referral_network_marks",
 ];
 
 const TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS: &[&str] = &[

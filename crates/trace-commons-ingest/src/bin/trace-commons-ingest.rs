@@ -1782,6 +1782,12 @@ struct AppState {
     /// The referral program's settings (`TRACE_COMMONS_REFERRAL_*`),
     /// validated at boot. Unset means the program has not started.
     referral_config: Arc<trace_commons_server::referral_config::ReferralConfig>,
+    /// The key network marks are made under
+    /// (`TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY`). Required, at boot,
+    /// whenever the referral program or its bonus is configured; `None`
+    /// otherwise, and then no mark is recorded.
+    referral_network_mark_key:
+        Option<Arc<trace_commons_server::referral_network::ReferralNetworkMarkKey>>,
     /// The first run's dollar estimate `GET /v1/public/first-run-estimate`
     /// serves: from the operator's two settings, validated at boot, or
     /// empty when neither is set.
@@ -5075,6 +5081,15 @@ impl AppState {
             trace_commons_server::referral_config::ReferralConfig::from_env()
                 .map_err(|error| anyhow::anyhow!("{}: {}", error.label(), error.setting()))?,
         );
+        // Server-observed network marks (owner decision 2026-10-29): with the
+        // program or its bonus configured, a missing key refuses the start
+        // rather than run the abuse checks without the network signal.
+        let referral_network_mark_key =
+            trace_commons_server::referral_network::ReferralNetworkMarkKey::from_env(
+                referral_config.program_start.is_some() || payout_rails.referral_bonus().is_some(),
+            )
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.label(), error.setting()))?
+            .map(Arc::new);
         let referral_store = db_connections.as_ref().map(|connections| {
             connections.postgres.clone() as Arc<dyn trace_commons_server::db::ReferralStore>
         });
@@ -5281,6 +5296,7 @@ impl AppState {
             payout_control_token_hash,
             referral_store,
             referral_config,
+            referral_network_mark_key,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             attestation_signing,
             legacy_invite_link,
@@ -22681,6 +22697,18 @@ static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
 /// never used for authorization.
 fn client_ip_for_rate_limit(headers: &HeaderMap) -> String {
     lookup_client_key(
+        headers,
+        &axum::http::HeaderName::from_static("x-forwarded-for"),
+    )
+}
+
+/// The client address the trusted edge observed, for a referral network
+/// mark: the same hop, and the same trust assumption, as
+/// [`client_ip_for_rate_limit`], but the address itself, so the mark can
+/// take its /24 or /48. `None` when unattributed or malformed: nothing is
+/// recorded then. Never a client-set field, and never logged.
+fn client_ip_for_referral_mark(headers: &HeaderMap) -> Option<std::net::IpAddr> {
+    trace_commons_server::invite_lookup::trusted_edge_hop(
         headers,
         &axum::http::HeaderName::from_static("x-forwarded-for"),
     )

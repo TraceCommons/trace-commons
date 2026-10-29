@@ -150,10 +150,25 @@ impl Harness {
         bearer: Option<&str>,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, serde_json::Value) {
+        self.call_from(method, uri, bearer, body, None).await
+    }
+
+    /// [`Self::call`] with an `X-Forwarded-For` line as the edge wrote it.
+    async fn call_from(
+        &self,
+        method: &str,
+        uri: &str,
+        bearer: Option<&str>,
+        body: Option<serde_json::Value>,
+        forwarded_for: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
         let mut request = axum::http::Request::builder()
             .method(method)
             .uri(uri)
             .header(CONTENT_TYPE, "application/json");
+        if let Some(forwarded_for) = forwarded_for {
+            request = request.header("x-forwarded-for", forwarded_for);
+        }
         if let Some(bearer) = bearer {
             request = request.header(AUTHORIZATION, format!("Bearer {bearer}"));
         }
@@ -539,4 +554,125 @@ async fn a_signup_code_is_applied_after_provisioning_and_never_fails_it() {
         ReferralOutcome::NotApplied
     );
     assert_eq!(h.applied_via(&lone).await, None);
+}
+
+fn mark_key() -> trace_commons_server::referral_network::ReferralNetworkMarkKey {
+    trace_commons_server::referral_network::ReferralNetworkMarkKey::from_bytes(&[4u8; 32]).unwrap()
+}
+
+impl Harness {
+    /// The account's network marks, read as the migrator.
+    async fn marks(&self, account: &Account) -> Vec<String> {
+        self.backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap()
+            .query(
+                "SELECT mark FROM trace_referral_network_marks
+                  WHERE tenant_id = $1 AND account_id = $2 ORDER BY mark",
+                &[&account.tenant, &account.id],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect()
+    }
+}
+
+/// Owner decision 2026-10-29: only what the server observes counts. The
+/// referral routes record a keyed mark of the network the trusted edge saw
+/// (the rightmost `X-Forwarded-For` hop, never one the caller wrote to its
+/// left), for an account in the program only.
+#[tokio::test]
+async fn referral_calls_record_the_edges_network_mark_for_program_accounts_only() {
+    let Some(mut h) = harness().await else { return };
+    Arc::get_mut(&mut h.state)
+        .unwrap()
+        .referral_network_mark_key = Some(Arc::new(mark_key()));
+    let edge = |address: &str| {
+        mark_key()
+            .mark_for_address(address.parse().unwrap())
+            .unwrap()
+    };
+    let referrer = h.account().await;
+
+    // Not in the program yet: listing leaves no mark.
+    let (status, _) = h
+        .call_from(
+            "GET",
+            CODES,
+            Some(&referrer.token),
+            None,
+            Some("198.51.100.1, 203.0.113.10"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(h.marks(&referrer).await.is_empty());
+
+    // Making a code puts the account in the program and records the edge's
+    // hop, not the caller's.
+    let (status, body) = h
+        .call_from(
+            "POST",
+            CODES,
+            Some(&referrer.token),
+            None,
+            Some("198.51.100.1, 203.0.113.10"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let code = body["code"].as_str().unwrap().to_owned();
+    assert_eq!(h.marks(&referrer).await, vec![edge("203.0.113.10")]);
+    assert_ne!(edge("203.0.113.10"), edge("198.51.100.1"));
+
+    // The referee applies from another host on the same /24: the same mark,
+    // in the referee's own tenant.
+    let referee = h.account().await;
+    let (status, body) = h
+        .call_from(
+            "POST",
+            REFERRAL,
+            Some(&referee.token),
+            Some(serde_json::json!({ "code": code })),
+            Some("203.0.113.99"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(h.marks(&referee).await, h.marks(&referrer).await);
+
+    // An unattributed, malformed or non-public address records nothing.
+    for forwarded_for in [None, Some("garbage"), Some("10.0.0.1"), Some("127.0.0.1")] {
+        let (status, _) = h
+            .call_from("GET", REFERRAL, Some(&referee.token), None, forwarded_for)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    assert_eq!(h.marks(&referee).await.len(), 1);
+    // A new network for the referee is a second mark.
+    let (status, _) = h
+        .call_from(
+            "GET",
+            REFERRAL,
+            Some(&referee.token),
+            None,
+            Some("2001:db8:77::5"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(h.marks(&referee).await.len(), 2);
+
+    // Without the key nothing is recorded.
+    let mut keyless = harness().await.unwrap();
+    let other = keyless.account().await;
+    let (_, _) = keyless.code(&other).await;
+    Arc::get_mut(&mut keyless.state)
+        .unwrap()
+        .referral_network_mark_key = None;
+    let (status, _) = keyless
+        .call_from("GET", CODES, Some(&other.token), None, Some("203.0.113.5"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(keyless.marks(&other).await.is_empty());
 }

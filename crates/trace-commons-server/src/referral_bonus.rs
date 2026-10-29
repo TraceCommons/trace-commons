@@ -32,7 +32,19 @@
 //! tenant; a crash between the two re-runs harmlessly on the next pass. It
 //! also refreshes the referee's mirror row (signals, link indexes), scores
 //! the code and the referrer ([`crate::referral_abuse`]), and opens the
-//! referral-stream holds. It sends nothing: the referral stream's sends are
+//! referral-stream holds.
+//!
+//! The client is open source, so nothing it sends is evidence (owner
+//! decision, 2026-10-29). Besides a shared payout org or subject, the pass
+//! compares two things the server observed itself, each read under its own
+//! side's tenant: the near-duplicate clusters of the referee's and the
+//! referrer's traces (`referral_same_traces`, and `referral_duplicate_traces`
+//! on the mirror, which counts toward the code's score), and their keyed
+//! network marks (`referral_same_network`, on the mirror as evidence only,
+//! never scored). A match holds; it never voids and never pays. Each of
+//! these two holds opens when the referee first shows the match, so an
+//! operator who clears it is not overruled by the next pass; a new referee
+//! with the same match opens it again. It sends nothing: the referral stream's sends are
 //! a later change, and this pass runs in `dry_run` only.
 //!
 //! Logs carry counts and labels only.
@@ -51,11 +63,22 @@ use crate::db::{
 };
 use crate::payout_rate::PayoutMode;
 use crate::referral_abuse::{
-    REFERRAL_CODE_SUSPENDED, REFERRAL_OVER_CEILING, REFERRAL_REFERRER_SUSPENDED,
-    REFERRAL_SAME_PAYOUT_ORG, REFERRAL_SAME_PAYOUT_SUBJECT, REFERRAL_TRIPPED, RefereeFacts,
+    REFERRAL_CODE_SUSPENDED, REFERRAL_DUPLICATE_TRACES, REFERRAL_OVER_CEILING,
+    REFERRAL_REFERRER_SUSPENDED, REFERRAL_SAME_NETWORK, REFERRAL_SAME_PAYOUT_ORG,
+    REFERRAL_SAME_PAYOUT_SUBJECT, REFERRAL_SAME_TRACES, REFERRAL_TRIPPED, RefereeFacts,
     referee_signal_labels, score_code, score_referrer, should_trip_dry_run,
 };
 use crate::referral_config::ReferralBonusSettings;
+use crate::referral_network::network_mark_retention_days;
+
+/// How far before the referee's account creation the trace comparison
+/// looks, on both sides: a self-referrer may have uploaded the content from
+/// the first account before making the second.
+pub const REFERRAL_TRACE_LOOKBACK_DAYS: i64 = 30;
+/// The most recent submissions per side whose clusters are compared.
+pub const REFERRAL_TRACE_COMPARE_LIMIT: i64 = 500;
+/// The most recently seen network marks per side that are compared.
+pub const REFERRAL_NETWORK_COMPARE_LIMIT: i64 = 256;
 
 /// The void label when the referrer's tenant or account is gone.
 pub const REFERRAL_REFERRER_GONE: &str = "referral_referrer_gone";
@@ -425,6 +448,16 @@ impl ReferralBonusHook {
         {
             self.record_tripped(control.halted);
         }
+        // Retention: network marks outlive the earning period by 30 days.
+        // Reads also ignore older marks, so a missed prune never matches.
+        if self
+            .store
+            .prune_referral_network_marks(tenant, self.mark_retention_days())
+            .await
+            .is_err()
+        {
+            report.skip("referral_mark_prune_failed");
+        }
         let attributions = match self.store.referral_attributions(tenant).await {
             Ok(attributions) => attributions,
             Err(_) => {
@@ -447,6 +480,83 @@ impl ReferralBonusHook {
             self.log(&report);
         }
         report
+    }
+
+    fn mark_retention_days(&self) -> u32 {
+        network_mark_retention_days(self.settings.earn_days)
+    }
+
+    /// Whether the referee's and the referrer's traces share a
+    /// near-duplicate cluster. Each side is read in its own tenant; the
+    /// cluster ids come from the cross-tenant simhash scan, so they compare.
+    async fn shares_traces(
+        &self,
+        tenant: &str,
+        attribution: &ReferralAttributionRecord,
+    ) -> Step<bool> {
+        let since =
+            attribution.referee_account_created_at - Duration::days(REFERRAL_TRACE_LOOKBACK_DAYS);
+        let theirs: BTreeSet<Uuid> = store(
+            self.store
+                .referral_trace_clusters(
+                    tenant,
+                    attribution.account_id,
+                    since,
+                    REFERRAL_TRACE_COMPARE_LIMIT,
+                )
+                .await,
+        )?
+        .into_iter()
+        .collect();
+        if theirs.is_empty() {
+            return Ok(false);
+        }
+        let mine = store(
+            self.store
+                .referral_trace_clusters(
+                    &attribution.referrer_tenant_id,
+                    attribution.referrer_account_id,
+                    since,
+                    REFERRAL_TRACE_COMPARE_LIMIT,
+                )
+                .await,
+        )?;
+        Ok(mine.iter().any(|cluster| theirs.contains(cluster)))
+    }
+
+    /// Whether the referee and the referrer share a keyed network mark.
+    async fn shares_network(
+        &self,
+        tenant: &str,
+        attribution: &ReferralAttributionRecord,
+    ) -> Step<bool> {
+        let retention = self.mark_retention_days();
+        let theirs: BTreeSet<String> = store(
+            self.store
+                .referral_network_marks(
+                    tenant,
+                    attribution.account_id,
+                    retention,
+                    REFERRAL_NETWORK_COMPARE_LIMIT,
+                )
+                .await,
+        )?
+        .into_iter()
+        .collect();
+        if theirs.is_empty() {
+            return Ok(false);
+        }
+        let mine = store(
+            self.store
+                .referral_network_marks(
+                    &attribution.referrer_tenant_id,
+                    attribution.referrer_account_id,
+                    retention,
+                    REFERRAL_NETWORK_COMPARE_LIMIT,
+                )
+                .await,
+        )?;
+        Ok(mine.iter().any(|mark| theirs.contains(mark)))
     }
 
     fn log(&self, report: &ReferralBonusReport) {
@@ -589,13 +699,16 @@ impl ReferralBonusHook {
                 .referral_referee_facts(tenant, &self.rail, referee)
                 .await,
         )?;
-        let labels: Vec<String> = referee_signal_labels(
+        // Server-observed signals against the referrer.
+        let same_traces = self.shares_traces(tenant, attribution).await?;
+        let same_network = self.shares_network(tenant, attribution).await?;
+        let mut labels: Vec<String> = referee_signal_labels(
             &RefereeFacts {
                 submissions: facts.submissions,
                 refused: facts.refused,
                 credit_hold_or_reversal: standing.credit_held || facts.reversed,
                 advance_forfeited: false,
-                duplicate_traces: false,
+                duplicate_traces: same_traces,
                 settled_credit: facts.credited,
                 account_created_at: attribution.referee_account_created_at,
             },
@@ -605,6 +718,27 @@ impl ReferralBonusHook {
         .into_iter()
         .map(str::to_owned)
         .collect();
+        // Evidence for an operator; `score_rows` never counts it.
+        if same_network {
+            labels.push(REFERRAL_SAME_NETWORK.to_owned());
+        }
+        // The two holds open when this referee first shows the match (the
+        // mirror does not carry its label yet), before the mirror is
+        // refreshed, so a failed refresh retries the hold too, and an
+        // operator's clear stands until another referee matches.
+        let shown = |label: &str| {
+            view.mirror
+                .as_ref()
+                .is_some_and(|mirror| mirror.signal_labels.iter().any(|held| held == label))
+        };
+        if same_traces && !shown(REFERRAL_DUPLICATE_TRACES) {
+            self.hold(referrer_tenant, referrer, REFERRAL_SAME_TRACES, report)
+                .await?;
+        }
+        if same_network && !shown(REFERRAL_SAME_NETWORK) {
+            self.hold(referrer_tenant, referrer, REFERRAL_SAME_NETWORK, report)
+                .await?;
+        }
         let referee_link = store(
             self.payouts
                 .payout_live_link(tenant, referee, &self.rail)

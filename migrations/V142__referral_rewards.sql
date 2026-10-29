@@ -14,7 +14,8 @@
 -- forced RLS and the central trace_corpus_tenant_isolation policy:
 --   * trace_referral_codes, trace_referral_referees,
 --     trace_referral_bonus_accruals live in the REFERRER's tenant;
---   * trace_referral_attributions lives in the REFEREE's tenant.
+--   * trace_referral_attributions lives in the REFEREE's tenant;
+--   * trace_referral_network_marks lives in each account's own tenant.
 -- A referral is applied in one transaction that writes the attribution
 -- under the referee's tenant context and the referee mirror under the
 -- referrer's, re-setting trace_commons.trace_tenant_id between statements.
@@ -48,6 +49,16 @@
 -- by #1415.
 --
 -- AMOUNTS are rail atomic units, NUMERIC(39,0) bounded to u128::MAX, as V132.
+--
+-- NETWORK MARKS. The client is open source, so nothing it sends is abuse
+-- evidence (owner, 2026-10-29). trace_referral_network_marks records what
+-- the server observes itself: a keyed hash of the network prefix (IPv4 /24,
+-- IPv6 /48) the trusted edge saw an account in the referral program call
+-- from. The key (TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY) never reaches the
+-- database, so a database reader cannot brute-force the 2^24 /24s back out
+-- of a mark. The bonus pass compares a referee's marks with the referrer's;
+-- a match holds the referral stream and is never counted toward a code's
+-- suspension. Marks are kept for the earning period plus 30 days.
 --
 -- RUNTIME GRANTS, on V105's terms: what the store reads and writes, nothing
 -- broader. Audit and bonus accruals are append-only (SELECT, INSERT).
@@ -234,6 +245,24 @@ CREATE TABLE trace_referral_audit (
 );
 CREATE INDEX trace_referral_audit_time ON trace_referral_audit (tenant_id, created_at);
 
+-- Network marks, in the account's own tenant: one row per account and mark,
+-- with when the edge first and last saw it. The mark is
+-- HMAC-SHA256(key, domain || canonical prefix) as sha256: + hex, so it is
+-- comparable across tenants and opaque without the key.
+CREATE TABLE trace_referral_network_marks (
+    tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
+    account_id UUID NOT NULL,
+    mark TEXT NOT NULL CHECK (mark ~ '^sha256:[0-9a-f]{64}$'),
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (tenant_id, account_id, mark),
+    CONSTRAINT trace_referral_network_marks_seen_order CHECK (last_seen_at >= first_seen_at),
+    FOREIGN KEY (tenant_id, account_id) REFERENCES trace_accounts(tenant_id, account_id)
+        ON DELETE NO ACTION
+);
+CREATE INDEX trace_referral_network_marks_seen
+    ON trace_referral_network_marks (tenant_id, last_seen_at);
+
 -- A second payout stream per link. Existing lines are the earned stream.
 ALTER TABLE trace_payout_lines
     ADD COLUMN stream TEXT NOT NULL DEFAULT 'earned' CHECK (stream IN ('earned', 'referral'));
@@ -296,6 +325,13 @@ CREATE POLICY trace_corpus_tenant_isolation ON trace_referral_audit
     USING (tenant_id = trace_current_tenant_id())
     WITH CHECK (tenant_id = trace_current_tenant_id());
 
+ALTER TABLE trace_referral_network_marks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_referral_network_marks FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS trace_corpus_tenant_isolation ON trace_referral_network_marks;
+CREATE POLICY trace_corpus_tenant_isolation ON trace_referral_network_marks
+    USING (tenant_id = trace_current_tenant_id())
+    WITH CHECK (tenant_id = trace_current_tenant_id());
+
 -- The resolver reads which tenant and account own a code index, and whether
 -- the code is live. Nothing else: not the sealed code, not other tables.
 -- Permissive policies OR together, so for this role the effective USING is
@@ -310,7 +346,8 @@ ALTER ROLE trace_referral_resolver SET statement_timeout = '2s';
 
 -- Runtime grants.
 REVOKE ALL ON trace_referral_codes, trace_referral_attributions, trace_referral_referees,
-    trace_referral_bonus_accruals, trace_referral_audit FROM PUBLIC;
+    trace_referral_bonus_accruals, trace_referral_audit, trace_referral_network_marks
+    FROM PUBLIC;
 GRANT SELECT, INSERT ON trace_referral_codes TO trace_ingest_runtime;
 GRANT UPDATE (disabled_at, suspended_at, suspension_labels, voided_at, void_label)
     ON trace_referral_codes TO trace_ingest_runtime;
@@ -323,3 +360,12 @@ GRANT SELECT, INSERT ON trace_referral_bonus_accruals TO trace_ingest_runtime;
 GRANT SELECT, INSERT ON trace_referral_audit TO trace_ingest_runtime;
 GRANT UPDATE (referral_program, final_paid_referral) ON trace_payout_links
     TO trace_ingest_runtime;
+-- Recording a mark refreshes last_seen_at; retention deletes old marks.
+GRANT SELECT, INSERT, DELETE ON trace_referral_network_marks TO trace_ingest_runtime;
+GRANT UPDATE (last_seen_at) ON trace_referral_network_marks TO trace_ingest_runtime;
+-- The pass compares the duplicate clusters of a referee's and a referrer's
+-- traces (V40's dedup_cluster_id, assigned from the cross-tenant simhash
+-- scan, so one cluster id means the same content in any tenant). It reads
+-- these columns of each side's own decisions, under that side's tenant.
+GRANT SELECT (tenant_id, submission_id, dedup_cluster_id)
+    ON trace_gate_decisions TO trace_ingest_runtime;

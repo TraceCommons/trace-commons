@@ -22,12 +22,13 @@ use trace_commons_server::{
 };
 use uuid::Uuid;
 
-const REFERRAL_TABLES: [&str; 5] = [
+const REFERRAL_TABLES: [&str; 6] = [
     "trace_referral_codes",
     "trace_referral_attributions",
     "trace_referral_referees",
     "trace_referral_bonus_accruals",
     "trace_referral_audit",
+    "trace_referral_network_marks",
 ];
 
 struct Fixture {
@@ -411,6 +412,7 @@ async fn the_resolver_reads_code_owners_across_tenants_and_nothing_else() {
         "trace_referral_referees",
         "trace_referral_bonus_accruals",
         "trace_referral_audit",
+        "trace_referral_network_marks",
     ] {
         let tx = client.transaction().await.unwrap();
         tx.batch_execute("SET LOCAL ROLE trace_referral_resolver")
@@ -746,4 +748,124 @@ async fn a_referral_total_is_recorded_only_when_its_link_closes() {
     )
     .await
     .expect("a link closes with both totals");
+}
+
+/// Network marks (owner decision 2026-10-29, "server-observed signals"):
+/// one row per account and mark in the account's own tenant, readable and
+/// refreshable by the runtime only under that tenant, deletable for
+/// retention, and never anything but a `sha256:` hex mark.
+#[tokio::test]
+async fn network_marks_are_tenant_scoped_and_shaped() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, account) = tenant_with_account(&fixture.owner).await;
+    let (other, _) = tenant_with_account(&fixture.owner).await;
+    let mark = sha("mark-1");
+    const INSERT_MARK: &str =
+        "INSERT INTO trace_referral_network_marks (tenant_id, account_id, mark)
+         VALUES (trace_current_tenant_id(), $1, $2)";
+    exec(&fixture.runtime, &tenant, INSERT_MARK, &[&account, &mark])
+        .await
+        .expect("the runtime records a mark");
+    let duplicate = exec(&fixture.runtime, &tenant, INSERT_MARK, &[&account, &mark])
+        .await
+        .expect_err("one row per account and mark");
+    assert_eq!(code_of(&duplicate), Some(&SqlState::UNIQUE_VIOLATION));
+    let raw = exec(
+        &fixture.runtime,
+        &tenant,
+        INSERT_MARK,
+        &[&account, &"203.0.113.0/24"],
+    )
+    .await
+    .expect_err("a mark is a hash, never a prefix");
+    assert_eq!(code_of(&raw), Some(&SqlState::CHECK_VIOLATION));
+    let elsewhere = exec(
+        &fixture.runtime,
+        &other,
+        "INSERT INTO trace_referral_network_marks (tenant_id, account_id, mark)
+         VALUES ($1, $2, $3)",
+        &[&tenant, &account, &sha("mark-2")],
+    )
+    .await
+    .expect_err("a mark is written only in its own tenant");
+    assert_eq!(code_of(&elsewhere), Some(&SqlState::INSUFFICIENT_PRIVILEGE));
+    assert_eq!(
+        count(
+            &fixture.runtime,
+            &tenant,
+            "SELECT count(*) FROM trace_referral_network_marks"
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        count(
+            &fixture.runtime,
+            &other,
+            "SELECT count(*) FROM trace_referral_network_marks"
+        )
+        .await,
+        0,
+        "another tenant's marks are invisible"
+    );
+    exec(
+        &fixture.runtime,
+        &tenant,
+        "UPDATE trace_referral_network_marks SET last_seen_at = clock_timestamp()",
+        &[],
+    )
+    .await
+    .expect("the runtime refreshes last_seen_at");
+    for sql in [
+        "UPDATE trace_referral_network_marks SET mark = mark",
+        "UPDATE trace_referral_network_marks SET first_seen_at = first_seen_at",
+        "UPDATE trace_referral_network_marks SET account_id = account_id",
+    ] {
+        let err = exec(&fixture.runtime, &tenant, sql, &[])
+            .await
+            .expect_err(sql);
+        assert_eq!(
+            code_of(&err),
+            Some(&SqlState::INSUFFICIENT_PRIVILEGE),
+            "{sql}"
+        );
+    }
+    exec(
+        &fixture.runtime,
+        &tenant,
+        "DELETE FROM trace_referral_network_marks WHERE account_id = $1",
+        &[&account],
+    )
+    .await
+    .expect("retention deletes marks");
+}
+
+/// The pass reads the dedup cluster of each side's own gate decisions
+/// through V142's column grant, not the operator's pilot grant.
+#[tokio::test]
+async fn the_runtime_reads_the_cluster_columns_of_gate_decisions() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let (tenant, _) = tenant_with_account(&fixture.owner).await;
+    count(
+        &fixture.runtime,
+        &tenant,
+        "SELECT count(DISTINCT dedup_cluster_id) FROM trace_gate_decisions
+          WHERE tenant_id = trace_current_tenant_id()
+            AND submission_id IS NOT NULL",
+    )
+    .await;
+    let mut client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    let err = tx
+        .query_one(
+            "SELECT nearest_neighbor_hash FROM trace_gate_decisions",
+            &[],
+        )
+        .await
+        .expect_err("no other gate column is granted by V142");
+    assert_eq!(code_of(&err), Some(&SqlState::INSUFFICIENT_PRIVILEGE));
 }
