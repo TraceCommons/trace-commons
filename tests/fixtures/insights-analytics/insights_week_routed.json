@@ -241,6 +241,20 @@
           "tokens_partial": false
         }
       ],
+      "by_model": [
+        {
+          "usd_micros": 12500,
+          "sessions": 1,
+          "calls": 1,
+          "calls_without_charge": 0,
+          "tokens": 110,
+          "usd_micros_known": 12500,
+          "usd_partial": false,
+          "tokens_known": 110,
+          "tokens_partial": false,
+          "key": "zai-org/glm-4.6"
+        }
+      ],
       "tokens": 110,
       "usd_micros_known": 12500,
       "usd_partial": false,

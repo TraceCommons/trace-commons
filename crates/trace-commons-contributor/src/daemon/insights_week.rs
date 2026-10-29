@@ -4107,8 +4107,8 @@ fn charge_map(
 
 /// `insights_week`'s `near_ai_credit`: where NEAR AI credit went
 /// (product owner, 2026-10-28), from every route tally's charge
-/// (`insights_credit`). `week` is the selected local week, by task, tool
-/// and folder; `today`, `by_day` (the last 7 local days, oldest first) and
+/// (`insights_credit`). `week` is the selected local week, by task, tool,
+/// folder and served model; `today`, `by_day` (the last 7 local days, oldest first) and
 /// `last_31_days` (today and the 30 local days before it) are sums only,
 /// and do not move with the selected week.
 ///
@@ -6512,11 +6512,16 @@ mod tests {
         outside.proof = Some(crate::routing::ProofStatus::Outside);
         outside.output_tokens = None;
         // A charged call through NEAR AI, so `near_ai_credit` has a known
-        // figure; the outside call adds no charge.
+        // figure, by model too; the outside call adds no charge.
         let mut charged = ledger_call(1, 30, "PRIVATE-CODEX-ID");
         charged.cost_usd = Some(0.0125);
+        charged.served_model = Some("zai-org/GLM-4.6".to_string());
         fold_with(&f.pass, true, vec![charged, outside]).unwrap();
         let value = f.week_routed();
+        assert_eq!(
+            value["near_ai_credit"]["week"]["by_model"][0]["key"],
+            "zai-org/glm-4.6"
+        );
         let mut categories: Vec<String> = sessions_of(&value)
             .iter()
             .map(|row| row["routing"]["category"].as_str().unwrap().to_string())
