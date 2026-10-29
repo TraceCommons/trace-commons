@@ -21,18 +21,6 @@ final class InsightsWorkTests: XCTestCase {
                                                copy: copy), "—", "nothing priced is the dash, never $0.00")
     }
 
-    func testLinesAndEditsAcceptedReadFromTheKnownCounts() throws {
-        let copy = try words()
-        let week = Totals(sessions: 3, usdMicrosKnown: 0, linesAddedKnown: 2_610, linesRemovedKnown: 470,
-                          editsKnown: 233, editsUndoneKnown: 15, editsDeniedKnown: 6)
-        XCTAssertEqual(InsightsWorkWords.lines(week, copy: copy), "2,610")
-        XCTAssertEqual(InsightsWorkWords.lineDetail(week, copy: copy), "+2,610 added · −470 removed")
-        XCTAssertEqual(InsightsWorkWords.editsAccepted(week, copy: copy)?.0, "91% · 212 of 233")
-        XCTAssertNil(InsightsWorkWords.editsAccepted(Totals(sessions: 1, usdMicrosKnown: 0), copy: copy))
-        let partial = Totals(sessions: 2, usdMicrosKnown: 0, linesAddedKnown: 10, linesPartial: true)
-        XCTAssertEqual(InsightsWorkWords.lines(partial, copy: copy), "at least 10")
-    }
-
     func testChangeVsLastWeekNeedsLastWeeksFigure() throws {
         let copy = try words()
         XCTAssertEqual(InsightsWorkWords.change(118, last: 100, copy: copy)?.words, "▲ 18% vs last week")
@@ -140,9 +128,9 @@ final class InsightsWorkTests: XCTestCase {
         XCTAssertEqual(Set(lines.map(\.id)).count, 3)
     }
 
-    /// Breakdown's By project carries Claude and Codex spend at API prices
-    /// and lines accepted, and the largest spend leads.
-    func testByProjectAddsSpendAndLinesFromWork() throws {
+    /// Breakdown's By project carries Claude and Codex spend at API prices,
+    /// and the largest spend leads.
+    func testByProjectAddsSpendFromWork() throws {
         let copy = try words()
         var object = try InsightsSessionRouteTests.recorded()
         var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
@@ -166,6 +154,5 @@ final class InsightsWorkTests: XCTestCase {
         let table = InsightsProjectRows.rows(decoded, copy: copy)
         XCTAssertEqual(table.first?.label, "site", "the largest spend leads")
         XCTAssertEqual(table.first?.spend, "$2.00")
-        XCTAssertEqual(table.first?.lines, "120")
     }
 }

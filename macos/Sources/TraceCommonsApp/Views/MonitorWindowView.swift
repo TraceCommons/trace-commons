@@ -114,9 +114,6 @@ struct MonitorWindowView: View {
     @State private var inference = InferenceStore(client: nil)
     /// Home and History (R9).
     @State private var home = HomeStore(client: nil)
-    /// The Insights Sessions tab's open trace, which the inspector shows
-    /// while Sessions is on screen (Ron's feedback, Insights PM 2026-10-26).
-    @State private var insightsInspector = InsightsInspector()
 
     /// Sample data, debug builds only, when `TRACE_COMMONS_SAMPLE` names a
     /// set; nil otherwise, and then the live client is attached below. A
@@ -273,8 +270,15 @@ struct MonitorWindowView: View {
                         missionsEnabled: model.missionsShown, inference: inference)
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
-                                 subscriptions: model.subscriptionUsageModel,
-                                 inspector: insightsInspector, home: home)
+                                 subscriptions: model.subscriptionUsageModel, home: home,
+                                 openTraces: {
+                                     tab = .traces
+                                     tracesPage = .tree
+                                 },
+                                 openSettings: {
+                                     navigation.requestSettings(at: .projects)
+                                     openWindow(id: WindowID.settings)
+                                 })
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
@@ -478,9 +482,6 @@ struct MonitorWindowView: View {
         // nothing is drawn then either.
         if !model.onboardingKnown || !inspectorAvailable {
             Color.clear
-        } else if shownTab == .insights, let detail = insightsInspector.detail {
-            // Insights' Sessions: the open trace's details, beside the list.
-            detail()
         } else {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // On Traces the prompts and the health banners are drawn
@@ -520,18 +521,15 @@ struct MonitorWindowView: View {
         (tab == .traces && tracesPage == .history) || (tab == .home && homePage == .history)
     }
 
-    /// Whether the inspector may open on what is shown: on Traces, on
-    /// Home's History, whose opened row is the inspector's, and on Insights
-    /// while its Sessions tab hands it the open trace (`insightsDetail`,
-    /// Insights PM 2026-10-26). Never on Home's other pages (owner,
-    /// 2026-10-08), Insights' other tabs or Inference (2026-10-09): they
-    /// have nothing for it to show, and their prompts head their page.
-    static func inspectorAvailable(_ shown: Tab, homePage: HomeTabView.Page, insightsDetail: Bool = false) -> Bool {
+    /// Whether the inspector may open on what is shown: on Traces, and on
+    /// Home's History, whose opened row is the inspector's. Never on Home's
+    /// other pages (owner, 2026-10-08), Insights or Inference (2026-10-09):
+    /// they have nothing for it to show, and their prompts head their page.
+    static func inspectorAvailable(_ shown: Tab, homePage: HomeTabView.Page) -> Bool {
         switch shown {
         case .traces: true
         case .home: homePage == .history
-        case .insights: insightsDetail
-        case .inference: false
+        case .insights, .inference: false
         }
     }
 
@@ -545,7 +543,7 @@ struct MonitorWindowView: View {
     }
 
     private var inspectorAvailable: Bool {
-        Self.inspectorAvailable(shownTab, homePage: homePage, insightsDetail: insightsInspector.detail != nil)
+        Self.inspectorAvailable(shownTab, homePage: homePage)
     }
 
     /// What the inspector must show right now (`InspectorDemand`); the
@@ -556,10 +554,6 @@ struct MonitorWindowView: View {
             // may open: on Home's page they head the main pane.
             .union(Self.promptsInInspector(shownTab, tracesPage: tracesPage) && inspectorAvailable
                 ? InspectorDemand.offerKeys(model: model) : [])
-            // A trace the person opened on Insights' Sessions: its details
-            // live in the inspector, as a selected Traces session's card
-            // does. On every tab, so showing a tab again is no new key.
-            .union(insightsInspector.demandKey.map { [$0] } ?? [])
     }
 
     /// The tab on screen (`shownTab(_:requiresOnboarding:)`).

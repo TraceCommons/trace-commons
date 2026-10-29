@@ -68,31 +68,6 @@ extension View {
     }
 }
 
-/// A disclosure: `GlassExpander` and, while open, its content indented
-/// under it. The replacement for a stock `DisclosureGroup`.
-struct InsightsDisclosure<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: () -> Content
-    @State private var isOpen = false
-
-    init(_ title: String, @ViewBuilder content: @escaping () -> Content) {
-        self.title = title
-        self.content = content
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            GlassExpander(title, isOpen: $isOpen)
-            if isOpen {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    content()
-                }
-                .padding(.leading, GlassTokens.Space.s8)
-            }
-        }
-    }
-}
-
 /// The hairline between a screen's sections.
 struct InsightsRule: View {
     var body: some View {
@@ -132,6 +107,62 @@ enum InsightsLayout {
     /// its title and its actions do (owner, 2026-10-19: the content between
     /// a card's title and its buttons ran too close to the card's sides).
     static let bodyInset: CGFloat = GlassTokens.Space.s5
+}
+
+/// Cards side by side in equal columns that fill the row, as many as fit
+/// at `minimum` each and never more than there are cards, wrapping onto
+/// rows of equal height (product owner, 2026-10-29: two cards in a row of
+/// three left a hole, and cards of one row differed in height). A card
+/// that should fill its row's height takes `maxHeight: .infinity`.
+struct InsightsCardFlow: Layout {
+    var minimum: CGFloat
+    /// The widest a card grows: a lone card keeps an empty column beside
+    /// it rather than stretch across the pane. `nil` fills the row.
+    var maximum: CGFloat? = nil
+    var spacing: CGFloat = GlassTokens.Space.cardGap
+
+    private func columns(_ width: CGFloat, count: Int) -> Int {
+        let fit = max(1, Int((width + spacing) / (minimum + spacing)))
+        let filled = min(count, fit)
+        guard let maximum else { return max(1, filled) }
+        let needed = Int(((width + spacing) / (maximum + spacing)).rounded(.up))
+        return max(1, min(fit, max(filled, needed)))
+    }
+
+    private func rows(_ width: CGFloat, _ subviews: Subviews) -> (width: CGFloat, heights: [CGFloat], columns: Int) {
+        let columns = columns(width, count: subviews.count)
+        let column = (width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+        let heights = stride(from: 0, to: subviews.count, by: columns).map { start in
+            subviews[start ..< min(start + columns, subviews.count)]
+                .map { $0.sizeThatFits(ProposedViewSize(width: column, height: nil)).height }
+                .max() ?? 0
+        }
+        return (column, heights, columns)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let width = proposal.width ?? minimum * CGFloat(subviews.count) + spacing * CGFloat(subviews.count - 1)
+        let laid = rows(width, subviews)
+        return CGSize(width: width,
+                      height: laid.heights.reduce(0, +) + spacing * CGFloat(max(0, laid.heights.count - 1)))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard !subviews.isEmpty else { return }
+        let laid = rows(bounds.width, subviews)
+        var y = bounds.minY
+        for (row, height) in laid.heights.enumerated() {
+            for column in 0 ..< laid.columns {
+                let index = row * laid.columns + column
+                guard index < subviews.count else { break }
+                let x = bounds.minX + CGFloat(column) * (laid.width + spacing)
+                subviews[index].place(at: CGPoint(x: x, y: y), anchor: .topLeading,
+                                      proposal: ProposedViewSize(width: laid.width, height: height))
+            }
+            y += height + spacing
+        }
+    }
 }
 
 extension View {
@@ -243,23 +274,6 @@ struct InsightsSectionTitle<Trailing: View>: View {
 extension InsightsSectionTitle where Trailing == EmptyView {
     init(_ title: String, info: [String] = []) {
         self.init(title: title, info: info, trailing: { EmptyView() })
-    }
-}
-
-/// A group's heading at the body-strong step, with its info.
-struct InsightsGroupHeading: View {
-    let title: String
-    var info: [String] = []
-
-    init(_ title: String, info: [String] = []) {
-        self.title = title
-        self.info = info
-    }
-
-    var body: some View {
-        InsightsTextWithInfo(title, style: GlassTokens.TypeScale.bodyStrong, infoTitle: title, info: info)
-            .foregroundStyle(GlassColor.textPrimary)
-            .accessibilityAddTraits(.isHeader)
     }
 }
 

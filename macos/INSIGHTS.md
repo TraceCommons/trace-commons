@@ -5,45 +5,16 @@ and notification setup begin only after selecting another destination, once
 per app launch. Their existing roots, onboarding, and activation checks still
 apply. Returning to Insights does not stop services already activated.
 
-The window has tabs. **Overview** (the default) shows one local week of the
-snapshots you saved, **Patterns** shows where that week's tokens went,
-**Sessions** shows one saved session turn by turn, and **Analyze** holds the
-whole screen described below. **Spend** is shown disabled with a "Later"
-chip.
+The window has three tabs (product owner, 2026-10-29): **Overview** (the
+default) shows one local week, **Breakdown** (`patterns`) shows where that
+week's tokens went, and **Benchmarks** compares models on your own traces.
+The Sessions and Analyze tabs are gone: the app no longer analyzes, saves,
+assesses or groups trace files itself. Snapshots saved to the local store
+(for example with the CLI) still feed the saved week below.
 
-Choose a Codex rollout, Claude Code session or trajectory file to analyze it
-locally. Analysis is
-temporary; **Re-read and save** reads the selected file again and saves derived
-observations to the same local store as the CLI. While the daemon's watched
-list shows in **Sessions** (Insights PM, 2026-10-21: terminal users never see
-their session files), an open watched row there also has **Analyze & save**:
-the daemon (`insights_analyze_session`) finds that session's file among the
-ones its watcher already watches, never in a Never folder, runs the same local
-analysis on it and saves it to the standard store; the saved snapshot then
-opens in Analyze's detail. With a custom `--insights-store` the action is not
-offered, since the daemon writes only the standard store. A row the daemon
-cannot analyze (too large, or a Codex file without exactly one session) says
-so in place of the action; a file moved or deleted since it was counted, or a
-row listed again since, says so under the row, and a row listed again
-refreshes the list. Choose file stays on Analyze either way: with counting
-off, without a daemon, with a custom store or in sample data it is the one
-way in, and the line under Analyze's title names only buttons on screen.
-Saved snapshots update only when analyzed again. Deleting a snapshot keeps the original file. Assessments
-are user-reported and remain separate from verified outcomes.
-
-The saved-history summary loads on entry and refreshes after saving, deleting,
-annotating, or clearing an assessment. It shows saved-session counts, reported
-categories/outcomes, and observed metric totals with both snapshot availability
-and original evidence coverage. Unknown assessments and unassessed sessions are
-separate; a measured zero remains distinct from an unavailable value. Dates are
-analysis dates, not work dates. Summary evidence buttons open the corresponding
-saved snapshot and scroll its detail into view. Separate summary and detail
-reads can observe different store versions; a missing snapshot clears the old
-detail and reports failure. A failed summary refresh removes the stale summary.
-
-The screen displays Rust-provided observations, coverage, provider/rubric
-attribution, and source-digest evidence. It does not calculate independent
-metrics, discover files, enroll contributors, or upload traces.
+The screen displays Rust-provided figures and coverage. It does not
+calculate independent metrics, discover files, enroll contributors, or
+upload traces.
 
 Overview reads `week_overview` and, for each card's drill-down,
 `card_inputs` from the same local service. It counts only sessions you
@@ -71,46 +42,11 @@ so a week with Codex sessions says how many sessions the figures cover. The
 re-read table names files only by a letter and the extension; no path is
 stored or shown. Week-to-week change is left out here.
 
-Sessions reads `session_drill` for one saved snapshot, the newest unless you
-pick another, while watched-folder counting (below) is not showing. The header gives the date, harness, turns, tokens and the time
-between the first and last recorded event, which is not active time. Input
-sent each turn is stacked cache read, uncached and cache write, with a dashed
-line at the long-context threshold. A turn with any counter unknown is a gap,
-never a zero bar. Markers fire once per occurrence and are lettered in turn
-order: the cache written again after a pause (inferred from counters; expiry
-itself is not observable), context shrinking (inferred), context passing the
-threshold, and a file read again with no edit tool call to it in between
-(from the order of tool calls, named by letter and extension). Codex sessions
-show that turn-by-turn usage is not recorded. No what-if estimate and no
-project name are shown.
-
 When the daemon's watched-folder counting (feed T, the
 `insights_counter_pass` setting, on by default since 2026-10-29) is on and readable,
 Overview and Patterns show its week instead, in the same shapes, and the feed
 line says so; the two feeds are never mixed, and a failed read falls back to
-the saved week with a line saying counting is unavailable. Sessions then
-lists watched traces only (`insights_sessions`, newest first, at most 200),
-each labelled by its folder, the day and time of its first recorded event,
-the tool and its turns ("trace-commons · Mon, Oct 19 14:02 · Claude Code ·
-119 turns"; a Codex trace records no turns, so its label has none). The
-folder is the label the daemon shows for that folder elsewhere, matched at
-answer time from the trace's stored folder digest; a folder it no longer
-knows reads "Unknown folder". Picking one reads `insights_session_drill`,
-the same drill a saved snapshot has, from the daemon's stored counters, so
-the same file gives the same figures either way; its header's "i" names the
-watched-folder feed. Each watched row also has two compact menus for the
-person's own labels (`insights_session_label`): Task (Bug fix, Refactor,
-Tests, Docs, Other), shown as the inferred task marked "inferred" until the
-person takes it with one click on Confirm or picks another, and Outcome
-(Kept, Partly kept, Thrown away), unset until they say. A choice shows at
-once; if the daemon cannot save it, the row goes back to what the daemon
-last said and says the label couldn't be saved. The labels stay in the
-daemon's counter store on this Mac, keyed so they survive the trace being
-read again, and go with it on unenroll; the Models answers read the task in
-place of the inferred one and count the outcomes as `kept`.
-Saved snapshots stay under Analyze. A watched list that
-cannot be read falls back to the saved snapshots with the same unavailable
-line Overview shows. Only then are
+the saved week with a line saying counting is unavailable. Only then are
 weeks compared: "vs last week" and "Your best week" (a tick on the cache
 bar) need comparable weeks. The daemon's kept weekly figures go unchanged to
 the core's `comparisons`, which marks your goals (Patterns, "Goals": six
@@ -121,9 +57,7 @@ summary card at the top of Overview. "View week" puts the closed week on
 screen; "Hide" clears the daemon's `insights_recap_card_enabled`, the
 card's only switch. Goals and "Not useful" are stored as rule IDs and Monday
 dates only. The week's feed T session rows carry no reference, so Overview
-and Patterns cards do not drill down to sessions; the Sessions tab lists
-them through `insights_sessions`, whose opaque references are not the
-week's.
+and Patterns cards do not drill down to sessions.
 
 With feed T on and readable, Overview also ends with a **Models** card
 (first version, 2026-10-21), from `insights_model_answers`: six answers
@@ -140,9 +74,8 @@ the Outcome label, beside the figure and never folded into it; the docs row
 adds what Private AI charged, never added to the API-price figure. How each figure is measured and the traces left out, by
 reason, are behind the row's "i". Labels are as the agent recorded them.
 When the answer is off, unreadable or not served, no card is drawn. The
-answers are read each time Overview appears and after each saved label, so
-a label set on Sessions shows, and a failed read hides the card only until
-the next one. Every word
+answers are read each time Overview appears, and a failed read hides the
+card only until the next one. Every word
 is the core's (`analytics_models_*`); no word ranks a model.
 
 Insights is the main window's fourth tab (Cmd-4; 2026-10-15, before that
@@ -172,16 +105,13 @@ group that holds the Insights digest keys: its watched-folder counting
 answers `key_unavailable` and it cannot save an analysis, and every tab is
 empty. For a design review, a Debug build launched with
 `TRACE_COMMONS_INSIGHTS_SAMPLE=1` draws Insights from `InsightsSampleWeek`, a
-fixed watched-folder week with goals, the lever, the weekly summary, and
-for Analyze five saved traces, their saved history summary and one group
-(`InsightsSampleAnalyze.swift`). Only the core's copy and the Overview
-drill-downs go to the store. A write to something the sample holds is
-answered with it unchanged and kept nowhere; any other write is refused, so
-none reaches the store. A release build never reads the variable.
+fixed watched-folder week with goals, the lever and the weekly summary, and
+no saved traces. Only the core's copy and the Overview drill-downs go to the
+store. A goal or lever write is answered and kept nowhere; any other write
+is refused, so none reaches the store. A release build never reads the variable.
 
 Local operations run off the UI thread. Closing or leaving the screen discards
-late results; a save or deletion already started can still finish. Reopening
-loads saved results again. Selection uses the native macOS file picker.
+late results. Reopening loads saved results again.
 
 Verify with a freshly built contributor FFI library:
 

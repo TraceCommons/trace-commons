@@ -160,10 +160,9 @@ enum InsightsProjectRows {
         let nearAiTokens: String?
         /// The known NEAR AI amount, for the order.
         let nearAiMicros: Int64?
-        /// Claude and Codex at API prices, and lines accepted (product
+        /// Claude and Codex at API prices (product
         /// owner, 2026-10-29); `nil` from a daemon that predates `work`.
         var spend: String? = nil
-        var lines: String? = nil
         var spendMicros: Int64 = 0
     }
 
@@ -208,7 +207,6 @@ enum InsightsProjectRows {
                        },
                        nearAiMicros: group.flatMap { $0.usdMicros ?? $0.usdMicrosKnown },
                        spend: week.work.map { _ in InsightsWorkWords.spend(totals, copy: copy) },
-                       lines: week.work.map { _ in InsightsWorkWords.lines(totals, copy: copy) },
                        spendMicros: totals?.usdMicrosKnown ?? 0)
         }
         func tokens(_ row: Row) -> Int64 { (row.claude?.tokens ?? 0) + (row.codex?.tokens ?? 0) }
@@ -221,6 +219,27 @@ enum InsightsProjectRows {
             if tokens(a) != tokens(b) { return tokens(a) > tokens(b) }
             return a.label < b.label
         }
+    }
+
+    /// Whether NEAR AI was called from this Mac in the week on screen.
+    static func hasNearAi(_ week: DaemonData.InsightsWeek) -> Bool {
+        guard let credit = week.nearAiCredit else { return false }
+        return !InsightsCreditWords.isEmpty(credit.week)
+    }
+
+    /// The columns By project draws: a tool's only while some folder has a
+    /// trace of it this week, NEAR AI only while it was called, spend and
+    /// spend only while some folder has it. A Claude user sees no Codex
+    /// column of dashes, and the reverse.
+    struct Columns: Equatable {
+        var spend = false, claude = false, codex = false, nearAi = false
+    }
+
+    static func columns(_ week: DaemonData.InsightsWeek, rows: [Row]) -> Columns {
+        let folders = week.work?.byFolder ?? []
+        return Columns(spend: rows.contains { $0.spend != nil } && folders.contains { InsightsWorkWords.knowsSpend($0) },
+                       claude: rows.contains { $0.claude != nil }, codex: rows.contains { $0.codex != nil },
+                       nearAi: hasNearAi(week))
     }
 
     /// A tool's cell: its tokens, or the dash.
@@ -248,20 +267,40 @@ struct InsightsDetailsTable: View {
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
+    /// The views this week has something for: By project always; By task
+    /// and By tool only with a NEAR AI call this week, since they split
+    /// NEAR AI spend; By model only with a model's spend, NEAR AI's
+    /// models included.
+    static func dimensions(_ week: DaemonData.InsightsWeek) -> [InsightsCreditWords.Dimension] {
+        var shown: [InsightsCreditWords.Dimension] = [.folder]
+        if InsightsProjectRows.hasNearAi(week) { shown += [.task, .tool] }
+        if !(week.work?.byModel ?? []).isEmpty || !(week.nearAiCredit?.week.byModel ?? []).isEmpty {
+            shown.append(.model)
+        }
+        return shown
+    }
+
     var body: some View {
+        let dimensions = Self.dimensions(week)
+        // A view this week has nothing for falls back to By project.
+        let shown = dimensions.contains(dimension) ? dimension : .folder
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             InsightsSectionTitle(text("analytics_credit_title"), info: [text("analytics_credit_scope")])
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                GlassSegmentedTabs(text("analytics_credit_title"), selection: $dimension, segments: [
-                    GlassSegment(text("analytics_card_by_project"), value: InsightsCreditWords.Dimension.folder),
-                    GlassSegment(text("analytics_credit_by_task"), value: InsightsCreditWords.Dimension.task),
-                    GlassSegment(text("analytics_card_by_tool"), value: InsightsCreditWords.Dimension.tool),
-                ] + (!InsightsCreditWords.showsModels(week) ? [] : [
-                    GlassSegment(text("analytics_card_by_model"), value: InsightsCreditWords.Dimension.model),
-                ]))
-                switch dimension {
+                if dimensions.count > 1 {
+                    GlassSegmentedTabs(text("analytics_credit_title"), selection: Binding(
+                        get: { shown }, set: { dimension = $0 }), segments: dimensions.map { dimension in
+                        switch dimension {
+                        case .folder: GlassSegment(text("analytics_card_by_project"), value: dimension)
+                        case .task: GlassSegment(text("analytics_credit_by_task"), value: dimension)
+                        case .tool: GlassSegment(text("analytics_card_by_tool"), value: dimension)
+                        case .model: GlassSegment(text("analytics_card_by_model"), value: dimension)
+                        }
+                    })
+                }
+                switch shown {
                 case .folder: projects
-                case .task, .tool: nearAi
+                case .task, .tool: nearAi(shown)
                 case .model: models
                 }
             }
@@ -275,33 +314,38 @@ struct InsightsDetailsTable: View {
     /// traces, and NEAR AI spend.
     @ViewBuilder private var projects: some View {
         let rows = InsightsProjectRows.rows(week, copy: copy)
+        let columns = InsightsProjectRows.columns(week, rows: rows)
         if rows.isEmpty {
             Text(text("analytics_unavailable")).insightsNote()
         } else {
-            Grid(alignment: .leading, horizontalSpacing: GlassTokens.Space.s4, verticalSpacing: GlassTokens.Space.s3) {
+            Grid(alignment: .leading, horizontalSpacing: GlassTokens.Space.s6, verticalSpacing: GlassTokens.Space.s3) {
                 GridRow {
                     Text(text("analytics_projects_project")).insightsCaption()
-                    if week.work != nil {
+                    if columns.spend {
                         Text(text("analytics_column_spend")).insightsCaption().gridColumnAlignment(.trailing)
-                        Text(text("analytics_column_lines")).insightsCaption().gridColumnAlignment(.trailing)
                     }
-                    Text(text("analytics_credit_tool_claude_code")).insightsCaption().gridColumnAlignment(.trailing)
-                    Text(text("analytics_credit_tool_codex")).insightsCaption().gridColumnAlignment(.trailing)
-                    Text(text("analytics_usage_near_ai")).insightsCaption().gridColumnAlignment(.trailing)
+                    if columns.claude {
+                        Text(text("analytics_credit_tool_claude_code")).insightsCaption().gridColumnAlignment(.trailing)
+                    }
+                    if columns.codex {
+                        Text(text("analytics_credit_tool_codex")).insightsCaption().gridColumnAlignment(.trailing)
+                    }
+                    if columns.nearAi {
+                        Text(text("analytics_usage_near_ai")).insightsCaption().gridColumnAlignment(.trailing)
+                    }
                 }
                 Divider()
                 ForEach(rows) { row in
                     GridRow(alignment: .firstTextBaseline) {
                         Text(row.label).lineLimit(2)
-                        if let spend = row.spend, let lines = row.lines {
-                            Text(spend).insightsMono()
-                            Text(lines).insightsMono()
-                        }
-                        usage(row.claude)
-                        usage(row.codex)
-                        VStack(alignment: .trailing, spacing: 0) {
-                            Text(row.nearAi).insightsMono()
-                            if let tokens = row.nearAiTokens { Text(tokens).insightsCaption() }
+                        if columns.spend { Text(row.spend ?? text("analytics_unavailable")).insightsMono() }
+                        if columns.claude { usage(row.claude) }
+                        if columns.codex { usage(row.codex) }
+                        if columns.nearAi {
+                            VStack(alignment: .trailing, spacing: 0) {
+                                Text(row.nearAi).insightsMono()
+                                if let tokens = row.nearAiTokens { Text(tokens).insightsCaption() }
+                            }
                         }
                     }
                     .accessibilityElement(children: .combine)
@@ -352,7 +396,7 @@ struct InsightsDetailsTable: View {
     }
 
     /// NEAR AI spend by task or by tool, with the traces it came from.
-    @ViewBuilder private var nearAi: some View {
+    @ViewBuilder private func nearAi(_ dimension: InsightsCreditWords.Dimension) -> some View {
         if let credit = week.nearAiCredit, !InsightsCreditWords.isEmpty(credit.week) {
             let groups = (dimension == .task ? credit.week.byTask : credit.week.byTool) ?? []
             HStack {
