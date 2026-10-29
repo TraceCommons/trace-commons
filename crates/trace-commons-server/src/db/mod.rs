@@ -17,6 +17,7 @@ use crate::trace_invite_registry::InviteTenantMode;
 pub mod postgres;
 pub mod postgres_inference_connection;
 mod postgres_payout;
+mod postgres_referral_bonus;
 
 mod trace_corpus_common;
 mod trace_corpus_pg;
@@ -4066,6 +4067,396 @@ pub trait PayoutStore: Send + Sync {
         &self,
         rail: &RailId,
     ) -> Result<Option<PayoutPassLock>, DatabaseError>;
+}
+
+// -- Referral bonus (docs/superpowers/specs/2026-10-29-referral-rewards-design.md,
+// sections 4, 6 and 7). Implemented for PostgreSQL in
+// `postgres_referral_bonus`. Every `Debug` below prints kinds, counts and
+// labels, never an account, tenant, index or hash.
+
+/// A `trace_referral_bonus_accruals` row's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReferralBonusKind {
+    Bonus,
+    Reversal,
+    Void,
+}
+
+impl ReferralBonusKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bonus => "bonus",
+            Self::Reversal => "reversal",
+            Self::Void => "void",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "bonus" => Self::Bonus,
+            "reversal" => Self::Reversal,
+            "void" => Self::Void,
+            _ => return None,
+        })
+    }
+}
+
+/// An attribution as the bonus pass reads it, in the referee's tenant.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralAttributionRecord {
+    pub account_id: Uuid,
+    pub code_index: String,
+    pub referrer_tenant_id: String,
+    pub referrer_account_id: Uuid,
+    pub referee_ref_hash: String,
+    pub referee_account_created_at: chrono::DateTime<chrono::Utc>,
+    pub applied_at: chrono::DateTime<chrono::Utc>,
+    pub voided: bool,
+}
+
+impl std::fmt::Debug for ReferralAttributionRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralAttributionRecord")
+            .field("voided", &self.voided)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One of the referee's payout accruals on a rail, with its batch's
+/// creation time (the referral window is over batches). `rail_units` is a
+/// magnitude; `kind` gives the sign.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralRefereeAccrual {
+    pub accrual_id: Uuid,
+    pub kind: PayoutAccrualKind,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub account_id: Option<Uuid>,
+    pub rail_units: u128,
+    pub rate_version: String,
+    pub instrument_id: InstrumentId,
+    pub batch_created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl std::fmt::Debug for ReferralRefereeAccrual {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralRefereeAccrual")
+            .field("kind", &self.kind)
+            .field("owned", &self.account_id.is_some())
+            .field("rate_version", &self.rate_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A stored bonus row for one referee. Units are magnitudes; `kind` gives
+/// the sign.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralBonusRecord {
+    pub kind: ReferralBonusKind,
+    pub source_accrual_id: Option<Uuid>,
+    pub bps: u32,
+    pub base_units: u128,
+    pub bonus_units: u128,
+}
+
+/// One bonus row to write in the referrer's tenant. Units are magnitudes; a
+/// reversal or void is stored negated.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralBonusWrite {
+    pub rail_id: RailId,
+    /// The referrer's account.
+    pub account_id: Uuid,
+    pub referee_ref_hash: String,
+    pub kind: ReferralBonusKind,
+    pub source_accrual_id: Option<Uuid>,
+    pub bps: u32,
+    pub base_units: u128,
+    pub bonus_units: u128,
+    pub rate_version: String,
+    pub instrument_id: InstrumentId,
+}
+
+impl std::fmt::Debug for ReferralBonusWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralBonusWrite")
+            .field("rail_id", &self.rail_id)
+            .field("kind", &self.kind)
+            .field("bps", &self.bps)
+            .field("rate_version", &self.rate_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What the referee's tenant says about the referee, for the abuse signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReferralRefereeFactsRow {
+    pub submissions: u64,
+    pub refused: u64,
+    /// A reversal accrual on the rail against the account.
+    pub reversed: bool,
+    /// Any credit accrual on the rail for the account.
+    pub credited: bool,
+}
+
+/// What the bonus pass reads in the referrer's tenant for one referee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralReferrerView {
+    /// The referrer's account row exists. A missing tenant reads as false.
+    pub referrer_exists: bool,
+    /// The mirror row, when there is one.
+    pub mirror: Option<crate::referral_abuse::RefereeMirror>,
+    /// Every bonus row for this referee on the rail.
+    pub bonus_rows: Vec<ReferralBonusRecord>,
+}
+
+/// One referral code's state, in its owner's tenant.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralCodeState {
+    pub code_index: String,
+    pub account_id: Uuid,
+    pub disabled: bool,
+    pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub suspension_labels: Vec<String>,
+    pub voided: bool,
+    /// Signal labels an operator exempted when clearing a suspension.
+    pub exempt_labels: std::collections::BTreeSet<String>,
+}
+
+impl std::fmt::Debug for ReferralCodeState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralCodeState")
+            .field("disabled", &self.disabled)
+            .field("suspended", &self.suspended_at.is_some())
+            .field("suspension_labels", &self.suspension_labels)
+            .field("voided", &self.voided)
+            .field("exempt_labels", &self.exempt_labels)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReferralCodeState {
+    pub fn state_label(&self) -> &'static str {
+        if self.voided {
+            "voided"
+        } else if self.suspended_at.is_some() {
+            "suspended"
+        } else if self.disabled {
+            "disabled"
+        } else {
+            "live"
+        }
+    }
+}
+
+/// The referrer's referral stream on a rail: `owed` is the net of the
+/// account's bonus rows (floored at zero), `sent` the referral-stream
+/// lines confirmed or still pending (a pending line may have landed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReferralOwed {
+    pub owed: u128,
+    pub sent: u128,
+}
+
+impl ReferralOwed {
+    pub fn unsent(&self) -> u128 {
+        self.owed.saturating_sub(self.sent)
+    }
+}
+
+/// What a void wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReferralVoidOutcome {
+    /// The referrer's account, for holds.
+    pub account_id: Option<Uuid>,
+    pub referees_voided: u64,
+    /// Units taken back by the void rows.
+    pub taken_back: u128,
+}
+
+/// A suspended code, for the operator list. Hash-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralSuspendedCode {
+    pub code_index: String,
+    pub suspension_labels: Vec<String>,
+    pub suspended_at: chrono::DateTime<chrono::Utc>,
+    pub referees: u64,
+    /// Net bonus of the code's referees: what the suspension holds.
+    pub held_units: u128,
+}
+
+/// One tenant's part of the dry-run report. Counts and units only.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReferralTenantReport {
+    pub codes_by_state: std::collections::BTreeMap<String, u64>,
+    pub referees: u64,
+    pub referees_by_signal: std::collections::BTreeMap<String, u64>,
+    pub owed: u128,
+    /// Unsent bonus of accounts with no open hold on the rail.
+    pub sendable: u128,
+    /// Unsent bonus of accounts with an open hold on the rail.
+    pub held: u128,
+}
+
+/// The referral bonus store.
+#[async_trait]
+pub trait ReferralBonusStore: Send + Sync {
+    // -- the referee's tenant ------------------------------------------------
+
+    /// Every attribution in the tenant (at most one per account).
+    async fn referral_attributions(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<ReferralAttributionRecord>, DatabaseError>;
+
+    /// The account's accruals on `rail` whose batch is finalized, with the
+    /// batch's creation time, oldest batch first.
+    async fn referral_referee_accruals(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        account: Uuid,
+    ) -> Result<Vec<ReferralRefereeAccrual>, DatabaseError>;
+
+    /// Submission and accrual facts about the account, for its signals.
+    async fn referral_referee_facts(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        account: Uuid,
+    ) -> Result<ReferralRefereeFactsRow, DatabaseError>;
+
+    /// Voids the account's attribution, once, with a `referral_voided` audit
+    /// row in the tenant. False when it was already void or is missing.
+    async fn void_referral_attribution(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        label: &str,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    // -- the referrer's tenant -----------------------------------------------
+
+    async fn referral_referrer_view(
+        &self,
+        tenant: &str,
+        referrer_account: Uuid,
+        referee_ref_hash: &str,
+        rail: &RailId,
+    ) -> Result<ReferralReferrerView, DatabaseError>;
+
+    /// Inserts each row once (`ON CONFLICT DO NOTHING` on the source or void
+    /// index); returns how many were new. Never re-prices a row.
+    async fn insert_referral_bonus_rows(
+        &self,
+        tenant: &str,
+        rows: &[ReferralBonusWrite],
+    ) -> Result<u64, DatabaseError>;
+
+    /// Rewrites the mirror row's signal labels and the referee's link
+    /// indexes.
+    async fn refresh_referral_referee_signals(
+        &self,
+        tenant: &str,
+        referee_ref_hash: &str,
+        labels: &[String],
+        recipient_index: Option<&str>,
+        subject_index: Option<&str>,
+    ) -> Result<(), DatabaseError>;
+
+    /// Every mirror row of every code `account` owns.
+    async fn referral_mirror_rows(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<Vec<crate::referral_abuse::RefereeMirror>, DatabaseError>;
+
+    /// Every code in the tenant, with its exemptions.
+    async fn referral_codes(&self, tenant: &str) -> Result<Vec<ReferralCodeState>, DatabaseError>;
+
+    /// Suspends a code that is not suspended or voided, with a
+    /// `code_suspended` audit row per label. False when nothing changed.
+    async fn suspend_referral_code(
+        &self,
+        tenant: &str,
+        code_index: &str,
+        labels: &[String],
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Clears a suspension, with one `code_resumed` audit row per exempt
+    /// label (or one labelled `operator_clear`). The exempt labels never
+    /// trip the code again. The code's owner, or `None` when the code was not
+    /// suspended.
+    async fn resume_referral_code(
+        &self,
+        tenant: &str,
+        code_index: &str,
+        exempt_labels: &[String],
+        actor_ref_hash: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
+
+    /// Voids a code: sets `voided_at`, voids each referee's mirror row, and
+    /// writes one `void` bonus row per referee taking back their unsent
+    /// bonus. `None` when the code is missing or already void.
+    async fn void_referral_code(
+        &self,
+        tenant: &str,
+        code_index: &str,
+        label: &str,
+        rail: &RailId,
+        actor_ref_hash: &str,
+    ) -> Result<Option<ReferralVoidOutcome>, DatabaseError>;
+
+    /// Voids one referee's mirror row and writes its `void` bonus row, once.
+    /// `None` when the mirror row is missing or already void.
+    async fn void_referral_referee(
+        &self,
+        tenant: &str,
+        referee_ref_hash: &str,
+        label: &str,
+        rail: &RailId,
+        actor_ref_hash: &str,
+    ) -> Result<Option<ReferralVoidOutcome>, DatabaseError>;
+
+    /// The referrer's referral stream on `rail`.
+    async fn referral_bonus_owed(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<ReferralOwed, DatabaseError>;
+
+    async fn referral_suspended_codes(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<ReferralSuspendedCode>, DatabaseError>;
+
+    async fn referral_tenant_report(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<ReferralTenantReport, DatabaseError>;
+
+    // -- deployment-wide, through `trace_referral_resolver` -------------------
+
+    /// `(tenant, code_index)` of every suspended, unvoided code.
+    async fn referral_suspended_code_tenants(&self)
+    -> Result<Vec<(String, String)>, DatabaseError>;
+
+    /// Every tenant holding a code.
+    async fn referral_code_tenants(&self) -> Result<Vec<String>, DatabaseError>;
+
+    /// Codes whose suspension began at or after `since`.
+    async fn referral_codes_suspended_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DatabaseError>;
 }
 
 #[cfg(test)]
