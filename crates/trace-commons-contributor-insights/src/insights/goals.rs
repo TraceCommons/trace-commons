@@ -1,18 +1,18 @@
-//! User-set goals, each evaluated per comparable week and shown as weekly
-//! marks. No run of weeks is counted (owner decision D1). Goals compare a
-//! week only with the user's own past weeks, and only under feed T.
+//! One week's figures, as the lever and the weekly summary card read them
+//! (feed T only). The user-set threshold goals that also read them left
+//! Insights (product owner, 2026-10-29): Goals are now the `/goal` goals
+//! set in Claude and Codex, in `slash_goals`.
 
 use std::collections::BTreeMap;
 
-use chrono::{Duration, NaiveDate};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
-use super::analytics_constants::WEEKLY_MARKS;
 use super::patterns::{LongContextFigure, PatternFigure, PatternKind, SessionPatterns};
-use super::week_rollup::{AnalyticsSource, Feed, Unavailable};
+use super::week_rollup::AnalyticsSource;
 use super::week_rollup::{WeekRollup, comparable};
 
-/// One week's figures, as goals and the lever read them.
+/// One week's figures, as the lever and the summary card read them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeekFigures {
     pub week_start: NaiveDate,
@@ -91,259 +91,16 @@ impl WeekFigures {
     }
 }
 
-/// A user-set threshold. Claude and Codex figures are never combined, so the
-/// source-scoped goals name their source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Goal {
-    CacheShareAtLeast {
-        source: AnalyticsSource,
-        permille: u64,
-    },
-    WeeklyTokensUnder {
-        source: AnalyticsSource,
-        tokens: u64,
-    },
-}
-
-impl Goal {
-    /// The week's figure this goal is judged on; `None` when unknown.
-    pub fn figure(&self, week: &WeekFigures) -> Option<u64> {
-        match self {
-            Self::CacheShareAtLeast { source, .. } => {
-                week.cache_share_permille.get(source).copied()
-            }
-            Self::WeeklyTokensUnder { source, .. } => week.tokens.get(source).copied(),
-        }
-    }
-
-    pub fn met(&self, figure: u64) -> bool {
-        match self {
-            Self::CacheShareAtLeast { permille, .. } => figure >= *permille,
-            Self::WeeklyTokensUnder { tokens, .. } => figure < *tokens,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WeekMark {
-    Met,
-    NotMet,
-    /// Not comparable, or no figure. Never read as not met.
-    NoFigure,
-}
-
-/// "Down from {x} last week." / "Up from {x} last week."
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "direction", rename_all = "snake_case")]
-pub enum GoalChange {
-    Down { from: u64 },
-    Up { from: u64 },
-    Same { from: u64 },
-}
-
-/// Marks for the last [`WEEKLY_MARKS`] calendar weeks, oldest first, and
-/// the change from last week. Deliberately no count of weeks in a row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GoalMarks {
-    pub marks: Vec<WeekMark>,
-    pub change: Option<GoalChange>,
-}
-
-/// Evaluate a goal over `weeks`, oldest first, whose last entry is the week
-/// being shown.
-pub fn goal_marks(
-    feed: Feed,
-    goal: &Goal,
-    weeks: &[WeekFigures],
-) -> Result<GoalMarks, Unavailable> {
-    if feed != Feed::CounterPass {
-        return Err(Unavailable::NeedsCounterPass);
-    }
-    let Some(this) = weeks.last() else {
-        return Err(Unavailable::InsufficientHistory);
-    };
-    let figure_at = |offset: usize| {
-        let start = this.week_start - Duration::days(7 * offset as i64);
-        weeks
-            .iter()
-            .find(|week| week.week_start == start)
-            .filter(|week| week.comparable)
-            .and_then(|week| goal.figure(week))
-    };
-    let marks = (0..WEEKLY_MARKS)
-        .rev()
-        .map(|offset| match figure_at(offset) {
-            Some(figure) if goal.met(figure) => WeekMark::Met,
-            Some(_) => WeekMark::NotMet,
-            None => WeekMark::NoFigure,
-        })
-        .collect();
-    let change = match (figure_at(0), figure_at(1)) {
-        (Some(now), Some(from)) => Some(match now.cmp(&from) {
-            std::cmp::Ordering::Less => GoalChange::Down { from },
-            std::cmp::Ordering::Greater => GoalChange::Up { from },
-            std::cmp::Ordering::Equal => GoalChange::Same { from },
-        }),
-        _ => None,
-    };
-    Ok(GoalMarks { marks, change })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::insights::week_rollup::{
-        AnalyticsSource, CodexObserved, SessionBody, SessionInput, week_rollup,
+        AnalyticsSource, CodexObserved, Feed, SessionBody, SessionInput, week_rollup,
     };
     use chrono::{Duration, NaiveDate, TimeZone, Utc};
 
     fn monday(weeks_ago: i64) -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 10, 5).unwrap() - Duration::days(7 * weeks_ago)
-    }
-
-    fn week(weeks_ago: i64, comparable: bool, tokens: Option<u64>) -> WeekFigures {
-        let mut figures = WeekFigures {
-            week_start: monday(weeks_ago),
-            comparable,
-            ..WeekFigures::default()
-        };
-        if let Some(tokens) = tokens {
-            figures.tokens.insert(AnalyticsSource::ClaudeCode, tokens);
-            figures
-                .cache_share_permille
-                .insert(AnalyticsSource::ClaudeCode, tokens / 1_000);
-            figures.patterns.insert(PatternKind::RepeatedReads, tokens);
-            figures.patterns.insert(PatternKind::LongContext, tokens);
-        }
-        figures
-    }
-
-    fn under(tokens: u64) -> Goal {
-        Goal::WeeklyTokensUnder {
-            source: AnalyticsSource::ClaudeCode,
-            tokens,
-        }
-    }
-
-    #[test]
-    fn goals_need_the_counter_pass_feed() {
-        for feed in [Feed::Saved, Feed::Ledger] {
-            assert_eq!(
-                goal_marks(feed, &under(10), &[week(0, true, Some(5))]),
-                Err(Unavailable::NeedsCounterPass)
-            );
-        }
-    }
-
-    #[test]
-    fn six_marks_oldest_first_padded_with_no_figure() {
-        let marks = goal_marks(
-            Feed::CounterPass,
-            &under(100),
-            &[week(1, true, Some(50)), week(0, true, Some(500))],
-        )
-        .unwrap();
-        assert_eq!(marks.marks.len(), WEEKLY_MARKS);
-        assert_eq!(
-            marks.marks,
-            vec![
-                WeekMark::NoFigure,
-                WeekMark::NoFigure,
-                WeekMark::NoFigure,
-                WeekMark::NoFigure,
-                WeekMark::Met,
-                WeekMark::NotMet,
-            ]
-        );
-    }
-
-    #[test]
-    fn only_the_last_six_weeks_are_marked() {
-        let weeks: Vec<_> = (0..9).rev().map(|ago| week(ago, true, Some(50))).collect();
-        let marks = goal_marks(Feed::CounterPass, &under(100), &weeks).unwrap();
-        assert_eq!(marks.marks, vec![WeekMark::Met; WEEKLY_MARKS]);
-    }
-
-    #[test]
-    fn a_week_that_is_not_comparable_or_has_no_figure_is_never_not_met() {
-        let marks = goal_marks(
-            Feed::CounterPass,
-            &under(100),
-            &[week(1, false, Some(500)), week(0, true, None)],
-        )
-        .unwrap();
-        assert_eq!(marks.marks[4], WeekMark::NoFigure);
-        assert_eq!(marks.marks[5], WeekMark::NoFigure);
-    }
-
-    #[test]
-    fn thresholds_compare_exactly() {
-        let at_least = Goal::CacheShareAtLeast {
-            source: AnalyticsSource::ClaudeCode,
-            permille: 500,
-        };
-        let met = goal_marks(
-            Feed::CounterPass,
-            &at_least,
-            &[week(0, true, Some(500_000))],
-        )
-        .unwrap();
-        assert_eq!(met.marks[5], WeekMark::Met);
-        let not = goal_marks(
-            Feed::CounterPass,
-            &at_least,
-            &[week(0, true, Some(499_000))],
-        )
-        .unwrap();
-        assert_eq!(not.marks[5], WeekMark::NotMet);
-
-        let equal =
-            goal_marks(Feed::CounterPass, &under(100), &[week(0, true, Some(100))]).unwrap();
-        assert_eq!(equal.marks[5], WeekMark::NotMet);
-    }
-
-    #[test]
-    fn change_needs_both_weeks_comparable() {
-        let down = goal_marks(
-            Feed::CounterPass,
-            &under(1_000),
-            &[week(1, true, Some(800)), week(0, true, Some(600))],
-        )
-        .unwrap();
-        assert_eq!(down.change, Some(GoalChange::Down { from: 800 }));
-        let up = goal_marks(
-            Feed::CounterPass,
-            &under(1_000),
-            &[week(1, true, Some(600)), week(0, true, Some(800))],
-        )
-        .unwrap();
-        assert_eq!(up.change, Some(GoalChange::Up { from: 600 }));
-        let thin = goal_marks(
-            Feed::CounterPass,
-            &under(1_000),
-            &[week(1, false, Some(600)), week(0, true, Some(800))],
-        )
-        .unwrap();
-        assert_eq!(thin.change, None);
-        // A gap week in between is not "last week".
-        let gap = goal_marks(
-            Feed::CounterPass,
-            &under(1_000),
-            &[week(2, true, Some(600)), week(0, true, Some(800))],
-        )
-        .unwrap();
-        assert_eq!(gap.change, None);
-    }
-
-    #[test]
-    fn marks_carry_no_run_count() {
-        let marks = goal_marks(Feed::CounterPass, &under(1), &[week(0, true, Some(5))]).unwrap();
-        let value = serde_json::to_value(&marks).unwrap();
-        let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
-        keys.sort();
-        assert_eq!(keys, vec!["change".to_string(), "marks".to_string()]);
     }
 
     #[test]

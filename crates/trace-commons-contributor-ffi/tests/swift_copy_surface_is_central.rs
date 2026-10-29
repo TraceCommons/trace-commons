@@ -1163,9 +1163,10 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_insights_call",
     ),
     // Feed T: the lever of the week and the weekly summary card on the
-    // Overview, and "Your goals" on Patterns, fill the core's words with the
-    // core's `comparisons` (`InsightsComparisonsWords`), read through the
-    // model's `tc_insights_call`.
+    // Overview fill the core's words with the core's `comparisons`
+    // (`InsightsComparisonsWords`), read through the model's
+    // `tc_insights_call`. Goals on Breakdown fill the core's words
+    // (`InsightsGoalsWords`) with the daemon's `insights_week` goals.
     (
         "Insights lever and weekly summary words",
         "TraceCommonsApp/Views/InsightsOverviewTab.swift",
@@ -1176,9 +1177,9 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     (
         "Insights goals words",
         "TraceCommonsApp/Views/InsightsPatternsTab.swift",
-        "InsightsComparisonsWords.",
+        "InsightsGoalsWords.",
         "TCBridge/TCInsights.swift",
-        "tc_insights_call",
+        "tc_insights_copy_json",
     ),
 ];
 

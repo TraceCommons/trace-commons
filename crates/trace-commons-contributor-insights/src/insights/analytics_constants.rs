@@ -96,10 +96,6 @@ pub const LEVER_SUPPRESSION_WEEKS: i64 = 4;
 /// Owner decision D10, open.
 pub const LEVER_DISMISSALS_TO_DISABLE: usize = 3;
 
-/// Weekly marks a goal shows: met, not met, or no figure, one per week. No
-/// run of weeks is counted and no ring is drawn. Owner decision D1, open.
-pub const WEEKLY_MARKS: usize = 6;
-
 /// Weekly bars each Patterns card draws, oldest first, ending at the week on
 /// screen. A week with no figure is a gap, never a zero bar, and no run of
 /// weeks is counted. Owner decisions D1 and D10, open.
@@ -307,8 +303,9 @@ pub const CODEX_REVIEWER_MODEL: &str = "codex-auto-review";
 /// section 5).
 pub const CLASSIFIER_VERSION: u32 = 1;
 /// Version of the stored session facts. A bump that changes what a scan
-/// collects re-reads each row once.
-pub const SESSION_FACTS_VERSION: u32 = 1;
+/// collects re-reads each row once. 2: Claude `/goal` goals are kept
+/// beside the facts (product owner, 2026-10-29).
+pub const SESSION_FACTS_VERSION: u32 = 2;
 
 /// Sessions a (task type, model) cell needs before its figure is compared
 /// (spec section 6).
@@ -418,8 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn weekly_marks_not_streaks() {
-        assert_eq!(WEEKLY_MARKS, 6);
+    fn pattern_bars_cover_six_weeks() {
         assert_eq!(PATTERN_BAR_WEEKS, 6);
     }
 
@@ -472,8 +468,8 @@ mod tests {
         assert_eq!(COUNTER_PASS_MAX_READS_PER_TICK, 16);
         assert_eq!(COUNTER_PASS_MAX_BYTES_PER_TICK, 64 * 1024 * 1024);
         assert_eq!(COUNTER_PASS_MAX_LINE_BYTES, 16 * 1024 * 1024);
-        // The kept weeks cover the six weekly marks plus the lever's baseline.
-        const { assert!(COUNTER_STORE_KEEP_WEEKS as usize > WEEKLY_MARKS + LEVER_BASELINE_WEEKS) };
+        // The kept weeks cover six weekly bars plus the lever's baseline.
+        const { assert!(COUNTER_STORE_KEEP_WEEKS as usize > PATTERN_BAR_WEEKS + LEVER_BASELINE_WEEKS) };
     }
 
     #[test]
@@ -503,7 +499,7 @@ mod tests {
     #[test]
     fn task_classifier_constants() {
         assert_eq!(CLASSIFIER_VERSION, 1);
-        assert_eq!(SESSION_FACTS_VERSION, 1);
+        assert_eq!(SESSION_FACTS_VERSION, 2);
         assert_eq!(DOC_EXTENSIONS, ["md", "mdx", "rst", "adoc"]);
         assert_eq!(DOC_DIRS, ["docs", "doc"]);
         assert_eq!(TEST_DIRS, ["tests", "test", "__tests__", "spec"]);

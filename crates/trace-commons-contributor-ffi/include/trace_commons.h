@@ -2246,11 +2246,11 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * session's per-turn counters (an unknown turn is null, never 0) and lettered
  * markers; Codex series is null as not_recorded. No path, digest or what-if.
  * Comparisons (feed T): comparisons {counter_weeks?,week_start?,tz,
- * recap_card_enabled?} marks each goal over the daemon's insights_week
- * history passed through, and returns the lever and the weekly summary card;
- * without counter_weeks nothing is compared. goal_set {id?,goal},
- * goal_delete {id}, lever_feedback {kind,week_start,action?} and
- * recap_opened {week_start} write rule IDs and Monday dates only.
+ * recap_card_enabled?} reads the daemon's insights_week history passed
+ * through, and returns the lever and the weekly summary card; without
+ * counter_weeks nothing is compared. Goals are the daemon's (insights_week
+ * goals). lever_feedback {kind,week_start,action?} and recap_opened
+ * {week_start} write rule IDs and Monday dates only.
  * lever_card {enabled} is the Settings switch for the lever's card; on, it
  * turns back on every kind repeated "Not useful" turned off. Its state is
  * comparisons' lever.card_enabled.

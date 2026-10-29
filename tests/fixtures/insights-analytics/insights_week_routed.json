@@ -1065,5 +1065,11 @@
       "claude_code": 37235,
       "codex": null
     }
-  ]
+  ],
+  "goals": {
+    "by_tool": {},
+    "goals": [],
+    "met": 0,
+    "total": 0
+  }
 }

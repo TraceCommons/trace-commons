@@ -2225,6 +2225,10 @@ extension DaemonData {
         /// cache savings (product owner, 2026-10-29); `nil` from a daemon
         /// that predates it.
         public var work: InsightsWork? = nil
+        /// The goals set with `/goal` in Claude and Codex whose last update
+        /// falls in the week (product owner, 2026-10-29); `nil` from a
+        /// daemon that predates them. Never a goal's text.
+        public var goals: InsightsWeekGoals? = nil
 
         /// Enabled, readable, from the counter pass, and carrying a rollup and
         /// the core's Overview for it.
@@ -2245,7 +2249,66 @@ extension DaemonData {
             case routingUnavailable = "routing_unavailable"
             case nearAiCredit = "near_ai_credit"
             case usageByDay = "usage_by_day"
-            case work
+            case work, goals
+        }
+    }
+
+    /// `insights_week`'s `goals`: each goal, newest update first, and how
+    /// many were met. `met` is Codex's `complete` or Claude's latest check
+    /// met; every other status is not met.
+    public struct InsightsWeekGoals: Codable, Equatable, Sendable {
+        public let goals: [InsightsWeekGoal]
+        public let met: Int
+        public let total: Int
+        /// Per tool with a goal this week (`claude_code`, `codex`).
+        public let byTool: [String: InsightsGoalCount]?
+
+        public init(goals: [InsightsWeekGoal], met: Int, total: Int, byTool: [String: InsightsGoalCount]? = nil) {
+            self.goals = goals; self.met = met; self.total = total; self.byTool = byTool
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case goals, met, total
+            case byTool = "by_tool"
+        }
+    }
+
+    /// Met and total, for one tool.
+    public struct InsightsGoalCount: Codable, Equatable, Sendable {
+        public let met: Int
+        public let total: Int
+    }
+
+    /// One `/goal` goal: its tool, the tool's own status and what it took.
+    /// Status and counts only, keyed to its trace.
+    public struct InsightsWeekGoal: Codable, Equatable, Sendable {
+        /// `claude_code` or `codex`.
+        public let tool: String
+        /// Codex's `active`, `paused`, `blocked`, `usage_limited`,
+        /// `budget_limited` or `complete`; Claude's `met`, `not_met` or
+        /// `open`; `unknown` for a status the daemon does not know.
+        public let status: String
+        public let met: Bool
+        public let tokens: Int64?
+        public let timeSecs: Int64?
+        public let iterations: Int64?
+        public let folder: String?
+        /// The trace's Sessions reference.
+        public let sessionRef: String
+        public let updatedAt: String
+
+        public init(tool: String, status: String, met: Bool, tokens: Int64?, timeSecs: Int64?,
+                    iterations: Int64? = nil, folder: String?, sessionRef: String, updatedAt: String) {
+            self.tool = tool; self.status = status; self.met = met; self.tokens = tokens
+            self.timeSecs = timeSecs; self.iterations = iterations; self.folder = folder
+            self.sessionRef = sessionRef; self.updatedAt = updatedAt
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case tool, status, met, tokens, iterations, folder
+            case timeSecs = "time_secs"
+            case sessionRef = "session_ref"
+            case updatedAt = "updated_at"
         }
     }
 

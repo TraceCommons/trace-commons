@@ -614,7 +614,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `work`, `usage_by_day[]`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (on by default; product owner, 2026-10-29); see "`insights_week`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `work`, `usage_by_day[]`, `overview`, `patterns`, `history[]`, `recap_card_enabled`, `goals` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (on by default; product owner, 2026-10-29); see "`insights_week`" below |
 | `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome, analyzable}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
@@ -5113,11 +5113,51 @@ for a failed read:
   `past_threshold` is `{"threshold", "sessions"}` (sessions whose context
   reached the contributor's `insights_context_threshold` that week) and
   `null` while that setting is unset. The shell passes `history` unchanged to
-  the in-process `comparisons` operation, which marks goals and picks the
-  lever and the weekly summary card: goals live in the Insights store, which
-  this daemon never reads.
+  the in-process `comparisons` operation, which picks the lever and the
+  weekly summary card. (It no longer marks goals: the threshold goals it
+  stored left Insights, product owner 2026-10-29.)
 - `recap_card_enabled` is the `insights_recap_card_enabled` setting, passed
   to `comparisons` with `history`.
+- `goals` is the goals the contributor set with the `/goal` slash command in
+  Claude and Codex whose last update falls in the week on screen (product
+  owner, 2026-10-29): `{"goals": [...], "met", "total", "by_tool":
+  {"claude_code"|"codex": {"met", "total"}}}`, a tool with no goal that week
+  absent from `by_tool`. Each goal, newest update first, is `{"tool":
+  "claude_code"|"codex", "status", "met", "tokens", "time_secs",
+  "iterations", "folder", "session_ref", "updated_at"}`:
+  - Codex's goals are read when the week is answered from
+    `goals_1.sqlite` in Codex's home (`$CODEX_HOME` when set and absolute,
+    else `~/.codex`), opened read-only and never created or written (opened
+    `immutable` only when no write-ahead log with content sits beside it).
+    Only `thread_id`, `status`, `tokens_used`, `time_used_seconds` and
+    `updated_at_ms` are selected, never `objective` or `goal_id`. A goal is
+    joined to the stored Codex row whose keyed session digest is its thread
+    ID's (the thread ID is the rollout's `session_meta` id), and is left out
+    when no row the Sessions list shows matches: a rollout aged out of the
+    store, archived, automated or in a Never folder. `status` is Codex's own
+    (`active`, `paused`, `blocked`, `usage_limited`, `budget_limited`,
+    `complete`, or `unknown` for a value this build does not know);
+    `iterations` is `null`. No database, no table, or one that cannot be
+    read is no Codex goals, never an error.
+  - Claude's goals are read by the counter pass from the transcript's
+    `attachment` records of type `goal_status` and stored on the session's
+    row: status, checks, tokens, time and time only. The record written when
+    a goal is set (`sentinel: true`) starts a goal; a later check continues
+    it while its condition is unchanged, compared by a digest held only
+    while the file is read, and a check with another condition starts a new
+    one. A goal's state is its latest record's: `open` while only the
+    sentinel is read, else `met` or `not_met`, with `iterations`,
+    `time_secs` (from `durationMs`) and `tokens` from that check. A session
+    keeps its latest 16 goals. Rows made before goals were kept are read
+    again once (`SESSION_FACTS_VERSION` 2).
+  - `met` is `true` for Codex `complete` and Claude `met`; every other
+    status counts as not met. `tokens`, `time_secs` and `iterations` are
+    `null` when the tool did not report them, never zero. `folder` and
+    `session_ref` are the session's as `insights_sessions` lists them, so
+    the reference opens `insights_session_drill`.
+  - A goal's text never crosses, is stored or is logged: not Codex's
+    `objective`, Claude's `condition` or `reason`, or the `/goal` command's
+    arguments.
 
 With the setting off none of these are present, as above.
 

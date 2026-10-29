@@ -9,12 +9,12 @@ import TCShellCore
 /// otherwise. Every word is the core's analytics copy, every figure the
 /// core's. A week with no figure is a gap marked with the dash, never a
 /// zero bar; files are letters with an extension, never a path. Only feed T
-/// compares weeks and carries "Your goals"; under feed S the change is left
-/// out.
+/// compares weeks and carries Goals, the goals set with `/goal` in Claude and
+/// Codex; under feed S the change is left out.
 ///
 /// Laid out for the main pane (direction B, 2026-10-15): one card per
 /// pattern in a single column, each with six labelled weeks on the chart
-/// surface and, when a goal covers it, the goal as a dashed line.
+/// surface.
 struct InsightsPatternsTab: View {
     let model: InsightsPatternsModel
     let comparisons: InsightsComparisonsModel
@@ -31,9 +31,6 @@ struct InsightsPatternsTab: View {
     var overview: InsightsOverviewModel?
     /// Saved snapshots, so a picked day's rows read as their labels.
     var snapshots: [LocalInsight] = []
-    @State private var goalKind = InsightsComparisonsWords.goalKinds[0]
-    @State private var goalSource = "claude_code"
-    @State private var goalNumber = ""
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
     private func figure(_ value: UInt64?) -> String { InsightsOverviewWords.figure(value, copy: copy) }
@@ -60,8 +57,8 @@ struct InsightsPatternsTab: View {
                             }
                         }
                     }
-                    if patterns.feed == "counter_pass", let found = comparisons.comparisons {
-                        goals(found)
+                    if patterns.feed == "counter_pass", let goals = week?.goals, goals.total > 0 {
+                        self.goals(goals)
                     }
                 } else if model.failed {
                     Text(text("analytics_unavailable")).insightsError()
@@ -186,106 +183,37 @@ struct InsightsPatternsTab: View {
         .accessibilityHidden(true)
     }
 
-    /// "Your goals" (feed T only): each goal with six weekly marks, oldest
-    /// first, and the change from last week. A met week is a filled square,
-    /// a missed one an outlined square, a week with no figure the dash: shape,
-    /// not colour alone. Marks, not a run of weeks (owner decision D1, open).
-    private func goals(_ found: InsightsComparisons) -> some View {
+    /// Goals (feed T only): "Goals met {n} of {m}" over one row per goal
+    /// set with `/goal` in Claude or Codex this week, newest first: the
+    /// tool, its own status, tokens and time, and the folder. Never the
+    /// goal's text, which stays in each tool. Hidden in a week with none.
+    private func goals(_ goals: DaemonData.InsightsWeekGoals) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             InsightsSectionTitle(text("analytics_goals_title"), info: [text("analytics_goals_note")])
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                Text(InsightsGoalsWords.metOf(goals, copy: copy)).insightsFigure()
                 VStack(spacing: 0) {
-                    ForEach(Array(found.goals.filter { InsightsComparisonsWords.goalKinds.contains($0.goal.kind) }.enumerated()), id: \.element.id) { index, goal in
+                    ForEach(Array(goals.goals.enumerated()), id: \.offset) { index, goal in
                         GlassTableRow(first: index == 0) {
-                            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
-                                    Text(InsightsComparisonsWords.goal(goal.goal, copy: copy))
-                                        .fixedSize(horizontal: false, vertical: true)
-                                    Spacer(minLength: GlassTokens.Space.s4)
-                                    Text(InsightsComparisonsWords.goalFigure(goal, copy: copy)).insightsMono()
-                                }
-                                HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
-                                    HStack(spacing: GlassTokens.Space.s2) {
-                                        ForEach(Array((goal.marks?.marks ?? []).enumerated()), id: \.offset) { _, mark in
-                                            InsightsGoalMark(wire: mark, copy: copy)
-                                        }
-                                    }
-                                    if let change = InsightsComparisonsWords.goalChange(goal, copy: copy) {
-                                        Text(change).insightsCaption()
-                                    }
-                                    Spacer(minLength: GlassTokens.Space.s4)
-                                    Button(text("analytics_goal_delete")) { comparisons.deleteGoal(goal.id) }
-                                        .buttonStyle(GlassButtonStyle(.link))
+                            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
+                                Text(InsightsGoalsWords.tool(goal.tool, copy: copy))
+                                Text(InsightsGoalsWords.status(goal.status, copy: copy))
+                                    .foregroundStyle(goal.met ? GlassTokens.Color.statusOn.color : GlassColor.textSecondary)
+                                Spacer(minLength: GlassTokens.Space.s4)
+                                Text(InsightsGoalsWords.line(goal, copy: copy)).insightsMono()
+                                if let folder = goal.folder {
+                                    Text(folder).insightsCaption().lineLimit(1)
                                 }
                             }
-                        }
-                    }
-                }
-                HStack(spacing: GlassTokens.Space.s6) {
-                    ForEach(["met", "not_met"], id: \.self) { wire in
-                        HStack(spacing: GlassTokens.Space.s3) {
-                            InsightsGoalMark(wire: wire, copy: copy).accessibilityHidden(true)
-                            Text(InsightsComparisonsWords.mark(wire, copy: copy)).insightsCaption()
+                            .accessibilityElement(children: .combine)
                         }
                     }
                 }
             }
             .insightsCardBody()
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                GlassSelect(text("analytics_goal_add"), selection: $goalKind,
-                            options: InsightsComparisonsWords.goalKinds.map { kind in
-                                GlassPickerOption(InsightsComparisonsWords.goal(
-                                    InsightsGoal(kind: kind), copy: copy), value: kind)
-                            })
-                HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-                    if InsightsComparisonsWords.goalNeedsSource(goalKind) {
-                        GlassSelect(text("analytics_card_by_tool"), selection: $goalSource, options: [
-                            GlassPickerOption(InsightsOverviewWords.harness("claude_code", copy: copy), value: "claude_code"),
-                            GlassPickerOption(InsightsOverviewWords.harness("codex", copy: copy), value: "codex"),
-                        ])
-                        .fixedSize()
-                    }
-                    GlassTextField(text("analytics_goal_add"), text: $goalNumber, showsLabel: false)
-                    Button(text("analytics_goal_add")) {
-                        if let goal = InsightsComparisonsWords.newGoal(kind: goalKind, source: goalSource, number: goalNumber) {
-                            comparisons.addGoal(goal); goalNumber = ""
-                        }
-                    }
-                    .buttonStyle(GlassButtonStyle(.glass, small: true))
-                    .disabled(InsightsComparisonsWords.newGoal(kind: goalKind, source: goalSource,
-                                                               number: goalNumber) == nil)
-                }
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .insightsSection()
-    }
-}
-
-/// One week of a goal: a filled square when met, an outlined one when not,
-/// the dash when the week has no figure. Read out in the core's words.
-struct InsightsGoalMark: View {
-    let wire: String
-    let copy: [String: String]
-
-    static let side: CGFloat = 10
-
-    var body: some View {
-        Group {
-            switch wire {
-            case "met":
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .fill(GlassTokens.Color.statusOn.color)
-            case "not_met":
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .strokeBorder(GlassColor.textTertiary, lineWidth: 1.5)
-            default:
-                Text(InsightsComparisonsWords.mark(wire, copy: copy)).insightsTick()
-            }
-        }
-        .frame(width: Self.side, height: Self.side)
-        .accessibilityElement()
-        .accessibilityLabel(InsightsComparisonsWords.mark(wire, copy: copy))
     }
 }
 

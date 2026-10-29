@@ -1051,7 +1051,8 @@ private actor SessionsRecorder {
 
 /// Feed T comparisons (owner decision D4, open): the daemon's week arrives in
 /// the core's own shapes, its weekly figures go to the core unchanged, and
-/// goals, the lever and the weekly summary card are the core's. Nothing is
+/// the lever and the weekly summary card are the core's. Goals are the
+/// daemon's `/goal` goals, in the core's words. Nothing is
 /// compared in Swift, and nothing is shown under feed S.
 final class InsightsComparisonsTests: XCTestCase {
     /// A real `insights_week` answer, recorded from the daemon's own test
@@ -1065,18 +1066,21 @@ final class InsightsComparisonsTests: XCTestCase {
         "analytics_change_down": "\u{25BC} {p}% vs last week",
         "analytics_change_up": "\u{25B2} {p}% vs last week",
         "analytics_best_week": "Your best week \u{b7} previous best {q}%",
-        "analytics_goal_cache_share": "Input read from cache \u{2265} {p}%",
-        "analytics_goal_weekly_tokens": "Weekly tokens under {t}",
+        "analytics_goals_met_of": "Goals met {n} of {m}",
         "analytics_goal_met": "Met",
         "analytics_goal_not_met": "Not met",
-        "analytics_goal_down_from": "Down from {x} last week.",
-        "analytics_goal_up_from": "Up from {x} last week.",
+        "analytics_goal_open": "Open",
+        "analytics_goal_complete": "Complete",
+        "analytics_goal_usage_limited": "Usage limit",
+        "analytics_goal_status_unknown": "Status unavailable",
+        "analytics_goal_line": "{t} tokens \u{b7} {span}",
+        "analytics_credit_tool_claude_code": "Claude",
+        "analytics_credit_tool_codex": "Codex",
         "analytics_pattern_retried_calls": "RETRIED",
         "analytics_your_week": "Your week \u{b7} {range}",
         "analytics_recap_fewer": "{n} traces \u{b7} {p}% fewer tokens than last week",
         "analytics_recap_more": "{n} traces \u{b7} {p}% more tokens than last week",
         "analytics_recap_best_cache": "Best cache week yet: {p}%. Previous best {q}%.",
-        "analytics_recap_goal_met": "Goal met: {goal}.",
         "analytics_recap_pattern_up": "{pattern} up {p}% on your usual week.",
         "analytics_recap_threshold": "{n} traces passed your {threshold} threshold.",
         "claude_code": "Claude Code",
@@ -1144,7 +1148,6 @@ final class InsightsComparisonsTests: XCTestCase {
         let found = try XCTUnwrap(model.comparisons)
         XCTAssertEqual(found.feed, "counter_pass")
         XCTAssertEqual(found.week_start, "2026-09-14")
-        XCTAssertEqual(found.goals, [])
         // One thin week: below the floor, so no lever.
         XCTAssertNil(found.lever.pick)
         XCTAssertEqual(found.lever.unavailable, "below_coverage_floor")
@@ -1157,7 +1160,7 @@ final class InsightsComparisonsTests: XCTestCase {
         let recorder = ComparisonsRecorder()
         let model = InsightsComparisonsModel(service: { try await recorder.call($0) })
         model.load(counterWeeks: nil, weekStart: "2026-10-05", recapCardEnabled: true)
-        model.notUseful(); model.addGoal(InsightsGoal(kind: "weekly_tokens_under", source: "codex", tokens: 5))
+        model.notUseful()
         for _ in 0..<20 { await Task.yield() }
         let requests = await recorder.requests
         XCTAssertTrue(requests.isEmpty)
@@ -1221,34 +1224,36 @@ final class InsightsComparisonsTests: XCTestCase {
         XCTAssertNil(InsightsOverviewWords.isoWeek("last week"))
     }
 
-    func testGoalWordsAreTheCoresFilled() throws {
-        let words = Self.words
-        let share = InsightsGoal(kind: "cache_share_at_least", source: "claude_code", permille: 600)
-        XCTAssertEqual(InsightsComparisonsWords.goal(share, copy: words),
-                       "Claude Code \u{b7} Input read from cache \u{2265} 60%")
-        XCTAssertEqual(InsightsComparisonsWords.goal(InsightsGoal(kind: "weekly_tokens_under", source: "claude_code",
-                                                                  tokens: 50_000), copy: words),
-                       "Claude Code \u{b7} Weekly tokens under 50K")
-        XCTAssertEqual(InsightsComparisonsWords.goalKinds, ["cache_share_at_least", "weekly_tokens_under"],
-                       "repeated reads and long context goals left Insights")
-        XCTAssertEqual(InsightsComparisonsWords.newGoal(kind: "cache_share_at_least", source: "codex", number: "60"),
-                       InsightsGoal(kind: "cache_share_at_least", source: "codex", permille: 600))
-        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "cache_share_at_least", source: "codex", number: "101"))
-        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "weekly_tokens_under", source: "codex", number: "0"))
-        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "weekly_tokens_under", source: "codex", number: "lots"))
-        XCTAssertEqual(InsightsComparisonsWords.newGoal(kind: "weekly_tokens_under", source: "codex", number: "9000"),
-                       InsightsGoal(kind: "weekly_tokens_under", source: "codex", tokens: 9000))
-        XCTAssertEqual(InsightsComparisonsWords.mark("met", copy: words), "Met")
-        XCTAssertEqual(InsightsComparisonsWords.mark("not_met", copy: words), "Not met")
-        XCTAssertEqual(InsightsComparisonsWords.mark("no_figure", copy: words), "\u{2014}")
-
-        let view = try JSONDecoder().decode(InsightsGoalView.self, from: Data("""
-        {"id":"goal-1","goal":{"kind":"weekly_tokens_under","source":"claude_code","tokens":900000},
-         "figure":800000,"marks":{"marks":["no_figure","no_figure","no_figure","no_figure","not_met","met"],
-         "change":{"direction":"down","from":1000000}},"unavailable":null}
+    /// The daemon's `/goal` goals (product owner, 2026-10-29): a daemon from
+    /// before them sends none, and each goal reads as its tool, its own
+    /// status, tokens and time in the core's words. No goal text crosses.
+    func testGoalsAreTheDaemonsSlashGoalsInTheCoresWords() throws {
+        XCTAssertNil(try week().goals, "a daemon from before goals sends none")
+        var object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(Self.daemonWeek.utf8)) as? [String: Any])
+        object["goals"] = try JSONSerialization.jsonObject(with: Data("""
+        {"goals":[{"tool":"claude_code","status":"open","met":false,"tokens":null,"time_secs":null,
+                   "iterations":null,"folder":null,"session_ref":"t0.7","updated_at":"2026-09-14T09:09:00Z"},
+                  {"tool":"codex","status":"complete","met":true,"tokens":42000,"time_secs":600,
+                   "iterations":null,"folder":"web","session_ref":"t1.7","updated_at":"2026-09-14T09:00:00Z"},
+                  {"tool":"codex","status":"from_a_newer_codex","met":false,"tokens":1,"time_secs":1,
+                   "iterations":null,"folder":null,"session_ref":"t2.7","updated_at":"2026-09-14T08:00:00Z"}],
+         "met":1,"total":3,"by_tool":{"claude_code":{"met":0,"total":1},"codex":{"met":1,"total":2}}}
         """.utf8))
-        XCTAssertEqual(InsightsComparisonsWords.goalFigure(view, copy: words), "800K")
-        XCTAssertEqual(InsightsComparisonsWords.goalChange(view, copy: words), "Down from 1M last week.")
+        let week = try DaemonDataDecoding.decoder().decode(
+            DaemonData.InsightsWeek.self, from: JSONSerialization.data(withJSONObject: object))
+        let goals = try XCTUnwrap(week.goals)
+        let words = Self.words
+        XCTAssertEqual(InsightsGoalsWords.metOf(goals, copy: words), "Goals met 1 of 3")
+        XCTAssertEqual(goals.goals.map { InsightsGoalsWords.tool($0.tool, copy: words) }, ["Claude", "Codex", "Codex"])
+        XCTAssertEqual(goals.goals.map { InsightsGoalsWords.status($0.status, copy: words) },
+                       ["Open", "Complete", "Status unavailable"])
+        XCTAssertEqual(InsightsGoalsWords.line(goals.goals[0], copy: words), "\u{2014} tokens \u{b7} \u{2014}",
+                       "unknown figures are the dash, never 0")
+        let tenMinutes = Duration.seconds(600).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
+        XCTAssertEqual(InsightsGoalsWords.line(goals.goals[1], copy: words), "42K tokens \u{b7} \(tenMinutes)")
+        XCTAssertEqual(goals.goals[1].folder, "web")
+        XCTAssertEqual(goals.goals[1].sessionRef, "t1.7")
     }
 
     func testTheLeverIsAnObservationInTheCoresWords() throws {
@@ -1276,7 +1281,6 @@ final class InsightsComparisonsTests: XCTestCase {
                      "no comparable week: no line, never 0%")
         XCTAssertEqual(recap.items.compactMap { InsightsComparisonsWords.recapItem($0, copy: words) }, [
             "Best cache week yet: 45%. Previous best 30%.",
-            "Goal met: Claude Code \u{b7} Weekly tokens under 50K.",
             "RETRIED up 50% on your usual week.",
         ])
         XCTAssertNil(InsightsComparisonsWords.recapThreshold(recap, copy: words),

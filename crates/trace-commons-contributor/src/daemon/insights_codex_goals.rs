@@ -55,18 +55,52 @@ pub(crate) fn read_codex_goals(path: &Path, key: &DigestKey) -> BTreeMap<KeyedDi
     read(path, key).unwrap_or_default()
 }
 
+/// Codex keeps the database in WAL mode. While Codex runs, the `-wal` and
+/// `-shm` files beside it exist and a read-only connection reads through
+/// them. When Codex has closed it, both are gone (or the log is empty) and
+/// a read-only connection cannot make the `-shm` it needs, so the file is
+/// opened `immutable`: with no log, every change is already in the main
+/// file. `immutable` is never used beside a log with content, which it
+/// would ignore.
+///
+/// `NOFOLLOW` refuses a symlinked ancestor too (macOS shows its temporary
+/// directory through `/var`), so the directory is resolved first; the file
+/// itself, already refused above when it is a link, keeps `NOFOLLOW`.
+fn open_read_only(path: &Path) -> Option<Connection> {
+    let dir = std::fs::canonicalize(path.parent()?).ok()?;
+    let path = &dir.join(path.file_name()?);
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let logged = match std::fs::symlink_metadata(PathBuf::from(wal)) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => return None,
+        Ok(meta) => meta.len() > 0,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return None,
+    };
+    if logged {
+        return Connection::open_with_flags(path, flags).ok();
+    }
+    let text = path.to_str()?;
+    let escaped = text
+        .replace('%', "%25")
+        .replace('?', "%3f")
+        .replace('#', "%23");
+    Connection::open_with_flags(
+        format!("file:{escaped}?immutable=1"),
+        flags | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .ok()
+}
+
 fn read(path: &Path, key: &DigestKey) -> Option<BTreeMap<KeyedDigest, CodexGoal>> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_DB_BYTES {
         return None;
     }
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .ok()?;
+    let conn = open_read_only(path)?;
     conn.busy_timeout(Duration::from_millis(50)).ok()?;
     // Never `objective` or `goal_id`: the text stays in Codex's file.
     let mut stmt = conn
@@ -171,6 +205,33 @@ pub(crate) mod tests {
         assert!(!format!("{goals:?}").contains("SECRET"));
         // Read-only: nothing is created beside the database.
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
+    }
+
+    /// While Codex runs, its changes sit in the log beside the file: they
+    /// are read through it, never missed.
+    #[test]
+    fn goals_still_in_the_write_ahead_log_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CODEX_GOALS_FILE);
+        write_goals_db(&path, &[("019e-a", "active", 1, 1, 1)]);
+        let codex = Connection::open(&path).unwrap();
+        codex.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        codex
+            .execute(
+                "UPDATE thread_goals SET status = 'complete', tokens_used = 77 WHERE thread_id = '019e-a'",
+                [],
+            )
+            .unwrap();
+        let wal = dir.path().join(format!("{CODEX_GOALS_FILE}-wal"));
+        assert!(
+            std::fs::metadata(&wal).unwrap().len() > 0,
+            "the change is in the log"
+        );
+        let goals = read_codex_goals(&path, &key());
+        let a = goals[&harness_session_digest(&key(), SOURCE_CODEX, "019e-a")];
+        assert_eq!(a.status, GoalStatus::Complete);
+        assert_eq!(a.tokens_used, Some(77));
+        drop(codex);
     }
 
     #[test]

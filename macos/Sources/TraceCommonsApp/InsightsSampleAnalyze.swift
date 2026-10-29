@@ -14,7 +14,7 @@ import TCBridge
 ///
 /// Nothing here is kept. A write to something the sample holds (an
 /// assessment, a link, a delete, a group's assessment or members) is
-/// answered with that thing as it stands, as a goal write is, so the next
+/// answered with that thing as it stands, as a lever write is, so the next
 /// read shows the sample unchanged. A write the sample has nothing to
 /// answer with (a new group, a comparison task or specification, saving an
 /// analyzed file) is refused. Neither reaches the store.

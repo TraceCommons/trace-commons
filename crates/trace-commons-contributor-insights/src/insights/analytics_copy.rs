@@ -48,7 +48,6 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "threshold",
     "letter",
     "ext",
-    "goal",
     "pattern",
     "ctx",
     "source",
@@ -581,19 +580,21 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_reread_tokens", "Tokens"),
     ("analytics_file_label", "File {letter} · {ext}"),
     ("analytics_file_label_no_ext", "File {letter}"),
-    // 16. Goals.
-    ("analytics_goal_add", "Add goal"),
-    ("analytics_goal_cache_share", "Cache share at least {p}%"),
-    ("analytics_goal_weekly_tokens", "Weekly tokens under {t}"),
+    // 16. Goals: the goals set with /goal in Claude and Codex, with each
+    // tool's own status (product owner, 2026-10-29). Never the goal's text.
+    ("analytics_goals_met_of", "Goals met {n} of {m}"),
+    ("analytics_goals_note", "Set with /goal in Claude or Codex."),
     ("analytics_goal_met", "Met"),
     ("analytics_goal_not_met", "Not met"),
-    ("analytics_goal_down_from", "Down from {x} last week."),
-    ("analytics_goal_up_from", "Up from {x} last week."),
-    (
-        "analytics_goals_note",
-        "Goals are compared only with your own past weeks.",
-    ),
-    ("analytics_goal_delete", "Delete"),
+    ("analytics_goal_open", "Open"),
+    ("analytics_goal_active", "Active"),
+    ("analytics_goal_paused", "Paused"),
+    ("analytics_goal_blocked", "Blocked"),
+    ("analytics_goal_usage_limited", "Usage limit"),
+    ("analytics_goal_budget_limited", "Budget limit"),
+    ("analytics_goal_complete", "Complete"),
+    ("analytics_goal_status_unknown", "Status unavailable"),
+    ("analytics_goal_line", "{t} tokens · {span}"),
     // 17. Lever (an observation only; its advice sentence is held, D2).
     (
         "analytics_lever_line",
@@ -819,8 +820,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_recap_best_cache",
         "Best cache week yet: {p}%. Previous best {q}%.",
     ),
-    ("analytics_recap_goal_met", "Goal met: {goal}."),
-    ("analytics_recap_goal_not_met", "Goal not met: {goal}."),
     (
         "analytics_recap_pattern_up",
         "{pattern} up {p}% on your usual week.",

@@ -315,8 +315,8 @@ struct InsightsView: View {
 
     /// Feed T's week replaces the saved week in both tabs, its counted
     /// sessions back the Sessions card's drill-down, the Sessions tab lists
-    /// watched traces, and its weekly figures go to the core for goals, the
-    /// lever and the summary card; `nil` (feed S) takes all of it away.
+    /// watched traces, and its weekly figures go to the core for the lever
+    /// and the summary card; `nil` (feed S) takes all of it away.
     private func showCounterWeek(_ week: DaemonData.InsightsWeek?) {
         sessionsModel.showWatched(week != nil)
         overviewModel.showCounter(week?.coreOverview, sessions: week.flatMap(InsightsCounterSessions.init(week:)))

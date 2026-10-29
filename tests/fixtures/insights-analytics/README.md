@@ -26,8 +26,9 @@ wire change fails there until the file is re-recorded. One session has no
 proxy record (`unobserved`); the other's calls went both through the route
 and outside it (`mixed`), with one call whose counters are unknown, so its
 `outside` tokens are `null`. Its one charged NEAR AI call names the model
-that served it, so `near_ai_credit.week.by_model` has one group. The macOS
-decode and Overview tests read it.
+that served it, so `near_ai_credit.week.by_model` has one group. Neither
+session set a `/goal`, so `goals` is empty; the daemon's own goal tests
+cover a week with goals. The macOS decode and Overview tests read it.
 
 `insights_model_answers.json` is the daemon's `insights_model_answers`
 answer, as the contributor crate's

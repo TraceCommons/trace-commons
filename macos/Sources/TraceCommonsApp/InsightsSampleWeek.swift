@@ -11,7 +11,7 @@ import TCShellCore
 /// variable.
 ///
 /// The week is shaped as the core sends it: a watched-folder week (feed T)
-/// with goals, the lever and the weekly summary, and the saved traces,
+/// with the lever and the weekly summary, and the saved traces,
 /// summary and group Analyze shows (`InsightsSampleAnalyze.swift`), which
 /// Sessions drills into, and the week's counted sessions behind Overview's
 /// Sessions breakdown, split by day. Sample figures, never a pilot's. Every
@@ -54,8 +54,8 @@ enum InsightsSampleWeek {
         case "patterns": body = ["type": type, "patterns": patterns]
         case "comparisons": body = ["type": type, "comparisons": comparisons]
         case "session_drill": body = ["type": type, "session": session(operation.snapshot_id ?? "sample")]
-        case "goal_set", "goal_delete", "lever_feedback", "recap_opened":
-            body = ["type": type, "state": ["goals": [Any](), "lever_card_off": false]]
+        case "lever_feedback", "recap_opened":
+            body = ["type": type, "state": ["lever_card_off": false]]
         default:
             guard let answer = try analyzeBody(operation) else { return nil }
             body = answer
@@ -223,21 +223,9 @@ enum InsightsSampleWeek {
         ]
     }
 
-    private static var cacheGoal: [String: Any] {
-        ["kind": "cache_share_at_least", "source": "claude_code", "permille": 850]
-    }
-
-    private static func marks(_ marks: [String], _ direction: String, from: Int) -> [String: Any] {
-        ["marks": marks, "change": ["direction": direction, "from": from]]
-    }
-
     static var comparisons: [String: Any] {
         [
             "feed": "counter_pass", "week_start": "2026-10-05",
-            "goals": [
-                ["id": "g1", "goal": cacheGoal, "figure": 872,
-                 "marks": marks(["not_met", "not_met", "no_figure", "met", "not_met", "met"], "up", from: 830)],
-            ],
             "lever": ["pick": ["kind": "retried_calls", "tokens": 410_000, "count": 37, "ratio_permille": 1500],
                       "disabled": [String](), "card_enabled": true],
             "recap": [
@@ -246,7 +234,6 @@ enum InsightsSampleWeek {
                             ["source": "codex", "tokens": 6_200_000, "change_permille": 40]],
                 "items": [
                     ["kind": "best_cache_week", "source": "claude_code", "permille": 872, "previous_best_permille": 840],
-                    ["kind": "goal", "id": "g1", "goal": cacheGoal, "met": true],
                     ["kind": "pattern_up", "pattern": "retried_calls", "up_permille": 310],
                 ],
             ],
