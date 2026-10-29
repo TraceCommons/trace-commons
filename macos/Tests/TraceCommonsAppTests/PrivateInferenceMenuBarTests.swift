@@ -77,6 +77,7 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     /// with the page's full sentence kept for its help and hint. Signed out
     /// of NEAR AI it read "On. Couldn't tell which account is answering."
     /// on a red dot.
+    @MainActor
     func testTheTabStatusRowIsTheMenuBarWordAndDot() throws {
         let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
         let labels = ["running", "running_destination_unknown", "running_answered_elsewhere", "running_no_backends",
