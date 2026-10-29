@@ -255,6 +255,11 @@ public protocol DaemonDataClient: Sendable {
     /// (4 or 13), from the counter pass. An older daemon refuses it as
     /// `unknown_method`, and Benchmarks shows nothing.
     func insightsBenchmarks(weeks: Int) async throws -> DaemonData.InsightsBenchmarks
+    /// `insights_submitted`: every trace the person has submitted, whatever
+    /// became of it, joined to what the counter pass stored about its
+    /// session, over the last `weeks` local weeks (4 or 13) or all time
+    /// (`nil`). An older daemon refuses it as `unknown_method`.
+    func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted
 
     /// Current native subscription usage, independent of the selected analytics week.
     /// A refresh schedules provider reads and returns the held snapshot at once.
@@ -334,6 +339,11 @@ extension DaemonDataClient {
     /// Clients that predate Benchmarks have none to read.
     public func insightsBenchmarks(weeks: Int) async throws -> DaemonData.InsightsBenchmarks {
         throw DaemonDataError.notAvailableYet(method: "insights_benchmarks")
+    }
+
+    /// Clients that predate `insights_submitted` have none to read.
+    public func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted {
+        throw DaemonDataError.notAvailableYet(method: "insights_submitted")
     }
 
     public func subscriptionUsage(refresh: Bool, interactive: Bool) async throws -> DaemonData.SubscriptionUsage {
