@@ -1,0 +1,4 @@
+[
+  {"stream": "earned", "owed": "700", "sent": "500", "waiting": "200"},
+  {"stream": "referral", "owed": "70", "sent": "0", "waiting": "70", "hold_label": "referral_account_held"}
+]

@@ -823,11 +823,15 @@ async fn status_passes_each_stream_through_and_leaves_none_out() {
         "no streams keeps the pre-referral shape: {without}"
     );
 
-    let streams = json!([
-        {"stream": "earned", "owed": "700", "sent": "500", "waiting": "200"},
-        {"stream": "referral", "owed": "70", "sent": "0", "waiting": "70",
-         "hold_label": "referral_account_held"},
-    ]);
+    // Shared with the macOS app's test, which decodes the same bytes: the
+    // amounts are decimal strings, as the commons sends them.
+    let streams: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/payout/streams.json"
+    ))
+    .unwrap();
+    let typed: Vec<trace_commons_protocol::payout_link::PayoutStreamStatus> =
+        serde_json::from_value(streams.clone()).expect("the commons's own stream shape");
+    assert_eq!(typed[0].owed, "700");
     f.ingest.stub.lock().unwrap().streams = Some(streams.clone());
     let with = status(&f).await;
     assert_eq!(with["rails"][0]["streams"], streams);

@@ -127,9 +127,16 @@ public struct ReferralCopy: Decodable, Equatable, Sendable {
     }
 }
 
-/// Reads a whole number of nano-USD from a JSON number, defensively: a
-/// negative, fractional or absent figure is nil, never a zero.
+/// Reads a whole number of nano-USD, defensively. The commons sends payout
+/// stream amounts as decimal strings, so a u128 survives JSON; other
+/// figures are JSON numbers. A negative, fractional, absent or malformed
+/// figure, or one past `UInt64.max`, is nil: unknown, never a zero.
 private func nanoUSD<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K) -> UInt64? {
+    if let text = try? c.decodeIfPresent(String.self, forKey: key) {
+        // Digits only: `UInt64("+5")` would otherwise read a sign.
+        guard !text.isEmpty, text.utf8.allSatisfy({ (0x30...0x39).contains($0) }) else { return nil }
+        return UInt64(text)
+    }
     if let value = try? c.decodeIfPresent(UInt64.self, forKey: key) { return value }
     return nil
 }

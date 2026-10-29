@@ -215,6 +215,36 @@ final class NearAiEarningsSplitTests: XCTestCase {
         ).utf8))
         XCTAssertNil(negative.streams?.first?.owed)
     }
+
+    /// The daemon passes the commons's streams through as they come, and
+    /// the commons sends each amount as a decimal string so a u128 survives
+    /// JSON. The fixture is the one the daemon's own test pins.
+    func testTheDaemonsStreamsDrawTheSplit() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let streams = try String(contentsOf: repository.appendingPathComponent(
+            "tests/fixtures/payout/streams.json"), encoding: .utf8)
+        let status = try JSONDecoder().decode(PayoutRailStatus.self, from: Data(
+            (#"{"rail_id":"near_ai","mode":"live","linked":true,"state":"active","version":1,"request_state":null,"unlink_requested":false,"recipient_unavailable":false,"recipient_ref_check":"match","organization_name":"A","pending_here":null,"streams":"#
+                + streams + "}").utf8))
+        XCTAssertEqual(status.streams?.map(\.owed), [700, 70])
+        XCTAssertEqual(status.streams?.map(\.sent), [500, 0])
+        XCTAssertEqual(status.streams?.map(\.waiting), [200, 70])
+        XCTAssertEqual(rows(status.streams).map(\.value), ["$700", "T:held $70"])
+    }
+
+    /// An amount past what the app can hold, or one that is not a whole
+    /// number, is unknown: never zero, and never drawn.
+    func testAnAmountTooLargeOrMalformedIsUnknown() throws {
+        let big = "340282366920938463463374607431768211455"
+        let streams = try JSONDecoder().decode([PayoutStreamStatus].self, from: Data(
+            (#"[{"stream":"earned","owed":"50"},{"stream":"referral","owed":""# + big + #"","sent":"1.5","waiting":"-3"}]"#).utf8))
+        XCTAssertEqual(streams.first?.owed, 50)
+        XCTAssertNil(streams.last?.owed)
+        XCTAssertNil(streams.last?.sent)
+        XCTAssertNil(streams.last?.waiting)
+        XCTAssertEqual(rows(streams), [])
+    }
 }
 
 /// The five IPC calls: the method names and parameters the daemon reads.

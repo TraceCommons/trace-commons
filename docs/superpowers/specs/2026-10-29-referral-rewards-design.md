@@ -238,7 +238,12 @@ the referral admin routes (section 6).
 `PayoutRailLinkStatus` gains `streams: [{ stream, owed, sent, waiting,
 hold_label? }]` in nano-USD, where `owed` is from accruals (earned) or bonus
 rows (referral), `sent` sums `confirmed` lines of that stream, and `waiting
-= owed - sent` floored at zero. A referral status route adds the count of
+= owed - sent` floored at zero. Each amount is a decimal string, so a u128
+survives JSON; the daemon passes the streams through unchanged, and an app
+reads an amount it cannot hold (past its integer width, or not a whole
+number) as unknown and draws nothing for it, never zero. The fixture
+`tests/fixtures/payout/streams.json` is read by both the daemon's test and
+the macOS app's. A referral status route adds the count of
 referees per code. The referee sees only that a code was applied.
 
 ## 6. Routes and app
