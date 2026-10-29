@@ -97,12 +97,12 @@ final class InsightsDayBreakdownTests: XCTestCase {
 
     func testTheKeyboardStepsThroughTheDaysAndPastEitherEndToTheWeek() {
         let ids = ["mon", "tue", "wed"]
-        XCTAssertEqual(InsightsOverviewTab.step(ids, from: nil, by: 1), "mon")
-        XCTAssertEqual(InsightsOverviewTab.step(ids, from: nil, by: -1), "wed")
-        XCTAssertEqual(InsightsOverviewTab.step(ids, from: "mon", by: 1), "tue")
-        XCTAssertNil(InsightsOverviewTab.step(ids, from: "wed", by: 1))
-        XCTAssertNil(InsightsOverviewTab.step(ids, from: "mon", by: -1))
-        XCTAssertNil(InsightsOverviewTab.step([], from: nil, by: 1))
+        XCTAssertEqual(InsightsTokensByDay.step(ids, from: nil, by: 1), "mon")
+        XCTAssertEqual(InsightsTokensByDay.step(ids, from: nil, by: -1), "wed")
+        XCTAssertEqual(InsightsTokensByDay.step(ids, from: "mon", by: 1), "tue")
+        XCTAssertNil(InsightsTokensByDay.step(ids, from: "wed", by: 1))
+        XCTAssertNil(InsightsTokensByDay.step(ids, from: "mon", by: -1))
+        XCTAssertNil(InsightsTokensByDay.step([], from: nil, by: 1))
     }
 
     func testADayOpensFoldedAndItsRowsSayThatDaysTokens() throws {
@@ -122,8 +122,9 @@ final class InsightsDayBreakdownTests: XCTestCase {
         XCTAssertEqual(InsightsSessionsWords.counterLabel(session, tokens: nil, copy: copy), week)
     }
 
+    /// Tokens by day moved to Details (product owner, 2026-10-28).
     func testAClickOnTheChartPicksTheDayAndASecondPutsTheWeekBack() throws {
-        let overview = try GlassSurfaceRulesTests.text("Views/InsightsOverviewTab.swift")
+        let overview = try GlassSurfaceRulesTests.text("Views/InsightsTokensByDay.swift")
         XCTAssertTrue(overview.contains("pickedDay = pickedDay == day.id ? nil : day.id"))
         XCTAssertTrue(overview.contains("InsightsDayPick.pick(pickedDay, days: overview.by_day)"))
     }

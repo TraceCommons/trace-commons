@@ -16,6 +16,7 @@ final class InsightsCreditTests: XCTestCase {
         "analytics_folder_unknown": "Unknown folder", "analytics_credit_tool_codex": "Codex",
         "analytics_credit_tool_claude_code": "Claude",
         "analytics_projects_traces": "{n} traces", "analytics_projects_traces_one": "{n} trace",
+        "analytics_usage_tokens": "{t} tokens",
     ]
 
     private func empty() -> Window { Window(usdMicros: 0, sessions: 0, calls: 0, callsWithoutCharge: 0) }
@@ -51,10 +52,34 @@ final class InsightsCreditTests: XCTestCase {
         let bars = InsightsUsageWords.days(shown, copy: copy)
         XCTAssertEqual(bars.count, 7)
         XCTAssertEqual(bars.map(\.id).first, "2026-10-22")
-        XCTAssertNil(bars[3].dollars, "an unknown day draws no bar")
+        XCTAssertNil(bars[3].value, "an unknown day draws no bar")
         XCTAssertEqual(bars[3].amount, "—")
         XCTAssertEqual(bars[1].amount, "$0.10")
         XCTAssertTrue(InsightsUsageWords.days(credit(week: empty()), copy: copy).isEmpty, "an older daemon has no bars")
+    }
+
+    /// Owner, 2026-10-28: every card has the same 7 bars. Claude's and
+    /// Codex's are tokens per day; an unknown day is the dash, no bar.
+    func testClaudeAndCodexBarsAreTokensPerDayWithUnknownDaysAsDashes() {
+        let days = [
+            DaemonData.InsightsUsageDay(date: "2026-10-27", claudeCode: 1_500, codex: nil),
+            DaemonData.InsightsUsageDay(date: "2026-10-28", claudeCode: 0, codex: 2_000_000),
+        ]
+        let claude = InsightsUsageWords.tokenBars(days, tool: "claude_code", copy: copy)
+        let codex = InsightsUsageWords.tokenBars(days, tool: "codex", copy: copy)
+        XCTAssertEqual(claude.map(\.value), [1_500, 0])
+        XCTAssertEqual(codex.map(\.value), [nil, 2_000_000])
+        XCTAssertEqual(codex[0].amount, "—")
+        XCTAssertEqual(codex[1].amount, "2M")
+        XCTAssertTrue(InsightsUsageWords.tokenBars(nil, tool: "codex", copy: copy).isEmpty)
+    }
+
+    /// Owner, 2026-10-28: the NEAR AI card shows spend and tokens together.
+    func testNearAiFiguresPairSpendWithTokens() {
+        let window = Window(usdMicros: 4_120_000, sessions: 1, calls: 3, callsWithoutCharge: 0, tokens: 1_200_000)
+        XCTAssertEqual(InsightsCreditWords.spendAndTokens(window, copy: copy), "$4.12 · 1.2M tokens")
+        let unknown = Window(usdMicros: nil, sessions: 1, calls: 3, callsWithoutCharge: 1, tokens: nil)
+        XCTAssertEqual(InsightsCreditWords.spendAndTokens(unknown, copy: copy), "— · —")
     }
 
     /// By project: one row per folder, Claude Code and Codex traces and
@@ -73,7 +98,7 @@ final class InsightsCreditTests: XCTestCase {
         var credit = try XCTUnwrap(object["near_ai_credit"] as? [String: Any])
         var week = try XCTUnwrap(credit["week"] as? [String: Any])
         week["by_folder"] = [
-            ["key": "site", "usd_micros": 900, "sessions": 1, "calls": 1, "calls_without_charge": 0],
+            ["key": "site", "usd_micros": 900, "sessions": 1, "calls": 1, "calls_without_charge": 0, "tokens": 4_200],
             ["key": NSNull(), "usd_micros": 12_500, "sessions": 1, "calls": 1, "calls_without_charge": 0],
         ]
         credit["week"] = week
@@ -94,6 +119,9 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertEqual(InsightsProjectRows.traces(unknown.codex, copy: copy), "1 trace", "one, not \"1 traces\"")
         XCTAssertEqual(unknown.nearAi, "$0.0125")
         XCTAssertEqual(table[0].nearAi, "$0.0009")
+        XCTAssertEqual(table[0].nearAiTokens, "4.2K tokens")
+        XCTAssertEqual(unknown.nearAiTokens, "—", "tokens unknown, never 0")
+        XCTAssertNil(app.nearAiTokens, "no NEAR AI call there")
     }
 
     /// The wiring: Overview leads with the usage cards and has no balance,
@@ -101,8 +129,10 @@ final class InsightsCreditTests: XCTestCase {
     /// project; the window no longer hands Insights the balance.
     func testOverviewLeadsWithTheUsageCardsAndDetailsWithTheDrillDown() throws {
         let overview = try GlassSurfaceRulesTests.text("Views/InsightsOverviewTab.swift")
-        XCTAssertTrue(overview.contains("InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, copy: copy,"))
-        for gone in ["InsightsLimitsTable", "InsightsSubscriptionsCard(", "InsightsCreditCard", "var credit: AnyView?"] {
+        XCTAssertTrue(overview.contains("InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, usageByDay: usageByDay,"))
+        // Owner, 2026-10-28: no Models card, and Tokens by day is on Details.
+        for gone in ["InsightsLimitsTable", "InsightsSubscriptionsCard(", "InsightsCreditCard", "var credit: AnyView?",
+                     "InsightsModelsCard", "byDay(", "pickedDay"] {
             XCTAssertFalse(overview.contains(gone), gone)
         }
         let window = try GlassSurfaceRulesTests.text("Views/InsightsView.swift")
@@ -112,6 +142,8 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertFalse(window.contains("Insights shows no money"), "owner, 2026-10-28: Insights may show money")
         let details = try GlassSurfaceRulesTests.text("Views/InsightsPatternsTab.swift")
         XCTAssertTrue(details.contains("if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }"))
+        XCTAssertTrue(details.contains("if let overview { InsightsTokensByDay(model: overview, copy: copy, snapshots: snapshots) }"))
+        XCTAssertFalse(window.contains("modelAnswers"))
         let monitor = try GlassSurfaceRulesTests.text("Views/MonitorWindowView.swift")
         XCTAssertFalse(monitor.contains(".credit(AnyView(InferenceBalanceSection()))"))
         XCTAssertFalse(monitor.contains(".creditLeft("))
@@ -126,5 +158,7 @@ final class InsightsCreditTests: XCTestCase {
         XCTAssertTrue(cards.contains("if !row.measured { Text(text(\"analytics_limits_refresh_to_see\")).insightsCaption() }"))
         XCTAssertEqual(cards.components(separatedBy: "InsightsUsageCard(title:").count - 1, 2,
                        "the login cards and the NEAR AI card are the one component")
+        XCTAssertEqual(cards.components(separatedBy: "InsightsUsageBars(").count - 1, 1,
+                       "one bar component, drawn by the card itself")
     }
 }

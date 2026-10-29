@@ -21,11 +21,34 @@ enum InsightsCreditWords {
 
     private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
 
-    /// Integer USD micros as dollars, as the Models card shows a charge;
-    /// `nil` (unknown) is the dash.
+    /// Integer USD micros as dollars; `nil` (unknown) is the dash.
     static func amount(_ micros: Int64?, copy: [String: String]) -> String {
         guard let micros, micros >= 0 else { return text("analytics_unavailable", copy) }
-        return InsightsModelsWords.money(UInt64(micros))
+        return money(UInt64(micros))
+    }
+
+    /// Integer USD micros as dollars, as the app's other prices are
+    /// (`InferenceViews.money`): two to four decimals, so "$0.50", "$1.00"
+    /// and "$0.0412". Under a hundredth of a cent, one significant digit,
+    /// so a charge is never shown as zero.
+    static func money(_ micros: UInt64) -> String {
+        let dollars = Decimal(micros) / 1_000_000
+        let style = Decimal.FormatStyle.Currency(code: "USD")
+        return micros > 0 && micros < 100
+            ? dollars.formatted(style.precision(.significantDigits(1)))
+            : dollars.formatted(style.precision(.fractionLength(2...4)))
+    }
+
+    /// A token figure with its unit, "1.2M tokens"; the dash when unknown.
+    static func tokens(_ tokens: Int64?, copy: [String: String]) -> String {
+        guard let tokens, tokens >= 0 else { return text("analytics_unavailable", copy) }
+        return InsightsOverviewWords.fill(text("analytics_usage_tokens", copy),
+                                          ["t": InsightsOverviewWords.figure(UInt64(tokens), copy: copy)])
+    }
+
+    /// A NEAR AI window's spend and tokens together, "$4.12 · 1.2M tokens".
+    static func spendAndTokens(_ window: DaemonData.InsightsCreditWindow, copy: [String: String]) -> String {
+        amount(window.usdMicros, copy: copy) + " · " + tokens(window.tokens, copy: copy)
     }
 
     /// A group's name: the task's word, the tool's, or the folder's own
@@ -73,6 +96,9 @@ enum InsightsProjectRows {
         /// The NEAR AI amount, or the dash when there was no call or a call
         /// had no charge.
         let nearAi: String
+        /// NEAR AI's tokens under its amount, "1.2M tokens"; `nil` with no
+        /// NEAR AI call in the folder.
+        let nearAiTokens: String?
         /// The known NEAR AI amount, for the order.
         let nearAiMicros: Int64?
     }
@@ -106,6 +132,7 @@ enum InsightsProjectRows {
                        label: InsightsCreditWords.label(folder, dimension: .folder, copy: copy),
                        claude: usage[folder]?.claude, codex: usage[folder]?.codex,
                        nearAi: group.map { InsightsCreditWords.amount($0.usdMicros, copy: copy) } ?? unknown,
+                       nearAiTokens: group.map { InsightsCreditWords.tokens($0.tokens, copy: copy) },
                        nearAiMicros: group?.usdMicros)
         }
         func tokens(_ row: Row) -> Int64 { (row.claude?.tokens ?? 0) + (row.codex?.tokens ?? 0) }
@@ -183,7 +210,10 @@ struct InsightsDetailsTable: View {
                         Text(row.label).lineLimit(2)
                         usage(row.claude)
                         usage(row.codex)
-                        Text(row.nearAi).insightsMono()
+                        VStack(alignment: .trailing, spacing: 0) {
+                            Text(row.nearAi).insightsMono()
+                            if let tokens = row.nearAiTokens { Text(tokens).insightsCaption() }
+                        }
                     }
                     .accessibilityElement(children: .combine)
                 }

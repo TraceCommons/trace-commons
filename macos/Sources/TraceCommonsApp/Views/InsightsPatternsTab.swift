@@ -26,6 +26,11 @@ struct InsightsPatternsTab: View {
     var week: DaemonData.InsightsWeek?
     /// The drill-down's view; Overview's "By project" sets it.
     var detailsView: Binding<InsightsCreditWords.Dimension> = .constant(.folder)
+    /// The week's Overview model, for Tokens by day beside the drill-down
+    /// (product owner, 2026-10-28); `nil` hides it.
+    var overview: InsightsOverviewModel?
+    /// Saved snapshots, so a picked day's rows read as their labels.
+    var snapshots: [LocalInsight] = []
     @State private var goalKind = InsightsComparisonsWords.goalKinds[0]
     @State private var goalSource = "claude_code"
     @State private var goalNumber = ""
@@ -44,6 +49,9 @@ struct InsightsPatternsTab: View {
                     // lever's "Show the reads" open them here, and the goals
                     // and re-read files live only here.
                     if let week { InsightsDetailsTable(week: week, copy: copy, dimension: detailsView) }
+                    // Tokens by day moved here from Overview, a picked day's
+                    // sessions with it (product owner, 2026-10-28).
+                    if let overview { InsightsTokensByDay(model: overview, copy: copy, snapshots: snapshots) }
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         ForEach(patterns.cards) { card in
                             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {

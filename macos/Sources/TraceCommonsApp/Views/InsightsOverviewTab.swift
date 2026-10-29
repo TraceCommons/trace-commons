@@ -27,14 +27,14 @@ struct InsightsOverviewTab: View {
     var notice: String?
     /// The same week's patterns, for "Where tokens went"; `nil` hides it.
     var patterns: InsightsWeekPatterns?
-    /// The daemon's model answers (feed T), for the Models card; `nil`
-    /// hides it.
-    var models: DaemonData.InsightsModelAnswers?
     /// Current subscription limits are independent of the selected week.
     var subscriptions: SubscriptionUsageModel?
     /// NEAR AI spend from this Mac (product owner, 2026-10-28): the week's
     /// `near_ai_credit`; `nil` hides the NEAR AI usage card.
     var nearAiCredit: DaemonData.InsightsNearAiCredit?
+    /// Claude and Codex tokens on each of the last 7 days, for the usage
+    /// cards' bars.
+    var usageByDay: [DaemonData.InsightsUsageDay]?
     /// A usage card's "By project": Details, on its By project view.
     var showProjects: () -> Void = {}
     /// Put a week on screen; the window routes it to the feed showing.
@@ -48,11 +48,6 @@ struct InsightsOverviewTab: View {
     /// "Patterns": the Patterns tab.
     var showPatterns: () -> Void = {}
     @State private var breakdown: Breakdown = .model
-    /// The day the by-day chart is reading, by its label; `nil` reads the week.
-    @State private var readDay: String?
-    /// The day clicked on the by-day chart, by its date; `nil` is the whole
-    /// week. The Sessions breakdown then shows that day's sessions.
-    @State private var pickedDay: String?
 
     /// By project is not drawn: analyzed files carry no project and
     /// watched-folder rows keep only a digest of one (owner decision D7,
@@ -67,16 +62,14 @@ struct InsightsOverviewTab: View {
             VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
                 // AI usage at a glance leads (product owner, 2026-10-28):
                 // one card per resource found on this Mac.
-                InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, copy: copy,
-                                   showProjects: showProjects)
+                InsightsUsageCards(subscriptions: subscriptions, nearAiCredit: nearAiCredit, usageByDay: usageByDay,
+                                   copy: copy, showProjects: showProjects)
                 if let overview = model.shown {
                     if let recap = comparisons.comparisons?.recap { recapCard(recap) }
-                    // The Sessions breakdown is off Overview (product owner,
-                    // 2026-10-28); Sessions has the rows. A day picked on
-                    // Tokens by day still shows that day's sessions here
-                    // (owner, 2026-10-28).
+                    // The Sessions breakdown and Tokens by day are off
+                    // Overview (product owner, 2026-10-28): Tokens by day,
+                    // and a picked day's sessions, are on Details.
                     header(overview)
-                    if pickedDay != nil { sessionsBreakdown(overview) }
                     LazyVGrid(columns: InsightsLayout.columns, alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         ForEach(overview.sources) { source in
                             harnessCard(source, overview: overview)
@@ -100,16 +93,12 @@ struct InsightsOverviewTab: View {
                 } else if model.failed {
                     Text(text("analytics_unavailable")).insightsError()
                 }
-                // The Models card covers the last 13 weeks whatever week is
-                // on screen, so it follows the week's cards.
-                if let models { InsightsModelsCard(answers: models, copy: copy) }
                 if model.busy { GlassSpinner() }
             }
             .padding(.vertical, GlassTokens.Space.s7)
             .frame(maxWidth: .infinity, alignment: .leading)
             .insightsSurface()
         }
-        .onChange(of: model.shown?.week_start) { _, _ in pickedDay = nil }
     }
 
     /// The week picker on its own row, on the right as on Patterns (owner,
@@ -132,23 +121,6 @@ struct InsightsOverviewTab: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .insightsSection()
-        }
-    }
-
-    /// The Sessions figure's breakdown, always shown right under it (owner,
-    /// 2026-10-22: it opened from a chevron on the card, and drew below the
-    /// harnesses): the daemon's rows under feed T, the core's under feed S.
-    /// A week with no rows draws none, never an empty card. A day picked on
-    /// the by-day chart narrows it to that day's sessions.
-    @ViewBuilder
-    private func sessionsBreakdown(_ overview: InsightsWeekOverview) -> some View {
-        let day = InsightsDayPick.pick(pickedDay, days: overview.by_day)
-        if let sessions = model.counterSessions {
-            if !sessions.rows.isEmpty {
-                InsightsCounterSessionsView(sessions: sessions, copy: copy, day: day) { pickedDay = nil }
-            }
-        } else if let inputs = model.sessionsInputs, !inputs.sessions.isEmpty {
-            InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy, day: day) { pickedDay = nil }
         }
     }
 
@@ -268,8 +240,9 @@ struct InsightsOverviewTab: View {
         }
     }
 
-    /// One harness: its tokens and cache share side by side, then its days
-    /// (Claude Code) or the note that it records whole-trace totals (Codex).
+    /// One harness: its tokens and cache share side by side, then, for
+    /// Codex, the note that it records whole-trace totals. Claude's days are
+    /// on Details' Tokens by day (product owner, 2026-10-28).
     private func harnessCard(_ source: InsightsWeekSource, overview: InsightsWeekOverview) -> some View {
         VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
             // The core's line for the harness says how it is counted:
@@ -312,9 +285,7 @@ struct InsightsOverviewTab: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                if source.source == "claude_code", let days = overview.by_day {
-                    byDay(days)
-                } else if source.source == "codex" {
+                if source.source == "codex" {
                     codexInterval(overview)
                 }
             }
@@ -337,145 +308,6 @@ struct InsightsOverviewTab: View {
             .strokeBorder(GlassTokens.Color.chartGrid.color, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
         // A well in the card's body: in line with the title, not the text.
         .modifier(InsightsInlineContainer())
-    }
-
-    struct Day: Identifiable, Equatable {
-        let id: String
-        /// The weekday, on the axis.
-        let name: String
-        /// The weekday and date, read out.
-        let label: String
-        let values: [InsightsSeries: UInt64]
-    }
-
-    static func days(_ days: [InsightsDayTokens]) -> [Day] {
-        let parse = Date.ISO8601FormatStyle().year().month().day()
-        let utc = TimeZone(secondsFromGMT: 0) ?? .current
-        let short = Date.FormatStyle(timeZone: utc).weekday(.abbreviated)
-        let long = Date.FormatStyle(timeZone: utc).weekday(.abbreviated).month(.abbreviated).day()
-        return days.map { day in
-            let date = try? Date(day.date, strategy: parse)
-            return Day(id: day.date, name: date?.formatted(short) ?? day.date, label: date?.formatted(long) ?? day.date,
-                       values: [.cacheRead: day.cache_read, .uncached: day.uncached,
-                                .cacheWrite: day.cache_write, .output: day.output])
-        }
-    }
-
-    /// Claude Code's days, stacked on the chart surface. Hovering a day
-    /// reads it out in the legend; leaving the chart reads the week, or the
-    /// picked day. Clicking a day picks it, and clicking it again puts the
-    /// week back.
-    private func byDay(_ raw: [InsightsDayTokens]) -> some View {
-        let days = Self.days(raw)
-        let picked = days.first { $0.id == pickedDay }
-        let reading = days.first { $0.name == readDay } ?? picked
-        // The axis runs a little past the tallest day, not to the next round
-        // number, so the bars use the plot's height.
-        let tallest = days.map { $0.values.values.reduce(0, +) }.max() ?? 0
-        let top = max(Double(tallest) * 1.1, 1)
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(text("analytics_card_tokens_by_day")).insightsHeading()
-                Spacer(minLength: GlassTokens.Space.s4)
-                if let reading { Text(reading.label).insightsCaption() }
-            }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: GlassTokens.Space.s3)],
-                      spacing: GlassTokens.Space.s3) {
-                ForEach(InsightsSeries.allCases, id: \.self) { series in
-                    let value = reading.map { $0.values[series] ?? 0 }
-                        ?? days.reduce(UInt64(0)) { $0 + ($1.values[series] ?? 0) }
-                    GlassLegendCell(text(series.key), value: figure(value), series: series.color)
-                }
-            }
-            Chart {
-                if let picked {
-                    RectangleMark(x: .value(text("analytics_card_tokens_by_day"), picked.name))
-                        .foregroundStyle(GlassColor.ink(0.14))
-                }
-                if let readDay, readDay != picked?.name {
-                    RectangleMark(x: .value(text("analytics_card_tokens_by_day"), readDay))
-                        .foregroundStyle(GlassColor.ink(0.08))
-                }
-                ForEach(days) { day in
-                    ForEach(InsightsSeries.stack, id: \.self) { series in
-                        BarMark(x: .value(text("analytics_card_tokens_by_day"), day.name),
-                                y: .value(text("analytics_card_tokens"), day.values[series] ?? 0),
-                                width: .ratio(0.56))
-                        .foregroundStyle(by: .value(text("analytics_card_tokens"), text(series.key)))
-                    }
-                }
-            }
-            .chartForegroundStyleScale(domain: InsightsSeries.allCases.map { text($0.key) },
-                                       range: InsightsSeries.allCases.map { $0.color.color })
-            .chartLegend(.hidden)
-            .chartXSelection(value: $readDay)
-            // A click lands on the day the pointer reads.
-            .simultaneousGesture(TapGesture().onEnded {
-                guard let day = days.first(where: { $0.name == readDay }) else { return }
-                pickedDay = pickedDay == day.id ? nil : day.id
-            })
-            // The days in their own order, always. Without it the hover
-            // wash, drawn first, made the hovered day the first category,
-            // and the bars reordered under the pointer.
-            .chartXScale(domain: days.map(\.name))
-            .chartYScale(domain: 0...top)
-            .chartYAxis {
-                AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
-                    AxisGridLine().foregroundStyle(GlassTokens.Color.chartGrid.color)
-                    AxisValueLabel {
-                        if let tokens = value.as(Double.self) {
-                            Text(figure(UInt64(max(0, tokens)))).insightsTick()
-                        }
-                    }
-                }
-            }
-            .chartXAxis {
-                AxisMarks { value in
-                    AxisValueLabel {
-                        if let name = value.as(String.self) {
-                            Text(name).insightsTick(current: name == readDay || name == picked?.name)
-                        }
-                    }
-                }
-            }
-            .frame(height: 120)
-            .insightsPlot()
-            // The keyboard and VoiceOver pick a day too: the arrow keys and
-            // the adjustable action step through the days, Escape and the
-            // last step past either end put the week back.
-            .focusable()
-            .onMoveCommand { direction in
-                switch direction {
-                case .left: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: -1)
-                case .right: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: 1)
-                default: break
-                }
-            }
-            .onExitCommand { pickedDay = nil }
-            .accessibilityElement()
-            .accessibilityLabel(text("analytics_card_tokens_by_day"))
-            .accessibilityValue(picked?.label ?? "")
-            .accessibilityAdjustableAction { direction in
-                switch direction {
-                case .decrement: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: -1)
-                case .increment: pickedDay = Self.step(days.map(\.id), from: pickedDay, by: 1)
-                @unknown default: break
-                }
-            }
-            .accessibilityActions {
-                ForEach(days) { day in
-                    Button(day.label) { pickedDay = pickedDay == day.id ? nil : day.id }
-                }
-            }
-        }
-    }
-
-    /// The day `by` steps from `current` among `ids`: from the week, the
-    /// first or the last day; past either end, the week again.
-    nonisolated static func step(_ ids: [String], from current: String?, by: Int) -> String? {
-        guard let current, let index = ids.firstIndex(of: current) else { return by > 0 ? ids.first : ids.last }
-        let next = index + by
-        return ids.indices.contains(next) ? ids[next] : nil
     }
 
     /// The same week's patterns, by name and figure, in the core's order.

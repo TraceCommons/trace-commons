@@ -22,14 +22,6 @@ final class InsightsModel {
     }
     private let weekReader: WeekReader?
     private var weekGeneration = UUID()
-    /// Reads `insights_model_answers` through the daemon client (feed T).
-    typealias ModelAnswersReader = @Sendable () async throws -> DaemonData.InsightsModelAnswers
-    private let modelAnswersReader: ModelAnswersReader?
-    private var modelAnswersGeneration = UUID()
-    /// A `refreshModelAnswers()` read is under way, and one more was asked
-    /// for meanwhile.
-    private var modelAnswersReading = false
-    private var modelAnswersAskedAgain = false
     /// Asks the daemon to analyze and save one watched trace by its
     /// Sessions reference (`insights_analyze_session`). `nil` without a
     /// daemon, and for a custom store, which the daemon never writes.
@@ -43,9 +35,6 @@ final class InsightsModel {
     /// The watched trace whose last Analyze & save failed, with the core's
     /// copy key that says why; cleared by the next one asked for.
     private(set) var sessionAnalyzeFailure: (reference: String, key: String)?
-    /// The Models card's answers, held only while the daemon answered them
-    /// enabled and readable; `nil` draws no card, never an empty one.
-    private(set) var modelAnswers: DaemonData.InsightsModelAnswers?
     /// Feed T only when the daemon answered enabled and readable; feed S
     /// (saved imports) otherwise.
     private(set) var weekFeed: WeekFeed = .saved
@@ -110,11 +99,9 @@ final class InsightsModel {
             defer { if scoped { file?.stopAccessingSecurityScopedResource() } }
             return try TCInsights.call(request)
         }.value
-    }, weekReader: WeekReader? = nil, modelAnswersReader: ModelAnswersReader? = nil,
-         sessionAnalyzer: SessionAnalyzer? = nil) {
+    }, weekReader: WeekReader? = nil, sessionAnalyzer: SessionAnalyzer? = nil) {
         self.service = service
         self.weekReader = weekReader
-        self.modelAnswersReader = modelAnswersReader
         self.sessionAnalyzer = sessionAnalyzer
     }
 
@@ -137,36 +124,6 @@ final class InsightsModel {
             showSavedFeed(notice: !((error as? DaemonDataError)?.isNotServed ?? false))
         }
     }
-    /// Ask the daemon for the Models card's answers. Shown only when they
-    /// are switched on and readable, as feed T's week is; anything else, a
-    /// failed read included, takes the card away rather than keep an
-    /// earlier answer.
-    func loadModelAnswers() async {
-        let generation = UUID(); modelAnswersGeneration = generation
-        guard let modelAnswersReader else { modelAnswers = nil; return }
-        let answers = try? await modelAnswersReader()
-        guard modelAnswersGeneration == generation else { return }
-        modelAnswers = answers.flatMap { $0.showsCounterPass ? $0 : nil }
-    }
-    /// Read the Models card's answers again: as Overview appears, and
-    /// after a label is saved, since the person's labels change them. One
-    /// read at a time; asked while one is under way, it reads once more
-    /// after it, so a label saved meanwhile is counted. A failed read takes
-    /// the card away only until the next one.
-    func refreshModelAnswers() {
-        guard modelAnswersReader != nil else { return }
-        guard !modelAnswersReading else { modelAnswersAskedAgain = true; return }
-        modelAnswersReading = true
-        Task { [weak self] in
-            await self?.loadModelAnswers()
-            guard let self else { return }
-            self.modelAnswersReading = false
-            if self.modelAnswersAskedAgain {
-                self.modelAnswersAskedAgain = false
-                self.refreshModelAnswers()
-            }
-        }
-    }
     private func showSavedFeed(notice: Bool) {
         weekFeed = .saved; counterWeek = nil
         counterPassNoticeKey = notice ? FeedLineKey.counterPassUnavailable : nil
@@ -177,12 +134,11 @@ final class InsightsModel {
         perform(.init("copy"))
         refreshEpisodes()
         if weekReader != nil { Task { [weak self] in await self?.loadWeek() } }
-        // The Models card's answers are read as Overview appears.
     }
     func close() {
         active = false; generation = UUID(); task?.cancel(); task = nil; busy = false
         analyzingSession = nil; sessionAnalyzeFailure = nil
-        weekGeneration = UUID(); modelAnswersGeneration = UUID(); modelAnswersAskedAgain = false
+        weekGeneration = UUID()
         episodePresentation = UUID(); episodeTask?.cancel(); episodeTask = nil; episodeBusy = false
         cardPresentation = UUID(); cardTask?.cancel(); cardTask = nil; cardBusy = false
         cardResult = nil; cardText = nil; cardError = nil
@@ -1374,7 +1330,7 @@ final class InsightsSessionsModel {
     /// The watched rows can be labelled: a daemon client is wired.
     var canLabel: Bool { watchedLabel != nil }
     /// Called each time the daemon saves a label, so what reads the labels
-    /// (the Models card) can read again.
+    /// (Details' NEAR AI spend by task) can read again.
     var labelSaved: (@MainActor () -> Void)?
     private var task: Task<Void, Never>?
     private var listTask: Task<Void, Never>?

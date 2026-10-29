@@ -212,7 +212,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // reads the weekly window, else the session window.
     ("analytics_limits_session_left", "Session left"),
     ("analytics_limits_weekly_left", "Weekly left"),
-    ("analytics_limits_next_reset", "Next reset"),
     ("analytics_limits_pace", "Pace"),
     ("analytics_limits_on_pace", "On pace"),
     ("analytics_limits_runs_out", "Runs out in {time}"),
@@ -225,6 +224,12 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // last 31 days of NEAR AI calls from this Mac, and the last 7 days as
     // bars. Each card ends with a link to Details' By project view.
     ("analytics_usage_title", "AI usage this week"),
+    // Each window's reset on its own row (owner, 2026-10-28: Claude shows
+    // both); a window the provider does not report has no rows.
+    ("analytics_usage_session_resets", "Session resets"),
+    ("analytics_usage_weekly_resets", "Weekly resets"),
+    // NEAR AI tokens beside its spend, and under its spend on By project.
+    ("analytics_usage_tokens", "{t} tokens"),
     ("analytics_usage_near_ai", "NEAR AI"),
     ("analytics_usage_last_31_days", "Last 31 days"),
     ("analytics_usage_last_7_days", "Last 7 days"),
@@ -837,204 +842,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // The `insights_ledger_feed` switch (owner decision D3, settled
     // 2026-10-09: on by default, the switch turns it off).
     ("analytics_setting_ledger_feed", "Count Private AI tokens"),
-    // 24. The Models card (feed T, `insights_model_answers`; model answers
-    // spec section 8). Drafted 2026-10-21 for the first macOS version; not
-    // in Ron's review. Each answer is a scoped fact about the contributor's
-    // own traces, never a ranking: no "best", "better", "fastest",
-    // "winner" or "benchmark". Money is a `{x}` the shell fills with the
-    // amount, always beside "at API prices" or "Charged through Private
-    // AI" (owner decision D5, settled 2026-10-20).
-    ("analytics_card_models", "Models"),
-    (
-        "analytics_models_scope",
-        "In your traces · labels as recorded · task type yours, else inferred",
-    ),
-    (
-        "analytics_models_window",
-        "From your traces in the last 13 weeks, whatever week is on screen.",
-    ),
-    // Each row's name, by the wire's `question`.
-    ("analytics_models_row_bug_fix_rejected", "Bug fixing"),
-    ("analytics_models_row_refactor_rejected", "Refactoring"),
-    ("analytics_models_row_tests_rejected", "Tests"),
-    ("analytics_models_row_docs_cost", "Docs cost"),
-    (
-        "analytics_models_row_rejected_across_tasks",
-        "All task types",
-    ),
-    ("analytics_models_row_finish_time", "Time to finish"),
-    // Each row's fact, by `question`, with `_undone` when the row's
-    // `basis` is `undone`. A rejection figure is a share of the model's
-    // edits, so its fact names a share: the lowest share can still be
-    // the most edits.
-    (
-        "analytics_models_lead_bug_fix_rejected",
-        "Lowest share of edits rejected in your bug-fix traces",
-    ),
-    (
-        "analytics_models_lead_bug_fix_rejected_undone",
-        "Lowest share of edits undone in your bug-fix traces",
-    ),
-    (
-        "analytics_models_lead_refactor_rejected",
-        "Lowest share of edits rejected in your refactoring traces",
-    ),
-    (
-        "analytics_models_lead_refactor_rejected_undone",
-        "Lowest share of edits undone in your refactoring traces",
-    ),
-    (
-        "analytics_models_lead_tests_rejected",
-        "Lowest share of edits rejected in your test traces",
-    ),
-    (
-        "analytics_models_lead_tests_rejected_undone",
-        "Lowest share of edits undone in your test traces",
-    ),
-    (
-        "analytics_models_lead_docs_cost",
-        "Lowest cost per docs trace, at API prices",
-    ),
-    (
-        "analytics_models_lead_rejected_across_tasks",
-        "Lowest share of edits rejected across your task types, weighted by task mix",
-    ),
-    (
-        "analytics_models_lead_rejected_across_tasks_undone",
-        "Lowest share of edits undone across your task types, weighted by task mix",
-    ),
-    (
-        "analytics_models_lead_finish_time",
-        "Least active time to finish, in your finished traces",
-    ),
-    // A model and its figure; the leading one, then the next.
-    ("analytics_models_model_line", "{label} ({x}, {n} traces)"),
-    (
-        "analytics_models_next_line",
-        "Next: {label} ({x}, {n} traces)",
-    ),
-    // The traces each model has, on a row short of them.
-    ("analytics_models_count_line_one", "{label}: {n} trace"),
-    ("analytics_models_count_line_other", "{label}: {n} traces"),
-    // The figures, by `figure.kind`.
-    ("analytics_models_rate", "{p}%"),
-    ("analytics_models_cost", "{x} at API prices"),
-    ("analytics_models_finish_one", "{span} active · {u} turn"),
-    ("analytics_models_finish_other", "{span} active · {u} turns"),
-    ("analytics_models_interrupts", "Interrupts per trace: {x}"),
-    // On a rejection row, each model whose traces the person gave an
-    // Outcome label (`kept_by_model`): the share they marked Kept, beside
-    // the figure and never folded into it. Partly kept is not kept.
-    (
-        "analytics_models_kept_one",
-        "{label}: {p}% kept, of {n} trace you marked",
-    ),
-    (
-        "analytics_models_kept_other",
-        "{label}: {p}% kept, of {n} traces you marked",
-    ),
-    // The row states that name no model first.
-    ("analytics_models_not_enough", "Not enough traces yet"),
-    ("analytics_models_not_priced", "Not priced"),
-    (
-        "analytics_models_no_clear_difference",
-        "No clear difference",
-    ),
-    // What a rejection row counts, by `basis`.
-    (
-        "analytics_models_basis_rejected",
-        "Rejected edits: ones you declined or undid",
-    ),
-    ("analytics_models_basis_undone", "Undone edits we could see"),
-    // Which traces the time row compares, by `edit_mode`.
-    (
-        "analytics_models_mode_prompting",
-        "Traces that asked you before editing",
-    ),
-    (
-        "analytics_models_mode_not_prompting",
-        "Traces that edited without asking",
-    ),
-    // What Private AI charged, on the Docs cost row only, apart from the
-    // API-price figure and never added to it.
-    (
-        "analytics_models_charge",
-        "Charged through Private AI: {x} per trace (median), {n} traces",
-    ),
-    (
-        "analytics_models_charge_unknown",
-        "Through Private AI: {n} traces, charge not recorded",
-    ),
-    (
-        "analytics_models_charge_some_unknown",
-        "Charge not recorded for {u} of them",
-    ),
-    // Behind a row's "i": how its figure is measured.
-    (
-        "analytics_models_info_rejected",
-        "Rejected edits are the edits you declined plus the edits undone after you stepped in, out of every edit the model made.",
-    ),
-    (
-        "analytics_models_info_undone",
-        "Not every trace records the edits you declined, so this compares undone edits: an edit put back by a later one after you stepped in. Edits made by shell commands or in an editor aren't seen.",
-    ),
-    (
-        "analytics_models_info_cost",
-        "At API prices: what the API would charge at its published list prices, not what a plan costs. Traces sent through Private AI are counted apart.",
-    ),
-    (
-        "analytics_models_info_finish",
-        "Median active time of finished traces, without the time spent waiting for you, and the median turns you took.",
-    ),
-    (
-        "analytics_models_info_lead",
-        "A model is named first only when its lead holds when the traces are resampled.",
-    ),
-    (
-        "analytics_models_info_no_clear_difference",
-        "The gap didn't hold when the traces were resampled, so neither model is named first.",
-    ),
-    // Behind a row's "i": the traces left out of it, per `left_out` reason.
-    ("analytics_models_left_out", "Left out of this answer:"),
-    (
-        "analytics_models_left_out_unknown_facts",
-        "Facts couldn't be read: {n}",
-    ),
-    (
-        "analytics_models_left_out_automated",
-        "Started by a tool, not by you: {n}",
-    ),
-    (
-        "analytics_models_left_out_delegated",
-        "Handed work to subagents we can't read: {n}",
-    ),
-    (
-        "analytics_models_left_out_capped",
-        "Too long to read whole: {n}",
-    ),
-    (
-        "analytics_models_left_out_routed",
-        "Route doesn't confirm the model: {n}",
-    ),
-    ("analytics_models_left_out_reviewer", "Review traces: {n}"),
-    (
-        "analytics_models_left_out_no_majority",
-        "No model on most turns: {n}",
-    ),
-    (
-        "analytics_models_left_out_unpriced",
-        "No API price for the model: {n}",
-    ),
-    (
-        "analytics_models_left_out_too_few_sessions",
-        "Model had too few traces of a task type: {n}",
-    ),
-    (
-        "analytics_models_left_out_too_few_edits",
-        "Model had too few edits: {n}",
-    ),
-    (
-        "analytics_models_left_out_mix_too_different",
-        "Model's task mix too different to compare: {n}",
-    ),
+    // 24. The Models card left Insights (product owner, 2026-10-28) with
+    // its words; `insights_model_answers` still answers over the socket.
 ];
