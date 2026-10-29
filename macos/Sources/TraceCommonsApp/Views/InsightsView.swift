@@ -23,6 +23,12 @@ struct InsightsView: View {
     /// Details' drill-down view; a usage card's "By project" opens it on
     /// By project (product owner, 2026-10-28).
     @State private var detailsView: InsightsCreditWords.Dimension = .folder
+    /// The get-started card's one action: Traces, on its folder list.
+    /// `nil` draws no link.
+    private let openTraces: (() -> Void)?
+    /// The sample under the get-started card, built the first time it is
+    /// drawn (`InsightsSampleModels`); never the person's own models.
+    @State private var sample: InsightsSampleModels?
 
     /// `daemon` is the app's live client, for the week from the daemon's
     /// counter pass (feed T); without one the window shows saved imports.
@@ -30,7 +36,8 @@ struct InsightsView: View {
                     storeCopy: [String: String]? = TCInsights.copy(),
                     daemon: (any DaemonDataClient)? = nil,
                     subscriptions: SubscriptionUsageModel? = nil,
-                    home: HomeStore? = nil) {
+                    home: HomeStore? = nil,
+                    openTraces: (() -> Void)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
             { @Sendable refresh, interactive, provider, login in
@@ -71,7 +78,7 @@ struct InsightsView: View {
                   subscriptionModel: subscriptions,
                   subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
                   benchmarks: InsightsBenchmarksModel(reader: benchmarks),
-                  home: home)
+                  home: home, openTraces: openTraces)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -86,7 +93,9 @@ struct InsightsView: View {
                     subscriptionModel: SubscriptionUsageModel? = nil,
                     subscriptionFallback: SubscriptionUsageModel? = nil,
                     benchmarks: InsightsBenchmarksModel? = nil,
-                    home: HomeStore? = nil) {
+                    home: HomeStore? = nil,
+                    openTraces: (() -> Void)? = nil) {
+        self.openTraces = openTraces
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
@@ -110,6 +119,36 @@ struct InsightsView: View {
         guard let home, home.rollup != nil || home.credit != nil else { return nil }
         return HomeFormat.creditTile(final: home.rollup?.creditFinal, pending: home.rollup?.creditPending,
                                      accepted: home.rollup?.allTime?.accepted, credit: home.credit)
+    }
+
+    /// Whether the week's first answers are in: the daemon's week (or no
+    /// daemon to ask) and the store's week.
+    private var weekSettled: Bool {
+        model.weekSettled && !overviewModel.busy && (overviewModel.shown != nil || overviewModel.failed)
+    }
+
+    /// Overview and Breakdown have no trace of the person's own to show
+    /// (product owner, 2026-10-29): the week on screen and every kept week
+    /// are empty.
+    private var weekEmpty: Bool {
+        weekSettled && !InsightsEmptyState.weekHasData(overviewModel.shown, history: model.counterWeek?.coreHistory)
+    }
+
+    /// Benchmarks has no kind of work with a trace in it.
+    private var benchmarksEmpty: Bool {
+        benchmarksModel.settled && !InsightsEmptyState.benchmarksHaveData(benchmarksModel.answer)
+    }
+
+    /// Whether the tab on screen draws the get-started card and the sample.
+    private var showsSample: Bool {
+        switch tab {
+        case .overview, .patterns: weekEmpty
+        case .benchmarks: benchmarksEmpty
+        }
+    }
+
+    private var getStarted: InsightsGetStarted {
+        InsightsGetStarted(copy: model.copy, openTraces: openTraces)
     }
 
     @ViewBuilder
@@ -145,6 +184,24 @@ struct InsightsView: View {
             // No top inset of its own: the main pane's `contentTop` is the
             // gap under the tab bar on every tab (owner, 2026-10-19).
             switch tab {
+            case .overview where showsSample:
+                if let sample {
+                    InsightsOverviewTab(
+                        model: sample.overview, comparisons: sample.comparisons, copy: model.copy, snapshots: [],
+                        subscriptions: sample.subscriptions, usageByDay: sample.week?.usageByDay,
+                        work: sample.week?.work, weekChanges: sample.week?.changeVsLastWeek,
+                        getStarted: getStarted)
+                    .task { await sample.load() }
+                }
+            case .patterns where showsSample:
+                if let sample {
+                    InsightsPatternsTab(model: sample.patterns, comparisons: sample.comparisons, copy: model.copy,
+                                        week: sample.week, overview: sample.overview, getStarted: getStarted)
+                }
+            case .benchmarks where showsSample:
+                if let sample {
+                    InsightsBenchmarksTab(model: sample.benchmarks, copy: model.copy, getStarted: getStarted)
+                }
             case .overview:
                 InsightsOverviewTab(
                     model: overviewModel, comparisons: comparisonsModel, copy: model.copy,
@@ -177,6 +234,22 @@ struct InsightsView: View {
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
         .onAppear { showSampleWeekIfAsked() }
+        // The sample is built only when it is first needed, and while it
+        // shows, Insights asks again each minute, so the card and the
+        // sample go as soon as the first trace is counted.
+        .onChange(of: showsSample, initial: true) { _, shows in
+            if shows, sample == nil { sample = InsightsSampleModels() }
+        }
+        .task(id: showsSample) {
+            guard showsSample else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled else { return }
+                await model.loadWeek()
+                overviewModel.reload()
+                await benchmarksModel.load()
+            }
+        }
         .onChange(of: model.snapshots.map(\.id)) { _, _ in
             overviewModel.reload()
             patternsModel.reload()

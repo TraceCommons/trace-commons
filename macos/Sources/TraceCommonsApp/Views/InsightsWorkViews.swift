@@ -35,11 +35,18 @@ enum InsightsWorkWords {
 
     private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
 
+    /// Whether any of the spend is known: a trace priced in full, or a
+    /// known part.
+    static func knowsSpend(_ totals: DaemonData.InsightsWorkTotals?) -> Bool {
+        guard let totals else { return false }
+        return totals.pricedSessions + (totals.nearAiSessions ?? 0) > 0 || totals.usdMicrosKnown > 0
+    }
+
     /// Spend at list prices: the sum as far as known, to the cent; a charge
     /// under a cent keeps `InsightsCreditWords.money`'s digit so it is never
     /// shown as zero.
     static func spend(_ totals: DaemonData.InsightsWorkTotals?, copy: [String: String]) -> String {
-        guard let totals, totals.pricedSessions + (totals.nearAiSessions ?? 0) > 0 || totals.usdMicrosKnown > 0 else {
+        guard knowsSpend(totals), let totals else {
             return text("analytics_unavailable", copy)
         }
         return dollars(totals.usdMicrosKnown)
@@ -113,6 +120,30 @@ enum InsightsWorkWords {
         return changes
     }
 
+    /// "Claude and Codex at API prices", or only the tool used this week,
+    /// so a Claude user is not told of Codex prices.
+    static func apiPrices(_ work: DaemonData.InsightsWork, copy: [String: String]) -> String {
+        let tools = Set(work.byModel.map(\.tool)).union(activeTools(work).compactMap(\.key))
+        if tools == ["claude_code"] { return text("analytics_tile_api_prices_claude", copy) }
+        if tools == ["codex"] { return text("analytics_tile_api_prices_codex", copy) }
+        return text("analytics_tile_api_prices", copy)
+    }
+
+    /// The tools with a trace this week, so a Claude user's card has no
+    /// Codex row and the reverse.
+    static func activeTools(_ work: DaemonData.InsightsWork) -> [DaemonData.InsightsWorkTotals] {
+        work.byTool.filter { $0.sessions > 0 }
+    }
+
+    /// Trends has something to draw: a day with known spend, this week or
+    /// the week before, or a change to list.
+    static func showsTrends(_ work: DaemonData.InsightsWork, tokens: [DaemonData.InsightsWeekChange]?,
+                            copy: [String: String]) -> Bool {
+        let spent = work.byDay.contains { $0.usdMicrosKnown > 0 }
+            || (work.lastWeekByDay ?? []).contains { $0.usdMicrosKnown > 0 }
+        return spent || !changes(work, tokens: tokens, copy: copy).isEmpty
+    }
+
     /// This week's days beside the week before's, in dollars.
     static func days(_ work: DaemonData.InsightsWork) -> [DayPair] {
         let parse = Date.ISO8601FormatStyle().year().month().day().dateSeparator(.dash)
@@ -139,13 +170,15 @@ struct InsightsWeekTiles: View {
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: GlassTokens.Space.cardGap, alignment: .top)],
-                  alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+        InsightsCardFlow(minimum: 170) {
+            // A tile with nothing known is left out, not drawn as the dash.
             if let work {
-                tile(text("analytics_tile_spend"), InsightsWorkWords.spend(work.week, copy: copy),
-                     InsightsWorkWords.change(work.week.usdMicrosKnown, last: work.lastWeek?.usdMicrosKnown,
-                                              partial: InsightsWorkWords.spendPartial(work),
-                                              copy: copy)?.words ?? text("analytics_tile_api_prices"))
+                if InsightsWorkWords.knowsSpend(work.week) {
+                    tile(text("analytics_tile_spend"), InsightsWorkWords.spend(work.week, copy: copy),
+                         InsightsWorkWords.change(work.week.usdMicrosKnown, last: work.lastWeek?.usdMicrosKnown,
+                                                  partial: InsightsWorkWords.spendPartial(work),
+                                                  copy: copy)?.words ?? InsightsWorkWords.apiPrices(work, copy: copy))
+                }
                 if let top = InsightsWorkWords.modelRows(work, copy: copy).first {
                     tile(text("analytics_tile_top_model"), top.label,
                          InsightsOverviewWords.fill(text("analytics_tile_share_of_spend"), ["p": top.percent
@@ -165,7 +198,7 @@ struct InsightsWeekTiles: View {
             if let note { Text(note).insightsCaption() }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .insightsCard()
+        .insightsSection()
         .accessibilityElement(children: .combine)
     }
 }
@@ -180,11 +213,13 @@ struct InsightsSpendByModelCard: View {
 
     var body: some View {
         let rows = InsightsWorkWords.modelRows(work, copy: copy)
+        // The tool under each model only when there are two to tell apart.
+        let tools = Set(rows.map(\.tool)).count > 1
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             HStack(alignment: .firstTextBaseline) {
                 Text(text("analytics_by_model_title")).insightsHeading()
                 Spacer(minLength: GlassTokens.Space.s3)
-                Text(text("analytics_tile_api_prices")).insightsCaption()
+                Text(InsightsWorkWords.apiPrices(work, copy: copy)).insightsCaption()
             }
             if rows.isEmpty {
                 Text(text("analytics_unavailable")).insightsNote()
@@ -193,7 +228,7 @@ struct InsightsSpendByModelCard: View {
                 HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
                     VStack(alignment: .leading, spacing: 0) {
                         Text(row.label).glassType(GlassTokens.TypeScale.label.weight(.semibold)).lineLimit(1)
-                        Text(row.tool).insightsCaption()
+                        if tools { Text(row.tool).insightsCaption() }
                     }
                     .frame(minWidth: 110, alignment: .leading)
                     GeometryReader { proxy in
@@ -209,11 +244,12 @@ struct InsightsSpendByModelCard: View {
                 }
                 .accessibilityElement(children: .combine)
             }
+            Spacer(minLength: 0)
             Button(text("analytics_tab_benchmarks")) { showBenchmarks() }
                 .buttonStyle(GlassButtonStyle(.link))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .insightsCard()
+        .insightsSection()
     }
 }
 
@@ -231,19 +267,23 @@ struct InsightsTrendsCard: View {
         let thisWeek = text("analytics_this_week"), before = text("analytics_trends_week_before")
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             Text(text("analytics_trends_title")).insightsHeading()
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
-                    chart(days, thisWeek: thisWeek, before: before).frame(minWidth: 320)
-                    changeList(changes).frame(minWidth: 200, maxWidth: 280)
-                }
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    chart(days, thisWeek: thisWeek, before: before)
-                    changeList(changes)
+            if changes.isEmpty {
+                chart(days, thisWeek: thisWeek, before: before)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
+                        chart(days, thisWeek: thisWeek, before: before).frame(minWidth: 320)
+                        changeList(changes).frame(minWidth: 200, maxWidth: 280)
+                    }
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                        chart(days, thisWeek: thisWeek, before: before)
+                        changeList(changes)
+                    }
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .insightsCard()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .insightsSection()
     }
 
     @ViewBuilder
@@ -276,7 +316,6 @@ struct InsightsTrendsCard: View {
             ForEach(changes) { change in
                 InsightsUsageRow(label: change.label, value: change.words)
             }
-            if changes.isEmpty { Text(text("analytics_unavailable")).insightsNote() }
         }
     }
 }
