@@ -28,6 +28,9 @@ sha2 = "0.10"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
+# Codex compresses older rollouts in place (`.jsonl.zst`); the Insights
+# counter pass reads them. The version trace-commons-server already locks.
+zstd = "0.14.3"
 
 # The OpenCode export reader refuses Windows reparse points, as it did
 # before moving out of the contributor crate.

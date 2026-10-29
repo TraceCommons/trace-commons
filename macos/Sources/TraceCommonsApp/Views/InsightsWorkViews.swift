@@ -191,15 +191,13 @@ struct InsightsWeekTiles: View {
         }
     }
 
+    /// Home's stat card (owner, 2026-10-29: the tiles' type matches the
+    /// rest of the app): the eyebrow label, the 17pt bold value and the
+    /// caption under it.
     private func tile(_ label: String, _ value: String, _ note: String?) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            Text(label).insightsEyebrow()
-            Text(value).insightsFigure().lineLimit(1).minimumScaleFactor(0.7)
-            if let note { Text(note).insightsCaption() }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .insightsSection()
-        .accessibilityElement(children: .combine)
+        GlassStatCard(label, value: value, detail: note)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .accessibilityElement(children: .combine)
     }
 }
 

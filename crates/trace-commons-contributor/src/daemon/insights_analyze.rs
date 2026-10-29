@@ -57,11 +57,17 @@ pub const ERR_SESSION_TOO_LARGE: &str = "insights-session-too-large";
 /// `session_meta`), which the analysis refuses.
 pub const ERR_SESSION_NOT_ONE_SESSION: &str = "insights-session-not-one-session";
 
+/// A session Analyze & save does not find or read: one in a NEAR AI
+/// managed profile (never among the watched sessions), or a compressed
+/// Codex rollout (the whole-file analysis reads plain files).
+pub const ERR_SESSION_INSIGHTS_ONLY: &str = "insights-session-insights-only";
+
 /// The answer for a file the analysis refuses, by why.
 fn not_analyzable(reason: NotAnalyzable) -> &'static str {
     match reason {
         NotAnalyzable::TooLarge => ERR_SESSION_TOO_LARGE,
         NotAnalyzable::NotOneSession => ERR_SESSION_NOT_ONE_SESSION,
+        NotAnalyzable::InsightsOnly => ERR_SESSION_INSIGHTS_ONLY,
     }
 }
 
@@ -283,6 +289,7 @@ mod tests {
                 modified_at: written,
                 started_at: Some(written),
                 group_member_count: 0,
+                role: crate::daemon::insights_week::CandidateRole::Watched,
             };
             let summary = self
                 .shared

@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 pub mod claude_code;
 pub mod cline;
 pub mod codex;
+pub mod compressed;
 pub mod discovery;
 pub mod gemini_cli;
 mod multi_root;

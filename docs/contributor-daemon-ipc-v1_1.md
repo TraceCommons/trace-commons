@@ -4596,7 +4596,38 @@ that was running or waiting at an `unenroll` writes nothing afterwards and
 makes no new key. No event marks a pass's end: `insights_week` answers from
 whatever the last finished pass stored, with its `updated_at`.
 It is not tied to whether a session was offered, sent, kept or
-declined. A session in a folder that is Never, by its own rule or a global
+declined.
+
+Codex's compressed rollouts are sessions like any other (owner decision
+2026-10-29): Codex replaces an older `rollout-<...>.jsonl` with
+`rollout-<...>.jsonl.zst` of the same name and last write, and the Codex
+adapter discovers, offers, uploads and counts it under the plain path it
+replaced, with the size it decompresses to. So a session offered, sent,
+declined, kept or counted before Codex compressed it is the same session
+after, with the same content hash: not offered or sent again, and not
+re-read. While both files are on disk only the plain one is listed. The
+compressed file is streamed through a zstd decoder, never decompressed to
+memory whole or to a file; the 64 MB load budget (`rollout-too-large`), the
+16 MB line limit below and the per-pass budget apply to the decompressed
+bytes. A file's output is also bounded at 512 MiB, and at 64 times the
+file's own size past 16 MiB, and a decoder window over 16 MiB is refused.
+In the counter pass, a compressed file that is corrupt, truncated or past a
+bound is stored as unknown, never as zero, and is not read again until it
+changes. `insights_analyze_session` reads plain files only, so a session
+whose file is compressed lists with `analyzable: false`.
+
+Beside the sessions a poll discovers, the pass reads sessions in NEAR AI
+managed profiles, which nothing offers, queues or uploads and
+`insights_analyze_session` does not find (each lists with `analyzable:
+false`): each profile's Claude Code `projects/` and Codex `sessions/` under
+the daemon's `managed-profiles/` folder, compressed rollouts included. A
+managed session is counted from its profile only: another copy of it the
+pass finds (the post-exit export, or one in a watched folder), named by its
+file name, is not read, and that copy's row is dropped once the profile's
+row exists. Its route joins as every row's does, by the session ID its
+transcript records.
+
+A session in a folder that is Never, by its own rule or a global
 Never contribution override (every folder while one is in force), is not
 read, and rows already stored for one are dropped by the next pass and left
 out of every answer at once. Claude Code rows are per turn; Codex rows hold the change
@@ -5495,7 +5526,9 @@ reaches the network.
   than 16 MiB (as the pass found it, or grown past it since) is
   `insights-session-too-large`; a Codex file that does not record exactly
   one `session_meta` (as the pass found it) is
-  `insights-session-not-one-session`. Such a row lists with `analyzable:
+  `insights-session-not-one-session`; a file the analysis does not find or
+  read (a session in a NEAR AI managed profile, or a compressed Codex
+  rollout) is `insights-session-insights-only`. Such a row lists with `analyzable:
   false`.
 - Any other analysis that fails is `unavailable` with the core's fixed
   label, never a path.
