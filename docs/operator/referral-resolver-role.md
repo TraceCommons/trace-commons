@@ -103,14 +103,22 @@ silently drops the three lines above. Before the next render:
    renders with. The render reads the mark key from the secret and refuses
    if the secret is missing.
 
-Going `live` (`TC_NEAR_AI_REFERRAL_MODE=live`) also needs
-`TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL` and
-`TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL_ID`. The credential is an `oc_` org
-credential, not the reseller key, and the id is not the payout rail's. The
-render takes them from the secret `tc-staging-nearai-referral-key` and
-`TC_NEAR_AI_REFERRAL_CREDENTIAL_ID`. The ingest refuses to start `live`
-without them (`near_ai_referral_config_missing`), and refuses a live referral
-stream while the payout rail is not `live`.
+Going `live` needs no new secret: set
+`TRACE_COMMONS_NEAR_AI_REFERRAL_MODE=live` (render with
+`TC_NEAR_AI_REFERRAL_MODE=live`) with the payout rail `live`. The stream then
+sends with the payout credential (owner decision, 2026-10-29). The ingest
+refuses a live referral stream while the payout rail is not `live`
+(`near_ai_referral_config_missing`).
+
+The tradeoff: one credential has one lifetime budget (`max_total_amount`) and
+one send window, so every referral send draws down the contributor payout
+budget, and a cloud-api stop on the credential reaches both streams. The pass
+keeps both streams inside the one window. The per-referrer ceiling
+(`TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO`) and the referral holds still
+apply. To cap referrals on NEAR AI's side apart from contributor payouts,
+configure a dedicated credential: `TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL`
+and `_ID` together (on staging, the secret `tc-staging-nearai-referral-key`
+and `TC_NEAR_AI_REFERRAL_CREDENTIAL_ID`).
 
 Make the grant before either of these is set:
 

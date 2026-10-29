@@ -79,12 +79,12 @@ set +x
 #                       only when given; unset, the ingest's defaults hold.
 #   TC_NEAR_AI_REFERRAL_MODE
 #                       default disabled. dry_run needs TC_NEAR_AI_PAYOUT_MODE
-#                       dry_run or live; live needs it live, plus
-#                       TC_NEAR_AI_REFERRAL_CREDENTIAL_ID (a UUID other than
-#                       the payout rail's) and the secret
-#                       tc-staging-nearai-referral-key (an oc_ org credential
-#                       other than the reseller key). Optional
-#                       TC_REFERRAL_ACCOUNT_CEILING_NANO.
+#                       dry_run or live; live needs it live, and sends with
+#                       the payout credential (one budget and one send window
+#                       for both streams). Optional, live only: a dedicated
+#                       credential, TC_NEAR_AI_REFERRAL_CREDENTIAL_ID with the
+#                       secret tc-staging-nearai-referral-key (an oc_ org
+#                       credential). Optional TC_REFERRAL_ACCOUNT_CEILING_NANO.
 #                       With a program start or a mode other than disabled,
 #                       the render also reads the secret
 #                       tc-staging-referral-network-mark-key (base64 of 32 or
@@ -571,22 +571,27 @@ if [ "$TC_NEAR_AI_REFERRAL_MODE" != disabled ]; then
       || refuse "TC_REFERRAL_ACCOUNT_CEILING_NANO is not a positive whole number"
     extra+="TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO=$TC_REFERRAL_ACCOUNT_CEILING_NANO"$'\n'
   fi
-  # A live stream sends with its own org credential, so a NEAR AI-side cap
-  # on it bounds referrals alone: never the reseller key or its credential
-  # id, which would spend the earned budget. dry_run sends nothing and reads
-  # neither.
-  if [ "$TC_NEAR_AI_REFERRAL_MODE" = live ]; then
+  # A live stream sends with the payout credential unless a dedicated one
+  # is given (owner decision, 2026-10-29): then both streams share one
+  # lifetime budget and one send window. A dedicated credential is set by
+  # TC_NEAR_AI_REFERRAL_CREDENTIAL_ID and the secret
+  # tc-staging-nearai-referral-key together. Half of the payout pair beside
+  # half of another is refused, as the ingest refuses it. dry_run sends
+  # nothing and reads neither.
+  if [ "$TC_NEAR_AI_REFERRAL_MODE" = live ] && [ -n "${TC_NEAR_AI_REFERRAL_CREDENTIAL_ID:-}" ]; then
     uuid='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
-    [[ "${TC_NEAR_AI_REFERRAL_CREDENTIAL_ID:-}" =~ $uuid ]] \
-      || refuse "TC_NEAR_AI_REFERRAL_CREDENTIAL_ID is not set (referral live)"
-    [ "$(printf '%s' "$TC_NEAR_AI_REFERRAL_CREDENTIAL_ID" | tr 'A-F' 'a-f')" \
-      != "$(printf '%s' "$TC_NEAR_AI_PAYOUT_CREDENTIAL_ID" | tr 'A-F' 'a-f')" ] \
-      || refuse "TC_NEAR_AI_REFERRAL_CREDENTIAL_ID is the payout rail's credential id"
+    [[ "$TC_NEAR_AI_REFERRAL_CREDENTIAL_ID" =~ $uuid ]] \
+      || refuse "TC_NEAR_AI_REFERRAL_CREDENTIAL_ID is not a UUID"
     referral_key="$(secret tc-staging-nearai-referral-key)"
     shaped tc-staging-nearai-referral-key "$referral_key" \
       '^oc_[0-9A-Fa-f]{64}$' "an org credential (oc_ and 64 hex characters)"
-    [ "$referral_key" != "$reseller_key" ] \
-      || refuse "secret tc-staging-nearai-referral-key is the reseller key"
+    same_key=0
+    same_id=0
+    [ "$referral_key" != "$reseller_key" ] || same_key=1
+    [ "$(printf '%s' "$TC_NEAR_AI_REFERRAL_CREDENTIAL_ID" | tr 'A-F' 'a-f')" \
+      != "$(printf '%s' "$TC_NEAR_AI_PAYOUT_CREDENTIAL_ID" | tr 'A-F' 'a-f')" ] || same_id=1
+    [ "$same_key" = "$same_id" ] \
+      || refuse "the referral credential and its id must both be the payout pair or both differ"
     extra+="TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL=$referral_key"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL_ID=$TC_NEAR_AI_REFERRAL_CREDENTIAL_ID"$'\n'
   fi

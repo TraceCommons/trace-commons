@@ -1052,12 +1052,34 @@ if grep -q 'tc-staging-nearai-referral-key' "$scratch/referral-live-no-key.err";
 else
   fail "the referral live refusal does not name the referral credential secret"
 fi
-referral_refused live-no-credential-id "${referral_live[@]}" TC_NEAR_AI_REFERRAL_CREDENTIAL_ID= \
-  "TC_SECRET_tc_staging_nearai_referral_key=$referral_key_ok"
+# Live with no referral credential sends with the payout credential (owner
+# decision, 2026-10-29): nothing more is rendered and no referral secret is
+# read, even one that is present.
+if run_render referral-live-shared "${referral_live[@]}" TC_NEAR_AI_REFERRAL_CREDENTIAL_ID= \
+  "TC_SECRET_tc_staging_nearai_referral_key=$referral_key_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_MODE live
+  if grep -q '^TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL' "$out/ingest.env"; then
+    fail "render-env.sh wrote a referral credential for a live stream on the payout credential"
+  else
+    pass "render-env.sh renders a live referral stream on the payout credential"
+  fi
+  no_secret_printed referral-live-shared "$referral_key_ok" "$mark_key_ok"
+else
+  fail "render-env.sh refused a live referral stream on the payout credential"
+  cat "$scratch/referral-live-shared.err" >&2
+fi
+# Naming the payout pair explicitly is the same choice, and renders.
+if run_render referral-live-payout-pair "${referral_live[@]}" \
+  TC_NEAR_AI_REFERRAL_CREDENTIAL_ID=00000000-0000-4000-8000-0000000000c1 \
+  "TC_SECRET_tc_staging_nearai_referral_key=$payout_key_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL "$payout_key_ok"
+else
+  fail "render-env.sh refused the payout pair named as the referral credential"
+  cat "$scratch/referral-live-payout-pair.err" >&2
+fi
 referral_refused live-api-key "${referral_live[@]}" \
   "TC_SECRET_tc_staging_nearai_referral_key=sk-$(printf 'e5%.0s' $(seq 32))"
-# The referral credential caps the referral budget on NEAR AI's side; the
-# reseller key again would spend the earned budget on referrals.
+# Half of the payout pair beside half of another is a mistake: refused.
 referral_refused live-reseller-key "${referral_live[@]}" \
   "TC_SECRET_tc_staging_nearai_referral_key=$payout_key_ok"
 referral_refused live-same-credential-id "${referral_live[@]}" \
