@@ -978,9 +978,9 @@ extension DaemonData {
         /// Decode-only until the Insights settings draw it: the user's own
         /// context-tip threshold in tokens; `nil` is unset, never a default.
         public let insightsContextThreshold: Int?
-        /// Decode-only until the Insights settings draw it: whether the
-        /// daemon runs the counter pass for `insights_week` (owner decision
-        /// D4, open; off by default).
+        /// Decode-only (Settings draws no switch for it): whether the
+        /// daemon runs the counter pass for `insights_week` (on by default
+        /// and always on; product owner, 2026-10-29).
         public let insightsCounterPass: Bool?
         /// Native subscription readers, on by default since 2026-10-27; nil
         /// means an older daemon. The Overview usage snapshot remains
@@ -2179,7 +2179,7 @@ extension DaemonData {
     // MARK: Insights feed T
 
     /// `insights_week`: one local ISO week from the daemon's counter pass
-    /// (owner decision D4, open; off by default). Use it only when
+    /// (on by default; product owner, 2026-10-29). Use it only when
     /// `showsCounterPass`; anything else is drawn as the saved-imports feed.
     /// Labels and counts only: no path, digest or session id crosses.
     public struct InsightsWeek: Codable, Equatable, Sendable {

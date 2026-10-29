@@ -1,9 +1,11 @@
 //! The Insights counter pass (feed T) and `insights_week`.
 //!
-//! Gated on owner decision D4 (open), through the `insights_counter_pass`
-//! setting, off by default. While it is off the watcher runs no pass, nothing
-//! is read for Insights, and `insights_week` answers `enabled: false` without
-//! opening the store or the key.
+//! Gated through the `insights_counter_pass` setting, on by default (product
+//! owner, 2026-10-29, settling owner decision D4; an install saved before
+//! then is turned on once). While it is off -- after unenroll, or an agent
+//! turning it off -- the watcher runs no pass, nothing is read for Insights,
+//! and `insights_week` answers `enabled: false` without opening the store or
+//! the key.
 //!
 //! # The pass
 //!
@@ -3598,7 +3600,8 @@ fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff:
 
 /// After the routing ledger's refresh: fold its new calls into the route
 /// tallies, only while both `insights_ledger_feed` (owner decision D3, on by
-/// default) and `insights_counter_pass` (D4, open) are on. Gated on the pass too
+/// default) and `insights_counter_pass` (on by default; product owner,
+/// 2026-10-29) are on. Gated on the pass too
 /// because the tallies live in its store: unenroll turns the pass off and
 /// clears the store, and a fold gated on the feed alone would write it back.
 /// A poisoned settings lock reads as off. Failures are logged inside, by
@@ -6903,8 +6906,9 @@ mod tests {
     }
 
     #[test]
-    fn the_method_answers_off_by_default_and_refuses_bad_params() {
+    fn the_method_answers_off_when_switched_off_and_refuses_bad_params() {
         let (_dir, s) = shared();
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let r = handle_week(&s, &call(serde_json::json!({})));
         assert_eq!(
             r.result.unwrap(),
@@ -7622,6 +7626,7 @@ mod tests {
         assert!(super::super::ipc::DEV_DRY_RUN_LOCAL_METHODS.contains(&"insights_week"));
         let (_dir, mut s) = shared();
         s.dev_dry_run = true;
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let r = super::super::ipc::handle_request(&s, &call(serde_json::json!({})));
         assert_eq!(r.result.unwrap()["enabled"], false);
     }
