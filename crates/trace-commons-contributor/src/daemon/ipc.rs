@@ -2047,16 +2047,9 @@ impl DaemonShared {
             .clone();
         // The label, not `state.label()`: while the proxy is running, which
         // account answers is part of what a shell has to say, and the honest
-        // answer includes "not known". The ledger is absent whenever this
-        // daemon is not running a proxy it owns, and `nearai_authenticated`
-        // is `None` until a status read succeeds -- both reach the unknown
-        // label rather than the plain running one, which is the direction
-        // this has to fail in.
-        let destination = self
-            .routing_ledger()
-            .and_then(|ledger| ledger.nearai_authenticated());
+        // answer includes "not known". See `private_inference_destination`.
         serde_json::json!({
-            "state": state.label_for(destination),
+            "state": state.label_for(self.private_inference_destination()),
             "port": state.port(),
         })
     }
@@ -2070,10 +2063,38 @@ impl DaemonShared {
             .lock()
             .expect("private inference state lock")
             .clone();
-        let destination = self
+        state.label_for(self.private_inference_destination())
+    }
+
+    /// Whether NEAR AI answers the proxy's calls, as far as is known.
+    ///
+    /// The proxy's own reading first. The ledger is absent whenever this
+    /// daemon is not running a proxy it owns, and `nearai_authenticated` is
+    /// `None` until a status read succeeds or when the proxy's backend list
+    /// does not mention NEAR AI -- which is what it sends when it was handed
+    /// no key. So the daemon's own credential state settles that one case:
+    /// the key the proxy runs on is the one in these settings
+    /// (`reconcile_private_inference`), and with none stored the proxy has
+    /// no NEAR AI key to answer with. See
+    /// [`super::private_inference::destination`].
+    ///
+    /// Takes the settings lock: never call this while holding it.
+    fn private_inference_destination(&self) -> Option<bool> {
+        let proxy = self
             .routing_ledger()
             .and_then(|ledger| ledger.nearai_authenticated());
-        state.label_for(destination)
+        super::private_inference::destination(proxy, self.holds_near_ai_key())
+    }
+
+    /// Whether this daemon holds a NEAR AI inference key: `None` when its
+    /// settings, or the store the key lives in, could not be read, which
+    /// is not the same as holding none.
+    fn holds_near_ai_key(&self) -> Option<bool> {
+        let settings = self.settings.lock().ok()?;
+        if settings.cloud_storage_unavailable {
+            return None;
+        }
+        Some(settings.near_ai_inference.is_some())
     }
 
     /// Hold `ledger` as the routing ledger, for tests.
@@ -10953,6 +10974,9 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
         let s = std::sync::Arc::new(shared());
+        // Signed in: without a key the daemon would already know the
+        // answer, and there would be nothing for the tick to learn.
+        s.settings.lock().unwrap().near_ai_inference = Some(test_near_ai_key());
         *s.private_inference_state.lock().unwrap() =
             crate::daemon::private_inference::PrivateInferenceState::Running { port };
         s.routing.write().unwrap().ledger = Some(Arc::new(
@@ -10982,6 +11006,129 @@ mod tests {
             again |= event.event == EVENT_STATUS_CHANGED;
         }
         assert!(!again, "an unchanged label is not a status change");
+    }
+
+    fn test_near_ai_key() -> crate::daemon::settings::NearAiInferenceCredential {
+        crate::daemon::settings::NearAiInferenceCredential {
+            key: "sk-super-secret-key".into(),
+            key_id: "key-1".into(),
+            key_prefix: "sk-sup".into(),
+            organization_id: "org-1".into(),
+            workspace_id: "ws-1".into(),
+            minted_at: chrono::Utc::now(),
+        }
+    }
+
+    /// The Private AI label after one routing refresh against a proxy whose
+    /// status object is `status`, with or without a NEAR AI key held here.
+    async fn label_after_status(status: serde_json::Value, signed_in: bool) -> &'static str {
+        label_after_status_with(status, signed_in, false).await
+    }
+
+    async fn label_after_status_with(
+        status: serde_json::Value,
+        signed_in: bool,
+        storage_unavailable: bool,
+    ) -> &'static str {
+        let router = axum::Router::new()
+            .route(
+                "/_ironwire/log",
+                axum::routing::get(|| async { axum::Json(serde_json::json!({ "exchanges": [] })) }),
+            )
+            .route(
+                "/_ironwire/status",
+                axum::routing::get(move || {
+                    let status = status.clone();
+                    async move { axum::Json(status) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let s = std::sync::Arc::new(shared());
+        if signed_in {
+            s.settings.lock().unwrap().near_ai_inference = Some(test_near_ai_key());
+        }
+        s.settings.lock().unwrap().cloud_storage_unavailable = storage_unavailable;
+        *s.private_inference_state.lock().unwrap() =
+            crate::daemon::private_inference::PrivateInferenceState::Running { port };
+        s.routing.write().unwrap().ledger = Some(Arc::new(
+            crate::routing::ironwire::IronWireLedger::new(port, "t".to_string()),
+        ));
+        s.refresh_routing().await;
+        let label = s.private_inference_label();
+        assert_eq!(
+            s.private_inference_value()["state"],
+            label,
+            "status and the map must say the same thing"
+        );
+        label
+    }
+
+    /// The bug: signed out of NEAR AI, the proxy leaves `nearai` out of its
+    /// backend list, and the tab said it could not tell which account
+    /// answers, in red. The daemon handed the proxy no key, so it knows:
+    /// the tools' own accounts answer.
+    #[tokio::test]
+    async fn signed_out_with_nearai_absent_from_the_proxy_reads_answered_elsewhere() {
+        let status = serde_json::json!({
+            "balance": {},
+            "backends": [{ "id": "anthropic", "authenticated": true }],
+        });
+        assert_eq!(
+            label_after_status(status, false).await,
+            crate::daemon::private_inference::LABEL_RUNNING_ANSWERED_ELSEWHERE
+        );
+        // No backend list at all, and no key: the same.
+        assert_eq!(
+            label_after_status(serde_json::json!({ "balance": {} }), false).await,
+            crate::daemon::private_inference::LABEL_RUNNING_ANSWERED_ELSEWHERE
+        );
+    }
+
+    /// Signed in, and the proxy does not mention NEAR AI: the key may or may
+    /// not have reached it, so the answer stays "not known" -- never the
+    /// plain running state.
+    #[tokio::test]
+    async fn signed_in_with_nearai_absent_from_the_proxy_stays_unknown() {
+        let status = serde_json::json!({
+            "balance": {},
+            "backends": [{ "id": "anthropic", "authenticated": true }],
+        });
+        assert_eq!(
+            label_after_status(status, true).await,
+            crate::daemon::private_inference::LABEL_RUNNING_DESTINATION_UNKNOWN,
+            "an unread destination must not be reported as the plain running state"
+        );
+    }
+
+    /// No key in the settings because the store holding it could not be
+    /// read is not the same as signed out: the key may be there. Not known.
+    #[tokio::test]
+    async fn an_unreadable_credential_store_with_nearai_absent_stays_unknown() {
+        let status = serde_json::json!({
+            "balance": {},
+            "backends": [{ "id": "anthropic", "authenticated": true }],
+        });
+        assert_eq!(
+            label_after_status_with(status, false, true).await,
+            crate::daemon::private_inference::LABEL_RUNNING_DESTINATION_UNKNOWN,
+            "an unreadable credential store is not a signed-out contributor"
+        );
+    }
+
+    /// Signed in, and the proxy says NEAR AI is authenticated: running.
+    #[tokio::test]
+    async fn signed_in_with_the_proxy_confirming_nearai_reads_running() {
+        let status = serde_json::json!({
+            "balance": {},
+            "backends": [{ "id": "nearai", "authenticated": true }],
+        });
+        assert_eq!(
+            label_after_status(status, true).await,
+            crate::daemon::private_inference::LABEL_RUNNING
+        );
     }
 
     /// `has_rows` only gets reported when it changes, not on every poll.

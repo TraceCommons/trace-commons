@@ -287,9 +287,10 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(source.contains("wallet?.commons ?? \"\""), "an absent word must not draw an unlabelled field")
     }
 
-    /// The window's Inference dot, the map's Private AI segment and the
-    /// inspector's Status row take #1146's rule: on while working, outside
-    /// (red) for every other tone, never grey.
+    /// The window's Inference dot and the map's Private AI segment take
+    /// #1146's rule: on while working, outside (red) for every other tone,
+    /// never grey. The inspector's Status row is the menu bar's word and
+    /// dot instead (`PrivateInferenceMenuBarTests`).
     func test_theDotReadsTheIndicator() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(
@@ -300,7 +301,10 @@ final class InferenceParityTests: XCTestCase {
         }
         let inspector = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(inspector.contains(
-            "status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))"))
+            "Self.statusRow(store.privateAI?.state, copy: copy, calls: model.privateInferenceCalls)"))
+        XCTAssertTrue(inspector.contains("MenuPanelStatus.privateAIDot(menu.tone)"))
+        XCTAssertFalse(inspector.contains("PrivateInferenceIndicator.dotStatus("),
+                       "the Status row paints attention red again")
     }
 
     /// No write without the preview, and a first connect asks the exposure
@@ -577,7 +581,11 @@ final class InferenceParityTests: XCTestCase {
         // while NEAR AI answers (2026-10-28).
         XCTAssertEqual(views.components(separatedBy: "Text(Self.subtitle(copy, state: store.privateAI?.state))").count - 1, 1,
                        "the inspector summary draws the core's subtitle once")
-        XCTAssertTrue(views.contains("GlassStatusLabel(state.line, status: Self.statusDot("))
+        // One word and the menu bar's dot, the full sentence as help and
+        // hint (2026-10-28).
+        XCTAssertTrue(views.contains("GlassStatusLabel(status.word, status: status.dot)"))
+        XCTAssertTrue(views.contains(".help(status.sentence)"))
+        XCTAssertTrue(views.contains(".accessibilityHint(status.sentence)"))
         XCTAssertEqual(views.components(separatedBy: "GlassTabHeading(").count - 1, 1,
                        "the summary draws a row besides Status")
         for needle in ["copy.inspectorCredential", "copy.inspectorConnectedTools", "copy.inspectorConnected,",
