@@ -1955,6 +1955,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "referral_rewards",
         include_str!("../../../../migrations/V142__referral_rewards.sql"),
     ),
+    // V143: the referral earning promise as 2208 hours, the same instant in
+    // every session time zone.
+    (
+        143,
+        "referral_earn_promise_in_hours",
+        include_str!("../../../../migrations/V143__referral_earn_promise_in_hours.sql"),
+    ),
 ];
 
 /// Shared by verified claim issuance and the explicit historical repair.

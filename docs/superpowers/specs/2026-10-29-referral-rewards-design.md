@@ -145,7 +145,8 @@ before `earn_until`, and whose referral is not voided:
 
 `earn_until = referee_account_created_at + TRACE_COMMONS_REFERRAL_EARN_DAYS
 days`, stamped on the attribution when the code is applied (V142 checks it
-is at least 92 days after creation). The period in force is the later of
+is at least 92 days after creation; V143 states that as 2208 hours, so the
+check does not move with the session time zone). The period in force is the later of
 the stamped end and the end under the current setting, so raising the
 setting extends every live referral without a data change, and lowering it
 affects only referrals applied afterwards: a promise already made is never
