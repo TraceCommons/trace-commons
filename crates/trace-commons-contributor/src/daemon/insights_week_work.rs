@@ -479,8 +479,7 @@ fn week_work(
     catalog: &PricingCatalog,
     week_start: NaiveDate,
     tz: &FixedOffset,
-    resumes: &[ClaudeResume],
-    routed: &BTreeMap<String, NearAiRoute>,
+    (resumes, routed): (&[ClaudeResume], &BTreeMap<String, NearAiRoute>),
     tables: &mut BTreeSet<PricingTableRef>,
 ) -> WeekWork {
     let counted = counted_claude_turns(Feed::CounterPass, inputs, week_start, tz);
@@ -611,8 +610,7 @@ pub(crate) fn work_value(
         catalog,
         week_start,
         &tz,
-        &resumes,
-        routed,
+        (&resumes, routed),
         &mut tables,
     );
     let last_start = week_start - Duration::days(7);
@@ -623,8 +621,7 @@ pub(crate) fn work_value(
             catalog,
             last_start,
             &tz,
-            &resumes,
-            routed,
+            (&resumes, routed),
             &mut tables,
         )
     });

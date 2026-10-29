@@ -784,10 +784,8 @@ pub fn claude_resumes(sessions: &[SessionInput]) -> Vec<ClaudeResume> {
             let y_len = keys[y].as_ref().map_or(0, BTreeSet::len);
             let y_in_x = count == y_len;
             let x_in_y = count == x_keys.len();
-            if y_in_x && (!x_in_y || rank(y) < rank(x)) {
-                if best.is_none_or(|(_, len)| y_len > len) {
-                    best = Some((y, y_len));
-                }
+            if y_in_x && (!x_in_y || rank(y) < rank(x)) && best.is_none_or(|(_, len)| y_len > len) {
+                best = Some((y, y_len));
             }
             if x_in_y && (!y_in_x || rank(x) < rank(y)) {
                 out[x].continued = true;
