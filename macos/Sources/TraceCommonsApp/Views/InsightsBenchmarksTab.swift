@@ -125,10 +125,6 @@ enum InsightsBenchmarkWords {
                 "first": tip.better ?? "", "second": tip.worse ?? "",
                 "x": ratio.formatted(.number.precision(.fractionLength(0...1))),
             ])
-        case "rereads":
-            return InsightsOverviewWords.fill(text("analytics_bench_tip_rereads", copy), [
-                "k": String(tip.sessionsWith ?? 0), "n": String(tip.sessions ?? 0),
-            ])
         default:
             return nil
         }

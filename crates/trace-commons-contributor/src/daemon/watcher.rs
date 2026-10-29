@@ -258,7 +258,8 @@ fn tick_over(
 }
 
 /// The Insights counter pass (feed T), gated on the `insights_counter_pass`
-/// setting (owner decision D4, open). Off, it makes no job and nothing is
+/// setting (on by default; product owner, 2026-10-29). Off, it makes no job
+/// and nothing is
 /// read. On, it collects every Claude Code and Codex session this pass
 /// discovered for `insights_week`, which reads only quiet sessions whose
 /// rows are missing or stale, within a per-poll budget. It is not tied to
@@ -2805,9 +2806,10 @@ mod tests {
         assert_eq!(f.states(), vec![QueueState::Pending]);
     }
 
-    /// Insights feed T (owner decision D4, open): with the setting on, a
-    /// full pass stores counter rows for quiet sessions, leaving out a Never
-    /// folder; with it off, nothing is read and no key is made.
+    /// Insights feed T (on by default; product owner, 2026-10-29): with the
+    /// setting on, a full pass stores counter rows for quiet sessions,
+    /// leaving out a Never folder; switched off, nothing is read and no key
+    /// is made.
     #[tokio::test]
     async fn the_counter_pass_runs_only_when_switched_on_and_skips_never_folders() {
         let f = WatcherFixture::new();
@@ -2828,6 +2830,7 @@ mod tests {
                 .clone()
         };
 
+        f.shared.settings.lock().unwrap().insights_counter_pass = false;
         f.settle(later).await;
         assert!(
             !f.shared

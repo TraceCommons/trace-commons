@@ -96,12 +96,37 @@ pub struct GoalState {
 struct GoalFile {
     schema: String,
     next_id: u64,
+    #[serde(deserialize_with = "goals_without_retired_kinds")]
     goals: Vec<StoredGoal>,
     lever_dismissals: Vec<LeverDismissal>,
     lever_reenables: Vec<LeverReenable>,
     #[serde(default)]
     lever_card_off: bool,
     recap_opened_week: Option<NaiveDate>,
+}
+
+/// Goal kinds that left Insights (product owner, 2026-10-29). A file written
+/// before that still holds them; they are dropped on read, and the file is
+/// written without them on the next change, so they never fail the store.
+const RETIRED_GOAL_KINDS: [&str; 2] = ["repeated_reads_under", "long_context_under"];
+
+fn goals_without_retired_kinds<'de, D>(deserializer: D) -> Result<Vec<StoredGoal>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut goals = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let retired = entry
+            .get("goal")
+            .and_then(|goal| goal.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| RETIRED_GOAL_KINDS.contains(&kind));
+        if !retired {
+            goals.push(serde_json::from_value(entry).map_err(serde::de::Error::custom)?);
+        }
+    }
+    Ok(goals)
 }
 
 impl GoalFile {
@@ -121,9 +146,7 @@ impl GoalFile {
 pub fn validate_goal(goal: &Goal) -> Result<(), GoalStoreError> {
     let valid = match goal {
         Goal::CacheShareAtLeast { permille, .. } => (1..=MAX_PERMILLE).contains(permille),
-        Goal::RepeatedReadsUnder { tokens }
-        | Goal::LongContextUnder { tokens }
-        | Goal::WeeklyTokensUnder { tokens, .. } => *tokens > 0,
+        Goal::WeeklyTokensUnder { tokens, .. } => *tokens > 0,
     };
     valid.then_some(()).ok_or(GoalStoreError::GoalInvalid)
 }
@@ -324,7 +347,10 @@ mod tests {
             .expect("a goal store label")
     }
 
-    const UNDER: Goal = Goal::RepeatedReadsUnder { tokens: 50_000 };
+    const UNDER: Goal = Goal::WeeklyTokensUnder {
+        source: AnalyticsSource::ClaudeCode,
+        tokens: 50_000,
+    };
 
     #[test]
     fn an_absent_store_reads_empty_and_is_not_created() {
@@ -386,8 +412,6 @@ mod tests {
                 source: AnalyticsSource::Codex,
                 permille: 1_001,
             },
-            Goal::RepeatedReadsUnder { tokens: 0 },
-            Goal::LongContextUnder { tokens: 0 },
             Goal::WeeklyTokensUnder {
                 source: AnalyticsSource::ClaudeCode,
                 tokens: 0,
@@ -590,13 +614,42 @@ mod tests {
         assert!(!store.goal_state().unwrap().lever_card_off);
     }
 
+    /// "Repeated reads under" and "Long context under" left Insights; a file
+    /// that still holds them loads without them and is not unreadable.
+    #[test]
+    fn goals_of_a_retired_kind_are_dropped_and_never_fail_the_store() {
+        let (_dir, store) = store();
+        std::fs::write(
+            store.dir.join(GOALS_FILE),
+            br#"{"schema":"trace_commons.insights_goals.v1","next_id":3,"goals":[{"id":"goal-1","goal":{"kind":"repeated_reads_under","tokens":50000}},{"id":"goal-2","goal":{"kind":"weekly_tokens_under","source":"codex","tokens":9000}},{"id":"goal-3","goal":{"kind":"long_context_under","tokens":0}}],"lever_dismissals":[],"lever_reenables":[],"recap_opened_week":null}"#,
+        )
+        .unwrap();
+        let state = store.goal_state().unwrap();
+        assert_eq!(
+            state.goals,
+            vec![StoredGoal {
+                id: "goal-2".to_owned(),
+                goal: Goal::WeeklyTokensUnder {
+                    source: AnalyticsSource::Codex,
+                    tokens: 9_000
+                }
+            }]
+        );
+        // A write succeeds and leaves the file without them.
+        let state = store.goal_set(None, UNDER).unwrap();
+        assert_eq!(state.goals.len(), 2);
+        let written = std::fs::read_to_string(store.dir.join(GOALS_FILE)).unwrap();
+        assert!(!written.contains("repeated_reads_under"));
+        assert!(!written.contains("long_context_under"));
+    }
+
     #[test]
     fn an_unreadable_file_is_an_error_and_is_never_replaced() {
         let (_dir, store) = store();
         for bytes in [
             &b"not json"[..],
             br#"{"schema":"other","next_id":0,"goals":[],"lever_dismissals":[],"lever_reenables":[],"recap_opened_week":null}"#,
-            br#"{"schema":"trace_commons.insights_goals.v1","next_id":0,"goals":[{"id":"goal-1","goal":{"kind":"long_context_under","tokens":0}}],"lever_dismissals":[],"lever_reenables":[],"recap_opened_week":null}"#,
+            br#"{"schema":"trace_commons.insights_goals.v1","next_id":0,"goals":[{"id":"goal-1","goal":{"kind":"weekly_tokens_under","source":"claude_code","tokens":0}}],"lever_dismissals":[],"lever_reenables":[],"recap_opened_week":null}"#,
             br#"{"schema":"trace_commons.insights_goals.v1","next_id":0,"goals":[],"lever_dismissals":[],"lever_reenables":[],"recap_opened_week":null,"path":"/x"}"#,
         ] {
             std::fs::write(store.dir.join(GOALS_FILE), bytes).unwrap();

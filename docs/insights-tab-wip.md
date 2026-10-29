@@ -52,7 +52,7 @@ Analyze asks you to **pick a session file by hand** (`~/.claude/projects/<folder
 - It never runs on Never folders, nothing goes over the network, and no file path is sent to the app.
 - A session the daemon can't analyze (over the core's size limit, or a Codex file without exactly one session) says so in place of the button.
 
-**"Choose file" stays.** Analyze & save needs watched-folder counting, which is off by default, a running daemon and the standard store. Without them (and in sample data mode) Choose file is the only way to add a trace, so it's always on Analyze. The line under Analyze's title names only buttons you can see: "Open a trace in Sessions and choose Analyze & save" only while Sessions offers it, otherwise the old "Choose a file to analyze".
+**"Choose file" stays.** Analyze & save needs watched-folder counting, which is on by default (product owner, 2026-10-29), a running daemon and the standard store. Without them (and in sample data mode) Choose file is the only way to add a trace, so it's always on Analyze. The line under Analyze's title names only buttons you can see: "Open a trace in Sessions and choose Analyze & save" only while Sessions offers it, otherwise the old "Choose a file to analyze".
 
 Known gaps:
 - With a custom `--insights-store` the button is hidden, because the daemon writes only the standard store.

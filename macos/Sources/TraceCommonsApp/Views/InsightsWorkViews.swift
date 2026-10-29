@@ -4,10 +4,10 @@ import TCDesign
 import TCShellCore
 
 /// Overview's week at a glance (product owner, 2026-10-29): AI spend at API
-/// prices, lines accepted, the top model and credits earned, then spend by
-/// model, lines of code accepted and trends. Figures come from
-/// `insights_week`'s `work`; every one is a sum as far as known, read as
-/// "at least" while partial, and the dash when nothing is known.
+/// prices, the top model and credits earned, then spend by model and
+/// trends. Figures come from `insights_week`'s `work`; every one is the sum
+/// as far as known (the coverage line says how many traces that is), and the
+/// dash when nothing is known.
 enum InsightsWorkWords {
     struct ModelRow: Equatable, Identifiable {
         let id: String
@@ -35,43 +35,23 @@ enum InsightsWorkWords {
 
     private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
 
-    /// Spend at list prices: exact, or the known part as "at least".
+    /// Spend at list prices: the sum as far as known, to the cent; a charge
+    /// under a cent keeps `InsightsCreditWords.money`'s digit so it is never
+    /// shown as zero.
     static func spend(_ totals: DaemonData.InsightsWorkTotals?, copy: [String: String]) -> String {
-        guard let totals, totals.pricedSessions > 0 || totals.usdMicrosKnown > 0 else {
+        guard let totals, totals.pricedSessions + (totals.nearAiSessions ?? 0) > 0 || totals.usdMicrosKnown > 0 else {
             return text("analytics_unavailable", copy)
         }
-        return InsightsCreditWords.spend(totals.usdPartial ? nil : totals.usdMicrosKnown,
-                                         known: totals.usdMicrosKnown, partial: totals.usdPartial, copy: copy)
+        return dollars(totals.usdMicrosKnown)
+    }
+
+    static func dollars(_ micros: Int64) -> String {
+        guard micros >= 10_000 else { return InsightsCreditWords.money(UInt64(max(0, micros))) }
+        return (Decimal(micros) / 1_000_000).formatted(Decimal.FormatStyle.Currency(code: "USD")
+            .precision(.fractionLength(2)))
     }
 
     static func count(_ value: Int64) -> String { value.formatted(.number) }
-
-    /// Lines accepted: lines added by edits that landed, "at least" while
-    /// any trace's lines are unknown; the dash with no trace.
-    static func lines(_ totals: DaemonData.InsightsWorkTotals?, copy: [String: String]) -> String {
-        guard let totals, totals.sessions > 0 else { return text("analytics_unavailable", copy) }
-        if totals.linesPartial && totals.linesAddedKnown == 0 { return text("analytics_unavailable", copy) }
-        let figure = count(totals.linesAddedKnown)
-        return totals.linesPartial
-            ? InsightsOverviewWords.fill(text("analytics_usage_at_least", copy), ["x": figure]) : figure
-    }
-
-    /// "+2,610 added · −470 removed".
-    static func lineDetail(_ totals: DaemonData.InsightsWorkTotals, copy: [String: String]) -> String {
-        InsightsOverviewWords.fill(text("analytics_lines_detail", copy),
-                                   ["a": count(totals.linesAddedKnown), "r": count(totals.linesRemovedKnown)])
-    }
-
-    /// The share of known edits kept, "91% · 212 of 233"; `nil` with none known.
-    static func editsAccepted(_ totals: DaemonData.InsightsWorkTotals, copy: [String: String]) -> (String, Double)? {
-        guard totals.editsKnown > 0 else { return nil }
-        let share = Double(totals.editsKeptKnown) / Double(totals.editsKnown)
-        let words = InsightsOverviewWords.fill(text("analytics_edits_accepted_value", copy), [
-            "p": String(Int((share * 100).rounded())), "k": count(totals.editsKeptKnown),
-            "n": count(totals.editsKnown),
-        ])
-        return (words, share)
-    }
 
     /// "▲ 18% vs last week"; `nil` without last week's figure, with no
     /// change, or when either week's figure is only partly known: a minimum
@@ -91,10 +71,6 @@ enum InsightsWorkWords {
         work.week.usdPartial || work.week.pricedSessions == 0 || work.lastWeek?.usdPartial == true
     }
 
-    static func linesPartial(_ work: DaemonData.InsightsWork) -> Bool {
-        work.week.linesPartial || work.lastWeek?.linesPartial == true
-    }
-
     static func toolName(_ tool: String, copy: [String: String]) -> String {
         text("analytics_credit_tool_" + tool, copy)
     }
@@ -106,15 +82,12 @@ enum InsightsWorkWords {
             let share = total > 0 ? Double(model.usdMicrosKnown) / Double(total) : 0
             return ModelRow(id: model.tool + ":" + model.key, label: model.key,
                             tool: toolName(model.tool, copy: copy),
-                            amount: InsightsCreditWords.spend(model.usdPartial ? nil : model.usdMicrosKnown,
-                                                              known: model.usdMicrosKnown,
-                                                              partial: model.usdPartial, copy: copy),
+                            amount: dollars(model.usdMicrosKnown),
                             share: share, percent: "\(Int((share * 100).rounded()))%")
         }
     }
 
-    /// The four changes that matter, largest first: spend, lines, and each
-    /// tool's tokens.
+    /// The changes that matter, largest first: spend and each tool's tokens.
     static func changes(_ work: DaemonData.InsightsWork, tokens: [DaemonData.InsightsWeekChange]?,
                         copy: [String: String]) -> [Change] {
         var changes: [Change] = []
@@ -125,8 +98,6 @@ enum InsightsWorkWords {
         }
         add("spend", text("analytics_tile_spend", copy), work.week.usdMicrosKnown, work.lastWeek?.usdMicrosKnown,
             partial: spendPartial(work))
-        add("lines", text("analytics_tile_lines", copy), work.week.linesAddedKnown, work.lastWeek?.linesAddedKnown,
-            partial: linesPartial(work))
         for change in tokens ?? [] {
             guard let permille = change.permille, permille != 0 else { continue }
             let percent = Int((Double(abs(permille)) / 10).rounded())
@@ -157,7 +128,7 @@ enum InsightsWorkWords {
     }
 }
 
-/// The four figures that lead Overview.
+/// The figures that lead Overview.
 struct InsightsWeekTiles: View {
     let work: DaemonData.InsightsWork?
     /// Home's credit tile, the same figure and word (Kristi: Home and
@@ -175,9 +146,6 @@ struct InsightsWeekTiles: View {
                      InsightsWorkWords.change(work.week.usdMicrosKnown, last: work.lastWeek?.usdMicrosKnown,
                                               partial: InsightsWorkWords.spendPartial(work),
                                               copy: copy)?.words ?? text("analytics_tile_api_prices"))
-                tile(text("analytics_tile_lines"), InsightsWorkWords.lines(work.week, copy: copy),
-                     InsightsWorkWords.change(work.week.linesAddedKnown, last: work.lastWeek?.linesAddedKnown,
-                                              partial: InsightsWorkWords.linesPartial(work), copy: copy)?.words)
                 if let top = InsightsWorkWords.modelRows(work, copy: copy).first {
                     tile(text("analytics_tile_top_model"), top.label,
                          InsightsOverviewWords.fill(text("analytics_tile_share_of_spend"), ["p": top.percent
@@ -243,39 +211,6 @@ struct InsightsSpendByModelCard: View {
             }
             Button(text("analytics_tab_benchmarks")) { showBenchmarks() }
                 .buttonStyle(GlassButtonStyle(.link))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .insightsCard()
-    }
-}
-
-/// Lines of code accepted this week, edits kept, and each tool's share.
-struct InsightsLinesCard: View {
-    let work: DaemonData.InsightsWork
-    let copy: [String: String]
-
-    private func text(_ key: String) -> String { copy[key] ?? "" }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            Text(text("analytics_lines_title")).insightsHeading()
-            HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                Text(InsightsWorkWords.lines(work.week, copy: copy)).insightsFigure()
-                if work.week.sessions > 0 {
-                    Text(InsightsWorkWords.lineDetail(work.week, copy: copy)).insightsCaption()
-                }
-            }
-            if let (words, share) = InsightsWorkWords.editsAccepted(work.week, copy: copy) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                    InsightsUsageRow(label: text("analytics_edits_accepted"), value: words)
-                    ProgressView(value: share).tint(GlassTokens.Color.chartSeries1.color)
-                }
-            }
-            ForEach(work.byTool, id: \.key) { tool in
-                InsightsUsageRow(label: InsightsWorkWords.toolName(tool.key ?? "", copy: copy),
-                                 value: InsightsWorkWords.lines(tool, copy: copy))
-            }
-            Text(text("analytics_lines_note")).insightsCaption()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .insightsCard()

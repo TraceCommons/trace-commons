@@ -2772,8 +2772,9 @@ final class AppModel: ObservableObject {
     enum InsightsDaemonSwitch: String, CaseIterable, Hashable, Sendable {
         /// Count Private AI tokens (`insights_ledger_feed`, on by default).
         case ledgerFeed = "insights_ledger_feed"
-        /// Count tokens in watched folders (`insights_counter_pass`, off
-        /// by default; owner decision D4).
+        /// Count tokens in watched folders (`insights_counter_pass`, on by
+        /// default and always on; product owner, 2026-10-29). Settings draws
+        /// no switch for it.
         case counterPass = "insights_counter_pass"
         /// The weekly summary card (`insights_recap_card_enabled`).
         case recapCard = "insights_recap_card_enabled"

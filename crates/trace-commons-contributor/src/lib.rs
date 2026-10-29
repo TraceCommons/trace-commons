@@ -10,6 +10,7 @@ pub mod attach_copy;
 pub mod brand;
 pub mod channel;
 pub mod cli;
+pub mod cli_tool;
 pub mod commands;
 pub mod commons_credit;
 pub mod compute;
