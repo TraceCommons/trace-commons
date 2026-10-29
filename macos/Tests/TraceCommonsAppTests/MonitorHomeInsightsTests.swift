@@ -27,9 +27,10 @@ final class MonitorHomeInsightsTests: XCTestCase {
         XCTAssertTrue(window.contains("InsightsView(storeSelection: insightsStoreSelection"))
         XCTAssertTrue(window.contains("daemon: home.client,"))
         XCTAssertTrue(window.contains("subscriptions: model.subscriptionUsageModel, home: home,"))
-        // The get-started card's buttons open Traces' folder list and
-        // Settings at Projects (product owner, 2026-10-29).
-        XCTAssertTrue(window.contains("navigation.requestSettings(at: .projects)"))
+        // The get-started card's one link opens Traces' folder list; it no
+        // longer offers Settings (product owner, 2026-10-29).
+        XCTAssertTrue(window.contains("tracesPage = .tree"))
+        XCTAssertFalse(window.contains("navigation.requestSettings(at: .projects)"))
         XCTAssertTrue(window.contains("openInsights: { tab = .insights }"))
         XCTAssertTrue(window.contains("insightsStoreSelection: insightsStoreSelection"))
         XCTAssertTrue(window.contains("missionDrafts: missionDrafts"))

@@ -23,10 +23,9 @@ struct InsightsView: View {
     /// Details' drill-down view; a usage card's "By project" opens it on
     /// By project (product owner, 2026-10-28).
     @State private var detailsView: InsightsCreditWords.Dimension = .folder
-    /// The get-started card's buttons: Traces, on its folder list, and
-    /// Settings, at Projects. `nil` draws no button.
+    /// The get-started card's one action: Traces, on its folder list.
+    /// `nil` draws no link.
     private let openTraces: (() -> Void)?
-    private let openSettings: (() -> Void)?
     /// The sample under the get-started card, built the first time it is
     /// drawn (`InsightsSampleModels`); never the person's own models.
     @State private var sample: InsightsSampleModels?
@@ -38,8 +37,7 @@ struct InsightsView: View {
                     daemon: (any DaemonDataClient)? = nil,
                     subscriptions: SubscriptionUsageModel? = nil,
                     home: HomeStore? = nil,
-                    openTraces: (() -> Void)? = nil,
-                    openSettings: (() -> Void)? = nil) {
+                    openTraces: (() -> Void)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
             { @Sendable refresh, interactive, provider, login in
@@ -80,7 +78,7 @@ struct InsightsView: View {
                   subscriptionModel: subscriptions,
                   subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
                   benchmarks: InsightsBenchmarksModel(reader: benchmarks),
-                  home: home, openTraces: openTraces, openSettings: openSettings)
+                  home: home, openTraces: openTraces)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -96,10 +94,8 @@ struct InsightsView: View {
                     subscriptionFallback: SubscriptionUsageModel? = nil,
                     benchmarks: InsightsBenchmarksModel? = nil,
                     home: HomeStore? = nil,
-                    openTraces: (() -> Void)? = nil,
-                    openSettings: (() -> Void)? = nil) {
+                    openTraces: (() -> Void)? = nil) {
         self.openTraces = openTraces
-        self.openSettings = openSettings
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
@@ -152,7 +148,7 @@ struct InsightsView: View {
     }
 
     private var getStarted: InsightsGetStarted {
-        InsightsGetStarted(copy: model.copy, openTraces: openTraces, openSettings: openSettings)
+        InsightsGetStarted(copy: model.copy, openTraces: openTraces)
     }
 
     @ViewBuilder

@@ -73,8 +73,8 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         let copy = try XCTUnwrap(TCInsights.copy())
         for key in ["analytics_start_title", "analytics_start_why", "analytics_start_step_use",
                     "analytics_start_step_use_detail", "analytics_start_step_share",
-                    "analytics_start_step_share_detail", "analytics_start_open_traces",
-                    "analytics_start_open_settings", "analytics_start_step_fill", "analytics_start_step_fill_detail",
+                    "analytics_start_step_share_detail", "analytics_start_choose",
+                    "analytics_start_step_fill", "analytics_start_step_fill_detail",
                     "analytics_sample_banner", "analytics_sample_banner_detail"] {
             XCTAssertFalse((copy[key] ?? "").isEmpty, key)
         }
@@ -347,7 +347,7 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         let subscriptions = SubscriptionUsageModel(reader: { _, _, _, _ in usage })
         let view = InsightsView(storeSelection: .standard, storeCopy: copy, model: model, overviewModel: overview,
                                 initialTab: tab, subscriptionModel: subscriptions, benchmarks: benchmarks,
-                                openTraces: {}, openSettings: {})
+                                openTraces: {})
         let height: CGFloat = width < 900 ? 4_000 : 2_800
         return try await render(AnyView(view), width: width, height: height) {
             model.weekSettled && !overview.busy && overview.shown != nil

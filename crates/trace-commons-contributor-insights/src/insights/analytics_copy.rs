@@ -926,37 +926,38 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "{first} had {x}× fewer edits undone than {second}.",
     ),
     ("analytics_bench_empty", "No traces to compare yet"),
-    // 26. DRAFT, NEEDS APPROVAL: the get-started card and the sample data
-    // under it (product owner, 2026-10-29), on Overview, Breakdown and
-    // Benchmarks while Insights has no trace of the person's own. The
+    // 26. Approved by the product owner in these words (2026-10-29): the
+    // get-started card and the sample data under it, on Overview, Breakdown
+    // and Benchmarks while Insights has no trace of the person's own. The
     // steps name the app's own screens: Traces' folder list and its rules
-    // (Ask / Automatic, `project_copy`), and Settings. `{first}` and
-    // `{second}` are the two folders the app watches; "30 minutes" is the
-    // daemon's default quiet time before a finished trace is sent.
+    // (Ask / Automatic, `project_copy`); the one action, "Choose what to
+    // share", is a text link with an arrow to that list. "Sessions" in the
+    // steps is the owner's word for what Claude Code and Codex record on
+    // this Mac. "30 minutes" is the daemon's default quiet time before a
+    // finished trace is sent.
     (
         "analytics_start_title",
-        "Your Insights fill in from your own traces",
+        "Your Insights grow with your traces",
     ),
     (
         "analytics_start_why",
-        "Keep working as you do now. Once your traces come in, this page shows where your AI spend goes, which models you lean on, and how they compare on your kind of work.",
+        "Keep using AI as you normally do. As your traces come in, you'll see how much you spend, which models you use most, and which work best for your tasks.",
     ),
-    ("analytics_start_step_use", "Use Claude or Codex as usual"),
+    ("analytics_start_step_use", "Keep using Claude or Codex"),
     (
         "analytics_start_step_use_detail",
-        "The app watches {first} and {second} on this Mac.",
+        "Trace Commons automatically detects sessions from Claude Code and Codex on your Mac.",
     ),
-    ("analytics_start_step_share", "Choose a folder to share"),
+    ("analytics_start_step_share", "Choose what to share"),
     (
         "analytics_start_step_share_detail",
-        "In Traces, pick a folder and set its rule to Automatic to send traces on their own, or Ask to review each one first.",
+        "Go to Traces to select a folder. Choose Automatic to share eligible traces without reviewing each one, or Ask to approve them first.",
     ),
-    ("analytics_start_open_traces", "Open Traces"),
-    ("analytics_start_open_settings", "Open Settings"),
-    ("analytics_start_step_fill", "Watch your Insights fill in"),
+    ("analytics_start_choose", "Choose what to share"),
+    ("analytics_start_step_fill", "See your Insights take shape"),
     (
         "analytics_start_step_fill_detail",
-        "Traces are counted here as they come in. In an Automatic folder, a finished trace is sent after about 30 minutes without activity.",
+        "As traces are collected, your Insights update automatically. In Automatic mode, completed sessions are shared after about 30 minutes of inactivity.",
     ),
     // The API-price note when only one tool was used this week.
     ("analytics_tile_api_prices_claude", "Claude at API prices"),

@@ -274,10 +274,6 @@ struct MonitorWindowView: View {
                                  openTraces: {
                                      tab = .traces
                                      tracesPage = .tree
-                                 },
-                                 openSettings: {
-                                     navigation.requestSettings(at: .projects)
-                                     openWindow(id: WindowID.settings)
                                  })
                 }
             } footer: {
