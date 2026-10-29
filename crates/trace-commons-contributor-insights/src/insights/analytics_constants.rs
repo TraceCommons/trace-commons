@@ -251,6 +251,25 @@ pub const COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS: usize = 196_608;
 /// automated tokens. Half the shared cap, so the store grows by at most
 /// half as many rows.
 pub const COUNTER_STORE_MAX_AUTOMATED_SESSIONS: usize = 1_024;
+/// Claude sub-agent transcripts' own allowance (product owner,
+/// 2026-10-29): the transcripts a Claude session's sub-agents and its
+/// workflows' sub-agents wrote (`<session>/subagents/**/agent-*.jsonl`) are
+/// kept as rows of their own, apart from the person's sessions, and count
+/// toward none of the caps above. At most this many are kept, and their
+/// per-turn series at most `..._TURNS` turns and `..._TOOL_CALLS` tool
+/// calls together, the oldest evicted first. They enter only Benchmarks'
+/// sub-agent population: never a week's totals, spend, Sessions or Models.
+///
+/// Sized from the owner's machine on 2026-10-29: 2,672 sub-agent
+/// transcripts in the last four weeks (741 delegated, 1,931 from
+/// workflows), a median of about 45 usage records each. The person's own
+/// session cap, so the store grows by at most as many rows again; a
+/// heavier user keeps their newest three or so weeks of sub-agents.
+pub const COUNTER_STORE_MAX_SPAWNED_SESSIONS: usize = 2_048;
+/// See `COUNTER_STORE_MAX_SPAWNED_SESSIONS`.
+pub const COUNTER_STORE_MAX_SPAWNED_TURNS: usize = 131_072;
+/// See `COUNTER_STORE_MAX_SPAWNED_SESSIONS`.
+pub const COUNTER_STORE_MAX_SPAWNED_TOOL_CALLS: usize = 131_072;
 /// Sessions last written longer ago than this many weeks are not read, and
 /// their rows are dropped: enough for six weekly marks and a four-week
 /// baseline. Owner decision D4, open.
@@ -306,8 +325,10 @@ pub const CLASSIFIER_VERSION: u32 = 1;
 /// collects re-reads each row once, its automation included. 2: Codex
 /// `FileChange` items are read as edits, and a spawned Codex thread is
 /// automated whatever `session_meta` follows its own. 3: Claude `/goal`
-/// goals are kept beside the facts (product owner, 2026-10-29).
-pub const SESSION_FACTS_VERSION: u32 = 3;
+/// goals are kept beside the facts (product owner, 2026-10-29). 4: a
+/// Claude session whose only sub-agents ran in a workflow is marked as
+/// having delegated (`delegated_unread`).
+pub const SESSION_FACTS_VERSION: u32 = 4;
 
 /// Sessions a (task type, model) cell needs before its figure is compared
 /// (spec section 6).
@@ -466,6 +487,9 @@ mod tests {
         };
         assert_eq!(COUNTER_STORE_MAX_AUTOMATED_SESSIONS, 1_024);
         const { assert!(COUNTER_STORE_MAX_AUTOMATED_SESSIONS < COUNTER_STORE_MAX_SESSIONS) };
+        assert_eq!(COUNTER_STORE_MAX_SPAWNED_SESSIONS, 2_048);
+        assert_eq!(COUNTER_STORE_MAX_SPAWNED_TURNS, 131_072);
+        assert_eq!(COUNTER_STORE_MAX_SPAWNED_TOOL_CALLS, 131_072);
         assert_eq!(COUNTER_STORE_KEEP_WEEKS, 13);
         assert_eq!(COUNTER_PASS_MAX_READS_PER_TICK, 16);
         assert_eq!(COUNTER_PASS_MAX_BYTES_PER_TICK, 64 * 1024 * 1024);
@@ -501,7 +525,7 @@ mod tests {
     #[test]
     fn task_classifier_constants() {
         assert_eq!(CLASSIFIER_VERSION, 1);
-        assert_eq!(SESSION_FACTS_VERSION, 3);
+        assert_eq!(SESSION_FACTS_VERSION, 4);
         assert_eq!(DOC_EXTENSIONS, ["md", "mdx", "rst", "adoc"]);
         assert_eq!(DOC_DIRS, ["docs", "doc"]);
         assert_eq!(TEST_DIRS, ["tests", "test", "__tests__", "spec"]);

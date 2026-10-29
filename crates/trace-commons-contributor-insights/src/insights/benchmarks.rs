@@ -127,6 +127,28 @@ impl BenchTool {
     }
 }
 
+/// Which sessions an answer is over (product owner, 2026-10-29): the
+/// person's own, or the transcripts Claude's sub-agents wrote, read as a
+/// population of their own. Never both in one answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchPopulation {
+    #[default]
+    Own,
+    Spawned,
+}
+
+impl BenchPopulation {
+    /// The population for its wire word.
+    pub fn from_wire(wire: &str) -> Option<Self> {
+        match wire {
+            "own" => Some(BenchPopulation::Own),
+            "spawned" => Some(BenchPopulation::Spawned),
+            _ => None,
+        }
+    }
+}
+
 /// Whether config files are most of a session's edited files.
 fn config_dominates(shape: &SessionShape) -> bool {
     let files = shape.edited_files;

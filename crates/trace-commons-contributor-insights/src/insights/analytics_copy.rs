@@ -916,6 +916,16 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "{first} had {x}× fewer edits undone than {second}.",
     ),
     ("analytics_bench_empty", "No traces to compare yet"),
+    // Benchmarks' population picker (product owner, 2026-10-29): the
+    // person's own traces, or Claude's sub-agent transcripts as their own
+    // population. Pending the owner's approval of these words.
+    ("analytics_bench_population", "Traces"),
+    ("analytics_bench_population_own", "Your traces"),
+    ("analytics_bench_population_spawned", "Sub-agents"),
+    (
+        "analytics_bench_intro_spawned",
+        "From {n} Claude sub-agent traces",
+    ),
     // 26. Approved by the product owner in these words (2026-10-29): the
     // get-started card and the sample data under it, on Overview, Breakdown
     // and Benchmarks while Insights has no trace of the person's own. The

@@ -360,7 +360,7 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         let model = InsightsModel(service: emptyStore, weekReader: reader)
         let overview = InsightsOverviewModel(service: emptyStore)
         let bench = benchmarks(state)
-        let benchmarks = InsightsBenchmarksModel(reader: { _ in bench })
+        let benchmarks = InsightsBenchmarksModel(reader: { _, _ in bench })
         let usage = subscriptions(state)
         let subscriptions = SubscriptionUsageModel(reader: { _, _, _, _ in usage })
         let view = InsightsView(storeSelection: .standard, storeCopy: copy, model: model, overviewModel: overview,

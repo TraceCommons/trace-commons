@@ -10,7 +10,7 @@ use super::{
     CounterPass, CounterRow, FEED_COUNTER_PASS, KeyedDigest, NeverFolders, never_digests,
     route_map, unreadable_value,
 };
-use crate::insights::benchmarks::{BenchTool, benchmarks};
+use crate::insights::benchmarks::{BenchPopulation, BenchTool, benchmarks};
 use crate::insights::session_labels::SessionLabel;
 use crate::insights::week_rollup::SessionInput;
 
@@ -20,6 +20,13 @@ impl CounterPass {
     /// the `weeks` ending `now`, for `tool` or both. Gated, joined to the
     /// person's labels and to the route tallies as `model_answers_value`
     /// is; no NEAR AI charge is read.
+    ///
+    /// `population` picks the rows: the person's own sessions, or Claude's
+    /// sub-agent transcripts (`CounterStore::spawned`), never both. A
+    /// sub-agent has no labels of its own and takes its parent's route
+    /// tally: the proxy ledger names a call by the session ID, which a
+    /// sub-agent shares with its parent.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn benchmarks_value(
         &self,
         enabled: bool,
@@ -27,6 +34,7 @@ impl CounterPass {
         routing_available: bool,
         weeks: u32,
         tool: Option<BenchTool>,
+        population: BenchPopulation,
         now: DateTime<Utc>,
     ) -> serde_json::Value {
         if !enabled {
@@ -37,6 +45,28 @@ impl CounterPass {
             Err(reason) => return unreadable_value(reason),
         };
         let (inputs, routes, labels) = match (&key, &store) {
+            (Some(key), Some(store)) if population == BenchPopulation::Spawned => {
+                let never = never_digests(key, never_project_keys);
+                let mut rows: Vec<CounterRow> = store
+                    .spawned
+                    .values()
+                    .filter(|spawned| !never.contains(&spawned.row.project))
+                    .map(|spawned| {
+                        let mut row = spawned.row.clone();
+                        row.harness_session = store
+                            .rows
+                            .get(&spawned.parent)
+                            .and_then(|parent| parent.harness_session);
+                        row
+                    })
+                    .collect();
+                rows.sort_by_key(|row| row.seq);
+                let borrowed: Vec<&CounterRow> = rows.iter().collect();
+                let routes = route_map(&borrowed, &store.routing, routing_available);
+                let inputs: Vec<SessionInput> =
+                    rows.iter().map(|row| row.session_input()).collect();
+                (inputs, routes, BTreeMap::new())
+            }
             (Some(key), Some(store)) => {
                 let never = never_digests(key, never_project_keys);
                 let mut keyed: Vec<(&KeyedDigest, &CounterRow)> = store
@@ -85,6 +115,7 @@ impl CounterPass {
             "window_end": answer.window_end.to_rfc3339(),
             "weeks": answer.weeks,
             "tool": tool,
+            "population": population,
             "pricing": {
                 "basis": crate::insights::session_pricing::PRICING_BASIS_API_LIST,
                 "tables": tables,
@@ -93,6 +124,7 @@ impl CounterPass {
             "min_sessions": answer.min_sessions,
             "categories": answer.categories,
             "left_out": answer.left_out,
+            "delegated": answer.delegated,
         })
     }
 }

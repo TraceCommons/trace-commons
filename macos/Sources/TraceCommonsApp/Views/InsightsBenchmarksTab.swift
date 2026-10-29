@@ -11,7 +11,8 @@ import TCShellCore
 @MainActor
 @Observable
 final class InsightsBenchmarksModel {
-    typealias Reader = @Sendable (Int) async throws -> DaemonData.InsightsBenchmarks
+    /// Weeks, then population (`own` or `spawned`).
+    typealias Reader = @Sendable (Int, String) async throws -> DaemonData.InsightsBenchmarks
 
     private let reader: Reader?
     private(set) var answer: DaemonData.InsightsBenchmarks?
@@ -19,6 +20,9 @@ final class InsightsBenchmarksModel {
     private(set) var busy = false
     /// 4 or 13 weeks.
     var weeks = 4
+    /// `own`, the person's traces, or `spawned`, Claude's sub-agent
+    /// transcripts as their own population (product owner, 2026-10-29).
+    var population = "own"
 
     /// Whether a read has finished at least once, or there is nothing to
     /// read: until then the get-started card is not drawn.
@@ -40,10 +44,10 @@ final class InsightsBenchmarksModel {
     func load() async {
         guard let reader else { settled = true; return }
         generation += 1
-        let mine = generation, asked = weeks
+        let mine = generation, asked = weeks, among = population
         busy = true
         do {
-            let reply = try await reader(asked)
+            let reply = try await reader(asked, among)
             guard mine == generation else { return }
             answer = reply
             failed = false
@@ -75,6 +79,19 @@ enum InsightsBenchmarkWords {
     private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
 
     static func name(_ key: String, copy: [String: String]) -> String { text("analytics_bench_cat_" + key, copy) }
+
+    /// The populations the picker offers, in its order.
+    static let populations = ["own", "spawned"]
+
+    static func population(_ key: String, copy: [String: String]) -> String {
+        text("analytics_bench_population_" + key, copy)
+    }
+
+    /// The heading over the cards: how many traces, and whose.
+    static func intro(_ count: Int, population: String, copy: [String: String]) -> String {
+        let key = population == "spawned" ? "analytics_bench_intro_spawned" : "analytics_bench_intro"
+        return InsightsOverviewWords.fill(text(key, copy), ["n": String(count)])
+    }
 
     static func traces(_ count: Int, copy: [String: String]) -> String {
         InsightsOverviewWords.fill(text("analytics_bench_traces", copy), ["n": String(count)])
@@ -177,7 +194,7 @@ struct InsightsBenchmarksTab: View {
             }
             if model.busy { GlassSpinner() }
         }
-        .task(id: model.weeks) { await model.load() }
+        .task(id: "\(model.weeks) \(model.population)") { await model.load() }
     }
 
     @ViewBuilder private var header: some View {
@@ -185,10 +202,16 @@ struct InsightsBenchmarksTab: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
                 if getStarted == nil, let sessions = model.answer?.sessions {
-                    Text(InsightsOverviewWords.fill(text("analytics_bench_intro"), ["n": String(sessions)]))
+                    Text(InsightsBenchmarkWords.intro(sessions, population: model.answer?.population ?? "own",
+                                                      copy: copy))
                         .insightsHeading()
                 }
                 Spacer(minLength: 0)
+                GlassSelect(text("analytics_bench_population"), selection: $model.population,
+                            options: InsightsBenchmarkWords.populations.map {
+                    GlassPickerOption(InsightsBenchmarkWords.population($0, copy: copy), value: $0)
+                })
+                .fixedSize()
                 GlassSelect(text("analytics_tab_benchmarks"), selection: $model.weeks, options: [4, 13].map {
                     GlassPickerOption(InsightsOverviewWords.fill(text("analytics_bench_weeks"), ["n": String($0)]),
                                       value: $0)

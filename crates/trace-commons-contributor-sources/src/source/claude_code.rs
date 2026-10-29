@@ -780,16 +780,19 @@ pub fn spawned_transcripts_for(parent: &Path) -> Vec<SpawnedTranscript> {
     let (Some(stem), Some(subagents_dir)) = (parent.file_stem(), subagents_dir_for(parent)) else {
         return out;
     };
-    let real_dir = |dir: &Path| {
-        std::fs::symlink_metadata(dir).is_ok_and(|md| md.is_dir())
-    };
+    let real_dir = |dir: &Path| std::fs::symlink_metadata(dir).is_ok_and(|md| md.is_dir());
     if !real_dir(&subagents_dir) {
         return out;
     }
     let session_uuid = stem.to_string_lossy().into_owned();
     let mut push = |found: Vec<GroupMember>, kind: SpawnedKind| {
         let mut found = found;
-        found.sort_by(|a, b| a.path.as_os_str().as_encoded_bytes().cmp(b.path.as_os_str().as_encoded_bytes()));
+        found.sort_by(|a, b| {
+            a.path
+                .as_os_str()
+                .as_encoded_bytes()
+                .cmp(b.path.as_os_str().as_encoded_bytes())
+        });
         out.extend(found.into_iter().map(|m| SpawnedTranscript {
             path: m.path,
             kind,
@@ -2462,7 +2465,10 @@ mod tests {
     /// Places a workflow sub-agent transcript, and the workflow's journal,
     /// under `parent`'s `subagents/workflows/<run>/`.
     fn add_workflow_member(parent: &Path, run: &str, name: &str, session: &str) -> PathBuf {
-        let dir = subagents_dir_for(parent).unwrap().join("workflows").join(run);
+        let dir = subagents_dir_for(parent)
+            .unwrap()
+            .join("workflows")
+            .join(run);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("journal.jsonl"), "{}\n").unwrap();
         let path = dir.join(name);
@@ -2476,7 +2482,12 @@ mod tests {
         let (_root, parent) = group_fixture(&[("agent-a.jsonl", "a"), ("agent-b.jsonl", "b")]);
         let workflow = add_workflow_member(&parent, "run-1", "agent-w.jsonl", session);
         // Another session's transcript planted in this one's workflows.
-        add_workflow_member(&parent, "run-2", "agent-x.jsonl", "33333333-3333-3333-3333-333333333333");
+        add_workflow_member(
+            &parent,
+            "run-2",
+            "agent-x.jsonl",
+            "33333333-3333-3333-3333-333333333333",
+        );
 
         // The upload group is unchanged: flat members only.
         let (members, excluded) = group_members_for(&parent);
@@ -2486,7 +2497,12 @@ mod tests {
         let spawned = spawned_transcripts_for(&parent);
         let kinds: Vec<(SpawnedKind, String)> = spawned
             .iter()
-            .map(|t| (t.kind, t.path.file_name().unwrap().to_string_lossy().into_owned()))
+            .map(|t| {
+                (
+                    t.kind,
+                    t.path.file_name().unwrap().to_string_lossy().into_owned(),
+                )
+            })
             .collect();
         assert_eq!(
             kinds,
@@ -2499,6 +2515,34 @@ mod tests {
         let w = spawned.iter().find(|t| t.path == workflow).unwrap();
         assert_eq!(w.size_bytes, std::fs::metadata(&workflow).unwrap().len());
         assert!(w.modified_at.is_some());
+    }
+
+    /// Uploads are untouched by Insights reading workflow sub-agents: a
+    /// `workflows/` directory changes neither the discovered ref (size,
+    /// member count) nor the loaded group's hash, so queue entry and
+    /// submission ids, and any approval keyed on them, stay the same.
+    #[test]
+    fn a_workflow_directory_changes_neither_the_offered_group_nor_its_hash() {
+        let session = "22222222-2222-2222-2222-222222222222";
+        let (root, parent) = group_fixture(&[("agent-a.jsonl", "a")]);
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        let before = source.discover().unwrap();
+        let hash_before = load_group(&parent, GROUP_RAW_BYTE_BUDGET)
+            .unwrap()
+            .session_hash;
+        // Keep the parent's mtime from moving the ref.
+        add_workflow_member(&parent, "run-1", "agent-w.jsonl", session);
+        let after = source.discover().unwrap();
+        let hash_after = load_group(&parent, GROUP_RAW_BYTE_BUDGET)
+            .unwrap()
+            .session_hash;
+        assert_eq!(before.len(), 1);
+        assert_eq!(after.len(), 1, "a workflow transcript is never its own ref");
+        assert_eq!(after[0].group_member_count, before[0].group_member_count);
+        assert_eq!(after[0].size_bytes, before[0].size_bytes);
+        assert_eq!(after[0].path, before[0].path);
+        assert_eq!(hash_after, hash_before);
+        assert_eq!(spawned_transcripts_for(&parent).len(), 2);
     }
 
     #[test]
@@ -2521,7 +2565,11 @@ mod tests {
         symlink(outside.path(), workflows.join("run-link")).unwrap();
         let run = workflows.join("run-1");
         std::fs::create_dir_all(&run).unwrap();
-        symlink(outside.path().join("agent-o.jsonl"), run.join("agent-l.jsonl")).unwrap();
+        symlink(
+            outside.path().join("agent-o.jsonl"),
+            run.join("agent-l.jsonl"),
+        )
+        .unwrap();
         let names: Vec<String> = spawned_transcripts_for(&parent)
             .iter()
             .map(|t| t.path.file_name().unwrap().to_string_lossy().into_owned())
