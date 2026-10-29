@@ -95,4 +95,33 @@ final class InsightsWorkTests: XCTestCase {
             XCTAssertFalse(InsightsBenchmarkWords.name(key, copy: copy).isEmpty, key)
         }
     }
+
+    /// Breakdown's By project carries Claude and Codex spend at API prices
+    /// and lines accepted, and the largest spend leads.
+    func testByProjectAddsSpendAndLinesFromWork() throws {
+        let copy = try words()
+        var object = try InsightsSessionRouteTests.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        rows[0]["folder"] = "app"
+        rows[1]["folder"] = "site"
+        rollup["sessions"] = rows
+        object["rollup"] = rollup
+        func totals(_ key: String, usd: Int, lines: Int) -> [String: Any] {
+            ["key": key, "sessions": 1, "priced_sessions": 1, "unpriced_sessions": 0, "usd_micros_known": usd,
+             "usd_partial": false, "cache_savings_usd_micros_known": 0, "lines_added_known": lines,
+             "lines_removed_known": 0, "lines_partial": false, "edits_known": 0, "edits_undone_known": 0,
+             "edits_denied_known": 0, "edits_partial": false]
+        }
+        var week = totals("week", usd: 2_100_000, lines: 130)
+        week["key"] = NSNull()
+        object["work"] = ["basis": "api_list", "week": week, "by_tool": [Any](), "by_model": [Any](),
+                          "by_folder": [totals("site", usd: 2_000_000, lines: 120), totals("app", usd: 100_000, lines: 10)],
+                          "by_day": [Any]()]
+        let decoded = try InsightsSessionRouteTests.decode(object)
+        let table = InsightsProjectRows.rows(decoded, copy: copy)
+        XCTAssertEqual(table.first?.label, "site", "the largest spend leads")
+        XCTAssertEqual(table.first?.spend, "$2.00")
+        XCTAssertEqual(table.first?.lines, "120")
+    }
 }
