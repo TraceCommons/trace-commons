@@ -57,11 +57,17 @@ pub const ERR_SESSION_TOO_LARGE: &str = "insights-session-too-large";
 /// `session_meta`), which the analysis refuses.
 pub const ERR_SESSION_NOT_ONE_SESSION: &str = "insights-session-not-one-session";
 
+/// A session only the counter pass reads (a compressed Codex rollout, or
+/// one in a NEAR AI managed profile), which Analyze & save does not find
+/// among the watched sessions.
+pub const ERR_SESSION_INSIGHTS_ONLY: &str = "insights-session-insights-only";
+
 /// The answer for a file the analysis refuses, by why.
 fn not_analyzable(reason: NotAnalyzable) -> &'static str {
     match reason {
         NotAnalyzable::TooLarge => ERR_SESSION_TOO_LARGE,
         NotAnalyzable::NotOneSession => ERR_SESSION_NOT_ONE_SESSION,
+        NotAnalyzable::InsightsOnly => ERR_SESSION_INSIGHTS_ONLY,
     }
 }
 

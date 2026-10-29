@@ -45,6 +45,16 @@ impl TraceSource for MultiRootSource {
         Ok(found)
     }
 
+    fn discover_insights_only(&self) -> anyhow::Result<Vec<SessionRef>> {
+        let mut found = Vec::new();
+        for source in &self.sources {
+            found.extend(source.discover_insights_only()?);
+        }
+        found.sort_by(|a, b| a.path.cmp(&b.path));
+        found.dedup_by(|a, b| a.path == b.path);
+        Ok(found)
+    }
+
     fn load(&self, session: &SessionRef) -> anyhow::Result<SessionTranscript> {
         self.owner(&session.path)
             .ok_or_else(|| anyhow::anyhow!("native-session-outside-roots"))?

@@ -4590,7 +4590,26 @@ that was running or waiting at an `unenroll` writes nothing afterwards and
 makes no new key. No event marks a pass's end: `insights_week` answers from
 whatever the last finished pass stored, with its `updated_at`.
 It is not tied to whether a session was offered, sent, kept or
-declined. A session in a folder that is Never, by its own rule or a global
+declined.
+
+Beside the sessions a poll discovers, the pass reads one kind that nothing
+offers, queues or uploads, and that `insights_analyze_session` does not
+find (it lists with `analyzable: false`):
+- Codex's compressed rollouts. Codex replaces an older
+  `rollout-<...>.jsonl` with `rollout-<...>.jsonl.zst` of the same name and
+  last write, in the same folder. The pass streams it through a zstd
+  decoder, never to memory whole or to a file, and applies its limits to
+  the decompressed bytes: the 16 MB line limit below, and the per-pass
+  budget charged at the size the file's frame records. A file's output is
+  also bounded at 512 MiB, and at 64 times the file's own size past
+  16 MiB; a decoder window over 16 MiB is refused. A compressed file that
+  is corrupt, truncated or past a bound is stored as unknown, never as
+  zero, and is not read again until it changes. Its row is keyed by the
+  plain name it replaced, so a row first read from the plain file is
+  replaced when Codex compresses it, never doubled; while both are on disk
+  only the plain file is read.
+
+A session in a folder that is Never, by its own rule or a global
 Never contribution override (every folder while one is in force), is not
 read, and rows already stored for one are dropped by the next pass and left
 out of every answer at once. Claude Code rows are per turn; Codex rows hold the change
@@ -5447,7 +5466,8 @@ reaches the network.
   than 16 MiB (as the pass found it, or grown past it since) is
   `insights-session-too-large`; a Codex file that does not record exactly
   one `session_meta` (as the pass found it) is
-  `insights-session-not-one-session`. Such a row lists with `analyzable:
+  `insights-session-not-one-session`; a file only the counter pass reads
+  (a compressed Codex rollout) is `insights-session-insights-only`. Such a row lists with `analyzable:
   false`.
 - Any other analysis that fails is `unavailable` with the core's fixed
   label, never a path.

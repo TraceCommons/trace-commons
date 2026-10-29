@@ -2,6 +2,9 @@
 //!
 //! Reads `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`
 //! session files and maps them into the shared `SessionTranscript` model.
+//! Codex compresses older rollouts in place to `<same name>.jsonl.zst`;
+//! those are listed only by `discover_insights_only`, for the Insights
+//! counter pass, and are never offered for contribution (see `compressed`).
 //! See `docs/superpowers/plans/` (Task 8) for the format facts and mapping
 //! rules; `Opaque` events (covering `event_msg`, `web_search_call`, and any
 //! unknown payload/record type) carry only a record-type marker, never a
@@ -42,6 +45,26 @@ impl TraceSource for CodexSource {
     /// The same walk, with no `peek_cwd`: every ref's `cwd` is `None`.
     fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
         self.discover_with(Peek::Nothing)
+    }
+
+    /// Compressed rollouts, for the Insights counter pass only.
+    fn discover_insights_only(&self) -> anyhow::Result<Vec<SessionRef>> {
+        let mut sessions = Vec::new();
+        let mut skipped = 0usize;
+        collect_rollout_files(
+            &self.root,
+            Peek::Cwd,
+            is_compressed_rollout_file_name,
+            &mut sessions,
+            &mut skipped,
+        )?;
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                "skipped unreadable compressed codex session entries during discovery"
+            );
+        }
+        Ok(sessions)
     }
 
     fn load(&self, r: &SessionRef) -> anyhow::Result<SessionTranscript> {
@@ -88,6 +111,14 @@ pub(crate) fn is_rollout_file_name(file_name: &str) -> bool {
     file_name.starts_with("rollout-") && file_name.ends_with(".jsonl")
 }
 
+/// A rollout Codex compressed in place: `rollout-<...>.jsonl.zst`. Read by
+/// the Insights counter pass only; `is_rollout_file_name` never matches one.
+pub(crate) fn is_compressed_rollout_file_name(file_name: &str) -> bool {
+    file_name
+        .strip_suffix(super::compressed::COMPRESSED_SUFFIX)
+        .is_some_and(is_rollout_file_name)
+}
+
 /// Whether discovery may open a rollout to learn its cwd.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Peek {
@@ -99,7 +130,13 @@ impl CodexSource {
     fn discover_with(&self, peek: Peek) -> anyhow::Result<Vec<SessionRef>> {
         let mut sessions = Vec::new();
         let mut skipped = 0usize;
-        collect_rollout_files(&self.root, peek, &mut sessions, &mut skipped)?;
+        collect_rollout_files(
+            &self.root,
+            peek,
+            is_rollout_file_name,
+            &mut sessions,
+            &mut skipped,
+        )?;
         if skipped > 0 {
             tracing::warn!(
                 skipped,
@@ -113,6 +150,7 @@ impl CodexSource {
 fn collect_rollout_files(
     dir: &Path,
     peek: Peek,
+    matches: fn(&str) -> bool,
     sessions: &mut Vec<SessionRef>,
     skipped: &mut usize,
 ) -> anyhow::Result<()> {
@@ -138,14 +176,14 @@ fn collect_rollout_files(
             }
         };
         if file_type.is_dir() {
-            collect_rollout_files(&path, peek, sessions, skipped)?;
+            collect_rollout_files(&path, peek, matches, sessions, skipped)?;
             continue;
         }
         let file_name = entry.file_name();
         let Some(file_name) = file_name.to_str() else {
             continue;
         };
-        if !is_rollout_file_name(file_name) {
+        if !matches(file_name) {
             continue;
         }
         if let Some(session) = rollout_session_ref(path, peek, skipped) {
@@ -235,8 +273,9 @@ fn rollout_session_ref(path: PathBuf, peek: Peek, skipped: &mut usize) -> Option
 /// said. Prefer `peek_cwd_memoized` from discovery; this is the uncached
 /// read behind it.
 fn peek_cwd(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
+    // Decompressed for a compressed rollout, and bounded like every read
+    // of one.
+    let mut reader = super::compressed::open_lines(path).ok()?;
     let mut buf = Vec::new();
     loop {
         buf.clear();
@@ -725,6 +764,44 @@ mod tests {
             .parent()
             .expect("crates/ directory")
             .join("trace-commons-contributor/fixtures/codex")
+    }
+
+    /// Codex compresses older rollouts in place. `discover` (what is offered
+    /// for contribution) never lists one, and no path maps to one; only
+    /// `discover_insights_only` does, with its cwd read through the decoder.
+    #[test]
+    fn compressed_rollouts_are_listed_for_insights_only() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let plain = day.join("rollout-2026-08-20T10-00-00-aaa.jsonl");
+        std::fs::write(&plain, "{}\n").unwrap();
+        let meta = "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/w/proj\"}}\n";
+        let compressed = day.join("rollout-2026-08-20T09-00-00-bbb.jsonl.zst");
+        std::fs::write(&compressed, zstd::encode_all(meta.as_bytes(), 3).unwrap()).unwrap();
+        std::fs::write(day.join("notes.jsonl.zst"), b"x").unwrap();
+        let source = CodexSource::new(root.path().to_path_buf());
+
+        let offered: Vec<PathBuf> = source
+            .discover()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert_eq!(offered, vec![plain.clone()]);
+        assert_eq!(source.session_for_path(&compressed), None);
+        assert!(source.session_at(&compressed).unwrap().is_none());
+
+        let insights = source.discover_insights_only().unwrap();
+        assert_eq!(insights.len(), 1);
+        assert_eq!(insights[0].path, compressed);
+        assert_eq!(insights[0].source, SOURCE_CODEX);
+        assert_eq!(insights[0].cwd.as_deref(), Some("/w/proj"));
+        assert_eq!(insights[0].project.as_deref(), Some("proj"));
+        assert_eq!(
+            insights[0].size_bytes,
+            std::fs::metadata(&compressed).unwrap().len()
+        );
     }
 
     /// A rollout is its own session, and nothing else in the tree is one.

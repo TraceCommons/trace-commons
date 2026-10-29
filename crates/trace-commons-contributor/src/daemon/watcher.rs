@@ -277,6 +277,11 @@ fn tick_over(
 /// session whose source gave no group time; a session's folder is resolved
 /// later, on the pass's thread, and only for a session about to be read or
 /// one that may hold a Never folder's route tally.
+///
+/// Beside the tick's own listing, the job takes each Codex source's
+/// compressed rollouts (`.jsonl.zst`, which Codex leaves in place of older
+/// rollouts; `TraceSource::discover_insights_only`), which only this pass
+/// reads: they are never offered, queued or uploaded.
 fn counter_pass_job(
     shared: &DaemonShared,
     now: DateTime<Utc>,
@@ -290,8 +295,7 @@ fn counter_pass_job(
     if !enabled {
         return None;
     }
-    let mut origins: Vec<(usize, SessionRef, Observation)> = Vec::new();
-    let mut candidates = Vec::new();
+    let mut job = CounterCandidates::default();
     for ((source, refs), &source_index) in discovered.iter().zip(source_indices) {
         if !matches!(
             source.name(),
@@ -301,34 +305,17 @@ fn counter_pass_job(
         }
         // `source_index` is which of the tick's own sources this is, so the
         // job can own it.
-        for session_ref in refs {
-            let modified_at = match session_ref.group_modified_at {
-                Some(at) => at,
-                None => match std::fs::metadata(&session_ref.path).and_then(|m| m.modified()) {
-                    Ok(at) => DateTime::<Utc>::from(at),
-                    Err(_) => continue,
-                },
-            };
-            candidates.push(super::insights_week::CounterCandidate {
-                origin: origins.len(),
-                source: session_ref.source,
-                path: session_ref.path.clone(),
-                size_bytes: session_ref.size_bytes,
-                modified_at,
-                started_at: session_ref.started_at,
-                group_member_count: session_ref.group_member_count,
-            });
-            origins.push((
-                source_index,
-                session_ref.clone(),
-                Observation {
-                    path: session_ref.path.clone(),
-                    size_bytes: session_ref.size_bytes,
-                    modified_at,
-                },
-            ));
+        job.add(source_index, refs, false);
+        // Compressed rollouts: an error lists none, and leaves the tick's
+        // own listing as it is.
+        if let Ok(compressed) = source.discover_insights_only() {
+            job.add(source_index, &compressed, true);
         }
     }
+    let CounterCandidates {
+        candidates,
+        origins,
+    } = job;
     let never_project_keys =
         super::insights_week::never_folders(&shared.policy.lock().expect("policy lock"));
     Some(CounterJobDraft {
@@ -340,12 +327,63 @@ fn counter_pass_job(
     })
 }
 
+/// Where one counter-pass candidate came from.
+struct CounterOrigin {
+    /// Its source: an index into the tick's sources.
+    source_index: usize,
+    session_ref: SessionRef,
+    observation: Observation,
+    /// Read by the counter pass alone (a compressed rollout): its folder is resolved without the watcher's
+    /// cwd cache, which counts the sessions the watcher offers per folder.
+    insights_only: bool,
+}
+
+/// The candidates a counter-pass job is built from, and their origins.
+#[derive(Default)]
+struct CounterCandidates {
+    candidates: Vec<super::insights_week::CounterCandidate>,
+    origins: Vec<CounterOrigin>,
+}
+
+impl CounterCandidates {
+    fn add(&mut self, source_index: usize, refs: &[SessionRef], insights_only: bool) {
+        for session_ref in refs {
+            let modified_at = match session_ref.group_modified_at {
+                Some(at) => at,
+                None => match std::fs::metadata(&session_ref.path).and_then(|m| m.modified()) {
+                    Ok(at) => DateTime::<Utc>::from(at),
+                    Err(_) => continue,
+                },
+            };
+            self.candidates
+                .push(super::insights_week::CounterCandidate {
+                    origin: self.origins.len(),
+                    source: session_ref.source,
+                    path: session_ref.path.clone(),
+                    size_bytes: session_ref.size_bytes,
+                    modified_at,
+                    started_at: session_ref.started_at,
+                    group_member_count: session_ref.group_member_count,
+                });
+            self.origins.push(CounterOrigin {
+                source_index,
+                session_ref: session_ref.clone(),
+                observation: Observation {
+                    path: session_ref.path.clone(),
+                    size_bytes: session_ref.size_bytes,
+                    modified_at,
+                },
+                insights_only,
+            });
+        }
+    }
+}
+
 /// A counter-pass job before the tick's sources move into it.
 struct CounterJobDraft {
     candidates: Vec<super::insights_week::CounterCandidate>,
-    /// Per candidate (`CounterCandidate::origin`): the index of its source
-    /// in the tick's sources, its session and its observation.
-    origins: Vec<(usize, SessionRef, Observation)>,
+    /// Per candidate (`CounterCandidate::origin`).
+    origins: Vec<CounterOrigin>,
     never_project_keys: super::insights_week::NeverFolders,
     now: DateTime<Utc>,
     quiescence_secs: u64,
@@ -362,8 +400,22 @@ impl CounterJobDraft {
         // briefly, with nothing of the pass's held.
         let project_of =
             move |shared: &DaemonShared, candidate: &super::insights_week::CounterCandidate| {
-                let (source_index, session_ref, obs) = &origins[candidate.origin];
-                let cwd = resolve_cwd(shared, sources[*source_index].as_ref(), session_ref, obs);
+                let origin = &origins[candidate.origin];
+                let source = sources[origin.source_index].as_ref();
+                let cwd = if origin.insights_only {
+                    // Discovery peeked it; else the adapter's own load, which
+                    // reads no compressed rollout.
+                    let compressed =
+                        crate::source::compressed::is_compressed(&origin.session_ref.path);
+                    origin.session_ref.cwd.clone().or_else(|| {
+                        (!compressed)
+                            .then(|| source.load(&origin.session_ref).ok())
+                            .flatten()
+                            .and_then(|transcript| transcript.cwd)
+                    })
+                } else {
+                    resolve_cwd(shared, source, &origin.session_ref, &origin.observation)
+                };
                 let (project_key, _) = project_for(cwd.as_deref());
                 let never = shared
                     .policy

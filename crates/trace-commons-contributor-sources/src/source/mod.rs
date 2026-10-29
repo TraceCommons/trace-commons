@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 pub mod claude_code;
 pub mod cline;
 pub mod codex;
+pub mod compressed;
 pub mod discovery;
 pub mod gemini_cli;
 mod multi_root;
@@ -465,6 +466,15 @@ pub trait TraceSource: Send + Sync {
     /// `discover` reads transcripts is never reached through here until it
     /// says how to discover without doing so.
     fn discover_unopened(&self) -> anyhow::Result<Vec<SessionRef>> {
+        Ok(Vec::new())
+    }
+
+    /// Sessions only the Insights counter pass reads: never offered for
+    /// contribution, queued or uploaded, and never named by
+    /// `session_for_path` or `session_at`. Codex's compressed rollouts
+    /// (`rollout-<...>.jsonl.zst`, see [`compressed`]) are the one kind
+    /// today. The default is none.
+    fn discover_insights_only(&self) -> anyhow::Result<Vec<SessionRef>> {
         Ok(Vec::new())
     }
 
