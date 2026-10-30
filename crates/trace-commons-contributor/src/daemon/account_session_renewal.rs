@@ -242,7 +242,7 @@ pub(super) async fn account_session(
     shared: &DaemonShared,
     via: Option<&RenewVia<'_>>,
 ) -> anyhow::Result<Option<LoadedAccountSession>> {
-    if let Some(session) = super::withdraw::account_session(shared)? {
+    if let Some(session) = stored_session(shared, None).await? {
         return Ok(Some(session));
     }
     let Some(via) = via else {
@@ -269,11 +269,18 @@ pub(super) async fn account_session(
 pub(crate) async fn account_session_for_read(
     shared: &DaemonShared,
 ) -> anyhow::Result<(Option<LoadedAccountSession>, bool)> {
-    if let Some(session) = super::withdraw::account_session(shared)? {
+    // One budget for every wait below, so a read that collided with a
+    // publication still answers within READ_WAIT.
+    let deadline = tokio::time::Instant::now() + READ_WAIT;
+    if let Some(session) = stored_session(shared, Some(deadline)).await? {
         return Ok((Some(session), false));
     }
     if !may_renew(shared) {
-        return Ok((None, false));
+        // `may_renew` reads the record too, and a publication between the
+        // two reads makes it refuse: read again once it is done.
+        return after_renewal(shared, Some(deadline))
+            .await
+            .map(|session| (session, false));
     }
     let Some(task) = shared.spawn_detached(|shared| async move {
         let _ = account_session_live(&shared).await;
@@ -283,9 +290,46 @@ pub(crate) async fn account_session_for_read(
             .map(|session| (session, false));
     };
     // Dropping the handle on the deadline leaves the task running.
-    let finished = tokio::time::timeout(READ_WAIT, task).await.is_ok();
+    let finished = tokio::time::timeout_at(deadline, task).await.is_ok();
     let session = super::withdraw::account_session(shared)?;
     Ok((session.clone(), session.is_none() && !finished))
+}
+
+/// The stored session, read again once any renewal in flight is done when
+/// the first read fails.
+///
+/// A renewal stores its session off the runtime thread
+/// ([`super::nearai_onboarding`] `store_renewed_session`), and a read that
+/// loads the record while that publication replaces it is refused by the
+/// credential store rather than answered from a stale snapshot. That is
+/// not "signed out": every feature reading at that moment used to answer
+/// `account-session-required` or an unknown figure. Renewals publish only
+/// inside [`renew`], with the turn held, so the second read, taken under
+/// the turn, sees what the renewal left. A store that cannot be read at
+/// all fails both reads and is reported as before.
+async fn stored_session(
+    shared: &DaemonShared,
+    deadline: Option<tokio::time::Instant>,
+) -> anyhow::Result<Option<LoadedAccountSession>> {
+    match super::withdraw::account_session(shared) {
+        Ok(session) => Ok(session),
+        Err(_) => after_renewal(shared, deadline).await,
+    }
+}
+
+/// The stored session read under the turn, so no renewal is publishing,
+/// waiting for the turn until `deadline` (a read) or for as long as it
+/// takes (an action). A read past its deadline reads anyway.
+async fn after_renewal(
+    shared: &DaemonShared,
+    deadline: Option<tokio::time::Instant>,
+) -> anyhow::Result<Option<LoadedAccountSession>> {
+    let turn = renewing(shared.store.dir());
+    let _turn = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, turn.lock()).await.ok(),
+        None => Some(turn.lock().await),
+    };
+    super::withdraw::account_session(shared)
 }
 
 /// Whether an automatic renewal could be attempted at all, from local
@@ -541,7 +585,7 @@ fn record(shared: &DaemonShared, trigger: Trigger, failure: Option<&'static str>
 pub(crate) async fn account_session_live(
     shared: &DaemonShared,
 ) -> anyhow::Result<Option<LoadedAccountSession>> {
-    if let Some(session) = super::withdraw::account_session(shared)? {
+    if let Some(session) = stored_session(shared, None).await? {
         return Ok(Some(session));
     }
     #[cfg(test)]

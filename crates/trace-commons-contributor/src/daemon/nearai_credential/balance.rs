@@ -1109,13 +1109,9 @@ mod tests {
     async fn a_service_that_does_not_answer_is_unavailable_rather_than_a_figure() {
         let s = shared();
         with_session(&s, "rt_first");
-        // Bound and immediately dropped: a port nothing is listening on.
-        let dead = {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            drop(listener);
-            format!("http://{address}")
-        };
+        // A port nothing is listening on.
+        let address = crate::config::tests_support::refusing_addr();
+        let dead = format!("http://{address}");
         let api = CloudApi::for_test(&dead).unwrap();
         let report = read_with(&s, &api).await;
         assert_eq!(report.state(), "unavailable");
