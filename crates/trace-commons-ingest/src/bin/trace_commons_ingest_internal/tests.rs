@@ -32681,13 +32681,13 @@ async fn concurrent_submissions_keep_one_audit_chain_in_file_and_db() {
                 submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
                     .await
                     .map(|_| ())
-                    .map_err(|(status, _)| status)
+                    .map_err(|(status, body)| format!("{status}: {:?}", body.0))
             }));
         }
         for task in tasks {
             task.await
                 .expect("submission task joins")
-                .unwrap_or_else(|status| panic!("{context}: submission failed with {status}"));
+                .unwrap_or_else(|error| panic!("{context}: submission failed with {error}"));
         }
 
         let file_events = read_all_audit_events(temp.path(), "tenant-a").expect("file audit log");
