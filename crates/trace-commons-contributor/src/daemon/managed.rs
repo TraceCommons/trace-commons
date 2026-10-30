@@ -622,11 +622,7 @@ fn remember_prepared(
     result: Result<Value, Refusal>,
 ) -> Result<Value, Refusal> {
     let value = result?;
-    if matches!(
-        request.method.as_str(),
-        "managed_launch_prepare" | "managed_session_start_again"
-    ) && value.get("ticket").is_some_and(Value::is_string)
-    {
+    if prepares_a_session(&request.method) && value.get("ticket").is_some_and(Value::is_string) {
         let id: Uuid = serde_json::from_value(value["session_id"].clone())
             .map_err(|_| ManagedError::InvalidRequest)?;
         let (prefs, keep) = with_service(shared, |service| {
@@ -846,15 +842,21 @@ where
     respond(request, remember_prepared(shared, request, result))
 }
 
+/// Whether `method` prepares a session: the requests
+/// [`ManagedService::resolve_launch`] resolves.
+fn prepares_a_session(method: &str) -> bool {
+    matches!(
+        method,
+        "managed_launch_prepare" | "managed_session_start_again"
+    )
+}
+
 /// [`ManagedService::prepares_on_sign_in`] for a prepare or start-again
 /// request, with the service locked directly: a read that publishes
 /// nothing.
 fn prepares_on_sign_in(shared: &DaemonShared, request: &Request, sign_in: bool) -> bool {
     // Every other request skips the lock; `resolve_launch` refuses them too.
-    if !matches!(
-        request.method.as_str(),
-        "managed_launch_prepare" | "managed_session_start_again"
-    ) {
+    if !prepares_a_session(&request.method) {
         return false;
     }
     let Ok(held) = shared.managed.lock() else {

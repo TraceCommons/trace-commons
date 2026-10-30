@@ -9710,9 +9710,9 @@ those checks refuse, or a replay of one already prepared, reads no balance,
 except that the version is checked only after the read: a tool too old to
 launch, on a low balance, is refused for the balance first and for its version
 once funded. `managed-folder-settings-save-failed`, which comes after
-preparing, can also follow a read. An unknown, unreachable or no-limit balance lets the launch
-through. A saved `near_ai` key is not checked: its account's balance is not
-readable here.
+preparing, can also follow a read. An unknown, unreachable or no-limit balance
+lets the launch through. A saved `near_ai` key is not checked: its account's
+balance is not readable here.
 
 `managed_session_report` answers `{accepted: true, stop: bool}`; an older
 launcher reads only `accepted`.
