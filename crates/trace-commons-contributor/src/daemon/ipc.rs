@@ -15262,6 +15262,248 @@ mod tests {
         assert_eq!(body["defaults"], serde_json::json!([]));
     }
 
+    /// The launch's balance read goes through the daemon's runtime when it
+    /// has one, so a launch that stops waiting never cuts the read short,
+    /// and reads inline when it has none. With no NEAR AI session stored,
+    /// both say so without touching the network.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_launch_balance_read_runs_detached_on_the_daemon_runtime() {
+        use crate::daemon::nearai_credential::balance::BalanceReport;
+        let inline = shared();
+        assert!(matches!(
+            crate::daemon::managed::read_balance(&inline, false).await,
+            BalanceReport::NoSession
+        ));
+        let daemon = std::sync::Arc::new(shared());
+        daemon.adopt_runtime();
+        daemon.adopt_self();
+        assert!(daemon.spawn_detached(|_| async {}).is_some());
+        assert!(matches!(
+            crate::daemon::managed::read_balance(&daemon, true).await,
+            BalanceReport::NoSession
+        ));
+    }
+
+    /// A launch on the NEAR AI sign-in reads the balance only when it
+    /// passes every other check and would prepare a new session, and is
+    /// refused, with nothing prepared, when the balance cannot pay for its
+    /// first calls. A sign-out during the read is caught when the request
+    /// is handled, and a replay of a prepared request is answered as
+    /// before, whatever the balance now says.
+    #[tokio::test]
+    async fn a_sign_in_launch_needs_balance_for_its_first_calls() {
+        use crate::daemon::nearai_credential::balance::{BalanceReading, BalanceReport};
+        let s = shared();
+        let cwd = tempfile::tempdir().unwrap();
+        let request_id = uuid::Uuid::new_v4();
+        let request_id_again = uuid::Uuid::new_v4();
+        let launch = |connection: &str| {
+            serde_json::json!({
+                "request_id": request_id,
+                "tool": "claude",
+                "connection": connection,
+                "account_id": crate::managed::signin::account_id(crate::managed::ToolId::Claude),
+                "cwd": cwd.path(),
+                "expected_generation": 0,
+            })
+        };
+        let reads = std::sync::Mutex::new(0_usize);
+        let balance = |remaining: i64| {
+            let reads = &reads;
+            move |_fresh: bool| {
+                *reads.lock().unwrap() += 1;
+                std::future::ready(BalanceReport::Known(BalanceReading {
+                    remaining_nanos: Some(remaining),
+                    spend_limit_nanos: None,
+                    total_spent_nanos: 0,
+                    total_requests: 0,
+                    total_tokens: 0,
+                    observed_at: chrono::Utc::now(),
+                }))
+            }
+        };
+        let prepare = |params| req("managed_launch_prepare", params);
+
+        // Signed out: refused for the sign-in, and no balance is read.
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            balance(0),
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-sign-in-required");
+        assert_eq!(*reads.lock().unwrap(), 0);
+
+        let sign_in = Some(crate::daemon::settings::NearAiInferenceCredential {
+            key: "sk-fixture".into(),
+            key_id: "key-1".into(),
+            key_prefix: "sk-fix".into(),
+            organization_id: "org-1".into(),
+            workspace_id: "ws-1".into(),
+            minted_at: chrono::Utc::now(),
+        });
+        s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
+        // A saved NEAR AI account that does not exist: refused as before,
+        // and its balance is not the sign-in's to read.
+        let r =
+            crate::daemon::managed::handle_async_with(&s, &prepare(launch("near_ai")), balance(0))
+                .await;
+        assert!(r.error.is_some());
+        assert_eq!(*reads.lock().unwrap(), 0);
+
+        // Out of money: refused after a cached and a fresh read.
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            balance(0),
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-balance-too-low");
+        assert_eq!(*reads.lock().unwrap(), 2);
+        // Nothing was prepared for it.
+        let r = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({}))).await;
+        assert_eq!(
+            r.result.expect("snapshot")["sessions"],
+            serde_json::json!([])
+        );
+
+        // Signed out while the balance was being read: refused for the
+        // sign-in, and still nothing prepared.
+        let signs_out = |_fresh: bool| {
+            s.settings.lock().unwrap().near_ai_inference = None;
+            std::future::ready(BalanceReport::Unavailable)
+        };
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            signs_out,
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-sign-in-required");
+        let r = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({}))).await;
+        assert_eq!(
+            r.result.expect("snapshot")["sessions"],
+            serde_json::json!([])
+        );
+        s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
+
+        // Switched to another NEAR AI account while the balance was read:
+        // the balance read may not be the new account's, so refused for the
+        // sign-in rather than the balance, and nothing prepared.
+        let switches = |_fresh: bool| {
+            let mut other = sign_in.clone().unwrap();
+            other.key_id = "key-2".into();
+            s.settings.lock().unwrap().near_ai_inference = Some(other);
+            // The old account's balance, too low: the switch still wins.
+            std::future::ready(BalanceReport::Known(BalanceReading {
+                remaining_nanos: Some(0),
+                spend_limit_nanos: None,
+                total_spent_nanos: 0,
+                total_requests: 0,
+                total_tokens: 0,
+                observed_at: chrono::Utc::now(),
+            }))
+        };
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            switches,
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-sign-in-required");
+        let r = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({}))).await;
+        assert_eq!(
+            r.result.expect("snapshot")["sessions"],
+            serde_json::json!([])
+        );
+        s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
+
+        // Funded: prepared.
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            balance(12_500_000_000),
+        )
+        .await;
+        let prepared = r.result.expect("prepared");
+        *reads.lock().unwrap() = 0;
+        // Preparing saved this folder's settings, which reloads settings
+        // from a disk this fixture never wrote the sign-in to.
+        s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
+
+        // The same request again after the balance ran out: the session
+        // already prepared, with no read.
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            balance(0),
+        )
+        .await;
+        assert_eq!(
+            r.result.expect("replayed")["session_id"],
+            prepared["session_id"]
+        );
+        assert_eq!(*reads.lock().unwrap(), 0);
+
+        // The session runs and exits, and is started again on the sign-in.
+        let id: uuid::Uuid = serde_json::from_value(prepared["session_id"].clone()).unwrap();
+        let proof = {
+            let mut held = s.managed.lock().unwrap();
+            let Ok(service) = held.as_mut() else {
+                panic!("managed service unavailable")
+            };
+            service
+                .sessions
+                .redeem(id, prepared["ticket"].as_str().unwrap())
+                .unwrap()
+                .proof
+        };
+        for (state, exit) in [("running", None), ("exited", Some(0))] {
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "managed_session_report",
+                    serde_json::json!({
+                        "session_id": id,
+                        "proof": proof,
+                        "state": state,
+                        "process_id": 4242,
+                        "process_identity": "4242:1",
+                        "exit_code": exit,
+                    }),
+                ),
+            )
+            .await;
+            assert!(r.error.is_none(), "{r:?}");
+        }
+        let again = || {
+            req(
+                "managed_session_start_again",
+                serde_json::json!({"session_id": id, "request_id": request_id_again}),
+            )
+        };
+        // Out of money: refused after a cached and a fresh read.
+        let r = crate::daemon::managed::handle_async_with(&s, &again(), balance(0)).await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-balance-too-low");
+        assert_eq!(*reads.lock().unwrap(), 2);
+        // Funded: started again after one read.
+        *reads.lock().unwrap() = 0;
+        let r =
+            crate::daemon::managed::handle_async_with(&s, &again(), balance(12_500_000_000)).await;
+        let started = r.result.expect("started again");
+        assert_ne!(started["session_id"], prepared["session_id"]);
+        assert_eq!(*reads.lock().unwrap(), 1);
+        s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
+        // Its replay after the money ran out: the same session, no read.
+        *reads.lock().unwrap() = 0;
+        let r = crate::daemon::managed::handle_async_with(&s, &again(), balance(0)).await;
+        assert_eq!(
+            r.result.expect("replayed")["session_id"],
+            started["session_id"]
+        );
+        assert_eq!(*reads.lock().unwrap(), 0);
+    }
+
     /// #1754 review: `managed_model_favorite_set` publishes
     /// `status_changed` only when the stored list moved. Unstarring an id
     /// that was never stored wakes no window. Unstarring needs no NEAR AI.

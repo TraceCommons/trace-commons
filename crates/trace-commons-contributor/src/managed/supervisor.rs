@@ -46,22 +46,29 @@ fn with_open_files_floor(command: std::process::Command) -> std::process::Comman
     wrapped
 }
 
-/// Markers a Claude Code session sets in the environment of every process it
-/// starts. A managed session is a new top-level session, never a child of
-/// whatever started the helper, the daemon or the terminal, so none of them
-/// may reach the tool: with `CLAUDE_CODE_CHILD_SESSION` inherited, Claude Code
-/// treats the session as a subagent and turns transcript saving off, which
-/// also leaves trace collection with nothing to read.
+/// Markers a Claude Code session sets in the environment of the processes it
+/// starts, and the IDE attachment it inherits from an IDE terminal. A
+/// managed session is a new top-level session, never a child of whatever
+/// started the helper, the daemon or the terminal, so none of them may reach
+/// the tool: with `CLAUDE_CODE_CHILD_SESSION` inherited, Claude Code treats
+/// the session as a subagent and turns transcript saving off, which also
+/// leaves trace collection with nothing to read.
+///
+/// Named one by one rather than by the `CLAUDE_CODE_` prefix: that prefix
+/// also carries the person's own settings (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`,
+/// `CLAUDE_CODE_DISABLE_*`), which a managed session keeps.
 const PARENT_SESSION_ENV: &[&str] = &[
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
     "CLAUDE_CODE_SESSION_ATTENDED",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_INVOKED_SKILLS",
+    "CLAUDE_CODE_SSE_PORT",
     "CLAUDE_PID",
     "CLAUDE_EFFORT",
-    "AI_AGENT",
 ];
 
 /// Drop every [`PARENT_SESSION_ENV`] marker from the tool's environment.

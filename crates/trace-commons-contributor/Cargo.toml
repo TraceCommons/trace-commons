@@ -781,6 +781,10 @@ keyring-core = "=1.0.0"
 # IronWire #66: opt-in NEAR Responses-to-Chat tool compatibility, preserving
 # namespaces, tool-result replay and complete Responses streaming lifecycles.
 # The native replay fix from #65 remains; no packages or dependencies are added.
+# IronWire #67 (7ac9251): the Anthropic emitter streams a translated tool
+# call's arguments as `input_json_delta` instead of in
+# `content_block_start.input`, which Claude Code discards; without it every
+# tool call in a Private AI Claude Code session reached the tool empty.
 ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "7ac9251bdde1ac8037b153f7b767d479905c9bbe" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
@@ -870,7 +874,7 @@ chrono-tz = "0.10"
 k256 = "0.13"
 sha3 = "0.10"
 tower = { version = "0.5", features = ["util"] }
-tokio = { version = "1", features = ["net"] }
+tokio = { version = "1", features = ["net", "test-util"] }
 
 # Cross-contract tests live in trace-commons-client-server-tests. Keep the
 # server out of this crate's dev-dependencies too: otherwise even a filtered

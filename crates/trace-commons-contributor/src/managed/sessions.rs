@@ -133,6 +133,17 @@ pub struct PreparedLaunch {
     pub ticket: Option<String>,
 }
 
+/// What [`SessionRegistry::check`] found a launch to be.
+enum Checked {
+    /// The session this request id already prepared.
+    Replayed(PreparedLaunch),
+    /// A new session, with the CLI options it would carry.
+    New {
+        cli_options_text: Option<String>,
+        cli_options: Vec<String>,
+    },
+}
+
 impl std::fmt::Debug for PreparedLaunch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedLaunch")
@@ -532,12 +543,94 @@ impl SessionRegistry {
             .any(|e| e.view.account_id == id && e.view.state.holds_profile())
     }
 
+    /// Whether [`Self::prepare`] would accept `request` and record a new
+    /// session for it, rather than refuse it or answer it as a replay.
+    /// Commits nothing.
+    pub fn would_prepare_new(&self, mut request: LaunchRequest, account: &AccountView) -> bool {
+        let Ok(cwd) = super::folder::canonical(&request.cwd) else {
+            return false;
+        };
+        request.cwd = cwd;
+        matches!(self.check(&request, account), Ok(Checked::New { .. }))
+    }
+
     pub fn prepare(
         &mut self,
         mut request: LaunchRequest,
         account: &AccountView,
     ) -> Result<PreparedLaunch, ManagedError> {
         request.cwd = super::folder::canonical(&request.cwd)?;
+        let (cli_options_text, cli_options) = match self.check(&request, account)? {
+            Checked::Replayed(existing) => return Ok(existing),
+            Checked::New {
+                cli_options_text,
+                cli_options,
+            } => (cli_options_text, cli_options),
+        };
+        let now = Utc::now();
+        let ticket = secret();
+        let id = Uuid::new_v4();
+        let view = SessionView {
+            model: request.model.clone(),
+            collect_traces: request.collect_traces,
+            collection: if request.collect_traces {
+                CollectionState::Pending
+            } else {
+                CollectionState::Off
+            },
+            purpose: request.purpose,
+            id,
+            tool: request.tool,
+            connection: request.connection,
+            account_id: account.id,
+            account_label: account.label.clone(),
+            selection_generation: request.expected_generation,
+            project_label: request
+                .cwd
+                .file_name()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            cwd: request.cwd.clone(),
+            started_at: now,
+            state: SessionState::Starting,
+            exit_code: None,
+            can_focus: false,
+            can_stop: false,
+            can_start_again: false,
+        };
+        let entry = Entry {
+            cli_options_text,
+            cli_options,
+            dismissed: false,
+            launched: false,
+            terminal: None,
+            stop_requested: false,
+            view,
+            keep_saved_model: request.keep_saved_model,
+            request,
+            ticket_hash: Some(digest(&ticket)),
+            ticket_expires: now + Duration::seconds(120),
+            proof_hash: None,
+            process_id: None,
+            process_identity: None,
+            last_seen: now,
+        };
+        let mut next = self.data.clone();
+        next.entries.push(entry);
+        self.commit(next)?;
+        Ok(PreparedLaunch {
+            session_id: id,
+            ticket: Some(ticket),
+        })
+    }
+
+    /// Every check [`Self::prepare`] makes on an already-canonical
+    /// `request`, and the CLI options a new session would carry.
+    fn check(
+        &self,
+        request: &LaunchRequest,
+        account: &AccountView,
+    ) -> Result<Checked, ManagedError> {
         let named = request
             .model
             .as_deref()
@@ -579,13 +672,13 @@ impl SessionRegistry {
             .iter()
             .find(|e| e.request.request_id == request.request_id)
         {
-            if entry.request != request {
+            if entry.request != *request {
                 return Err(ManagedError::Conflict);
             }
-            return Ok(PreparedLaunch {
+            return Ok(Checked::Replayed(PreparedLaunch {
                 session_id: entry.view.id,
                 ticket: None,
-            });
+            }));
         }
         if !request.cwd.is_absolute() || !request.cwd.is_dir() {
             return Err(ManagedError::InvalidRequest);
@@ -598,37 +691,6 @@ impl SessionRegistry {
         }) {
             return Err(ManagedError::Conflict);
         }
-        let now = Utc::now();
-        let ticket = secret();
-        let id = Uuid::new_v4();
-        let view = SessionView {
-            model: request.model.clone(),
-            collect_traces: request.collect_traces,
-            collection: if request.collect_traces {
-                CollectionState::Pending
-            } else {
-                CollectionState::Off
-            },
-            purpose: request.purpose,
-            id,
-            tool: request.tool,
-            connection: request.connection,
-            account_id: account.id,
-            account_label: account.label.clone(),
-            selection_generation: request.expected_generation,
-            project_label: request
-                .cwd
-                .file_name()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            cwd: request.cwd.clone(),
-            started_at: now,
-            state: SessionState::Starting,
-            exit_code: None,
-            can_focus: false,
-            can_stop: false,
-            can_start_again: false,
-        };
         let cli_options_text = if request.purpose == LaunchPurpose::Coding {
             Some(match request.cli_options.clone() {
                 Some(text) => text,
@@ -641,29 +703,9 @@ impl SessionRegistry {
             Some(text) => super::options::parse(request.tool, text)?,
             None => vec![],
         };
-        let entry = Entry {
+        Ok(Checked::New {
             cli_options_text,
             cli_options,
-            dismissed: false,
-            launched: false,
-            terminal: None,
-            stop_requested: false,
-            view,
-            keep_saved_model: request.keep_saved_model,
-            request,
-            ticket_hash: Some(digest(&ticket)),
-            ticket_expires: now + Duration::seconds(120),
-            proof_hash: None,
-            process_id: None,
-            process_identity: None,
-            last_seen: now,
-        };
-        let mut next = self.data.clone();
-        next.entries.push(entry);
-        self.commit(next)?;
-        Ok(PreparedLaunch {
-            session_id: id,
-            ticket: Some(ticket),
         })
     }
 

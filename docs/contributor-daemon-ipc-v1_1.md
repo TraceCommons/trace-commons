@@ -9697,6 +9697,23 @@ focusable or stoppable.
   folder, `managed-not-found` for a removed account, and
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.
 
+When `managed_launch_prepare` or `managed_session_start_again` passes the
+checks that come before preparing, other than the tool's version, and would
+prepare a new session on `near_ai_signin`, the daemon first reads the
+sign-in's NEAR AI balance, waiting at most 5 seconds in all. A sign-out, or a
+switch to another NEAR AI key, during the wait is refused with
+`managed-near-ai-sign-in-required`. Otherwise, when the balance is known to be
+under $0.10 and a fresh read agrees with the cached one, the request is
+refused with `managed-near-ai-balance-too-low` and nothing is prepared. Then
+the request is handled as usual, with all its checks run again. A request
+those checks refuse, or a replay of one already prepared, reads no balance,
+except that the version is checked only after the read: a tool too old to
+launch, on a low balance, is refused for the balance first and for its version
+once funded. `managed-folder-settings-save-failed`, which comes after
+preparing, can also follow a read. An unknown, unreachable or no-limit balance
+lets the launch through. A saved `near_ai` key is not checked: its account's
+balance is not readable here.
+
 `managed_session_report` answers `{accepted: true, stop: bool}`; an older
 launcher reads only `accepted`.
 
