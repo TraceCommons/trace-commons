@@ -15256,10 +15256,33 @@ mod tests {
         assert_eq!(body["defaults"], serde_json::json!([]));
     }
 
-    /// A launch on the NEAR AI sign-in reads the balance only once the
-    /// request would prepare a new session, and is refused when the balance
-    /// cannot pay for its first calls. A replay of a prepared request is
-    /// answered as before, whatever the balance now says.
+    /// The launch's balance read goes through the daemon's runtime when it
+    /// has one, so a launch that stops waiting never cuts the read short,
+    /// and reads inline when it has none. With no NEAR AI session stored,
+    /// both say so without touching the network.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_launch_balance_read_runs_detached_on_the_daemon_runtime() {
+        use crate::daemon::nearai_credential::balance::BalanceReport;
+        let inline = shared();
+        assert!(matches!(
+            crate::daemon::managed::read_balance(&inline, false).await,
+            BalanceReport::NoSession
+        ));
+        let daemon = std::sync::Arc::new(shared());
+        daemon.adopt_runtime();
+        daemon.adopt_self();
+        assert!(daemon.spawn_detached(|_| async {}).is_some());
+        assert!(matches!(
+            crate::daemon::managed::read_balance(&daemon, true).await,
+            BalanceReport::NoSession
+        ));
+    }
+
+    /// A launch on the NEAR AI sign-in reads the balance only once it has
+    /// passed every other check and prepared a new session, and is refused,
+    /// with that session removed, when the balance cannot pay for its first
+    /// calls. A replay of a prepared request is answered as before,
+    /// whatever the balance now says.
     #[tokio::test]
     async fn a_sign_in_launch_needs_balance_for_its_first_calls() {
         use crate::daemon::nearai_credential::balance::{BalanceReading, BalanceReport};
@@ -15329,6 +15352,12 @@ mod tests {
         .await;
         assert_eq!(r.error.unwrap().message, "managed-near-ai-balance-too-low");
         assert_eq!(*reads.lock().unwrap(), 2);
+        // The session it prepared was rolled back before its ticket left.
+        let r = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({}))).await;
+        assert_eq!(
+            r.result.expect("snapshot")["sessions"],
+            serde_json::json!([])
+        );
 
         // Funded: prepared.
         let r = crate::daemon::managed::handle_async_with(

@@ -118,61 +118,6 @@ impl ManagedService {
         }
     }
 
-    /// Whether `request` would prepare a new session billed to the NEAR AI
-    /// sign-in, decided on the same typed request and resolved account
-    /// [`Self::handle`] uses. A request those checks refuse, or a replay of
-    /// one already prepared, is `false`: `handle` answers it, and no balance
-    /// is read for it.
-    fn prepares_on_sign_in(&self, request: &Request, sign_in: bool) -> bool {
-        let launch = match request.method.as_str() {
-            "managed_launch_prepare" => {
-                let Ok(params) = crate::managed::folder::with_default_cwd(
-                    request.params.clone(),
-                    dirs::home_dir(),
-                ) else {
-                    return false;
-                };
-                let Ok(mut launch) = serde_json::from_value::<LaunchRequest>(params) else {
-                    return false;
-                };
-                if launch.expected_generation != self.accounts.generation(launch.tool) {
-                    return false;
-                }
-                // As `SessionRegistry::prepare` stores it, so a replay matches.
-                let Ok(cwd) = crate::managed::folder::canonical(&launch.cwd) else {
-                    return false;
-                };
-                launch.cwd = cwd;
-                launch
-            }
-            "managed_session_start_again" => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Params {
-                    session_id: Uuid,
-                    request_id: Uuid,
-                }
-                let Ok(p) = parse::<Params>(request) else {
-                    return false;
-                };
-                let Ok(launch) = self
-                    .sessions
-                    .start_again_request(p.session_id, p.request_id)
-                else {
-                    return false;
-                };
-                if !launch.cwd.is_dir() {
-                    return false;
-                }
-                launch
-            }
-            _ => return false,
-        };
-        launch.connection == ConnectionKind::NearAiSignIn
-            && self.launch_account(&launch, sign_in).is_ok()
-            && self.sessions.replayed(&launch).is_none()
-    }
-
     /// Whether an ended coding row can be launched again as it was: same
     /// account (still saved, or still signed in) and same folder (still
     /// there). A shell also needs `capabilities.terminal_launch` to offer it,
@@ -742,13 +687,6 @@ where
         return model_catalogue(request).await;
     }
     let sign_in = sign_in_present(shared);
-    let needs_funds = with_service(shared, |service| {
-        Ok(service.prepares_on_sign_in(request, sign_in))
-    })
-    .unwrap_or(false);
-    if needs_funds && let Err(error) = funds_for_first_calls(read).await {
-        return respond(request, Err(error.into()));
-    }
     let choice = terminal_choice(shared);
     let mut ended = vec![];
     let result = with_service(shared, |service| {
@@ -759,7 +697,43 @@ where
     for route in ended {
         route.shutdown().await;
     }
+    // Every check `handle` makes has passed by now, and a replay was
+    // answered without a ticket, so only a session this request has just
+    // prepared on the sign-in waits for the balance. One the balance cannot
+    // pay for is rolled back before its ticket leaves the daemon.
+    if let Some(id) = new_sign_in_session(shared, request, &result)
+        && let Err(error) = funds_for_first_calls(read).await
+    {
+        let _ = with_service(shared, |service| service.sessions.rollback_prepared(id));
+        return respond(request, Err(error.into()));
+    }
     respond(request, remember_prepared(shared, request, result))
+}
+
+/// The session `request` has just prepared on the NEAR AI sign-in: a
+/// launch or start-again answered with a ticket, which a replay never
+/// carries.
+fn new_sign_in_session(
+    shared: &DaemonShared,
+    request: &Request,
+    result: &Result<Value, Refusal>,
+) -> Option<Uuid> {
+    if !matches!(
+        request.method.as_str(),
+        "managed_launch_prepare" | "managed_session_start_again"
+    ) {
+        return None;
+    }
+    let value = result.as_ref().ok()?;
+    value.get("ticket").filter(|ticket| ticket.is_string())?;
+    let id: Uuid = serde_json::from_value(value.get("session_id")?.clone()).ok()?;
+    let held = shared.managed.lock().ok()?;
+    let service = held.as_ref().ok()?;
+    matches!(
+        service.sessions.describe(id),
+        Some((ConnectionKind::NearAiSignIn, _))
+    )
+    .then_some(id)
 }
 
 /// The least a NEAR AI balance must hold for a launch on the sign-in, in
@@ -769,17 +743,18 @@ where
 /// first request.
 const MIN_LAUNCH_BALANCE_NANOS: i64 = 100_000_000;
 
-/// How long a launch waits for the sign-in's balance before going ahead
-/// without it.
+/// How long a launch waits for the sign-in's balance, across every read,
+/// before going ahead without it.
 const FUNDS_CHECK_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// The sign-in's balance, or [`BalanceReport::Unavailable`] when NEAR AI
-/// has not answered within [`FUNDS_CHECK_WITHIN`]. The read runs detached
-/// on the daemon's runtime, so giving up on it never cuts a refresh-token
-/// rotation short; it finishes and fills the cache for the next look. A
-/// daemon with no runtime of its own (a test, a one-shot command) reads
-/// inline.
-async fn read_balance(shared: &DaemonShared, fresh: bool) -> BalanceReport {
+/// The sign-in's balance. The read runs detached on the daemon's runtime,
+/// so when [`funds_for_first_calls`] stops waiting for it, a refresh-token
+/// rotation in flight is never cut short: it finishes and fills the cache
+/// for the next look. A sender dropped without an answer is
+/// [`BalanceReport::Unavailable`]. Only a `DaemonShared` that never
+/// adopted a runtime (a unit test, a one-shot command) reads inline; the
+/// daemon that serves the socket always has one.
+pub(crate) async fn read_balance(shared: &DaemonShared, fresh: bool) -> BalanceReport {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let detached = shared.spawn_detached(move |this| async move {
         let _ = sender.send(balance::read(&this, fresh).await);
@@ -787,10 +762,7 @@ async fn read_balance(shared: &DaemonShared, fresh: bool) -> BalanceReport {
     if detached.is_none() {
         return balance::read(shared, fresh).await;
     }
-    match tokio::time::timeout(FUNDS_CHECK_WITHIN, receiver).await {
-        Ok(Ok(report)) => report,
-        _ => BalanceReport::Unavailable,
-    }
+    receiver.await.unwrap_or(BalanceReport::Unavailable)
 }
 
 /// Refuse a launch only on a balance known to be below
@@ -800,12 +772,30 @@ async fn read_balance(shared: &DaemonShared, fresh: bool) -> BalanceReport {
 /// nothing about the money, and a null remaining means no limit was ever
 /// set. NEAR AI still refuses calls it will not pay for; this only stops a
 /// session that would fail at once.
+///
+/// Both reads share one [`FUNDS_CHECK_WITHIN`] deadline; a read still
+/// pending when it passes counts as [`BalanceReport::Unavailable`].
 async fn funds_for_first_calls<R, F>(read: R) -> Result<(), ManagedError>
 where
     R: Fn(bool) -> F,
     F: std::future::Future<Output = BalanceReport>,
 {
-    if !too_low(&read(false).await) || !too_low(&read(true).await) {
+    funds_within(read, FUNDS_CHECK_WITHIN).await
+}
+
+/// [`funds_for_first_calls`] with its deadline `within` from now.
+async fn funds_within<R, F>(read: R, within: std::time::Duration) -> Result<(), ManagedError>
+where
+    R: Fn(bool) -> F,
+    F: std::future::Future<Output = BalanceReport>,
+{
+    let deadline = tokio::time::Instant::now() + within;
+    let within = |future: F| async move {
+        tokio::time::timeout_at(deadline, future)
+            .await
+            .unwrap_or(BalanceReport::Unavailable)
+    };
+    if !too_low(&within(read(false)).await) || !too_low(&within(read(true)).await) {
         return Ok(());
     }
     Err(ManagedError::NearAiBalanceTooLow)
@@ -1069,6 +1059,32 @@ mod tests {
         };
         assert!(funds_for_first_calls(fine).await.is_ok());
         assert_eq!(*reads.lock().unwrap(), [false]);
+    }
+
+    /// NEAR AI that never answers holds a launch for the deadline once, not
+    /// once per read, and then lets it through.
+    #[tokio::test]
+    async fn an_unanswered_balance_lets_the_launch_through_after_one_deadline() {
+        let within = std::time::Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let never = |_fresh: bool| std::future::pending::<BalanceReport>();
+        assert!(funds_within(never, within).await.is_ok());
+        let waited = started.elapsed();
+        assert!(waited >= within && waited < within * 2, "{waited:?}");
+
+        // A cached low figure, then a fresh read that never comes back:
+        // still one deadline, and the launch goes ahead.
+        let started = std::time::Instant::now();
+        let low_then_never = |fresh: bool| async move {
+            if fresh {
+                std::future::pending().await
+            } else {
+                known(Some(0))
+            }
+        };
+        assert!(funds_within(low_then_never, within).await.is_ok());
+        let waited = started.elapsed();
+        assert!(waited >= within && waited < within * 2, "{waited:?}");
     }
 
     fn service() -> (tempfile::TempDir, ConfigStore, ManagedService) {
