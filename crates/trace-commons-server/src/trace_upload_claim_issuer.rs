@@ -1834,9 +1834,7 @@ impl TraceUploadClaimIssuerState {
         if request.device_key_id != auth.device_key_id {
             return Err(IssuerError::bad_request("device key id mismatch"));
         }
-        if (Utc::now().timestamp() - request.issued_at).abs()
-            > DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS
-        {
+        if !device_invite_subject_is_fresh(Utc::now().timestamp(), request.issued_at) {
             return Err(IssuerError::bad_request(DEVICE_INVITE_SUBJECT_STALE));
         }
         let tenant_id =
@@ -1866,6 +1864,15 @@ impl TraceUploadClaimIssuerState {
             invite_subject_hash,
         })
     }
+}
+
+/// Whether `issued_at` sits within [`DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS`]
+/// of `now`, either way, bound included. The clock is a parameter so the
+/// bound is tested exactly rather than against a clock that moves while the
+/// request is in flight. `abs_diff`, because `issued_at` is the caller's: a
+/// subtraction overflows for one near `i64::MIN`.
+fn device_invite_subject_is_fresh(now: i64, issued_at: i64) -> bool {
+    now.abs_diff(issued_at) <= DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS.unsigned_abs()
 }
 
 impl TraceUploadClaimIssuerState {
@@ -7017,20 +7024,54 @@ mod tests {
             assert_eq!(error(&response), Some("device_not_invite_onboarded"));
         }
 
+        /// A minute past the bound either way. The route reads its clock
+        /// after the test does, and both truncate to whole seconds, so a body
+        /// one second past the bound can land on it and be served; the exact
+        /// bound is `the_skew_bound_is_inclusive_either_way`, on a fixed
+        /// clock.
         #[tokio::test]
         async fn a_stale_or_future_request_is_refused() {
             let d = device();
-            for issued_at in [Utc::now().timestamp() - 301, Utc::now().timestamp() + 301] {
+            let past_the_bound = DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS + 60;
+            for offset in [-past_the_bound, past_the_bound] {
                 let (status, response) = signed(
                     config_with(vec![record(&d, Some(INVITE), false)]),
                     &d,
-                    body(&d.id, issued_at),
+                    body(&d.id, Utc::now().timestamp() + offset),
                 )
                 .await;
                 assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
                 assert_eq!(
                     error(&response),
                     Some("device_invite_subject_request_stale")
+                );
+            }
+        }
+
+        #[test]
+        fn the_skew_bound_is_inclusive_either_way() {
+            let now = 1_800_000_000;
+            let bound = DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS;
+            for issued_at in [now, now - bound, now + bound] {
+                assert!(
+                    device_invite_subject_is_fresh(now, issued_at),
+                    "{issued_at}"
+                );
+            }
+            // `now + i64::MIN` is 2^63 seconds back: `now - issued_at`
+            // overflows, which panics a debug build and wraps a release
+            // build to `i64::MIN`, whose `abs()` stays negative and so read
+            // as fresh.
+            for issued_at in [
+                now - bound - 1,
+                now + bound + 1,
+                i64::MIN,
+                i64::MAX,
+                now + i64::MIN,
+            ] {
+                assert!(
+                    !device_invite_subject_is_fresh(now, issued_at),
+                    "{issued_at}"
                 );
             }
         }
