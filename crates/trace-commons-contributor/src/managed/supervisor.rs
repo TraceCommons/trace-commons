@@ -46,6 +46,31 @@ fn with_open_files_floor(command: std::process::Command) -> std::process::Comman
     wrapped
 }
 
+/// Markers a Claude Code session sets in the environment of every process it
+/// starts. A managed session is a new top-level session, never a child of
+/// whatever started the helper, the daemon or the terminal, so none of them
+/// may reach the tool: with `CLAUDE_CODE_CHILD_SESSION` inherited, Claude Code
+/// treats the session as a subagent and turns transcript saving off, which
+/// also leaves trace collection with nothing to read.
+const PARENT_SESSION_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "AI_AGENT",
+];
+
+/// Drop every [`PARENT_SESSION_ENV`] marker from the tool's environment.
+fn clear_parent_session(command: &mut std::process::Command) {
+    for key in PARENT_SESSION_ENV {
+        command.env_remove(key);
+    }
+}
+
 pub async fn redeem_and_run(store: &ConfigStore, prepared: PreparedLaunch) -> anyhow::Result<i32> {
     let mut signals = TerminalSignals::new()?;
     let context: LaunchContext = call(
@@ -294,6 +319,7 @@ async fn run_native(
             let _ = capture.configure_codex(&mut command);
         }
     }
+    clear_parent_session(&mut command);
     #[cfg(unix)]
     let command = with_open_files_floor(command);
     let mut child = tokio::process::Command::from(command)
@@ -678,7 +704,7 @@ impl TerminalSignals {
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
-    use super::with_open_files_floor;
+    use super::{PARENT_SESSION_ENV, clear_parent_session, with_open_files_floor};
     use super::{near_ai_route, sign_in_route_command, status_line, stop_asked};
     #[cfg(unix)]
     use super::{opencode_route_command, opencode_sign_in_command};
@@ -1201,6 +1227,32 @@ mod tests {
             .env("KEPT", "yes")
             .env_remove("GONE");
         command
+    }
+
+    /// A helper started from inside a Claude Code session (its Bash tool, or
+    /// a terminal or daemon that one started) inherits that session's
+    /// markers. The managed tool must start as its own top-level session, or
+    /// Claude Code turns transcript saving off.
+    #[cfg(unix)]
+    #[test]
+    fn the_spawned_tool_does_not_inherit_a_parent_claude_code_session() {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "env"]);
+        for key in PARENT_SESSION_ENV {
+            command.env(key, "1");
+        }
+        command.env("KEPT", "yes");
+        clear_parent_session(&mut command);
+        let out = with_open_files_floor(command).output().unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        let names: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .collect();
+        for key in PARENT_SESSION_ENV {
+            assert!(!names.contains(key), "{key} reached the tool");
+        }
+        assert!(names.contains(&"KEPT"), "{text}");
     }
 
     /// A tool started from a shell at launchd's 256 open files outgrows it at

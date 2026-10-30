@@ -122,6 +122,8 @@ pub enum ManagedError {
     TerminalNotFound,
     #[error("the chosen model is not available on NEAR AI")]
     ModelUnavailable,
+    #[error("add funds to NEAR AI before launching")]
+    NearAiBalanceTooLow,
 }
 
 pub mod copy;
