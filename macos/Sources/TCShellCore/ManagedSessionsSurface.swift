@@ -482,17 +482,21 @@ public extension ManagedSurface {
             ?? copy("model_default_unknown")
         let models = catalogue?.models ?? []
         let favorites = Set(catalogue?.favorites ?? [])
-        let favored = models.filter { favorites.contains($0.id) }
-            .map { ManagedModelOption(title: $0.id, value: $0.id) }
-        let others = models.filter { !favorites.contains($0.id) }
-        let known = Set(modelTiers.map(\.0))
-        let grouped = modelTiers.flatMap { tier, key in
-            others.filter { $0.tier == tier }
-                .map { ManagedModelOption(title: $0.id, value: $0.id, section: copy(key)) }
+        // One pass: favorites first, then each known tier in `modelTiers`
+        // order, then models with no known tier under no heading.
+        var favored: [ManagedModelOption] = []
+        var byTier = [[ManagedModelOption]](repeating: [], count: modelTiers.count)
+        var rest: [ManagedModelOption] = []
+        for model in models {
+            if favorites.contains(model.id) {
+                favored.append(ManagedModelOption(title: model.id, value: model.id))
+            } else if let index = modelTiers.firstIndex(where: { $0.0 == model.tier }) {
+                byTier[index].append(ManagedModelOption(title: model.id, value: model.id, section: copy(modelTiers[index].1)))
+            } else {
+                rest.append(ManagedModelOption(title: model.id, value: model.id))
+            }
         }
-        let rest = others.filter { !known.contains($0.tier ?? "") }
-            .map { ManagedModelOption(title: $0.id, value: $0.id) }
-        return [ManagedModelOption(title: first, value: defaultModel)] + favored + grouped + rest
+        return [ManagedModelOption(title: first, value: defaultModel)] + favored + byTier.flatMap { $0 } + rest
     }
 
     /// The favorites NEAR AI no longer lists, each shown with a way to

@@ -45,8 +45,9 @@ pub const EXCLUDED: &[&str] = &["rerank", "privacy-filter", "embedding", "whispe
 pub enum ModelTier {
     /// "Incognito": a vendor's model (OpenAI, Anthropic, Google, ...) on
     /// the vendor's servers, sent through NEAR AI's gateway under NEAR AI's
-    /// account. `owned_by` is the vendor's name; any name NEAR AI does not
-    /// otherwise mark lands here, since it claims the least.
+    /// account. `owned_by` is the vendor's name, but only the vendors in
+    /// `INCOGNITO_OWNERS` are recognised: an owner the code does not know
+    /// has no tier, so the picker never claims a tier NEAR AI did not give.
     Incognito,
     /// "Confidential TEE": NEAR AI's own GPUs, in a TEE. `owned_by` is
     /// `nearai`.
@@ -54,20 +55,31 @@ pub enum ModelTier {
     /// "3P Confidential TEE": a third party's TEE. `owned_by` is
     /// `Attested 3P`.
     External,
+    /// A tier a newer daemon sent that this build does not know. Treated as
+    /// no tier: the picker lists the model last, under no heading.
+    #[serde(other)]
+    Unknown,
 }
 
+/// The `owned_by` vendors NEAR AI's docs name as Incognito (OpenAI,
+/// Anthropic, Google), matched case-insensitively. Other owners in the
+/// catalogue (`system`, `organization-owner`, ...) carry no tier.
+const INCOGNITO_OWNERS: &[&str] = &["openai", "anthropic", "google"];
+
 impl ModelTier {
-    /// The tier `owned_by` names; none without one.
+    /// The tier `owned_by` positively names; none for an absent, blank or
+    /// unrecognised owner.
     fn from_owner(owned_by: Option<&str>) -> Option<Self> {
         let owner = owned_by?.trim();
-        if owner.is_empty() {
-            None
-        } else if owner == "nearai" {
+        let is = |name: &str| owner.eq_ignore_ascii_case(name);
+        if ["nearai", "near-ai", "near ai"].into_iter().any(is) {
             Some(Self::NearAi)
-        } else if owner.eq_ignore_ascii_case("attested 3p") {
+        } else if is("attested 3p") {
             Some(Self::External)
-        } else {
+        } else if INCOGNITO_OWNERS.iter().copied().any(is) {
             Some(Self::Incognito)
+        } else {
+            None
         }
     }
 }
@@ -424,6 +436,12 @@ mod tests {
             {"id": "z-ai/glm-5.3", "owned_by": "attested 3p"},
             {"id": "moonshotai/kimi-k3", "owned_by": "Attested 3P"},
             {"id": "x-ai/grok-4.7", "owned_by": "some-new-vendor"},
+            {"id": "a/b", "owned_by": "system"},
+            {"id": "c/d", "owned_by": "organization-owner"},
+            {"id": "e/f", "owned_by": "NearAI"},
+            {"id": "g/h", "owned_by": "Near-AI"},
+            {"id": "i/j", "owned_by": "near ai"},
+            {"id": "k/l", "owned_by": "OpenAI"},
             {"id": "no/owner"},
             {"id": "blank/owner", "owned_by": " "},
         ]}));
@@ -435,7 +453,13 @@ mod tests {
                 ("Qwen/Qwen3.8-27B", Some(ModelTier::NearAi)),
                 ("z-ai/glm-5.3", Some(ModelTier::External)),
                 ("moonshotai/kimi-k3", Some(ModelTier::External)),
-                ("x-ai/grok-4.7", Some(ModelTier::Incognito)),
+                ("x-ai/grok-4.7", None),
+                ("a/b", None),
+                ("c/d", None),
+                ("e/f", Some(ModelTier::NearAi)),
+                ("g/h", Some(ModelTier::NearAi)),
+                ("i/j", Some(ModelTier::NearAi)),
+                ("k/l", Some(ModelTier::Incognito)),
                 ("no/owner", None),
                 ("blank/owner", None),
             ]
@@ -450,9 +474,18 @@ mod tests {
             ])
         );
         assert_eq!(
-            serde_json::to_value(&kept[5]).unwrap(),
+            serde_json::to_value(&kept[11]).unwrap(),
             json!({"id": "no/owner"})
         );
+    }
+
+    /// A tier string a newer daemon sends reads as `Unknown`, not an error,
+    /// so an older launcher still loads the launch context.
+    #[test]
+    fn unknown_tier_string_deserializes() {
+        let model: ChatModel =
+            serde_json::from_value(json!({"id": "a/b", "tier": "future_tier"})).unwrap();
+        assert_eq!(model.tier, Some(ModelTier::Unknown));
     }
 
     /// An entry without modality fields is kept unless its id names a
