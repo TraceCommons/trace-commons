@@ -38,6 +38,10 @@ public struct ManagedFolderDraft: Equatable, Sendable {
     public private(set) var remembered = false
     private var token: UUID?
     public var model: String?
+    /// The picker fell back to the default because NEAR AI no longer lists
+    /// the folder's saved model. The launch runs the default and sends
+    /// `keep_saved_model`, so the saved model is not replaced by it.
+    public private(set) var keepsSavedModel = false
     public var collectTraces = false
     public var cliOptions = ""
 
@@ -75,6 +79,19 @@ public struct ManagedFolderDraft: Equatable, Sendable {
         self.tool == tool && self.cwd == cwd && phase == .ready
     }
 
+    /// The saved model is not listed: run the default, keep the saved one.
+    public mutating func fallBackToDefault() {
+        model = nil
+        keepsSavedModel = true
+    }
+
+    /// A model the person picked (nil for the default), which the launch
+    /// remembers.
+    public mutating func choose(_ model: String?) {
+        self.model = model
+        keepsSavedModel = false
+    }
+
     public mutating func useDefaults(tool: String, cwd: String?, cliOptions: String) {
         self = Self()
         self.tool = tool
@@ -101,6 +118,7 @@ public extension ManagedFolderDraft {
         result["collect_traces"] = collectTraces
         let mode = ManagedSurface.folderModelMode(tool: params["tool"] as? String ?? "", connection: params["connection"] as? String ?? "")
         result["model"] = mode == .none ? nil : model
+        if keepsSavedModel && mode != .none { result["keep_saved_model"] = true }
         return result
     }
 }

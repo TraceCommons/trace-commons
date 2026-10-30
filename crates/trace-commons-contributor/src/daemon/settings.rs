@@ -2186,14 +2186,17 @@ pub fn apply_settings_object(
             // id, `false` unstars it, omitted ids stay. One bad entry, or a
             // patch that grows the list past the bound, refuses the whole
             // patch. A removal is never refused for the bound, so a person
-            // can always tidy a full list. Also reachable as
+            // can always tidy a full list, nor for the id's shape: removing
+            // an exact stored string is always safe, and an older or
+            // hand-edited file may hold one the star check refuses. Also
+            // reachable as
             // `managed_model_favorite_set`, which writes through here.
             "managed_favorite_models" => {
                 let entries = value.as_object().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
                 let mut candidate = settings.managed_favorite_models.clone();
                 for (id, on) in entries {
                     let on = on.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
-                    if !valid_favorite_model_id(id) {
+                    if on && !valid_favorite_model_id(id) {
                         return Err(ERR_SETTINGS_INVALID_VALUE);
                     }
                     if !on {
@@ -3503,6 +3506,38 @@ mod tests {
             DaemonSettings::load(&store).unwrap().managed_terminal,
             TerminalSetting::Unrecognized
         );
+    }
+
+    /// A stored id that would fail the star check (from an older or
+    /// hand-edited file) is still removed by `false`: removing an exact
+    /// stored string is always safe, and the entry must not hold one of the
+    /// 32 places for good (#1754 review). Starring it stays refused.
+    #[test]
+    fn a_malformed_stored_favorite_can_be_unstarred() {
+        let long = "m".repeat(MAX_FAVORITE_MODEL_ID_BYTES + 1);
+        for bad in ["a one", "a/\u{0007}", "", long.as_str()] {
+            let mut s = DaemonSettings {
+                managed_favorite_models: vec!["a/one".into(), bad.into()],
+                ..DaemonSettings::default()
+            };
+            assert_eq!(
+                apply_settings_object(
+                    &mut s,
+                    &serde_json::json!({"managed_favorite_models": { bad: true }})
+                ),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{bad:?}"
+            );
+            assert_eq!(
+                apply_settings_object(
+                    &mut s,
+                    &serde_json::json!({"managed_favorite_models": { bad: false }})
+                ),
+                Ok(true),
+                "{bad:?}"
+            );
+            assert_eq!(s.managed_favorite_models, ["a/one"], "{bad:?}");
+        }
     }
 
     /// Favorite models merge like `notify`: `true` stars an id, `false`

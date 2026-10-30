@@ -9685,7 +9685,11 @@ launcher reads only `accepted`.
 `managed_launch_prepare` also accepts `model` for Claude Code and Codex on
 `near_ai` and `near_ai_signin`, as the session's default model; on
 `subscription` and `api_key` it is still refused (`managed-invalid-request`).
-Absent means the tool's default (see `docs/managed-sessions.md`). A model NEAR
+Absent means the tool's default (see `docs/managed-sessions.md`). It also
+accepts additive `keep_saved_model: boolean` (absent is false): the shell
+fell back to the default because NEAR AI no longer lists the folder's saved
+model, so the launch remembers its other folder choices but keeps the saved
+model. A model NEAR
 AI does not list as a chat model is refused when the proxy starts, with
 `managed-model-unavailable`: at `managed_launch_redeem` on the sign-in, in the
 launcher on a saved key.
@@ -9705,16 +9709,23 @@ launcher on a saved key.
   list favorites after the default option and before the other models, do
   not repeat them, never offer an unavailable favorite, and show each one
   apart with a way to unstar it. A saved model the catalogue does not list
-  falls back to the default option, visibly; with no catalogue it is kept.
+  falls back to the default option, visibly, for that launch only: the
+  launch sends `keep_saved_model: true` and the folder keeps its saved
+  model. With no catalogue the model is kept; once the read has failed, the
+  launch is not held for it, and the daemon refuses an unlisted model as
+  above.
 - `managed_model_favorite_set {model, favorite}` (async only) stars
   (`favorite: true`) or unstars one model and answers `{favorites: [string]}`,
   the whole stored list in no particular order. Starring reads NEAR AI's chat
   models first and refuses a model it does not list with
   `managed-model-unavailable`, also the answer when NEAR AI cannot be read;
-  nothing is written. Unstarring reads nothing and always succeeds for a
-  well-formed id. An empty or malformed id, a non-boolean `favorite`, any
-  other field, or starring a 33rd favorite is `managed-invalid-request`;
-  unstarring is never refused for the bound. The list is
+  nothing is written. Unstarring reads nothing and accepts any string, so an
+  id an older or hand-edited settings file holds can always be removed.
+  Starring an empty or malformed id, a non-boolean `favorite`, any other
+  field, or starring a 33rd favorite is `managed-invalid-request`;
+  unstarring is never refused for the bound or the id's shape. A change
+  publishes `status_changed`, so every window re-reads `get_settings`
+  (`managed_favorite_models`). The list is
   global, not per tool: one favorite shows in each tool's picker that offers
   it. A developer dry run refuses it, as it does `managed_model_catalogue`.
 - Session views' `model` is the model the session starts on: the one named,

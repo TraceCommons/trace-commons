@@ -321,6 +321,7 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
         cwd,
         expected_generation,
         save_default: false,
+        keep_saved_model: false,
     };
     let prepared: PreparedLaunch = call(store, "managed_launch_prepare", json!(request))?;
     super::supervisor::redeem_and_run(store, prepared).await

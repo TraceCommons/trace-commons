@@ -165,10 +165,16 @@ pub(crate) fn schema() -> Value {
     properties.insert("managed_terminal".into(), terminal);
     properties.insert("managed_favorite_models".into(), json!({
         "type":"object",
-        "propertyNames":{"minLength":1,"maxLength":settings::MAX_FAVORITE_MODEL_ID_BYTES,"pattern":"^\\S+$"},
+        // JSON Schema counts characters, not bytes, so `maxLength` is only
+        // an upper bound; the description states the daemon's byte limit.
+        "propertyNames":{"minLength":1,"maxLength":settings::MAX_FAVORITE_MODEL_ID_BYTES,"pattern":"^[^\\s\\x00-\\x1f\\x7f]+$"},
         "additionalProperties":{"type":"boolean"},
         "examples":[{}],
-        "description":"Partial update of the models listed first in the managed-session model picker: true stars a NEAR AI model id, false unstars it, omitted ids remain. At most 32 favorites. Whether NEAR AI offers an id is not checked here."
+        "description":format!(
+            "Partial update of the models listed first in the managed-session model picker: true stars a NEAR AI model id, false unstars it, omitted ids remain. At most {} favorites. A starred id is at most {} UTF-8 bytes with no whitespace or control characters, which the daemon checks; false removes any stored id. Whether NEAR AI offers an id is not checked here.",
+            settings::MAX_FAVORITE_MODELS,
+            settings::MAX_FAVORITE_MODEL_ID_BYTES
+        )
     }));
     properties.insert("managed_folder_settings".into(), json!({
         "type":"array", "items":{
@@ -337,6 +343,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// #1754 review: the favorites schema states the daemon's bounds from
+    /// its constants, says the byte bound is the daemon's (JSON Schema's
+    /// `maxLength` counts characters), and its pattern refuses the control
+    /// characters the daemon refuses.
+    #[test]
+    fn favorite_models_schema_states_the_daemons_bounds() {
+        let entry = &schema()["patch_schema"]["properties"]["managed_favorite_models"];
+        let description = entry["description"].as_str().unwrap();
+        assert!(
+            description.contains(&format!(
+                "At most {} favorites",
+                settings::MAX_FAVORITE_MODELS
+            )),
+            "{description}"
+        );
+        assert!(
+            description.contains(&format!(
+                "{} UTF-8 bytes",
+                settings::MAX_FAVORITE_MODEL_ID_BYTES
+            )),
+            "{description}"
+        );
+        let pattern = entry["propertyNames"]["pattern"].as_str().unwrap();
+        assert_eq!(pattern, "^[^\\s\\x00-\\x1f\\x7f]+$");
     }
 
     #[test]

@@ -15279,7 +15279,6 @@ mod tests {
             serde_json::json!({}),
             serde_json::json!({"model":"fixture-model"}),
             serde_json::json!({"model":"","favorite":true}),
-            serde_json::json!({"model":"","favorite":false}),
             serde_json::json!({"model":"fixture model","favorite":true}),
             serde_json::json!({"model":"fixture-model","favorite":"yes"}),
             serde_json::json!({"model":"fixture-model","favorite":true,"tool":"codex"}),
@@ -15363,6 +15362,22 @@ mod tests {
             r.result.expect("unstarred"),
             serde_json::json!({"favorites":[]})
         );
+        // A malformed id an older or hand-edited settings file holds can
+        // still be removed: unstarring an exact stored string is always
+        // safe, so the shape check is for stars only (#1754 review).
+        for bad in ["bad id", "bad\u{7}id", ""] {
+            s.settings
+                .lock()
+                .unwrap()
+                .managed_favorite_models
+                .push(bad.into());
+            let r = favorite(serde_json::json!({"model":bad,"favorite":false})).await;
+            assert_eq!(
+                r.result.expect("unstarred"),
+                serde_json::json!({"favorites":[]}),
+                "{bad:?}"
+            );
+        }
         assert_eq!(
             catalogue_lists().await,
             (serde_json::json!([]), serde_json::json!([]))

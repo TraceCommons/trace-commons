@@ -140,6 +140,7 @@ impl ManagedService {
                         cwd: view.cwd.clone(),
                         expected_generation: Generation(0),
                         save_default: false,
+                        keep_saved_model: false,
                     },
                     sign_in,
                 )
@@ -449,6 +450,7 @@ impl ManagedService {
                     cwd: self.profiles.profile_root(account.id)?,
                     expected_generation: self.accounts.generation(account.tool),
                     save_default: false,
+                    keep_saved_model: false,
                 };
                 Ok(json!(self.sessions.prepare(request, &account)?))
             }
@@ -560,8 +562,19 @@ fn remember_prepared(
     {
         let id: Uuid = serde_json::from_value(value["session_id"].clone())
             .map_err(|_| ManagedError::InvalidRequest)?;
-        let prefs = with_service(shared, |service| Ok(service.sessions.folder_settings(id)))?;
-        if let Some(prefs) = prefs {
+        let (prefs, keep) = with_service(shared, |service| {
+            Ok((
+                service.sessions.folder_settings(id),
+                service.sessions.keeps_saved_model(id),
+            ))
+        })?;
+        if let Some(mut prefs) = prefs {
+            // A launch that fell back to the default because NEAR AI no
+            // longer lists the saved model remembers its other choices but
+            // not the fallback: the folder keeps the model it had.
+            if keep {
+                prefs.model = saved_folder_model(shared, &prefs);
+            }
             let write = Request {
                 id: request.id,
                 method: "set_settings".into(),
@@ -575,6 +588,20 @@ fn remember_prepared(
         }
     }
     Ok(value)
+}
+
+/// The model the folder's saved settings name for `prefs`' tool, if any.
+fn saved_folder_model(
+    shared: &DaemonShared,
+    prefs: &crate::managed::folder::FolderSettings,
+) -> Option<String> {
+    let cwd = crate::managed::folder::canonical(&prefs.cwd).ok()?;
+    let settings = shared.settings.lock().ok()?;
+    settings
+        .managed_folder_settings
+        .iter()
+        .find(|entry| entry.tool == prefs.tool && entry.cwd == cwd)
+        .and_then(|entry| entry.model.clone())
 }
 
 fn refusal_label(refusal: Refusal) -> &'static str {
@@ -755,9 +782,12 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
 /// `managed_model_favorite_set {model, favorite}`: star or unstar one model
 /// for the Launch sheet's picker. Starring reads NEAR AI's chat models and
 /// refuses one it does not list, so only an offered model is ever added;
-/// unstarring reads nothing. Writes through `set_settings`, whose checks
-/// (id shape, list bound) apply too. Answers `{"favorites"}`, the stored
-/// list. No lock is held across the read.
+/// unstarring reads nothing and takes any stored string, so a malformed id
+/// from an older or hand-edited file can still be removed. Writes through
+/// `set_settings`, whose checks (id shape for a star, list bound) apply
+/// too. Answers `{"favorites"}`, the stored list, and publishes
+/// `status_changed` so every window re-reads its settings. No lock is held
+/// across the read.
 async fn favorite_set(shared: &DaemonShared, request: &Request) -> Response {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -769,7 +799,7 @@ async fn favorite_set(shared: &DaemonShared, request: &Request) -> Response {
         Ok(p) => p,
         Err(error) => return respond(request, Err(error.into())),
     };
-    if !crate::daemon::settings::valid_favorite_model_id(&p.model) {
+    if p.favorite && !crate::daemon::settings::valid_favorite_model_id(&p.model) {
         return respond(request, Err(ManagedError::InvalidRequest.into()));
     }
     if p.favorite {
@@ -792,6 +822,7 @@ async fn favorite_set(shared: &DaemonShared, request: &Request) -> Response {
         }
         return response;
     }
+    shared.publish(super::ipc::EVENT_STATUS_CHANGED, json!({}));
     respond(request, Ok(json!({"favorites": favorite_models(shared)})))
 }
 
@@ -1035,6 +1066,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
             model: None,
             collect_traces: false,
         })
@@ -1113,6 +1145,7 @@ mod tests {
                     cwd: home.path().to_path_buf(),
                     expected_generation: Generation(0),
                     save_default: false,
+                    keep_saved_model: false,
                     model: None,
                     collect_traces: false,
                 }),

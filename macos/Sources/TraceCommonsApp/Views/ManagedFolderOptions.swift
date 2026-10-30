@@ -14,11 +14,9 @@ struct ManagedFolderOptions: View {
     let reset: () -> Void
     @EnvironmentObject private var model: AppModel
     @State private var favoriteBusy = false
-    @State private var favoriteRefused = false
-    /// The saved or chosen model was dropped by NEAR AI and the picker fell
-    /// back to the default. Set only by that fallback, never for a missing
-    /// catalogue, and cleared when the person picks again.
-    @State private var fellBack = false
+    /// The copy key of the last refused star or removal; cleared by the
+    /// next pick, star or removal, and by a new account or folder.
+    @State private var favoriteError: String?
 
     static func modelIsAvailable(_ draft: ManagedFolderDraft, tool: String, connection: String,
                                  catalogue: ManagedModelCatalogue?) -> Bool {
@@ -57,7 +55,7 @@ struct ManagedFolderOptions: View {
                 HStack(spacing: GlassTokens.Space.s2) {
                     GlassPicker(model.managedText("model_choice"), selection: Binding(
                         get: { draft.model ?? ManagedSurface.defaultModel },
-                        set: { draft.model = $0.flatMap { $0.isEmpty ? nil : $0 }; favoriteRefused = false; fellBack = false }),
+                        set: { draft.choose($0.flatMap { $0.isEmpty ? nil : $0 }); favoriteError = nil }),
                         options: modelOptions, placeholder: model.managedText("model_default_unknown"))
                     if let chosen = draft.model, ManagedSurface.offersFavorite(chosen, in: catalogue) {
                         favoriteStar(chosen)
@@ -68,16 +66,19 @@ struct ManagedFolderOptions: View {
             // The catalogue may arrive before or after the folder settings:
             // this runs when the fields appear and on every new catalogue.
             .onChange(of: catalogue, initial: true) { _, _ in reconcileModel() }
-            .onDisappear { fellBack = false }
+            // The sheet keeps this view when the account or folder changes;
+            // a refused star's line was about the old one (#1754 review).
+            .onChange(of: draft.phase) { _, _ in favoriteError = nil }
+            .onDisappear { favoriteError = nil }
             ForEach(ManagedSurface.unavailableFavorites(catalogue), id: \.self) { stale in
                 unavailableFavoriteRow(stale)
             }
-            if favoriteRefused {
-                Text(model.managedText("model_unavailable"))
+            if let favoriteError {
+                Text(model.managedText(favoriteError))
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
             }
-            if fellBack {
+            if draft.keepsSavedModel {
                 Text(model.managedText("folder_model_unavailable"))
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
@@ -114,13 +115,37 @@ struct ManagedFolderOptions: View {
         }
     }
 
-    /// A model NEAR AI no longer lists falls back to the default, visibly.
-    /// Without a catalogue nothing changes: unknown is not removed.
+    /// A model NEAR AI no longer lists falls back to the default, visibly,
+    /// for this launch only: the folder keeps its saved model
+    /// (`keep_saved_model`). Without a catalogue nothing changes: unknown
+    /// is not removed.
     private func reconcileModel() {
-        let reconciled = ManagedSurface.reconciledModel(draft.model, in: catalogue)
-        guard reconciled.fellBack else { return }
-        draft.model = reconciled.model
-        fellBack = true
+        guard ManagedSurface.reconciledModel(draft.model, in: catalogue).fellBack else { return }
+        draft.fallBackToDefault()
+    }
+
+    /// Whether Launch may go as far as the model is concerned. A pending
+    /// catalogue read holds a saved model, as `modelIsAvailable` does; a
+    /// failed one does not, since nothing on the sheet would say why
+    /// (#1754 review). The daemon still refuses a model NEAR AI does not
+    /// list, with `managed-model-unavailable`.
+    static func launchModelReady(_ draft: ManagedFolderDraft, tool: String, connection: String,
+                                 catalogue: ManagedModelCatalogue?, catalogueFailed: Bool) -> Bool {
+        if catalogueFailed, catalogue == nil,
+           ManagedSurface.folderModelMode(tool: tool, connection: connection) == .catalogue {
+            return true
+        }
+        return modelIsAvailable(draft, tool: tool, connection: connection, catalogue: catalogue)
+    }
+
+    /// After a star or removal the catalogue is read again, so its two
+    /// favorites lists are the daemon's, never recomputed here. A failed
+    /// read keeps the one shown.
+    private func reloadCatalogue() {
+        model.managedModelCatalogue(tool: tool) { fresh in
+            favoriteBusy = false
+            if let fresh { catalogue = fresh }
+        }
     }
 
     /// A favorite NEAR AI no longer lists, and its removal.
@@ -133,9 +158,14 @@ struct ManagedFolderOptions: View {
             Spacer()
             Button(model.managedText("remove")) {
                 favoriteBusy = true
-                model.setFavoriteModel(stale, favorite: false) { favorites in
-                    favoriteBusy = false
-                    if let favorites { catalogue = catalogue?.withFavorites(favorites) }
+                favoriteError = nil
+                model.setFavoriteModel(stale, favorite: false) { favorites, label in
+                    guard favorites != nil else {
+                        favoriteBusy = false
+                        favoriteError = ManagedSurface.favoriteErrorKey(label)
+                        return
+                    }
+                    reloadCatalogue()
                 }
             }
             .buttonStyle(GlassButtonStyle(.link))
@@ -152,14 +182,14 @@ struct ManagedFolderOptions: View {
             systemImage: starred ? "star.fill" : "star", small: true
         ) {
             favoriteBusy = true
-            favoriteRefused = false
-            model.setFavoriteModel(chosen, favorite: !starred) { favorites in
-                favoriteBusy = false
-                if let favorites {
-                    catalogue = catalogue?.withFavorites(favorites)
-                } else {
-                    favoriteRefused = true
+            favoriteError = nil
+            model.setFavoriteModel(chosen, favorite: !starred) { favorites, label in
+                guard favorites != nil else {
+                    favoriteBusy = false
+                    favoriteError = ManagedSurface.favoriteErrorKey(label)
+                    return
                 }
+                reloadCatalogue()
             }
         }
         .disabled(favoriteBusy)

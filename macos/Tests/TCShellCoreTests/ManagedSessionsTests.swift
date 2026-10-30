@@ -322,11 +322,6 @@ final class ManagedSessionsTests: XCTestCase {
         let older = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"b/two"}],"default":null}"#.utf8))
         XCTAssertEqual(older.favorites, [])
         XCTAssertEqual(ManagedSurface.modelOptions(older) { Self.modelCopy[$0] ?? "" }.map(\.value), [ManagedSurface.defaultModel, "a/one", "b/two"])
-
-        // A star's answer replaces the list; the models stay as read.
-        let starred = older.withFavorites(["b/two"])
-        XCTAssertEqual(ManagedSurface.modelOptions(starred) { Self.modelCopy[$0] ?? "" }.map(\.value), [ManagedSurface.defaultModel, "b/two", "a/one"])
-        XCTAssertEqual(starred.models, older.models)
     }
 
     /// The star is offered only for a model NEAR AI lists: never for the
@@ -341,23 +336,15 @@ final class ManagedSessionsTests: XCTestCase {
     }
 
     /// A favorite NEAR AI no longer lists is reported apart, for its own
-    /// row with a way to remove it. Removing it drops the row without a
-    /// re-read. An older daemon sends none, and no catalogue (offline, or
-    /// the read failed) marks nothing: unknown is not removed.
+    /// row with a way to remove it. An older daemon sends none, and no
+    /// catalogue (offline, or the read failed) marks nothing: unknown is
+    /// not removed. After a star or removal the shell re-reads the
+    /// catalogue rather than recomputing these lists (#1754 review).
     func testUnavailableFavoritesAreListedApartAndNeverGuessed() throws {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"b/two"}],"default":"a/one","favorites":["b/two"],"unavailable_favorites":["gone/model","gone/other"]}"#.utf8))
         XCTAssertEqual(ManagedSurface.unavailableFavorites(catalogue), ["gone/model", "gone/other"])
         // Never in the picker.
         XCTAssertFalse(ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }.map(\.value).contains("gone/model"))
-
-        // The stored list after removing one stale favorite.
-        let removed = catalogue.withFavorites(["gone/other", "b/two"])
-        XCTAssertEqual(ManagedSurface.unavailableFavorites(removed), ["gone/other"])
-        XCTAssertEqual(removed.favorites, ["b/two"])
-        // Starring a listed model never makes it unavailable.
-        let starred = removed.withFavorites(["gone/other", "b/two", "a/one"])
-        XCTAssertEqual(ManagedSurface.unavailableFavorites(starred), ["gone/other"])
-        XCTAssertEqual(Set(starred.favorites), ["a/one", "b/two"])
 
         let older = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":null}"#.utf8))
         XCTAssertEqual(older.unavailableFavorites, [])
@@ -381,11 +368,25 @@ final class ManagedSessionsTests: XCTestCase {
             ManagedFavoriteRow(model: "a/one", unavailable: false),
         ])
         XCTAssertEqual(ManagedSurface.favoriteRows(stored: [], catalogue: catalogue), [])
-        // The stored list Settings shows: the catalogue's two lists when it
-        // has one, else the settings read.
-        XCTAssertEqual(Set(ManagedSurface.storedFavorites(catalogue: catalogue, settings: nil)), Set(stored))
-        XCTAssertEqual(ManagedSurface.storedFavorites(catalogue: nil, settings: ["x/y"]), ["x/y"])
-        XCTAssertEqual(ManagedSurface.storedFavorites(catalogue: nil, settings: nil), [])
+        // The rows come from the stored list (`get_settings`), never from
+        // the catalogue's two lists (#1754 review): a favorite NEAR AI
+        // lists but the read tool is not offered is in neither list, and
+        // still has its row, after the ones the catalogue orders.
+        let partial = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one","favorites":["a/one"],"unavailable_favorites":[]}"#.utf8))
+        XCTAssertEqual(ManagedSurface.favoriteRows(stored: ["not/offered", "a/one"], catalogue: partial), [
+            ManagedFavoriteRow(model: "a/one", unavailable: false),
+            ManagedFavoriteRow(model: "not/offered", unavailable: false),
+        ])
+    }
+
+    /// #1754 review: a refused star is described by its cause. Only
+    /// NEAR AI not listing the model says so; anything else (the list is
+    /// full, the write failed, no daemon) is the generic failure.
+    func testAFavoriteFailureNamesOnlyItsOwnCause() {
+        XCTAssertEqual(ManagedSurface.favoriteErrorKey("managed-model-unavailable"), "model_unavailable")
+        for other in ["managed-invalid-request", "settings-write-failed", "unavailable", nil] as [String?] {
+            XCTAssertEqual(ManagedSurface.favoriteErrorKey(other), "action_failed", "\(other ?? "nil")")
+        }
     }
 
     /// A saved or chosen model NEAR AI no longer lists falls back to the
@@ -399,12 +400,34 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.reconciledModel("gone/model", in: nil), ManagedModelReconcile(model: "gone/model", fellBack: false))
 
         // The launch after a fallback names no model: the tool's default.
+        // It also says `keep_saved_model`, so the folder's saved model is
+        // not replaced by the fallback (#1754 review).
         var draft = ManagedFolderDraft()
         draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
         draft.model = "gone/model"
-        draft.model = ManagedSurface.reconciledModel(draft.model, in: catalogue).model
+        XCTAssertFalse(draft.keepsSavedModel)
+        draft.fallBackToDefault()
+        XCTAssertTrue(draft.keepsSavedModel)
         let params = draft.applying(to: ["tool": "claude", "connection": "near_ai"])
         XCTAssertNil(params["model"] as? String)
+        XCTAssertEqual(params["keep_saved_model"] as? Bool, true)
+        // A model the person picks is theirs to remember.
+        draft.choose("a/one")
+        XCTAssertFalse(draft.keepsSavedModel)
+        let chosen = draft.applying(to: ["tool": "claude", "connection": "near_ai"])
+        XCTAssertEqual(chosen["model"] as? String, "a/one")
+        XCTAssertNil(chosen["keep_saved_model"])
+        draft.fallBackToDefault()
+        draft.choose(nil)
+        XCTAssertFalse(draft.keepsSavedModel)
+        // A new folder or account starts clear.
+        draft.fallBackToDefault()
+        draft.begin(tool: "claude", cwd: "/other")
+        XCTAssertFalse(draft.keepsSavedModel)
+        // No model choice at all: nothing to keep, nothing sent.
+        draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
+        draft.fallBackToDefault()
+        XCTAssertNil(draft.applying(to: ["tool": "claude", "connection": "subscription"])["keep_saved_model"])
     }
 
     /// The `managed_model_favorite_set` request: the model and the new

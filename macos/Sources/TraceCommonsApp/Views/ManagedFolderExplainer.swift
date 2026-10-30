@@ -26,11 +26,14 @@ struct ManagedFolderExplainerSheet: View {
     @State private var path: String?
     @State private var draft = ManagedFolderDraft()
     @State private var catalogue: ManagedModelCatalogue?
+    /// The catalogue read failed: Open is not held for it (#1754 review).
+    @State private var catalogueFailed = false
     private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
     private var canOpen: Bool {
         guard !model.managedBusy else { return false }
         return !supportsFolderSettings || (draft.matches(tool: tool, cwd: path)
-            && ManagedFolderOptions.modelIsAvailable(draft, tool: tool, connection: "near_ai_signin", catalogue: catalogue))
+            && ManagedFolderOptions.launchModelReady(draft, tool: tool, connection: "near_ai_signin",
+                                                     catalogue: catalogue, catalogueFailed: catalogueFailed))
     }
 
     init(tool: String, onCancel: @escaping () -> Void, onOpen: @escaping (String?) -> Void,
@@ -98,7 +101,9 @@ struct ManagedFolderExplainerSheet: View {
         }
         .onAppear {
             loadFolderSettings()
-            if supportsFolderSettings { model.managedModelCatalogue(tool: tool) { catalogue = $0 } }
+            if supportsFolderSettings {
+                model.managedModelCatalogue(tool: tool) { catalogue = $0; catalogueFailed = $0 == nil }
+            }
         }
         .onChange(of: path) { _, _ in loadFolderSettings() }
     }

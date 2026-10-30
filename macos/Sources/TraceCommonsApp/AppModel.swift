@@ -81,12 +81,28 @@ final class AppModel: ObservableObject {
     /// Star or unstar one model for the Launch sheet's picker. `done` gets
     /// the daemon's stored list, or nil when it refused (a model NEAR AI no
     /// longer lists, or NEAR AI could not be read).
-    func setFavoriteModel(_ model: String, favorite: Bool, done: @escaping @MainActor ([String]?) -> Void) {
-        guard let client else { return done(nil) }
+    func setFavoriteModel(_ model: String, favorite: Bool,
+                          done: @escaping @MainActor (_ favorites: [String]?, _ errorLabel: String?) -> Void) {
+        guard let client else { return done(nil, nil) }
         let params = ManagedSurface.favoriteParams(model: model, favorite: favorite)
         Task.detached(priority: .userInitiated) {
-            let favorites = (try? client.managedAction("managed_model_favorite_set", params: params))?["favorites"] as? [String]
-            await MainActor.run { done(favorites) }
+            let (favorites, label): ([String]?, String?) = {
+                do {
+                    let answer = try client.managedAction("managed_model_favorite_set", params: params)
+                    return (answer["favorites"] as? [String] ?? [], nil)
+                } catch let failure as DaemonClient.Failure {
+                    return (nil, failure.message)
+                } catch {
+                    return (nil, nil)
+                }
+            }()
+            await MainActor.run {
+                // Every window's settings, the Settings card's list among
+                // them, follow the change (the daemon also publishes
+                // `status_changed`).
+                if favorites != nil { self.refreshSettings() }
+                done(favorites, label)
+            }
         }
     }
 

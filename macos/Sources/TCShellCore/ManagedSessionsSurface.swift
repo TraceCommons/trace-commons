@@ -328,23 +328,6 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         favorites = try container.decodeIfPresent([String].self, forKey: .favorites) ?? []
         unavailableFavorites = try container.decodeIfPresent([String].self, forKey: .unavailableFavorites) ?? []
     }
-
-    private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String]) {
-        self.models = models
-        self.default = `default`
-        self.favorites = favorites
-        self.unavailableFavorites = unavailableFavorites
-    }
-
-    /// This catalogue with the stored list `managed_model_favorite_set`
-    /// answered: a listed model is a favorite, and a stale one stays
-    /// unavailable until it is removed. Nothing is re-read.
-    public func withFavorites(_ stored: [String]) -> ManagedModelCatalogue {
-        ManagedModelCatalogue(
-            models: models, default: `default`,
-            favorites: stored.filter { id in models.contains { $0.id == id } },
-            unavailableFavorites: unavailableFavorites.filter(stored.contains))
-    }
 }
 
 /// `ManagedSurface.reconciledModel`'s answer: the picker's value, and
@@ -420,12 +403,12 @@ public extension ManagedSurface {
         return ManagedModelReconcile(model: nil, fellBack: true)
     }
 
-    /// The stored favorites Settings lists. With a catalogue read for a tool
-    /// offered every NEAR AI model, its two lists together are the whole
-    /// stored list; without one, the settings read's.
-    static func storedFavorites(catalogue: ManagedModelCatalogue?, settings: [String]?) -> [String] {
-        if let catalogue { return catalogue.favorites + catalogue.unavailableFavorites }
-        return settings ?? []
+    /// The copy key for a refused `managed_model_favorite_set`, from the
+    /// daemon's label: only NEAR AI not listing the model says so. A full
+    /// list, a failed write or no daemon is the generic failure, never a
+    /// claim that the model is unavailable.
+    static func favoriteErrorKey(_ label: String?) -> String {
+        label == "managed-model-unavailable" ? "model_unavailable" : "action_failed"
     }
 
     /// Settings' favorites list: the listed ones in NEAR AI's order, then

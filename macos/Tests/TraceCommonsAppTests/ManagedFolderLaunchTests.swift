@@ -48,6 +48,44 @@ final class ManagedFolderLaunchTests: XCTestCase {
         XCTAssertTrue(ManagedFolderOptions.modelIsAvailable(draft, tool: "codex", connection: "near_ai_signin", catalogue: nil))
     }
 
+    /// #1754 review, the view-only findings: Settings reads NEAR AI only
+    /// while there is a favorite; the card draws from the stored list with
+    /// no state of its own; a star or removal refreshes the settings every
+    /// window reads and re-reads the catalogue instead of recomputing it;
+    /// and a refused star's line does not outlive the account it was for.
+    func testFavoritesViewsFollowTheReview() throws {
+        func text(_ rel: String) throws -> String {
+            try String(contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent(rel), encoding: .utf8)
+        }
+        let section = try text("Views/Settings/PrivateAISection.swift")
+        XCTAssertTrue(section.contains(".task(id: hasFavorites)"), "the catalogue read is keyed on having a favorite")
+        let card = try text("Views/Settings/ManagedFavoritesCard.swift")
+        XCTAssertFalse(card.contains("@State private var stored"))
+        XCTAssertFalse(card.contains("withFavorites"))
+        XCTAssertTrue(card.contains("model.daemonSettings?.managedFavoriteModels"))
+        let options = try text("Views/ManagedFolderOptions.swift")
+        XCTAssertFalse(options.contains("withFavorites"))
+        XCTAssertTrue(options.contains(".onChange(of: draft.phase)"), "a new account or folder clears a refused star's line")
+        let app = try text("AppModel.swift")
+        XCTAssertTrue(app.contains("if favorites != nil { self.refreshSettings() }"))
+    }
+
+    /// #1754 review: a failed catalogue read no longer holds Launch with
+    /// no word of why. While the read is pending a saved model is held as
+    /// before; once it has failed, Launch goes, and the daemon refuses a
+    /// model NEAR AI does not list (`managed-model-unavailable`).
+    @MainActor
+    func testAFailedCatalogueReadDoesNotHoldLaunch() {
+        var draft = ManagedFolderDraft()
+        draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
+        draft.model = "a/one"
+        XCTAssertFalse(ManagedFolderOptions.launchModelReady(draft, tool: "claude", connection: "near_ai", catalogue: nil, catalogueFailed: false))
+        XCTAssertTrue(ManagedFolderOptions.launchModelReady(draft, tool: "claude", connection: "near_ai", catalogue: nil, catalogueFailed: true))
+        // OpenCode's typed model still needs text, read or not.
+        draft.useDefaults(tool: "opencode", cwd: "/project", cliOptions: "")
+        XCTAssertFalse(ManagedFolderOptions.launchModelReady(draft, tool: "opencode", connection: "api_key", catalogue: nil, catalogueFailed: true))
+    }
+
     /// Launch is held for a model the catalogue does not list, and while
     /// there is no catalogue to check it against; the default always goes.
     @MainActor

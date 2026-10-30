@@ -447,6 +447,8 @@ struct ManagedLaunchSheet: View {
     /// they could not be.
     @State private var catalogue: ManagedModelCatalogue?
     @State private var catalogueTool: String?
+    /// The last catalogue read failed (offline, timeout, NEAR AI down).
+    @State private var catalogueFailed = false
     @State private var project: URL?
     private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
@@ -454,7 +456,8 @@ struct ManagedLaunchSheet: View {
     private var folderReady: Bool {
         guard let account = selectedAccount, loadedAccountID == accountID else { return false }
         return folderDraft.matches(tool: account.tool, cwd: project?.path)
-            && ManagedFolderOptions.modelIsAvailable(folderDraft, tool: account.tool, connection: account.connection, catalogue: catalogue)
+            && ManagedFolderOptions.launchModelReady(folderDraft, tool: account.tool, connection: account.connection,
+                                                     catalogue: catalogue, catalogueFailed: catalogueFailed)
     }
 
     init(onClose: @escaping () -> Void, accountID: String = "") {
@@ -572,8 +575,15 @@ struct ManagedLaunchSheet: View {
         guard catalogueTool != tool else { return }
         catalogueTool = tool
         catalogue = nil
+        catalogueFailed = false
         model.managedModelCatalogue(tool: tool) { result in
-            if catalogueTool == tool { catalogue = result }
+            guard catalogueTool == tool else { return }
+            catalogue = result
+            // A failed read is tried again on the next account change.
+            if result == nil {
+                catalogueFailed = true
+                catalogueTool = nil
+            }
         }
     }
 }

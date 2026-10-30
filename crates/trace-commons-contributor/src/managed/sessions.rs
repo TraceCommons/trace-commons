@@ -76,6 +76,11 @@ pub struct LaunchRequest {
     pub expected_generation: Generation,
     #[serde(default)]
     pub save_default: bool,
+    /// The launcher fell back to the default because NEAR AI no longer
+    /// lists the folder's saved model: the launch's other choices are
+    /// remembered, the saved model is kept. Absent means false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_saved_model: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -454,6 +459,7 @@ impl SessionRegistry {
         Ok(LaunchRequest {
             request_id,
             save_default: false,
+            keep_saved_model: false,
             ..entry.request.clone()
         })
     }
@@ -683,6 +689,14 @@ impl SessionRegistry {
             collect_traces: entry.request.collect_traces,
             cli_options: entry.cli_options_text.clone()?,
         })
+    }
+
+    /// Whether the launch asked to keep the folder's saved model.
+    pub fn keeps_saved_model(&self, id: Uuid) -> bool {
+        self.data
+            .entries
+            .iter()
+            .any(|entry| entry.view.id == id && entry.request.keep_saved_model)
     }
 
     pub fn validate_ticket(&self, session_id: Uuid, ticket: &str) -> Result<(), ManagedError> {
@@ -989,6 +1003,7 @@ mod tests {
             cwd: home.path().to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
         };
         let sign_in = crate::managed::signin::entry(ToolId::Opencode).unwrap();
         assert_eq!(
@@ -1064,6 +1079,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
         }
     }
 
@@ -1257,6 +1273,7 @@ mod tests {
             cwd: home.path().to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
         };
         let launch = registry.prepare(request, &account).unwrap();
         let mut value = serde_json::to_value(&registry.data).unwrap();
@@ -1293,6 +1310,7 @@ mod tests {
             cwd: home.path().to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
         };
         let launch = registry.prepare(request.clone(), &account).unwrap();
         registry.data.entries[0].ticket_expires = Utc::now() - Duration::seconds(1);
@@ -1334,6 +1352,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
         }
     }
 

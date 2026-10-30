@@ -3,28 +3,25 @@ import TCDesign
 import TCShellCore
 
 /// "Favorite models": every model the person starred beside the Launch
-/// sheet's picker, each with Remove. One NEAR AI stopped listing reads as
-/// no longer available; with no catalogue (offline, or the read failed)
-/// none is marked, because unknown is not removed. Drawn only while there
-/// is a favorite. The catalogue is read for Claude Code, which is offered
-/// every NEAR AI chat model, so its two lists are the whole stored list.
-/// The section reads it (`ManagedFavoritesCard.readCatalogue`), so the read
-/// happens while the card is still hidden.
+/// sheet's picker, each with Remove. The rows are the stored list from
+/// `get_settings`; the catalogue only orders them and marks one NEAR AI
+/// stopped listing as no longer available. With no catalogue (offline, or
+/// the read failed) none is marked, because unknown is not removed. Drawn
+/// only while there is a favorite.
 struct ManagedFavoritesCard: View {
     @EnvironmentObject private var model: AppModel
-    @Binding var catalogue: ManagedModelCatalogue?
-    /// The stored list from the last removal's answer, newer than either read.
-    @State private var stored: [String]?
+    let catalogue: ManagedModelCatalogue?
 
-    /// The tool whose catalogue Settings reads: offered every chat model.
+    /// The tool whose catalogue Settings reads. Its `unavailable_favorites`
+    /// is computed against every NEAR AI chat model whichever tool asks,
+    /// and a favorite it is not offered still has its row, so the choice
+    /// only decides the order of the rows.
     static let catalogueTool = "claude"
     @State private var busy = false
     @State private var failed = false
 
     private var rows: [ManagedFavoriteRow] {
-        let list = stored ?? ManagedSurface.storedFavorites(
-            catalogue: catalogue, settings: model.daemonSettings?.managedFavoriteModels)
-        return ManagedSurface.favoriteRows(stored: list, catalogue: catalogue)
+        ManagedSurface.favoriteRows(stored: model.daemonSettings?.managedFavoriteModels ?? [], catalogue: catalogue)
     }
 
     var body: some View {
@@ -35,8 +32,6 @@ struct ManagedFavoritesCard: View {
                     if failed { GlassAlert(model.managedText("action_failed")) }
                 }
             }
-            // A fresh catalogue supersedes the last removal's answer.
-            .onChange(of: catalogue) { _, _ in stored = nil }
         }
     }
 
@@ -56,16 +51,14 @@ struct ManagedFavoritesCard: View {
         }
     }
 
-    /// Unstarring reads nothing and is never refused for the bound.
+    /// Unstarring reads nothing and is never refused for the bound or the
+    /// id's shape. The model refreshes the settings this card reads.
     private func remove(_ id: String) {
         busy = true
         failed = false
-        model.setFavoriteModel(id, favorite: false) { favorites in
+        model.setFavoriteModel(id, favorite: false) { favorites, _ in
             busy = false
-            guard let favorites else { failed = true; return }
-            stored = favorites
-            catalogue = catalogue?.withFavorites(favorites)
-            model.refreshSettings()
+            failed = favorites == nil
         }
     }
 }
