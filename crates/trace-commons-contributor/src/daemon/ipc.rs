@@ -5213,6 +5213,15 @@ fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
     if req.method == "grant_automatic" && include_existing {
         return Response::err(req.id, ERR_BAD_PARAMS, "include-existing-method-required");
     }
+    // What happens to folders marked Ask (owner, 2026-10-30): kept as Ask
+    // when true, cleared so every folder is Automatic when false. Only with
+    // include_existing; absent keeps the earlier rule, where the grant
+    // supersedes an Ask marked before it without clearing it.
+    let keep_folder_asks = match req.params.get("keep_folder_asks") {
+        None => None,
+        Some(serde_json::Value::Bool(value)) if include_existing => Some(*value),
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "keep-folder-asks-invalid"),
+    };
     let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
     };
@@ -5242,6 +5251,15 @@ fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
         policy.grant_automatic(now, terms);
         if include_existing {
             policy.include_existing_under_grant();
+            match keep_folder_asks {
+                Some(true) => {
+                    policy.keep_folder_asks_under_grant();
+                }
+                Some(false) => {
+                    policy.clear_folder_asks_under_grant();
+                }
+                None => {}
+            }
         }
         if policy.save(&shared.store).is_err() {
             *policy = previous;
@@ -5371,19 +5389,32 @@ fn handle_acknowledge_arming_rewordings(shared: &DaemonShared, req: &Request) ->
     Response::ok(req.id, serde_json::json!({ "acknowledged": acknowledged }))
 }
 
-// Withdraw the Flow 1 grant. Projects it armed keep their own entries.
+// Withdraw the Flow 1 grant. Projects it armed keep their own entries,
+// unless `return_folders_to_ask` puts them back to Ask.
 fn handle_withdraw_automatic_grant(shared: &DaemonShared, req: &Request) -> Response {
-    let withdrawn = {
+    // Settings' "Ask each time" (#1753 item 4) also puts back to Ask every
+    // folder the grant armed. Absent keeps the earlier rule, where they
+    // keep sending.
+    let to_ask = match req.params.get("return_folders_to_ask") {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "return-folders-to-ask-invalid"),
+    };
+    let (withdrawn, changed) = {
         let mut policy = shared.policy.lock().expect("policy lock");
-        let previous = policy.automatic_grant.clone();
-        let withdrawn = policy.withdraw_automatic_grant();
-        if withdrawn && policy.save(&shared.store).is_err() {
-            policy.automatic_grant = previous;
+        let previous = policy.clone();
+        let withdrawn = if to_ask {
+            policy.withdraw_automatic_grant_to_ask()
+        } else {
+            policy.withdraw_automatic_grant()
+        };
+        if *policy != previous && policy.save(&shared.store).is_err() {
+            *policy = previous;
             return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
         }
-        withdrawn
+        (withdrawn, *policy != previous)
     };
-    if withdrawn {
+    if changed {
         // After the withdrawal, not before: a record that fails to write
         // must not leave the grant in force.
         let _ = audit::append(
@@ -5392,7 +5423,7 @@ fn handle_withdraw_automatic_grant(shared: &DaemonShared, req: &Request) -> Resp
                 at: Utc::now(),
                 action: "automatic-grant-withdrawn".to_string(),
                 project_label: None,
-                detail: None,
+                detail: to_ask.then(|| "folders-to-ask".to_string()),
             },
         );
         shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
