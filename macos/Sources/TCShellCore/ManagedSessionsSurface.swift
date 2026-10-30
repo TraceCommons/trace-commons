@@ -107,6 +107,10 @@ public struct ManagedToolAvailability: Decodable, Equatable, Identifiable, Senda
 public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     public struct Capabilities: Decodable, Equatable, Sendable {
         public let folderSettings: Bool?
+        /// Whether `managed_launch_prepare` reads `keep_saved_model`. An
+        /// older daemon refuses the unknown field, so it is sent only when
+        /// this is true; absent reads as no.
+        public let keepSavedModel: Bool?
         public let managedLaunch: Bool
         public let terminalLaunch: Bool
         /// Terminal installer support; absent from older daemons.
@@ -125,6 +129,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case managedLaunch = "managed_launch", terminalLaunch = "terminal_launch", terminalDestination = "terminal_destination"
             case toolSetup = "tool_setup"
             case folderSettings = "folder_settings"
+            case keepSavedModel = "keep_saved_model"
             case nearAiSignin = "near_ai_signin"
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
         }
@@ -331,6 +336,76 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         `default` = try container.decodeIfPresent(String.self, forKey: .default)
         favorites = try container.decodeIfPresent([String].self, forKey: .favorites) ?? []
         unavailableFavorites = try container.decodeIfPresent([String].self, forKey: .unavailableFavorites) ?? []
+    }
+
+    private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String]) {
+        self.models = models
+        self.default = `default`
+        self.favorites = favorites
+        self.unavailableFavorites = unavailableFavorites
+    }
+
+    /// This catalogue with `managed_model_favorite_set`'s answer, the
+    /// stored list, applied as the daemon's catalogue would apply it:
+    /// favorites are the listed models it holds, in NEAR AI's order. A star
+    /// adds only a listed model, so a favorite NEAR AI stopped listing stays
+    /// only while it is stored. The read again that follows confirms it.
+    public func projecting(storedFavorites stored: [String]) -> ManagedModelCatalogue {
+        let held = Set(stored)
+        return ManagedModelCatalogue(
+            models: models, default: `default`,
+            favorites: models.map(\.id).filter(held.contains),
+            unavailableFavorites: unavailableFavorites.filter(held.contains))
+    }
+}
+
+/// The Launch sheet's catalogue reads. Each read has a token, and only the
+/// newest read's answer lands: an older read, for this tool or another,
+/// changes nothing (#1754 review).
+public struct ManagedCatalogueReads: Equatable, Sendable {
+    /// The tool whose catalogue is shown or being read. Nil after a failed
+    /// first read, so the next account change tries again.
+    public private(set) var tool: String?
+    public var catalogue: ManagedModelCatalogue?
+    /// The read for `tool` failed with nothing shown.
+    public private(set) var failed = false
+    private var token: UUID?
+
+    public init() {}
+
+    /// A first read for `tool`, clearing what is shown. Nil when its
+    /// catalogue is shown or a read for it is under way.
+    public mutating func begin(tool: String) -> UUID? {
+        guard self.tool != tool else { return nil }
+        self = Self()
+        self.tool = tool
+        let next = UUID()
+        token = next
+        return next
+    }
+
+    /// A read again for the shown tool, after a star or removal. What is
+    /// shown stays until it answers. Nil with nothing shown.
+    public mutating func refresh() -> (tool: String, token: UUID)? {
+        guard let tool, catalogue != nil else { return nil }
+        let next = UUID()
+        token = next
+        return (tool, next)
+    }
+
+    /// A read's answer, nil when it failed. False, changing nothing, when a
+    /// newer read has started since.
+    @discardableResult
+    public mutating func complete(_ result: ManagedModelCatalogue?, token: UUID) -> Bool {
+        guard self.token == token else { return false }
+        self.token = nil
+        if let result {
+            catalogue = result
+        } else if catalogue == nil {
+            failed = true
+            tool = nil
+        }
+        return true
     }
 }
 

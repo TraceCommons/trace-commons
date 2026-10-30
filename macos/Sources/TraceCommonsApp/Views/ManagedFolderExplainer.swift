@@ -25,15 +25,14 @@ struct ManagedFolderExplainerSheet: View {
     @EnvironmentObject private var model: AppModel
     @State private var path: String?
     @State private var draft = ManagedFolderDraft()
-    @State private var catalogue: ManagedModelCatalogue?
-    /// The catalogue read failed: Open is not held for it (#1754 review).
-    @State private var catalogueFailed = false
+    /// The catalogue read; a failed one does not hold Open (#1754 review).
+    @State private var catalogueReads = ManagedCatalogueReads()
     private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
     private var canOpen: Bool {
         guard !model.managedBusy else { return false }
         return !supportsFolderSettings || (draft.matches(tool: tool, cwd: path)
             && ManagedFolderOptions.launchModelReady(draft, tool: tool, connection: "near_ai_signin",
-                                                     catalogue: catalogue, catalogueFailed: catalogueFailed))
+                                                     catalogue: catalogueReads.catalogue, catalogueFailed: catalogueReads.failed))
     }
 
     init(tool: String, onCancel: @escaping () -> Void, onOpen: @escaping (String?) -> Void,
@@ -94,15 +93,16 @@ struct ManagedFolderExplainerSheet: View {
                 }
                 if supportsFolderSettings {
                     ManagedFolderOptions(tool: tool, connection: "near_ai_signin", draft: $draft,
-                        catalogue: $catalogue, supportsFolderSettings: true,
+                        catalogue: $catalogueReads.catalogue, refreshCatalogue: refreshCatalogue,
+                        supportsFolderSettings: true,
                         retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
                 }
             }
         }
         .onAppear {
             loadFolderSettings()
-            if supportsFolderSettings {
-                model.managedModelCatalogue(tool: tool) { catalogue = $0; catalogueFailed = $0 == nil }
+            if supportsFolderSettings, let token = catalogueReads.begin(tool: tool) {
+                model.managedModelCatalogue(tool: tool) { catalogueReads.complete($0, token: token) }
             }
         }
         .onChange(of: path) { _, _ in loadFolderSettings() }
@@ -112,6 +112,12 @@ struct ManagedFolderExplainerSheet: View {
         guard canOpen else { return }
         if supportsFolderSettings, let onOpenWithSettings { onOpenWithSettings(path, draft) }
         else { onOpen(path) }
+    }
+
+    /// The read again after a star or removal.
+    private func refreshCatalogue() {
+        guard let read = catalogueReads.refresh() else { return }
+        model.managedModelCatalogue(tool: read.tool) { catalogueReads.complete($0, token: read.token) }
     }
 
     private func loadFolderSettings(reset: Bool = false) {

@@ -65,9 +65,18 @@ final class ManagedFolderLaunchTests: XCTestCase {
         XCTAssertTrue(card.contains("model.daemonSettings?.managedFavoriteModels"))
         let options = try text("Views/ManagedFolderOptions.swift")
         XCTAssertFalse(options.contains("withFavorites"))
-        XCTAssertTrue(options.contains(".onChange(of: draft.phase)"), "a new account or folder clears a refused star's line")
+        // A new account or folder redraws the fields, and `.onDisappear`
+        // clears a refused star's line; an `.onChange(of: draft.phase)`
+        // inside the fields never saw a change (#1754 review).
+        XCTAssertFalse(options.contains(".onChange(of: draft.phase)"))
+        XCTAssertTrue(options.contains(".onDisappear { favoriteError = nil }"))
+        // A star shows the setter's answer at once; the read again that
+        // follows belongs to the sheet, which drops another tool's answer.
+        XCTAssertTrue(options.contains("catalogue = catalogue?.projecting(storedFavorites: favorites)"))
+        XCTAssertFalse(options.contains("model.managedModelCatalogue("))
+        // Settings follow the daemon's `status_changed`, not a second read.
         let app = try text("AppModel.swift")
-        XCTAssertTrue(app.contains("if favorites != nil { self.refreshSettings() }"))
+        XCTAssertFalse(app.contains("if favorites != nil { self.refreshSettings() }"))
     }
 
     /// #1754 review: a failed catalogue read no longer holds Launch with
@@ -115,7 +124,7 @@ final class ManagedFolderLaunchTests: XCTestCase {
             draft.useDefaults(tool: tool, cwd: "/project", cliOptions: "--custom")
             draft.collectTraces = true
             let view = NSHostingView(rootView: ManagedFolderOptions(tool: tool, connection: "near_ai_signin",
-                draft: .constant(draft), catalogue: .constant(nil), supportsFolderSettings: true, retry: {}, reset: {})
+                draft: .constant(draft), catalogue: .constant(nil), refreshCatalogue: {}, supportsFolderSettings: true, retry: {}, reset: {})
                 .environmentObject(model).padding(20).frame(width: 520)
                 .background(Color(nsColor: .windowBackgroundColor)))
             let size = view.fittingSize

@@ -408,13 +408,16 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertFalse(draft.keepsSavedModel)
         draft.fallBackToDefault()
         XCTAssertTrue(draft.keepsSavedModel)
-        let params = draft.applying(to: ["tool": "claude", "connection": "near_ai"])
+        let params = draft.applying(to: ["tool": "claude", "connection": "near_ai"], daemonKeepsSavedModel: true)
         XCTAssertNil(params["model"] as? String)
         XCTAssertEqual(params["keep_saved_model"] as? Bool, true)
+        // A daemon that does not say it reads the flag refuses unknown
+        // fields, so it is not sent there (#1754 review).
+        XCTAssertNil(draft.applying(to: ["tool": "claude", "connection": "near_ai"], daemonKeepsSavedModel: false)["keep_saved_model"])
         // A model the person picks is theirs to remember.
         draft.choose("a/one")
         XCTAssertFalse(draft.keepsSavedModel)
-        let chosen = draft.applying(to: ["tool": "claude", "connection": "near_ai"])
+        let chosen = draft.applying(to: ["tool": "claude", "connection": "near_ai"], daemonKeepsSavedModel: true)
         XCTAssertEqual(chosen["model"] as? String, "a/one")
         XCTAssertNil(chosen["keep_saved_model"])
         draft.fallBackToDefault()
@@ -427,7 +430,77 @@ final class ManagedSessionsTests: XCTestCase {
         // No model choice at all: nothing to keep, nothing sent.
         draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
         draft.fallBackToDefault()
-        XCTAssertNil(draft.applying(to: ["tool": "claude", "connection": "subscription"])["keep_saved_model"])
+        XCTAssertNil(draft.applying(to: ["tool": "claude", "connection": "subscription"], daemonKeepsSavedModel: true)["keep_saved_model"])
+    }
+
+    /// #1754 review: the snapshot says whether the daemon reads
+    /// `keep_saved_model`; an older one says nothing, which reads as no.
+    func testTheSnapshotSaysWhetherTheDaemonKeepsTheSavedModel() throws {
+        func capabilities(_ extra: String) throws -> ManagedSnapshot.Capabilities {
+            try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true\#(extra)}}"#.utf8)).capabilities
+        }
+        XCTAssertNil(try capabilities("").keepSavedModel)
+        XCTAssertEqual(try capabilities(#","keep_saved_model":true"#).keepSavedModel, true)
+    }
+
+    /// #1754 review: only the newest catalogue read lands. Account A
+    /// (claude) starts R1, B (codex) starts R2, A again starts R3. R1's
+    /// failure and R2's answer change nothing, and R3's answer is shown.
+    func testOnlyTheNewestCatalogueReadLands() throws {
+        let claude = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one"}"#.utf8))
+        let codex = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"b/two"}],"default":"b/two"}"#.utf8))
+        var reads = ManagedCatalogueReads()
+        let r1 = try XCTUnwrap(reads.begin(tool: "claude"))
+        XCTAssertNil(reads.begin(tool: "claude"), "one read per tool")
+        let r2 = try XCTUnwrap(reads.begin(tool: "codex"))
+        let r3 = try XCTUnwrap(reads.begin(tool: "claude"))
+        XCTAssertFalse(reads.complete(nil, token: r1))
+        XCTAssertFalse(reads.failed)
+        XCTAssertFalse(reads.complete(codex, token: r2))
+        XCTAssertNil(reads.catalogue)
+        XCTAssertTrue(reads.complete(claude, token: r3))
+        XCTAssertEqual(reads.catalogue, claude)
+        XCTAssertEqual(reads.tool, "claude")
+
+        // A read again after a star keeps what is shown until it answers,
+        // and a failure keeps it too. A switch of tool drops its answer.
+        let again = try XCTUnwrap(reads.refresh())
+        XCTAssertEqual(again.tool, "claude")
+        XCTAssertEqual(reads.catalogue, claude)
+        XCTAssertTrue(reads.complete(nil, token: again.token))
+        XCTAssertEqual(reads.catalogue, claude)
+        XCTAssertFalse(reads.failed)
+        let stale = try XCTUnwrap(reads.refresh())
+        let r4 = try XCTUnwrap(reads.begin(tool: "codex"))
+        XCTAssertFalse(reads.complete(claude, token: stale.token), "another tool's catalogue is never shown")
+        XCTAssertNil(reads.catalogue)
+
+        // A failed first read is tried again on the next account change.
+        XCTAssertTrue(reads.complete(nil, token: r4))
+        XCTAssertTrue(reads.failed)
+        XCTAssertNil(reads.refresh(), "nothing shown, nothing to read again")
+        let r5 = try XCTUnwrap(reads.begin(tool: "codex"))
+        XCTAssertFalse(reads.failed)
+        XCTAssertTrue(reads.complete(codex, token: r5))
+        XCTAssertEqual(reads.catalogue, codex)
+    }
+
+    /// #1754 review: a star or removal shows at once, from the setter's
+    /// answer (the stored list), as the daemon would list it: favorites are
+    /// the listed models it holds, in NEAR AI's order, and a favorite NEAR
+    /// AI stopped listing stays only while it is stored.
+    func testAFavoriteChangeShowsTheSettersAnswerAtOnce() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"a/two"},{"id":"a/three"}],"default":"a/one","favorites":["a/two"],"unavailable_favorites":["gone/x","gone/y"]}"#.utf8))
+        let starred = catalogue.projecting(storedFavorites: ["gone/x", "a/three", "a/two", "gone/y", "other/tool"])
+        XCTAssertEqual(starred.favorites, ["a/two", "a/three"])
+        XCTAssertEqual(starred.unavailableFavorites, ["gone/x", "gone/y"])
+        XCTAssertEqual(starred.models, catalogue.models)
+        XCTAssertEqual(starred.default, catalogue.default)
+        XCTAssertTrue(ManagedSurface.isFavoriteModel("a/three", in: starred))
+        let removed = starred.projecting(storedFavorites: ["a/three", "gone/y"])
+        XCTAssertEqual(removed.favorites, ["a/three"])
+        XCTAssertEqual(removed.unavailableFavorites, ["gone/y"])
+        XCTAssertFalse(ManagedSurface.isFavoriteModel("a/two", in: removed))
     }
 
     /// The `managed_model_favorite_set` request: the model and the new

@@ -171,7 +171,9 @@ struct ManagedSessionsSection: View {
         guard !model.managedBusy,
               var params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }
-        if let settings { params = settings.applying(to: params) }
+        if let settings {
+            params = settings.applying(to: params, daemonKeepsSavedModel: model.managedSnapshot?.capabilities.keepSavedModel == true)
+        }
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
     }
 
@@ -443,12 +445,9 @@ struct ManagedLaunchSheet: View {
     @State private var accountID = ""
     @State private var folderDraft = ManagedFolderDraft()
     @State private var loadedAccountID: String?
-    /// NEAR AI's chat models for `catalogueTool`; nil until read, or when
-    /// they could not be.
-    @State private var catalogue: ManagedModelCatalogue?
-    @State private var catalogueTool: String?
-    /// The last catalogue read failed (offline, timeout, NEAR AI down).
-    @State private var catalogueFailed = false
+    /// NEAR AI's chat models for the chosen account's tool: nil until read,
+    /// or when they could not be (offline, timeout, NEAR AI down).
+    @State private var catalogueReads = ManagedCatalogueReads()
     @State private var project: URL?
     private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
@@ -457,7 +456,7 @@ struct ManagedLaunchSheet: View {
         guard let account = selectedAccount, loadedAccountID == accountID else { return false }
         return folderDraft.matches(tool: account.tool, cwd: project?.path)
             && ManagedFolderOptions.launchModelReady(folderDraft, tool: account.tool, connection: account.connection,
-                                                     catalogue: catalogue, catalogueFailed: catalogueFailed)
+                                                     catalogue: catalogueReads.catalogue, catalogueFailed: catalogueReads.failed)
     }
 
     init(onClose: @escaping () -> Void, accountID: String = "") {
@@ -512,7 +511,8 @@ struct ManagedLaunchSheet: View {
                 }
                 if let account = selectedAccount {
                     ManagedFolderOptions(tool: account.tool, connection: account.connection, draft: $folderDraft,
-                        catalogue: $catalogue, supportsFolderSettings: supportsFolderSettings,
+                        catalogue: $catalogueReads.catalogue, refreshCatalogue: refreshCatalogue,
+                        supportsFolderSettings: supportsFolderSettings,
                         retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
                 }
                 HStack(spacing: GlassTokens.Space.s4) {
@@ -546,7 +546,9 @@ struct ManagedLaunchSheet: View {
             account: account, cwd: project?.path, requestID: UUID().uuidString,
             generation: snapshot.generations[account.tool] ?? 0,
             model: folderDraft.model, collectTraces: folderDraft.collectTraces)
-        if supportsFolderSettings { params = folderDraft.applying(to: params) }
+        if supportsFolderSettings {
+            params = folderDraft.applying(to: params, daemonKeepsSavedModel: snapshot.capabilities.keepSavedModel == true)
+        }
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
         onClose()
     }
@@ -571,20 +573,16 @@ struct ManagedLaunchSheet: View {
     /// tool. A different account starts again from the default.
     private func loadModels() {
         guard let account = selectedAccount, ManagedSurface.folderModelMode(tool: account.tool, connection: account.connection) == .catalogue else { return }
-        let tool = account.tool
-        guard catalogueTool != tool else { return }
-        catalogueTool = tool
-        catalogue = nil
-        catalogueFailed = false
-        model.managedModelCatalogue(tool: tool) { result in
-            guard catalogueTool == tool else { return }
-            catalogue = result
-            // A failed read is tried again on the next account change.
-            if result == nil {
-                catalogueFailed = true
-                catalogueTool = nil
-            }
-        }
+        // Only the newest read's answer lands. A failed first read is tried
+        // again on the next account change.
+        guard let token = catalogueReads.begin(tool: account.tool) else { return }
+        model.managedModelCatalogue(tool: account.tool) { catalogueReads.complete($0, token: token) }
+    }
+
+    /// The read again after a star or removal, for the tool shown now.
+    private func refreshCatalogue() {
+        guard let read = catalogueReads.refresh() else { return }
+        model.managedModelCatalogue(tool: read.tool) { catalogueReads.complete($0, token: read.token) }
     }
 }
 

@@ -98,9 +98,8 @@ final class AppModel: ObservableObject {
             }()
             await MainActor.run {
                 // Every window's settings, the Settings card's list among
-                // them, follow the change (the daemon also publishes
-                // `status_changed`).
-                if favorites != nil { self.refreshSettings() }
+                // them, follow the daemon's `status_changed`, which it
+                // publishes when the stored list moved.
                 done(favorites, label)
             }
         }
