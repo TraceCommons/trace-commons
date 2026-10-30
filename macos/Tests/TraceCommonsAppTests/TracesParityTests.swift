@@ -526,6 +526,11 @@ final class TracesParityTests: XCTestCase {
         for (file, source) in [("TracesViews.swift", tree), ("EdgeRailView.swift", rail)] {
             XCTAssertTrue(source.contains(".actionHelp("), "\(file): the split button's action carries the tip")
         }
+        // The folder inspector's split button too: its tip is the action half's.
+        let inspector = try Self.text("Views/Monitor/ToolFolderInspectors.swift")
+        XCTAssertTrue(inspector.contains(".actionHelp(TracesTreeView.submitHelp("), "the inspector's action half carries the tip")
+        XCTAssertFalse(inspector.contains("}\n                    .help(TracesTreeView.submitHelp("),
+                       "a tooltip over the inspector's whole split button")
         let controls = try Self.text("../TCDesign/Components/Controls.swift")
         XCTAssertTrue(controls.contains(".helpIfAny(actionTip)"), "the split button's action half shows the tip")
         XCTAssertTrue(controls.contains(".helpIfAny(menuLabel)"), "the chevron is named, not given the Submit tip")
