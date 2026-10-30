@@ -760,11 +760,8 @@ mod tests {
             std::env::var(crate::config::TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT).is_err(),
             "this proves nothing unless the environment is silent"
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("a loopback port");
-        let address = listener.local_addr().expect("an address");
-        drop(listener); // Deterministic connection refusal; no provider is called.
+        // Deterministic connection refusal; no provider is called.
+        let address = crate::config::tests_support::refusing_addr();
 
         let allowlist = HostAllowlist::from_csv("127.0.0.1");
         let published = format!("https://{address}/v1");

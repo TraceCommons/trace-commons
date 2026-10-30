@@ -199,13 +199,15 @@ impl ManagedService {
     }
 
     /// `sign_in` says only whether the daemon holds a NEAR AI sign-in;
-    /// `choice` is the terminal the settings name.
+    /// `terminal` is the terminal the settings name, and whether the person
+    /// chose it.
     fn handle(
         &mut self,
         request: &Request,
         sign_in: bool,
-        choice: TerminalSetting,
+        terminal: TerminalChoice,
     ) -> Result<Value, ManagedError> {
+        let choice = terminal.setting;
         match request.method.as_str() {
             "managed_snapshot" => {
                 let mut sessions = self.sessions.views()?;
@@ -236,7 +238,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
                 )
             }
             "managed_tool_setup" => {
@@ -498,13 +500,29 @@ fn sign_in_key(shared: &DaemonShared) -> Option<String> {
         .map(|c| c.key.clone())
 }
 
-/// The terminal the settings name, read per request like the sign-in.
-fn terminal_choice(shared: &DaemonShared) -> TerminalSetting {
+/// The terminal the settings name, and whether the person chose it
+/// (`managed_terminal_chosen`). A shell asks for a terminal in the launch
+/// dialog until they have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalChoice {
+    setting: TerminalSetting,
+    chosen: bool,
+}
+
+/// The terminal choice, read per request like the sign-in. Unreadable
+/// settings name no app, and count as chosen so nothing asks over them.
+fn terminal_choice(shared: &DaemonShared) -> TerminalChoice {
     shared
         .settings
         .lock()
-        .map(|s| s.managed_terminal)
-        .unwrap_or(TerminalSetting::Unrecognized)
+        .map(|s| TerminalChoice {
+            setting: s.managed_terminal,
+            chosen: s.managed_terminal_chosen,
+        })
+        .unwrap_or(TerminalChoice {
+            setting: TerminalSetting::Unrecognized,
+            chosen: true,
+        })
 }
 
 /// The terminal choice changed: move the revision so every shell re-reads
@@ -572,8 +590,16 @@ fn remember_prepared(
             // A launch that fell back to the default because NEAR AI no
             // longer lists the saved model remembers its other choices but
             // not the fallback: the folder keeps the model it had.
+            // When the saved model cannot be read, nothing is written: a
+            // default must never replace it (#1754 review).
             if keep {
-                prefs.model = saved_folder_model(shared, &prefs);
+                match saved_folder_model(shared, &prefs) {
+                    Ok(model) => prefs.model = model,
+                    Err(()) => {
+                        with_service(shared, |service| service.sessions.rollback_prepared(id))?;
+                        return Err(Refusal::Unavailable("managed-folder-settings-save-failed"));
+                    }
+                }
             }
             let write = Request {
                 id: request.id,
@@ -590,18 +616,20 @@ fn remember_prepared(
     Ok(value)
 }
 
-/// The model the folder's saved settings name for `prefs`' tool, if any.
+/// The model the folder's saved settings name for `prefs`' tool: `None`
+/// when they name none, `Err` when they could not be read (the folder is
+/// gone, or the settings lock is poisoned).
 fn saved_folder_model(
     shared: &DaemonShared,
     prefs: &crate::managed::folder::FolderSettings,
-) -> Option<String> {
-    let cwd = crate::managed::folder::canonical(&prefs.cwd).ok()?;
-    let settings = shared.settings.lock().ok()?;
-    settings
+) -> Result<Option<String>, ()> {
+    let cwd = crate::managed::folder::canonical(&prefs.cwd).map_err(|_| ())?;
+    let settings = shared.settings.lock().map_err(|_| ())?;
+    Ok(settings
         .managed_folder_settings
         .iter()
         .find(|entry| entry.tool == prefs.tool && entry.cwd == cwd)
-        .and_then(|entry| entry.model.clone())
+        .and_then(|entry| entry.model.clone()))
 }
 
 fn refusal_label(refusal: Refusal) -> &'static str {
@@ -701,6 +729,12 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
     if request.method == "managed_model_favorite_set" {
         return favorite_set(shared, request).await;
     }
+    if launches_on_sign_in(shared, request) {
+        let report = crate::daemon::nearai_credential::balance::read(shared, false).await;
+        if let Err(error) = funds_for_first_calls(&report) {
+            return respond(request, Err(error.into()));
+        }
+    }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
     let mut ended = vec![];
@@ -733,6 +767,64 @@ fn favorite_models(shared: &DaemonShared) -> Vec<String> {
         .lock()
         .map(|s| s.managed_favorite_models.clone())
         .unwrap_or_default()
+}
+
+/// The least a NEAR AI balance must hold for a launch on the sign-in, in
+/// nano-dollars: $0.10. Enough for the first few calls of a coding session
+/// (a Claude Code turn sends a system prompt and tool list of tens of
+/// thousands of tokens), so a session does not open only to fail on its
+/// first request.
+const MIN_LAUNCH_BALANCE_NANOS: i64 = 100_000_000;
+
+/// Whether `request` would start or restart a session billed to the NEAR
+/// AI sign-in. Only that account's balance can be read here: a saved NEAR
+/// AI key may belong to another account.
+fn launches_on_sign_in(shared: &DaemonShared, request: &Request) -> bool {
+    match request.method.as_str() {
+        "managed_launch_prepare" => {
+            request.params.get("connection").and_then(Value::as_str) == Some("near_ai_signin")
+        }
+        "managed_session_start_again" => {
+            let Some(id) = request
+                .params
+                .get("session_id")
+                .and_then(|id| serde_json::from_value::<Uuid>(id.clone()).ok())
+            else {
+                return false;
+            };
+            shared.managed.lock().is_ok_and(|held| {
+                held.as_ref().is_ok_and(|service| {
+                    matches!(
+                        service.sessions.describe(id),
+                        Some((ConnectionKind::NearAiSignIn, _))
+                    )
+                })
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Refuse a launch only on a balance known to be below
+/// [`MIN_LAUNCH_BALANCE_NANOS`]. Every other state lets it through: no
+/// session, an expired one or an unreachable service says nothing about
+/// the money, and a null remaining means no limit was ever set. NEAR AI
+/// still refuses calls it will not pay for; this only stops a session
+/// that would fail at once.
+fn funds_for_first_calls(
+    report: &crate::daemon::nearai_credential::balance::BalanceReport,
+) -> Result<(), ManagedError> {
+    use crate::daemon::nearai_credential::balance::BalanceReport;
+    match report {
+        BalanceReport::Known(reading)
+            if reading
+                .remaining_nanos
+                .is_some_and(|remaining| remaining < MIN_LAUNCH_BALANCE_NANOS) =>
+        {
+            Err(ManagedError::NearAiBalanceTooLow)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The NEAR AI chat models a launch can name, and the one `tool` gets
@@ -787,8 +879,8 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
 /// from an older or hand-edited file can still be removed. Writes through
 /// `set_settings`, whose checks (id shape for a star, list bound) apply
 /// too. Answers `{"favorites"}`, the stored list, and publishes
-/// `status_changed` so every window re-reads its settings. No lock is held
-/// across the read.
+/// `status_changed` when that list moved, so every window re-reads its
+/// settings. No lock is held across the read.
 async fn favorite_set(shared: &DaemonShared, request: &Request) -> Response {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -809,6 +901,7 @@ async fn favorite_set(shared: &DaemonShared, request: &Request) -> Response {
             _ => return respond(request, Err(ManagedError::ModelUnavailable.into())),
         }
     }
+    let before = favorite_models(shared);
     let write = Request {
         id: request.id,
         method: "set_settings".into(),
@@ -823,8 +916,11 @@ async fn favorite_set(shared: &DaemonShared, request: &Request) -> Response {
         }
         return response;
     }
-    shared.publish(super::ipc::EVENT_STATUS_CHANGED, json!({}));
-    respond(request, Ok(json!({"favorites": favorite_models(shared)})))
+    let favorites = favorite_models(shared);
+    if favorites != before {
+        shared.publish(super::ipc::EVENT_STATUS_CHANGED, json!({}));
+    }
+    respond(request, Ok(json!({ "favorites": favorites })))
 }
 
 /// The daemon reads the sign-in here, at launch time, and gives it only to
@@ -966,6 +1062,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::InvalidCliOptions => "managed-cli-options-invalid",
         ManagedError::TerminalNotFound => "managed-terminal-not-found",
         ManagedError::ModelUnavailable => "managed-model-unavailable",
+        ManagedError::NearAiBalanceTooLow => "managed-near-ai-balance-too-low",
     }
 }
 
@@ -973,6 +1070,43 @@ fn label(error: ManagedError) -> &'static str {
 mod tests {
     use super::*;
     use crate::managed::{sessions::PreparedLaunch, terminal::TerminalHandle};
+
+    #[test]
+    fn a_launch_on_the_sign_in_needs_enough_balance_for_its_first_calls() {
+        use crate::daemon::nearai_credential::balance::{BalanceReading, BalanceReport};
+        let known = |remaining_nanos| {
+            BalanceReport::Known(BalanceReading {
+                remaining_nanos,
+                spend_limit_nanos: None,
+                total_spent_nanos: 0,
+                total_requests: 0,
+                total_tokens: 0,
+                observed_at: chrono::Utc::now(),
+            })
+        };
+        for refused in [Some(0), Some(-5), Some(MIN_LAUNCH_BALANCE_NANOS - 1)] {
+            assert!(matches!(
+                funds_for_first_calls(&known(refused)),
+                Err(ManagedError::NearAiBalanceTooLow)
+            ));
+        }
+        assert!(funds_for_first_calls(&known(Some(MIN_LAUNCH_BALANCE_NANOS))).is_ok());
+        assert!(funds_for_first_calls(&known(Some(12_500_000_000))).is_ok());
+        // No limit set, or nothing known: the launch goes ahead.
+        assert!(funds_for_first_calls(&known(None)).is_ok());
+        for unknown in [
+            BalanceReport::NoSession,
+            BalanceReport::SessionExpired,
+            BalanceReport::NoOrganization,
+            BalanceReport::Unavailable,
+        ] {
+            assert!(funds_for_first_calls(&unknown).is_ok());
+        }
+        assert_eq!(
+            label(ManagedError::NearAiBalanceTooLow),
+            "managed-near-ai-balance-too-low"
+        );
+    }
 
     fn service() -> (tempfile::TempDir, ConfigStore, ManagedService) {
         let home = tempfile::tempdir().unwrap();
@@ -998,6 +1132,17 @@ mod tests {
         sign_in: bool,
         choice: TerminalSetting,
     ) -> Result<Value, ManagedError> {
+        call_choosing(service, method, params, sign_in, choice, false)
+    }
+
+    fn call_choosing(
+        service: &mut ManagedService,
+        method: &str,
+        params: Value,
+        sign_in: bool,
+        setting: TerminalSetting,
+        chosen: bool,
+    ) -> Result<Value, ManagedError> {
         service.handle(
             &Request {
                 id: 1,
@@ -1005,8 +1150,51 @@ mod tests {
                 params,
             },
             sign_in,
-            choice,
+            TerminalChoice { setting, chosen },
         )
+    }
+
+    /// #1754 review: a shell sends `keep_saved_model` only to a daemon that
+    /// says it reads it; a daemon that predates the field refuses it.
+    #[test]
+    fn the_snapshot_says_it_reads_keep_saved_model() {
+        let (_dir, _store, mut service) = service();
+        let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        assert_eq!(snapshot["capabilities"]["keep_saved_model"], true);
+    }
+
+    /// #1754 review: "no saved model" and "could not tell" are different
+    /// answers, so a failed lookup never writes `model: None` over the
+    /// folder's saved model.
+    #[test]
+    fn saved_folder_model_tells_none_from_could_not_tell() {
+        let (home, store, _service) = service();
+        let shared = DaemonShared::load(store).unwrap();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let prefs = |cwd: &std::path::Path| crate::managed::folder::FolderSettings {
+            tool: ToolId::Codex,
+            cwd: cwd.to_path_buf(),
+            model: None,
+            collect_traces: false,
+            cli_options: String::new(),
+        };
+        assert_eq!(saved_folder_model(&shared, &prefs(&folder)), Ok(None));
+        shared
+            .settings
+            .lock()
+            .unwrap()
+            .managed_folder_settings
+            .push(crate::managed::folder::FolderSettings {
+                model: Some("provider/saved".into()),
+                ..prefs(&crate::managed::folder::canonical(&folder).unwrap())
+            });
+        assert_eq!(
+            saved_folder_model(&shared, &prefs(&folder)),
+            Ok(Some("provider/saved".into()))
+        );
+        // The folder went away between prepare and this write.
+        assert!(saved_folder_model(&shared, &prefs(&home.path().join("gone"))).is_err());
     }
 
     #[test]
@@ -1441,6 +1629,25 @@ mod tests {
         .unwrap();
         assert_eq!(unknown["capabilities"]["terminal_current"], Value::Null);
         assert_eq!(unknown["capabilities"]["terminal_destination"], Value::Null);
+    }
+
+    /// The snapshot says whether the person has chosen a terminal, so a
+    /// shell asks in the launch dialog until they have.
+    #[test]
+    fn the_snapshot_says_whether_the_terminal_was_chosen() {
+        let (_home, _store, mut service) = service();
+        for chosen in [false, true] {
+            let snapshot = call_choosing(
+                &mut service,
+                "managed_snapshot",
+                json!({}),
+                false,
+                TerminalSetting::default(),
+                chosen,
+            )
+            .unwrap();
+            assert_eq!(snapshot["capabilities"]["terminal_chosen"], chosen);
+        }
     }
 
     /// Off macOS, no offered terminal found means no Launch, rather than a

@@ -486,6 +486,15 @@ enum InsightsRouteWords {
         }
     }
 
+    /// Whether a row draws its Private AI line: not when the proxy saw none
+    /// of the session's calls (no route, or `unobserved`), which on a week
+    /// of direct calls said "No record" on every row (owner, 2026-10-29).
+    /// A category this build does not know still draws, as the dash.
+    static func drawsLine(_ routing: DaemonData.InsightsWeekRouting?) -> Bool {
+        guard let category = routing?.category else { return false }
+        return category != "unobserved"
+    }
+
     /// The category's word; the dash for a missing route or a category this
     /// build does not know, so nothing is claimed for it.
     static func category(_ routing: DaemonData.InsightsWeekRouting?, copy: [String: String]) -> String {

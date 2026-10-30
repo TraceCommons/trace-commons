@@ -5219,6 +5219,15 @@ fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
     if req.method == "grant_automatic" && include_existing {
         return Response::err(req.id, ERR_BAD_PARAMS, "include-existing-method-required");
     }
+    // What happens to folders marked Ask (owner, 2026-10-30): kept as Ask
+    // when true, cleared so every folder is Automatic when false. Only with
+    // include_existing; absent keeps the earlier rule, where the grant
+    // supersedes an Ask marked before it without clearing it.
+    let keep_folder_asks = match req.params.get("keep_folder_asks") {
+        None => None,
+        Some(serde_json::Value::Bool(value)) if include_existing => Some(*value),
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "keep-folder-asks-invalid"),
+    };
     let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
     };
@@ -5248,6 +5257,15 @@ fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
         policy.grant_automatic(now, terms);
         if include_existing {
             policy.include_existing_under_grant();
+            match keep_folder_asks {
+                Some(true) => {
+                    policy.keep_folder_asks_under_grant();
+                }
+                Some(false) => {
+                    policy.clear_folder_asks_under_grant();
+                }
+                None => {}
+            }
         }
         if policy.save(&shared.store).is_err() {
             *policy = previous;
@@ -5377,19 +5395,32 @@ fn handle_acknowledge_arming_rewordings(shared: &DaemonShared, req: &Request) ->
     Response::ok(req.id, serde_json::json!({ "acknowledged": acknowledged }))
 }
 
-// Withdraw the Flow 1 grant. Projects it armed keep their own entries.
+// Withdraw the Flow 1 grant. Projects it armed keep their own entries,
+// unless `return_folders_to_ask` puts them back to Ask.
 fn handle_withdraw_automatic_grant(shared: &DaemonShared, req: &Request) -> Response {
-    let withdrawn = {
+    // Settings' "Ask each time" (#1753 item 4) also puts back to Ask every
+    // folder the grant armed. Absent keeps the earlier rule, where they
+    // keep sending.
+    let to_ask = match req.params.get("return_folders_to_ask") {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "return-folders-to-ask-invalid"),
+    };
+    let (withdrawn, changed) = {
         let mut policy = shared.policy.lock().expect("policy lock");
-        let previous = policy.automatic_grant.clone();
-        let withdrawn = policy.withdraw_automatic_grant();
-        if withdrawn && policy.save(&shared.store).is_err() {
-            policy.automatic_grant = previous;
+        let previous = policy.clone();
+        let withdrawn = if to_ask {
+            policy.withdraw_automatic_grant_to_ask()
+        } else {
+            policy.withdraw_automatic_grant()
+        };
+        if *policy != previous && policy.save(&shared.store).is_err() {
+            *policy = previous;
             return Response::err(req.id, ERR_UNAVAILABLE, "policy-write-failed");
         }
-        withdrawn
+        (withdrawn, *policy != previous)
     };
-    if withdrawn {
+    if changed {
         // After the withdrawal, not before: a record that fails to write
         // must not leave the grant in force.
         let _ = audit::append(
@@ -5398,7 +5429,7 @@ fn handle_withdraw_automatic_grant(shared: &DaemonShared, req: &Request) -> Resp
                 at: Utc::now(),
                 action: "automatic-grant-withdrawn".to_string(),
                 project_label: None,
-                detail: None,
+                detail: to_ask.then(|| "folders-to-ask".to_string()),
             },
         );
         shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
@@ -10992,11 +11023,9 @@ mod tests {
     /// on its own, exercised here through the daemon's own entry point.
     #[tokio::test]
     async fn a_refresh_failure_leaves_the_daemon_running_and_the_overlay_empty() {
-        // Bind to get a genuinely free loopback port, then drop the
-        // listener so nothing answers on it.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        // A loopback port nothing answers on.
+        let addr = crate::config::tests_support::refusing_addr();
+        let port = addr.port();
 
         let s = std::sync::Arc::new(shared());
         s.routing.write().unwrap().ledger = Some(Arc::new(
@@ -15233,6 +15262,45 @@ mod tests {
         assert_eq!(body["defaults"], serde_json::json!([]));
     }
 
+    /// #1754 review: `managed_model_favorite_set` publishes
+    /// `status_changed` only when the stored list moved. Unstarring an id
+    /// that was never stored wakes no window. Unstarring needs no NEAR AI.
+    #[tokio::test]
+    async fn a_favorite_change_that_changes_nothing_publishes_nothing() {
+        let s = shared();
+        let mut rx = s.events.subscribe();
+        let mut status_changed = || {
+            let mut seen = false;
+            while let Ok(event) = rx.try_recv() {
+                seen |= event.event == EVENT_STATUS_CHANGED;
+            }
+            seen
+        };
+        let unstar = |model: &str| {
+            req(
+                "managed_model_favorite_set",
+                serde_json::json!({"model":model,"favorite":false}),
+            )
+        };
+        let r = handle_request_async(&s, &unstar("never/stored")).await;
+        assert_eq!(
+            r.result.expect("unstarred"),
+            serde_json::json!({"favorites":[]})
+        );
+        assert!(!status_changed(), "a no-op unstar is not a status change");
+        s.settings
+            .lock()
+            .unwrap()
+            .managed_favorite_models
+            .push("stored/model".into());
+        let r = handle_request_async(&s, &unstar("stored/model")).await;
+        assert_eq!(
+            r.result.expect("unstarred"),
+            serde_json::json!({"favorites":[]})
+        );
+        assert!(status_changed(), "a removal is a status change");
+    }
+
     /// Starring, unstarring and the catalogue's favorite lists, against
     /// the fixture NEAR AI `managed_sign_in_redeem_hosts_the_proxy_and_ends_it`
     /// serves. Leaves no favorite stored.
@@ -18735,14 +18803,10 @@ mod tests {
     #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_probe_against_a_dead_port_reports_unreachable_with_the_port() {
-        // Bind and drop, so the port is real and definitely closed. The
-        // token is readable, so nothing but the connection can explain the
-        // answer.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback");
-        let port = listener.local_addr().expect("addr").port();
-        drop(listener);
+        // A real port, definitely closed. The token is readable, so
+        // nothing but the connection can explain the answer.
+        let addr = crate::config::tests_support::refusing_addr();
+        let port = addr.port();
 
         let dir = token_dir_holding("a-readable-token");
         let response = handle_probe_routing(&probe_request(port, Some(dir.path()))).await;
@@ -19472,11 +19536,8 @@ mod tests {
     #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_tool_list_against_a_dead_port_reports_unreachable() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback");
-        let port = listener.local_addr().expect("addr").port();
-        drop(listener);
+        let addr = crate::config::tests_support::refusing_addr();
+        let port = addr.port();
         let dir = token_dir_holding("a-readable-token");
 
         let response =
@@ -19950,9 +20011,8 @@ mod tests {
     #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn an_unreachable_proxy_stamps_no_refresh_time() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let addr = crate::config::tests_support::refusing_addr();
+        let port = addr.port();
 
         let dir = declared_token_dir();
         let s = std::sync::Arc::new(shared());
@@ -21329,6 +21389,7 @@ mod tests {
                     .expect("snapshot")
             };
             assert_eq!(snapshot(&s)["capabilities"]["terminal_current"], default);
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_chosen"], false);
             let mut rx = s.events.subscribe();
             let r = handle_request(
                 &s,
@@ -21356,6 +21417,9 @@ mod tests {
                 snapshot(&s)["capabilities"]["terminal_current"],
                 chosen.id()
             );
+            // Choosing the terminal is remembered, so no shell asks again.
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_chosen"], true);
+            assert_eq!(settings["managed_terminal_chosen"], true);
 
             for bad in [
                 serde_json::json!({}),

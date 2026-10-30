@@ -79980,21 +79980,37 @@ fn write_json_file<T: Serialize + ?Sized>(
     value: &T,
     label: &str,
 ) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {} dir {}", label, parent.display()))?;
-    }
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} path has no parent {}", label, path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {} dir {}", label, parent.display()))?;
+    // Written beside `path` and renamed over it, so a reader sees the
+    // previous file or this one, never one cut short. Truncating in place
+    // left it empty until the flush, and a submission reading every derived
+    // record while another wrote its own answered 500. The temporary's
+    // `.tmp*` name matches no `*.json` scan. Its mode is the one
+    // `File::create` gave, not `tempfile`'s owner-only default.
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
+    let temporary = builder
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to write {} {}", label, path.display()))?;
     // Serialized straight into the file: a body file can be a whole
     // envelope, and buffering it first would be one more copy of it in
     // memory. Same bytes as `to_string_pretty`.
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("failed to write {} {}", label, path.display()))?;
-    let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+    let mut writer = std::io::BufWriter::with_capacity(1 << 20, temporary);
     serde_json::to_writer_pretty(&mut writer, value)
         .with_context(|| format!("failed to serialize {label}"))?;
     writer
-        .flush()
-        .with_context(|| format!("failed to write {} {}", label, path.display()))
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)
+        .with_context(|| format!("failed to write {} {}", label, path.display()))?
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to write {} {}", label, path.display()))?;
+    Ok(())
 }
 
 /// A `Write` that keeps only a SHA-256 and a byte count of what passes

@@ -1593,6 +1593,17 @@ pub(crate) mod tests_support {
     use super::ConfigStore;
     use sha2::Digest as _;
 
+    /// A loopback address that refuses connections and that no test can be
+    /// handed. A port bound and released goes back to the pool, and a
+    /// server another test binds to port 0 could take it and answer
+    /// (#1759). Port 1 (tcpmux) is below every ephemeral range, nothing
+    /// listens there, and the refusal is immediate on every platform; a
+    /// socket bound and never listening is refused on Linux but silently
+    /// dropped on macOS.
+    pub(crate) fn refusing_addr() -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([127, 0, 0, 1], 1))
+    }
+
     pub(crate) fn temp_store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();

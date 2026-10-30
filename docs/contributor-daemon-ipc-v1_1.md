@@ -3853,10 +3853,30 @@ arms it with its backlog (`include_backlog: false` is refused with
 `pending` is approved on the next pass. Adopting the contributor's chosen
 data uses (`adopt_chosen_scopes`, #1739) keeps the grant and its exceptions.
 
+`keep_folder_asks` (optional, only with `include_existing`; owner, 2026-10-30)
+says what happens to folders already set to `notify_only`. `true` keeps every
+one as an exception to this grant, however long before it was set, so they
+keep asking and every other folder is armed. `false` clears them, so every
+folder except `ignore` is armed and a later grant that keeps Ask marks does
+not bring them back. Absent keeps the rule above. Anything else is refused with
+`keep-folder-asks-invalid`.
+
 Widened terms void the grant itself as well as the projects it armed, with an
 `automatic-grant-voided` entry. `withdraw_automatic_grant` returns
 `{"withdrawn": bool}` and leaves the projects the grant armed as they are;
-each is withdrawn with `set_project_mode`. `automatic_grant` returns
+each is withdrawn with `set_project_mode`. With `return_folders_to_ask: true`
+(Settings' "Ask each time", #1753) it also puts every project the grant armed
+back to no rule of its own, which reads `notify_only`; a project the
+contributor set to `auto_upload` themselves, and every `ignore` and
+`notify_only`, is left as it is. A non-boolean is refused with
+`return-folders-to-ask-invalid`.
+
+A policy file written before #1753's fix that holds a `notify_only`
+contribution override (the macOS setup's "Ask each time" wrote one) is
+migrated once on load: every folder whose own mode is `auto_upload` is set to
+`notify_only`, the grant is withdrawn and the override cleared, so every folder
+keeps showing Ask and a folder set to `auto_upload` afterwards sends. An
+`ignore` override, and a file a current build wrote, are left alone. `automatic_grant` returns
 `{"granted": false}` when none is in force. None of the three returns a path
 or a count of them.
 
@@ -9686,10 +9706,17 @@ launcher reads only `accepted`.
 `near_ai` and `near_ai_signin`, as the session's default model; on
 `subscription` and `api_key` it is still refused (`managed-invalid-request`).
 Absent means the tool's default (see `docs/managed-sessions.md`). It also
-accepts additive `keep_saved_model: boolean` (absent is false): the shell
+accepts `keep_saved_model: boolean` (absent is false): the shell
 fell back to the default because NEAR AI no longer lists the folder's saved
 model, so the launch remembers its other folder choices but keeps the saved
-model. A model NEAR
+model. If the saved model cannot be read (the folder went away, say), the
+launch is refused with `managed-folder-settings-save-failed` rather than
+written over. `managed_session_start_again` of such a launch keeps it too.
+The field is not additive: `managed_launch_prepare` refuses unknown fields,
+so a shell sends it only when the managed snapshot advertises
+`capabilities.keep_saved_model: true` (an older daemon omits it). The session
+registry stores it on the entry, outside the stored request, so an older
+daemon can still read the registry. A model NEAR
 AI does not list as a chat model is refused when the proxy starts, with
 `managed-model-unavailable`: at `managed_launch_redeem` on the sign-in, in the
 launcher on a saved key.
@@ -9723,8 +9750,9 @@ launcher on a saved key.
   id an older or hand-edited settings file holds can always be removed.
   Starring an empty or malformed id, a non-boolean `favorite`, any other
   field, or starring a 33rd favorite is `managed-invalid-request`;
-  unstarring is never refused for the bound or the id's shape. A change
-  publishes `status_changed`, so every window re-reads `get_settings`
+  unstarring is never refused for the bound or the id's shape. A change to
+  the stored list publishes `status_changed` (unstarring an id that was not
+  stored publishes nothing), so every window re-reads `get_settings`
   (`managed_favorite_models`). The list is
   global, not per tool: one favorite shows in each tool's picker that offers
   it. A developer dry run refuses it, as it does `managed_model_catalogue`.

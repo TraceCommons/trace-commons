@@ -260,13 +260,11 @@ public enum FirstRunPlan {
             // A folder's Automatic can be picked and confirmed before sign-in
             // (Ron, 2026-10-22); it is armed here, after the scopes, once the
             // enrollment it needs is held, and never for watching only.
-            // Under Ask each time a folder's Automatic is not sent: the
-            // global Ask override sent above decides every folder, so the
-            // arming would be recorded but not in force, and would start
-            // sending if that override were later cleared.
+            // Under Ask each time it is sent too: Ask each time is the
+            // default for folders without a rule, and a folder's own rule
+            // wins (#1753 A2), so a folder picked Automatic sends.
             if let mode = state.rules[projectID],
-                mode != .autoUpload
-                    || (FirstRunNavigation.canChooseAutomatic(state) && state.sharing != .askMe)
+                mode != .autoUpload || FirstRunNavigation.canChooseAutomatic(state)
             {
                 let call = FirstRunCall.setProjectMode(projectID: projectID, mode)
                 if afterGrant(projectID) { later.append(call) } else { calls.append(call) }

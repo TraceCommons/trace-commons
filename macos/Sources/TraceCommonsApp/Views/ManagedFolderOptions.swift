@@ -7,8 +7,11 @@ struct ManagedFolderOptions: View {
     let tool: String
     let connection: String
     @Binding var draft: ManagedFolderDraft
-    /// Starring a model replaces its `favorites` with the daemon's answer.
+    /// Starring a model applies the daemon's answer to its favorites.
     @Binding var catalogue: ManagedModelCatalogue?
+    /// Reads the catalogue again after a star or removal. The caller owns
+    /// the read, so an answer for a tool it no longer shows is dropped.
+    let refreshCatalogue: () -> Void
     let supportsFolderSettings: Bool
     let retry: () -> Void
     let reset: () -> Void
@@ -66,9 +69,8 @@ struct ManagedFolderOptions: View {
             // The catalogue may arrive before or after the folder settings:
             // this runs when the fields appear and on every new catalogue.
             .onChange(of: catalogue, initial: true) { _, _ in reconcileModel() }
-            // The sheet keeps this view when the account or folder changes;
-            // a refused star's line was about the old one (#1754 review).
-            .onChange(of: draft.phase) { _, _ in favoriteError = nil }
+            // A new account or folder takes these fields away while its
+            // settings load; a refused star's line was about the old one.
             .onDisappear { favoriteError = nil }
             ForEach(ManagedSurface.unavailableFavorites(catalogue), id: \.self) { stale in
                 unavailableFavoriteRow(stale)
@@ -138,14 +140,13 @@ struct ManagedFolderOptions: View {
         return modelIsAvailable(draft, tool: tool, connection: connection, catalogue: catalogue)
     }
 
-    /// After a star or removal the catalogue is read again, so its two
-    /// favorites lists are the daemon's, never recomputed here. A failed
-    /// read keeps the one shown.
-    private func reloadCatalogue() {
-        model.managedModelCatalogue(tool: tool) { fresh in
-            favoriteBusy = false
-            if let fresh { catalogue = fresh }
-        }
+    /// A star or removal shows the setter's answer, the stored list, at
+    /// once, then the caller reads the catalogue again; a failed read keeps
+    /// what is shown (#1754 review).
+    private func favoritesChanged(_ favorites: [String]) {
+        favoriteBusy = false
+        catalogue = catalogue?.projecting(storedFavorites: favorites)
+        refreshCatalogue()
     }
 
     /// A favorite NEAR AI no longer lists, and its removal.
@@ -160,12 +161,12 @@ struct ManagedFolderOptions: View {
                 favoriteBusy = true
                 favoriteError = nil
                 model.setFavoriteModel(stale, favorite: false) { favorites, label in
-                    guard favorites != nil else {
+                    guard let favorites else {
                         favoriteBusy = false
                         favoriteError = ManagedSurface.favoriteErrorKey(label)
                         return
                     }
-                    reloadCatalogue()
+                    favoritesChanged(favorites)
                 }
             }
             .buttonStyle(GlassButtonStyle(.link))
@@ -184,12 +185,12 @@ struct ManagedFolderOptions: View {
             favoriteBusy = true
             favoriteError = nil
             model.setFavoriteModel(chosen, favorite: !starred) { favorites, label in
-                guard favorites != nil else {
+                guard let favorites else {
                     favoriteBusy = false
                     favoriteError = ManagedSurface.favoriteErrorKey(label)
                     return
                 }
-                reloadCatalogue()
+                favoritesChanged(favorites)
             }
         }
         .disabled(favoriteBusy)

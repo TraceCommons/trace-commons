@@ -67,8 +67,10 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
 
         XCTAssertEqual(daemon.calls.map(\.method), ["grant_automatic_including_existing"])
         let params = try XCTUnwrap(daemon.lastParams)
-        XCTAssertEqual(Set(params.keys), ["confirmed", "witness_signing_address", "include_existing"])
+        XCTAssertEqual(Set(params.keys), ["confirmed", "witness_signing_address", "include_existing", "keep_folder_asks"])
         XCTAssertEqual(params["include_existing"] as? Bool, true)
+        // A folder's own Ask is kept under the first run's grant (#1753).
+        XCTAssertEqual(params["keep_folder_asks"] as? Bool, true)
         // A JSON true, not 1: the daemon only takes a boolean confirmation.
         XCTAssertTrue(daemon.calls[0].params.contains(#""confirmed":true"#))
         // No witness is a JSON null, never an omitted key: an omitted key is
@@ -125,24 +127,24 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
         }
     }
 
-    func test_askStopsUploadsBeforeWithdrawingTheStandingGrant() throws {
+    /// Ask each time withdraws the grant and returns the folders it armed
+    /// to Ask; it sets no global Ask override, which no screen could clear
+    /// and under which a folder set to Automatic never sent (#1753 A2).
+    func test_askWithdrawsTheGrantAndSetsNoOverride() throws {
         let daemon = GrantRecordingDaemon()
-        daemon.methodResponses = [
-            "set_contribution_override": #"{"id":1,"result":{"changed":true,"contribution_override":{"mode":"notify_only"},"returned":2}}"#,
-            "withdraw_automatic_grant": #"{"id":1,"result":{"withdrawn":true}}"#,
-        ]
-        let client = DaemonClient(daemon: daemon)
-        _ = try client.setAskEachTime()
-        XCTAssertEqual(daemon.calls.map(\.method), ["set_contribution_override", "withdraw_automatic_grant"])
-        let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(daemon.calls[0].params.utf8)) as? [String: String])
-        XCTAssertEqual(params, ["mode": "notify_only"])
+        daemon.response = #"{"id":1,"result":{"withdrawn":true}}"#
+        XCTAssertTrue(try DaemonClient(daemon: daemon).setAskEachTime())
+        XCTAssertEqual(daemon.calls.map(\.method), ["withdraw_automatic_grant"])
+        let params = try XCTUnwrap(daemon.lastParams)
+        XCTAssertEqual(params["return_folders_to_ask"] as? Bool, true)
     }
 
-    func test_unconfirmedAskDoesNotWithdrawTheStandingGrant() throws {
+    func test_aRefusedAskThrowsTheDaemonsLabel() {
         let daemon = GrantRecordingDaemon()
-        daemon.response = #"{"id":1,"result":{"changed":true,"contribution_override":{"mode":"auto_upload"},"returned":0}}"#
-        XCTAssertThrowsError(try DaemonClient(daemon: daemon).setAskEachTime())
-        XCTAssertEqual(daemon.calls.map(\.method), ["set_contribution_override"])
+        daemon.response = #"{"id":1,"error":{"code":"unavailable","message":"policy-write-failed"}}"#
+        XCTAssertThrowsError(try DaemonClient(daemon: daemon).setAskEachTime()) { error in
+            XCTAssertEqual((error as? DaemonClient.Failure)?.message, "policy-write-failed")
+        }
     }
 
     func test_inviteLookupSendsTheInviteAsItsCode() throws {

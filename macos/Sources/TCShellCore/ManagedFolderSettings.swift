@@ -112,13 +112,15 @@ public extension ManagedSurface {
 
 public extension ManagedFolderDraft {
     /// Only launch choices change; the account remains the caller's selection.
-    func applying(to params: [String: Any]) -> [String: Any] {
+    /// `keep_saved_model` goes only to a daemon that reads it
+    /// (`capabilities.keep_saved_model`): an older one refuses the field.
+    func applying(to params: [String: Any], daemonKeepsSavedModel: Bool) -> [String: Any] {
         var result = params
         result["cli_options"] = cliOptions
         result["collect_traces"] = collectTraces
         let mode = ManagedSurface.folderModelMode(tool: params["tool"] as? String ?? "", connection: params["connection"] as? String ?? "")
         result["model"] = mode == .none ? nil : model
-        if keepsSavedModel && mode != .none { result["keep_saved_model"] = true }
+        if keepsSavedModel && mode != .none && daemonKeepsSavedModel { result["keep_saved_model"] = true }
         return result
     }
 }
