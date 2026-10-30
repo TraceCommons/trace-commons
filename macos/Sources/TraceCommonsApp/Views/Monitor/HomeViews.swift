@@ -236,7 +236,10 @@ private struct HomeOverview: View {
                 // first-contribution note are the Traces tab's popover
                 // notices (owner, 2026-10-19, `MonitorNotices`), not Home's.
                 // No Watching card (owner, 2026-10-12): the tiles lead.
+                // Over the cards below, so the Balance tile's coins fall
+                // over them too.
                 stats
+                    .zIndex(1)
                 // The NEAR AI campaign, under the tiles (owner, 2026-10-12).
                 campaign
                 // Ron's Missions card, as a hero promotion (owner,
@@ -375,6 +378,9 @@ private struct HomeOverview: View {
             HomeSection(words?.sectionAccount) {
                 HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)
             }
+            // Over Private AI, so the coins that burst from the Balance
+            // tile fall over it, not under it.
+            .zIndex(1)
             privateAI
         }
     }

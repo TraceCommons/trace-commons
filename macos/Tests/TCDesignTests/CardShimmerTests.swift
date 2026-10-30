@@ -90,22 +90,54 @@ final class CardShimmerTests: XCTestCase {
 
     /// On the dark theme the light adds to what is under it; it lights the
     /// card's face and leaves only a faint blurred glow on its edge, with no
-    /// crisp rim line; the tab shown or the window back in focus starts the
-    /// passes over; none under Reduce Motion.
+    /// crisp rim line. Each theme's layers are built once, not every frame.
     @MainActor
     func test_theLightAddsWithNoCrispRim() throws {
         let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "CardShimmer.swift" }?.1)
         XCTAssertTrue(source.contains(".blendMode(dark ? .plusLighter : .normal)"))
-        XCTAssertTrue(source.contains("for layer in [Self.glow(dark: dark), Self.core(dark: dark)] {"))
-        XCTAssertTrue(source.contains("context.fill(shape.path(in: card), with: light)"))
+        XCTAssertTrue(source.contains("for layer in dark ? Self.darkLayers : Self.lightLayers {"))
+        XCTAssertEqual(GlassCardShine.darkLayers, [GlassCardShine.glow(dark: true), GlassCardShine.core(dark: true)])
+        XCTAssertEqual(GlassCardShine.lightLayers, [GlassCardShine.glow(dark: false), GlassCardShine.core(dark: false)])
+        XCTAssertTrue(source.contains("context.fill(card, with: light)"))
         XCTAssertFalse(source.contains("context.stroke("), "a crisp rim line is back")
         XCTAssertTrue(source.contains("glow.addFilter(.blur(radius: Self.rimGlowBlur))"))
         XCTAssertLessThanOrEqual(GlassCardShine.rimGlowShare, 0.5)
+        XCTAssertTrue(source.contains("guard progress > 0 else { return }"), "light between passes")
+    }
+
+    /// The tab shown, or the window back in focus or in sight, starts the
+    /// passes over. None runs under Reduce Motion or while the window cannot
+    /// be seen, and none starts once its run is cancelled. Each pass only
+    /// adds to `sweep`, so a pass needs no reset.
+    func test_passesRunOnlyWhileSeenAndStopWhenCancelled() throws {
+        let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "CardShimmer.swift" }?.1)
         XCTAssertTrue(source.contains(".onChange(of: activeState == .inactive)"))
         XCTAssertTrue(source.contains("if !inactive { focus += 1 }"))
-        XCTAssertTrue(source.contains(".task(id: Run(reduceMotion: reduceMotion, focus: focus))"))
-        XCTAssertTrue(source.contains("guard !reduceMotion else {"))
-        XCTAssertTrue(source.contains("withAnimation(GlassMotion.curve(Self.duration)) { progress = 1 }"))
-        XCTAssertTrue(source.contains("guard progress > 0, progress < 1 else { return }"), "light between passes")
+        XCTAssertTrue(source.contains("@Environment(\\.glassAnimationsVisible) private var visible"))
+        XCTAssertTrue(source.contains(".task(id: Run(reduceMotion: reduceMotion, visible: visible, focus: focus))"))
+        XCTAssertTrue(source.contains("guard !reduceMotion, visible else { return }"))
+        XCTAssertTrue(source.contains("try? await Task.sleep(for: wait)\n" + String(repeating: " ", count: 20)
+                                      + "guard !Task.isCancelled else { return }"), "a cancelled run starts a pass")
+        XCTAssertTrue(source.contains("withAnimation(GlassMotion.curve(Self.duration)) { sweep += 1 }"))
+        XCTAssertFalse(source.contains("withTransaction"), "a pass is reset again")
+    }
+
+    /// The card's band and the map's are one geometry, at one lean.
+    @MainActor
+    func test_theCardAndTheMapShareOneBand() {
+        XCTAssertEqual(GlassCardShine.slant, GlassMapMarks.shimmerSlant)
+        let size = CGSize(width: 560, height: 70)
+        for progress in [0.0, 0.3, 0.75] {
+            let card = GlassCardShine.band(progress: progress, size: size)
+            let shared = GlassShimmerBand.band(progress: progress, size: size, slant: GlassCardShine.slant,
+                                               halfWidth: GlassCardShine.halfWidth)
+            XCTAssertEqual(card.start, shared.start)
+            XCTAssertEqual(card.end, shared.end)
+            let map = GlassMapMarks.shimmerBand(sweep: 4 + progress, size: size)
+            let mapShared = GlassShimmerBand.band(progress: progress, size: size, slant: GlassMapMarks.shimmerSlant,
+                                                  halfWidth: GlassMapMarks.shimmerHalfWidth)
+            XCTAssertEqual(map.start.x, mapShared.start.x, accuracy: 0.0001)
+            XCTAssertEqual(map.end.y, mapShared.end.y, accuracy: 0.0001)
+        }
     }
 }

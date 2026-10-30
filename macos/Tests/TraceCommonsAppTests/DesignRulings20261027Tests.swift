@@ -1,5 +1,6 @@
 import SwiftUI
 import TCDesign
+import TCShellCore
 import XCTest
 
 @testable import TraceCommonsApp
@@ -62,5 +63,34 @@ final class DesignRulings20261027Tests: XCTestCase {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertFalse(home.contains("balanceReceived"), "the received line is back")
         XCTAssertFalse(home.contains("supplementaryDetail"), "the received line is back")
+        // Nothing on macOS reads the core's received-in-24-hours figures.
+        let fields = Mirror(reflecting: BalanceStatus.unreported).children.compactMap(\.label)
+        XCTAssertTrue(fields.contains("receivedTotalNanos"))
+        XCTAssertFalse(fields.contains { $0.hasPrefix("received24h") }, "the received line's fields are back")
+    }
+
+    /// The coins fall over the cards below the Balance tile, on Home and in
+    /// the edge rail, rather than under them.
+    func test_theCoinsFallOverTheCardsBelow() throws {
+        let home = try Self.text("Views/Monitor/HomeViews.swift")
+        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
+        let raised = try XCTUnwrap(home.range(of: ".zIndex(1)", range: account.upperBound..<home.endIndex))
+        let privateAI = try XCTUnwrap(home.range(of: "privateAI\n", range: account.upperBound..<home.endIndex))
+        XCTAssertLessThan(raised.lowerBound, privateAI.lowerBound, "the Account section is under Private AI")
+        XCTAssertTrue(home.contains("stats\n                    .zIndex(1)"), "the tiles are under the cards below")
+        let rail = try Self.text("Views/EdgeRail/EdgeRailView.swift")
+        let tiles = try XCTUnwrap(rail.range(of: "HomeAccountTiles(store: data.home) { open(.inference) }\n"))
+        let railRaised = try XCTUnwrap(rail.range(of: ".zIndex(1)", range: tiles.upperBound..<rail.endIndex))
+        let map = try XCTUnwrap(rail.range(of: "EdgeRailPrivateAIMap(", range: tiles.upperBound..<rail.endIndex))
+        XCTAssertLessThan(railRaised.lowerBound, map.lowerBound, "the rail's tiles are under its map")
+    }
+
+    /// A balance refresh mid-burst does not cut the coins off, nor clear a
+    /// burst begun after it.
+    func test_aRefreshMidBurstLetsTheCoinsLand() throws {
+        let flourish = try Self.text("Views/Monitor/BalanceArrivalFlourish.swift")
+        XCTAssertTrue(flourish.contains("await Task { try? await Task.sleep(for: left) }.value"))
+        XCTAssertTrue(flourish.contains("if burst == mine { burst = nil }"))
+        XCTAssertFalse(flourish.contains("burst = nil\n"), "a burst is cleared whoever began it")
     }
 }

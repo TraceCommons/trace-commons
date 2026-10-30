@@ -79,16 +79,13 @@ final class BalanceArrivalHomeTests: XCTestCase {
         let status = BalanceStatus.parse(fromJSON: """
             {"state":"known","scale":9,"remaining_nanos":8200000000,
              "change_24h_nanos":null,"change_24h_text":null,
-             "change_24h_unavailable_text":"24-hour balance change unavailable",
-             "received_24h_nanos":null,"received_24h_text":null,
-             "received_24h_unavailable_text":"Amount received in 24 hours unavailable"}
+             "change_24h_unavailable_text":"24-hour balance change unavailable"}
             """)
         let model = AppModel()
         let copy = try XCTUnwrap(model.privateInferenceCopy)
         let rendered = HomeFormat.balance(status, copy: copy, calls: model.balanceCalls)
         XCTAssertNil(rendered.detail)
         XCTAssertNil(rendered.detailInk)
-        XCTAssertNil(status.received24hNanos)
         XCTAssertNil(status.change24hNanos)
     }
 

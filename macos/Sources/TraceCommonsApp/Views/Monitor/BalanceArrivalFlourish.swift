@@ -6,7 +6,9 @@ import TCShellCore
 /// of the card's centre like a firework while the figure counts up from the
 /// one last shown to the new one (owner, 2026-10-27, in place of the edge
 /// that lit in the status green). Under Reduce Motion there is no count and
-/// the coins are drawn still, spread round the centre, for a moment.
+/// the coins are drawn still, spread round the centre, for a moment. The
+/// tile is drawn above what follows it (`zIndex`, where it is placed), so
+/// the coins fall over the cards below.
 ///
 /// One self-contained view: `content` draws the tile, given the figure to
 /// show while counting (nil otherwise).
@@ -57,30 +59,37 @@ struct BalanceArrivalFlourish<Content: View>: View {
             await celebrate()
         case .countUp(let from, let to):
             // The coins burst as the count starts and fly while it runs.
-            let ends = ContinuousClock.now + Self.burstLength(reduceMotion)
-            burst = .now
+            // Never under Reduce Motion, which is `.highlight`.
+            let mine = Date()
+            burst = mine
             for step in BalanceArrival.countSteps(fromNanos: from, toNanos: to, frames: Self.frames) {
                 guard !Task.isCancelled else { break }
                 countingFigure = calls.amount(1, step, status.scale).flatMap { $0.isEmpty ? nil : $0 }
                 try? await Task.sleep(for: Self.frame)
             }
             countingFigure = nil
-            try? await Task.sleep(until: ends, clock: .continuous)
-            burst = nil
+            await land(mine, after: .seconds(GlassCoinBurst.duration))
         }
     }
 
     /// Burst the coins and let them fall away; still ones held a moment
     /// under Reduce Motion.
     private func celebrate() async {
-        burst = .now
-        try? await Task.sleep(for: Self.burstLength(reduceMotion))
-        burst = nil
+        let mine = Date()
+        burst = mine
+        await land(mine, after: reduceMotion ? Self.hold : .seconds(GlassCoinBurst.duration))
     }
 
-    /// How long the coins are drawn: one burst, or `hold` still.
-    private static func burstLength(_ reduceMotion: Bool) -> Duration {
-        reduceMotion ? hold : .seconds(GlassCoinBurst.duration)
+    /// Clears the burst begun at `mine` once `length` has passed since it
+    /// began. A balance refresh mid-burst restarts `run` and cancels this
+    /// task, but the coins still finish their flight; and a newer burst,
+    /// begun meanwhile, is left alone.
+    private func land(_ mine: Date, after length: Duration) async {
+        let left = length - .seconds(Date().timeIntervalSince(mine))
+        // Waited out in a task of its own, which this one's cancellation
+        // does not reach.
+        await Task { try? await Task.sleep(for: left) }.value
+        if burst == mine { burst = nil }
     }
 
     // MARK: - What was last shown

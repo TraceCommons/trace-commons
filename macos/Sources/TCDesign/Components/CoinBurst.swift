@@ -5,9 +5,11 @@ import SwiftUI
 /// the green edge that lit): a brief gold flash, then small coins fly out
 /// every way, slow as they spread, tumble end over end as they droop and
 /// fade, each trailing a few sparks while it is fast. The coins may fly
-/// past the card's edges (`spill`). Under Reduce Motion the coins are drawn
-/// still, spread round the centre, and nothing moves. Give it with
-/// `glassCoinBurst` over the card.
+/// above and below the card (`spill`), but never past its sides, where a
+/// scroll view or a panel holding the card would cut them off (`sideways`).
+/// Under Reduce Motion the coins are drawn still, spread round the centre,
+/// and nothing moves. Give it with `glassCoinBurst` over the card, and draw
+/// the card above what follows it, so the coins fall over the cards below.
 public struct GlassCoinBurst: View {
     /// When the burst began; nil draws nothing.
     private let start: Date?
@@ -90,12 +92,26 @@ public struct GlassCoinBurst: View {
     }
 
     /// Where a coin is `t` seconds into the burst, from the centre: out
-    /// along its way, slowed by drag, pulled down.
-    static func offset(_ coin: Coin, at t: Double) -> CGVector {
+    /// along its way, slowed by drag, pulled down. `sideways` shortens its
+    /// reach side to side.
+    static func offset(_ coin: Coin, at t: Double, sideways: Double = 1) -> CGVector {
         let flown = max(0, t - coin.delay)
         let reach = coin.speed * (1 - exp(-drag * flown)) / drag
         let fall = 0.5 * gravity * flown * flown
-        return CGVector(dx: cos(coin.angle) * reach, dy: sin(coin.angle) * reach * squash + fall)
+        return CGVector(dx: cos(coin.angle) * reach * sideways, dy: sin(coin.angle) * reach * squash + fall)
+    }
+
+    /// The farthest any coin flies side to side: its speed, spent against
+    /// drag.
+    static let farthest = (coins.map(\.speed).max() ?? 0) / drag
+    /// The widest coin.
+    static let widest = coins.map(\.diameter).max() ?? 0
+
+    /// How much of its reach a coin flies side to side on a card whose
+    /// centre is `halfWidth` from its sides: all of it on a wide card, less
+    /// on a narrow one, so that no coin passes the card's sides.
+    static func sideways(halfWidth: CGFloat) -> Double {
+        max(0, min(1, Double(halfWidth - widest) / farthest))
     }
 
     /// How much of the coins shows `t` seconds in: whole while they fly,
@@ -120,9 +136,11 @@ public struct GlassCoinBurst: View {
         .accessibilityHidden(true)
     }
 
-    /// The burst `t` seconds in, round the centre of a field of `size`.
+    /// The burst `t` seconds in, round the centre of a field of `size`: the
+    /// card and `spill` past it.
     static func draw(in context: inout GraphicsContext, size: CGSize, at t: Double, flash: Bool) {
         let centre = CGPoint(x: size.width / 2, y: size.height / 2)
+        let sideways = Self.sideways(halfWidth: size.width / 2 - spill)
         if flash, t < flashDuration {
             let left = 1 - t / flashDuration
             let radius = flashRadius * CGFloat(0.4 + 0.6 * (t / flashDuration))
@@ -138,12 +156,12 @@ public struct GlassCoinBurst: View {
         for coin in coins {
             let flown = t - coin.delay
             guard flown > 0 else { continue }
-            let at = offset(coin, at: t)
+            let at = offset(coin, at: t, sideways: sideways)
             let point = CGPoint(x: centre.x + at.dx, y: centre.y + at.dy)
             // Sparks behind it while it is still fast.
             if flown < 0.55 {
                 for step in 1...3 {
-                    let back = offset(coin, at: t - Double(step) * 0.035)
+                    let back = offset(coin, at: t - Double(step) * 0.035, sideways: sideways)
                     let dot = coin.diameter * (0.42 - CGFloat(step) * 0.08)
                     context.fill(
                         Path(ellipseIn: CGRect(x: centre.x + back.dx - dot / 2, y: centre.y + back.dy - dot / 2,
@@ -182,8 +200,13 @@ public struct GlassCoinBurst: View {
 
 public extension View {
     /// Bursts gold coins out of this view's centre (`GlassCoinBurst`) from
-    /// `start`; nil draws nothing.
+    /// `start`. Nil draws nothing, and adds no view: almost always, there
+    /// is no burst.
     func glassCoinBurst(start: Date?, still: Bool = false) -> some View {
-        overlay { GlassCoinBurst(start: start, still: still) }
+        overlay {
+            if start != nil {
+                GlassCoinBurst(start: start, still: still)
+            }
+        }
     }
 }

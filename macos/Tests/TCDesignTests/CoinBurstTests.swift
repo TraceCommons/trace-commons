@@ -81,6 +81,38 @@ final class CoinBurstTests: XCTestCase {
         }
     }
 
+    /// No coin passes the card's sides, however narrow, where a scroll view
+    /// or a panel holding the card would cut it off; a wide card lets the
+    /// coins fly their full reach.
+    @MainActor
+    func test_noCoinPassesTheCardsSides() {
+        for width in [100.0, 160, 240, 400] {
+            let half = CGFloat(width / 2)
+            let sideways = GlassCoinBurst.sideways(halfWidth: half)
+            var t = 0.0
+            while t < GlassCoinBurst.duration {
+                for coin in GlassCoinBurst.coins {
+                    let at = GlassCoinBurst.offset(coin, at: t, sideways: sideways)
+                    XCTAssertLessThanOrEqual(abs(at.dx) + coin.diameter / 2, half, "\(width)pt card: past its side at \(t)s")
+                }
+                t += 0.05
+            }
+        }
+        XCTAssertEqual(GlassCoinBurst.sideways(halfWidth: 400), 1, "a wide card holds the whole burst")
+        XCTAssertGreaterThan(GlassCoinBurst.sideways(halfWidth: 120), 0.9, "Home's Balance tile: nearly all of it")
+    }
+
+    /// The burst adds a view only while there is one; almost always there
+    /// is none.
+    func test_noBurstAddsNoView() throws {
+        let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "CoinBurst.swift" }?.1)
+        let modifier = try XCTUnwrap(source.range(of: "func glassCoinBurst("))
+        let check = try XCTUnwrap(source.range(of: "if start != nil {", range: modifier.upperBound..<source.endIndex))
+        let burst = try XCTUnwrap(source.range(of: "GlassCoinBurst(start: start, still: still)",
+                                               range: modifier.upperBound..<source.endIndex))
+        XCTAssertLessThan(check.lowerBound, burst.lowerBound)
+    }
+
     /// Nothing moves under Reduce Motion: the timeline is paused while the
     /// coins are still, and the drawing reads no clock.
     func test_reduceMotionDrawsTheCoinsStill() throws {
