@@ -15278,11 +15278,12 @@ mod tests {
         ));
     }
 
-    /// A launch on the NEAR AI sign-in reads the balance only once it has
-    /// passed every other check and prepared a new session, and is refused,
-    /// with that session removed, when the balance cannot pay for its first
-    /// calls. A replay of a prepared request is answered as before,
-    /// whatever the balance now says.
+    /// A launch on the NEAR AI sign-in reads the balance only when it
+    /// passes every other check and would prepare a new session, and is
+    /// refused, with nothing prepared, when the balance cannot pay for its
+    /// first calls. A sign-out during the read is caught when the request
+    /// is handled, and a replay of a prepared request is answered as
+    /// before, whatever the balance now says.
     #[tokio::test]
     async fn a_sign_in_launch_needs_balance_for_its_first_calls() {
         use crate::daemon::nearai_credential::balance::{BalanceReading, BalanceReport};
@@ -15352,12 +15353,32 @@ mod tests {
         .await;
         assert_eq!(r.error.unwrap().message, "managed-near-ai-balance-too-low");
         assert_eq!(*reads.lock().unwrap(), 2);
-        // The session it prepared was rolled back before its ticket left.
+        // Nothing was prepared for it.
         let r = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({}))).await;
         assert_eq!(
             r.result.expect("snapshot")["sessions"],
             serde_json::json!([])
         );
+
+        // Signed out while the balance was being read: refused for the
+        // sign-in, and still nothing prepared.
+        let signs_out = |_fresh: bool| {
+            s.settings.lock().unwrap().near_ai_inference = None;
+            std::future::ready(BalanceReport::Unavailable)
+        };
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            signs_out,
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-sign-in-required");
+        let r = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({}))).await;
+        assert_eq!(
+            r.result.expect("snapshot")["sessions"],
+            serde_json::json!([])
+        );
+        s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
 
         // Funded: prepared.
         let r = crate::daemon::managed::handle_async_with(

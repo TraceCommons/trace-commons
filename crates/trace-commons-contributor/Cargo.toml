@@ -874,7 +874,7 @@ chrono-tz = "0.10"
 k256 = "0.13"
 sha3 = "0.10"
 tower = { version = "0.5", features = ["util"] }
-tokio = { version = "1", features = ["net"] }
+tokio = { version = "1", features = ["net", "test-util"] }
 
 # Cross-contract tests live in trace-commons-client-server-tests. Keep the
 # server out of this crate's dev-dependencies too: otherwise even a filtered

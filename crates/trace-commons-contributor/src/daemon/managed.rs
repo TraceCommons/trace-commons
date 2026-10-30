@@ -118,6 +118,94 @@ impl ManagedService {
         }
     }
 
+    /// Prepare the session a `managed_launch_prepare` or
+    /// `managed_session_start_again` request resolves to.
+    fn prepare_launch(&mut self, request: &Request, sign_in: bool) -> Result<Value, ManagedError> {
+        match self.resolve_launch(request, sign_in, None)? {
+            Some(Resolved::Replayed(existing)) => Ok(json!(existing)),
+            Some(Resolved::Launch(launch, account)) => {
+                Ok(json!(self.sessions.prepare(launch, &account)?))
+            }
+            None => Err(ManagedError::InvalidRequest),
+        }
+    }
+
+    /// The launch a prepare or start-again request resolves to, after every
+    /// check made before [`crate::managed::sessions::SessionRegistry::prepare`].
+    /// With `only` set, a launch on any other connection is `Ok(None)` as
+    /// soon as its account resolves, before the tool's version is run.
+    fn resolve_launch(
+        &self,
+        request: &Request,
+        sign_in: bool,
+        only: Option<ConnectionKind>,
+    ) -> Result<Option<Resolved>, ManagedError> {
+        let wanted = |launch: &LaunchRequest| only.is_none_or(|kind| kind == launch.connection);
+        match request.method.as_str() {
+            "managed_launch_prepare" => {
+                // No folder named: the person's home directory.
+                let params = crate::managed::folder::with_default_cwd(
+                    request.params.clone(),
+                    dirs::home_dir(),
+                )?;
+                let p: LaunchRequest =
+                    serde_json::from_value(params).map_err(|_| ManagedError::InvalidRequest)?;
+                let account = self.launch_account(&p, sign_in)?;
+                if !wanted(&p) {
+                    return Ok(None);
+                }
+                let generation = self.accounts.generation(p.tool);
+                if p.expected_generation != generation {
+                    return Err(ManagedError::Conflict);
+                }
+                // Default changes are separate until the cross-file transaction is available.
+                if p.save_default {
+                    return Err(ManagedError::InvalidRequest);
+                }
+                verify_visible_version(&self.profiles, &account)?;
+                Ok(Some(Resolved::Launch(p, account)))
+            }
+            "managed_session_start_again" => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Params {
+                    session_id: Uuid,
+                    request_id: Uuid,
+                }
+                let p: Params = parse(request)?;
+                let mut again = self
+                    .sessions
+                    .start_again_request(p.session_id, p.request_id)?;
+                if let Some(existing) = self.sessions.replayed(&again) {
+                    return Ok(Some(Resolved::Replayed(existing)));
+                }
+                let account = self.launch_account(&again, sign_in)?;
+                if !wanted(&again) {
+                    return Ok(None);
+                }
+                if !again.cwd.is_absolute() || !again.cwd.is_dir() {
+                    return Err(ManagedError::InvalidRequest);
+                }
+                again.expected_generation = self.accounts.generation(again.tool);
+                Ok(Some(Resolved::Launch(again, account)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Whether `request` would prepare a new session on the NEAR AI
+    /// sign-in: it passes every check [`Self::prepare_launch`] makes and is
+    /// not a replay. Commits nothing; the request is resolved and checked
+    /// again when it is handled.
+    fn prepares_on_sign_in(&self, request: &Request, sign_in: bool) -> bool {
+        match self.resolve_launch(request, sign_in, Some(ConnectionKind::NearAiSignIn)) {
+            Ok(Some(Resolved::Launch(launch, account))) => {
+                self.sessions.would_prepare_new(launch, &account)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether an ended coding row can be launched again as it was: same
     /// account (still saved, or still signed in) and same folder (still
     /// there). A shell also needs `capabilities.terminal_launch` to offer it,
@@ -280,26 +368,7 @@ impl ManagedService {
                 self.sessions.changed()?;
                 Ok(json!(selection))
             }
-            "managed_launch_prepare" => {
-                // No folder named: the person's home directory.
-                let params = crate::managed::folder::with_default_cwd(
-                    request.params.clone(),
-                    dirs::home_dir(),
-                )?;
-                let p: LaunchRequest =
-                    serde_json::from_value(params).map_err(|_| ManagedError::InvalidRequest)?;
-                let account = self.launch_account(&p, sign_in)?;
-                let generation = self.accounts.generation(p.tool);
-                if p.expected_generation != generation {
-                    return Err(ManagedError::Conflict);
-                }
-                // Default changes are separate until the cross-file transaction is available.
-                if p.save_default {
-                    return Err(ManagedError::InvalidRequest);
-                }
-                verify_visible_version(&self.profiles, &account)?;
-                Ok(json!(self.sessions.prepare(p, &account)?))
-            }
+            "managed_launch_prepare" => self.prepare_launch(request, sign_in),
             "managed_terminal_launch" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -351,27 +420,7 @@ impl ManagedService {
                 self.sessions.request_stop(p.session_id)?;
                 Ok(json!({"stopping":true}))
             }
-            "managed_session_start_again" => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Params {
-                    session_id: Uuid,
-                    request_id: Uuid,
-                }
-                let p: Params = parse(request)?;
-                let mut again = self
-                    .sessions
-                    .start_again_request(p.session_id, p.request_id)?;
-                if let Some(existing) = self.sessions.replayed(&again) {
-                    return Ok(json!(existing));
-                }
-                let account = self.launch_account(&again, sign_in)?;
-                if !again.cwd.is_absolute() || !again.cwd.is_dir() {
-                    return Err(ManagedError::InvalidRequest);
-                }
-                again.expected_generation = self.accounts.generation(again.tool);
-                Ok(json!(self.sessions.prepare(again, &account)?))
-            }
+            "managed_session_start_again" => self.prepare_launch(request, sign_in),
             "managed_session_dismiss" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -578,6 +627,14 @@ fn remember_prepared(
     Ok(value)
 }
 
+/// What a prepare or start-again request resolves to.
+enum Resolved {
+    /// A new launch, checked and ready to prepare.
+    Launch(LaunchRequest, AccountView),
+    /// The session this request id already prepared.
+    Replayed(crate::managed::sessions::PreparedLaunch),
+}
+
 fn refusal_label(refusal: Refusal) -> &'static str {
     match refusal {
         Refusal::Unavailable(value) => value,
@@ -686,6 +743,15 @@ where
     if request.method == "managed_model_catalogue" {
         return model_catalogue(request).await;
     }
+    // A launch that would prepare a new session on the sign-in waits for
+    // the balance before anything is committed: a refusal, a cancelled
+    // request or a sign-out during the wait leaves no session behind, and
+    // `handle` below resolves and checks the request again from scratch.
+    if prepares_on_sign_in(shared, request)
+        && let Err(error) = funds_for_first_calls(read).await
+    {
+        return respond(request, Err(error.into()));
+    }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
     let mut ended = vec![];
@@ -697,43 +763,25 @@ where
     for route in ended {
         route.shutdown().await;
     }
-    // Every check `handle` makes has passed by now, and a replay was
-    // answered without a ticket, so only a session this request has just
-    // prepared on the sign-in waits for the balance. One the balance cannot
-    // pay for is rolled back before its ticket leaves the daemon.
-    if let Some(id) = new_sign_in_session(shared, request, &result)
-        && let Err(error) = funds_for_first_calls(read).await
-    {
-        let _ = with_service(shared, |service| service.sessions.rollback_prepared(id));
-        return respond(request, Err(error.into()));
-    }
     respond(request, remember_prepared(shared, request, result))
 }
 
-/// The session `request` has just prepared on the NEAR AI sign-in: a
-/// launch or start-again answered with a ticket, which a replay never
-/// carries.
-fn new_sign_in_session(
-    shared: &DaemonShared,
-    request: &Request,
-    result: &Result<Value, Refusal>,
-) -> Option<Uuid> {
+/// [`ManagedService::prepares_on_sign_in`] for a prepare or start-again
+/// request, with the service locked directly: a read that publishes
+/// nothing.
+fn prepares_on_sign_in(shared: &DaemonShared, request: &Request) -> bool {
     if !matches!(
         request.method.as_str(),
         "managed_launch_prepare" | "managed_session_start_again"
     ) {
-        return None;
+        return false;
     }
-    let value = result.as_ref().ok()?;
-    value.get("ticket").filter(|ticket| ticket.is_string())?;
-    let id: Uuid = serde_json::from_value(value.get("session_id")?.clone()).ok()?;
-    let held = shared.managed.lock().ok()?;
-    let service = held.as_ref().ok()?;
-    matches!(
-        service.sessions.describe(id),
-        Some((ConnectionKind::NearAiSignIn, _))
-    )
-    .then_some(id)
+    let sign_in = sign_in_present(shared);
+    let Ok(held) = shared.managed.lock() else {
+        return false;
+    };
+    held.as_ref()
+        .is_ok_and(|service| service.prepares_on_sign_in(request, sign_in))
 }
 
 /// The least a NEAR AI balance must hold for a launch on the sign-in, in
@@ -751,9 +799,12 @@ const FUNDS_CHECK_WITHIN: std::time::Duration = std::time::Duration::from_secs(5
 /// so when [`funds_for_first_calls`] stops waiting for it, a refresh-token
 /// rotation in flight is never cut short: it finishes and fills the cache
 /// for the next look. A sender dropped without an answer is
-/// [`BalanceReport::Unavailable`]. Only a `DaemonShared` that never
-/// adopted a runtime (a unit test, a one-shot command) reads inline; the
-/// daemon that serves the socket always has one.
+/// [`BalanceReport::Unavailable`].
+///
+/// A `DaemonShared` that never adopted a runtime reads inline, and there
+/// the deadline can cut a rotation short. Only unit tests reach that: the
+/// daemon serving the socket adopts its runtime at start, and managed
+/// launches reach it over IPC.
 pub(crate) async fn read_balance(shared: &DaemonShared, fresh: bool) -> BalanceReport {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let detached = shared.spawn_detached(move |this| async move {
@@ -780,16 +831,7 @@ where
     R: Fn(bool) -> F,
     F: std::future::Future<Output = BalanceReport>,
 {
-    funds_within(read, FUNDS_CHECK_WITHIN).await
-}
-
-/// [`funds_for_first_calls`] with its deadline `within` from now.
-async fn funds_within<R, F>(read: R, within: std::time::Duration) -> Result<(), ManagedError>
-where
-    R: Fn(bool) -> F,
-    F: std::future::Future<Output = BalanceReport>,
-{
-    let deadline = tokio::time::Instant::now() + within;
+    let deadline = tokio::time::Instant::now() + FUNDS_CHECK_WITHIN;
     let within = |future: F| async move {
         tokio::time::timeout_at(deadline, future)
             .await
@@ -1063,18 +1105,16 @@ mod tests {
 
     /// NEAR AI that never answers holds a launch for the deadline once, not
     /// once per read, and then lets it through.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_unanswered_balance_lets_the_launch_through_after_one_deadline() {
-        let within = std::time::Duration::from_millis(200);
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let never = |_fresh: bool| std::future::pending::<BalanceReport>();
-        assert!(funds_within(never, within).await.is_ok());
-        let waited = started.elapsed();
-        assert!(waited >= within && waited < within * 2, "{waited:?}");
+        assert!(funds_for_first_calls(never).await.is_ok());
+        assert_eq!(started.elapsed(), FUNDS_CHECK_WITHIN);
 
         // A cached low figure, then a fresh read that never comes back:
         // still one deadline, and the launch goes ahead.
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let low_then_never = |fresh: bool| async move {
             if fresh {
                 std::future::pending().await
@@ -1082,9 +1122,8 @@ mod tests {
                 known(Some(0))
             }
         };
-        assert!(funds_within(low_then_never, within).await.is_ok());
-        let waited = started.elapsed();
-        assert!(waited >= within && waited < within * 2, "{waited:?}");
+        assert!(funds_for_first_calls(low_then_never).await.is_ok());
+        assert_eq!(started.elapsed(), FUNDS_CHECK_WITHIN);
     }
 
     fn service() -> (tempfile::TempDir, ConfigStore, ManagedService) {
