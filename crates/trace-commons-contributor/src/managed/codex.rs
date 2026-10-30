@@ -12,7 +12,9 @@
 //! `gpt-6.1-sol`. To keep that, the launcher reads the shipped list
 //! (`codex debug models --bundled`) and a model Codex matches keeps its
 //! prompt and its reasoning and context settings under the NEAR AI id
-//! ([`KEPT`]). Every entry's tool settings are basic, because the
+//! ([`KEPT`]). Every entry's context window is at most what NEAR AI
+//! lists for the model, less its output limit
+//! ([`ChatModel::input_window`]). Every entry's tool settings are basic, because the
 //! shipped ones make Codex send requests NEAR AI refuses. Any other
 //! model gets basic settings with the prompt of Codex's own first listed
 //! model.
@@ -77,6 +79,15 @@ pub fn catalog(default: &str, models: &[ChatModel], bundled: Option<&Value>) -> 
                         entry[*field] = value.clone();
                     }
                 }
+            }
+            // Never more than NEAR AI serves: the window it lists less the
+            // longest answer, which is how Codex sizes its own models, and
+            // no more than the window Codex ships for a model it knows.
+            if let Some(near) = model.input_window() {
+                let window = entry["context_window"]
+                    .as_u64()
+                    .map_or(near, |shipped| shipped.min(near));
+                entry["context_window"] = json!(window);
             }
             entry["slug"] = json!(model.id);
             entry["display_name"] = json!(display);
@@ -201,6 +212,7 @@ mod tests {
             id: id.into(),
             name: name.map(Into::into),
             tier: None,
+            ..Default::default()
         }
     }
 
@@ -296,6 +308,42 @@ mod tests {
                 ]
             );
         }
+    }
+
+    /// Each entry's window is at most NEAR AI's, less the output limit:
+    /// a model Codex knows keeps a smaller shipped window, a larger one is
+    /// cut to NEAR AI's, and a model Codex does not know is given NEAR AI's.
+    /// A model NEAR AI gives no window for keeps whatever Codex would use.
+    #[test]
+    fn context_windows_never_exceed_what_near_ai_lists() {
+        let sized = |id: &str, window: u64, output: Option<u64>| ChatModel {
+            context_length: Some(window),
+            max_output_length: output,
+            ..chat(id, None)
+        };
+        let models = [
+            sized("openai/gpt-6.1-sol", 1_050_000, Some(128_000)),
+            sized("openai/gpt-5.5", 200_000, Some(64_000)),
+            sized("z-ai/glm-5.3-flash", 1_048_576, None),
+            sized("x/small", 32_768, Some(65_536)),
+            chat("x/unsized", None),
+        ];
+        let bundled = bundled();
+        let catalog = catalog("openai/gpt-6.1-sol", &models, Some(&bundled));
+        let window = |slug: &str| {
+            catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["slug"] == slug)
+                .unwrap()["context_window"]
+                .clone()
+        };
+        assert_eq!(window("openai/gpt-6.1-sol"), 272_000);
+        assert_eq!(window("openai/gpt-5.5"), 136_000);
+        assert_eq!(window("z-ai/glm-5.3-flash"), 1_048_576);
+        assert_eq!(window("x/small"), 32_768);
+        assert!(window("x/unsized").is_null());
     }
 
     /// A model Codex knows keeps Codex's own settings and prompt, as it

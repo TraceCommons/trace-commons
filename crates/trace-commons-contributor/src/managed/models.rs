@@ -78,7 +78,7 @@ impl ModelTier {
 }
 
 /// A chat model from the NEAR AI catalogue, as a picker shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatModel {
     pub id: String,
     /// NEAR AI's display name, when it gives one.
@@ -88,6 +88,39 @@ pub struct ChatModel {
     /// private host; none only when a payload omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<ModelTier>,
+    /// NEAR AI's context window for the model in tokens, input and output
+    /// together (`context_length`). Each tool is told it, so it compacts
+    /// before NEAR AI refuses a request as too long; none when NEAR AI
+    /// gives none, and the tool keeps its own assumption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+    /// The most tokens NEAR AI lets the model write in one answer
+    /// (`max_output_length`); none when NEAR AI gives none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_length: Option<u64>,
+}
+
+impl ChatModel {
+    /// The tokens a request may send and still leave room for the longest
+    /// answer: the window less the output limit, as Codex sizes its own
+    /// models (GPT-5: 400,000 less 128,000 is Codex's 272,000). The whole
+    /// window when no output limit below it is given.
+    pub fn input_window(&self) -> Option<u64> {
+        let window = self.context_length?;
+        Some(match self.max_output_length {
+            Some(output) if output < window => window - output,
+            _ => window,
+        })
+    }
+}
+
+/// The largest token count read from the catalogue; anything above is
+/// treated as unreadable rather than passed to a tool.
+const MAX_TOKENS: u64 = 100_000_000;
+
+/// A positive token count in `value`, or none.
+fn tokens(value: &serde_json::Value) -> Option<u64> {
+    value.as_u64().filter(|n| (1..=MAX_TOKENS).contains(n))
 }
 
 /// The chat models in a NEAR AI `/v1/models` answer, in its order. An id
@@ -111,6 +144,10 @@ pub fn chat_models(catalogue: &serde_json::Value) -> Vec<ChatModel> {
                 .filter(|name| !name.trim().is_empty())
                 .map(str::to_owned),
             tier: Some(ModelTier::from_owner(entry["owned_by"].as_str())),
+            context_length: tokens(&entry["context_length"])
+                .or_else(|| tokens(&entry["top_provider"]["context_length"])),
+            max_output_length: tokens(&entry["max_output_length"])
+                .or_else(|| tokens(&entry["top_provider"]["max_completion_tokens"])),
         });
     }
     kept
@@ -263,7 +300,8 @@ const CLAUDE_ALIASES: [(&str, &str, &str); 4] = [
 /// the default, so the alias is never given a substitute by the proxy.
 /// The small, fast model is the Haiku alias's. A default that no alias
 /// names (an older Sonnet, or another vendor's model while every family is
-/// listed) is offered as the picker's custom entry.
+/// listed) is offered as the picker's custom entry. The default's
+/// context window is `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
 pub fn claude_env(default: &str, models: &[ChatModel]) -> Vec<(&'static str, Option<String>)> {
     let default_model = models.iter().find(|m| m.id == default);
     let named = |model: Option<&ChatModel>| model.and_then(|m| m.name.clone());
@@ -288,6 +326,18 @@ pub fn claude_env(default: &str, models: &[ChatModel]) -> Vec<(&'static str, Opt
     env.push((
         "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
         custom.then(|| named(default_model)).flatten(),
+    ));
+    // The default's window, for Claude Code to compact at when it cannot
+    // size the model itself. Claude Code applies this only to an id it
+    // does not recognize (another vendor's model, or a Claude model newer
+    // than the installed Claude Code); a Claude model it knows keeps the
+    // window it has on the Anthropic API. Removed when NEAR AI gives none,
+    // so a value set for another gateway does not size this one.
+    env.push((
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+        default_model
+            .and_then(|m| m.context_length)
+            .map(|n| n.to_string()),
     ));
     // Descriptions and capabilities a person set for other models, and a
     // subagent model that may not be listed: none of them apply here.
@@ -386,6 +436,7 @@ mod tests {
                 id: (*id).into(),
                 name: None,
                 tier: None,
+                ..Default::default()
             })
             .collect()
     }
@@ -649,6 +700,84 @@ mod tests {
         );
     }
 
+    /// NEAR AI's window and output limit are read from each entry, from
+    /// `top_provider` when the top level lacks them; zero, negative, huge
+    /// or non-numeric values are unreadable, never passed on.
+    #[test]
+    fn context_limits_are_read_from_the_catalogue() {
+        let text = json!({"input_modalities": ["text"], "output_modalities": ["text"]});
+        let entry = |id: &str, extra: serde_json::Value| {
+            let mut e = text.clone();
+            e["id"] = json!(id);
+            for (k, v) in extra.as_object().unwrap() {
+                e[k] = v.clone();
+            }
+            e
+        };
+        let kept = chat_models(&json!({"data": [
+            entry("a/top", json!({"context_length": 1_050_000, "max_output_length": 128_000})),
+            entry("b/provider", json!({"top_provider": {"context_length": 262_144, "max_completion_tokens": 65_536}})),
+            entry("c/none", json!({})),
+            entry("d/bad", json!({"context_length": 0, "max_output_length": "big"})),
+            entry("e/huge", json!({"context_length": 1u64 << 40, "max_output_length": -1})),
+        ]}));
+        let limits: Vec<_> = kept
+            .iter()
+            .map(|m| (m.id.as_str(), m.context_length, m.max_output_length))
+            .collect();
+        assert_eq!(
+            limits,
+            vec![
+                ("a/top", Some(1_050_000), Some(128_000)),
+                ("b/provider", Some(262_144), Some(65_536)),
+                ("c/none", None, None),
+                ("d/bad", None, None),
+                ("e/huge", None, None),
+            ]
+        );
+        assert_eq!(kept[0].input_window(), Some(922_000));
+        assert_eq!(kept[2].input_window(), None);
+        // A window that arrived without these fields still deserializes.
+        let old: ChatModel = serde_json::from_value(json!({"id": "x/y"})).unwrap();
+        assert_eq!(old.context_length, None);
+        assert!(
+            serde_json::to_value(&old)
+                .unwrap()
+                .get("context_length")
+                .is_none()
+        );
+    }
+
+    /// Claude Code is told the default's window, which it uses for a model
+    /// it cannot size itself; without one, an inherited value is removed.
+    #[test]
+    fn claude_is_told_the_default_models_context_window() {
+        let sized = |id: &str, window: Option<u64>| ChatModel {
+            id: id.into(),
+            context_length: window,
+            ..Default::default()
+        };
+        let kept = vec![
+            sized("anthropic/claude-sonnet-5-5", Some(1_000_000)),
+            sized("z-ai/glm-5.3", Some(1_048_576)),
+            sized("x/unsized", None),
+        ];
+        let vars = claude_env("z-ai/glm-5.3", &kept);
+        assert_eq!(
+            env_of(&vars)["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+            Some("1048576")
+        );
+        let vars = claude_env("anthropic/claude-sonnet-5-5", &kept);
+        assert_eq!(
+            env_of(&vars)["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
+            Some("1000000")
+        );
+        let vars = claude_env("x/unsized", &kept);
+        let env = env_of(&vars);
+        assert!(env.contains_key("CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
+        assert_eq!(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], None);
+    }
+
     fn env_of<'a>(
         vars: &'a [(&'static str, Option<String>)],
     ) -> std::collections::BTreeMap<&'static str, Option<&'a str>> {
@@ -664,6 +793,7 @@ mod tests {
             id: "anthropic/claude-opus-4-1".into(),
             name: Some("Claude Opus 4.1".into()),
             tier: None,
+            ..Default::default()
         });
         kept[2].name = Some("Claude Opus 5.5".into());
         let vars = claude_env("anthropic/claude-sonnet-5-5", &kept);
@@ -721,11 +851,13 @@ mod tests {
                 id: "openai/gpt-6.1-sol".into(),
                 name: Some("GPT-6.1 Sol".into()),
                 tier: None,
+                ..Default::default()
             },
             ChatModel {
                 id: "anthropic/claude-sonnet-5".into(),
                 name: None,
                 tier: None,
+                ..Default::default()
             },
         ];
         let vars = claude_env("openai/gpt-6.1-sol", &kept);

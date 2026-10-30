@@ -855,11 +855,13 @@ mod tests {
                     id: "anthropic/fixture-chat".into(),
                     name: Some("Fixture chat".into()),
                     tier: None,
+                    ..Default::default()
                 },
                 ChatModel {
                     id: "openai/fixture-chat".into(),
                     name: None,
                     tier: None,
+                    ..Default::default()
                 },
             ],
         }
@@ -1569,6 +1571,7 @@ mod tests {
                 id: format!("vendor/model-{i}"),
                 name: None,
                 tier: None,
+                ..Default::default()
             })
             .collect();
         let catalogue =
@@ -1635,6 +1638,7 @@ mod tests {
                 id: "fixture/chat".into(),
                 name: None,
                 tier: Some(crate::managed::models::ModelTier::Incognito),
+                ..Default::default()
             }]
         );
         server.abort();

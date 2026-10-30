@@ -140,6 +140,23 @@ tools whose executable availability is not checked.
     (named by NEAR AI's display name or the id); `model` and `small_model`
     are the default. Its profile is isolated, so the list never reaches the
     person's own OpenCode settings.
+- Each tool is told the context window NEAR AI lists for a model
+  (`context_length` in `/v1/models`, with `max_output_length`), so it
+  compacts before NEAR AI refuses a request as too long. A model NEAR AI
+  gives no window for is left to the tool's own assumption.
+  - Claude Code: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is the default model's
+    window, or removed when NEAR AI gives none. Claude Code applies it only
+    to an id it does not recognize (another vendor's model, or a Claude
+    model newer than the installed Claude Code, which it would otherwise
+    assume is 200,000 tokens); a Claude model it knows keeps its Anthropic
+    API window.
+  - Codex: each catalog entry's `context_window` is NEAR AI's window less
+    the output limit (how Codex sizes its own models: GPT-5's 400,000 less
+    128,000 is Codex's 272,000), and never more than the window Codex ships
+    for a model it knows.
+  - OpenCode: each listed model's `limit` is `{context, output}` from NEAR
+    AI; without an output limit, OpenCode's own 32,000, never above the
+    window.
 - Each NEAR AI session's proxy has its own IronWire home,
   `managed-routes/<session id>` in the state directory, whichever process
   hosts it (the launcher for a saved key, the daemon for the sign-in). Its
