@@ -443,8 +443,13 @@ struct InsightsDrillRow<Extra: View>: View {
                 if let label {
                     Text(label).insightsCaption().lineLimit(1).truncationMode(.tail)
                 }
-                Text(reasons.isEmpty ? state : state + " \u{b7} " + reasons).insightsCaption()
-                    .fixedSize(horizontal: false, vertical: true)
+                // One line, the full text on hover (owner, 2026-10-29: the
+                // day's rows felt crowded); VoiceOver reads it whole.
+                let coverage = reasons.isEmpty ? state : state + " \u{b7} " + reasons
+                Text(coverage).insightsCaption()
+                    .lineLimit(1).truncationMode(.tail)
+                    .help(coverage)
+                    .accessibilityLabel(coverage)
                 extra()
             }
             .frame(maxWidth: .infinity, alignment: .leading)

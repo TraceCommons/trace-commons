@@ -574,7 +574,7 @@ struct MonitorWindowView: View {
     }
 
     private var inspectorAvailable: Bool {
-        Self.inspectorAvailable(shownTab, homePage: homePage, insightsDetail: insightsInspector.detail != nil)
+        Self.inspectorAvailable(shownTab, homePage: homePage, insightsDetail: insightsInspector.offered)
     }
 
     /// What the inspector must show right now (`InspectorDemand`); the

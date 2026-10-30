@@ -24,6 +24,11 @@ final class InsightsBreakdownInspector {
 
     func show(_ detail: @escaping @MainActor () -> InsightsBreakdownDetail) { self.detail = detail }
 
+    /// Whether the window offers the panel: Breakdown is on screen and a
+    /// day is picked. With nothing picked it only drew Breakdown's title
+    /// over the dash (owner, 2026-10-29: unnecessary).
+    var offered: Bool { detail != nil && pickedDay != nil }
+
     func clear() { detail = nil }
 
     /// A day picked on Tokens by day, or `nil` for the week again; the
