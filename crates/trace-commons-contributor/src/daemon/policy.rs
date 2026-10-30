@@ -411,6 +411,11 @@ pub struct ProjectPolicy {
     /// from that build's rule on load, then sets this.
     #[serde(default)]
     pub grant_exceptions_derived: bool,
+    /// Whether [`ProjectPolicy::retire_ask_override`] has run on this file.
+    /// Set by [`ProjectPolicy::new`]; a file an older build wrote reads
+    /// `false` and is migrated once on load.
+    #[serde(default)]
+    pub ask_override_retired: bool,
 }
 
 /// The key the contribution override's arming record is listed under in
@@ -602,6 +607,7 @@ impl ProjectPolicy {
             notify_kinds_known: true,
             grant_generation: 0,
             grant_exceptions_derived: true,
+            ask_override_retired: true,
         }
     }
 
@@ -1120,6 +1126,107 @@ impl ProjectPolicy {
         self.automatic_grant.take().is_some()
     }
 
+    /// Keep every folder marked Ask as an exception to the include-existing
+    /// grant just given, however long ago it was marked (owner, 2026-10-30:
+    /// "keep folders flagged ask with ask, all else automatic"). Call after
+    /// [`Self::include_existing_under_grant`]; without one in force it does
+    /// nothing. Returns how many folders it kept.
+    pub fn keep_folder_asks_under_grant(&mut self) -> usize {
+        let Some(generation) = self
+            .automatic_grant
+            .as_ref()
+            .filter(|grant| grant.include_existing)
+            .map(|grant| grant.generation)
+        else {
+            return 0;
+        };
+        let mut kept = 0;
+        for (key, entry) in &mut self.projects {
+            if key != UNKNOWN_PROJECT_KEY && entry.mode == ProjectMode::NotifyOnly {
+                entry.set_under_grant = Some(generation);
+                kept += 1;
+            }
+        }
+        kept
+    }
+
+    /// Clear every folder's Ask mark under the include-existing grant just
+    /// given, so every folder is Automatic (owner, 2026-10-30: "automatic
+    /// for all"). The grant already supersedes them; clearing them as well
+    /// means a later grant that keeps Ask marks does not bring back marks
+    /// this one overrode. Never stays. Returns how many it cleared.
+    pub fn clear_folder_asks_under_grant(&mut self) -> usize {
+        if !self.includes_existing_automatically() {
+            return 0;
+        }
+        let before = self.projects.len();
+        self.projects.retain(|key, entry| {
+            key == UNKNOWN_PROJECT_KEY || entry.mode != ProjectMode::NotifyOnly
+        });
+        before - self.projects.len()
+    }
+
+    /// Withdraw the Flow 1 grant and put back to Ask every folder it armed,
+    /// so after "Ask each time" nothing the grant switched on keeps sending
+    /// (#1753 item 4). A folder the contributor set to Automatic themselves
+    /// keeps its own setting; a folder's own Ask or Never is untouched. The
+    /// folders go back to having no rule of their own, which reads Ask, so
+    /// a later grant that keeps Ask marks arms them again. Returns whether a
+    /// grant was in force.
+    pub fn withdraw_automatic_grant_to_ask(&mut self) -> bool {
+        let withdrawn = self.withdraw_automatic_grant();
+        for key in std::mem::take(&mut self.armed_by_grant) {
+            if self
+                .projects
+                .get(&key)
+                .is_some_and(|entry| entry.mode == ProjectMode::AutoUpload)
+            {
+                self.projects.remove(&key);
+                self.armed_from_now.remove(&key);
+                self.arming_claims.remove(&key);
+            }
+        }
+        self.prune_arming_record();
+        withdrawn
+    }
+
+    /// Retire an Ask contribution override, once (#1753 A2). The macOS
+    /// setup's "Ask each time" set it, nothing in the app could clear it,
+    /// and while it held a folder set to Automatic kept asking with no
+    /// error. Every folder keeps what it showed: a folder whose own setting
+    /// was Automatic (or that the grant covered) is set to Ask, the grant
+    /// is withdrawn, and the override is cleared, so "Ask each time" is the
+    /// visible default it was meant to be and a folder set to Automatic
+    /// afterwards sends. Runs only while `ask_override_retired` is false,
+    /// which is only a file an older build wrote. In memory, like the rekey;
+    /// the next save persists it.
+    pub fn retire_ask_override(&mut self, now: DateTime<Utc>) {
+        if self.ask_override_retired {
+            return;
+        }
+        self.ask_override_retired = true;
+        if self
+            .contribution_override
+            .as_ref()
+            .is_none_or(|o| o.mode != ProjectMode::NotifyOnly)
+        {
+            return;
+        }
+        self.withdraw_automatic_grant();
+        self.armed_by_grant.clear();
+        let automatic: Vec<String> = self
+            .projects
+            .iter()
+            .filter(|(_, entry)| entry.mode == ProjectMode::AutoUpload)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in automatic {
+            // `set_mode` refuses only a key it never stored; skip one.
+            let _ = self.set_mode(&key, ProjectMode::NotifyOnly, now);
+        }
+        self.clear_contribution_override();
+    }
+
     /// Which grant is in force, by the instant it was given. A pass reads
     /// this before it lists anything, and records only for the grant it
     /// read, so a grant given while discovery was walking the disk is
@@ -1475,6 +1582,7 @@ impl ProjectPolicy {
         // Before the rekey below, which merges `added_at`: the derivation
         // reads each folder's own.
         policy.derive_grant_exceptions();
+        policy.retire_ask_override(Utc::now());
         // Migrate in memory on every load rather than rewriting the file
         // here: `load` has no business writing, and the next `save` -- which
         // every mutation already performs -- persists the v2 form. A file
@@ -3120,6 +3228,170 @@ mod tests {
         p.include_existing_under_grant();
         assert!(p.record_source(at, SRC, BTreeSet::new(), BTreeSet::new()));
         p
+    }
+
+    /// Owner, 2026-10-30: turning Automatic on can keep every folder marked
+    /// Ask on Ask, however long ago it was marked, while every other folder
+    /// is armed. Never stays Never.
+    #[test]
+    fn a_grant_that_keeps_folder_asks_keeps_an_ask_from_before_it() {
+        let mut p = granted_including_existing();
+        assert!(
+            p.arms_by_default("/w/pre", "/s/a.jsonl", SRC),
+            "superseded first"
+        );
+        assert_eq!(p.keep_folder_asks_under_grant(), 1);
+        assert!(p.asks_despite_grant("/w/pre"));
+        assert!(!p.arms_by_default("/w/pre", "/s/a.jsonl", SRC));
+        assert!(
+            p.arms_by_default("/w/none", "/s/b.jsonl", SRC),
+            "no mark, armed"
+        );
+    }
+
+    /// "Automatic for all" clears the Ask marks, so a later grant that keeps
+    /// marks does not bring back one this grant overrode. Never stays.
+    #[test]
+    fn a_grant_for_every_folder_clears_the_ask_marks_but_not_never() {
+        let mut p = granted_including_existing();
+        p.set_mode("/w/never", ProjectMode::Ignore, t("2026-10-29T13:00:00Z"))
+            .unwrap();
+        assert_eq!(p.clear_folder_asks_under_grant(), 1);
+        assert!(!p.projects.contains_key("/w/pre"));
+        assert_eq!(p.folder_mode("/w/never"), ProjectMode::Ignore);
+        assert_eq!(p.keep_folder_asks_under_grant(), 0, "no mark left to keep");
+        assert!(p.arms_by_default("/w/pre", "/s/a.jsonl", SRC));
+    }
+
+    /// Without the include-existing grant neither does anything: a mark is
+    /// only kept or cleared against a grant.
+    #[test]
+    fn keeping_or_clearing_asks_needs_the_include_existing_grant() {
+        let mut p = ProjectPolicy::new();
+        p.set_mode("/w/pre", ProjectMode::NotifyOnly, t("2026-10-29T11:00:00Z"))
+            .unwrap();
+        assert_eq!(p.keep_folder_asks_under_grant(), 0);
+        assert_eq!(p.clear_folder_asks_under_grant(), 0);
+        assert_eq!(p.folder_mode("/w/pre"), ProjectMode::NotifyOnly);
+    }
+
+    /// "Ask each time" in Settings (#1753 item 4): the grant goes, and every
+    /// folder it armed goes back to Ask. A folder the contributor set to
+    /// Automatic themselves keeps it; Never and Ask marks are untouched.
+    #[test]
+    fn withdrawing_to_ask_returns_the_folders_the_grant_armed() {
+        let mut p = granted_including_existing();
+        let terms = grant_terms_with("https://ingest.invalid");
+        p.arm_by_grant("/w/armed", t("2026-10-29T13:00:00Z"), terms)
+            .unwrap();
+        p.set_mode(
+            "/w/mine",
+            ProjectMode::AutoUpload,
+            t("2026-10-29T13:00:00Z"),
+        )
+        .unwrap();
+        p.set_mode("/w/never", ProjectMode::Ignore, t("2026-10-29T13:00:00Z"))
+            .unwrap();
+
+        assert!(p.withdraw_automatic_grant_to_ask());
+        assert!(p.automatic_grant.is_none());
+        assert_eq!(p.resolve("/w/armed"), ProjectMode::NotifyOnly);
+        assert!(!p.projects.contains_key("/w/armed"), "back to no rule");
+        assert_eq!(p.resolve("/w/mine"), ProjectMode::AutoUpload);
+        assert_eq!(p.resolve("/w/never"), ProjectMode::Ignore);
+        assert_eq!(p.resolve("/w/pre"), ProjectMode::NotifyOnly);
+        assert!(p.armed_by_grant.is_empty());
+        assert!(
+            !p.withdraw_automatic_grant_to_ask(),
+            "nothing left to withdraw"
+        );
+    }
+
+    /// #1753 A2: the Ask override setup wrote is retired once on load. What
+    /// each folder showed is kept (Ask), the override and the grant go, and
+    /// a folder set to Automatic afterwards resolves to Automatic.
+    #[test]
+    fn the_setup_ask_override_is_retired_once_keeping_what_folders_showed() {
+        let mut p = granted_including_existing();
+        p.set_mode(
+            "/w/auto",
+            ProjectMode::AutoUpload,
+            t("2026-10-29T13:00:00Z"),
+        )
+        .unwrap();
+        p.set_contribution_override(ProjectMode::NotifyOnly, t("2026-10-29T14:00:00Z"), None)
+            .unwrap();
+        p.ask_override_retired = false;
+        assert_eq!(p.resolve("/w/auto"), ProjectMode::NotifyOnly);
+
+        p.retire_ask_override(t("2026-10-30T00:00:00Z"));
+        assert!(p.contribution_override.is_none());
+        assert!(p.automatic_grant.is_none());
+        assert_eq!(
+            p.resolve("/w/auto"),
+            ProjectMode::NotifyOnly,
+            "showed Ask, stays Ask"
+        );
+        assert_eq!(p.resolve("/w/none"), ProjectMode::NotifyOnly);
+
+        p.set_mode(
+            "/w/auto",
+            ProjectMode::AutoUpload,
+            t("2026-10-30T01:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(
+            p.resolve("/w/auto"),
+            ProjectMode::AutoUpload,
+            "Automatic now sends"
+        );
+
+        p.set_contribution_override(ProjectMode::NotifyOnly, t("2026-10-30T02:00:00Z"), None)
+            .unwrap();
+        p.retire_ask_override(t("2026-10-30T03:00:00Z"));
+        assert!(p.contribution_override.is_some(), "only once");
+    }
+
+    /// A Never override, and a file a current build wrote, are left alone.
+    #[test]
+    fn retiring_leaves_a_never_override_and_a_new_file_alone() {
+        let mut p = ProjectPolicy::new();
+        p.set_contribution_override(ProjectMode::NotifyOnly, t("2026-10-29T14:00:00Z"), None)
+            .unwrap();
+        p.retire_ask_override(t("2026-10-30T00:00:00Z"));
+        assert!(
+            p.contribution_override.is_some(),
+            "a new file is never migrated"
+        );
+
+        let mut p = ProjectPolicy::new();
+        p.ask_override_retired = false;
+        p.set_contribution_override(ProjectMode::Ignore, t("2026-10-29T14:00:00Z"), None)
+            .unwrap();
+        p.retire_ask_override(t("2026-10-30T00:00:00Z"));
+        assert_eq!(
+            p.contribution_override.as_ref().map(|o| o.mode),
+            Some(ProjectMode::Ignore)
+        );
+        assert!(p.ask_override_retired);
+    }
+
+    /// An older file has no marker and is migrated on load.
+    #[test]
+    fn an_older_file_is_retired_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        let mut p = ProjectPolicy::new();
+        p.set_contribution_override(ProjectMode::NotifyOnly, t("2026-10-29T14:00:00Z"), None)
+            .unwrap();
+        let mut body = serde_json::to_value(&p).unwrap();
+        body.as_object_mut().unwrap().remove("ask_override_retired");
+        store
+            .write_daemon_file(DAEMON_PROJECTS_FILE, &serde_json::to_vec(&body).unwrap())
+            .unwrap();
+        let loaded = ProjectPolicy::load(&store).unwrap();
+        assert!(loaded.contribution_override.is_none());
+        assert!(loaded.ask_override_retired);
     }
 
     /// Owner decision 2026-10-29: Ask is always offered on a folder, and a

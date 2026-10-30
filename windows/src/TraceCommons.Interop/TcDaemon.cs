@@ -434,7 +434,10 @@ public sealed class TcDaemon : IDisposable
     ///
     /// MUST be called from a plain thread that is not inside a tc_subscribe
     /// callback. Blocks the calling thread for up to
-    /// <paramref name="drainTimeout"/> plus <paramref name="unsubscribeTimeout"/>.
+    /// <paramref name="drainTimeout"/> plus <paramref name="unsubscribeTimeout"/>,
+    /// plus at most 3 seconds inside tc_daemon_stop (2) and tc_handle_free (1),
+    /// which stop waiting on a daemon pass that is still running (TEARDOWN
+    /// BOUNDS in the header).
     /// That is the point: teardown that does not block is teardown that does
     /// not know whether it is safe to free.
     ///
