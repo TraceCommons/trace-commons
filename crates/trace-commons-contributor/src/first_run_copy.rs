@@ -414,6 +414,15 @@ pub struct UsesCopy {
     pub reward_opportunities: &'static str,
     pub automatic_scope: &'static str,
     pub ask_each_time: &'static str,
+    /// Settings > Projects' sharing choice, the setup choice made
+    /// changeable (owner, 2026-10-30; #1753 A2): the line under it, and the
+    /// question Automatic asks when folders are set to Ask, with `{count}`
+    /// those folders. DRAFT, NEEDS APPROVAL.
+    pub settings_sharing_note: &'static str,
+    pub keep_asks_title: &'static str,
+    pub keep_asks_body: &'static str,
+    pub keep_asks_keep: &'static str,
+    pub keep_asks_all: &'static str,
     /// `{count}` optional uses, every one on.
     pub optional_all_on: &'static str,
     pub optional_all_off: &'static str,
@@ -696,6 +705,12 @@ pub fn first_run_copy() -> FirstRunCopy {
             reward_opportunities: crate::consent_copy::DATA_USE_REWARD_OPPORTUNITIES,
             automatic_scope: "Upload older traces first, then new traces, from all watched folders. Traces must be unchanged for 24 hours. Ignore a folder to exclude it.",
             ask_each_time: "Ask each time",
+            // DRAFT, NEEDS APPROVAL (2026-10-30).
+            settings_sharing_note: "A folder set to Ask keeps asking, even when Automatic is on. A folder set to Never is never shared.",
+            keep_asks_title: "Keep folders set to Ask?",
+            keep_asks_body: "Folders set to Ask: {count}. Keep them asking, or make every folder Automatic.",
+            keep_asks_keep: "Keep them on Ask",
+            keep_asks_all: "Make all Automatic",
             optional_all_on: "{count} optional uses, all on",
             optional_all_off: "{count} optional uses, all off",
             optional_some_on: "{count} optional uses · {selected} on",

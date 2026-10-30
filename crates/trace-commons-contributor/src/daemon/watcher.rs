@@ -5325,6 +5325,85 @@ mod tests {
         assert_eq!(*f.shared.policy.lock().unwrap(), before);
     }
 
+    /// Settings' sharing choice (owner, 2026-10-30): Automatic keeps the
+    /// folders marked Ask with `keep_folder_asks: true`, makes every folder
+    /// Automatic with `false`, and "Ask each time" puts the folders the
+    /// grant armed back to Ask with `return_folders_to_ask`.
+    #[tokio::test]
+    async fn the_sharing_choice_keeps_or_clears_folder_asks_and_returns_armed_folders() {
+        use crate::daemon::policy::ProjectMode;
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let call = |method: &str, params: serde_json::Value| {
+            super::super::ipc::handle_request(
+                &f.shared,
+                &super::super::ipc::Request {
+                    id: 1,
+                    method: method.to_string(),
+                    params,
+                },
+            )
+        };
+        let grant = |keep: serde_json::Value| {
+            call(
+                "grant_automatic_including_existing",
+                serde_json::json!({"confirmed": true, "witness_signing_address": null,
+                    "include_existing": true, "keep_folder_asks": keep}),
+            )
+        };
+        let marked = project_key_for(Some(&abs("Users/testuser/code/marked")));
+        f.shared
+            .policy
+            .lock()
+            .unwrap()
+            .set_mode(&marked, ProjectMode::NotifyOnly, Utc::now())
+            .unwrap();
+
+        assert!(grant(serde_json::json!(true)).error.is_none());
+        assert!(f.shared.policy.lock().unwrap().asks_despite_grant(&marked));
+
+        assert!(grant(serde_json::json!(false)).error.is_none());
+        {
+            let policy = f.shared.policy.lock().unwrap();
+            assert!(
+                !policy.projects.contains_key(&marked),
+                "the mark is cleared"
+            );
+            assert!(!policy.asks_despite_grant(&marked));
+        }
+
+        let armed = project_key_for(Some(&abs("Users/testuser/code/armed")));
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            policy
+                .set_mode(&armed, ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy.armed_by_grant.insert(armed.clone());
+        }
+        let withdrawn = call(
+            "withdraw_automatic_grant",
+            serde_json::json!({"return_folders_to_ask": true}),
+        );
+        assert_eq!(withdrawn.result.unwrap()["withdrawn"], true);
+        let policy = f.shared.policy.lock().unwrap();
+        assert!(policy.automatic_grant.is_none());
+        assert_eq!(policy.resolve(&armed), ProjectMode::NotifyOnly);
+        drop(policy);
+
+        assert!(grant(serde_json::json!("yes")).error.is_some());
+        assert!(
+            call(
+                "withdraw_automatic_grant",
+                serde_json::json!({"return_folders_to_ask": 1})
+            )
+            .error
+            .is_some()
+        );
+    }
+
     /// K3: under the Flow 1 grant a project first seen after it is armed,
     /// with an explicit policy entry, the terms it is granted under, and an
     /// audit row. A project already on disk at the grant keeps asking, and

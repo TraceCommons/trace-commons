@@ -23,6 +23,24 @@ final class InsightsBreakdownInspectorTests: XCTestCase {
         XCTAssertFalse(MonitorWindowView.inspectorAvailable(.inference, homePage: .overview, insightsDetail: true))
     }
 
+    /// The panel is offered only while a day is picked (owner, 2026-10-29:
+    /// the panel with nothing picked is unnecessary).
+    func testThePanelIsOfferedOnlyWhileADayIsPicked() throws {
+        let inspector = InsightsBreakdownInspector()
+        XCTAssertFalse(inspector.offered)
+        inspector.show { self.detail(inspector) }
+        XCTAssertFalse(inspector.offered, "Breakdown with nothing picked offers no panel")
+        inspector.pick(day: "2026-10-20")
+        XCTAssertTrue(inspector.offered)
+        inspector.pick(day: nil)
+        XCTAssertFalse(inspector.offered, "Show week closes the panel")
+        inspector.pick(day: "2026-10-21")
+        inspector.clear()
+        XCTAssertFalse(inspector.offered, "another tab offers no Breakdown panel")
+        let window = try InsightsGlassConventionsTests.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("insightsDetail: insightsInspector.offered)"))
+    }
+
     /// Nothing picked is the empty state; a day shows only when it is in
     /// the week on screen and has sessions.
     func testWhatTheInspectorShows() {
