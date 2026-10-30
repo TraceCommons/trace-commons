@@ -50,8 +50,9 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // The managed-session terminal: the picker reads it from the
             // managed snapshot (`capabilities.terminal_current`), with the
             // installed choices beside it, and writes it with
-            // `set_managed_terminal`.
-            "managed_terminal",
+            // `set_managed_terminal`. Whether it was chosen is read the same
+            // way (`capabilities.terminal_chosen`).
+            "managed_terminal", "managed_terminal_chosen",
         ]
         // Staging builds only: where the signed NEAR AI pin set stands, and
         // the last attestation outcome under it (owner decision S16):

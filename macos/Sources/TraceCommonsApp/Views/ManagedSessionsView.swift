@@ -15,6 +15,8 @@ struct ManagedSessionsSection: View {
     @EnvironmentObject private var model: AppModel
     /// The tool whose launch dialog is open: its folder, then Open.
     @State private var launching: ManagedFolderChoice?
+    /// The terminal picked in the launch dialog while it asks for one.
+    @State private var launchTerminal: String?
     /// The session whose stop is being confirmed.
     @State private var stopping: ManagedSession?
     /// The session whose row menu is open.
@@ -45,7 +47,8 @@ struct ManagedSessionsSection: View {
                 onOpenWithSettings: { path, settings in
                     launching = nil
                     launch(choice.tool, in: path, settings: settings)
-                }
+                },
+                terminal: $launchTerminal
             ).environmentObject(model)
         }
         .glassModal(item: $stopping) { session in
@@ -162,6 +165,7 @@ struct ManagedSessionsSection: View {
     /// A tool's launch dialog: an optional folder, then Open.
     private func start(_ tool: String) {
         guard !model.managedBusy else { return }
+        launchTerminal = nil
         launching = ManagedFolderChoice(tool: tool)
     }
 
@@ -172,7 +176,10 @@ struct ManagedSessionsSection: View {
               var params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }
         if let settings { params = settings.applying(to: params) }
-        model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
+        // A dialog that asked for a terminal saves it first, so this launch
+        // opens there and later ones do not ask again.
+        let terminal = model.managedSnapshot?.asksForTerminal == true ? launchTerminal : nil
+        model.managedAction("managed_launch_prepare", params: params, openTerminal: true, terminal: terminal)
     }
 
     // MARK: Failures and connecting
@@ -448,6 +455,18 @@ struct ManagedLaunchSheet: View {
     @State private var catalogue: ManagedModelCatalogue?
     @State private var catalogueTool: String?
     @State private var project: URL?
+    /// The terminal picked here while the sheet asks for one.
+    @State private var launchTerminal: String?
+    /// Where the session opens: the terminal picked here while the sheet
+    /// asks for one, else the daemon's.
+    private var destination: String {
+        let snapshot = model.managedSnapshot
+        if snapshot?.asksForTerminal == true,
+           let picked = snapshot?.terminalChoices.first(where: { $0.id == launchTerminal }) {
+            return picked.name
+        }
+        return snapshot?.capabilities.terminalDestination ?? model.managedText("terminal")
+    }
     private var selectedAccount: ManagedAccount? { model.managedSnapshot?.accounts.first { $0.id == accountID } }
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
     private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
@@ -529,7 +548,11 @@ struct ManagedLaunchSheet: View {
                         if let path = FolderPanel.choose() { project = URL(fileURLWithPath: path, isDirectory: true) }
                     }
                 }
-                ManagedNote(text: model.managedText("launch_scope").replacingOccurrences(of: "{destination}", with: model.managedSnapshot?.capabilities.terminalDestination ?? model.managedText("terminal")))
+                // The first launch asks which terminal to open in.
+                if let snapshot = model.managedSnapshot, snapshot.asksForTerminal {
+                    ManagedLaunchTerminalRow(snapshot: snapshot, selection: $launchTerminal)
+                }
+                ManagedNote(text: model.managedText("launch_scope").replacingOccurrences(of: "{destination}", with: destination))
             }
         }
         .onAppear { loadModels(); loadFolderSettings() }
@@ -544,7 +567,8 @@ struct ManagedLaunchSheet: View {
             generation: snapshot.generations[account.tool] ?? 0,
             model: folderDraft.model, collectTraces: folderDraft.collectTraces)
         if supportsFolderSettings { params = folderDraft.applying(to: params) }
-        model.managedAction("managed_launch_prepare", params: params, openTerminal: true)
+        let terminal = snapshot.asksForTerminal ? launchTerminal : nil
+        model.managedAction("managed_launch_prepare", params: params, openTerminal: true, terminal: terminal)
         onClose()
     }
 
