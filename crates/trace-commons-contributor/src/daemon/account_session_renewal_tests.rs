@@ -925,7 +925,10 @@ async fn a_slow_renewal_does_not_hold_the_home_reads() {
     let fx = Fixture::new(Session::Expired).await;
     fx.as_running_daemon();
     fx.enable_missions();
-    *fx.stub.state.start_delay_ms.lock().unwrap() = 6_000;
+    // The renewal stalls far longer than the bound below, so the bound can
+    // leave room for a loaded CI runner (2.96s seen against the old 2.5s
+    // bound) and still fail any read that waited for the renewal.
+    *fx.stub.state.start_delay_ms.lock().unwrap() = 20_000;
 
     let started = std::time::Instant::now();
     let (payout, credit, missions) = tokio::join!(
@@ -936,7 +939,7 @@ async fn a_slow_renewal_does_not_hold_the_home_reads() {
     let waited = started.elapsed();
 
     assert!(
-        waited < READ_WAIT + std::time::Duration::from_millis(1_500),
+        waited < READ_WAIT + std::time::Duration::from_secs(5),
         "the Home reads took {waited:?} behind a renewal"
     );
     assert_eq!(refusal(&payout), Some("account-session-required"));
