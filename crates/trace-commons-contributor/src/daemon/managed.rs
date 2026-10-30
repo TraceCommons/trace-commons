@@ -140,6 +140,7 @@ impl ManagedService {
                         cwd: view.cwd.clone(),
                         expected_generation: Generation(0),
                         save_default: false,
+                        keep_saved_model: false,
                     },
                     sign_in,
                 )
@@ -237,7 +238,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
                 )
             }
             "managed_tool_setup" => {
@@ -451,6 +452,7 @@ impl ManagedService {
                     cwd: self.profiles.profile_root(account.id)?,
                     expected_generation: self.accounts.generation(account.tool),
                     save_default: false,
+                    keep_saved_model: false,
                 };
                 Ok(json!(self.sessions.prepare(request, &account)?))
             }
@@ -578,8 +580,27 @@ fn remember_prepared(
     {
         let id: Uuid = serde_json::from_value(value["session_id"].clone())
             .map_err(|_| ManagedError::InvalidRequest)?;
-        let prefs = with_service(shared, |service| Ok(service.sessions.folder_settings(id)))?;
-        if let Some(prefs) = prefs {
+        let (prefs, keep) = with_service(shared, |service| {
+            Ok((
+                service.sessions.folder_settings(id),
+                service.sessions.keeps_saved_model(id),
+            ))
+        })?;
+        if let Some(mut prefs) = prefs {
+            // A launch that fell back to the default because NEAR AI no
+            // longer lists the saved model remembers its other choices but
+            // not the fallback: the folder keeps the model it had.
+            // When the saved model cannot be read, nothing is written: a
+            // default must never replace it (#1754 review).
+            if keep {
+                match saved_folder_model(shared, &prefs) {
+                    Ok(model) => prefs.model = model,
+                    Err(()) => {
+                        with_service(shared, |service| service.sessions.rollback_prepared(id))?;
+                        return Err(Refusal::Unavailable("managed-folder-settings-save-failed"));
+                    }
+                }
+            }
             let write = Request {
                 id: request.id,
                 method: "set_settings".into(),
@@ -593,6 +614,22 @@ fn remember_prepared(
         }
     }
     Ok(value)
+}
+
+/// The model the folder's saved settings name for `prefs`' tool: `None`
+/// when they name none, `Err` when they could not be read (the folder is
+/// gone, or the settings lock is poisoned).
+fn saved_folder_model(
+    shared: &DaemonShared,
+    prefs: &crate::managed::folder::FolderSettings,
+) -> Result<Option<String>, ()> {
+    let cwd = crate::managed::folder::canonical(&prefs.cwd).map_err(|_| ())?;
+    let settings = shared.settings.lock().map_err(|_| ())?;
+    Ok(settings
+        .managed_folder_settings
+        .iter()
+        .find(|entry| entry.tool == prefs.tool && entry.cwd == cwd)
+        .and_then(|entry| entry.model.clone()))
 }
 
 fn refusal_label(refusal: Refusal) -> &'static str {
@@ -687,7 +724,10 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
         return redeem_async(shared, request).await;
     }
     if request.method == "managed_model_catalogue" {
-        return model_catalogue(request).await;
+        return model_catalogue(shared, request).await;
+    }
+    if request.method == "managed_model_favorite_set" {
+        return favorite_set(shared, request).await;
     }
     if launches_on_sign_in(shared, request) {
         let report = crate::daemon::nearai_credential::balance::read(shared, false).await;
@@ -707,6 +747,26 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
         route.shutdown().await;
     }
     respond(request, remember_prepared(shared, request, result))
+}
+
+/// NEAR AI's chat models, read without a key. `None` when NEAR AI cannot
+/// be read.
+async fn fetch_chat_models() -> Option<Vec<models::ChatModel>> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    models::fetch(&client, near_ai_base_url()).await
+}
+
+/// The stored favorite model ids.
+fn favorite_models(shared: &DaemonShared) -> Vec<String> {
+    shared
+        .settings
+        .lock()
+        .map(|s| s.managed_favorite_models.clone())
+        .unwrap_or_default()
 }
 
 /// The least a NEAR AI balance must hold for a launch on the sign-in, in
@@ -769,8 +829,13 @@ fn funds_for_first_calls(
 
 /// The NEAR AI chat models a launch can name, and the one `tool` gets
 /// when it names none (`managed::models`). The catalogue is public: no
-/// key is read or sent. Answers `{"models":[{"id","name"?}],"default"}`.
-async fn model_catalogue(request: &Request) -> Response {
+/// key is read or sent. Answers `{"models":[{"id","name"?}],"default",
+/// "favorites","unavailable_favorites"}`: `favorites` is the starred models
+/// among `models`, in NEAR AI's order; `unavailable_favorites` is the
+/// starred ids NEAR AI no longer lists for any tool. Neither prunes the
+/// stored list, so a model NEAR AI offers again is a favorite again. When
+/// NEAR AI cannot be read there is no answer, so nothing is marked.
+async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Params {
@@ -780,24 +845,81 @@ async fn model_catalogue(request: &Request) -> Response {
         Ok(p) => p,
         Err(error) => return respond(request, Err(error.into())),
     };
-    let Ok(client) = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    else {
-        return respond(request, Err(ManagedError::ModelUnavailable.into()));
-    };
-    let offered = models::fetch(&client, near_ai_base_url())
-        .await
-        .map(|models| models::offered(p.tool, models));
-    let result = match offered {
-        Some(models) if !models.is_empty() => {
+    let listed = fetch_chat_models().await;
+    let offered = listed.clone().map(|models| models::offered(p.tool, models));
+    let result = match (listed, offered) {
+        (Some(listed), Some(models)) if !models.is_empty() => {
             let default = models::default_for(p.tool, &models).map(|m| m.id.clone());
-            Ok(json!({"models":models,"default":default}))
+            let starred = favorite_models(shared);
+            let favorites: Vec<&str> = models
+                .iter()
+                .map(|m| m.id.as_str())
+                .filter(|id| starred.iter().any(|s| s == id))
+                .collect();
+            let unavailable: Vec<&str> = starred
+                .iter()
+                .map(String::as_str)
+                .filter(|id| !listed.iter().any(|m| m.id == *id))
+                .collect();
+            Ok(json!({
+                "models":models,"default":default,"favorites":favorites,
+                "unavailable_favorites":unavailable,
+            }))
         }
         _ => Err(ManagedError::ModelUnavailable.into()),
     };
     respond(request, result)
+}
+
+/// `managed_model_favorite_set {model, favorite}`: star or unstar one model
+/// for the Launch sheet's picker. Starring reads NEAR AI's chat models and
+/// refuses one it does not list, so only an offered model is ever added;
+/// unstarring reads nothing and takes any stored string, so a malformed id
+/// from an older or hand-edited file can still be removed. Writes through
+/// `set_settings`, whose checks (id shape for a star, list bound) apply
+/// too. Answers `{"favorites"}`, the stored list, and publishes
+/// `status_changed` when that list moved, so every window re-reads its
+/// settings. No lock is held across the read.
+async fn favorite_set(shared: &DaemonShared, request: &Request) -> Response {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        model: String,
+        favorite: bool,
+    }
+    let p: Params = match parse(request) {
+        Ok(p) => p,
+        Err(error) => return respond(request, Err(error.into())),
+    };
+    if p.favorite && !crate::daemon::settings::valid_favorite_model_id(&p.model) {
+        return respond(request, Err(ManagedError::InvalidRequest.into()));
+    }
+    if p.favorite {
+        match fetch_chat_models().await {
+            Some(models) if models.iter().any(|m| m.id == p.model) => {}
+            _ => return respond(request, Err(ManagedError::ModelUnavailable.into())),
+        }
+    }
+    let before = favorite_models(shared);
+    let write = Request {
+        id: request.id,
+        method: "set_settings".into(),
+        params: json!({"managed_favorite_models":{ p.model: p.favorite }}),
+    };
+    let response = super::ipc::handle_set_settings(shared, &write);
+    if let Some(error) = &response.error {
+        // A full list is the only refusal a well-formed id can meet here;
+        // a failed write keeps its own answer.
+        if error.message == crate::daemon::settings::ERR_SETTINGS_INVALID_VALUE {
+            return respond(request, Err(ManagedError::InvalidRequest.into()));
+        }
+        return response;
+    }
+    let favorites = favorite_models(shared);
+    if favorites != before {
+        shared.publish(super::ipc::EVENT_STATUS_CHANGED, json!({}));
+    }
+    respond(request, Ok(json!({ "favorites": favorites })))
 }
 
 /// The daemon reads the sign-in here, at launch time, and gives it only to
@@ -1031,6 +1153,49 @@ mod tests {
         )
     }
 
+    /// #1754 review: a shell sends `keep_saved_model` only to a daemon that
+    /// says it reads it; a daemon that predates the field refuses it.
+    #[test]
+    fn the_snapshot_says_it_reads_keep_saved_model() {
+        let (_dir, _store, mut service) = service();
+        let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        assert_eq!(snapshot["capabilities"]["keep_saved_model"], true);
+    }
+
+    /// #1754 review: "no saved model" and "could not tell" are different
+    /// answers, so a failed lookup never writes `model: None` over the
+    /// folder's saved model.
+    #[test]
+    fn saved_folder_model_tells_none_from_could_not_tell() {
+        let (home, store, _service) = service();
+        let shared = DaemonShared::load(store).unwrap();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let prefs = |cwd: &std::path::Path| crate::managed::folder::FolderSettings {
+            tool: ToolId::Codex,
+            cwd: cwd.to_path_buf(),
+            model: None,
+            collect_traces: false,
+            cli_options: String::new(),
+        };
+        assert_eq!(saved_folder_model(&shared, &prefs(&folder)), Ok(None));
+        shared
+            .settings
+            .lock()
+            .unwrap()
+            .managed_folder_settings
+            .push(crate::managed::folder::FolderSettings {
+                model: Some("provider/saved".into()),
+                ..prefs(&crate::managed::folder::canonical(&folder).unwrap())
+            });
+        assert_eq!(
+            saved_folder_model(&shared, &prefs(&folder)),
+            Ok(Some("provider/saved".into()))
+        );
+        // The folder went away between prepare and this write.
+        assert!(saved_folder_model(&shared, &prefs(&home.path().join("gone"))).is_err());
+    }
+
     #[test]
     fn tool_setup_needs_no_sign_in_account_profile_or_session() {
         let (_dir, _store, mut service) = service();
@@ -1089,6 +1254,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
             model: None,
             collect_traces: false,
         })
@@ -1167,6 +1333,7 @@ mod tests {
                     cwd: home.path().to_path_buf(),
                     expected_generation: Generation(0),
                     save_default: false,
+                    keep_saved_model: false,
                     model: None,
                     collect_traces: false,
                 }),

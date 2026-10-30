@@ -163,6 +163,20 @@ pub(crate) fn schema() -> Value {
         terminal["enum"] = json!(terminals);
     }
     properties.insert("managed_terminal".into(), terminal);
+    properties.insert("managed_favorite_models".into(), json!({
+        "type":"object",
+        // No `propertyNames`: it would bind the `false` keys too, which the
+        // daemon takes whatever their shape, and no JSON Schema pattern
+        // matches Rust's whitespace and control classes exactly. The
+        // description states the daemon's rule for a star.
+        "additionalProperties":{"type":"boolean"},
+        "examples":[{}],
+        "description":format!(
+            "Partial update of the models listed first in the managed-session model picker: true stars a NEAR AI model id, false unstars it, omitted ids remain. At most {} favorites. A starred id is at most {} UTF-8 bytes with no whitespace or control characters, which the daemon checks; false removes any stored id, whatever its shape. Whether NEAR AI offers an id is not checked here.",
+            settings::MAX_FAVORITE_MODELS,
+            settings::MAX_FAVORITE_MODEL_ID_BYTES
+        )
+    }));
     properties.insert("managed_folder_settings".into(), json!({
         "type":"array", "items":{
             "type":"object", "required":["tool","cwd"], "additionalProperties":false,
@@ -214,7 +228,7 @@ pub(crate) fn schema() -> Value {
             "type":"object", "minProperties":1,"additionalProperties":false,"properties":properties
         },
         "semantics":{
-            "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify, managed_cli_options and managed_folder_settings, which merge supplied entries.",
+            "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify, managed_favorite_models, managed_cli_options and managed_folder_settings, which merge supplied entries.",
             "preview":"Validation and proposed canonical changes only; does not persist, start services, submit traces, or reserve a transaction. Daily-cap changes include uses_server_allowance before/after metadata when choosing a local cap or resetting to follow server allowances, even if the saved number is unchanged.",
             "apply":"Revalidates against current settings. Runtime result fields are separate from the saved preference.",
             "contextual_validation":"Filesystem and platform constraints are checked by the daemon parser; JSON Schema alone is not sufficient validation.",
@@ -329,6 +343,63 @@ mod tests {
                 &json!({"managed_cli_options":{"future":"--flag"}})
             )
             .is_err()
+        );
+    }
+
+    /// #1754 review: the favorites schema states the daemon's bounds from
+    /// its constants and says the byte bound is the daemon's. It puts no
+    /// shape on the keys: `propertyNames` would also bind the `false` keys
+    /// the daemon accepts whatever their shape, and no JSON Schema pattern
+    /// matches Rust's whitespace and control-character classes exactly.
+    #[test]
+    fn favorite_models_schema_states_the_daemons_bounds() {
+        let entry = &schema()["patch_schema"]["properties"]["managed_favorite_models"];
+        assert!(entry.get("propertyNames").is_none(), "{entry}");
+        let description = entry["description"].as_str().unwrap();
+        assert!(
+            description.contains("false removes any stored id, whatever its shape"),
+            "{description}"
+        );
+        // What the description promises, the daemon does.
+        let mut stored = DaemonSettings {
+            managed_favorite_models: vec!["bad id".into(), String::new()],
+            ..Default::default()
+        };
+        settings::apply_settings_object(
+            &mut stored,
+            &json!({"managed_favorite_models":{"bad id":false,"":false}}),
+        )
+        .unwrap();
+        assert!(stored.managed_favorite_models.is_empty());
+        for refused in ["bad id", "", "c1\u{85}id"] {
+            assert!(
+                settings::apply_settings_object(
+                    &mut DaemonSettings::default(),
+                    &json!({"managed_favorite_models":{ refused: true }}),
+                )
+                .is_err(),
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn favorite_models_schema_states_the_daemons_numeric_bounds() {
+        let entry = &schema()["patch_schema"]["properties"]["managed_favorite_models"];
+        let description = entry["description"].as_str().unwrap();
+        assert!(
+            description.contains(&format!(
+                "At most {} favorites",
+                settings::MAX_FAVORITE_MODELS
+            )),
+            "{description}"
+        );
+        assert!(
+            description.contains(&format!(
+                "{} UTF-8 bytes",
+                settings::MAX_FAVORITE_MODEL_ID_BYTES
+            )),
+            "{description}"
         );
     }
 
