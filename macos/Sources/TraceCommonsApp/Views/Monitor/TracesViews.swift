@@ -1121,6 +1121,12 @@ struct TracesFolderRow: View, Equatable {
                 Toggle(automaticLabel, isOn: Binding(get: { automatic }, set: { onAutomatic($0) }))
                     .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
                     .help(automaticLabel)
+            } else {
+                // A row with no switch (Traces with no project) keeps its
+                // place, so every Submit lines up.
+                Color.clear
+                    .frame(width: GlassTokens.Size.watchSwitchWidth, height: 1)
+                    .accessibilityHidden(true)
             }
         })
     }
