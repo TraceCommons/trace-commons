@@ -220,6 +220,16 @@ final class InsightsSessionRouteTests: XCTestCase {
                       "the per-call note goes with the lines")
     }
 
+    /// A row's state and reasons are one line, the full text on hover and
+    /// read whole by VoiceOver (owner, 2026-10-29: the day's rows felt
+    /// crowded).
+    func testARowsReasonsAreOneLineWithTheFullTextOnHover() throws {
+        let glass = try InsightsGlassConventionsTests.text("Views/InsightsGlass.swift")
+        XCTAssertTrue(glass.contains(
+            "Text(coverage).insightsCaption()\n                    .lineLimit(1).truncationMode(.tail)\n                    .help(coverage)"),
+            "the reasons line wraps again")
+    }
+
     func testTheSplitLineIsInProxyTokensWithTheDashForUnknown() throws {
         let copy = try Self.coreCopy()
         let rows = try XCTUnwrap(Self.decode(Self.recorded()).rollup?.sessions)
