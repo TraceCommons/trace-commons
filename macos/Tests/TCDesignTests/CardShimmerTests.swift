@@ -92,6 +92,7 @@ final class CardShimmerTests: XCTestCase {
     /// card's face and leaves only a faint blurred glow on its edge, with no
     /// crisp rim line; the tab shown or the window back in focus starts the
     /// passes over; none under Reduce Motion.
+    @MainActor
     func test_theLightAddsWithNoCrispRim() throws {
         let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "CardShimmer.swift" }?.1)
         XCTAssertTrue(source.contains(".blendMode(dark ? .plusLighter : .normal)"))
