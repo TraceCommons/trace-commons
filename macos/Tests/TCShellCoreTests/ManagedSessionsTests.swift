@@ -288,7 +288,70 @@ final class ManagedSessionsTests: XCTestCase {
 
     private static let modelCopy = [
         "model_default": "Default: {model}", "model_default_unknown": "Default",
+        "model_group_incognito": "Incognito models", "model_group_near_ai": "NEAR AI private models",
+        "model_group_external": "External private models",
     ]
+
+    /// Owner, 2026-10-30: the picker groups models by NEAR AI's privacy
+    /// tier, Incognito first, then NEAR AI's TEEs, then a third party's,
+    /// each in NEAR AI's order. The default heads no group; a model with
+    /// no tier (an older daemon) comes last, under no heading.
+    func testTheModelPickerGroupsModelsByPrivacyTier() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
+        {"models":[
+          {"id":"z-ai/glm-5.3","tier":"external"},
+          {"id":"anthropic/claude-sonnet-5-5","tier":"incognito"},
+          {"id":"Qwen/Qwen3.8-27B","tier":"near_ai"},
+          {"id":"x/untiered"},
+          {"id":"openai/gpt-6-sol","tier":"incognito"},
+          {"id":"x/future","tier":"some_future_tier"}
+        ],"default":"anthropic/claude-sonnet-5-5"}
+        """#.utf8))
+        let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(options.map(\.value), [
+            ManagedSurface.defaultModel,
+            "anthropic/claude-sonnet-5-5", "openai/gpt-6-sol",
+            "Qwen/Qwen3.8-27B",
+            "z-ai/glm-5.3",
+            "x/untiered", "x/future",
+        ])
+        XCTAssertEqual(options.map(\.section), [
+            nil,
+            "Incognito models", "Incognito models",
+            "NEAR AI private models",
+            "External private models",
+            nil, nil,
+        ])
+        // Favorites come first, in NEAR AI's order (as the daemon answers
+        // them), under no heading, and leave their groups.
+        let starred = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
+        {"models":[
+          {"id":"z-ai/glm-5.3","tier":"external"},
+          {"id":"anthropic/claude-sonnet-5-5","tier":"incognito"},
+          {"id":"Qwen/Qwen3.8-27B","tier":"near_ai"},
+          {"id":"x/untiered"},
+          {"id":"openai/gpt-6-sol","tier":"incognito"},
+          {"id":"x/future","tier":"some_future_tier"}
+        ],"default":"anthropic/claude-sonnet-5-5","favorites":["z-ai/glm-5.3","openai/gpt-6-sol"]}
+        """#.utf8))
+        let favored = ManagedSurface.modelOptions(starred) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(favored.map(\.value), [
+            ManagedSurface.defaultModel,
+            "z-ai/glm-5.3", "openai/gpt-6-sol",
+            "anthropic/claude-sonnet-5-5",
+            "Qwen/Qwen3.8-27B",
+            "x/untiered", "x/future",
+        ])
+        XCTAssertEqual(favored.map(\.section), [
+            nil, nil, nil,
+            "Incognito models",
+            "NEAR AI private models",
+            nil, nil,
+        ])
+        // No tiers at all: no headings.
+        let flat = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"x/y"}],"default":null}"#.utf8))
+        XCTAssertEqual(ManagedSurface.modelOptions(flat) { Self.modelCopy[$0] ?? "" }.map(\.section), [nil, nil])
+    }
 
     /// The picker's first option names no model and says which one the
     /// session will get; every NEAR AI chat model follows, in its order.

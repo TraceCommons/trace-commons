@@ -37,6 +37,41 @@ use serde::{Deserialize, Serialize};
 /// lowercase substrings.
 pub const EXCLUDED: &[&str] = &["rerank", "privacy-filter", "embedding", "whisper", "flux"];
 
+/// NEAR AI's privacy tier for a model, which a picker groups by. NEAR AI
+/// labels each catalogue entry with one of three, through `owned_by`
+/// (docs.near.ai/cloud/models, read 2026-10-30):
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTier {
+    /// "Incognito": a vendor's model (OpenAI, Anthropic, Google, ...) on
+    /// the vendor's servers, sent through NEAR AI's gateway under NEAR AI's
+    /// account. `owned_by` is the vendor's name; any name NEAR AI does not
+    /// otherwise mark lands here, since it claims the least.
+    Incognito,
+    /// "Confidential TEE": NEAR AI's own GPUs, in a TEE. `owned_by` is
+    /// `nearai`.
+    NearAi,
+    /// "3P Confidential TEE": a third party's TEE. `owned_by` is
+    /// `Attested 3P`.
+    External,
+}
+
+impl ModelTier {
+    /// The tier `owned_by` names; none without one.
+    fn from_owner(owned_by: Option<&str>) -> Option<Self> {
+        let owner = owned_by?.trim();
+        if owner.is_empty() {
+            None
+        } else if owner == "nearai" {
+            Some(Self::NearAi)
+        } else if owner.eq_ignore_ascii_case("attested 3p") {
+            Some(Self::External)
+        } else {
+            Some(Self::Incognito)
+        }
+    }
+}
+
 /// A chat model from the NEAR AI catalogue, as a picker shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatModel {
@@ -44,6 +79,10 @@ pub struct ChatModel {
     /// NEAR AI's display name, when it gives one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// NEAR AI's privacy tier; none when the catalogue gives no `owned_by`
+    /// (OpenCode's own list, a fixture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ModelTier>,
 }
 
 /// The chat models in a NEAR AI `/v1/models` answer, in its order. An id
@@ -66,6 +105,7 @@ pub fn chat_models(catalogue: &serde_json::Value) -> Vec<ChatModel> {
                 .as_str()
                 .filter(|name| !name.trim().is_empty())
                 .map(str::to_owned),
+            tier: ModelTier::from_owner(entry["owned_by"].as_str()),
         });
     }
     kept
@@ -340,6 +380,7 @@ mod tests {
             .map(|id| ChatModel {
                 id: (*id).into(),
                 name: None,
+                tier: None,
             })
             .collect()
     }
@@ -369,6 +410,49 @@ mod tests {
             ]
         );
         assert_eq!(kept[0].name.as_deref(), Some("anthropic/claude-fable-5"));
+    }
+
+    /// NEAR AI's privacy tier comes from `owned_by`, as its catalogue
+    /// labels it (live 2026-10-30): `nearai` runs in NEAR AI's TEEs,
+    /// `Attested 3P` in a third party's, and a vendor's own name is a model
+    /// on that vendor's servers. No `owned_by` is no tier.
+    #[test]
+    fn each_model_carries_near_ai_privacy_tier() {
+        let kept = chat_models(&json!({"data": [
+            {"id": "anthropic/claude-sonnet-5-5", "owned_by": "anthropic"},
+            {"id": "Qwen/Qwen3.8-27B", "owned_by": "nearai"},
+            {"id": "z-ai/glm-5.3", "owned_by": "attested 3p"},
+            {"id": "moonshotai/kimi-k3", "owned_by": "Attested 3P"},
+            {"id": "x-ai/grok-4.7", "owned_by": "some-new-vendor"},
+            {"id": "no/owner"},
+            {"id": "blank/owner", "owned_by": " "},
+        ]}));
+        let tiers: Vec<_> = kept.iter().map(|m| (m.id.as_str(), m.tier)).collect();
+        assert_eq!(
+            tiers,
+            vec![
+                ("anthropic/claude-sonnet-5-5", Some(ModelTier::Incognito)),
+                ("Qwen/Qwen3.8-27B", Some(ModelTier::NearAi)),
+                ("z-ai/glm-5.3", Some(ModelTier::External)),
+                ("moonshotai/kimi-k3", Some(ModelTier::External)),
+                ("x-ai/grok-4.7", Some(ModelTier::Incognito)),
+                ("no/owner", None),
+                ("blank/owner", None),
+            ]
+        );
+        // On the wire: snake_case, and absent when unknown.
+        assert_eq!(
+            serde_json::to_value(&kept[..3]).unwrap(),
+            json!([
+                {"id": "anthropic/claude-sonnet-5-5", "tier": "incognito"},
+                {"id": "Qwen/Qwen3.8-27B", "tier": "near_ai"},
+                {"id": "z-ai/glm-5.3", "tier": "external"},
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(&kept[5]).unwrap(),
+            json!({"id": "no/owner"})
+        );
     }
 
     /// An entry without modality fields is kept unless its id names a
@@ -553,6 +637,7 @@ mod tests {
         kept.push(ChatModel {
             id: "anthropic/claude-opus-4-1".into(),
             name: Some("Claude Opus 4.1".into()),
+            tier: None,
         });
         kept[2].name = Some("Claude Opus 5.5".into());
         let vars = claude_env("anthropic/claude-sonnet-5-5", &kept);
@@ -609,10 +694,12 @@ mod tests {
             ChatModel {
                 id: "openai/gpt-6.1-sol".into(),
                 name: Some("GPT-6.1 Sol".into()),
+                tier: None,
             },
             ChatModel {
                 id: "anthropic/claude-sonnet-5".into(),
                 name: None,
+                tier: None,
             },
         ];
         let vars = claude_env("openai/gpt-6.1-sol", &kept);

@@ -198,7 +198,7 @@ struct ManagedFolderOptions: View {
 
     private var modelOptions: [GlassPickerOption<String>] {
         var values = ManagedSurface.modelOptions(catalogue, copy: model.managedText)
-            .map { GlassPickerOption($0.title, value: $0.value) }
+            .map { GlassPickerOption($0.title, value: $0.value, section: $0.section) }
         if let chosen = draft.model, !values.contains(where: { $0.value == chosen }) {
             values.append(GlassPickerOption(chosen, value: chosen))
         }
