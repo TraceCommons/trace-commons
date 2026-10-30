@@ -763,6 +763,13 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub managed_terminal: crate::managed::terminal::TerminalSetting,
 
+    /// Whether the person has chosen `managed_terminal` themselves. False
+    /// until a write names a terminal, which sets it; nothing clears it. A
+    /// shell asks for a terminal in the launch dialog while this is false
+    /// and more than one is installed. Not writable on its own.
+    #[serde(default)]
+    pub managed_terminal_chosen: bool,
+
     /// Per-agent argv text for new managed coding sessions. Omitted tools
     /// keep their existing values during partial configuration updates.
     #[serde(default)]
@@ -1419,6 +1426,7 @@ impl Default for DaemonSettings {
             notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
             managed_terminal: Default::default(),
+            managed_terminal_chosen: false,
             managed_cli_options: Default::default(),
             managed_folder_settings: Default::default(),
             notify: NotifyKinds::default(),
@@ -2150,13 +2158,15 @@ pub fn apply_settings_object(
             // The terminal app managed sessions open in. One of this
             // platform's fixed ids; anything else, `null` included, is refused,
             // never read as an app name or a command. Also reachable as
-            // `set_managed_terminal`, which writes through here.
+            // `set_managed_terminal`, which writes through here. A write is
+            // the person's choice, so it also marks the terminal chosen.
             "managed_terminal" => {
                 settings.managed_terminal = value
                     .as_str()
                     .and_then(crate::managed::terminal::TerminalApp::parse)
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?
                     .into();
+                settings.managed_terminal_chosen = true;
             }
             "managed_folder_settings" => {
                 crate::managed::folder::apply_patch(settings, value)?;
@@ -3401,12 +3411,21 @@ mod tests {
         use crate::managed::terminal::{TerminalApp, TerminalSetting};
         let mut s = DaemonSettings::default();
         assert_eq!(s.managed_terminal, TerminalSetting::default());
+        assert!(!s.managed_terminal_chosen);
+        for bad in [
+            serde_json::json!({"managed_terminal_chosen": true}),
+            serde_json::json!({"managed_terminal": "Ghostty"}),
+        ] {
+            assert!(apply_settings_object(&mut s, &bad).is_err(), "{bad}");
+            assert!(!s.managed_terminal_chosen, "{bad}");
+        }
         for app in TerminalApp::offered().iter().rev() {
             assert_eq!(
                 apply_settings_object(&mut s, &serde_json::json!({"managed_terminal": app.id()})),
                 Ok(true)
             );
             assert_eq!(s.managed_terminal, TerminalSetting::from(*app));
+            assert!(s.managed_terminal_chosen);
         }
         let mut bad = vec![
             serde_json::json!({"managed_terminal": "Ghostty"}),
@@ -3438,7 +3457,8 @@ mod tests {
             stored["managed_terminal"],
             TerminalSetting::default().app().unwrap().id()
         );
-        stored["managed_terminal"] = serde_json::json!("wezterm");
+        assert_eq!(stored["managed_terminal_chosen"], false);
+        stored["managed_terminal"] = serde_json::json!("hyper");
         store
             .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&stored).unwrap())
             .unwrap();
