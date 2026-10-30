@@ -529,9 +529,8 @@ mod tests {
         }
 
         // Nothing is listening here, so the daemon dials and gets nothing.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let addr = crate::config::tests_support::refusing_addr();
+        let port = addr.port();
 
         let refused = check("http://commons.example").await;
         let unanswered = check(&format!("https://127.0.0.1:{port}")).await;

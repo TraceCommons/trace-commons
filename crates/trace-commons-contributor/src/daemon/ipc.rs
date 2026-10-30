@@ -11017,11 +11017,9 @@ mod tests {
     /// on its own, exercised here through the daemon's own entry point.
     #[tokio::test]
     async fn a_refresh_failure_leaves_the_daemon_running_and_the_overlay_empty() {
-        // Bind to get a genuinely free loopback port, then drop the
-        // listener so nothing answers on it.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        // A loopback port nothing answers on.
+        let addr = crate::config::tests_support::refusing_addr();
+        let port = addr.port();
 
         let s = std::sync::Arc::new(shared());
         s.routing.write().unwrap().ledger = Some(Arc::new(
@@ -18538,14 +18536,10 @@ mod tests {
     #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_probe_against_a_dead_port_reports_unreachable_with_the_port() {
-        // Bind and drop, so the port is real and definitely closed. The
-        // token is readable, so nothing but the connection can explain the
-        // answer.
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback");
-        let port = listener.local_addr().expect("addr").port();
-        drop(listener);
+        // A real port, definitely closed. The token is readable, so
+        // nothing but the connection can explain the answer.
+        let addr = crate::config::tests_support::refusing_addr();
+        let port = addr.port();
 
         let dir = token_dir_holding("a-readable-token");
         let response = handle_probe_routing(&probe_request(port, Some(dir.path()))).await;
@@ -19275,11 +19269,8 @@ mod tests {
     #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_tool_list_against_a_dead_port_reports_unreachable() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback");
-        let port = listener.local_addr().expect("addr").port();
-        drop(listener);
+        let addr = crate::config::tests_support::refusing_addr();
+        let port = addr.port();
         let dir = token_dir_holding("a-readable-token");
 
         let response =
@@ -19753,9 +19744,8 @@ mod tests {
     #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn an_unreachable_proxy_stamps_no_refresh_time() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let addr = crate::config::tests_support::refusing_addr();
+        let port = addr.port();
 
         let dir = declared_token_dir();
         let s = std::sync::Arc::new(shared());
