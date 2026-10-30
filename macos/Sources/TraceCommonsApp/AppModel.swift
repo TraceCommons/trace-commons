@@ -128,7 +128,11 @@ final class AppModel: ObservableObject {
         ])
     }
 
-    func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil) {
+    /// `terminal`, when set, is saved as the terminal choice before the
+    /// request, in the same task, so a launch dialog that asked for one
+    /// opens in it.
+    func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil,
+                       terminal: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true
         managedErrorKey = nil
@@ -146,6 +150,9 @@ final class AppModel: ObservableObject {
             let result = Result {
                 guard let params = try JSONSerialization.jsonObject(with: encodedParams.get()) as? [String: Any] else {
                     throw CocoaError(.coderInvalidValue)
+                }
+                if let terminal {
+                    _ = try client.managedAction("set_managed_terminal", params: ["terminal": terminal])
                 }
                 var response = try client.managedAction(method, params: params)
                 if method == "managed_tool_setup", response["opened"] as? Bool != true {

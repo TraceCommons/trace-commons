@@ -50,8 +50,9 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // The managed-session terminal: the picker reads it from the
             // managed snapshot (`capabilities.terminal_current`), with the
             // installed choices beside it, and writes it with
-            // `set_managed_terminal`.
-            "managed_terminal",
+            // `set_managed_terminal`. Whether it was chosen is read the same
+            // way (`capabilities.terminal_chosen`).
+            "managed_terminal", "managed_terminal_chosen",
             // Favorite models: the Launch sheet's picker reads them from
             // `managed_model_catalogue`'s `favorites` and writes them with
             // `managed_model_favorite_set`.

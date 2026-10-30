@@ -211,6 +211,17 @@ Decided in #1406 (design owner, 2026-10-14): the choice lives in Settings >
 Private AI on every shell, the Start buttons are unchanged, and Windows and
 Linux get the same choice as macOS, as an exception to the #1173 D13 freeze.
 
+**The first launch asks.** Until the person has chosen a terminal
+(`managed_terminal_chosen`, set by any write of `managed_terminal` and
+never cleared), the snapshot's `capabilities.terminal_chosen` is false, and
+the macOS launch dialogs (the sign-in card's and Launch managed session)
+draw the same "Open sessions in" picker as Settings, over the installed
+apps, starting on the current choice. Open saves the choice, then
+launches, so the session opens there and later dialogs do not ask. With
+one terminal installed nothing is asked. A settings file written before
+the key existed counts as not chosen, so a person who has launched before
+is asked once too.
+
 **The test.** A terminal is offered only if it accepts both a command and a
 working directory from its scripting interface or command line, documented
 by its vendor. On Windows and Linux the command reaches it as an argv vector:
@@ -231,9 +242,15 @@ another in Settings." until another is chosen.
 | macOS | Terminal | `terminal` | AppleScript `do script`, addressed by bundle id `com.apple.Terminal` | the launch shipped before the choice |
 | macOS | Ghostty | `ghostty` | AppleScript `new surface configuration`, `command`, `wait after command` | Ghostty AppleScript dictionary |
 | macOS | iTerm2 | `iterm2` | AppleScript `create window with default profile command` | iTerm2 AppleScript dictionary |
+| macOS | kitty | `kitty` | `open -n -b net.kovidgoyal.kitty --args --directory <folder> --hold <helper> <args>` | as Linux kitty below; `--detach`: "On macOS use open -a kitty.app -n instead", kitty(1); bundle id from kitty's `setup.py` (`net.kovidgoyal.{appname}`) |
+| macOS | WezTerm | `wezterm` | `open -n -b com.github.wez.wezterm --args --config exit_behavior="Hold" start --always-new-process --cwd <folder> -- <helper> <args>` | as Linux WezTerm below; the bundle's executable is `wezterm-gui`, which takes `--config` and `start` itself (`wezterm-gui/src/main.rs`); bundle id from `assets/macos/WezTerm.app/Contents/Info.plist` |
+| macOS | Alacritty | `alacritty` | `open -n -b org.alacritty --args --working-directory <folder> --hold -e <helper> <args>` | as Linux Alacritty below; bundle id from `extra/osx/Alacritty.app/Contents/Info.plist` |
 | Windows | Windows Terminal | `windows_terminal` | `wt.exe new-tab --title "NEAR AI" -d <folder> <helper> <args>` | `new-tab --startingDirectory, -d` and `commandline` ("Executable with optional arguments"), <https://learn.microsoft.com/en-us/windows/terminal/command-line-arguments> |
 | Linux | GNOME Terminal | `gnome_terminal` | `gnome-terminal --working-directory=<folder> -- <helper> <args>` | `--working-directory=DIRNAME` "Set the terminal's working directory"; `--` is what the deprecated `-x, --execute` entry ("interpret all subsequent options as a program and arguments") says to use instead (`-e` is deprecated too), gnome-terminal(1), <https://manpages.debian.org/testing/gnome-terminal/gnome-terminal.1.en.html> |
 | Linux | Konsole | `konsole` | `konsole --workdir <folder> --hold -e <helper> <args>` | `--workdir dir` "Open with dir as the initial working directory"; `-e` "will catch all following arguments ... and execute it as command"; `--hold` "Do not close the initial session automatically when it ends", <https://docs.kde.org/stable_kf6/en/konsole/konsole/command-line-options.html> |
+| Linux | kitty | `kitty` | `kitty --directory <folder> --hold <helper> <args>` | synopsis `kitty [options] [program-to-run ...]`; `--directory` "Change to the specified directory when launching"; `--hold` "Remain open, at a shell prompt, after child process exits", kitty(1), <https://sw.kovidgoyal.net/kitty/invocation/> |
+| Linux | WezTerm | `wezterm` | `wezterm --config exit_behavior="Hold" start --always-new-process --cwd <folder> -- <helper> <args>` | `start`: `--cwd` "Specify the current working directory for the initially spawned program", `--always-new-process` "don't try to ask an existing wezterm GUI instance to start the command", and the program after `--`, <https://wezterm.org/cli/start.html>; `--config 'exit_behavior="Hold"'`, <https://wezterm.org/config/files.html>, "keep the pane open after the program exits", <https://wezterm.org/config/lua/config/exit_behavior.html> |
+| Linux | Alacritty | `alacritty` | `alacritty --working-directory <folder> --hold -e <helper> <args>` | `--working-directory` "Start the shell in the specified working directory"; `--hold` "Remain open after child process exits"; `-e, --command` "Command and args to execute (must be last argument)", alacritty(1), <https://manpages.debian.org/trixie/alacritty/alacritty.1.en.html> |
 | Linux | Ghostty | `ghostty` | `ghostty --working-directory=<folder> --wait-after-command=true -e <helper> <args>` | "Every configuration key is a valid CLI flag", <https://ghostty.org/docs/config>; `working-directory`, `wait-after-command`, and `-e` sets `initial-command` and "Disables shell expansion since the input is expected to already be shell-expanded", <https://ghostty.org/docs/config/reference> |
 
 Windows Terminal reads `;` anywhere in its command line as the start of a new
@@ -266,9 +283,25 @@ Launch is never turned off this way, because Terminal is always there.
   daemon was started, and that cannot be checked without a Windows run. It
   can be added once a Windows smoke test shows the session gets the console.
   `cmd.exe` takes its command only as one string.
-- Other Linux terminals (kitty, Alacritty, WezTerm, foot, xfce4-terminal,
-  Tilix) were not evaluated in this change; each can be added once its
-  documented flags are checked against the test above.
+- Other Linux terminals (foot, xfce4-terminal, Tilix) have not been
+  evaluated; each can be added once its documented flags are checked
+  against the test above.
+- Warp (macOS), as of 2026-10-30. It has no AppleScript dictionary and no
+  command line that opens a local window with a command
+  (<https://github.com/warpdotdev/warp/issues/3364>; the `oz` CLI runs
+  Warp's own agents, <https://docs.warp.dev/developers/cli>). Its URI
+  scheme opens a folder but "does not run a shell command"
+  (`warp://action/new_window?path=`, <https://docs.warp.dev/features/uri-scheme>).
+  The only route that runs a command is a Tab Config, a TOML file under
+  `~/.warp/tab_configs/` with `directory` and `commands`, opened by
+  `warp://tab_config/<name>?new_window=true`
+  (<https://docs.warp.dev/terminal/windows/tab-configs/>). That fails the
+  test: the command reaches Warp as shell text typed into its shell, not as
+  argv or a string literal, the one-time ticket would be written into a file
+  Warp lists in its own menu, the file has to be removed after Warp has read
+  it with no signal that it has, and nothing reports whether the window
+  opened. Revisit if Warp ships a scripting interface or a CLI that takes a
+  command and a folder.
 
 Every launch path except macOS Terminal still needs the release smoke test
 below on its platform: none of the Windows or Linux terminals is started by

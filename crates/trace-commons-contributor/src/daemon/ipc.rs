@@ -21389,6 +21389,7 @@ mod tests {
                     .expect("snapshot")
             };
             assert_eq!(snapshot(&s)["capabilities"]["terminal_current"], default);
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_chosen"], false);
             let mut rx = s.events.subscribe();
             let r = handle_request(
                 &s,
@@ -21416,6 +21417,9 @@ mod tests {
                 snapshot(&s)["capabilities"]["terminal_current"],
                 chosen.id()
             );
+            // Choosing the terminal is remembered, so no shell asks again.
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_chosen"], true);
+            assert_eq!(settings["managed_terminal_chosen"], true);
 
             for bad in [
                 serde_json::json!({}),

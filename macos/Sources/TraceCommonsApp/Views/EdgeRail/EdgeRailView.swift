@@ -258,6 +258,8 @@ private struct EdgeRailPeekCard: View {
                 .disabled(model.managedBusy)
             }
             HomeAccountTiles(store: data.home) { open(.inference) }
+                // Over the map, so the Balance tile's coins fall over it.
+                .zIndex(1)
             if let label = model.privateInferenceCopy?.destination {
                 EdgeRailPrivateAIMap(data: data, label: label)
             }
