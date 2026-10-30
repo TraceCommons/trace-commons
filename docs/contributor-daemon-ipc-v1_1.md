@@ -689,7 +689,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `complete_setup` | `expected_scope` from `get_setup_status`; optional `scopes[]` of wire-name data uses | durable completion state for the same enrollment | agent-selected scopes use the existing validation/audit path; publishes `status_changed`; grants no automatic-upload permission |
 | `get_config_schema` | empty object | versioned settings-patch JSON Schema, effects and patch semantics | read-only; credentials and read-only settings are not settable properties |
 | `preview_settings` | partial object accepted by `set_settings` | versioned canonical before/after changes; redacted values remain hidden | read-only; validates without persistence or runtime effects |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_cli_options`, `managed_folder_settings` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -710,6 +710,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
+| `managed_model_favorite_set` | `model` (**required**, a model id), `favorite` (**required**, boolean) | `favorites` (`[string]`, the stored list) | async only; stars or unstars one model for the Launch sheet's picker; writes `managed_favorite_models` through `set_settings`; see "Managed session model choice" below |
 | `managed_cli_options_set` | `tool` (`claude`, `codex`, `opencode`), `options` (string) | `tool`, `options`, `revision` | validates and saves through `set_settings.managed_cli_options`; returns the current saved value and managed revision so older snapshots cannot undo an acknowledged save; invalid quoting or reserved flags return `managed-cli-options-invalid` |
 | `managed_folder_settings_get` | `tool`, `cwd` (existing absolute folder) | `tool`, `model`, `collect_traces`, `cli_options`, `remembered`, `revision` | canonical folder/agent preferences; falls back to global CLI options, default model and collection off; never selects an account |
 | `managed_folder_settings_reset` | `tool`, `cwd` | same as lookup | removes only this canonical folder/agent profile through the normal settings writer and returns effective defaults |
@@ -5993,7 +5994,7 @@ Takes a JSON object whose top-level keys must come from
 `verdicts_offer_pending`, `idle_offer_pending`,
 `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
-`insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_cli_options`, `managed_folder_settings` --
+`insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -6074,6 +6075,19 @@ snapshot's `capabilities` carries `terminal_current` (the chosen id, or
 this computer; empty under Flatpak) and `terminal_destination` (the
 chosen app's name). A launch whose chosen app was not found is refused
 with `managed-terminal-not-found`.
+
+`managed_favorite_models` (object) stars or unstars NEAR AI models for the
+Launch sheet's model picker, merging like `notify`: `{"<model id>": true}`
+stars an id, `false` unstars it, and omitted ids stay. An id must be
+non-empty, at most 256 UTF-8 bytes, and free of whitespace and control
+characters; a value that is not a boolean, a bad id, or a patch that grows
+the list past 32 entries refuses the whole patch with `bad_params` /
+`settings-invalid-value`. A favorite NEAR AI stopped listing still counts
+toward the 32, but a removal is never refused for the bound.
+`set_settings` does not check that NEAR AI offers the id;
+`managed_model_favorite_set` does, and is what shells call. The settings
+answer carries the stored list as `managed_favorite_models` (`[string]`, in no
+particular order).
 
 `managed_cli_options` (object) updates saved CLI options for new managed coding
 sessions. Accepted keys are `claude`, `codex` and `opencode`, with string values.
@@ -9691,7 +9705,18 @@ launcher reads only `accepted`.
 `managed_launch_prepare` also accepts `model` for Claude Code and Codex on
 `near_ai` and `near_ai_signin`, as the session's default model; on
 `subscription` and `api_key` it is still refused (`managed-invalid-request`).
-Absent means the tool's default (see `docs/managed-sessions.md`). A model NEAR
+Absent means the tool's default (see `docs/managed-sessions.md`). It also
+accepts `keep_saved_model: boolean` (absent is false): the shell
+fell back to the default because NEAR AI no longer lists the folder's saved
+model, so the launch remembers its other folder choices but keeps the saved
+model. If the saved model cannot be read (the folder went away, say), the
+launch is refused with `managed-folder-settings-save-failed` rather than
+written over. `managed_session_start_again` of such a launch keeps it too.
+The field is not additive: `managed_launch_prepare` refuses unknown fields,
+so a shell sends it only when the managed snapshot advertises
+`capabilities.keep_saved_model: true` (an older daemon omits it). The session
+registry stores it on the entry, outside the stored request, so an older
+daemon can still read the registry. A model NEAR
 AI does not list as a chat model is refused when the proxy starts, with
 `managed-model-unavailable`: at `managed_launch_redeem` on the sign-in, in the
 launcher on a saved key.
@@ -9700,7 +9725,37 @@ launcher on a saved key.
   `{models: [{id, name?}], default: string | null}`: NEAR AI's chat models in
   its order, and the model `tool` gets when a launch names none. The catalogue
   is public; no key is read or sent. `managed-model-unavailable` when NEAR AI
-  cannot be read; `managed-invalid-request` for other parameters.
+  cannot be read; `managed-invalid-request` for other parameters. It also
+  carries `favorites` (`[string]`): the starred models NEAR AI offers `tool`,
+  in its order; and `unavailable_favorites` (`[string]`): the starred ids
+  NEAR AI no longer lists for any tool. A starred model it lists but `tool`
+  is never offered (Codex's refused models) is in neither. Nothing is pruned:
+  a model NEAR AI lists again is a favorite again. When NEAR AI cannot be
+  read the method fails, so nothing is ever marked unavailable for want of
+  a catalogue. An older daemon omits both fields, which read as none. Shells
+  list favorites after the default option and before the other models, do
+  not repeat them, never offer an unavailable favorite, and show each one
+  apart with a way to unstar it. A saved model the catalogue does not list
+  falls back to the default option, visibly, for that launch only: the
+  launch sends `keep_saved_model: true` and the folder keeps its saved
+  model. With no catalogue the model is kept; once the read has failed, the
+  launch is not held for it, and the daemon refuses an unlisted model as
+  above.
+- `managed_model_favorite_set {model, favorite}` (async only) stars
+  (`favorite: true`) or unstars one model and answers `{favorites: [string]}`,
+  the whole stored list in no particular order. Starring reads NEAR AI's chat
+  models first and refuses a model it does not list with
+  `managed-model-unavailable`, also the answer when NEAR AI cannot be read;
+  nothing is written. Unstarring reads nothing and accepts any string, so an
+  id an older or hand-edited settings file holds can always be removed.
+  Starring an empty or malformed id, a non-boolean `favorite`, any other
+  field, or starring a 33rd favorite is `managed-invalid-request`;
+  unstarring is never refused for the bound or the id's shape. A change to
+  the stored list publishes `status_changed` (unstarring an id that was not
+  stored publishes nothing), so every window re-reads `get_settings`
+  (`managed_favorite_models`). The list is
+  global, not per tool: one favorite shows in each tool's picker that offers
+  it. A developer dry run refuses it, as it does `managed_model_catalogue`.
 - Session views' `model` is the model the session starts on: the one named,
   or, once a NEAR AI proxy has started, the default it chose. The proxy is
   pinned to the NEAR AI backend only, so the tool may switch to any listed

@@ -69,7 +69,7 @@ extension ManagedFolderSettingsTests {
             draft.useDefaults(tool: tool, cwd: "/project", cliOptions: "--custom")
             draft.model = "chosen-model"
             draft.collectTraces = true
-            let params = draft.applying(to: ["tool": tool, "connection": "near_ai_signin", "account_id": "current-account"])
+            let params = draft.applying(to: ["tool": tool, "connection": "near_ai_signin", "account_id": "current-account"], daemonKeepsSavedModel: true)
             XCTAssertEqual(params["account_id"] as? String, "current-account")
             XCTAssertEqual(params["model"] as? String, "chosen-model")
             XCTAssertEqual(params["collect_traces"] as? Bool, true)
@@ -81,7 +81,7 @@ extension ManagedFolderSettingsTests {
         var draft = ManagedFolderDraft()
         draft.useDefaults(tool: "codex", cwd: "/project", cliOptions: "")
         draft.model = "near-ai-model"
-        XCTAssertNil(draft.applying(to: ["tool": "codex", "connection": "subscription"])["model"])
+        XCTAssertNil(draft.applying(to: ["tool": "codex", "connection": "subscription"], daemonKeepsSavedModel: true)["model"])
     }
 
     func testCollectionIsolationRefusalUsesActionableSharedCopy() {

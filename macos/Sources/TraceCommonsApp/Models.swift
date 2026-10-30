@@ -749,6 +749,10 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// that predates the key, which draws no switch rather than an "off"
     /// nobody set.
     var insightsLedgerFeed: Bool? = nil
+    /// The stored favorite model ids (`managed_favorite_models`), for
+    /// Settings' favorites list while NEAR AI's catalogue cannot be read.
+    /// Absent from an older daemon.
+    var managedFavoriteModels: [String]? = nil
     /// Whether the daemon counts tokens in the watched folders for
     /// Insights (`insights_counter_pass`; on by default, product owner,
     /// 2026-10-29). Absent from an older daemon: no switch, never an "off".
@@ -801,6 +805,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case privateInferenceOfferSeen = "private_inference_offer_seen"
         case privateInferenceState = "private_inference_state"
         case insightsLedgerFeed = "insights_ledger_feed"
+        case managedFavoriteModels = "managed_favorite_models"
         case missionsEnabled = "missions_enabled"
         case insightsCounterPass = "insights_counter_pass"
         case insightsRecapCardEnabled = "insights_recap_card_enabled"

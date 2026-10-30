@@ -76,6 +76,14 @@ pub struct LaunchRequest {
     pub expected_generation: Generation,
     #[serde(default)]
     pub save_default: bool,
+    /// The launcher fell back to the default because NEAR AI no longer
+    /// lists the folder's saved model: the launch's other choices are
+    /// remembered, the saved model is kept. Absent means false. Read from a
+    /// request, never written: the registry keeps it on the entry, where a
+    /// daemon that predates it can skip it, and a shell sends it only when
+    /// the snapshot says `capabilities.keep_saved_model`.
+    #[serde(default, skip_serializing)]
+    pub keep_saved_model: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,6 +228,9 @@ struct Entry {
     stop_requested: bool,
     view: SessionView,
     request: LaunchRequest,
+    /// `request.keep_saved_model`, stored here and copied back on open.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    keep_saved_model: bool,
     ticket_hash: Option<String>,
     ticket_expires: DateTime<Utc>,
     proof_hash: Option<String>,
@@ -283,6 +294,7 @@ impl SessionRegistry {
                 entry.view.collection = CollectionState::Failed;
             }
             entry.ticket_hash = None;
+            entry.request.keep_saved_model = entry.keep_saved_model;
         }
         let launched = store
             .read_daemon_file(FIRST_LAUNCH_FILE)
@@ -451,6 +463,8 @@ impl SessionRegistry {
         if entry.request.purpose != LaunchPurpose::Coding {
             return Err(ManagedError::InvalidRequest);
         }
+        // A fallback launch's restart runs the same fallback, so it keeps
+        // the folder's saved model too.
         Ok(LaunchRequest {
             request_id,
             save_default: false,
@@ -635,6 +649,7 @@ impl SessionRegistry {
             terminal: None,
             stop_requested: false,
             view,
+            keep_saved_model: request.keep_saved_model,
             request,
             ticket_hash: Some(digest(&ticket)),
             ticket_expires: now + Duration::seconds(120),
@@ -683,6 +698,14 @@ impl SessionRegistry {
             collect_traces: entry.request.collect_traces,
             cli_options: entry.cli_options_text.clone()?,
         })
+    }
+
+    /// Whether the launch asked to keep the folder's saved model.
+    pub fn keeps_saved_model(&self, id: Uuid) -> bool {
+        self.data
+            .entries
+            .iter()
+            .any(|entry| entry.view.id == id && entry.request.keep_saved_model)
     }
 
     pub fn validate_ticket(&self, session_id: Uuid, ticket: &str) -> Result<(), ManagedError> {
@@ -970,6 +993,74 @@ mod tests {
     use super::*;
     use crate::managed::accounts::AccountStore;
 
+    /// #1754 review: a fallback launch's `keep_saved_model` is kept on the
+    /// registry entry, not in its stored request, so a daemon that predates
+    /// the field (its `LaunchRequest` refuses unknown fields) can still read
+    /// the registry. It survives a restart, a retry of the same request is
+    /// still one session, and Start again keeps it.
+    #[test]
+    fn keep_saved_model_survives_a_restart_and_start_again() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let sign_in = crate::managed::signin::entry(ToolId::Opencode).unwrap();
+        let request = LaunchRequest {
+            cli_options: None,
+            model: None,
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Opencode,
+            connection: ConnectionKind::NearAiSignIn,
+            account_id: sign_in.id,
+            cwd: home.path().to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+            keep_saved_model: true,
+        };
+        let id = registry
+            .prepare(request.clone(), &sign_in)
+            .unwrap()
+            .session_id;
+        assert!(registry.keeps_saved_model(id));
+
+        let raw: serde_json::Value =
+            serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
+        let entry = &raw["entries"][0];
+        assert!(
+            entry["request"].get("keep_saved_model").is_none(),
+            "{entry}"
+        );
+        assert_eq!(entry["keep_saved_model"], true);
+
+        // A restart fails the unredeemed launch, which ends it.
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        assert!(registry.keeps_saved_model(id));
+        assert_eq!(
+            registry.prepare(request, &sign_in).unwrap().session_id,
+            id,
+            "a retry of the same request is the same session"
+        );
+        let again = registry.start_again_request(id, Uuid::new_v4()).unwrap();
+        assert!(again.keep_saved_model, "Start again keeps the saved model");
+        assert_eq!(again.model, None);
+        // A launch without the flag stores none.
+        let other = registry
+            .prepare(
+                LaunchRequest {
+                    keep_saved_model: false,
+                    ..again
+                },
+                &sign_in,
+            )
+            .unwrap()
+            .session_id;
+        assert!(!registry.keeps_saved_model(other));
+        let raw: serde_json::Value =
+            serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
+        assert!(raw["entries"][1].get("keep_saved_model").is_none());
+    }
+
     /// OpenCode can use the sign-in proxy's default or select a valid model.
     /// A saved key still needs a model; subscriptions remain unavailable.
     #[test]
@@ -989,6 +1080,7 @@ mod tests {
             cwd: home.path().to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
         };
         let sign_in = crate::managed::signin::entry(ToolId::Opencode).unwrap();
         assert_eq!(
@@ -1064,6 +1156,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
         }
     }
 
@@ -1257,6 +1350,7 @@ mod tests {
             cwd: home.path().to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
         };
         let launch = registry.prepare(request, &account).unwrap();
         let mut value = serde_json::to_value(&registry.data).unwrap();
@@ -1293,6 +1387,7 @@ mod tests {
             cwd: home.path().to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
         };
         let launch = registry.prepare(request.clone(), &account).unwrap();
         registry.data.entries[0].ticket_expires = Utc::now() - Duration::seconds(1);
@@ -1334,6 +1429,7 @@ mod tests {
             cwd: cwd.to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
         }
     }
 

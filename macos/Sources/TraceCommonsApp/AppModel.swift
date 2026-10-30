@@ -78,6 +78,33 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Star or unstar one model for the Launch sheet's picker. `done` gets
+    /// the daemon's stored list, or nil when it refused (a model NEAR AI no
+    /// longer lists, or NEAR AI could not be read).
+    func setFavoriteModel(_ model: String, favorite: Bool,
+                          done: @escaping @MainActor (_ favorites: [String]?, _ errorLabel: String?) -> Void) {
+        guard let client else { return done(nil, nil) }
+        let params = ManagedSurface.favoriteParams(model: model, favorite: favorite)
+        Task.detached(priority: .userInitiated) {
+            let (favorites, label): ([String]?, String?) = {
+                do {
+                    let answer = try client.managedAction("managed_model_favorite_set", params: params)
+                    return (answer["favorites"] as? [String] ?? [], nil)
+                } catch let failure as DaemonClient.Failure {
+                    return (nil, failure.message)
+                } catch {
+                    return (nil, nil)
+                }
+            }()
+            await MainActor.run {
+                // Every window's settings, the Settings card's list among
+                // them, follow the daemon's `status_changed`, which it
+                // publishes when the stored list moved.
+                done(favorites, label)
+            }
+        }
+    }
+
     /// The terminal app managed sessions open in, by the id the daemon
     /// offered in `capabilities.terminal_choices`. The daemon refuses any
     /// other value; the snapshot is re-read after the write.
