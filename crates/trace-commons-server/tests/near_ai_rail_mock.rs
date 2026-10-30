@@ -936,12 +936,10 @@ async fn each_reply_maps_to_its_refusal() {
         slow.send(&line).await.unwrap_err(),
         RailRefusal::Retry("near_ai_timeout")
     );
-    let closed = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
-        format!("http://{address}/v1")
-    };
+    // Port 1 is below every ephemeral range, so a server another test binds
+    // to port 0 can never be handed it, as a port bound and released could
+    // be (#1759), and the refusal is immediate on every platform.
+    let closed = "http://127.0.0.1:1/v1".to_string();
     let unreachable = NearAiRail::new(
         NearAiTransferClient::at_loopback(&closed, credentials(), Duration::from_secs(2)).unwrap(),
     );
