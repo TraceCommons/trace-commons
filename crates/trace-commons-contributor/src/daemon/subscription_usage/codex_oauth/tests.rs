@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use serde_json::json;
 
-use super::super::providers::{collect_codex_via, fingerprint};
+use super::super::providers::{collect_codex_in, collect_codex_via, fingerprint};
 use super::super::{Provider, native_metadata_revision};
 
 const TOKEN: &str = "fixture-access-token-never-logged";
@@ -237,6 +237,24 @@ async fn fresh_token_reads_usage_while_codex_runs_and_never_writes_auth() {
         codex.0.try_wait().unwrap().is_none(),
         "the user's Codex keeps running"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_silent_read_never_falls_back_to_the_native_app_server() {
+    let near_expiry = jwt(json!({"exp": Utc::now().timestamp() + 120}));
+    let dir = tempfile::tempdir().unwrap();
+    let auth = json!({"tokens":{"access_token":near_expiry,"refresh_token":"r","account_id":"a"}});
+    let bytes = serde_json::to_vec(&auth).unwrap();
+    std::fs::write(dir.path().join("auth.json"), &bytes).unwrap();
+    let server = fake_server(200, USAGE).await;
+    let login = login(dir.path());
+    let failure = collect_codex_in(&login, false, lease(), &target(&server))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.reason, "not_checked");
+    assert!(server.seen.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read(dir.path().join("auth.json")).unwrap(), bytes);
 }
 
 #[cfg(unix)]

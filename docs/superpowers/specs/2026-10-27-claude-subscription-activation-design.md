@@ -15,13 +15,17 @@ This is the original #1666 acquisition approach with the review safeguards retai
 ## Boundaries
 
 - Claude needs no separate opt-in. Codex's existing permission and file-storage policy remain independent.
-- Opening views, daemon startup, status reads and ticks only inspect file metadata and expire readings. Keychain APIs, including attribute queries, run only within an explicit selected-login Refresh.
+- Daemon startup, status reads and ticks only inspect file metadata and expire readings. Keychain APIs, including attribute queries, run only within a selected-login Refresh. Opening Insights starts a silent Refresh for each login with no current figures (amended 2026-10-30, below); only a pressed Refresh may show a Keychain dialog or start the native CLI.
 - One Refresh targets one known local login. Codex actions cannot acquire Claude credentials. Native reads are serialized; interactive authority belongs to the exact selected request.
 - OAuth profile identity uses comparable account and organization evidence, not an access-token hash. Known credential/binding changes invalidate results. Secrets and raw provider errors never enter IPC, logs or contributed traces.
 - Fixed HTTPS endpoints, an app user agent, bounded responses and network deadlines constrain the provider request. Native credential calls run on leased threads with a longer interactive deadline; a late return retains its concurrency lease and wipes unconsumed secret bytes.
 - Claude values are explicitly captured on Refresh. File changes invalidate known state, but the app does not silently track Keychain account changes. The UI instructs users to Refresh after changing Claude accounts and never presents the captured account as continuously verified.
 - Unenroll clears all held readings and cancels pending generations. Late Keychain permission results cannot start provider HTTP after cancellation. A future explicit Refresh remains available independently of Commons enrollment.
 - Exact native profile service selection respects `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`; custom profiles never borrow the global item. Managed launches clear an inherited secure-storage override so their collector and native CLI use the same profile.
+
+## Amendment 2026-10-30: read on open
+
+The owner asked why Claude and Codex limits appeared only after pressing Refresh. Readings live only in daemon memory and expire after an hour, so every daemon restart and every open after an hour showed "Not checked". Opening Insights now reads each login that has no figures, or stale ones, without interaction: Codex reads its saved sign-in and never starts its app-server (which can renew and rewrite auth.json); Claude uses the daemon's own cached token or a Keychain read that refuses to show a dialog. A login that needs permission still shows the Refresh instruction. Each login is read silently at most once per open and again only after 20 minutes. A silent read that fails does not hold the 60-second Refresh floor, so the person's Refresh right after it still runs.
 
 ## Verification
 
