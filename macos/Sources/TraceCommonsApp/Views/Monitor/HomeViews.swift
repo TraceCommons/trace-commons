@@ -1712,7 +1712,8 @@ struct HomeAccountTiles: View {
 /// figure. The word wraps at a space, never inside a word.
 /// The Traces hero's three steps (owner, 2026-10-29): side by side, an
 /// arrow between each, each a translucent panel on the hero's ground with
-/// a numbered disc, an icon, a title and one line. All in heroInk, as
+/// a numbered disc and an icon on one row, then a title and one line
+/// across the panel's width. All in heroInk, as
 /// every word on a hero is; the discs and icons are heroAccent, the
 /// owner's mock-up's blue. The panels are as tall as the tallest.
 /// Contribute opens Traces and Use Private AI opens Private AI, each panel
@@ -1779,30 +1780,33 @@ struct HomeHeroStepPanel: View {
     private var panel: some View {
         let ink = GlassTokens.Color.heroInk.color
         let shape = RoundedRectangle(cornerRadius: GlassTier.cardQuiet.radius, style: .continuous)
-        return HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-            Text("\(step.number)")
-                .glassType(GlassTokens.TypeScale.bodyStrong)
-                .foregroundStyle(ink)
-                .frame(width: HomeHeroSteps.disc, height: HomeHeroSteps.disc)
-                .background(Circle().fill(GlassTokens.Color.heroAccent.color))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+        // The disc and icon share the top row, so the title and line take
+        // the panel's whole width: beside the disc they wrapped a word a
+        // line and hyphenated "Contribute" in a narrow window.
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
+                Text("\(step.number)")
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(ink)
+                    .frame(width: HomeHeroSteps.disc, height: HomeHeroSteps.disc)
+                    .background(Circle().fill(GlassTokens.Color.heroAccent.color))
+                    .accessibilityHidden(true)
                 Image(systemName: step.systemImage)
                     .glassGlyph(HomeHeroSteps.icon, weight: .regular)
                     .foregroundStyle(GlassTokens.Color.heroAccent.color)
                     // One height for every icon, so the titles line up.
                     .frame(height: HomeHeroSteps.icon + 6, alignment: .leading)
                     .accessibilityHidden(true)
-                    .padding(.bottom, GlassTokens.Space.s1)
-                Text(step.title)
-                    .glassType(GlassTokens.TypeScale.bodyStrong)
-                    .foregroundStyle(ink)
-                Text(step.detail)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(ink.opacity(0.8))
-                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
+            .padding(.bottom, GlassTokens.Space.s1)
+            Text(step.title)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(ink)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(step.detail)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(ink.opacity(0.8))
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(GlassTokens.Space.s3)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

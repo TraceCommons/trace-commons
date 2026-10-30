@@ -204,6 +204,22 @@ final class InsightsSessionRouteTests: XCTestCase {
         XCTAssertNil(InsightsRouteWords.split(unobserved, copy: copy), "no record has no figures to split")
     }
 
+    /// A session the proxy saw none of (no record, or no route at all) draws
+    /// no Private AI line: on a week of direct calls every row said "No
+    /// record" (owner, 2026-10-29). Every other category still draws it.
+    func testNoProxyRecordDrawsNoPrivateAILine() throws {
+        XCTAssertFalse(InsightsRouteWords.drawsLine(nil))
+        XCTAssertFalse(InsightsRouteWords.drawsLine(try Self.route("unobserved")))
+        for category in ["unrecorded", "outside", "mixed", "check_failed", "routed_verified",
+                         "routed_unverified", "from_the_future"] {
+            XCTAssertTrue(InsightsRouteWords.drawsLine(try Self.route(category)), category)
+        }
+        let source = try InsightsGlassConventionsTests.text("Views/InsightsOverviewTab.swift")
+        XCTAssertTrue(source.contains("if routed, InsightsRouteWords.drawsLine(row.session.routing) {"))
+        XCTAssertTrue(source.contains("if routed, rows.contains(where: { InsightsRouteWords.drawsLine($0.session.routing) }) {"),
+                      "the per-call note goes with the lines")
+    }
+
     func testTheSplitLineIsInProxyTokensWithTheDashForUnknown() throws {
         let copy = try Self.coreCopy()
         let rows = try XCTUnwrap(Self.decode(Self.recorded()).rollup?.sessions)

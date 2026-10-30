@@ -371,7 +371,10 @@ struct InsightsCounterSessionsView: View {
                     }
                     InsightsBreakdownFold(count: sessions.rows.count, showAll: $showAll, copy: copy)
                 }
-                if routed {
+                // The per-call note goes with the Private AI lines: none
+                // drawn, no note.
+                let rows = dayRows?.map(\.session) ?? sessions.rows
+                if routed, rows.contains(where: { InsightsRouteWords.drawsLine($0.session.routing) }) {
                     Text(text("analytics_route_measure_note")).insightsCaption()
                 }
                 if let line = InsightsRouteWords.unavailableLine(sessions.column, copy: copy) {
@@ -401,7 +404,7 @@ struct InsightsCounterSessionsView: View {
             reasons: row.session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
                 .joined(separator: " \u{b7} ")
         ) {
-            if routed { route(row.session.routing) }
+            if routed, InsightsRouteWords.drawsLine(row.session.routing) { route(row.session.routing) }
         }
     }
 
