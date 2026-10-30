@@ -97,7 +97,7 @@ final class BalanceArrivalHomeTests: XCTestCase {
             contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent(
                 "Views/Monitor/BalanceArrivalFlourish.swift"),
             encoding: .utf8)
-        XCTAssertTrue(source.contains(".glassCoinBurst(start: burst, still: reduceMotion, trailingRoom: Self.edgeRoom)"))
+        XCTAssertTrue(source.contains(".glassCoinBurst(start: burst, still: reduceMotion)"))
         XCTAssertFalse(source.contains("strokeBorder"), "the lit edge is back")
         XCTAssertFalse(source.contains("statusOnText"), "the green edge is back")
         XCTAssertTrue(source.contains("accessibilityReduceMotion"))

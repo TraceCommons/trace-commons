@@ -58,7 +58,7 @@ final class DesignRulings20261027Tests: XCTestCase {
     /// tile no longer repeats what was received under the 24-hour change.
     func test_creditBurstsCoinsAndTheReceivedLineIsGone() throws {
         let flourish = try Self.text("Views/Monitor/BalanceArrivalFlourish.swift")
-        XCTAssertTrue(flourish.contains(".glassCoinBurst(start: burst, still: reduceMotion, trailingRoom: Self.edgeRoom)"))
+        XCTAssertTrue(flourish.contains(".glassCoinBurst(start: burst, still: reduceMotion)"))
         XCTAssertFalse(flourish.contains("strokeBorder"))
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertFalse(home.contains("balanceReceived"), "the received line is back")

@@ -81,13 +81,14 @@ final class CoinBurstTests: XCTestCase {
         }
     }
 
-    /// No coin passes the edge that cuts it off, on the right, however
-    /// narrow the tile; the left is not limited, so a narrow tile still
-    /// bursts every way (not a tall plume); a wide one flies the full reach.
+    /// No coin passes the tile's right side, however narrow the tile: Home's
+    /// scroll view runs flush to it and would cut them off. The left is not
+    /// limited, so a narrow tile still bursts every way (not a tall plume);
+    /// a wide one flies the full reach.
     @MainActor
-    func test_noCoinPassesTheCutOffEdge() {
+    func test_noCoinPassesTheCutOffEdge() throws {
         for width in [100.0, 115, 160, 240, 400] {
-            let room = CGFloat(width / 2) + 12
+            let room = CGFloat(width / 2)
             let sideways = GlassCoinBurst.sideways(room: room)
             var t = 0.0
             while t < GlassCoinBurst.duration {
@@ -104,8 +105,11 @@ final class CoinBurstTests: XCTestCase {
         XCTAssertEqual(GlassCoinBurst.sideways(room: 400), 1, "room enough holds the whole burst")
         // Home's edge-rail tile (about 115pt): the left reach is what it was.
         let left = GlassCoinBurst.coins.min { cos($0.angle) < cos($1.angle) }!
-        XCTAssertEqual(GlassCoinBurst.offset(left, at: 0.5, sideways: GlassCoinBurst.sideways(room: 70)).dx,
+        XCTAssertEqual(GlassCoinBurst.offset(left, at: 0.5, sideways: GlassCoinBurst.sideways(room: 58)).dx,
                        GlassCoinBurst.offset(left, at: 0.5).dx)
+        // The drawing's edge is the tile's own side, with no room past it.
+        let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "CoinBurst.swift" }?.1)
+        XCTAssertTrue(source.contains("let sideways = Self.sideways(room: size.width / 2 - spill)\n"))
     }
 
     /// The burst adds a view only while there is one; almost always there
@@ -114,7 +118,7 @@ final class CoinBurstTests: XCTestCase {
         let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "CoinBurst.swift" }?.1)
         let modifier = try XCTUnwrap(source.range(of: "func glassCoinBurst("))
         let check = try XCTUnwrap(source.range(of: "if let start {", range: modifier.upperBound..<source.endIndex))
-        let burst = try XCTUnwrap(source.range(of: "GlassCoinBurst(start: start, still: still, trailingRoom: trailingRoom)",
+        let burst = try XCTUnwrap(source.range(of: "GlassCoinBurst(start: start, still: still)",
                                                range: modifier.upperBound..<source.endIndex))
         XCTAssertLessThan(check.lowerBound, burst.lowerBound)
     }

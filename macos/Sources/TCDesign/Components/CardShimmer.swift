@@ -9,7 +9,8 @@ import SwiftUI
 /// time the card's tab is shown or its window comes back into focus or into
 /// sight, then one every 18s. Each pass is one SwiftUI animation of
 /// `GlassCardShine`, so nothing redraws between passes. Under Reduce Motion
-/// there are no passes, nor while the window cannot be seen
+/// there are no passes, and the light is not drawn, so turning it on ends a
+/// pass under way; nor are there passes while the window cannot be seen
 /// (`glassAnimationsVisible`). Give it with `glassCardShimmer` after the
 /// card's tier, so the light sits over the card's fill, its watermark and
 /// its words.
@@ -48,10 +49,6 @@ public struct GlassCardShimmer: View {
         return max(first, now.duration(to: passEnds))
     }
 
-    /// `sweep` with no pass under way: the next whole step, where nothing
-    /// shows.
-    static func resting(_ sweep: Double) -> Double { sweep.rounded(.up) }
-
     /// What starts the passes over: Reduce Motion turned on or off, the
     /// window coming into or out of sight, or back in focus.
     private struct Run: Equatable {
@@ -61,7 +58,15 @@ public struct GlassCardShimmer: View {
     }
 
     public var body: some View {
-        GlassCardShine(sweep: sweep, radius: radius, dark: colorScheme == .dark)
+        // Under Reduce Motion the light is not drawn, so a pass under way
+        // when it is turned on ends at once. Setting `sweep` would not end
+        // it: `sweep` is already the whole step the pass animates toward.
+        Color.clear
+            .overlay {
+                if !reduceMotion {
+                    GlassCardShine(sweep: sweep, radius: radius, dark: colorScheme == .dark)
+                }
+            }
             .allowsHitTesting(false)
             .accessibilityHidden(true)
             // The tab shown builds the card, which starts the passes; the
@@ -72,10 +77,6 @@ public struct GlassCardShimmer: View {
             .task(id: Run(reduceMotion: reduceMotion, visible: visible, focus: focus)) {
                 // A pass under way when this starts over runs out; none
                 // starts after it.
-                // Reduce Motion turned on mid-pass ends it at once.
-                if reduceMotion {
-                    withTransaction(Transaction(animation: nil)) { sweep = Self.resting(sweep) }
-                }
                 guard !reduceMotion, visible else { return }
                 var wait = Self.firstWait(now: .now, passEnds: passEnds)
                 while !Task.isCancelled {

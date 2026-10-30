@@ -122,17 +122,19 @@ final class CardShimmerTests: XCTestCase {
         XCTAssertFalse(source.contains("sweep = 0"), "a pass is reset again")
     }
 
-    /// Reduce Motion turned on during a pass ends it at once, with no
-    /// animation, on a whole step where nothing shows.
+    /// Reduce Motion turned on during a pass ends it at once: under it the
+    /// light is not drawn at all. Setting `sweep` with no animation would
+    /// not, since `sweep` is already the whole step the pass animates
+    /// toward, so the pass would run on.
     func test_reduceMotionDuringAPassEndsIt() throws {
-        XCTAssertEqual(GlassCardShimmer.resting(3.4), 4)
-        XCTAssertEqual(GlassCardShimmer.resting(3), 3, "between passes it stays put")
         let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "CardShimmer.swift" }?.1)
-        let reduce = try XCTUnwrap(source.range(
-            of: "if reduceMotion {\n" + String(repeating: " ", count: 20)
-                + "withTransaction(Transaction(animation: nil)) { sweep = Self.resting(sweep) }"))
-        let stop = try XCTUnwrap(source.range(of: "guard !reduceMotion, visible else { return }"))
-        XCTAssertLessThan(reduce.lowerBound, stop.lowerBound, "before the guard that stops the passes")
+        let body = try XCTUnwrap(source.range(of: "public var body: some View {"))
+        let hidden = try XCTUnwrap(source.range(of: "if !reduceMotion {", range: body.upperBound..<source.endIndex))
+        let shine = try XCTUnwrap(source.range(of: "GlassCardShine(sweep: sweep, radius: radius, dark: colorScheme == .dark)",
+                                               range: body.upperBound..<source.endIndex))
+        XCTAssertEqual(source[hidden.upperBound..<shine.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines), "",
+                       "the light is drawn under Reduce Motion")
+        XCTAssertFalse(source.contains("withTransaction"), "a reset that leaves the pass running")
     }
 
     /// The card's band and the map's are one geometry, at one lean.

@@ -6,8 +6,9 @@ import SwiftUI
 /// every way, slow as they spread, tumble end over end as they droop and
 /// fade, each trailing a few sparks while it is fast. The coins may fly
 /// above and below the card (`spill`), and to its left, where they fall over
-/// the cards beside it; to its right they stop short of the edge of what
-/// holds the card, which would cut them off (`sideways`).
+/// the cards beside it; to its right they stop at the card's side
+/// (`sideways`), where the card is the last in its row and what holds it
+/// ends: Home's scroll view runs flush to it, and would cut them off.
 /// Under Reduce Motion the coins are drawn still, spread round the centre,
 /// and nothing moves. Give it with `glassCoinBurst` over the card, and draw
 /// the card above what follows it, so the coins fall over the cards below.
@@ -16,14 +17,10 @@ public struct GlassCoinBurst: View {
     private let start: Date
     /// Draws the coins still, at `stillAt`, for Reduce Motion.
     private let still: Bool
-    /// How far past the card's right side the edge that cuts the coins off
-    /// is; the coins stay inside it.
-    private let trailingRoom: CGFloat
 
-    public init(start: Date, still: Bool = false, trailingRoom: CGFloat = 0) {
+    public init(start: Date, still: Bool = false) {
         self.start = start
         self.still = still
-        self.trailingRoom = trailingRoom
     }
 
     /// How long a burst lasts, start to the last coin gone.
@@ -98,8 +95,7 @@ public struct GlassCoinBurst: View {
 
     /// Where a coin is `t` seconds into the burst, from the centre: out
     /// along its way, slowed by drag, pulled down. `sideways` shortens its
-    /// reach to the right
-    /// (the side that is cut off), and only that.
+    /// reach to the right (the side that is cut off), and only that.
     static func offset(_ coin: Coin, at t: Double, sideways: Double = 1) -> CGVector {
         let cosine = cos(coin.angle)
         let flown = max(0, t - coin.delay)
@@ -115,10 +111,10 @@ public struct GlassCoinBurst: View {
     static let widest = coins.map(\.diameter).max() ?? 0
 
     /// How much of its reach a coin flies to the right when the edge that
-    /// cuts it off is `room` from the centre: all of it when there is room,
-    /// less when there is not, so that no coin passes that edge. The left is
-    /// not limited: those coins fall over the cards beside, which cut
-    /// nothing off.
+    /// cuts it off, the card's right side, is `room` from the centre: all of
+    /// it when there is room, less when there is not, so that no coin
+    /// passes that edge. The left is not limited: those coins fall over the
+    /// cards beside, which cut nothing off.
     static func sideways(room: CGFloat) -> Double {
         max(0, min(1, Double(room - widest) / farthest))
     }
@@ -136,7 +132,7 @@ public struct GlassCoinBurst: View {
             Canvas { context, size in
                 let t = still ? Self.stillAt : date.timeIntervalSince(start)
                 guard t >= 0, t < Self.duration else { return }
-                Self.draw(in: &context, size: size, at: t, flash: !still, trailingRoom: trailingRoom)
+                Self.draw(in: &context, size: size, at: t, flash: !still)
             }
         }
         .padding(-Self.spill)
@@ -145,12 +141,10 @@ public struct GlassCoinBurst: View {
     }
 
     /// The burst `t` seconds in, round the centre of a field of `size`: the
-    /// card and `spill` past it, with `trailingRoom` between the card's right
-    /// side and the edge that cuts the coins off.
-    static func draw(in context: inout GraphicsContext, size: CGSize, at t: Double, flash: Bool,
-                     trailingRoom: CGFloat = 0) {
+    /// card and `spill` past it.
+    static func draw(in context: inout GraphicsContext, size: CGSize, at t: Double, flash: Bool) {
         let centre = CGPoint(x: size.width / 2, y: size.height / 2)
-        let sideways = Self.sideways(room: size.width / 2 - spill + trailingRoom)
+        let sideways = Self.sideways(room: size.width / 2 - spill)
         if flash, t < flashDuration {
             let left = 1 - t / flashDuration
             let radius = flashRadius * CGFloat(0.4 + 0.6 * (t / flashDuration))
@@ -211,12 +205,11 @@ public struct GlassCoinBurst: View {
 public extension View {
     /// Bursts gold coins out of this view's centre (`GlassCoinBurst`) from
     /// `start`. Nil draws nothing, and adds no view: almost always, there
-    /// is no burst. `trailingRoom` is the space between this view's right
-    /// side and the edge that would cut the coins off.
-    func glassCoinBurst(start: Date?, still: Bool = false, trailingRoom: CGFloat = 0) -> some View {
+    /// is no burst.
+    func glassCoinBurst(start: Date?, still: Bool = false) -> some View {
         overlay {
             if let start {
-                GlassCoinBurst(start: start, still: still, trailingRoom: trailingRoom)
+                GlassCoinBurst(start: start, still: still)
             }
         }
     }

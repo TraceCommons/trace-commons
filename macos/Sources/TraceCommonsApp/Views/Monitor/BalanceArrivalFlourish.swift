@@ -38,10 +38,6 @@ struct BalanceArrivalFlourish<Content: View>: View {
     /// How long the still coins stay under Reduce Motion.
     static var hold: Duration { .milliseconds(1600) }
 
-    /// The room the coins have past the tile's right side, inside the scroll
-    /// view that holds Home's tiles: they stop short of its edge.
-    static var edgeRoom: CGFloat { GlassTokens.Space.s3 }
-
     /// How long the coins stay: their flight, or under Reduce Motion the
     /// moment they are held still.
     static func coinsStay(reduceMotion: Bool) -> Duration {
@@ -50,7 +46,7 @@ struct BalanceArrivalFlourish<Content: View>: View {
 
     var body: some View {
         content(countingFigure)
-            .glassCoinBurst(start: burst, still: reduceMotion, trailingRoom: Self.edgeRoom)
+            .glassCoinBurst(start: burst, still: reduceMotion)
             .task(id: Run(received: status.receivedTotalNanos, remaining: status.remainingNanos)) {
                 check()
             }
