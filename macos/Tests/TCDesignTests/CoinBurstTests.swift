@@ -81,25 +81,31 @@ final class CoinBurstTests: XCTestCase {
         }
     }
 
-    /// No coin passes the card's sides, however narrow, where a scroll view
-    /// or a panel holding the card would cut it off; a wide card lets the
-    /// coins fly their full reach.
+    /// No coin passes the edge that cuts it off, on the right, however
+    /// narrow the tile; the left is not limited, so a narrow tile still
+    /// bursts every way (not a tall plume); a wide one flies the full reach.
     @MainActor
-    func test_noCoinPassesTheCardsSides() {
-        for width in [100.0, 160, 240, 400] {
-            let half = CGFloat(width / 2)
-            let sideways = GlassCoinBurst.sideways(halfWidth: half)
+    func test_noCoinPassesTheCutOffEdge() {
+        for width in [100.0, 115, 160, 240, 400] {
+            let room = CGFloat(width / 2) + 12
+            let sideways = GlassCoinBurst.sideways(room: room)
             var t = 0.0
             while t < GlassCoinBurst.duration {
                 for coin in GlassCoinBurst.coins {
                     let at = GlassCoinBurst.offset(coin, at: t, sideways: sideways)
-                    XCTAssertLessThanOrEqual(abs(at.dx) + coin.diameter / 2, half, "\(width)pt card: past its side at \(t)s")
+                    XCTAssertLessThanOrEqual(at.dx + coin.diameter / 2, room, "\(width)pt tile: past the edge at \(t)s")
+                    let free = GlassCoinBurst.offset(coin, at: t)
+                    if cos(coin.angle) <= 0 { XCTAssertEqual(at, free, "the left is not limited") }
+                    XCTAssertEqual(at.dy, free.dy, "nor up and down")
                 }
                 t += 0.05
             }
         }
-        XCTAssertEqual(GlassCoinBurst.sideways(halfWidth: 400), 1, "a wide card holds the whole burst")
-        XCTAssertGreaterThan(GlassCoinBurst.sideways(halfWidth: 120), 0.9, "Home's Balance tile: nearly all of it")
+        XCTAssertEqual(GlassCoinBurst.sideways(room: 400), 1, "room enough holds the whole burst")
+        // Home's edge-rail tile (about 115pt): the left reach is what it was.
+        let left = GlassCoinBurst.coins.min { cos($0.angle) < cos($1.angle) }!
+        XCTAssertEqual(GlassCoinBurst.offset(left, at: 0.5, sideways: GlassCoinBurst.sideways(room: 70)).dx,
+                       GlassCoinBurst.offset(left, at: 0.5).dx)
     }
 
     /// The burst adds a view only while there is one; almost always there
@@ -107,8 +113,8 @@ final class CoinBurstTests: XCTestCase {
     func test_noBurstAddsNoView() throws {
         let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "CoinBurst.swift" }?.1)
         let modifier = try XCTUnwrap(source.range(of: "func glassCoinBurst("))
-        let check = try XCTUnwrap(source.range(of: "if start != nil {", range: modifier.upperBound..<source.endIndex))
-        let burst = try XCTUnwrap(source.range(of: "GlassCoinBurst(start: start, still: still)",
+        let check = try XCTUnwrap(source.range(of: "if let start {", range: modifier.upperBound..<source.endIndex))
+        let burst = try XCTUnwrap(source.range(of: "GlassCoinBurst(start: start, still: still, trailingRoom: trailingRoom)",
                                                range: modifier.upperBound..<source.endIndex))
         XCTAssertLessThan(check.lowerBound, burst.lowerBound)
     }
@@ -117,7 +123,7 @@ final class CoinBurstTests: XCTestCase {
     /// coins are still, and the drawing reads no clock.
     func test_reduceMotionDrawsTheCoinsStill() throws {
         let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "CoinBurst.swift" }?.1)
-        XCTAssertTrue(source.contains("GlassAnimationTimeline(paused: start == nil || still)"))
+        XCTAssertTrue(source.contains("GlassAnimationTimeline(paused: still)"))
         XCTAssertTrue(source.contains("let t = still ? Self.stillAt : date.timeIntervalSince(start)"))
         XCTAssertTrue(source.contains(".allowsHitTesting(false)"))
         XCTAssertTrue(source.contains(".accessibilityHidden(true)"))

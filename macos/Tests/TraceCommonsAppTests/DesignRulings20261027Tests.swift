@@ -58,7 +58,7 @@ final class DesignRulings20261027Tests: XCTestCase {
     /// tile no longer repeats what was received under the 24-hour change.
     func test_creditBurstsCoinsAndTheReceivedLineIsGone() throws {
         let flourish = try Self.text("Views/Monitor/BalanceArrivalFlourish.swift")
-        XCTAssertTrue(flourish.contains(".glassCoinBurst(start: burst, still: reduceMotion)"))
+        XCTAssertTrue(flourish.contains(".glassCoinBurst(start: burst, still: reduceMotion, trailingRoom: Self.edgeRoom)"))
         XCTAssertFalse(flourish.contains("strokeBorder"))
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertFalse(home.contains("balanceReceived"), "the received line is back")
@@ -85,12 +85,13 @@ final class DesignRulings20261027Tests: XCTestCase {
         XCTAssertLessThan(railRaised.lowerBound, map.lowerBound, "the rail's tiles are under its map")
     }
 
-    /// A balance refresh mid-burst does not cut the coins off, nor clear a
-    /// burst begun after it.
+    /// A balance refresh mid-burst does not cut the coins off: they clear on
+    /// a `.task(id: burst)`, which only a newer burst or the tile going away
+    /// restarts or ends.
     func test_aRefreshMidBurstLetsTheCoinsLand() throws {
         let flourish = try Self.text("Views/Monitor/BalanceArrivalFlourish.swift")
-        XCTAssertTrue(flourish.contains("await Task { try? await Task.sleep(for: left) }.value"))
-        XCTAssertTrue(flourish.contains("if burst == mine { burst = nil }"))
-        XCTAssertFalse(flourish.contains("burst = nil\n"), "a burst is cleared whoever began it")
+        XCTAssertTrue(flourish.contains(".task(id: burst) {"))
+        XCTAssertTrue(flourish.contains("guard !Task.isCancelled else { return }\n                burst = nil"))
+        XCTAssertEqual(flourish.components(separatedBy: "burst = nil").count - 1, 1, "cleared in one place")
     }
 }

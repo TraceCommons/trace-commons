@@ -48,6 +48,10 @@ public struct GlassCardShimmer: View {
         return max(first, now.duration(to: passEnds))
     }
 
+    /// `sweep` with no pass under way: the next whole step, where nothing
+    /// shows.
+    static func resting(_ sweep: Double) -> Double { sweep.rounded(.up) }
+
     /// What starts the passes over: Reduce Motion turned on or off, the
     /// window coming into or out of sight, or back in focus.
     private struct Run: Equatable {
@@ -68,6 +72,10 @@ public struct GlassCardShimmer: View {
             .task(id: Run(reduceMotion: reduceMotion, visible: visible, focus: focus)) {
                 // A pass under way when this starts over runs out; none
                 // starts after it.
+                // Reduce Motion turned on mid-pass ends it at once.
+                if reduceMotion {
+                    withTransaction(Transaction(animation: nil)) { sweep = Self.resting(sweep) }
+                }
                 guard !reduceMotion, visible else { return }
                 var wait = Self.firstWait(now: .now, passEnds: passEnds)
                 while !Task.isCancelled {

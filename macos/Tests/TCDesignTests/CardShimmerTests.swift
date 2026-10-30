@@ -119,7 +119,20 @@ final class CardShimmerTests: XCTestCase {
         XCTAssertTrue(source.contains("try? await Task.sleep(for: wait)\n" + String(repeating: " ", count: 20)
                                       + "guard !Task.isCancelled else { return }"), "a cancelled run starts a pass")
         XCTAssertTrue(source.contains("withAnimation(GlassMotion.curve(Self.duration)) { sweep += 1 }"))
-        XCTAssertFalse(source.contains("withTransaction"), "a pass is reset again")
+        XCTAssertFalse(source.contains("sweep = 0"), "a pass is reset again")
+    }
+
+    /// Reduce Motion turned on during a pass ends it at once, with no
+    /// animation, on a whole step where nothing shows.
+    func test_reduceMotionDuringAPassEndsIt() throws {
+        XCTAssertEqual(GlassCardShimmer.resting(3.4), 4)
+        XCTAssertEqual(GlassCardShimmer.resting(3), 3, "between passes it stays put")
+        let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "CardShimmer.swift" }?.1)
+        let reduce = try XCTUnwrap(source.range(
+            of: "if reduceMotion {\n" + String(repeating: " ", count: 20)
+                + "withTransaction(Transaction(animation: nil)) { sweep = Self.resting(sweep) }"))
+        let stop = try XCTUnwrap(source.range(of: "guard !reduceMotion, visible else { return }"))
+        XCTAssertLessThan(reduce.lowerBound, stop.lowerBound, "before the guard that stops the passes")
     }
 
     /// The card's band and the map's are one geometry, at one lean.

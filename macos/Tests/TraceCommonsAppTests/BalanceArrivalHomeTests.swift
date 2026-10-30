@@ -97,7 +97,7 @@ final class BalanceArrivalHomeTests: XCTestCase {
             contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent(
                 "Views/Monitor/BalanceArrivalFlourish.swift"),
             encoding: .utf8)
-        XCTAssertTrue(source.contains(".glassCoinBurst(start: burst, still: reduceMotion)"))
+        XCTAssertTrue(source.contains(".glassCoinBurst(start: burst, still: reduceMotion, trailingRoom: Self.edgeRoom)"))
         XCTAssertFalse(source.contains("strokeBorder"), "the lit edge is back")
         XCTAssertFalse(source.contains("statusOnText"), "the green edge is back")
         XCTAssertTrue(source.contains("accessibilityReduceMotion"))
@@ -107,5 +107,27 @@ final class BalanceArrivalHomeTests: XCTestCase {
                 "Views/Monitor/HomeViews.swift"),
             encoding: .utf8)
         XCTAssertTrue(home.contains("BalanceArrivalFlourish("))
+    }
+
+    /// A balance refresh mid-count neither cancels the count nor the coins:
+    /// the count has a task of its own, keyed on the count and not on the
+    /// balance, and the coins clear on a `.task(id: burst)`, not on a task
+    /// the check begins.
+    func test_aRefreshMidCountLeavesTheCountAndCoinsToFinish() throws {
+        let source = try String(
+            contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent(
+                "Views/Monitor/BalanceArrivalFlourish.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(source.contains(".task(id: count) {"))
+        XCTAssertTrue(source.contains(".task(id: burst) {"))
+        XCTAssertTrue(source.contains("count = Count(from: from, to: to)"))
+        XCTAssertFalse(source.contains("Task {"), "no unstructured task")
+        XCTAssertFalse(source.contains("burst == mine"), "no Date check by hand")
+        // The check task starts the count and returns; it does not run it.
+        let check = try XCTUnwrap(source.range(of: "private func check() {"))
+        XCTAssertFalse(source[check.upperBound...].contains("Task.sleep"))
+        XCTAssertEqual(BalanceArrivalFlourish<EmptyView>.coinsStay(reduceMotion: true), .milliseconds(1600))
+        XCTAssertEqual(BalanceArrivalFlourish<EmptyView>.coinsStay(reduceMotion: false),
+                       .seconds(GlassCoinBurst.duration))
     }
 }
