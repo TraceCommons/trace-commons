@@ -439,7 +439,7 @@ struct TracesTreeView: View, Equatable {
     /// Automatic, off at Ask, when the core offers the other; nil at Never
     /// or for a folder the core lists no mode for. Turning it on arms the
     /// folder through `modeChange`, so the core's arming question is asked.
-    static func automaticSwitch(_ folder: TracesTree.FolderNode) -> Bool? {
+    nonisolated static func automaticSwitch(_ folder: TracesTree.FolderNode) -> Bool? {
         switch folder.mode {
         case .autoUpload: folder.offerableModes.contains(.ask) ? true : nil
         case .ask: folder.offerableModes.contains(.autoUpload) ? false : nil
