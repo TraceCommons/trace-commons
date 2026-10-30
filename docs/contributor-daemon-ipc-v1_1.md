@@ -2920,6 +2920,22 @@ refused with `project-id-unrecognized`.
 clearing the override returns it to. They differ only while an override is
 in force. See "The contribution override" below.
 
+Under the include-existing grant both report what the daemon will apply
+(since 2026-10-29): a folder the grant will arm on its next pass -- one set
+to `notify_only` before the grant, or one with no rule yet (a discovered or
+found row) -- reads `auto_upload` in `mode` and `folder_mode`, though no
+`auto_upload` rule is stored for it yet. Its sessions are approved
+unattended, so `notify_only` would misstate it, and a shell that only sends
+a pick differing from `mode` could not offer Ask on it. Picking
+`notify_only` there makes the folder an exception to the grant. A folder set
+to `ignore`, one set to `notify_only` after the grant, and the unknown bucket
+read as their own mode. With no grant, or a grant without
+`include_existing`, nothing changes. `status.contribution_mode` rolls up the
+same value, so it reads `auto_upload`, not `mixed`, when every folder will
+upload. Such a configured row also carries `automatic_disclosure`
+(`patterns_only` until its sessions earn more) and `from_now: false`, as an
+armed row does. No field is added; a client reads `mode` as before.
+
 An armed row also carries `from_now`: `true` when it was armed from now
 (`include_backlog: false`), so its backlog waits for the contributor, and
 `false` when it was armed with its backlog -- the default since 2026-10-19,
@@ -3817,9 +3833,15 @@ including folders set to `notify_only` before the grant. A folder set to
 `ignore` is never armed. Neither is a folder set to `notify_only` **after**
 the grant (owner decision 2026-10-29): it is an exception to the grant, so it
 resolves to Ask, its sessions wait as `pending`, and every other folder stays
-automatic. "After" is the folder's own last mode change, strictly later than
-`granted_at`, so a later include-existing grant supersedes the exception in
-the same way. A folder the grant armed and a void then returned to
+automatic. "After" is by identity, not by clock: each fresh global choice
+(`grant_automatic`, and widening it to include existing history) gets a new
+grant generation, and a folder's mode change records the generation in force.
+A `notify_only` recorded under the current generation is an exception, so a
+clock stepped backwards or an exact tie cannot arm it, and a later
+include-existing grant supersedes the exception in the same way. A policy
+file written before generations existed has them derived once on load from
+the earlier rule (a mode change later than `granted_at`), so an upgrade arms
+no folder that was asking. A folder the grant armed and a void then returned to
 `notify_only` keeps asking too. Setting the folder back to `auto_upload`
 arms it with its backlog (`include_backlog: false` is refused with
 `automatic-sharing-includes-existing` under this grant), so what it held as

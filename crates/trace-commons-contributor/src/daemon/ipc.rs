@@ -4993,14 +4993,18 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         .iter()
         .map(|(key, entry)| {
             let shown = entry.display_path.as_deref().unwrap_or(key);
-            let mode = policy.resolve(key);
+            // `mode` and `folder_mode` are what the daemon will apply: a
+            // folder the include-existing grant will arm on its next pass
+            // reads Automatic (`ProjectPolicy::shown_mode`), so a shell shows
+            // the choice in force and can offer Ask on it as a change.
+            let mode = policy.shown_mode(key);
             let mut row = with_counts(
                 serde_json::json!({
                 "project_id": project_id_for(key),
                 "project_label": labels.label(key, entry.display_path.as_deref()),
                 "project_path": display_path(shown),
                 "mode": mode,
-                "folder_mode": policy.folder_mode(key),
+                "folder_mode": policy.shown_folder_mode(key),
                 "added_at": entry.added_at,
                 "configured": true,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
@@ -5032,8 +5036,8 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 "project_id": project_id_for(key),
                 "project_label": labels.label(key, shown.as_deref()),
                 "project_path": display_path(shown.as_deref().unwrap_or(key)),
-                "mode": policy.resolve(key),
-                "folder_mode": policy.folder_mode(key),
+                "mode": policy.shown_mode(key),
+                "folder_mode": policy.shown_folder_mode(key),
                 "added_at": serde_json::Value::Null,
                 "configured": false,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
@@ -5047,8 +5051,8 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 "project_id": project_id_for(key),
                 "project_label": labels.label(key, None),
                 "project_path": display_path(key),
-                "mode": policy.resolve(key),
-                "folder_mode": policy.folder_mode(key),
+                "mode": policy.shown_mode(key),
+                "folder_mode": policy.shown_folder_mode(key),
                 "added_at": serde_json::Value::Null,
                 "configured": false,
                 "is_unresolved_bucket": false,

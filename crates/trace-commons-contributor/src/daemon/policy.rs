@@ -694,7 +694,9 @@ impl ProjectPolicy {
     /// they differ ("Mixed").
     ///
     /// "Every folder" is every configured folder and every key in
-    /// `discovered` (the queue's), by its own mode ([`Self::folder_mode`]),
+    /// `discovered` (the queue's), by its own mode as shown
+    /// ([`Self::shown_folder_mode`], so a folder the include-existing grant
+    /// will arm counts as Automatic, as its row reads),
     /// excluding the unknown bucket, which can never be armed and so would
     /// make any all-automatic set read as mixed. With no folders it is
     /// `NotifyOnly`, the default every unruled folder resolves to.
@@ -739,7 +741,43 @@ impl ProjectPolicy {
     }
 
     fn folder_mode_unless_unknown(&self, project_key: &str) -> Option<ProjectMode> {
-        (project_key != UNKNOWN_PROJECT_KEY).then(|| self.folder_mode(project_key))
+        (project_key != UNKNOWN_PROJECT_KEY).then(|| self.shown_folder_mode(project_key))
+    }
+
+    /// Whether the include-existing grant in force will arm `project_key`
+    /// on its next pass: a real folder whose own mode is Ask and that is not
+    /// an exception to the grant ([`Self::asks_despite_grant`]) -- one set
+    /// to Ask before the grant, or one with no entry yet. The same test as
+    /// [`Self::arms_by_default`]'s include-existing branch, less the
+    /// recorded source, which a listing has no session to name. Reading
+    /// Automatic before the source is recorded only ever says more is sent
+    /// than is, never less.
+    pub fn grant_will_arm(&self, project_key: &str) -> bool {
+        self.includes_existing_automatically()
+            && project_key != UNKNOWN_PROJECT_KEY
+            && self.folder_mode(project_key) == ProjectMode::NotifyOnly
+            && !self.asks_despite_grant(project_key)
+    }
+
+    /// [`Self::folder_mode`] as a shell shows it: Automatic for a folder the
+    /// include-existing grant will arm ([`Self::grant_will_arm`]), because
+    /// that is what the daemon will do with its sessions. Showing it as Ask
+    /// would say a person decides while the grant sends, and a shell could
+    /// not offer Ask on it as a change. Never, a post-grant Ask, and the
+    /// unknown bucket read as their own mode; with no include-existing grant
+    /// this is `folder_mode`.
+    pub fn shown_folder_mode(&self, project_key: &str) -> ProjectMode {
+        if self.grant_will_arm(project_key) {
+            ProjectMode::AutoUpload
+        } else {
+            self.folder_mode(project_key)
+        }
+    }
+
+    /// [`Self::resolve`] as a shell shows it: the contribution override read
+    /// over [`Self::shown_folder_mode`] by the same rules.
+    pub fn shown_mode(&self, project_key: &str) -> ProjectMode {
+        self.resolve_over(self.shown_folder_mode(project_key), project_key)
     }
 
     /// The arming-from-now record that holds `project_key`'s backlog, if
@@ -1498,7 +1536,12 @@ impl ProjectPolicy {
     /// An `AutoUpload` override's hold on what was already on disk is not
     /// here but in [`Self::waits_for_a_person`], beside the other holds.
     pub fn resolve(&self, project_key: &str) -> ProjectMode {
-        let own = self.folder_mode(project_key);
+        self.resolve_over(self.folder_mode(project_key), project_key)
+    }
+
+    /// The override read over `own`, the folder's mode, as [`Self::resolve`]
+    /// describes.
+    fn resolve_over(&self, own: ProjectMode, project_key: &str) -> ProjectMode {
         let Some(o) = self.contribution_override.as_ref() else {
             return own;
         };
@@ -3244,6 +3287,59 @@ mod tests {
         assert_eq!(p.projects.len(), 1, "the two spellings merged");
         assert!(p.asks_despite_grant(&key));
         assert!(!p.arms_by_default(&key, "/s/a.jsonl", SRC));
+    }
+
+    /// What a shell shows for a folder is what the daemon will do with it:
+    /// under the include-existing grant a folder the grant will arm reads
+    /// Automatic, and nothing else moves. With no grant, or a legacy
+    /// from-now grant, the shown mode is the resolved one.
+    #[test]
+    fn a_folder_the_grant_will_arm_shows_as_automatic_and_nothing_else_moves() {
+        let mut p = granted_including_existing();
+        p.set_mode(
+            "/w/post",
+            ProjectMode::NotifyOnly,
+            t("2026-10-29T13:00:00Z"),
+        )
+        .unwrap();
+        p.set_mode("/w/never", ProjectMode::Ignore, t("2026-10-29T13:00:00Z"))
+            .unwrap();
+        for (key, shown) in [
+            ("/w/pre", ProjectMode::AutoUpload),
+            ("/w/none", ProjectMode::AutoUpload),
+            ("/w/post", ProjectMode::NotifyOnly),
+            ("/w/never", ProjectMode::Ignore),
+            (UNKNOWN_PROJECT_KEY, ProjectMode::NotifyOnly),
+        ] {
+            assert_eq!(p.shown_folder_mode(key), shown, "{key}");
+            assert_eq!(p.shown_mode(key), shown, "{key}");
+            assert_eq!(
+                p.grant_will_arm(key),
+                shown == ProjectMode::AutoUpload,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            p.resolve("/w/pre"),
+            ProjectMode::NotifyOnly,
+            "stored mode untouched"
+        );
+        // An Ask override still reads Ask over a folder the grant will arm.
+        p.set_contribution_override(ProjectMode::NotifyOnly, t("2026-10-29T14:00:00Z"), None)
+            .unwrap();
+        assert_eq!(p.shown_mode("/w/pre"), ProjectMode::NotifyOnly);
+        assert_eq!(p.shown_folder_mode("/w/pre"), ProjectMode::AutoUpload);
+
+        for p in [ProjectPolicy::new(), granted_with_disk(&[], &[])] {
+            let mut p = p;
+            p.set_mode("/w/ask", ProjectMode::NotifyOnly, t("2026-10-29T13:00:00Z"))
+                .unwrap();
+            for key in ["/w/ask", "/w/none"] {
+                assert!(!p.grant_will_arm(key), "{key}");
+                assert_eq!(p.shown_mode(key), p.resolve(key), "{key}");
+                assert_eq!(p.shown_folder_mode(key), p.folder_mode(key), "{key}");
+            }
+        }
     }
 
     /// The exception belongs to the include-existing grant: under a legacy
