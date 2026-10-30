@@ -742,6 +742,92 @@ async fn a_refused_renewal_is_not_retried_by_another_feature() {
     );
 }
 
+/// Replace `path` in one step, as the credential store publishes, so no
+/// read sees it half written.
+fn swap_in(path: &std::path::Path, bytes: &[u8]) {
+    let staged = path.with_extension("swap");
+    std::fs::write(&staged, bytes).unwrap();
+    std::fs::rename(&staged, path).unwrap();
+}
+
+/// A read that collides with a renewal publishing its session reads again
+/// once the renewal is done. A renewal stores its session off the runtime
+/// thread, and the credential store refuses a read whose record is being
+/// replaced rather than answer from a stale snapshot. That refusal is not
+/// "signed out": features reading at that moment answered
+/// `account-session-required` or an unknown figure (the CI failure of
+/// `features_that_arrive_together_renew_once`, Linux only). Here an
+/// unreadable record stands in for the one being replaced while the test
+/// holds the renewal's turn, on the inline path and on a running daemon.
+#[tokio::test]
+async fn a_read_that_collides_with_a_renewal_reads_what_it_left() {
+    for running in [false, true] {
+        let fx = Fixture::new(Session::Expired).await;
+        fx.enable_missions();
+        if running {
+            fx.as_running_daemon();
+        }
+        let renewed = json!({
+            "access_token": renewed_token(),
+            "expires_at": Utc::now() + chrono::Duration::hours(12),
+            "account_id": ACCOUNT,
+            "ingest_origin": fx.stub.origin,
+        });
+        fx.shared
+            .store
+            .write_daemon_file(
+                crate::config::ACCOUNT_SESSION_FILE,
+                &serde_json::to_vec(&renewed).unwrap(),
+            )
+            .unwrap();
+        // Read once so the file is the store's record, not the plain
+        // session a first read would migrate.
+        assert!(
+            crate::daemon::withdraw::account_session(&fx.shared)
+                .unwrap()
+                .is_some()
+        );
+        let record = fx
+            .shared
+            .store
+            .daemon_path(crate::config::ACCOUNT_SESSION_FILE);
+        let published = std::fs::read(&record).unwrap();
+        let turn = renewing(fx.shared.store.dir());
+        let held = turn.lock().await;
+        swap_in(&record, b"{");
+
+        let ((status, credit, missions), ()) = tokio::join!(
+            async {
+                tokio::join!(
+                    fx.call("account_session_status", json!({})),
+                    fx.call("commons_credit_summary", json!({})),
+                    fx.call("activity_missions_status", json!({})),
+                )
+            },
+            // Polled after the reads' first poll, in which the status
+            // read has already been refused and waits for the turn: the
+            // collision happens every run, with no timing involved.
+            async {
+                swap_in(&record, &published);
+                drop(held);
+            },
+        );
+
+        assert_eq!(
+            status.result.as_ref().unwrap()["signed_in"],
+            true,
+            "running={running}"
+        );
+        assert_eq!(
+            credit.result.as_ref().unwrap()["points_state"],
+            "known",
+            "running={running}"
+        );
+        assert_eq!(refusal(&missions), None, "running={running}");
+        assert_eq!(fx.ceremonies(), (0, 0), "running={running}");
+    }
+}
+
 #[tokio::test]
 async fn features_that_arrive_together_renew_once() {
     let fx = Fixture::new(Session::Expired).await;
