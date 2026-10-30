@@ -491,7 +491,9 @@ pub struct ArmedFromNow {
 
 /// The Flow 1 grant. Fresh onboarding can explicitly include existing
 /// eligible history from every watched folder; older grants retain their
-/// from-now scope.
+/// from-now scope. Under an include-existing grant a folder set to Never, or
+/// set to Ask after the grant, is excluded from it
+/// ([`ProjectPolicy::asks_despite_grant`]).
 ///
 /// By default it arms nothing already on disk, recorded
 /// **per source**. A source's first successful discovery under the grant
@@ -989,8 +991,10 @@ impl ProjectPolicy {
     }
 
     /// Expand the fresh grant to all watched history. A fresh global choice
-    /// supersedes old global modes and per-folder Automatic-from-now limits,
-    /// while folder Never and every per-session decision remain in force.
+    /// supersedes old global modes, old per-folder Ask modes and per-folder
+    /// Automatic-from-now limits, while folder Never and every per-session
+    /// decision remain in force. A folder set to Ask after this is an
+    /// exception to it, as Never is ([`Self::asks_despite_grant`]).
     pub fn include_existing_under_grant(&mut self) {
         let Some(grant) = self.automatic_grant.as_mut() else {
             return;
@@ -1052,7 +1056,8 @@ impl ProjectPolicy {
     /// `session_path` from `source_key`: a recorded source, a real project
     /// with no entry of its own, and neither the project nor the session on
     /// disk when the grant recorded it. An explicit include-existing grant
-    /// also arms existing Ask folders, while Never remains excluded.
+    /// also arms Ask folders set before it, while Never and an Ask set after
+    /// it ([`Self::asks_despite_grant`]) remain excluded.
     pub fn arms_by_default(&self, project_key: &str, session_path: &str, source_key: &str) -> bool {
         let Some(grant) = self.automatic_grant.as_ref() else {
             return false;
@@ -1060,14 +1065,45 @@ impl ProjectPolicy {
         grant.recorded_sources.contains(source_key)
             && project_key != UNKNOWN_PROJECT_KEY
             && if grant.include_existing {
-                // This fresh global choice includes Ask folders; Never is
-                // still an explicit exclusion and must always win.
+                // This fresh global choice includes Ask folders from before
+                // it; Never is still an explicit exclusion and must always
+                // win, and so is an Ask the contributor chose after it.
                 self.folder_mode(project_key) == ProjectMode::NotifyOnly
+                    && !self.asks_despite_grant(project_key)
             } else {
                 !self.projects.contains_key(project_key)
                     && !grant.projects_on_disk.contains(project_key)
                     && !self.sessions_on_disk_at_grant.contains(session_path)
             }
+    }
+
+    /// Whether `project_key` is a folder the contributor set to Ask
+    /// (`NotifyOnly`) after the include-existing grant in force was given:
+    /// an exception to that grant, as a folder set to Never is (owner
+    /// decision 2026-10-29, after Ask went missing under the grant in
+    /// staging). The grant does not arm it ([`Self::arms_by_default`]), so it
+    /// resolves to Ask and its sessions wait for a person.
+    ///
+    /// "After" is the folder's own `added_at`, which [`Self::set_mode`]
+    /// writes on every mode change, strictly later than the grant's
+    /// `granted_at`. So an Ask from before the grant is superseded by it --
+    /// the fresh global choice replaces old folder modes at the moment it is
+    /// made, as [`Self::include_existing_under_grant`] says -- and a later
+    /// include-existing grant supersedes this one's exceptions the same way.
+    /// A folder the grant armed and a sweep then voided back to Ask
+    /// ([`Self::sweep_grants`]) counts too: it was armed after the grant, so
+    /// it keeps asking rather than being re-armed on its next session.
+    pub fn asks_despite_grant(&self, project_key: &str) -> bool {
+        let Some(grant) = self
+            .automatic_grant
+            .as_ref()
+            .filter(|grant| grant.include_existing)
+        else {
+            return false;
+        };
+        self.projects.get(project_key).is_some_and(|entry| {
+            entry.mode == ProjectMode::NotifyOnly && entry.added_at > grant.granted_at
+        })
     }
 
     /// Whether the session at `session_path` must not be approved unattended
@@ -2884,6 +2920,134 @@ mod tests {
         let sweep = p.sweep_grants(&wide, t("2026-09-25T04:00:00Z"));
         assert!(sweep.voided.is_empty());
         assert!(sweep.automatic_grant_voided.is_none());
+    }
+
+    /// A policy whose Flow 1 grant includes existing history, given at
+    /// `2026-10-29T12:00:00Z` with its one source recorded, and a folder set
+    /// to Ask an hour before it.
+    fn granted_including_existing() -> ProjectPolicy {
+        let mut p = ProjectPolicy::new();
+        p.set_mode("/w/pre", ProjectMode::NotifyOnly, t("2026-10-29T11:00:00Z"))
+            .unwrap();
+        let at = t("2026-10-29T12:00:00Z");
+        p.grant_automatic(at, grant_terms_with("https://ingest.invalid"));
+        p.include_existing_under_grant();
+        assert!(p.record_source(at, SRC, BTreeSet::new(), BTreeSet::new()));
+        p
+    }
+
+    /// Owner decision 2026-10-29: Ask is always offered on a folder, and a
+    /// folder set to Ask after the include-existing grant is an exception
+    /// to it, as a folder set to Never is. A folder's Ask from before the
+    /// grant is still superseded by it: the fresh global choice replaces
+    /// old folder modes at the moment it is made.
+    #[test]
+    fn a_folder_set_to_ask_after_the_grant_is_an_exception_to_it() {
+        let mut p = granted_including_existing();
+        p.set_mode(
+            "/w/post",
+            ProjectMode::NotifyOnly,
+            t("2026-10-29T13:00:00Z"),
+        )
+        .unwrap();
+        p.set_mode("/w/never", ProjectMode::Ignore, t("2026-10-29T13:00:00Z"))
+            .unwrap();
+
+        assert!(p.arms_by_default("/w/none", "/s/a.jsonl", SRC), "no entry");
+        assert!(
+            p.arms_by_default("/w/pre", "/s/b.jsonl", SRC),
+            "an Ask from before the grant is superseded by it"
+        );
+        assert!(!p.asks_despite_grant("/w/pre"));
+        assert!(
+            !p.arms_by_default("/w/post", "/s/c.jsonl", SRC),
+            "an Ask chosen after the grant is the folder's exception"
+        );
+        assert!(p.asks_despite_grant("/w/post"));
+        assert_eq!(p.resolve("/w/post"), ProjectMode::NotifyOnly);
+        assert!(!p.arms_by_default("/w/never", "/s/d.jsonl", SRC));
+        assert!(!p.arms_by_default(UNKNOWN_PROJECT_KEY, "/s/e.jsonl", SRC));
+
+        // Back to Automatic: the exception is gone, and Ask again restores it.
+        p.set_mode(
+            "/w/post",
+            ProjectMode::AutoUpload,
+            t("2026-10-29T14:00:00Z"),
+        )
+        .unwrap();
+        assert!(!p.asks_despite_grant("/w/post"));
+        assert_eq!(p.resolve("/w/post"), ProjectMode::AutoUpload);
+        p.set_mode(
+            "/w/post",
+            ProjectMode::NotifyOnly,
+            t("2026-10-29T15:00:00Z"),
+        )
+        .unwrap();
+        assert!(!p.arms_by_default("/w/post", "/s/c.jsonl", SRC));
+
+        // A fresh include-existing grant is a fresh global choice: it
+        // supersedes the folder's Ask as it did the pre-grant one.
+        let again = t("2026-10-29T16:00:00Z");
+        p.grant_automatic(again, grant_terms_with("https://ingest.invalid"));
+        p.include_existing_under_grant();
+        assert!(p.record_source(again, SRC, BTreeSet::new(), BTreeSet::new()));
+        assert!(!p.asks_despite_grant("/w/post"));
+        assert!(p.arms_by_default("/w/post", "/s/c.jsonl", SRC));
+    }
+
+    /// The exception belongs to the include-existing grant: under a legacy
+    /// from-now grant every folder with an entry already keeps its own mode,
+    /// and with no grant there is nothing to be an exception to.
+    #[test]
+    fn asking_despite_the_grant_needs_an_include_existing_grant() {
+        let mut p = ProjectPolicy::new();
+        p.set_mode("/w/ask", ProjectMode::NotifyOnly, t("2026-10-29T13:00:00Z"))
+            .unwrap();
+        assert!(!p.asks_despite_grant("/w/ask"));
+        let mut p = granted_with_disk(&[], &[]);
+        p.set_mode("/w/ask", ProjectMode::NotifyOnly, t("2026-10-29T13:00:00Z"))
+            .unwrap();
+        assert!(!p.asks_despite_grant("/w/ask"));
+        assert!(!p.arms_by_default("/w/ask", "/s/a.jsonl", SRC));
+    }
+
+    /// #1739's keep-alive: adopting the contributor's chosen data uses
+    /// keeps the grant, and keeps a folder's Ask chosen under it.
+    #[test]
+    fn a_folder_ask_under_the_grant_survives_adopting_chosen_scopes() {
+        let mut p = granted_including_existing();
+        p.set_mode("/w/ask", ProjectMode::NotifyOnly, t("2026-10-29T13:00:00Z"))
+            .unwrap();
+        let mut widened = grant_terms_with("https://ingest.invalid");
+        widened.consent_scopes.insert("model_training".to_string());
+        assert!(p.adopt_chosen_scopes(&widened.consent_scopes));
+        let sweep = p.sweep_grants(&widened, t("2026-10-29T14:00:00Z"));
+        assert!(sweep.automatic_grant_voided.is_none());
+        assert!(p.includes_existing_automatically());
+        assert!(p.asks_despite_grant("/w/ask"));
+        assert!(!p.arms_by_default("/w/ask", "/s/a.jsonl", SRC));
+        assert_eq!(p.resolve("/w/ask"), ProjectMode::NotifyOnly);
+    }
+
+    /// A folder armed after the grant and then voided while the grant
+    /// survives returns to Ask and stays there: the void's "asks again" is
+    /// not undone by the grant re-arming it on the next session. The
+    /// fail-closed reading, and the one `sweep_grants` documents.
+    #[test]
+    fn a_folder_voided_after_the_grant_keeps_asking() {
+        let mut p = granted_including_existing();
+        let narrow = grant_terms_with("https://ingest.invalid");
+        p.arm_by_grant("/w/api", t("2026-10-29T13:00:00Z"), narrow.clone())
+            .unwrap();
+        // The folder's terms widen while the grant's own still cover them.
+        let mut wide = narrow;
+        wide.consent_scopes.insert("model_training".to_string());
+        p.automatic_grant.as_mut().unwrap().granted_under = wide.clone();
+        let sweep = p.sweep_grants(&wide, t("2026-10-29T14:00:00Z"));
+        assert_eq!(sweep.voided.len(), 1);
+        assert!(sweep.automatic_grant_voided.is_none());
+        assert_eq!(p.resolve("/w/api"), ProjectMode::NotifyOnly);
+        assert!(!p.arms_by_default("/w/api", "/s/a.jsonl", SRC));
     }
 
     /// R6's ship condition, in the policy: every void leaves a notice for
