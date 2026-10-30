@@ -29,7 +29,8 @@
  *
  * tc_daemon_stop is idempotent, but it is NOT a teardown barrier for a
  * SECOND CONCURRENT CALLER. If two threads call it at once, one thread
- * performs the teardown and blocks until it completes; the other returns
+ * performs the teardown and waits for it, for at most 2 seconds (see
+ * TEARDOWN BOUNDS below); the other returns
  * IMMEDIATELY, possibly while the daemon is still stopping. Do not treat a
  * tc_daemon_stop return on thread B as proof that thread A's teardown
  * finished. (An earlier revision made the second caller wait; that was
@@ -37,6 +38,21 @@
  * the waiter had to re-acquire, and a waiter parked on one of the daemon
  * runtime's own worker threads could deadlock the teardown it was waiting
  * for. A weaker honest guarantee is better than a stronger false one.)
+ *
+ * TEARDOWN BOUNDS: neither tc_daemon_stop nor tc_handle_free waits on
+ * daemon work without a deadline, so a host may call them on its UI
+ * thread while quitting. tc_daemon_stop waits at most 2 seconds for the
+ * daemon's current pass to end; a pass checks for stop only between steps,
+ * and a step can block for longer. Past that it returns, and the rest of
+ * the teardown finishes on its own thread: the daemon keeps its exclusive
+ * lock on the state directory until that pass has ended, so a new
+ * tc_daemon_start on the same directory fails, as against any running
+ * daemon, until then. tc_handle_free waits at most 1 second more, for
+ * blocking work outside the pass; if the pass is still running it leaks
+ * the handle's runtime instead of cancelling the pass part way. Neither
+ * bound makes a return mean the daemon has finished stopping, and neither
+ * cancels the pass or any blocking work: what is still running when the
+ * process exits stops there, as it would on a force quit.
  *
  * Every function here catches Rust panics at the boundary and converts them
  * to an ordinary error; a panic never unwinds into the caller. Every
@@ -2189,6 +2205,10 @@ int32_t     tc_witness_last_result_tone(void);
  * threads. Does NOT free the handle; call tc_handle_free once nothing else
  * will use it again. Safe to call with NULL.
  *
+ * Waits at most 2 seconds for the daemon's current pass to end, then
+ * returns and leaves the teardown to finish in the background -- see
+ * TEARDOWN BOUNDS above.
+ *
  * Idempotent, but NOT a teardown barrier for a second concurrent caller:
  * of two simultaneous callers, one performs the teardown and the other
  * returns immediately, possibly before the daemon has finished stopping.
@@ -2215,6 +2235,12 @@ void        tc_daemon_stop(tc_handle*);
  * own worker threads is refused (leaking the handle, recorded via
  * tc_last_error) rather than risking the crash that would otherwise
  * follow.
+ *
+ * Bounded like tc_daemon_stop (see TEARDOWN BOUNDS above): up to 2 seconds
+ * for its own stop when tc_daemon_stop was not called first, then at most
+ * 1 second for the runtime's other blocking work. If the daemon's pass is
+ * still running after the stop's bound, the runtime is leaked rather than
+ * shut down, so that pass is never cancelled part way.
  */
 void        tc_handle_free(tc_handle*);
 
