@@ -1634,7 +1634,7 @@ mod tests {
             vec![ChatModel {
                 id: "fixture/chat".into(),
                 name: None,
-                tier: None,
+                tier: Some(crate::managed::models::ModelTier::Incognito),
             }]
         );
         server.abort();

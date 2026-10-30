@@ -15602,9 +15602,9 @@ mod tests {
         assert_eq!(
             context["route_models"],
             serde_json::json!([
-                {"id":"fixture-model"},
+                {"id":"fixture-model","tier":"incognito"},
                 {"id":"fixture-other","name":"Fixture Other","tier":"near_ai"},
-                {"id":"openai/gpt-6.1-sol"},
+                {"id":"openai/gpt-6.1-sol","tier":"incognito"},
             ])
         );
         assert!(
@@ -15645,7 +15645,7 @@ mod tests {
         assert_eq!(
             r.result.expect("catalogue"),
             serde_json::json!({
-                "models":[{"id":"fixture-model"},{"id":"fixture-other","name":"Fixture Other","tier":"near_ai"}],
+                "models":[{"id":"fixture-model","tier":"incognito"},{"id":"fixture-other","name":"Fixture Other","tier":"near_ai"}],
                 "default":"fixture-model",
                 "favorites":[],
                 "unavailable_favorites":[],

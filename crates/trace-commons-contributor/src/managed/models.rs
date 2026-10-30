@@ -62,20 +62,17 @@ pub enum ModelTier {
 
 impl ModelTier {
     /// The tier `owned_by` names: NEAR AI or `Attested 3P` only when the
-    /// owner says so, otherwise Incognito (the least private) for any named
-    /// owner. None only for an absent or blank one.
-    fn from_owner(owned_by: Option<&str>) -> Option<Self> {
-        let owner = owned_by?.trim();
-        if owner.is_empty() {
-            return None;
-        }
+    /// owner says so, otherwise Incognito, the least private, whether the
+    /// owner is unlisted, generic, blank or absent.
+    fn from_owner(owned_by: Option<&str>) -> Self {
+        let owner = owned_by.unwrap_or("").trim();
         let is = |name: &str| owner.eq_ignore_ascii_case(name);
         if ["nearai", "near-ai", "near ai"].into_iter().any(is) {
-            Some(Self::NearAi)
+            Self::NearAi
         } else if is("attested 3p") {
-            Some(Self::External)
+            Self::External
         } else {
-            Some(Self::Incognito)
+            Self::Incognito
         }
     }
 }
@@ -87,8 +84,8 @@ pub struct ChatModel {
     /// NEAR AI's display name, when it gives one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// NEAR AI's privacy tier; none when the catalogue gives no `owned_by`
-    /// (OpenCode's own list, a fixture).
+    /// NEAR AI's privacy tier. Incognito unless `owned_by` names a known
+    /// private host; none only when a payload omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<ModelTier>,
 }
@@ -113,7 +110,7 @@ pub fn chat_models(catalogue: &serde_json::Value) -> Vec<ChatModel> {
                 .as_str()
                 .filter(|name| !name.trim().is_empty())
                 .map(str::to_owned),
-            tier: ModelTier::from_owner(entry["owned_by"].as_str()),
+            tier: Some(ModelTier::from_owner(entry["owned_by"].as_str())),
         });
     }
     kept
@@ -423,7 +420,7 @@ mod tests {
     /// NEAR AI's privacy tier comes from `owned_by`, as its catalogue
     /// labels it (live 2026-10-30): `nearai` runs in NEAR AI's TEEs,
     /// `Attested 3P` in a third party's, and a vendor's own name is a model
-    /// on that vendor's servers. No `owned_by` is no tier.
+    /// on that vendor's servers; so is any owner not known to be private.
     #[test]
     fn each_model_carries_near_ai_privacy_tier() {
         let kept = chat_models(&json!({"data": [
@@ -456,8 +453,8 @@ mod tests {
                 ("g/h", Some(ModelTier::NearAi)),
                 ("i/j", Some(ModelTier::NearAi)),
                 ("k/l", Some(ModelTier::Incognito)),
-                ("no/owner", None),
-                ("blank/owner", None),
+                ("no/owner", Some(ModelTier::Incognito)),
+                ("blank/owner", Some(ModelTier::Incognito)),
             ]
         );
         // On the wire: snake_case, and absent when unknown.
@@ -471,7 +468,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&kept[11]).unwrap(),
-            json!({"id": "no/owner"})
+            json!({"id": "no/owner", "tier": "incognito"})
         );
     }
 
