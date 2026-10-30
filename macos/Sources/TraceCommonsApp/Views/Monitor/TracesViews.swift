@@ -1080,6 +1080,9 @@ struct TracesFolderRow: View, Equatable {
                 onMenu: onMenu
             )
             .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.folder(projectID: folder.id)))
+            // Spoken, not a hover tip: the pill carries that, and VoiceOver
+            // lands on the row, so the core's withheld sentence is heard here.
+            .accessibilityHint(help)
             .disabled(writing)
             .opacity(writing ? TracesRowBusy.opacity : 1)
             .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
@@ -1115,8 +1118,8 @@ struct TracesFolderRow: View, Equatable {
                 GlassSplitButton(split.title, menuLabel: split.menuLabel, menuOpen: split.menuOpen, onMenu: onSplitMenu) {
                     onSplitSubmit()
                 }
+                .actionHelp(help)
                 .disabled(split.busy)
-                .help(help)
             }
             if let automatic {
                 Toggle(automaticLabel, isOn: Binding(get: { automatic }, set: { onAutomatic($0) }))

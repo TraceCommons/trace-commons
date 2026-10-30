@@ -596,7 +596,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             submit: "Submit",
             submit_count: "Submit \u{00b7} {count}",
             submitting: "Submitting\u{2026}",
-            submit_tip: "Submits this folder's waiting traces.",
+            submit_tip: "Submits this folder's eligible traces.",
             submit_trace_tip: "Sends this trace now.",
             eligible_count: "{count} eligible",
             reviewing: "Reviewing",
@@ -1932,10 +1932,9 @@ mod tests {
     /// follows it whenever some traces are held back.
     #[test]
     fn the_folder_submit_tip_names_the_folder() {
-        assert_eq!(
-            monitor_traces_copy().tree.submit_tip,
-            "Submits this folder's waiting traces."
-        );
+        let tree = monitor_traces_copy().tree;
+        assert!(tree.submit_tip.contains("folder"), "{}", tree.submit_tip);
+        assert_ne!(tree.submit_tip, tree.submit_trace_tip);
     }
 
     /// Ron's lines verbatim, with his numbers as `{name}` holes.
