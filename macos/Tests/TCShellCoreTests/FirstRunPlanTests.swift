@@ -483,28 +483,28 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
             .setAskEachTime,
             .setConsentScopes(["research"]),
+            .setProjectMode(projectID: "p1", .autoUpload),
             .includePastSessions(projectID: "p1", ["s1"]),
             .setPrivateAI(true),
             .markComplete,
         ])
     }
 
-    /// Ask each time is the global Ask override, which every folder's own
-    /// Automatic resolves under. Arming a folder beneath it would write an
-    /// arming and its audit row that are not in force, and that would start
-    /// sending if the override were later cleared, so Start sends none.
-    /// Its Ask and Never rules, and its picked past sessions, still go.
-    func test_askEachTimeNeverArmsAFolderBeneathTheOverride() {
+    /// Ask each time is the default for folders without a rule, not a
+    /// global override (#1753 A2): a folder picked Automatic in Customize is
+    /// armed and sends, as are its Ask and Never rules and its picked past
+    /// sessions. Before, it was dropped, and the folder kept asking.
+    func test_askEachTimeStillArmsAFolderPickedAutomatic() {
         var state = signedIn()
         state.scopes = ["research"]
         state.sharing = .askMe
         state.rules = ["p1": .autoUpload, "p2": .ask, "p3": .ignore]
         state.pastSelections = ["p1": ["s1"]]
         let calls = FirstRunPlan.calls(for: state, at: .start)
-        XCTAssertFalse(calls.contains(.setProjectMode(projectID: "p1", .autoUpload)))
         XCTAssertEqual(calls, [
             .setAskEachTime,
             .setConsentScopes(["research"]),
+            .setProjectMode(projectID: "p1", .autoUpload),
             .setProjectMode(projectID: "p2", .ask),
             .setProjectMode(projectID: "p3", .ignore),
             .includePastSessions(projectID: "p1", ["s1"]),

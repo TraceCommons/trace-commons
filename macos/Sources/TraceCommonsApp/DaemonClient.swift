@@ -323,18 +323,17 @@ final class DaemonClient: Sendable {
         return try call("list_audit", params: ["limit": limit], as: Wrapper.self).entries
     }
 
-    /// A confirmed Ask choice holds prior unattended approvals as well.
-    func setAskEachTime() throws -> DaemonData.ContributionOverrideResult {
-        let result = try call("set_contribution_override", params: ["mode": ProjectMode.ask.rawValue],
-                              as: DaemonData.ContributionOverrideResult.self)
-        guard result.contributionOverride?.mode == ProjectMode.ask.rawValue else {
-            throw Failure(code: "unavailable", message: "sharing-choice-unconfirmed")
-        }
-        // Stop sends before withdrawing the standing default: projects the
-        // grant armed retain their own policy entries after withdrawal.
+    /// "Ask each time", in setup or Settings: the standing Automatic grant
+    /// is withdrawn and every folder it armed goes back to Ask. A folder's
+    /// own rule still wins: one set to Automatic sends, one set to Never
+    /// never does. It used to set a global Ask override instead, which no
+    /// screen could clear and under which a folder set to Automatic kept
+    /// asking with no error (#1753 A2). Returns whether a grant was in force.
+    @discardableResult
+    func setAskEachTime() throws -> Bool {
         struct Withdrawal: Decodable { let withdrawn: Bool }
-        _ = try call("withdraw_automatic_grant", as: Withdrawal.self)
-        return result
+        return try call("withdraw_automatic_grant", params: ["return_folders_to_ask": true],
+                        as: Withdrawal.self).withdrawn
     }
 
     func consentOptions() throws -> [ConsentScope] {
