@@ -50,7 +50,7 @@ public struct GlassCardShimmer: View {
 
     /// `sweep` with no pass under way: the next whole step, where nothing
     /// shows.
-    static func resting(_ sweep: Double) -> Double { sweep.rounded(.up) }
+    nonisolated static func resting(_ sweep: Double) -> Double { sweep.rounded(.up) }
 
     /// What starts the passes over: Reduce Motion turned on or off, the
     /// window coming into or out of sight, or back in focus.
