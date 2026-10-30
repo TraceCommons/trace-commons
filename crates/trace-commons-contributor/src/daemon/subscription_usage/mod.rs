@@ -165,6 +165,9 @@ struct State {
 struct Claim {
     login: LoginSpec,
     generation: u64,
+    /// A silent read (opening Insights) that fails does not hold the manual
+    /// floor, so the person's own Refresh right after it still runs.
+    interactive: bool,
 }
 
 pub(crate) struct UsageService {
@@ -297,6 +300,7 @@ impl State {
                 Some(Claim {
                     login: entry.login.clone(),
                     generation: entry.generation,
+                    interactive: false,
                 })
             })
             .collect()
@@ -380,13 +384,15 @@ impl State {
                     entry.reading = None;
                     entry.measured_at = None;
                 }
-                if matches!(
-                    failure.reason,
-                    "credential_read_timeout"
-                        | "credential_check_timeout"
-                        | "keychain_needs_permission"
-                        | "timeout"
-                ) {
+                if !claim.interactive
+                    || matches!(
+                        failure.reason,
+                        "credential_read_timeout"
+                            | "credential_check_timeout"
+                            | "keychain_needs_permission"
+                            | "timeout"
+                    )
+                {
                     entry.last_started = None;
                 }
                 entry.reason = Some(failure.reason);
@@ -669,7 +675,13 @@ fn schedule(
         .state
         .lock()
         .map(|mut state| state.claims(now, manual, provider, login))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(|claim| Claim {
+            interactive,
+            ..claim
+        })
+        .collect::<Vec<_>>();
     if claims.is_empty() {
         return;
     }
@@ -787,7 +799,9 @@ fn clear_token_cache(service: &UsageService) {
     }
 }
 
-/// Background ticks synchronize metadata only; explicit Refresh owns all probes.
+/// Background ticks synchronize metadata only. Probes start only from a
+/// subscription_usage request with refresh: a pressed Refresh (interactive)
+/// or Insights opening (silent, never a Keychain dialog or the native CLI).
 pub(super) fn tick(shared: &DaemonShared, _now: DateTime<Utc>) {
     synchronize(shared);
 }
@@ -1242,6 +1256,42 @@ mod tests {
                 .claims(now(), true, Some(Provider::Claude), Some("saved-claude"))
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn a_failed_silent_read_does_not_hold_the_floor_against_a_pressed_refresh() {
+        let mut state = State::default();
+        let mut claude = login("claude-default");
+        claude.provider = Provider::Claude;
+        state.synchronize([false, true], vec![claude]);
+        let expired = || {
+            Err(ProbeFailure {
+                reason: "auth_expired",
+                identity: None,
+            })
+        };
+        let scope = (Some(Provider::Claude), Some("claude-default"));
+        // Opening Insights: a silent read. Its failure leaves Refresh open.
+        let silent = state.claims(now(), true, scope.0, scope.1);
+        assert_eq!(silent.len(), 1);
+        assert!(!silent[0].interactive);
+        state.complete(&silent[0], expired(), now());
+        let pressed: Vec<_> = state
+            .claims(now() + Duration::seconds(1), true, scope.0, scope.1)
+            .into_iter()
+            .map(|claim| Claim {
+                interactive: true,
+                ..claim
+            })
+            .collect();
+        assert_eq!(pressed.len(), 1);
+        // A pressed Refresh that fails the same way still holds the floor.
+        state.complete(&pressed[0], expired(), now() + Duration::seconds(2));
+        assert!(
+            state
+                .claims(now() + Duration::seconds(3), true, scope.0, scope.1)
+                .is_empty()
         );
     }
 

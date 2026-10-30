@@ -98,6 +98,16 @@
 //!   no longer lists now falls back to the default instead of holding the
 //!   launch, and this line says so.
 //!
+//! The model picker's group headings, one per NEAR AI privacy tier
+//! (`managed::models::ModelTier`). Named by the owner 2026-10-30:
+//! - `model_group_incognito` "Incognito models" -- a vendor's model on the
+//!   vendor's servers, reached through NEAR AI's gateway (NEAR AI's
+//!   term).
+//! - `model_group_near_ai` "NEAR AI private models" -- NEAR AI's own TEEs
+//!   (its "Confidential TEE").
+//! - `model_group_external` "External private models" -- a third party's
+//!   TEE (its "3P Confidential TEE").
+//!
 //! Refusing a launch on the NEAR AI sign-in whose balance is too low for its
 //! first calls. Proposed 2026-10-30, not yet approved:
 //! - `balance_too_low` "Add funds to your NEAR AI balance to start a
@@ -177,6 +187,9 @@ pub fn copy() -> serde_json::Value {
             "model_choice": "Model",
             "model_default": "Default: {model}",
             "model_default_unknown": "Default",
+            "model_group_incognito": "Incognito models",
+            "model_group_near_ai": "NEAR AI private models",
+            "model_group_external": "External private models",
             "model_unavailable": "That model isn't available on NEAR AI. Choose another.",
             "model_favorite_add": "Add to favorites",
             "model_favorite_remove": "Remove from favorites",

@@ -22,6 +22,11 @@ final class SubscriptionUsageModel {
     private var refreshingLogin: String?
     private var observation: UUID?
     private var observationSleep: Task<Void, Never>?
+    /// When each login was last read silently during this observation, so a
+    /// login that cannot be read is tried once per open, then again only
+    /// after a reading would have gone stale.
+    private var silentReads: [String: ContinuousClock.Instant] = [:]
+    private let silentReadInterval: Duration
     private let activePollInterval: Duration
     private(set) var codexEnabled: Bool?
     private(set) var claudeEnabled: Bool?
@@ -43,26 +48,36 @@ final class SubscriptionUsageModel {
     }
     var canChange: Bool { writer != nil }
 
-    init(reader: Reader? = nil, writer: Writer? = nil, activePollInterval: Duration = .seconds(2)) {
+    init(reader: Reader? = nil, writer: Writer? = nil, activePollInterval: Duration = .seconds(2),
+         silentReadInterval: Duration = .seconds(20 * 60)) {
         self.reader = reader
         self.writer = writer
         self.activePollInterval = activePollInterval
+        self.silentReadInterval = silentReadInterval
     }
 
     /// The view's task owns polling and cancellation. Only an explicit button
     /// passes interactive:true; opening Overview cannot prompt for Keychain.
-    func observe() async {
+    /// With readOnOpen, logins with no current figures are read silently:
+    /// the daemon never shows a Keychain dialog or starts the native CLI for
+    /// these, so a login that needs permission still waits for Refresh.
+    func observe(readOnOpen: Bool = false) async {
         let token = UUID()
         observationSleep?.cancel()
         observation = token
         generation = UUID()
         clearQueuedRefresh()
+        silentReads = [:]
         await withTaskCancellationHandler {
             defer { endObservation(token) }
             while !Task.isCancelled, observation == token {
                 await load()
                 guard !Task.isCancelled, observation == token else { return }
                 if unsupported || reader == nil { return }
+                if readOnOpen {
+                    await readMissing(token)
+                    guard !Task.isCancelled, observation == token else { return }
+                }
                 let delay: Duration = isRefreshing ? activePollInterval : .seconds(60)
                 let sleeper = Task<Void, Never> { _ = try? await Task.sleep(for: delay) }
                 observationSleep = sleeper
@@ -74,6 +89,25 @@ final class SubscriptionUsageModel {
             // A transport may ignore cancellation while waiting on IPC. End
             // the view's authority without waiting for that reply to arrive.
             Task { @MainActor [weak self] in self?.endObservation(token) }
+        }
+    }
+
+    /// Silent, per-login reads for figures that are missing or stale. Never
+    /// interactive, and never while a pressed Refresh is running or queued.
+    private func readMissing(_ token: UUID) async {
+        let now = ContinuousClock.now
+        let due: [(String, String)] = supportedProviders.flatMap { row in
+            row.logins.filter { login in
+                !row.refreshing && login.refreshing != true
+                    && (login.state != "observed" || login.stale)
+                    && silentReads["\(row.provider)/\(login.id)"].map { now - $0 >= silentReadInterval } ?? true
+            }.map { (row.provider, $0.id) }
+        }
+        for (provider, login) in due {
+            guard !Task.isCancelled, observation == token, reading == nil, !queuedRefresh,
+                  refreshingProvider == nil, changingProviders.isEmpty else { return }
+            silentReads["\(provider)/\(login)"] = now
+            await load(refresh: true, interactive: false, provider: provider, login: login)
         }
     }
 
