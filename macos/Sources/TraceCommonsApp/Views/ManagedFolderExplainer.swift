@@ -22,23 +22,30 @@ struct ManagedFolderExplainerSheet: View {
     /// Open, with the chosen folder's path, or nil for the home folder.
     let onOpen: (String?) -> Void
     let onOpenWithSettings: ((String?, ManagedFolderDraft) -> Void)?
+    /// The terminal picked in the dialog while it asks for one
+    /// (`ManagedSnapshot.asksForTerminal`); nil otherwise.
+    @Binding var terminal: String?
     @EnvironmentObject private var model: AppModel
     @State private var path: String?
     @State private var draft = ManagedFolderDraft()
-    @State private var catalogue: ManagedModelCatalogue?
+    /// The catalogue read; a failed one does not hold Open (#1754 review).
+    @State private var catalogueReads = ManagedCatalogueReads()
     private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
     private var canOpen: Bool {
         guard !model.managedBusy else { return false }
         return !supportsFolderSettings || (draft.matches(tool: tool, cwd: path)
-            && ManagedFolderOptions.modelIsAvailable(draft, tool: tool, connection: "near_ai_signin", catalogue: catalogue))
+            && ManagedFolderOptions.launchModelReady(draft, tool: tool, connection: "near_ai_signin",
+                                                     catalogue: catalogueReads.catalogue, catalogueFailed: catalogueReads.failed))
     }
 
     init(tool: String, onCancel: @escaping () -> Void, onOpen: @escaping (String?) -> Void,
-         onOpenWithSettings: ((String?, ManagedFolderDraft) -> Void)? = nil) {
+         onOpenWithSettings: ((String?, ManagedFolderDraft) -> Void)? = nil,
+         terminal: Binding<String?> = .constant(nil)) {
         self.tool = tool
         self.onCancel = onCancel
         self.onOpen = onOpen
         self.onOpenWithSettings = onOpenWithSettings
+        _terminal = terminal
     }
 
     /// The dialog's Open button: "Open Claude Code".
@@ -89,16 +96,23 @@ struct ManagedFolderExplainerSheet: View {
                     .buttonStyle(GlassButtonStyle(.glass, small: true))
                     .fixedSize()
                 }
+                // The first launch asks which terminal to open in.
+                if let snapshot = model.managedSnapshot, snapshot.asksForTerminal {
+                    ManagedLaunchTerminalRow(snapshot: snapshot, selection: $terminal)
+                }
                 if supportsFolderSettings {
                     ManagedFolderOptions(tool: tool, connection: "near_ai_signin", draft: $draft,
-                        catalogue: catalogue, supportsFolderSettings: true,
+                        catalogue: $catalogueReads.catalogue, refreshCatalogue: refreshCatalogue,
+                        supportsFolderSettings: true,
                         retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
                 }
             }
         }
         .onAppear {
             loadFolderSettings()
-            if supportsFolderSettings { model.managedModelCatalogue(tool: tool) { catalogue = $0 } }
+            if supportsFolderSettings, let token = catalogueReads.begin(tool: tool) {
+                model.managedModelCatalogue(tool: tool) { catalogueReads.complete($0, token: token) }
+            }
         }
         .onChange(of: path) { _, _ in loadFolderSettings() }
     }
@@ -107,6 +121,12 @@ struct ManagedFolderExplainerSheet: View {
         guard canOpen else { return }
         if supportsFolderSettings, let onOpenWithSettings { onOpenWithSettings(path, draft) }
         else { onOpen(path) }
+    }
+
+    /// The read again after a star or removal.
+    private func refreshCatalogue() {
+        guard let read = catalogueReads.refresh() else { return }
+        model.managedModelCatalogue(tool: read.tool) { catalogueReads.complete($0, token: read.token) }
     }
 
     private func loadFolderSettings(reset: Bool = false) {

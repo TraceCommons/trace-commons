@@ -80,6 +80,24 @@
 //!   another." The line a shell shows for the refusal
 //!   `managed-model-unavailable`.
 //!
+//! Favorite models. Proposed 2026-10-29, not yet approved:
+//! - `model_favorite_add` "Add to favorites" and `model_favorite_remove`
+//!   "Remove from favorites" -- the accessible name and tooltip of the star
+//!   beside the model picker, for the chosen model, while it is not and is a
+//!   favorite. Favorites are listed first in the picker.
+//! - `model_favorite_unavailable` "{model} is no longer available on NEAR
+//!   AI." -- a row beside the picker for each favorite NEAR AI stopped
+//!   listing, with a `remove` button whose accessible name is
+//!   `model_favorite_remove_named` "Remove {model} from favorites". Shells
+//!   fill `{model}` with the model id.
+//! - `favorites_title` "Favorite models" -- the card in Settings > Private
+//!   AI that lists every favorite, each with `remove`; one NEAR AI stopped
+//!   listing reads `model_favorite_unavailable` instead of its bare id.
+//! - `folder_model_unavailable` changed from "The saved model is
+//!   unavailable. Choose a model before launching." -- a saved model NEAR AI
+//!   no longer lists now falls back to the default instead of holding the
+//!   launch, and this line says so.
+//!
 //! Refusing a launch on the NEAR AI sign-in whose balance is too low for its
 //! first calls. Proposed 2026-10-30, not yet approved:
 //! - `balance_too_low` "Add funds to your NEAR AI balance to start a
@@ -96,7 +114,7 @@ pub fn copy() -> serde_json::Value {
             "folder_settings_failed": "Could not load folder settings. Try again.",
             "folder_settings_reset": "Reset",
             "folder_settings_reset_accessibility": "Reset {tool} folder settings",
-            "folder_model_unavailable": "The saved model is unavailable. Choose a model before launching.",
+            "folder_model_unavailable": "The saved model is no longer available, so the default is selected.",
             "cli_options_title": "Agent CLI options",
             "cli_options_scope": "Applies to new managed sessions. Quote values that contain spaces. Account routing, profiles and session identity are managed by Trace Commons.",
             "cli_options_label": "CLI options",
@@ -160,6 +178,11 @@ pub fn copy() -> serde_json::Value {
             "model_default": "Default: {model}",
             "model_default_unknown": "Default",
             "model_unavailable": "That model isn't available on NEAR AI. Choose another.",
+            "model_favorite_add": "Add to favorites",
+            "model_favorite_remove": "Remove from favorites",
+            "model_favorite_unavailable": "{model} is no longer available on NEAR AI.",
+            "model_favorite_remove_named": "Remove {model} from favorites",
+            "favorites_title": "Favorite models",
             "balance_too_low": "Add funds to your NEAR AI balance to start a session.",
             "collect_traces": "Collect this session",
             "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
@@ -268,6 +291,28 @@ mod tests {
         );
         assert_eq!(copy["sign_in_near_ai"], "Sign in");
         assert_eq!(copy["sign_in_near_ai_accessibility"], "Sign in to NEAR AI");
+    }
+
+    /// The star beside the model picker names its action both ways.
+    #[test]
+    fn the_favorite_star_has_its_words() {
+        let copy = copy();
+        assert_eq!(copy["model_favorite_add"], "Add to favorites");
+        assert_eq!(copy["model_favorite_remove"], "Remove from favorites");
+        assert_eq!(
+            copy["model_favorite_unavailable"],
+            "{model} is no longer available on NEAR AI."
+        );
+        assert_eq!(
+            copy["model_favorite_remove_named"],
+            "Remove {model} from favorites"
+        );
+        assert_eq!(copy["favorites_title"], "Favorite models");
+        // A saved model NEAR AI dropped falls back to the default.
+        assert_eq!(
+            copy["folder_model_unavailable"],
+            "The saved model is no longer available, so the default is selected."
+        );
     }
 
     /// The terminal choice reads these words, exactly as proposed.

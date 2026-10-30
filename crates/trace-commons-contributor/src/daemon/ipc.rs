@@ -362,6 +362,7 @@ pub const METHODS: &[&str] = &[
     "managed_account_set_key",
     "managed_account_verify",
     "managed_model_catalogue",
+    "managed_model_favorite_set",
     "account_bind",
     "account_binding",
     "account_session_status",
@@ -3719,6 +3720,10 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "managed_model_catalogue",
         "managed-model-catalogue-requires-async",
     ),
+    (
+        "managed_model_favorite_set",
+        "managed-model-favorite-requires-async",
+    ),
     ("inference_summary", "inference-summary-requires-async"),
     ("model_spend", "model-spend-requires-async"),
     ("set_private_ai", "private-ai-requires-async"),
@@ -3907,6 +3912,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "managed_account_verify" => super::managed::handle(shared, req),
         "managed_account_reconnect" => super::managed::handle(shared, req),
         "managed_model_catalogue" => super::managed::handle(shared, req),
+        "managed_model_favorite_set" => super::managed::handle(shared, req),
         "hello" => Response::ok(
             req.id,
             serde_json::json!({
@@ -15290,6 +15296,7 @@ mod tests {
         let s = shared();
         let cwd = tempfile::tempdir().unwrap();
         let request_id = uuid::Uuid::new_v4();
+        let request_id_again = uuid::Uuid::new_v4();
         let launch = |connection: &str| {
             serde_json::json!({
                 "request_id": request_id,
@@ -15380,6 +15387,29 @@ mod tests {
         );
         s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
 
+        // Switched to another NEAR AI account while the balance was read:
+        // the balance read may not be the new account's, so refused for the
+        // sign-in, and nothing prepared.
+        let switches = |_fresh: bool| {
+            let mut other = sign_in.clone().unwrap();
+            other.key_id = "key-2".into();
+            s.settings.lock().unwrap().near_ai_inference = Some(other);
+            std::future::ready(BalanceReport::Unavailable)
+        };
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            switches,
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-sign-in-required");
+        let r = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({}))).await;
+        assert_eq!(
+            r.result.expect("snapshot")["sessions"],
+            serde_json::json!([])
+        );
+        s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
+
         // Funded: prepared.
         let r = crate::daemon::managed::handle_async_with(
             &s,
@@ -15406,6 +15436,316 @@ mod tests {
             prepared["session_id"]
         );
         assert_eq!(*reads.lock().unwrap(), 0);
+
+        // The session runs and exits, and is started again on the sign-in.
+        let id: uuid::Uuid = serde_json::from_value(prepared["session_id"].clone()).unwrap();
+        let proof = {
+            let mut held = s.managed.lock().unwrap();
+            let Ok(service) = held.as_mut() else {
+                panic!("managed service unavailable")
+            };
+            service
+                .sessions
+                .redeem(id, prepared["ticket"].as_str().unwrap())
+                .unwrap()
+                .proof
+        };
+        for (state, exit) in [("running", None), ("exited", Some(0))] {
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "managed_session_report",
+                    serde_json::json!({
+                        "session_id": id,
+                        "proof": proof,
+                        "state": state,
+                        "process_id": 4242,
+                        "process_identity": "4242:1",
+                        "exit_code": exit,
+                    }),
+                ),
+            )
+            .await;
+            assert!(r.error.is_none(), "{r:?}");
+        }
+        let again = || {
+            req(
+                "managed_session_start_again",
+                serde_json::json!({"session_id": id, "request_id": request_id_again}),
+            )
+        };
+        // Out of money: refused after a cached and a fresh read.
+        let r = crate::daemon::managed::handle_async_with(&s, &again(), balance(0)).await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-balance-too-low");
+        assert_eq!(*reads.lock().unwrap(), 2);
+        // Funded: started again after one read.
+        *reads.lock().unwrap() = 0;
+        let r =
+            crate::daemon::managed::handle_async_with(&s, &again(), balance(12_500_000_000)).await;
+        let started = r.result.expect("started again");
+        assert_ne!(started["session_id"], prepared["session_id"]);
+        assert_eq!(*reads.lock().unwrap(), 1);
+        s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
+        // Its replay after the money ran out: the same session, no read.
+        *reads.lock().unwrap() = 0;
+        let r = crate::daemon::managed::handle_async_with(&s, &again(), balance(0)).await;
+        assert_eq!(
+            r.result.expect("replayed")["session_id"],
+            started["session_id"]
+        );
+        assert_eq!(*reads.lock().unwrap(), 0);
+    }
+
+    /// #1754 review: `managed_model_favorite_set` publishes
+    /// `status_changed` only when the stored list moved. Unstarring an id
+    /// that was never stored wakes no window. Unstarring needs no NEAR AI.
+    #[tokio::test]
+    async fn a_favorite_change_that_changes_nothing_publishes_nothing() {
+        let s = shared();
+        let mut rx = s.events.subscribe();
+        let mut status_changed = || {
+            let mut seen = false;
+            while let Ok(event) = rx.try_recv() {
+                seen |= event.event == EVENT_STATUS_CHANGED;
+            }
+            seen
+        };
+        let unstar = |model: &str| {
+            req(
+                "managed_model_favorite_set",
+                serde_json::json!({"model":model,"favorite":false}),
+            )
+        };
+        let r = handle_request_async(&s, &unstar("never/stored")).await;
+        assert_eq!(
+            r.result.expect("unstarred"),
+            serde_json::json!({"favorites":[]})
+        );
+        assert!(!status_changed(), "a no-op unstar is not a status change");
+        s.settings
+            .lock()
+            .unwrap()
+            .managed_favorite_models
+            .push("stored/model".into());
+        let r = handle_request_async(&s, &unstar("stored/model")).await;
+        assert_eq!(
+            r.result.expect("unstarred"),
+            serde_json::json!({"favorites":[]})
+        );
+        assert!(status_changed(), "a removal is a status change");
+    }
+
+    /// Starring, unstarring and the catalogue's favorite lists, against
+    /// the fixture NEAR AI `managed_sign_in_redeem_hosts_the_proxy_and_ends_it`
+    /// serves. Leaves no favorite stored.
+    async fn managed_favorites_against_the_fixture(s: &DaemonShared) {
+        // Each request boxed, so the futures do not pile up on the stack.
+        async fn boxed_request(s: &DaemonShared, request: &Request) -> Response {
+            Box::pin(handle_request_async(s, request)).await
+        }
+        // Starring a listed model saves it, and the catalogue then names it.
+        let favorite = async |params: serde_json::Value| {
+            boxed_request(s, &req("managed_model_favorite_set", params)).await
+        };
+        let catalogue_lists = async || {
+            let catalogue = boxed_request(
+                s,
+                &req(
+                    "managed_model_catalogue",
+                    serde_json::json!({"tool":"codex"}),
+                ),
+            )
+            .await
+            .result
+            .expect("catalogue");
+            (
+                catalogue["favorites"].clone(),
+                catalogue["unavailable_favorites"].clone(),
+            )
+        };
+        let catalogue_favorites = async || catalogue_lists().await.0;
+        let r = favorite(serde_json::json!({"model":"fixture-other","favorite":true})).await;
+        assert_eq!(
+            r.result.expect("starred"),
+            serde_json::json!({"favorites":["fixture-other"]})
+        );
+        assert_eq!(
+            catalogue_favorites().await,
+            serde_json::json!(["fixture-other"])
+        );
+        // A model NEAR AI does not list is refused before any write.
+        let r = favorite(serde_json::json!({"model":"anthropic/claude-sonnet-9","favorite":true}))
+            .await;
+        assert_eq!(r.error.unwrap().message, "managed-model-unavailable");
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"model":"fixture-model"}),
+            serde_json::json!({"model":"","favorite":true}),
+            serde_json::json!({"model":"fixture model","favorite":true}),
+            serde_json::json!({"model":"fixture-model","favorite":"yes"}),
+            serde_json::json!({"model":"fixture-model","favorite":true,"tool":"codex"}),
+        ] {
+            let r = favorite(params.clone()).await;
+            assert_eq!(
+                r.error.unwrap().message,
+                "managed-invalid-request",
+                "{params}"
+            );
+        }
+        // The synchronous entry answers no star: it needs the catalogue.
+        let r = handle_request(
+            s,
+            &req(
+                "managed_model_favorite_set",
+                serde_json::json!({"model":"fixture-model","favorite":true}),
+            ),
+        );
+        assert_eq!(
+            r.error.unwrap().message,
+            "managed-model-favorite-requires-async"
+        );
+        assert_eq!(
+            s.settings.lock().unwrap().managed_favorite_models,
+            ["fixture-other"]
+        );
+        // A favorite NEAR AI stopped offering is kept but not named, and
+        // unstarring it needs no catalogue.
+        let r = handle_request(
+            s,
+            &req(
+                "set_settings",
+                serde_json::json!({"managed_favorite_models":{"gone/model":true}}),
+            ),
+        );
+        assert!(r.error.is_none(), "{r:?}");
+        assert_eq!(
+            catalogue_favorites().await,
+            serde_json::json!(["fixture-other"])
+        );
+        assert_eq!(catalogue_lists().await.1, serde_json::json!(["gone/model"]));
+        // A model NEAR AI lists but Codex is never offered is neither a
+        // Codex favorite nor unavailable: Claude Code's picker shows it.
+        let r = favorite(serde_json::json!({"model":"openai/gpt-6.1-sol","favorite":true})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        assert_eq!(
+            catalogue_lists().await,
+            (
+                serde_json::json!(["fixture-other"]),
+                serde_json::json!(["gone/model"])
+            )
+        );
+        let claude = boxed_request(
+            s,
+            &req(
+                "managed_model_catalogue",
+                serde_json::json!({"tool":"claude"}),
+            ),
+        )
+        .await
+        .result
+        .expect("catalogue");
+        assert_eq!(
+            claude["favorites"],
+            serde_json::json!(["fixture-other", "openai/gpt-6.1-sol"])
+        );
+        assert_eq!(
+            claude["unavailable_favorites"],
+            serde_json::json!(["gone/model"])
+        );
+        let r = favorite(serde_json::json!({"model":"openai/gpt-6.1-sol","favorite":false})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let r = favorite(serde_json::json!({"model":"gone/model","favorite":false})).await;
+        assert_eq!(
+            r.result.expect("unstarred"),
+            serde_json::json!({"favorites":["fixture-other"]})
+        );
+        let r = favorite(serde_json::json!({"model":"fixture-other","favorite":false})).await;
+        assert_eq!(
+            r.result.expect("unstarred"),
+            serde_json::json!({"favorites":[]})
+        );
+        // A malformed id an older or hand-edited settings file holds can
+        // still be removed: unstarring an exact stored string is always
+        // safe, so the shape check is for stars only (#1754 review).
+        for bad in ["bad id", "bad\u{7}id", ""] {
+            s.settings
+                .lock()
+                .unwrap()
+                .managed_favorite_models
+                .push(bad.into());
+            let r = favorite(serde_json::json!({"model":bad,"favorite":false})).await;
+            assert_eq!(
+                r.result.expect("unstarred"),
+                serde_json::json!({"favorites":[]}),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            catalogue_lists().await,
+            (serde_json::json!([]), serde_json::json!([]))
+        );
+        // A stored id NEAR AI lists is a favorite again: nothing pruned it.
+        let r = handle_request(
+            s,
+            &req(
+                "set_settings",
+                serde_json::json!({"managed_favorite_models":{"fixture-model":true}}),
+            ),
+        );
+        assert!(r.error.is_none(), "{r:?}");
+        assert_eq!(
+            catalogue_favorites().await,
+            serde_json::json!(["fixture-model"])
+        );
+        let r = favorite(serde_json::json!({"model":"fixture-model","favorite":false})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        // A full list refuses one more, even a listed model.
+        let full: serde_json::Map<_, _> = (0..crate::daemon::settings::MAX_FAVORITE_MODELS)
+            .map(|n| (format!("m/{n}"), serde_json::json!(true)))
+            .collect();
+        let r = handle_request(
+            s,
+            &req(
+                "set_settings",
+                serde_json::json!({ "managed_favorite_models": full.clone() }),
+            ),
+        );
+        assert!(r.error.is_none(), "{r:?}");
+        let r = favorite(serde_json::json!({"model":"fixture-model","favorite":true})).await;
+        assert_eq!(r.error.unwrap().message, "managed-invalid-request");
+        // Every one of them is a favorite NEAR AI stopped listing. The full
+        // list never stops the tidy-up: each is reported unavailable and
+        // can be removed, and then a listed model can be starred again.
+        let (favorites, unavailable) = catalogue_lists().await;
+        assert_eq!(favorites, serde_json::json!([]));
+        assert_eq!(
+            unavailable.as_array().unwrap().len(),
+            crate::daemon::settings::MAX_FAVORITE_MODELS
+        );
+        let r = favorite(serde_json::json!({"model":"m/0","favorite":false})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let r = favorite(serde_json::json!({"model":"fixture-model","favorite":true})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let (favorites, unavailable) = catalogue_lists().await;
+        assert_eq!(favorites, serde_json::json!(["fixture-model"]));
+        assert_eq!(
+            unavailable.as_array().unwrap().len(),
+            crate::daemon::settings::MAX_FAVORITE_MODELS - 1
+        );
+        let r = favorite(serde_json::json!({"model":"fixture-model","favorite":false})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let cleared: serde_json::Map<_, _> = full
+            .keys()
+            .map(|k| (k.clone(), serde_json::json!(false)))
+            .collect();
+        let r = handle_request(
+            s,
+            &req(
+                "set_settings",
+                serde_json::json!({ "managed_favorite_models": cleared }),
+            ),
+        );
+        assert!(r.error.is_none(), "{r:?}");
     }
 
     /// The daemon-hosted proxy for a session on the NEAR AI sign-in: the
@@ -15420,9 +15760,11 @@ mod tests {
             if let Some(auth) = headers.get("authorization") {
                 seen.lock().unwrap().push(auth.to_str().unwrap().into());
             }
+            // The last is one NEAR AI lists that Codex is never offered.
             Json(serde_json::json!({"data":[
                 {"id":"fixture-model"},
                 {"id":"fixture-other","name":"Fixture Other"},
+                {"id":"openai/gpt-6.1-sol"},
             ]}))
         }
         let seen: Seen = Default::default();
@@ -15496,6 +15838,7 @@ mod tests {
             serde_json::json!([
                 {"id":"fixture-model"},
                 {"id":"fixture-other","name":"Fixture Other"},
+                {"id":"openai/gpt-6.1-sol"},
             ])
         );
         assert!(
@@ -15538,6 +15881,8 @@ mod tests {
             serde_json::json!({
                 "models":[{"id":"fixture-model"},{"id":"fixture-other","name":"Fixture Other"}],
                 "default":"fixture-model",
+                "favorites":[],
+                "unavailable_favorites":[],
             })
         );
         for params in [
@@ -15547,6 +15892,10 @@ mod tests {
             let r = handle_request_async(&s, &req("managed_model_catalogue", params)).await;
             assert_eq!(r.error.unwrap().message, "managed-invalid-request");
         }
+
+        // Favorites, against the same fixture. Boxed: inline, this test's
+        // future overflows the test thread's stack.
+        Box::pin(managed_favorites_against_the_fixture(&s)).await;
         // A model NEAR AI does not list starts no proxy, and says why.
         let mut named = launch("claude");
         named["model"] = "anthropic/claude-sonnet-9".into();
@@ -18601,7 +18950,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 83);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 84);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -19084,7 +19433,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 105, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 106, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 91, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -21274,6 +21623,7 @@ mod tests {
                     .expect("snapshot")
             };
             assert_eq!(snapshot(&s)["capabilities"]["terminal_current"], default);
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_chosen"], false);
             let mut rx = s.events.subscribe();
             let r = handle_request(
                 &s,
@@ -21301,6 +21651,9 @@ mod tests {
                 snapshot(&s)["capabilities"]["terminal_current"],
                 chosen.id()
             );
+            // Choosing the terminal is remembered, so no shell asks again.
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_chosen"], true);
+            assert_eq!(settings["managed_terminal_chosen"], true);
 
             for bad in [
                 serde_json::json!({}),

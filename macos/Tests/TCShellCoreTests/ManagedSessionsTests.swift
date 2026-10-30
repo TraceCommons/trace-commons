@@ -20,6 +20,26 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(snapshot.terminalChoices, [ManagedTerminalChoice(id: "terminal", name: "Terminal"), ManagedTerminalChoice(id: "ghostty", name: "Ghostty")])
     }
 
+    /// The launch dialog asks for a terminal until one is chosen, only with
+    /// more than one installed, and never for an older daemon that does not
+    /// say; it starts on the current app when installed, else the first.
+    func testTheLaunchDialogAsksForATerminalUntilOneIsChosen() throws {
+        func snapshot(chosen: String, current: String, choices: [String]) throws -> ManagedSnapshot {
+            let list = choices.map { #"{"id":"\#($0)","name":"\#($0)"}"# }.joined(separator: ",")
+            let json = #"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_current":\#(current),\#(chosen)"terminal_choices":[\#(list)]}}"#
+            return try JSONDecoder().decode(ManagedSnapshot.self, from: Data(json.utf8))
+        }
+        let asking = try snapshot(chosen: #""terminal_chosen":false,"#, current: #""ghostty""#, choices: ["terminal", "ghostty"])
+        XCTAssertTrue(asking.asksForTerminal)
+        XCTAssertEqual(asking.proposedTerminal, "ghostty")
+        XCTAssertFalse(try snapshot(chosen: #""terminal_chosen":true,"#, current: #""ghostty""#, choices: ["terminal", "ghostty"]).asksForTerminal)
+        XCTAssertFalse(try snapshot(chosen: "", current: #""ghostty""#, choices: ["terminal", "ghostty"]).asksForTerminal)
+        XCTAssertFalse(try snapshot(chosen: #""terminal_chosen":false,"#, current: #""terminal""#, choices: ["terminal"]).asksForTerminal)
+        let missing = try snapshot(chosen: #""terminal_chosen":false,"#, current: "null", choices: ["kitty", "wezterm"])
+        XCTAssertTrue(missing.asksForTerminal)
+        XCTAssertEqual(missing.proposedTerminal, "kitty")
+    }
+
     func testAnOlderSnapshotOffersNoTerminalChoice() throws {
         let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Terminal"}}"#.utf8))
         XCTAssertNil(snapshot.capabilities.terminalCurrent)
@@ -305,6 +325,211 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.modelOptions(nil) { Self.modelCopy[$0] ?? "" }.map(\.title), ["Default"])
         let unnamed = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"x/y"}],"default":null}"#.utf8))
         XCTAssertEqual(ManagedSurface.modelOptions(unnamed) { Self.modelCopy[$0] ?? "" }.map(\.title), ["Default", "x/y"])
+    }
+
+    /// Favorites come straight after the default, in NEAR AI's order rather
+    /// than the order they were starred, and are not repeated below. A
+    /// favorite NEAR AI no longer offers is not shown. An older daemon sends
+    /// no `favorites`, which reads as none.
+    func testFavoriteModelsComeFirstInTheModelPicker() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"b/two"},{"id":"c/three"},{"id":"d/four"}],"default":"a/one","favorites":["d/four","b/two","gone/model"]}"#.utf8))
+        XCTAssertEqual(catalogue.favorites, ["d/four", "b/two", "gone/model"])
+        let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(options.map(\.value), [ManagedSurface.defaultModel, "b/two", "d/four", "a/one", "c/three"])
+        XCTAssertTrue(ManagedSurface.isFavoriteModel("b/two", in: catalogue))
+        XCTAssertFalse(ManagedSurface.isFavoriteModel("a/one", in: catalogue))
+
+        let older = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"b/two"}],"default":null}"#.utf8))
+        XCTAssertEqual(older.favorites, [])
+        XCTAssertEqual(ManagedSurface.modelOptions(older) { Self.modelCopy[$0] ?? "" }.map(\.value), [ManagedSurface.defaultModel, "a/one", "b/two"])
+    }
+
+    /// The star is offered only for a model NEAR AI lists: never for the
+    /// default option, and never for a saved model it no longer offers.
+    func testTheStarIsOfferedOnlyForAListedModel() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one"}"#.utf8))
+        XCTAssertTrue(ManagedSurface.offersFavorite("a/one", in: catalogue))
+        XCTAssertFalse(ManagedSurface.offersFavorite(nil, in: catalogue))
+        XCTAssertFalse(ManagedSurface.offersFavorite(ManagedSurface.defaultModel, in: catalogue))
+        XCTAssertFalse(ManagedSurface.offersFavorite("gone/model", in: catalogue))
+        XCTAssertFalse(ManagedSurface.offersFavorite("a/one", in: nil))
+    }
+
+    /// A favorite NEAR AI no longer lists is reported apart, for its own
+    /// row with a way to remove it. An older daemon sends none, and no
+    /// catalogue (offline, or the read failed) marks nothing: unknown is
+    /// not removed. After a star or removal the shell re-reads the
+    /// catalogue rather than recomputing these lists (#1754 review).
+    func testUnavailableFavoritesAreListedApartAndNeverGuessed() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"b/two"}],"default":"a/one","favorites":["b/two"],"unavailable_favorites":["gone/model","gone/other"]}"#.utf8))
+        XCTAssertEqual(ManagedSurface.unavailableFavorites(catalogue), ["gone/model", "gone/other"])
+        // Never in the picker.
+        XCTAssertFalse(ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }.map(\.value).contains("gone/model"))
+
+        let older = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":null}"#.utf8))
+        XCTAssertEqual(older.unavailableFavorites, [])
+        XCTAssertEqual(ManagedSurface.unavailableFavorites(nil), [])
+    }
+
+    /// Settings' favorites list: every stored favorite, listed ones in
+    /// NEAR AI's order, then the ones it stopped listing, marked. With no
+    /// catalogue every one is shown as stored and none is marked.
+    func testTheFavoritesListMarksOnlyWhatTheCatalogueDropped() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"b/two"}],"default":"a/one","favorites":["a/one","b/two"],"unavailable_favorites":["gone/model"]}"#.utf8))
+        let stored = ["gone/model", "b/two", "a/one"]
+        XCTAssertEqual(ManagedSurface.favoriteRows(stored: stored, catalogue: catalogue), [
+            ManagedFavoriteRow(model: "a/one", unavailable: false),
+            ManagedFavoriteRow(model: "b/two", unavailable: false),
+            ManagedFavoriteRow(model: "gone/model", unavailable: true),
+        ])
+        XCTAssertEqual(ManagedSurface.favoriteRows(stored: stored, catalogue: nil), [
+            ManagedFavoriteRow(model: "gone/model", unavailable: false),
+            ManagedFavoriteRow(model: "b/two", unavailable: false),
+            ManagedFavoriteRow(model: "a/one", unavailable: false),
+        ])
+        XCTAssertEqual(ManagedSurface.favoriteRows(stored: [], catalogue: catalogue), [])
+        // The rows come from the stored list (`get_settings`), never from
+        // the catalogue's two lists (#1754 review): a favorite NEAR AI
+        // lists but the read tool is not offered is in neither list, and
+        // still has its row, after the ones the catalogue orders.
+        let partial = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one","favorites":["a/one"],"unavailable_favorites":[]}"#.utf8))
+        XCTAssertEqual(ManagedSurface.favoriteRows(stored: ["not/offered", "a/one"], catalogue: partial), [
+            ManagedFavoriteRow(model: "a/one", unavailable: false),
+            ManagedFavoriteRow(model: "not/offered", unavailable: false),
+        ])
+    }
+
+    /// #1754 review: a refused star is described by its cause. Only
+    /// NEAR AI not listing the model says so; anything else (the list is
+    /// full, the write failed, no daemon) is the generic failure.
+    func testAFavoriteFailureNamesOnlyItsOwnCause() {
+        XCTAssertEqual(ManagedSurface.favoriteErrorKey("managed-model-unavailable"), "model_unavailable")
+        for other in ["managed-invalid-request", "settings-write-failed", "unavailable", nil] as [String?] {
+            XCTAssertEqual(ManagedSurface.favoriteErrorKey(other), "action_failed", "\(other ?? "nil")")
+        }
+    }
+
+    /// A saved or chosen model NEAR AI no longer lists falls back to the
+    /// default, and says so. With no catalogue the model is unknown, not
+    /// removed: it is kept, and nothing says it is unavailable.
+    func testAModelNoLongerListedFallsBackToTheDefault() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one"}"#.utf8))
+        XCTAssertEqual(ManagedSurface.reconciledModel("a/one", in: catalogue), ManagedModelReconcile(model: "a/one", fellBack: false))
+        XCTAssertEqual(ManagedSurface.reconciledModel("gone/model", in: catalogue), ManagedModelReconcile(model: nil, fellBack: true))
+        XCTAssertEqual(ManagedSurface.reconciledModel(nil, in: catalogue), ManagedModelReconcile(model: nil, fellBack: false))
+        XCTAssertEqual(ManagedSurface.reconciledModel("gone/model", in: nil), ManagedModelReconcile(model: "gone/model", fellBack: false))
+
+        // The launch after a fallback names no model: the tool's default.
+        // It also says `keep_saved_model`, so the folder's saved model is
+        // not replaced by the fallback (#1754 review).
+        var draft = ManagedFolderDraft()
+        draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
+        draft.model = "gone/model"
+        XCTAssertFalse(draft.keepsSavedModel)
+        draft.fallBackToDefault()
+        XCTAssertTrue(draft.keepsSavedModel)
+        let params = draft.applying(to: ["tool": "claude", "connection": "near_ai"], daemonKeepsSavedModel: true)
+        XCTAssertNil(params["model"] as? String)
+        XCTAssertEqual(params["keep_saved_model"] as? Bool, true)
+        // A daemon that does not say it reads the flag refuses unknown
+        // fields, so it is not sent there (#1754 review).
+        XCTAssertNil(draft.applying(to: ["tool": "claude", "connection": "near_ai"], daemonKeepsSavedModel: false)["keep_saved_model"])
+        // A model the person picks is theirs to remember.
+        draft.choose("a/one")
+        XCTAssertFalse(draft.keepsSavedModel)
+        let chosen = draft.applying(to: ["tool": "claude", "connection": "near_ai"], daemonKeepsSavedModel: true)
+        XCTAssertEqual(chosen["model"] as? String, "a/one")
+        XCTAssertNil(chosen["keep_saved_model"])
+        draft.fallBackToDefault()
+        draft.choose(nil)
+        XCTAssertFalse(draft.keepsSavedModel)
+        // A new folder or account starts clear.
+        draft.fallBackToDefault()
+        draft.begin(tool: "claude", cwd: "/other")
+        XCTAssertFalse(draft.keepsSavedModel)
+        // No model choice at all: nothing to keep, nothing sent.
+        draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
+        draft.fallBackToDefault()
+        XCTAssertNil(draft.applying(to: ["tool": "claude", "connection": "subscription"], daemonKeepsSavedModel: true)["keep_saved_model"])
+    }
+
+    /// #1754 review: the snapshot says whether the daemon reads
+    /// `keep_saved_model`; an older one says nothing, which reads as no.
+    func testTheSnapshotSaysWhetherTheDaemonKeepsTheSavedModel() throws {
+        func capabilities(_ extra: String) throws -> ManagedSnapshot.Capabilities {
+            try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true\#(extra)}}"#.utf8)).capabilities
+        }
+        XCTAssertNil(try capabilities("").keepSavedModel)
+        XCTAssertEqual(try capabilities(#","keep_saved_model":true"#).keepSavedModel, true)
+    }
+
+    /// #1754 review: only the newest catalogue read lands. Account A
+    /// (claude) starts R1, B (codex) starts R2, A again starts R3. R1's
+    /// failure and R2's answer change nothing, and R3's answer is shown.
+    func testOnlyTheNewestCatalogueReadLands() throws {
+        let claude = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one"}"#.utf8))
+        let codex = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"b/two"}],"default":"b/two"}"#.utf8))
+        var reads = ManagedCatalogueReads()
+        let r1 = try XCTUnwrap(reads.begin(tool: "claude"))
+        XCTAssertNil(reads.begin(tool: "claude"), "one read per tool")
+        let r2 = try XCTUnwrap(reads.begin(tool: "codex"))
+        let r3 = try XCTUnwrap(reads.begin(tool: "claude"))
+        XCTAssertFalse(reads.complete(nil, token: r1))
+        XCTAssertFalse(reads.failed)
+        XCTAssertFalse(reads.complete(codex, token: r2))
+        XCTAssertNil(reads.catalogue)
+        XCTAssertTrue(reads.complete(claude, token: r3))
+        XCTAssertEqual(reads.catalogue, claude)
+        XCTAssertEqual(reads.tool, "claude")
+
+        // A read again after a star keeps what is shown until it answers,
+        // and a failure keeps it too. A switch of tool drops its answer.
+        let again = try XCTUnwrap(reads.refresh())
+        XCTAssertEqual(again.tool, "claude")
+        XCTAssertEqual(reads.catalogue, claude)
+        XCTAssertTrue(reads.complete(nil, token: again.token))
+        XCTAssertEqual(reads.catalogue, claude)
+        XCTAssertFalse(reads.failed)
+        let stale = try XCTUnwrap(reads.refresh())
+        let r4 = try XCTUnwrap(reads.begin(tool: "codex"))
+        XCTAssertFalse(reads.complete(claude, token: stale.token), "another tool's catalogue is never shown")
+        XCTAssertNil(reads.catalogue)
+
+        // A failed first read is tried again on the next account change.
+        XCTAssertTrue(reads.complete(nil, token: r4))
+        XCTAssertTrue(reads.failed)
+        XCTAssertNil(reads.refresh(), "nothing shown, nothing to read again")
+        let r5 = try XCTUnwrap(reads.begin(tool: "codex"))
+        XCTAssertFalse(reads.failed)
+        XCTAssertTrue(reads.complete(codex, token: r5))
+        XCTAssertEqual(reads.catalogue, codex)
+    }
+
+    /// #1754 review: a star or removal shows at once, from the setter's
+    /// answer (the stored list), as the daemon would list it: favorites are
+    /// the listed models it holds, in NEAR AI's order, and a favorite NEAR
+    /// AI stopped listing stays only while it is stored.
+    func testAFavoriteChangeShowsTheSettersAnswerAtOnce() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"a/two"},{"id":"a/three"}],"default":"a/one","favorites":["a/two"],"unavailable_favorites":["gone/x","gone/y"]}"#.utf8))
+        let starred = catalogue.projecting(storedFavorites: ["gone/x", "a/three", "a/two", "gone/y", "other/tool"])
+        XCTAssertEqual(starred.favorites, ["a/two", "a/three"])
+        XCTAssertEqual(starred.unavailableFavorites, ["gone/x", "gone/y"])
+        XCTAssertEqual(starred.models, catalogue.models)
+        XCTAssertEqual(starred.default, catalogue.default)
+        XCTAssertTrue(ManagedSurface.isFavoriteModel("a/three", in: starred))
+        let removed = starred.projecting(storedFavorites: ["a/three", "gone/y"])
+        XCTAssertEqual(removed.favorites, ["a/three"])
+        XCTAssertEqual(removed.unavailableFavorites, ["gone/y"])
+        XCTAssertFalse(ManagedSurface.isFavoriteModel("a/two", in: removed))
+    }
+
+    /// The `managed_model_favorite_set` request: the model and the new
+    /// state, nothing else.
+    func testTheFavoriteRequestNamesTheModelAndTheState() {
+        let params = ManagedSurface.favoriteParams(model: "a/one", favorite: true)
+        XCTAssertEqual(params.count, 2)
+        XCTAssertEqual(params["model"] as? String, "a/one")
+        XCTAssertEqual(params["favorite"] as? Bool, true)
     }
 
     /// Only Claude Code and Codex on a saved NEAR AI key choose a model in

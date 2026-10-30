@@ -48,6 +48,72 @@ final class ManagedFolderLaunchTests: XCTestCase {
         XCTAssertTrue(ManagedFolderOptions.modelIsAvailable(draft, tool: "codex", connection: "near_ai_signin", catalogue: nil))
     }
 
+    /// #1754 review, the view-only findings: Settings reads NEAR AI only
+    /// while there is a favorite; the card draws from the stored list with
+    /// no state of its own; a star or removal refreshes the settings every
+    /// window reads and re-reads the catalogue instead of recomputing it;
+    /// and a refused star's line does not outlive the account it was for.
+    func testFavoritesViewsFollowTheReview() throws {
+        func text(_ rel: String) throws -> String {
+            try String(contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent(rel), encoding: .utf8)
+        }
+        let section = try text("Views/Settings/PrivateAISection.swift")
+        XCTAssertTrue(section.contains(".task(id: hasFavorites)"), "the catalogue read is keyed on having a favorite")
+        let card = try text("Views/Settings/ManagedFavoritesCard.swift")
+        XCTAssertFalse(card.contains("@State private var stored"))
+        XCTAssertFalse(card.contains("withFavorites"))
+        XCTAssertTrue(card.contains("model.daemonSettings?.managedFavoriteModels"))
+        let options = try text("Views/ManagedFolderOptions.swift")
+        XCTAssertFalse(options.contains("withFavorites"))
+        // A new account or folder redraws the fields, and `.onDisappear`
+        // clears a refused star's line; an `.onChange(of: draft.phase)`
+        // inside the fields never saw a change (#1754 review).
+        XCTAssertFalse(options.contains(".onChange(of: draft.phase)"))
+        XCTAssertTrue(options.contains(".onDisappear { favoriteError = nil }"))
+        // A star shows the setter's answer at once; the read again that
+        // follows belongs to the sheet, which drops another tool's answer.
+        XCTAssertTrue(options.contains("catalogue = catalogue?.projecting(storedFavorites: favorites)"))
+        XCTAssertFalse(options.contains("model.managedModelCatalogue("))
+        // Settings follow the daemon's `status_changed`, not a second read.
+        let app = try text("AppModel.swift")
+        XCTAssertFalse(app.contains("if favorites != nil { self.refreshSettings() }"))
+    }
+
+    /// #1754 review: a failed catalogue read no longer holds Launch with
+    /// no word of why. While the read is pending a saved model is held as
+    /// before; once it has failed, Launch goes, and the daemon refuses a
+    /// model NEAR AI does not list (`managed-model-unavailable`).
+    @MainActor
+    func testAFailedCatalogueReadDoesNotHoldLaunch() {
+        var draft = ManagedFolderDraft()
+        draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
+        draft.model = "a/one"
+        XCTAssertFalse(ManagedFolderOptions.launchModelReady(draft, tool: "claude", connection: "near_ai", catalogue: nil, catalogueFailed: false))
+        XCTAssertTrue(ManagedFolderOptions.launchModelReady(draft, tool: "claude", connection: "near_ai", catalogue: nil, catalogueFailed: true))
+        // OpenCode's typed model still needs text, read or not.
+        draft.useDefaults(tool: "opencode", cwd: "/project", cliOptions: "")
+        XCTAssertFalse(ManagedFolderOptions.launchModelReady(draft, tool: "opencode", connection: "api_key", catalogue: nil, catalogueFailed: true))
+    }
+
+    /// Launch is held for a model the catalogue does not list, and while
+    /// there is no catalogue to check it against; the default always goes.
+    @MainActor
+    func testLaunchNeverNamesAModelTheCatalogueDoesNotList() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one"}"#.utf8))
+        var draft = ManagedFolderDraft()
+        draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
+        for connection in ["near_ai", "near_ai_signin"] {
+            draft.model = nil
+            XCTAssertTrue(ManagedFolderOptions.modelIsAvailable(draft, tool: "claude", connection: connection, catalogue: catalogue))
+            XCTAssertTrue(ManagedFolderOptions.modelIsAvailable(draft, tool: "claude", connection: connection, catalogue: nil))
+            draft.model = "a/one"
+            XCTAssertTrue(ManagedFolderOptions.modelIsAvailable(draft, tool: "claude", connection: connection, catalogue: catalogue))
+            XCTAssertFalse(ManagedFolderOptions.modelIsAvailable(draft, tool: "claude", connection: connection, catalogue: nil))
+            draft.model = "gone/model"
+            XCTAssertFalse(ManagedFolderOptions.modelIsAvailable(draft, tool: "claude", connection: connection, catalogue: catalogue))
+        }
+    }
+
     @MainActor
     func testFolderScreenShowsCollectionOptionsForAllThreeAgents() throws {
         _ = NSApplication.shared
@@ -58,7 +124,7 @@ final class ManagedFolderLaunchTests: XCTestCase {
             draft.useDefaults(tool: tool, cwd: "/project", cliOptions: "--custom")
             draft.collectTraces = true
             let view = NSHostingView(rootView: ManagedFolderOptions(tool: tool, connection: "near_ai_signin",
-                draft: .constant(draft), catalogue: nil, supportsFolderSettings: true, retry: {}, reset: {})
+                draft: .constant(draft), catalogue: .constant(nil), refreshCatalogue: {}, supportsFolderSettings: true, retry: {}, reset: {})
                 .environmentObject(model).padding(20).frame(width: 520)
                 .background(Color(nsColor: .windowBackgroundColor)))
             let size = view.fittingSize

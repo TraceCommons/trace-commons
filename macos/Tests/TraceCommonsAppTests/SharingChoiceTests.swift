@@ -96,6 +96,9 @@ final class SharingChoiceTests: XCTestCase {
         XCTAssertNil(TracesTreeView.automaticSwitch(folder("d", nil)))
         XCTAssertNil(TracesTreeView.automaticSwitch(folder("e", .ask, offers: [.ask, .ignore])),
                      "no switch to a mode the core does not offer")
+        var bucket = folder("u", .ask, offers: [.ask])
+        bucket.isBucket = true
+        XCTAssertEqual(TracesTreeView.automaticSwitch(bucket), false, "Traces with no project: a switch that stays off")
     }
 
     func testTheTabSwitchCountsTheFoldersThatSendOnTheirOwn() {

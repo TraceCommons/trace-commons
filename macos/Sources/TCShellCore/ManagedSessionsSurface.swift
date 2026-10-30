@@ -107,6 +107,10 @@ public struct ManagedToolAvailability: Decodable, Equatable, Identifiable, Senda
 public struct ManagedSnapshot: Decodable, Equatable, Sendable {
     public struct Capabilities: Decodable, Equatable, Sendable {
         public let folderSettings: Bool?
+        /// Whether `managed_launch_prepare` reads `keep_saved_model`. An
+        /// older daemon refuses the unknown field, so it is sent only when
+        /// this is true; absent reads as no.
+        public let keepSavedModel: Bool?
         public let managedLaunch: Bool
         public let terminalLaunch: Bool
         /// Terminal installer support; absent from older daemons.
@@ -118,6 +122,9 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         /// The chosen terminal's id; nil from an older daemon, or for a
         /// stored choice the daemon does not know.
         public let terminalCurrent: String?
+        /// Whether the person has chosen the terminal; nil from an older
+        /// daemon, which reads as chosen so nothing asks.
+        public let terminalChosen: Bool?
         /// The terminal apps installed on this Mac; absent from an older
         /// daemon.
         public let terminalChoices: [ManagedTerminalChoice]?
@@ -125,8 +132,10 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case managedLaunch = "managed_launch", terminalLaunch = "terminal_launch", terminalDestination = "terminal_destination"
             case toolSetup = "tool_setup"
             case folderSettings = "folder_settings"
+            case keepSavedModel = "keep_saved_model"
             case nearAiSignin = "near_ai_signin"
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
+            case terminalChosen = "terminal_chosen"
         }
     }
     public var cliOptions: [String: String]?
@@ -310,10 +319,123 @@ public struct ManagedModel: Decodable, Equatable, Identifiable, Sendable {
 }
 
 /// `managed_model_catalogue`'s answer: NEAR AI's chat models in its order,
-/// and the one the tool gets when a launch names none.
+/// the one the tool gets when a launch names none, and the starred ones.
 public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
     public let models: [ManagedModel]
     public let `default`: String?
+    /// The person's favorite model ids. An older daemon sends none.
+    public let favorites: [String]
+    /// Favorites NEAR AI no longer lists, kept in case it offers them again.
+    /// An older daemon sends none.
+    public let unavailableFavorites: [String]
+
+    private enum CodingKeys: String, CodingKey {
+        case models, `default`, favorites
+        case unavailableFavorites = "unavailable_favorites"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        models = try container.decode([ManagedModel].self, forKey: .models)
+        `default` = try container.decodeIfPresent(String.self, forKey: .default)
+        favorites = try container.decodeIfPresent([String].self, forKey: .favorites) ?? []
+        unavailableFavorites = try container.decodeIfPresent([String].self, forKey: .unavailableFavorites) ?? []
+    }
+
+    private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String]) {
+        self.models = models
+        self.default = `default`
+        self.favorites = favorites
+        self.unavailableFavorites = unavailableFavorites
+    }
+
+    /// This catalogue with `managed_model_favorite_set`'s answer, the
+    /// stored list, applied as the daemon's catalogue would apply it:
+    /// favorites are the listed models it holds, in NEAR AI's order. A star
+    /// adds only a listed model, so a favorite NEAR AI stopped listing stays
+    /// only while it is stored. The read again that follows confirms it.
+    public func projecting(storedFavorites stored: [String]) -> ManagedModelCatalogue {
+        let held = Set(stored)
+        return ManagedModelCatalogue(
+            models: models, default: `default`,
+            favorites: models.map(\.id).filter(held.contains),
+            unavailableFavorites: unavailableFavorites.filter(held.contains))
+    }
+}
+
+/// The Launch sheet's catalogue reads. Each read has a token, and only the
+/// newest read's answer lands: an older read, for this tool or another,
+/// changes nothing (#1754 review).
+public struct ManagedCatalogueReads: Equatable, Sendable {
+    /// The tool whose catalogue is shown or being read. Nil after a failed
+    /// first read, so the next account change tries again.
+    public private(set) var tool: String?
+    public var catalogue: ManagedModelCatalogue?
+    /// The read for `tool` failed with nothing shown.
+    public private(set) var failed = false
+    private var token: UUID?
+
+    public init() {}
+
+    /// A first read for `tool`, clearing what is shown. Nil when its
+    /// catalogue is shown or a read for it is under way.
+    public mutating func begin(tool: String) -> UUID? {
+        guard self.tool != tool else { return nil }
+        self = Self()
+        self.tool = tool
+        let next = UUID()
+        token = next
+        return next
+    }
+
+    /// A read again for the shown tool, after a star or removal. What is
+    /// shown stays until it answers. Nil with nothing shown.
+    public mutating func refresh() -> (tool: String, token: UUID)? {
+        guard let tool, catalogue != nil else { return nil }
+        let next = UUID()
+        token = next
+        return (tool, next)
+    }
+
+    /// A read's answer, nil when it failed. False, changing nothing, when a
+    /// newer read has started since.
+    @discardableResult
+    public mutating func complete(_ result: ManagedModelCatalogue?, token: UUID) -> Bool {
+        guard self.token == token else { return false }
+        self.token = nil
+        if let result {
+            catalogue = result
+        } else if catalogue == nil {
+            failed = true
+            tool = nil
+        }
+        return true
+    }
+}
+
+/// `ManagedSurface.reconciledModel`'s answer: the picker's value, and
+/// whether it fell back to the default because NEAR AI dropped the model.
+public struct ManagedModelReconcile: Equatable, Sendable {
+    public let model: String?
+    public let fellBack: Bool
+
+    public init(model: String?, fellBack: Bool) {
+        self.model = model
+        self.fellBack = fellBack
+    }
+}
+
+/// One favorite in Settings' list: its id, and whether NEAR AI stopped
+/// listing it.
+public struct ManagedFavoriteRow: Equatable, Sendable, Identifiable {
+    public let model: String
+    public let unavailable: Bool
+    public var id: String { model }
+
+    public init(model: String, unavailable: Bool) {
+        self.model = model
+        self.unavailable = unavailable
+    }
 }
 
 /// One entry in the Launch sheet's model picker.
@@ -336,13 +458,70 @@ public extension ManagedSurface {
     }
 
     /// The picker's options: the default first, which names the model it
-    /// will be when the catalogue says, then each chat model. With no
-    /// catalogue, only the default.
+    /// will be when the catalogue says, then the favorites, then the other
+    /// chat models, each group in NEAR AI's order. A favorite NEAR AI does
+    /// not list is not shown. With no catalogue, only the default.
     static func modelOptions(_ catalogue: ManagedModelCatalogue?, copy: (String) -> String) -> [ManagedModelOption] {
         let first = catalogue?.default.map { copy("model_default").replacingOccurrences(of: "{model}", with: $0) }
             ?? copy("model_default_unknown")
+        let models = catalogue?.models ?? []
+        let favorites = Set(catalogue?.favorites ?? [])
+        let ordered = models.filter { favorites.contains($0.id) } + models.filter { !favorites.contains($0.id) }
         return [ManagedModelOption(title: first, value: defaultModel)]
-            + (catalogue?.models ?? []).map { ManagedModelOption(title: $0.id, value: $0.id) }
+            + ordered.map { ManagedModelOption(title: $0.id, value: $0.id) }
+    }
+
+    /// The favorites NEAR AI no longer lists, each shown with a way to
+    /// remove it. None without a catalogue: unknown is not removed.
+    static func unavailableFavorites(_ catalogue: ManagedModelCatalogue?) -> [String] {
+        catalogue?.unavailableFavorites ?? []
+    }
+
+    /// The picker's value once the catalogue is known. A model it does not
+    /// list falls back to the default (`fellBack`), which the sheet says;
+    /// with no catalogue the model is kept, unknown rather than removed.
+    static func reconciledModel(_ model: String?, in catalogue: ManagedModelCatalogue?) -> ManagedModelReconcile {
+        guard let model, let catalogue else { return ManagedModelReconcile(model: model, fellBack: false) }
+        if catalogue.models.contains(where: { $0.id == model }) { return ManagedModelReconcile(model: model, fellBack: false) }
+        return ManagedModelReconcile(model: nil, fellBack: true)
+    }
+
+    /// The copy key for a refused `managed_model_favorite_set`, from the
+    /// daemon's label: only NEAR AI not listing the model says so. A full
+    /// list, a failed write or no daemon is the generic failure, never a
+    /// claim that the model is unavailable.
+    static func favoriteErrorKey(_ label: String?) -> String {
+        label == "managed-model-unavailable" ? "model_unavailable" : "action_failed"
+    }
+
+    /// Settings' favorites list: the listed ones in NEAR AI's order, then
+    /// the ones it stopped listing, marked. Without a catalogue, the stored
+    /// order and nothing marked: unknown is not removed.
+    static func favoriteRows(stored: [String], catalogue: ManagedModelCatalogue?) -> [ManagedFavoriteRow] {
+        guard let catalogue else { return stored.map { ManagedFavoriteRow(model: $0, unavailable: false) } }
+        let unavailable = Set(catalogue.unavailableFavorites)
+        let rank = Dictionary(catalogue.models.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let listed = stored.filter { !unavailable.contains($0) }
+            .sorted { (rank[$0] ?? Int.max, $0) < (rank[$1] ?? Int.max, $1) }
+        return listed.map { ManagedFavoriteRow(model: $0, unavailable: false) }
+            + stored.filter(unavailable.contains).map { ManagedFavoriteRow(model: $0, unavailable: true) }
+    }
+
+    /// Whether `model` is starred.
+    static func isFavoriteModel(_ model: String, in catalogue: ManagedModelCatalogue?) -> Bool {
+        catalogue?.favorites.contains(model) == true
+    }
+
+    /// Whether the star is shown for the picker's value: only a model NEAR
+    /// AI lists, never the default option or a saved model it dropped.
+    static func offersFavorite(_ model: String?, in catalogue: ManagedModelCatalogue?) -> Bool {
+        guard let model, model != defaultModel else { return false }
+        return catalogue?.models.contains { $0.id == model } == true
+    }
+
+    /// The `managed_model_favorite_set` request.
+    static func favoriteParams(model: String, favorite: Bool) -> [String: Any] {
+        ["model": model, "favorite": favorite]
     }
 
     /// The Launch sheet's `managed_launch_prepare` request. A model is sent
@@ -421,6 +600,21 @@ public extension ManagedSnapshot {
     /// The terminal apps a picker offers: the installed ones, none from an
     /// older daemon.
     var terminalChoices: [ManagedTerminalChoice] { capabilities.terminalChoices ?? [] }
+
+    /// Whether a launch dialog asks which terminal to open in: until the
+    /// person has chosen one, and only when more than one is installed.
+    /// An older daemon that does not say never asks.
+    var asksForTerminal: Bool {
+        capabilities.terminalChosen == false && terminalChoices.count > 1
+    }
+
+    /// The terminal a launch dialog that asks starts on: the current one
+    /// when it is installed, else the first installed.
+    var proposedTerminal: String? {
+        let ids = terminalChoices.map(\.id)
+        if let current = capabilities.terminalCurrent, ids.contains(current) { return current }
+        return ids.first
+    }
 
     /// The tool's NEAR AI sign-in entry, only while signed in.
     func signInEntry(_ tool: String) -> ManagedAccount? {
