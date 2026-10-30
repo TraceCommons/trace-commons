@@ -32648,6 +32648,47 @@ async fn db_audit_table_mirrors_the_file_audit_log_in_both_dual_write_modes() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// A JSON record file is replaced whole: a write that fails partway leaves
+/// the previous file as it was, with nothing beside it, and the mode is the
+/// one `File::create` gives. Written in place, the file sat empty until the
+/// flush, and a concurrent submission reading every derived record parsed
+/// it and answered 500 (the test below).
+#[test]
+fn write_json_file_replaces_the_file_whole() {
+    struct FailsPartway;
+    impl serde::Serialize for FailsPartway {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::{Error as _, SerializeSeq as _};
+            let mut seq = serializer.serialize_seq(None)?;
+            // Past the writer's 1 MiB buffer, so bytes reach the file.
+            seq.serialize_element(&"x".repeat(2 << 20))?;
+            Err(S::Error::custom("fails partway"))
+        }
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("derived").join("record.json");
+    let previous = serde_json::json!({ "kept": true });
+    write_json_file(&path, &previous, "test record").expect("first write");
+    write_json_file(&path, &FailsPartway, "test record").expect_err("second write fails");
+
+    let body = std::fs::read_to_string(&path).expect("previous file still there");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).expect("previous file parses"),
+        previous
+    );
+    let entries = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+    assert_eq!(entries, 1, "no temporary is left beside the record");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let created = temp.path().join("created.json");
+        std::fs::File::create(&created).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), mode(&created));
+    }
+}
+
 /// Concurrent submissions: the append lock orders each event's chain fields,
 /// its DB row and its file line together, so both logs hold one unforked
 /// chain in the same order, in both dual-write modes.
