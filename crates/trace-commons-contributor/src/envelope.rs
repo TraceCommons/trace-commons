@@ -45,56 +45,18 @@ use crate::source::{
 /// the reverse).
 pub use trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES as MAX_ENVELOPE_BYTES;
 
-/// The limit `raw_contribution_size_ok` and `envelope_size_ok` refuse over:
-/// `MAX_ENVELOPE_BYTES`, except inside a unit test that lowered it for its
-/// own thread with [`lower_envelope_limit_for_test`]. Unit tests run in
-/// parallel threads of one process, so the override is per thread and a
-/// lowered limit never reaches another test.
-pub(crate) fn envelope_limit_bytes() -> usize {
-    #[cfg(test)]
-    if let Some(limit) = TEST_ENVELOPE_LIMIT.with(std::cell::Cell::get) {
-        return limit;
-    }
-    MAX_ENVELOPE_BYTES
-}
+/// The envelope limit the oversized-path tests lower a state directory to
+/// (`ConfigStore::lower_envelope_limit_for_tests`), so they need not build a
+/// 256 MiB session: far above any fixture session's envelope, far below the
+/// production limit. One constant for the unit and the integration tests.
+#[cfg(any(test, feature = "test-credential-store"))]
+pub const TEST_ENVELOPE_LIMIT_BYTES: usize = 1024 * 1024;
 
-#[cfg(test)]
-thread_local! {
-    static TEST_ENVELOPE_LIMIT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-}
-
-/// Lowers [`envelope_limit_bytes`] on this thread until the guard drops, so
-/// a test can drive the oversized path without building a 256 MiB session.
-///
-/// Only the thread that called it sees the lower limit. A `#[tokio::test]`
-/// runs on one thread unless the code under test moves work elsewhere
-/// (`spawn_blocking`, a multi-thread runtime); a check that ran on another
-/// thread would see `MAX_ENVELOPE_BYTES`, admit the test's payload, and fail
-/// the test's refusal assertion rather than pass it.
-#[cfg(test)]
-pub(crate) fn lower_envelope_limit_for_test(limit: usize) -> TestEnvelopeLimit {
-    assert!(
-        limit <= MAX_ENVELOPE_BYTES,
-        "a test may lower the envelope limit, never raise it"
-    );
-    TEST_ENVELOPE_LIMIT.with(|cell| cell.set(Some(limit)));
-    TestEnvelopeLimit(())
-}
-
-/// The limit the oversized-path unit tests lower to: far above any fixture
-/// session, far below the 256 MiB a debug build takes seconds to serialize.
-#[cfg(test)]
-pub(crate) const TEST_ENVELOPE_LIMIT_BYTES: usize = 1024 * 1024;
-
-/// Restores `MAX_ENVELOPE_BYTES` on this thread when dropped.
-#[cfg(test)]
-pub(crate) struct TestEnvelopeLimit(());
-
-#[cfg(test)]
-impl Drop for TestEnvelopeLimit {
-    fn drop(&mut self) {
-        TEST_ENVELOPE_LIMIT.with(|cell| cell.set(None));
-    }
+/// The limit a size check applies for a caller-supplied `limit`: never above
+/// `MAX_ENVELOPE_BYTES`, so no caller can raise the cap by passing a bigger
+/// number.
+pub(crate) fn clamp_envelope_limit(limit: usize) -> usize {
+    limit.min(MAX_ENVELOPE_BYTES)
 }
 
 /// NEAR AI privacy-filter backend settings. Constructed from env by
@@ -400,9 +362,13 @@ pub fn residual_secret_labels_fail_closed(
 /// envelope. Checking here lets `submit` skip the expensive chunked,
 /// networked privacy-filter pass on sessions that would be refused for size
 /// anyway; `envelope_size_ok` remains the authoritative post-redaction guard.
-pub fn raw_contribution_size_ok(raw: &RawTraceContribution) -> Result<usize> {
+///
+/// `limit` is the caller's state directory's limit
+/// (`ConfigStore::envelope_limit_bytes`); a limit above `MAX_ENVELOPE_BYTES`
+/// is treated as `MAX_ENVELOPE_BYTES`.
+pub fn raw_contribution_size_ok(raw: &RawTraceContribution, limit: usize) -> Result<usize> {
     let size = raw_contribution_size(raw)?;
-    if size > envelope_limit_bytes() {
+    if size > clamp_envelope_limit(limit) {
         anyhow::bail!("session too large");
     }
     Ok(size)
@@ -417,9 +383,11 @@ pub fn raw_contribution_size(raw: &RawTraceContribution) -> Result<usize> {
 
 /// Serialize `envelope` and refuse (label-only) if it exceeds
 /// `MAX_ENVELOPE_BYTES`. Returns the serialized byte size on success.
-pub fn envelope_size_ok(envelope: &TraceContributionEnvelope) -> Result<usize> {
+///
+/// `limit` as for [`raw_contribution_size_ok`].
+pub fn envelope_size_ok(envelope: &TraceContributionEnvelope, limit: usize) -> Result<usize> {
     let size = envelope_size(envelope)?;
-    if size > envelope_limit_bytes() {
+    if size > clamp_envelope_limit(limit) {
         anyhow::bail!("session too large");
     }
     Ok(size)
@@ -1714,12 +1682,31 @@ mod tests {
     #[test]
     fn the_production_envelope_limit_is_256_mib() {
         assert_eq!(MAX_ENVELOPE_BYTES, 256 * 1024 * 1024);
-        assert_eq!(envelope_limit_bytes(), MAX_ENVELOPE_BYTES);
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        assert_eq!(store.envelope_limit_bytes(), MAX_ENVELOPE_BYTES);
+    }
+
+    /// A limit above the production one is clamped to it, so no caller can
+    /// raise the cap by passing a bigger number; a lower one is kept.
+    #[test]
+    fn a_limit_above_the_production_one_is_clamped() {
+        assert_eq!(clamp_envelope_limit(usize::MAX), MAX_ENVELOPE_BYTES);
+        assert_eq!(clamp_envelope_limit(MAX_ENVELOPE_BYTES + 1), MAX_ENVELOPE_BYTES);
+        assert_eq!(clamp_envelope_limit(TEST_ENVELOPE_LIMIT_BYTES), TEST_ENVELOPE_LIMIT_BYTES);
+    }
+
+    /// The predicates refuse exactly over the limit they are given.
+    #[test]
+    fn the_size_predicates_refuse_only_over_the_given_limit() {
+        let cfg = test_config();
+        let small = build_raw_contribution(&fixture_transcript(), &cfg, chrono::Utc::now());
+        let size = raw_contribution_size(&small).unwrap();
+        assert!(raw_contribution_size_ok(&small, size).is_ok());
+        assert!(raw_contribution_size_ok(&small, size - 1).is_err());
     }
 
     #[test]
     fn oversized_raw_is_refused_before_redaction() {
-        let _limit = lower_envelope_limit_for_test(TEST_ENVELOPE_LIMIT_BYTES);
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
@@ -1734,10 +1721,10 @@ mod tests {
             success: None,
         });
         let big = build_raw_contribution(&t, &cfg, chrono::Utc::now());
-        assert!(raw_contribution_size_ok(&big).is_err());
+        assert!(raw_contribution_size_ok(&big, TEST_ENVELOPE_LIMIT_BYTES).is_err());
 
         let small = build_raw_contribution(&fixture_transcript(), &cfg, chrono::Utc::now());
-        assert!(raw_contribution_size_ok(&small).is_ok());
+        assert!(raw_contribution_size_ok(&small, TEST_ENVELOPE_LIMIT_BYTES).is_ok());
     }
 
     /// The declaration must describe the payload, not assert a constant.

@@ -1175,13 +1175,6 @@ pub struct DaemonShared {
     /// spend its bound on them again. In memory only: a restart tries them
     /// once more.
     pub(crate) backfill_tried: Mutex<std::collections::HashSet<Uuid>>,
-    /// The envelope size this daemon refuses over: when it pins a preview
-    /// (`approved_envelope::save_within`) and when `approve` labels an entry
-    /// `envelope-too-large` (`preview::size_refusal_over`). Always
-    /// `MAX_ENVELOPE_BYTES` outside tests; only
-    /// [`Self::set_envelope_limit_bytes_for_tests`] changes it, so a test can
-    /// drive the oversized path without building a 256 MiB session.
-    envelope_limit_bytes: usize,
 }
 
 /// Counts one preview build on [`DaemonShared`] for as long as it lives.
@@ -1436,25 +1429,6 @@ pub const ROUTING_TOKEN_UNREADABLE: &str = "token_unreadable";
 pub const ROUTING_UNKNOWN: &str = "unknown";
 
 impl DaemonShared {
-    /// Lowers the envelope limit this daemon refuses over, for a test that
-    /// needs a session past it. Compiled only into test builds (the
-    /// test-only `test-credential-store` feature, see `Cargo.toml`); a
-    /// shipped daemon always refuses over `MAX_ENVELOPE_BYTES`. Call before
-    /// the daemon is shared.
-    #[cfg(any(test, feature = "test-credential-store"))]
-    pub fn set_envelope_limit_bytes_for_tests(&mut self, limit: usize) {
-        assert!(
-            limit <= crate::envelope::MAX_ENVELOPE_BYTES,
-            "a test may lower the envelope limit, never raise it"
-        );
-        self.envelope_limit_bytes = limit;
-    }
-
-    /// The envelope size this daemon refuses over. See the field.
-    pub(crate) fn envelope_limit_bytes(&self) -> usize {
-        self.envelope_limit_bytes
-    }
-
     pub fn load(store: ConfigStore) -> Result<Self> {
         let mut queue = Queue::load(&store)?;
         // `Uploading` is a transient, in-pass claim. A daemon that died
@@ -1624,7 +1598,6 @@ impl DaemonShared {
             settlement: Mutex::new(Default::default()),
             preview_builds: std::sync::atomic::AtomicUsize::new(0),
             backfill_tried: Mutex::new(std::collections::HashSet::new()),
-            envelope_limit_bytes: crate::envelope::MAX_ENVELOPE_BYTES,
         })
     }
 
@@ -7632,9 +7605,9 @@ pub(super) async fn approve_as_a_person(
                 // re-check below would otherwise give it -- this one is
                 // permanent, and retrying the same session can never
                 // succeed, which `not-pinned`'s other causes do not imply.
-                if let Some(too_large_label) = super::preview::size_refusal_over(
+                if let Some(too_large_label) = super::preview::size_refusal(
                     summary.would_send_bytes,
-                    shared.envelope_limit_bytes(),
+                    shared.store.envelope_limit_bytes(),
                 ) {
                     skipped.push((id, too_large_label));
                     // Reported *and* recorded. Reporting alone left the
@@ -8249,6 +8222,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     // its way (OWNER DECISION E13).
     let _building = shared.preview_build_started();
     match super::preview::build_preview_card(
+        &shared.store,
         cfg.as_ref(),
         near_ai,
         attested_bodies,
@@ -8501,6 +8475,7 @@ async fn build_and_pin_preview(
             &transcript,
             session_ref.size_bytes,
             attested_bodies,
+            shared.store.envelope_limit_bytes(),
         )
         .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"))?;
         // The stored artifact this summary was rebuilt from is the one the
@@ -9190,14 +9165,7 @@ fn pin_previewed_envelope(
     ) {
         return;
     }
-    if super::approved_envelope::save_within(
-        &shared.store,
-        entry_id,
-        envelope,
-        shared.envelope_limit_bytes(),
-    )
-    .is_err()
-    {
+    if super::approved_envelope::save(&shared.store, entry_id, envelope).is_err() {
         return;
     }
     // K10: the summary already measured the bytes this envelope serializes
@@ -10594,6 +10562,7 @@ mod tests {
             &transcript,
             reference.size_bytes,
             false,
+            crate::envelope::MAX_ENVELOPE_BYTES,
         )
         .unwrap();
         (
@@ -11482,7 +11451,10 @@ mod tests {
             enrolled: true,
             subagent_count: 0,
             subagents_dropped: 0,
-            reason_label: super::super::preview::size_refusal(would_send_bytes),
+            reason_label: super::super::preview::size_refusal(
+                would_send_bytes,
+                crate::envelope::MAX_ENVELOPE_BYTES,
+            ),
             scrub_counts: super::super::second_look::ScrubCounts::default(),
         };
         let max = crate::envelope::MAX_ENVELOPE_BYTES;

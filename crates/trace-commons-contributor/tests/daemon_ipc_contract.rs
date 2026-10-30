@@ -1712,17 +1712,19 @@ async fn approve_reports_counts_a_client_can_show_without_asking_again() {
     assert_eq!(v["skipped"].as_array().unwrap().len(), 0, "{v}");
 }
 
-/// The envelope limit the oversized-session daemon runs under. Far above the
-/// ordinary fixture session's envelope, so that one is still approved, and
-/// far below the production `MAX_ENVELOPE_BYTES` (256 MiB), which a debug
-/// build took minutes to serialize and preview. The production value is
-/// pinned by `envelope::tests::the_production_envelope_limit_is_256_mib`.
-const OVERSIZED_FIXTURE_LIMIT_BYTES: usize = 1024 * 1024;
+/// The envelope limit the oversized-session daemon's state directory runs
+/// under: far above the ordinary fixture session's envelope, so that one is
+/// still approved, and far below the production `MAX_ENVELOPE_BYTES`
+/// (256 MiB), which a debug build took minutes to serialize and preview. The
+/// production value is pinned by
+/// `envelope::tests::the_production_envelope_limit_is_256_mib`.
+const OVERSIZED_FIXTURE_LIMIT_BYTES: usize =
+    trace_commons_contributor::envelope::TEST_ENVELOPE_LIMIT_BYTES;
 
 /// An enrolled daemon with two pending entries in one project: one ordinary
-/// session, and one whose sole event carries content past the daemon's
-/// envelope limit, which this fixture lowers to
-/// `OVERSIZED_FIXTURE_LIMIT_BYTES`. `build_preview` does not size-check the raw
+/// session, and one whose sole event carries content past the envelope limit
+/// of the daemon's state directory, which this fixture lowers to
+/// `OVERSIZED_FIXTURE_LIMIT_BYTES` (`ConfigStore::lower_envelope_limit_for_tests`). `build_preview` does not size-check the raw
 /// contribution -- only the stored artifact does -- so the build itself
 /// succeeds; `approve` catches the oversize before attempting to pin it and
 /// reports the entry `skipped` (`envelope-too-large`) rather than letting it
@@ -1807,9 +1809,10 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
     seed("oversized-fixture-oversized", &oversized_ref);
     queue.save(&store).unwrap();
 
-    let mut shared = DaemonShared::load(store).unwrap();
-    shared.set_envelope_limit_bytes_for_tests(OVERSIZED_FIXTURE_LIMIT_BYTES);
-    let shared = Arc::new(shared);
+    // Every size check against this state directory -- the preview's label,
+    // the pin, `approve`, `submit` -- reads the lowered limit.
+    store.lower_envelope_limit_for_tests(OVERSIZED_FIXTURE_LIMIT_BYTES);
+    let shared = Arc::new(DaemonShared::load(store).unwrap());
     let listener = bind_store(&store_dir).await;
     tokio::spawn(async move {
         let _ = serve(listener, shared).await;
@@ -1874,6 +1877,52 @@ async fn a_partial_batch_accounts_for_every_entry_it_was_given() {
     assert!(
         stored("oversized-fixture-good"),
         "the good envelope must be stored"
+    );
+}
+
+/// The preview and the approval refuse the same entry for size, with the
+/// same label: what the contributor is told before approving is what
+/// approving then does. Both read the state directory's limit.
+#[tokio::test]
+async fn the_preview_and_the_approval_agree_on_an_oversized_entry() {
+    let (daemon, store) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
+    let oversized_id = entry_id_for("oversized-fixture-oversized");
+    let good_id = entry_id_for("oversized-fixture-good");
+
+    let preview = call(
+        &daemon,
+        "preview",
+        serde_json::json!({ "entry_id": oversized_id.to_string() }),
+    )
+    .await;
+    assert_eq!(
+        preview["reason_label"], "envelope-too-large",
+        "the preview must warn about the size approve will refuse: {preview}"
+    );
+    assert!(
+        preview["would_send_bytes"].as_u64().unwrap() > OVERSIZED_FIXTURE_LIMIT_BYTES as u64,
+        "{preview}"
+    );
+    let good = call(
+        &daemon,
+        "preview",
+        serde_json::json!({ "entry_id": good_id.to_string() }),
+    )
+    .await;
+    assert!(good.get("reason_label").is_none(), "{good}");
+    assert!(good["would_send_bytes"].is_u64(), "{good}");
+
+    let v = call(&daemon, "approve", serde_json::json!({ "all": true })).await;
+    assert_eq!(v["approved"].as_u64(), Some(1), "{v}");
+    let skipped = v["skipped"].as_array().expect("skipped");
+    assert_eq!(skipped.len(), 1, "{v}");
+    assert_eq!(skipped[0]["entry_id"], oversized_id.to_string(), "{v}");
+    assert_eq!(skipped[0]["reason_label"], preview["reason_label"], "{v}");
+    assert!(
+        trace_commons_contributor::daemon::approved_envelope::load(&store, oversized_id)
+            .unwrap()
+            .is_none(),
+        "neither the preview nor the approval may store the oversized envelope"
     );
 }
 

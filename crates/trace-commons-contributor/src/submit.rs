@@ -441,12 +441,15 @@ fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
     }
 }
 
-fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
+/// `limit_bytes` is the limit the session was refused over: the state
+/// directory's (`ConfigStore::envelope_limit_bytes`), which is
+/// `MAX_ENVELOPE_BYTES` in a shipped build.
+fn refused_for_size(session_ref: &str, size_bytes: usize, limit_bytes: usize) -> SubmitOutcome {
     SubmitOutcome::Refused {
         reason_label: "session-too-large".to_string(),
         session_ref: session_ref.to_string(),
         size_bytes: Some(size_bytes),
-        limit_bytes: Some(MAX_ENVELOPE_BYTES),
+        limit_bytes: Some(crate::envelope::clamp_envelope_limit(limit_bytes)),
     }
 }
 
@@ -989,7 +992,8 @@ impl<'a> SubmitContext<'a> {
             std::sync::Arc::new(config_allowlist(self.cfg)),
             std::time::Duration::from_secs(120),
         )?
-        .with_admission_evidence(true);
+        .with_admission_evidence(true)
+        .with_envelope_limit(self.store.envelope_limit_bytes());
         let payload = crate::witness::witness_token_session(
             &transport,
             crate::witness::TokenBundleSession {
@@ -1364,7 +1368,8 @@ impl<'a> SubmitContext<'a> {
         )
         .map_err(|e| e.refusal_label())?
         .with_admission_evidence(admission_profile)
-        .with_background_workload(self.background_witness);
+        .with_background_workload(self.background_witness)
+        .with_envelope_limit(self.store.envelope_limit_bytes());
 
         // The source-selected profile is already frozen. Optional legacy
         // receipt failures retain ordinary review; a bound admission call
@@ -1545,6 +1550,8 @@ impl<'a> SubmitContext<'a> {
         self.last_rate_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let opts = self.opts;
+        // Every size refusal below is against the state directory's limit.
+        let envelope_limit = self.store.envelope_limit_bytes();
         // Taken up front, not at the point it is used below: several paths
         // return before that point (already-submitted, an unavailable
         // filter, an over-size refusal), and an approved envelope left
@@ -1701,16 +1708,21 @@ impl<'a> SubmitContext<'a> {
                 // the expensive redaction/privacy-filter pass; they would be
                 // refused for size after redaction anyway (envelope_size_ok
                 // below is the authoritative check).
-                if raw_contribution_size_ok(&raw).is_err() {
+                if raw_contribution_size_ok(&raw, envelope_limit).is_err() {
                     let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-                    return Ok(refused_for_size(&transcript.session_hash, size));
+                    return Ok(refused_for_size(
+                        &transcript.session_hash,
+                        size,
+                        envelope_limit,
+                    ));
                 }
                 match witness_settings {
                     // Absent means the witness path is not entered at all, and
                     // this is byte for byte what it was before the feature
                     // existed.
                     None => {
-                        match checked_local_redaction(&redactor, raw, self.canary_checked).await {
+                        match checked_local_redaction(&redactor, raw, self.canary_checked, envelope_limit)
+                            .await {
                             Ok(e) => {
                                 // Recorded, rather than left at whatever the
                                 // previous submission set: a shell asking "what
@@ -1826,11 +1838,15 @@ impl<'a> SubmitContext<'a> {
             self.near_ai_notice_recorded = true;
         }
 
-        let size = match envelope_size_ok(&envelope) {
+        let size = match envelope_size_ok(&envelope, envelope_limit) {
             Ok(s) => s,
             Err(_) => {
                 let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-                return Ok(refused_for_size(&transcript.session_hash, size));
+                return Ok(refused_for_size(
+                    &transcript.session_hash,
+                    size,
+                    envelope_limit,
+                ));
             }
         };
 
@@ -1902,9 +1918,13 @@ impl<'a> SubmitContext<'a> {
             return Ok(outcome);
         }
 
-        if envelope_size_ok(&envelope).is_err() {
+        if envelope_size_ok(&envelope, envelope_limit).is_err() {
             let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-            return Ok(refused_for_size(&transcript.session_hash, size));
+            return Ok(refused_for_size(
+                &transcript.session_hash,
+                size,
+                envelope_limit,
+            ));
         }
 
         // R5: the last check before anything reaches the commons, after every
@@ -1984,6 +2004,7 @@ impl<'a> SubmitContext<'a> {
             &self.effective_cfg,
             witnessed.as_ref(),
             &mut rate_limit_retry_after,
+            envelope_limit,
         )
         .await;
         if let Some(seconds) = rate_limit_retry_after {
@@ -2017,7 +2038,11 @@ impl<'a> SubmitContext<'a> {
             }
             Err(reason_label) if reason_label == "session-too-large" => {
                 let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-                Ok(refused_for_size(&transcript.session_hash, size))
+                Ok(refused_for_size(
+                    &transcript.session_hash,
+                    size,
+                    envelope_limit,
+                ))
             }
             Err(reason_label) => Ok(SubmitOutcome::Failed { reason_label }),
         }
@@ -2507,10 +2532,15 @@ pub async fn emit_scoped_attestation(
 /// Shared local preview/submit redaction, including post-redaction checks.
 /// A submit batch may have already checked this same redactor; standalone
 /// previews always pass false. No state, credentials, or network are opened.
+///
+/// `envelope_limit` is the caller's state directory's limit
+/// (`ConfigStore::envelope_limit_bytes`); a caller with no state directory
+/// passes `MAX_ENVELOPE_BYTES`.
 pub(crate) async fn checked_local_redaction(
     redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
     raw: RawTraceContribution,
     canary_checked: bool,
+    envelope_limit: usize,
 ) -> std::result::Result<TraceContributionEnvelope, &'static str> {
     if !canary_checked {
         canary_self_test_async(redactor)
@@ -2547,15 +2577,16 @@ pub(crate) async fn checked_local_redaction(
             _ => "redaction-failed",
         }
     })?;
-    validate_local_envelope(redactor, &envelope)?;
+    validate_local_envelope(redactor, &envelope, envelope_limit)?;
     Ok(envelope)
 }
 
 pub(crate) fn validate_local_envelope(
     redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
+    envelope_limit: usize,
 ) -> std::result::Result<(), &'static str> {
-    envelope_size_ok(envelope).map_err(|_| "session-too-large")?;
+    envelope_size_ok(envelope, envelope_limit).map_err(|_| "session-too-large")?;
     if envelope_has_residual_secret(redactor, envelope).map_err(|_| "secret-scan-failed")? {
         return Err("secret-leak-detected");
     }
@@ -2800,6 +2831,8 @@ async fn upload_with_retry(
     effective_cfg: &ContributorConfig,
     witnessed: Option<&WitnessedEnvelope>,
     rate_limit_retry_after: &mut Option<u32>,
+    // The state directory's envelope limit (`ConfigStore::envelope_limit_bytes`).
+    envelope_limit: usize,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
     let mut transport_attempts: u32 = 0;
     let mut remint_attempted = false;
@@ -2923,7 +2956,7 @@ async fn upload_with_retry(
                         } else {
                             stamp_granted_scopes(envelope, effective_cfg, &new_token);
                         }
-                        if envelope_size_ok(envelope).is_err() {
+                        if envelope_size_ok(envelope, envelope_limit).is_err() {
                             return Err("session-too-large".to_string());
                         }
                         *claim = Some(new_token);
@@ -3945,8 +3978,8 @@ mod tests {
             "canonical-width placeholder identity must preserve serialized size"
         );
         assert_eq!(
-            envelope_size_ok(&preview).is_ok(),
-            envelope_size_ok(&enrolled).is_ok(),
+            envelope_size_ok(&preview, MAX_ENVELOPE_BYTES).is_ok(),
+            envelope_size_ok(&enrolled, MAX_ENVELOPE_BYTES).is_ok(),
             "placeholder identity must not change the size decision"
         );
         assert_eq!(
@@ -4106,7 +4139,7 @@ mod tests {
     /// envelope cap itself, never a literal.
     #[test]
     fn refused_for_size_names_the_session_the_size_and_the_limit() {
-        let outcome = refused_for_size("sha256:abc", MAX_ENVELOPE_BYTES + 1);
+        let outcome = refused_for_size("sha256:abc", MAX_ENVELOPE_BYTES + 1, MAX_ENVELOPE_BYTES);
         match outcome {
             SubmitOutcome::Refused {
                 reason_label,
@@ -4121,7 +4154,7 @@ mod tests {
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
-        let refusal = refused_for_size("sha256:abc", MAX_ENVELOPE_BYTES + 1);
+        let refusal = refused_for_size("sha256:abc", MAX_ENVELOPE_BYTES + 1, MAX_ENVELOPE_BYTES);
         assert!(!outcomes_have_failure(std::slice::from_ref(&refusal), true));
         assert!(outcomes_have_failure(&[refusal], false));
     }
@@ -5815,9 +5848,9 @@ mod tests {
             None,
             None,
         );
-        let _limit = crate::envelope::lower_envelope_limit_for_test(
-            crate::envelope::TEST_ENVELOPE_LIMIT_BYTES,
-        );
+        // The witness path holds the session to this state directory's
+        // limit, lowered so the oversized session need not be 256 MiB.
+        store.lower_envelope_limit_for_tests(crate::envelope::TEST_ENVELOPE_LIMIT_BYTES);
         let mut oversized = raw.events[0].clone();
         oversized.content = Some("x".repeat(crate::envelope::TEST_ENVELOPE_LIMIT_BYTES + 1));
         raw.events.push(oversized);
@@ -6795,6 +6828,7 @@ mod tests {
             &cfg,
             witnessed,
             &mut None,
+            MAX_ENVELOPE_BYTES,
         )
         .await;
         let captured = captured.lock().unwrap().clone();
@@ -7081,7 +7115,7 @@ mod json_output_tests {
         // stops a future change from surfacing a response body or path to a
         // caller that logs this output.
         let out = outcomes_to_json(
-            &[refused_for_size("sha256:test", 1_600_000)],
+            &[refused_for_size("sha256:test", 1_600_000, MAX_ENVELOPE_BYTES)],
             true,
             &["preview notice"],
         );

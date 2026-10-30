@@ -513,8 +513,16 @@ async fn canonical_size_boundary_agrees_before_and_after_enrollment() {
     );
     assert_eq!(preview_size, enrolled_size);
     assert_eq!(
-        trace_commons_contributor::envelope::envelope_size_ok(&preview).is_ok(),
-        trace_commons_contributor::envelope::envelope_size_ok(&enrolled).is_ok(),
+        trace_commons_contributor::envelope::envelope_size_ok(
+            &preview,
+            trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES
+        )
+        .is_ok(),
+        trace_commons_contributor::envelope::envelope_size_ok(
+            &enrolled,
+            trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES
+        )
+        .is_ok(),
     );
 }
 

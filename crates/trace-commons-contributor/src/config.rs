@@ -1154,6 +1154,15 @@ pub struct ConfigStore {
     dir: PathBuf,
 }
 
+/// Test-lowered envelope limits, by state directory. See
+/// `ConfigStore::lower_envelope_limit_for_tests`.
+#[cfg(any(test, feature = "test-credential-store"))]
+fn test_envelope_limits() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, usize>> {
+    static LIMITS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>> =
+        std::sync::OnceLock::new();
+    LIMITS.get_or_init(Default::default)
+}
+
 /// A config naming the other channel's issuer or ingest is neither loaded nor
 /// saved: a production build never talks to the staging server, nor the
 /// reverse, whether the address came from an invite or a hand edit.
@@ -1229,6 +1238,43 @@ impl ConfigStore {
     /// The directory backing this store.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// The envelope size every check against this state directory refuses
+    /// over: the preview's `envelope-too-large` label, `approve`, the stored
+    /// approved envelope, and `submit`'s and the witness path's size
+    /// refusals all read it from here, so they cannot disagree.
+    ///
+    /// `MAX_ENVELOPE_BYTES` in every shipped build. Only a test build can
+    /// lower it, per directory, with [`Self::lower_envelope_limit_for_tests`].
+    pub fn envelope_limit_bytes(&self) -> usize {
+        #[cfg(any(test, feature = "test-credential-store"))]
+        if let Some(limit) = test_envelope_limits()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&self.dir)
+        {
+            return *limit;
+        }
+        crate::envelope::MAX_ENVELOPE_BYTES
+    }
+
+    /// Lowers [`Self::envelope_limit_bytes`] for this state directory, so a
+    /// test can drive the oversized path without building a 256 MiB session.
+    /// Every store opened on the same directory sees it, and no other
+    /// directory does, so tests running in parallel do not see each other's
+    /// limits. Compiled only into test builds (`cfg(test)`, or the test-only
+    /// `test-credential-store` feature; see `Cargo.toml`).
+    #[cfg(any(test, feature = "test-credential-store"))]
+    pub fn lower_envelope_limit_for_tests(&self, limit: usize) {
+        assert!(
+            limit <= crate::envelope::MAX_ENVELOPE_BYTES,
+            "a test may lower the envelope limit, never raise it"
+        );
+        test_envelope_limits()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(self.dir.clone(), limit);
     }
 
     fn config_path(&self) -> PathBuf {
