@@ -311,6 +311,12 @@ pub struct MonitorTreeCopy {
     pub automatic_folder: &'static str,
     pub automatic_all: &'static str,
     pub automatic_count: &'static str,
+    /// The titles over the tree's columns while the Automatic switches
+    /// show: the folders, their Submit, and their Automatic switch (owner,
+    /// 2026-10-30, Proposal A). DRAFT, NEEDS APPROVAL.
+    pub column_folders: &'static str,
+    pub column_submit: &'static str,
+    pub column_automatic: &'static str,
     /// The session row menu's one item, and its confirmation.
     pub dismiss_session: &'static str,
     pub dismiss_session_title: &'static str,
@@ -610,6 +616,9 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             automatic_folder: "Automatic for {label}",
             automatic_all: "Automatic for every folder",
             automatic_count: "{count} of {total} folders automatic. A folder set to Ask keeps asking.",
+            column_folders: "Folders on this Mac",
+            column_submit: "Submit",
+            column_automatic: "Auto",
             dismiss_session: "Dismiss trace",
             dismiss_session_title: "Dismiss this trace?",
             dismiss_session_body: "{when} \u{00b7} {size}. Dismissing removes it from the traces \

@@ -178,6 +178,10 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let automaticFolder: String?
     public let automaticAll: String?
     public let automaticCount: String?
+    /// The titles over the tree's columns while the Automatic switches show.
+    public let columnFolders: String?
+    public let columnSubmit: String?
+    public let columnAutomatic: String?
     public let dismissSession: String
     public let dismissSessionTitle: String
     public let dismissSessionBody: String
@@ -217,6 +221,9 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case automaticFolder = "automatic_folder"
         case automaticAll = "automatic_all"
         case automaticCount = "automatic_count"
+        case columnFolders = "column_folders"
+        case columnSubmit = "column_submit"
+        case columnAutomatic = "column_automatic"
         case dismissSession = "dismiss_session"
         case dismissSessionTitle = "dismiss_session_title"
         case dismissSessionBody = "dismiss_session_body"

@@ -190,6 +190,10 @@ struct TracesTreeView: View, Equatable {
                         SharingChoiceCard(asSwitch: automatic)
                             .padding(.bottom, GlassTokens.Space.s2)
                     }
+                    if automaticSwitch != nil, let tree = store.words?.tree,
+                        let folders = tree.columnFolders, let submit = tree.columnSubmit, let auto = tree.columnAutomatic {
+                        TracesColumnTitles(folders: folders, submit: submit, automatic: auto)
+                    }
                     tree
                 }
             }
@@ -1447,3 +1451,37 @@ struct TracesRowMenuPill: View {
     }
 }
 
+/// The titles over the tree's columns while the Automatic switches show
+/// (owner, 2026-10-30, Proposal A): the folders at the left, Submit, and
+/// Auto over the rows' switches. Decorative: each control has its own
+/// accessible name, so the titles are hidden from assistive tech.
+struct TracesColumnTitles: View {
+    let folders: String
+    let submit: String
+    let automatic: String
+
+    var body: some View {
+        HStack(spacing: GlassTokens.Space.s4) {
+            Text(folders)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // Submit and the switch sit 6pt apart in the row's accessory;
+            // the switch ends it, before the row menu's 22pt column and the
+            // row's 6pt trailing inset. Submit's title is centred over the
+            // usual split button, "Submit all (n)" and its chevron.
+            HStack(spacing: GlassTokens.Space.s3) {
+                Text(submit)
+                    .frame(minWidth: 128)
+                Text(automatic)
+                    .frame(width: GlassTokens.Size.watchSwitchWidth)
+            }
+            Color.clear.frame(width: 22, height: 0)
+        }
+        .glassType(GlassTokens.TypeScale.eyebrow)
+        .foregroundStyle(GlassColor.textTertiary)
+        .lineLimit(1)
+        .padding(.leading, 8)
+        .padding(.trailing, 6)
+        .padding(.bottom, GlassTokens.Space.s2)
+        .accessibilityHidden(true)
+    }
+}
