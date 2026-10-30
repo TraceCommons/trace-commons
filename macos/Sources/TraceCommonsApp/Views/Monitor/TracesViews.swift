@@ -440,7 +440,10 @@ struct TracesTreeView: View, Equatable {
     /// or for a folder the core lists no mode for. Turning it on arms the
     /// folder through `modeChange`, so the core's arming question is asked.
     nonisolated static func automaticSwitch(_ folder: TracesTree.FolderNode) -> Bool? {
-        switch folder.mode {
+        // Traces with no project: a switch that stays off (owner,
+        // 2026-10-30); pressing it says why.
+        if folder.isBucket { return folder.mode == nil ? nil : false }
+        return switch folder.mode {
         case .autoUpload: folder.offerableModes.contains(.ask) ? true : nil
         case .ask: folder.offerableModes.contains(.autoUpload) ? false : nil
         case .ignore, nil: nil
@@ -679,7 +682,13 @@ struct TracesTreeView: View, Equatable {
             onSplitSubmit: { Task { await store.contributeFolder(folder, verdict: nil) } },
             onSplitMenu: { rowMenu = Self.toggled(.submit(folder.id), current: rowMenu) },
             onMenu: menu ? { rowMenu = Self.toggled(.folder(folder.id), current: rowMenu) } : nil,
-            onAutomatic: { on in request(folder, on ? .autoUpload : .ask) },
+            onAutomatic: { on in
+                if folder.isBucket {
+                    if on, let note = ProjectCopy.unresolvedBucketNote { store.say(note) }
+                } else {
+                    request(folder, on ? .autoUpload : .ask)
+                }
+            },
             spoken: $spoken
         )
         .equatable()

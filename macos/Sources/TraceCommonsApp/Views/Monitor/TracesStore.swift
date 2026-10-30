@@ -939,6 +939,12 @@ final class TracesStore {
     /// confirmation the view showed (arming, or ignoring a folder with
     /// sessions waiting). `promised` is the waiting count that confirmation
     /// named; the core's `purged` is the authority, and a difference is said.
+    /// A line for the tab's folder notice that no write produced: why a
+    /// switch did not move.
+    func say(_ line: String) {
+        folderNotice = line
+    }
+
     func setFolderMode(_ folder: TracesTree.FolderNode, _ mode: ProjectMode, promised: Int) async {
         guard !writing.contains(folder.id) else { return }
         let mine = attachment
