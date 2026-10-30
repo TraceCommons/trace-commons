@@ -306,10 +306,32 @@ public struct ManagedModel: Decodable, Equatable, Identifiable, Sendable {
 }
 
 /// `managed_model_catalogue`'s answer: NEAR AI's chat models in its order,
-/// and the one the tool gets when a launch names none.
+/// the one the tool gets when a launch names none, and the starred ones.
 public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
     public let models: [ManagedModel]
     public let `default`: String?
+    /// The person's favorite model ids. An older daemon sends none.
+    public let favorites: [String]
+
+    private enum CodingKeys: String, CodingKey { case models, `default`, favorites }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        models = try container.decode([ManagedModel].self, forKey: .models)
+        `default` = try container.decodeIfPresent(String.self, forKey: .default)
+        favorites = try container.decodeIfPresent([String].self, forKey: .favorites) ?? []
+    }
+
+    private init(models: [ManagedModel], default: String?, favorites: [String]) {
+        self.models = models
+        self.default = `default`
+        self.favorites = favorites
+    }
+
+    /// This catalogue with the list `managed_model_favorite_set` answered.
+    public func withFavorites(_ favorites: [String]) -> ManagedModelCatalogue {
+        ManagedModelCatalogue(models: models, default: `default`, favorites: favorites)
+    }
 }
 
 /// One entry in the Launch sheet's model picker.
@@ -332,13 +354,34 @@ public extension ManagedSurface {
     }
 
     /// The picker's options: the default first, which names the model it
-    /// will be when the catalogue says, then each chat model. With no
-    /// catalogue, only the default.
+    /// will be when the catalogue says, then the favorites, then the other
+    /// chat models, each group in NEAR AI's order. A favorite NEAR AI does
+    /// not list is not shown. With no catalogue, only the default.
     static func modelOptions(_ catalogue: ManagedModelCatalogue?, copy: (String) -> String) -> [ManagedModelOption] {
         let first = catalogue?.default.map { copy("model_default").replacingOccurrences(of: "{model}", with: $0) }
             ?? copy("model_default_unknown")
+        let models = catalogue?.models ?? []
+        let favorites = Set(catalogue?.favorites ?? [])
+        let ordered = models.filter { favorites.contains($0.id) } + models.filter { !favorites.contains($0.id) }
         return [ManagedModelOption(title: first, value: defaultModel)]
-            + (catalogue?.models ?? []).map { ManagedModelOption(title: $0.id, value: $0.id) }
+            + ordered.map { ManagedModelOption(title: $0.id, value: $0.id) }
+    }
+
+    /// Whether `model` is starred.
+    static func isFavoriteModel(_ model: String, in catalogue: ManagedModelCatalogue?) -> Bool {
+        catalogue?.favorites.contains(model) == true
+    }
+
+    /// Whether the star is shown for the picker's value: only a model NEAR
+    /// AI lists, never the default option or a saved model it dropped.
+    static func offersFavorite(_ model: String?, in catalogue: ManagedModelCatalogue?) -> Bool {
+        guard let model, model != defaultModel else { return false }
+        return catalogue?.models.contains { $0.id == model } == true
+    }
+
+    /// The `managed_model_favorite_set` request.
+    static func favoriteParams(model: String, favorite: Bool) -> [String: Any] {
+        ["model": model, "favorite": favorite]
     }
 
     /// The Launch sheet's `managed_launch_prepare` request. A model is sent

@@ -669,7 +669,10 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
         return redeem_async(shared, request).await;
     }
     if request.method == "managed_model_catalogue" {
-        return model_catalogue(request).await;
+        return model_catalogue(shared, request).await;
+    }
+    if request.method == "managed_model_favorite_set" {
+        return favorite_set(shared, request).await;
     }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
@@ -685,10 +688,32 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
     respond(request, remember_prepared(shared, request, result))
 }
 
+/// NEAR AI's chat models, read without a key. `None` when NEAR AI cannot
+/// be read.
+async fn fetch_chat_models() -> Option<Vec<models::ChatModel>> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    models::fetch(&client, near_ai_base_url()).await
+}
+
+/// The stored favorite model ids.
+fn favorite_models(shared: &DaemonShared) -> Vec<String> {
+    shared
+        .settings
+        .lock()
+        .map(|s| s.managed_favorite_models.clone())
+        .unwrap_or_default()
+}
+
 /// The NEAR AI chat models a launch can name, and the one `tool` gets
 /// when it names none (`managed::models`). The catalogue is public: no
-/// key is read or sent. Answers `{"models":[{"id","name"?}],"default"}`.
-async fn model_catalogue(request: &Request) -> Response {
+/// key is read or sent. Answers `{"models":[{"id","name"?}],"default",
+/// "favorites"}`, where `favorites` is the starred models among `models`,
+/// in NEAR AI's order.
+async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Params {
@@ -698,24 +723,66 @@ async fn model_catalogue(request: &Request) -> Response {
         Ok(p) => p,
         Err(error) => return respond(request, Err(error.into())),
     };
-    let Ok(client) = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    else {
-        return respond(request, Err(ManagedError::ModelUnavailable.into()));
-    };
-    let offered = models::fetch(&client, near_ai_base_url())
+    let offered = fetch_chat_models()
         .await
         .map(|models| models::offered(p.tool, models));
     let result = match offered {
         Some(models) if !models.is_empty() => {
             let default = models::default_for(p.tool, &models).map(|m| m.id.clone());
-            Ok(json!({"models":models,"default":default}))
+            let starred = favorite_models(shared);
+            let favorites: Vec<&str> = models
+                .iter()
+                .map(|m| m.id.as_str())
+                .filter(|id| starred.iter().any(|s| s == id))
+                .collect();
+            Ok(json!({"models":models,"default":default,"favorites":favorites}))
         }
         _ => Err(ManagedError::ModelUnavailable.into()),
     };
     respond(request, result)
+}
+
+/// `managed_model_favorite_set {model, favorite}`: star or unstar one model
+/// for the Launch sheet's picker. Starring reads NEAR AI's chat models and
+/// refuses one it does not list, so only an offered model is ever added;
+/// unstarring reads nothing. Writes through `set_settings`, whose checks
+/// (id shape, list bound) apply too. Answers `{"favorites"}`, the stored
+/// list. No lock is held across the read.
+async fn favorite_set(shared: &DaemonShared, request: &Request) -> Response {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        model: String,
+        favorite: bool,
+    }
+    let p: Params = match parse(request) {
+        Ok(p) => p,
+        Err(error) => return respond(request, Err(error.into())),
+    };
+    if !crate::daemon::settings::valid_favorite_model_id(&p.model) {
+        return respond(request, Err(ManagedError::InvalidRequest.into()));
+    }
+    if p.favorite {
+        match fetch_chat_models().await {
+            Some(models) if models.iter().any(|m| m.id == p.model) => {}
+            _ => return respond(request, Err(ManagedError::ModelUnavailable.into())),
+        }
+    }
+    let write = Request {
+        id: request.id,
+        method: "set_settings".into(),
+        params: json!({"managed_favorite_models":{ p.model: p.favorite }}),
+    };
+    let response = super::ipc::handle_set_settings(shared, &write);
+    if let Some(error) = &response.error {
+        // A full list is the only refusal a well-formed id can meet here;
+        // a failed write keeps its own answer.
+        if error.message == crate::daemon::settings::ERR_SETTINGS_INVALID_VALUE {
+            return respond(request, Err(ManagedError::InvalidRequest.into()));
+        }
+        return response;
+    }
+    respond(request, Ok(json!({"favorites": favorite_models(shared)})))
 }
 
 /// The daemon reads the sign-in here, at launch time, and gives it only to

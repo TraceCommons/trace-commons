@@ -509,7 +509,7 @@ struct ManagedLaunchSheet: View {
                 }
                 if let account = selectedAccount {
                     ManagedFolderOptions(tool: account.tool, connection: account.connection, draft: $folderDraft,
-                        catalogue: catalogue, supportsFolderSettings: supportsFolderSettings,
+                        catalogue: $catalogue, supportsFolderSettings: supportsFolderSettings,
                         retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
                 }
                 HStack(spacing: GlassTokens.Space.s4) {

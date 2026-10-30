@@ -763,6 +763,14 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub managed_terminal: crate::managed::terminal::TerminalSetting,
 
+    /// NEAR AI model ids the person starred, which the Launch sheet's model
+    /// picker lists first (`managed_model_catalogue`'s `favorites`). Order
+    /// is not meaningful: shells show them in NEAR AI's order. Written only
+    /// through [`apply_settings_object`], which checks each id and bounds
+    /// the list ([`MAX_FAVORITE_MODELS`], [`MAX_FAVORITE_MODEL_ID_BYTES`]).
+    #[serde(default)]
+    pub managed_favorite_models: Vec<String>,
+
     /// Per-agent argv text for new managed coding sessions. Omitted tools
     /// keep their existing values during partial configuration updates.
     #[serde(default)]
@@ -1419,6 +1427,7 @@ impl Default for DaemonSettings {
             notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
             managed_terminal: Default::default(),
+            managed_favorite_models: Vec::new(),
             managed_cli_options: Default::default(),
             managed_folder_settings: Default::default(),
             notify: NotifyKinds::default(),
@@ -1854,6 +1863,21 @@ pub const ERR_SETTINGS_UNKNOWN_FIELD: &str = "settings-unknown-field";
 /// the caller's value, and "wrong type" vs. "right type, wrong range" is
 /// not a distinction a fail-closed caller needs to branch on.
 pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
+
+/// The most favorite models one settings file keeps.
+pub const MAX_FAVORITE_MODELS: usize = 32;
+/// The longest favorite model id, in UTF-8 bytes. NEAR AI's ids are a
+/// fraction of this.
+pub const MAX_FAVORITE_MODEL_ID_BYTES: usize = 256;
+
+/// Whether `id` can be a favorite model id: non-empty, bounded, and free of
+/// whitespace and control characters. Says nothing about whether NEAR AI
+/// offers it; `managed_model_favorite_set` checks that against the catalogue.
+pub fn valid_favorite_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_FAVORITE_MODEL_ID_BYTES
+        && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+}
 /// A `notify` object named a kind this build does not know. A fixed label:
 /// the caller's key never enters it.
 pub const ERR_SETTINGS_UNKNOWN_NOTIFY_KIND: &str = "settings-unknown-notify-kind";
@@ -2157,6 +2181,32 @@ pub fn apply_settings_object(
                     .and_then(crate::managed::terminal::TerminalApp::parse)
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?
                     .into();
+            }
+            // Favorite models merge like `notify`: `{"<id>": true}` stars an
+            // id, `false` unstars it, omitted ids stay. One bad entry, or a
+            // list past the bound, refuses the whole patch. Also reachable as
+            // `managed_model_favorite_set`, which writes through here.
+            "managed_favorite_models" => {
+                let entries = value.as_object().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                let mut candidate = settings.managed_favorite_models.clone();
+                for (id, on) in entries {
+                    let on = on.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                    if !valid_favorite_model_id(id) {
+                        return Err(ERR_SETTINGS_INVALID_VALUE);
+                    }
+                    if !on {
+                        candidate.retain(|kept| kept != id);
+                    }
+                }
+                for (id, on) in entries {
+                    if on.as_bool() == Some(true) && !candidate.contains(id) {
+                        candidate.push(id.clone());
+                    }
+                }
+                if candidate.len() > MAX_FAVORITE_MODELS {
+                    return Err(ERR_SETTINGS_INVALID_VALUE);
+                }
+                settings.managed_favorite_models = candidate;
             }
             "managed_folder_settings" => {
                 crate::managed::folder::apply_patch(settings, value)?;
@@ -3448,6 +3498,116 @@ mod tests {
         assert_eq!(
             DaemonSettings::load(&store).unwrap().managed_terminal,
             TerminalSetting::Unrecognized
+        );
+    }
+
+    /// Favorite models merge like `notify`: `true` stars an id, `false`
+    /// unstars it, omitted ids stay. Every id is checked, the whole patch is
+    /// refused on one bad entry, and the list is bounded. A file written
+    /// before the key existed loads with none.
+    #[test]
+    fn favorite_models_merge_and_refuse_bad_ids() {
+        let mut s = DaemonSettings::default();
+        assert!(s.managed_favorite_models.is_empty());
+        let patch =
+            |entries: serde_json::Value| serde_json::json!({ "managed_favorite_models": entries });
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &patch(serde_json::json!({"b/two": true, "a/one": true}))
+            ),
+            Ok(true)
+        );
+        // Starring again and unstarring an absent id change nothing.
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &patch(serde_json::json!({"a/one": true, "c/three": false}))
+            ),
+            Ok(true)
+        );
+        let mut starred = s.managed_favorite_models.clone();
+        starred.sort();
+        assert_eq!(starred, ["a/one", "b/two"]);
+        assert_eq!(
+            apply_settings_object(&mut s, &patch(serde_json::json!({"b/two": false}))),
+            Ok(true)
+        );
+        assert_eq!(s.managed_favorite_models, ["a/one"]);
+
+        let long = "m".repeat(MAX_FAVORITE_MODEL_ID_BYTES + 1);
+        for bad in [
+            serde_json::json!(["a/one"]),
+            serde_json::json!("a/one"),
+            serde_json::json!(null),
+            serde_json::json!({"a/one": 1}),
+            serde_json::json!({"a/one": null}),
+            serde_json::json!({"": true}),
+            serde_json::json!({" a/one": true}),
+            serde_json::json!({"a one": true}),
+            serde_json::json!({"a/one\n": true}),
+            serde_json::json!({"a/\u{0007}": true}),
+            serde_json::json!({ long.clone(): true }),
+            // One bad entry refuses the good one beside it.
+            serde_json::json!({"z/ok": true, "": true}),
+        ] {
+            let mut candidate = s.clone();
+            assert_eq!(
+                apply_settings_object(&mut candidate, &patch(bad.clone())),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{bad}"
+            );
+            assert_eq!(candidate.managed_favorite_models, ["a/one"], "{bad}");
+        }
+
+        let mut full = DaemonSettings::default();
+        let many: serde_json::Map<_, _> = (0..MAX_FAVORITE_MODELS)
+            .map(|n| (format!("m/{n}"), serde_json::json!(true)))
+            .collect();
+        assert_eq!(
+            apply_settings_object(&mut full, &patch(serde_json::Value::Object(many))),
+            Ok(true)
+        );
+        assert_eq!(full.managed_favorite_models.len(), MAX_FAVORITE_MODELS);
+        assert_eq!(
+            apply_settings_object(
+                &mut full.clone(),
+                &patch(serde_json::json!({"m/extra": true}))
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        // At the bound, one out and one in within the same patch is fine.
+        assert_eq!(
+            apply_settings_object(
+                &mut full,
+                &patch(serde_json::json!({"m/0": false, "m/extra": true}))
+            ),
+            Ok(true)
+        );
+        assert_eq!(full.managed_favorite_models.len(), MAX_FAVORITE_MODELS);
+
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut stored = serde_json::to_value(DaemonSettings::default()).unwrap();
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("managed_favorite_models");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&stored).unwrap())
+            .unwrap();
+        assert!(
+            DaemonSettings::load(&store)
+                .unwrap()
+                .managed_favorite_models
+                .is_empty()
+        );
+        s.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store)
+                .unwrap()
+                .managed_favorite_models,
+            ["a/one"]
         );
     }
 

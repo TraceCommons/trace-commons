@@ -307,6 +307,48 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.modelOptions(unnamed) { Self.modelCopy[$0] ?? "" }.map(\.title), ["Default", "x/y"])
     }
 
+    /// Favorites come straight after the default, in NEAR AI's order rather
+    /// than the order they were starred, and are not repeated below. A
+    /// favorite NEAR AI no longer offers is not shown. An older daemon sends
+    /// no `favorites`, which reads as none.
+    func testFavoriteModelsComeFirstInTheModelPicker() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"b/two"},{"id":"c/three"},{"id":"d/four"}],"default":"a/one","favorites":["d/four","b/two","gone/model"]}"#.utf8))
+        XCTAssertEqual(catalogue.favorites, ["d/four", "b/two", "gone/model"])
+        let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(options.map(\.value), [ManagedSurface.defaultModel, "b/two", "d/four", "a/one", "c/three"])
+        XCTAssertTrue(ManagedSurface.isFavoriteModel("b/two", in: catalogue))
+        XCTAssertFalse(ManagedSurface.isFavoriteModel("a/one", in: catalogue))
+
+        let older = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"b/two"}],"default":null}"#.utf8))
+        XCTAssertEqual(older.favorites, [])
+        XCTAssertEqual(ManagedSurface.modelOptions(older) { Self.modelCopy[$0] ?? "" }.map(\.value), [ManagedSurface.defaultModel, "a/one", "b/two"])
+
+        // A star's answer replaces the list; the models stay as read.
+        let starred = older.withFavorites(["b/two"])
+        XCTAssertEqual(ManagedSurface.modelOptions(starred) { Self.modelCopy[$0] ?? "" }.map(\.value), [ManagedSurface.defaultModel, "b/two", "a/one"])
+        XCTAssertEqual(starred.models, older.models)
+    }
+
+    /// The star is offered only for a model NEAR AI lists: never for the
+    /// default option, and never for a saved model it no longer offers.
+    func testTheStarIsOfferedOnlyForAListedModel() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one"}"#.utf8))
+        XCTAssertTrue(ManagedSurface.offersFavorite("a/one", in: catalogue))
+        XCTAssertFalse(ManagedSurface.offersFavorite(nil, in: catalogue))
+        XCTAssertFalse(ManagedSurface.offersFavorite(ManagedSurface.defaultModel, in: catalogue))
+        XCTAssertFalse(ManagedSurface.offersFavorite("gone/model", in: catalogue))
+        XCTAssertFalse(ManagedSurface.offersFavorite("a/one", in: nil))
+    }
+
+    /// The `managed_model_favorite_set` request: the model and the new
+    /// state, nothing else.
+    func testTheFavoriteRequestNamesTheModelAndTheState() {
+        let params = ManagedSurface.favoriteParams(model: "a/one", favorite: true)
+        XCTAssertEqual(params.count, 2)
+        XCTAssertEqual(params["model"] as? String, "a/one")
+        XCTAssertEqual(params["favorite"] as? Bool, true)
+    }
+
     /// Only Claude Code and Codex on a saved NEAR AI key choose a model in
     /// the Launch sheet. OpenCode keeps its own model field.
     func testOnlyClaudeAndCodexOnASavedNearAiKeyOfferTheModelPicker() {

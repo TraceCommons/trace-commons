@@ -91,7 +91,7 @@ struct ManagedFolderExplainerSheet: View {
                 }
                 if supportsFolderSettings {
                     ManagedFolderOptions(tool: tool, connection: "near_ai_signin", draft: $draft,
-                        catalogue: catalogue, supportsFolderSettings: true,
+                        catalogue: $catalogue, supportsFolderSettings: true,
                         retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
                 }
             }

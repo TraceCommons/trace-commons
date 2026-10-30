@@ -163,6 +163,13 @@ pub(crate) fn schema() -> Value {
         terminal["enum"] = json!(terminals);
     }
     properties.insert("managed_terminal".into(), terminal);
+    properties.insert("managed_favorite_models".into(), json!({
+        "type":"object",
+        "propertyNames":{"minLength":1,"maxLength":settings::MAX_FAVORITE_MODEL_ID_BYTES,"pattern":"^\\S+$"},
+        "additionalProperties":{"type":"boolean"},
+        "examples":[{}],
+        "description":"Partial update of the models listed first in the managed-session model picker: true stars a NEAR AI model id, false unstars it, omitted ids remain. At most 32 favorites. Whether NEAR AI offers an id is not checked here."
+    }));
     properties.insert("managed_folder_settings".into(), json!({
         "type":"array", "items":{
             "type":"object", "required":["tool","cwd"], "additionalProperties":false,
@@ -214,7 +221,7 @@ pub(crate) fn schema() -> Value {
             "type":"object", "minProperties":1,"additionalProperties":false,"properties":properties
         },
         "semantics":{
-            "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify, managed_cli_options and managed_folder_settings, which merge supplied entries.",
+            "patch":"Partial settings object; omitted top-level fields remain unchanged. Structured declarations replace their value except notify, managed_favorite_models, managed_cli_options and managed_folder_settings, which merge supplied entries.",
             "preview":"Validation and proposed canonical changes only; does not persist, start services, submit traces, or reserve a transaction. Daily-cap changes include uses_server_allowance before/after metadata when choosing a local cap or resetting to follow server allowances, even if the saved number is unchanged.",
             "apply":"Revalidates against current settings. Runtime result fields are separate from the saved preference.",
             "contextual_validation":"Filesystem and platform constraints are checked by the daemon parser; JSON Schema alone is not sufficient validation.",

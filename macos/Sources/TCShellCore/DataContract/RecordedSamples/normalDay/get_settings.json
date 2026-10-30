@@ -57,6 +57,7 @@
   "notifications_enabled": true,
   "menu_bar_mark_enabled": true,
   "managed_terminal": "terminal",
+  "managed_favorite_models": [],
   "near_ai_configured": false,
   "near_ai_inference_configured": false,
   "trajectory_source_mode": "unset",

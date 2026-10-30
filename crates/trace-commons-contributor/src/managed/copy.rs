@@ -79,6 +79,12 @@
 //! - `model_unavailable` "That model isn't available on NEAR AI. Choose
 //!   another." The line a shell shows for the refusal
 //!   `managed-model-unavailable`.
+//!
+//! Favorite models. Proposed 2026-10-29, not yet approved:
+//! - `model_favorite_add` "Add to favorites" and `model_favorite_remove`
+//!   "Remove from favorites" -- the accessible name and tooltip of the star
+//!   beside the model picker, for the chosen model, while it is not and is a
+//!   favorite. Favorites are listed first in the picker.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "My Private AI sessions",
@@ -154,6 +160,8 @@ pub fn copy() -> serde_json::Value {
             "model_default": "Default: {model}",
             "model_default_unknown": "Default",
             "model_unavailable": "That model isn't available on NEAR AI. Choose another.",
+            "model_favorite_add": "Add to favorites",
+            "model_favorite_remove": "Remove from favorites",
             "collect_traces": "Collect this session",
             "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
             "collection_scope": "Collects this session when OpenCode exits, under your existing review and contribution settings. Other sessions created inside OpenCode are not collected.",
@@ -261,6 +269,14 @@ mod tests {
         );
         assert_eq!(copy["sign_in_near_ai"], "Sign in");
         assert_eq!(copy["sign_in_near_ai_accessibility"], "Sign in to NEAR AI");
+    }
+
+    /// The star beside the model picker names its action both ways.
+    #[test]
+    fn the_favorite_star_has_its_words() {
+        let copy = copy();
+        assert_eq!(copy["model_favorite_add"], "Add to favorites");
+        assert_eq!(copy["model_favorite_remove"], "Remove from favorites");
     }
 
     /// The terminal choice reads these words, exactly as proposed.

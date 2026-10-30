@@ -58,7 +58,7 @@ final class ManagedFolderLaunchTests: XCTestCase {
             draft.useDefaults(tool: tool, cwd: "/project", cliOptions: "--custom")
             draft.collectTraces = true
             let view = NSHostingView(rootView: ManagedFolderOptions(tool: tool, connection: "near_ai_signin",
-                draft: .constant(draft), catalogue: nil, supportsFolderSettings: true, retry: {}, reset: {})
+                draft: .constant(draft), catalogue: .constant(nil), supportsFolderSettings: true, retry: {}, reset: {})
                 .environmentObject(model).padding(20).frame(width: 520)
                 .background(Color(nsColor: .windowBackgroundColor)))
             let size = view.fittingSize

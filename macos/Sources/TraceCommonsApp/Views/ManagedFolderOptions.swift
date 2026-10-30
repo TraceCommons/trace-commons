@@ -7,11 +7,14 @@ struct ManagedFolderOptions: View {
     let tool: String
     let connection: String
     @Binding var draft: ManagedFolderDraft
-    let catalogue: ManagedModelCatalogue?
+    /// Starring a model replaces its `favorites` with the daemon's answer.
+    @Binding var catalogue: ManagedModelCatalogue?
     let supportsFolderSettings: Bool
     let retry: () -> Void
     let reset: () -> Void
     @EnvironmentObject private var model: AppModel
+    @State private var favoriteBusy = false
+    @State private var favoriteRefused = false
 
     static func modelIsAvailable(_ draft: ManagedFolderDraft, tool: String, connection: String,
                                  catalogue: ManagedModelCatalogue?) -> Bool {
@@ -47,12 +50,22 @@ struct ManagedFolderOptions: View {
                 Text(model.managedText("model_choice"))
                     .glassType(GlassTokens.TypeScale.eyebrow)
                     .foregroundStyle(GlassColor.textTertiary)
-                GlassPicker(model.managedText("model_choice"), selection: Binding(
-                    get: { draft.model ?? ManagedSurface.defaultModel },
-                    set: { draft.model = $0.flatMap { $0.isEmpty ? nil : $0 } }),
-                    options: modelOptions, placeholder: model.managedText("model_default_unknown"))
+                HStack(spacing: GlassTokens.Space.s2) {
+                    GlassPicker(model.managedText("model_choice"), selection: Binding(
+                        get: { draft.model ?? ManagedSurface.defaultModel },
+                        set: { draft.model = $0.flatMap { $0.isEmpty ? nil : $0 }; favoriteRefused = false }),
+                        options: modelOptions, placeholder: model.managedText("model_default_unknown"))
+                    if let chosen = draft.model, ManagedSurface.offersFavorite(chosen, in: catalogue) {
+                        favoriteStar(chosen)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            if favoriteRefused {
+                Text(model.managedText("model_unavailable"))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+            }
             if !Self.modelIsAvailable(draft, tool: tool, connection: connection, catalogue: catalogue) {
                 Text(model.managedText("folder_model_unavailable"))
                     .glassType(GlassTokens.TypeScale.caption)
@@ -88,6 +101,28 @@ struct ManagedFolderOptions: View {
                 .toggleStyle(GlassToggleStyle(.settings))
             Text(model.managedText("collection_scope")).glassType(GlassTokens.TypeScale.caption)
         }
+    }
+
+    /// The star for the chosen model: filled while it is a favorite.
+    private func favoriteStar(_ chosen: String) -> some View {
+        let starred = ManagedSurface.isFavoriteModel(chosen, in: catalogue)
+        return GlassRoundButton(
+            model.managedText(starred ? "model_favorite_remove" : "model_favorite_add"),
+            systemImage: starred ? "star.fill" : "star", small: true
+        ) {
+            favoriteBusy = true
+            favoriteRefused = false
+            model.setFavoriteModel(chosen, favorite: !starred) { favorites in
+                favoriteBusy = false
+                if let favorites {
+                    catalogue = catalogue?.withFavorites(favorites)
+                } else {
+                    favoriteRefused = true
+                }
+            }
+        }
+        .disabled(favoriteBusy)
+        .accessibilityAddTraits(starred ? .isSelected : [])
     }
 
     private var modelOptions: [GlassPickerOption<String>] {
