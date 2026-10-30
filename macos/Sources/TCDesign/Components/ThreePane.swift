@@ -184,11 +184,18 @@ public struct GlassPaneLayout: Equatable, Sendable {
     /// that would run off the screen's visible frame moves left only as far
     /// as it must; one wider than the screen is held to the screen, and the
     /// map takes the difference, then a main pane wider than its default.
-    public static func windowFrame(_ frame: CGRect, width: CGFloat, visible: CGRect) -> CGRect {
+    /// With `keepsOnScreen` false (a pane opening or closing) the window
+    /// never moves: it grows past the screen's edge instead (owner,
+    /// 2026-10-30).
+    public static func windowFrame(
+        _ frame: CGRect, width: CGFloat, visible: CGRect, keepsOnScreen: Bool = true
+    ) -> CGRect {
         let width = min(width, visible.width)
         var x = frame.minX
-        if x + width > visible.maxX { x = visible.maxX - width }
-        x = max(visible.minX, x)
+        if keepsOnScreen {
+            if x + width > visible.maxX { x = visible.maxX - width }
+            x = max(visible.minX, x)
+        }
         // AppKit's origin is the bottom-left corner: keeping the top fixed
         // keeps `maxY`, and the height does not change.
         return CGRect(x: x, y: frame.minY, width: width, height: frame.height)
@@ -521,7 +528,7 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
         let width = GlassPaneLayout.windowWidth(
             current: current, from: old, to: new, main: host.main, mapWidth: keptMapWidth)
         let visible = window.screen?.visibleFrame ?? CGRect(x: -1e6, y: -1e6, width: 2e6, height: 2e6)
-        let frame = GlassPaneLayout.windowFrame(window.frame, width: width, visible: visible)
+        let frame = GlassPaneLayout.windowFrame(window.frame, width: width, visible: visible, keepsOnScreen: false)
         // A window held to the screen squeezes the main pane to make room
         // for the map; the move animates only a main pane that keeps its
         // width, so a squeezed one changes at once.

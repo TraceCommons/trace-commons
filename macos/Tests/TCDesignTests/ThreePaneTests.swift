@@ -207,6 +207,19 @@ final class ThreePaneTests: XCTestCase {
                        CGRect(x: 1000, y: 200, width: 380, height: 760))
     }
 
+    /// Opening or closing a pane never moves the window: near the screen's
+    /// right edge the window grows past it rather than shifting left, so
+    /// nothing the person was looking at moves (owner, 2026-10-30).
+    func test_aPaneChangeKeepsTheLeadingEdgeEvenPastTheScreen() {
+        let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let nearEdge = CGRect(x: 1000, y: 200, width: 690, height: 760)
+        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 1280, visible: screen, keepsOnScreen: false),
+                       CGRect(x: 1000, y: 200, width: 1280, height: 760))
+        // Wider than the screen it is still held to the screen's width.
+        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 2400, visible: screen, keepsOnScreen: false),
+                       CGRect(x: 1000, y: 200, width: 1920, height: 760))
+    }
+
     func test_theTrafficLightsHaveTheirClearance() {
         XCTAssertGreaterThanOrEqual(GlassTokens.Space.windowControlsWidth, 78)
         XCTAssertEqual(EnvironmentValues().glassWindowControlsInset, 0)
