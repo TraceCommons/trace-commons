@@ -259,14 +259,27 @@ pub(crate) fn bounded_output(command: Command) -> Result<std::process::Output, M
     bounded_output_limit(command, 65536)
 }
 
+/// An unnamed file that holds a helper's output until it is read. On
+/// Windows `tempfile::tempfile()` intermittently fails with "access
+/// denied" when its random name lands on a file still being deleted, so
+/// the platform crate names the file with a UUID instead.
+fn capture_file() -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    return trace_commons_contributor_platform::local_files::create_capture_file(
+        &std::env::temp_dir(),
+    );
+    #[cfg(not(windows))]
+    tempfile::tempfile()
+}
+
 pub(crate) fn bounded_output_limit(
     mut command: Command,
     limit: u64,
 ) -> Result<std::process::Output, ManagedError> {
     use std::io::{Read, Seek};
     use std::process::Stdio;
-    let mut stdout = tempfile::tempfile().map_err(|_| ManagedError::StorageUnavailable)?;
-    let mut stderr = tempfile::tempfile().map_err(|_| ManagedError::StorageUnavailable)?;
+    let mut stdout = capture_file().map_err(|_| ManagedError::StorageUnavailable)?;
+    let mut stderr = capture_file().map_err(|_| ManagedError::StorageUnavailable)?;
     command
         .stdin(Stdio::null())
         .stdout(

@@ -107,6 +107,41 @@ fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
     unreachable!("the last attempt returns")
 }
 
+/// Create an unnamed scratch file in `dir` for capturing a child process's
+/// output: readable and writable, shared with no other opener, marked
+/// temporary, and deleted when its last handle closes. These are the flags
+/// `tempfile::tempfile()` uses on Windows; only the name differs.
+///
+/// `tempfile` names come from `fastrand`, which is not seeded from the OS,
+/// and it retries only when the name already exists. A name whose file is
+/// still pending deletion fails with ERROR_ACCESS_DENIED instead, which it
+/// does not retry. Parallel daemons on CI hit that a few times in a hundred
+/// runs. A v4 UUID name, from the OS random source, does not collide.
+#[cfg(windows)]
+pub fn create_capture_file(dir: &Path) -> std::io::Result<std::fs::File> {
+    open_capture_file(&capture_path(dir))
+}
+
+#[cfg(windows)]
+fn capture_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(format!(".capture-{}.tmp", Uuid::new_v4().simple()))
+}
+
+#[cfg(windows)]
+fn open_capture_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_DELETE_ON_CLOSE,
+    };
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .custom_flags(FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE)
+        .open(path)
+}
+
 /// Open a selected file for reading without following a final symlink or
 /// reparse point and without blocking on a FIFO or device. Errors carry
 /// fixed labels only.
@@ -251,6 +286,77 @@ mod tests {
             0,
             "a non-transient Windows error must not enter the retry loop"
         );
+    }
+
+    /// The mechanism behind the managed-session flake: on Windows a create
+    /// at a name whose file is still pending deletion fails with
+    /// ERROR_ACCESS_DENIED (5), not ERROR_FILE_EXISTS, so a creator that
+    /// retries only "already exists" gives up. A capture file never lands
+    /// on such a name, because each one gets a fresh v4 UUID.
+    #[cfg(windows)]
+    #[test]
+    fn capture_file_is_unaffected_by_a_delete_pending_name() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let pending = capture_path(dir.path());
+        let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        let deleting = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(share)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(&pending)
+            .unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(share)
+            .open(&pending)
+            .unwrap();
+        // Closing the delete-on-close handle while another stays open
+        // leaves the name pending deletion.
+        drop(deleting);
+
+        let refused = open_capture_file(&pending).unwrap_err();
+        assert_eq!(refused.raw_os_error(), Some(5), "{refused:?}");
+
+        for _ in 0..8 {
+            create_capture_file(dir.path()).unwrap();
+        }
+        drop(holder);
+        assert!(!pending.exists());
+    }
+
+    /// Capture files keep tempfile's Windows contract: distinct names,
+    /// readable after a rewind, and gone once the last handle closes.
+    #[cfg(windows)]
+    #[test]
+    fn capture_files_are_distinct_readable_and_removed_on_close() {
+        use std::io::{Read, Seek};
+
+        let dir = tempfile::tempdir().unwrap();
+        let first = capture_path(dir.path());
+        let second = capture_path(dir.path());
+        assert_ne!(first, second);
+
+        let mut file = open_capture_file(&first).unwrap();
+        let mut clone = file.try_clone().unwrap();
+        clone.write_all(b"captured").unwrap();
+        file.rewind().unwrap();
+        let mut read = String::new();
+        file.read_to_string(&mut read).unwrap();
+        assert_eq!(read, "captured");
+        // Nothing else can open it while it is held.
+        assert!(std::fs::File::open(&first).is_err());
+
+        drop(file);
+        drop(clone);
+        assert!(!first.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[cfg(windows)]
