@@ -5815,12 +5815,15 @@ mod tests {
             None,
             None,
         );
+        let _limit = crate::envelope::lower_envelope_limit_for_test(
+            crate::envelope::TEST_ENVELOPE_LIMIT_BYTES,
+        );
         let mut oversized = raw.events[0].clone();
-        oversized.content = Some("x".repeat(crate::envelope::MAX_ENVELOPE_BYTES + 1_000_000));
+        oversized.content = Some("x".repeat(crate::envelope::TEST_ENVELOPE_LIMIT_BYTES + 1));
         raw.events.push(oversized);
         assert!(
             crate::envelope::raw_contribution_size(&raw).unwrap()
-                > crate::envelope::MAX_ENVELOPE_BYTES,
+                > crate::envelope::TEST_ENVELOPE_LIMIT_BYTES,
             "the session must exceed the bound, or this test observes nothing"
         );
         let request = r#"{"model":"Qwen/Qwen3.6-27B-FP8","metadata":{"trace_commons_admission":"tcad1:bound-call"}}"#;

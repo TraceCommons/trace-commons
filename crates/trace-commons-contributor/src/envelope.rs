@@ -45,6 +45,58 @@ use crate::source::{
 /// the reverse).
 pub use trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES as MAX_ENVELOPE_BYTES;
 
+/// The limit `raw_contribution_size_ok` and `envelope_size_ok` refuse over:
+/// `MAX_ENVELOPE_BYTES`, except inside a unit test that lowered it for its
+/// own thread with [`lower_envelope_limit_for_test`]. Unit tests run in
+/// parallel threads of one process, so the override is per thread and a
+/// lowered limit never reaches another test.
+pub(crate) fn envelope_limit_bytes() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = TEST_ENVELOPE_LIMIT.with(std::cell::Cell::get) {
+        return limit;
+    }
+    MAX_ENVELOPE_BYTES
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ENVELOPE_LIMIT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Lowers [`envelope_limit_bytes`] on this thread until the guard drops, so
+/// a test can drive the oversized path without building a 256 MiB session.
+///
+/// Only the thread that called it sees the lower limit. A `#[tokio::test]`
+/// runs on one thread unless the code under test moves work elsewhere
+/// (`spawn_blocking`, a multi-thread runtime); a check that ran on another
+/// thread would see `MAX_ENVELOPE_BYTES`, admit the test's payload, and fail
+/// the test's refusal assertion rather than pass it.
+#[cfg(test)]
+pub(crate) fn lower_envelope_limit_for_test(limit: usize) -> TestEnvelopeLimit {
+    assert!(
+        limit <= MAX_ENVELOPE_BYTES,
+        "a test may lower the envelope limit, never raise it"
+    );
+    TEST_ENVELOPE_LIMIT.with(|cell| cell.set(Some(limit)));
+    TestEnvelopeLimit(())
+}
+
+/// The limit the oversized-path unit tests lower to: far above any fixture
+/// session, far below the 256 MiB a debug build takes seconds to serialize.
+#[cfg(test)]
+pub(crate) const TEST_ENVELOPE_LIMIT_BYTES: usize = 1024 * 1024;
+
+/// Restores `MAX_ENVELOPE_BYTES` on this thread when dropped.
+#[cfg(test)]
+pub(crate) struct TestEnvelopeLimit(());
+
+#[cfg(test)]
+impl Drop for TestEnvelopeLimit {
+    fn drop(&mut self) {
+        TEST_ENVELOPE_LIMIT.with(|cell| cell.set(None));
+    }
+}
+
 /// NEAR AI privacy-filter backend settings. Constructed from env by
 /// `near_ai_settings_from_env`, or injected directly by callers/tests so
 /// tests never have to touch process env (`set_var`/`remove_var` are
@@ -350,7 +402,7 @@ pub fn residual_secret_labels_fail_closed(
 /// anyway; `envelope_size_ok` remains the authoritative post-redaction guard.
 pub fn raw_contribution_size_ok(raw: &RawTraceContribution) -> Result<usize> {
     let size = raw_contribution_size(raw)?;
-    if size > MAX_ENVELOPE_BYTES {
+    if size > envelope_limit_bytes() {
         anyhow::bail!("session too large");
     }
     Ok(size)
@@ -367,7 +419,7 @@ pub fn raw_contribution_size(raw: &RawTraceContribution) -> Result<usize> {
 /// `MAX_ENVELOPE_BYTES`. Returns the serialized byte size on success.
 pub fn envelope_size_ok(envelope: &TraceContributionEnvelope) -> Result<usize> {
     let size = envelope_size(envelope)?;
-    if size > MAX_ENVELOPE_BYTES {
+    if size > envelope_limit_bytes() {
         anyhow::bail!("session too large");
     }
     Ok(size)
@@ -1654,15 +1706,27 @@ mod tests {
         assert_eq!(envelope_size(&envelope).unwrap(), ground_truth);
     }
 
+    /// The production limit, pinned. Tests that drive the oversized paths
+    /// lower the limit (`lower_envelope_limit_for_test`, and the daemon's
+    /// `set_envelope_limit_bytes_for_tests`) rather than build a payload this
+    /// size, so this is the test that holds the shipped value. Ingest's body
+    /// limit derives from the same protocol constant.
+    #[test]
+    fn the_production_envelope_limit_is_256_mib() {
+        assert_eq!(MAX_ENVELOPE_BYTES, 256 * 1024 * 1024);
+        assert_eq!(envelope_limit_bytes(), MAX_ENVELOPE_BYTES);
+    }
+
     #[test]
     fn oversized_raw_is_refused_before_redaction() {
+        let _limit = lower_envelope_limit_for_test(TEST_ENVELOPE_LIMIT_BYTES);
         let cfg = test_config();
         let mut t = fixture_transcript();
         t.events.push(crate::source::SessionEvent {
             served_by: None,
             kind: crate::source::SessionEventKind::Assistant,
             timestamp: None,
-            content: Some("x".repeat(MAX_ENVELOPE_BYTES + 1)),
+            content: Some("x".repeat(TEST_ENVELOPE_LIMIT_BYTES + 1)),
             structured: serde_json::Value::Null,
             tool_name: None,
             token_counts: None,
