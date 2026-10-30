@@ -316,6 +316,9 @@ public struct ManagedModel: Decodable, Equatable, Identifiable, Sendable {
     public let id: String
     /// NEAR AI's display name; absent when it gives none.
     public let name: String?
+    /// NEAR AI's privacy tier (`incognito`, `near_ai`, `external`) that the
+    /// picker groups by; absent from an older daemon or an unlabelled entry.
+    public let tier: String?
 }
 
 /// `managed_model_catalogue`'s answer: NEAR AI's chat models in its order,
@@ -442,6 +445,9 @@ public struct ManagedFavoriteRow: Equatable, Sendable, Identifiable {
 public struct ManagedModelOption: Equatable, Sendable {
     public let title: String
     public let value: String
+    /// The heading of the group it is listed under; none for the default
+    /// and for a model with no known tier.
+    public var section: String? = nil
 }
 
 /// Choosing the model of a NEAR AI session in the Launch sheet.
@@ -457,18 +463,40 @@ public extension ManagedSurface {
         ["claude", "codex"].contains(tool) && connection == "near_ai"
     }
 
+    /// NEAR AI's privacy tiers in the picker's order (owner, 2026-10-30),
+    /// each with the copy key of its heading.
+    static let modelTiers = [
+        ("incognito", "model_group_incognito"),
+        ("near_ai", "model_group_near_ai"),
+        ("external", "model_group_external"),
+    ]
+
     /// The picker's options: the default first, which names the model it
     /// will be when the catalogue says, then the favorites, then the other
-    /// chat models, each group in NEAR AI's order. A favorite NEAR AI does
-    /// not list is not shown. With no catalogue, only the default.
+    /// chat models grouped by privacy tier in `modelTiers` order, each in
+    /// NEAR AI's order. Favorites head no group; a model with no known tier
+    /// comes last, under no heading. A favorite NEAR AI does not list is not
+    /// shown. With no catalogue, only the default.
     static func modelOptions(_ catalogue: ManagedModelCatalogue?, copy: (String) -> String) -> [ManagedModelOption] {
         let first = catalogue?.default.map { copy("model_default").replacingOccurrences(of: "{model}", with: $0) }
             ?? copy("model_default_unknown")
         let models = catalogue?.models ?? []
         let favorites = Set(catalogue?.favorites ?? [])
-        let ordered = models.filter { favorites.contains($0.id) } + models.filter { !favorites.contains($0.id) }
-        return [ManagedModelOption(title: first, value: defaultModel)]
-            + ordered.map { ManagedModelOption(title: $0.id, value: $0.id) }
+        // One pass: favorites first, then each known tier in `modelTiers`
+        // order, then models with no known tier under no heading.
+        var favored: [ManagedModelOption] = []
+        var byTier = [[ManagedModelOption]](repeating: [], count: modelTiers.count)
+        var rest: [ManagedModelOption] = []
+        for model in models {
+            if favorites.contains(model.id) {
+                favored.append(ManagedModelOption(title: model.id, value: model.id))
+            } else if let index = modelTiers.firstIndex(where: { $0.0 == model.tier }) {
+                byTier[index].append(ManagedModelOption(title: model.id, value: model.id, section: copy(modelTiers[index].1)))
+            } else {
+                rest.append(ManagedModelOption(title: model.id, value: model.id))
+            }
+        }
+        return [ManagedModelOption(title: first, value: defaultModel)] + favored + byTier.flatMap { $0 } + rest
     }
 
     /// The favorites NEAR AI no longer lists, each shown with a way to

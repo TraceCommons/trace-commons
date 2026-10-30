@@ -854,10 +854,12 @@ mod tests {
                 ChatModel {
                     id: "anthropic/fixture-chat".into(),
                     name: Some("Fixture chat".into()),
+                    tier: None,
                 },
                 ChatModel {
                     id: "openai/fixture-chat".into(),
                     name: None,
+                    tier: None,
                 },
             ],
         }
@@ -1566,6 +1568,7 @@ mod tests {
             .map(|i| ChatModel {
                 id: format!("vendor/model-{i}"),
                 name: None,
+                tier: None,
             })
             .collect();
         let catalogue =
@@ -1630,7 +1633,8 @@ mod tests {
             live_models(port).await.unwrap(),
             vec![ChatModel {
                 id: "fixture/chat".into(),
-                name: None
+                name: None,
+                tier: Some(crate::managed::models::ModelTier::Incognito),
             }]
         );
         server.abort();
