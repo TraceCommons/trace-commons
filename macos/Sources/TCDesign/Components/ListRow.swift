@@ -17,6 +17,9 @@ public struct GlassListRow: View {
     private let off: Bool
     private let expanded: Bool?
     private let submitTitle: String?
+    /// The Submit pill's tooltip; empty for none. On the pill alone, never
+    /// the row, so it cannot cover the controls beside it.
+    private let submitHelp: String
     private let submitDone: Bool
     private let submitFocusable: Bool
     private let watched: Binding<Bool>?
@@ -53,6 +56,7 @@ public struct GlassListRow: View {
         off: Bool = false,
         expanded: Bool? = nil,
         submitTitle: String? = nil,
+        submitHelp: String = "",
         submitDone: Bool = false,
         submitFocusable: Bool = true,
         watched: Binding<Bool>? = nil,
@@ -76,6 +80,7 @@ public struct GlassListRow: View {
         self.off = off
         self.expanded = expanded
         self.submitTitle = submitTitle
+        self.submitHelp = submitHelp
         self.submitDone = submitDone
         self.submitFocusable = submitFocusable
         self.watched = watched
@@ -196,6 +201,7 @@ public struct GlassListRow: View {
                     .fixedSize()
                     .disabled(onSubmit == nil)
                     .focusable(submitFocusable)
+                    .help(submitHelp)
             } else {
                 Color.clear.frame(width: 0, height: 0)
             }

@@ -504,6 +504,23 @@ final class TracesParityTests: XCTestCase {
                       "the paragraphs behind Learn more are drawn as the first two")
     }
 
+    /// Owner, 2026-10-30: the Submit tip showed unreliably, and over the
+    /// Automatic switch, because it was the whole row's tooltip and the
+    /// switch inside has its own. The tip belongs to the Submit pill (or
+    /// the split button) alone; neither row carries a row-wide tooltip.
+    func test_theSubmitTipIsThePillsNotTheRows() throws {
+        let tree = try Self.text("Views/Monitor/TracesViews.swift")
+        XCTAssertEqual(tree.components(separatedBy: "submitHelp: help,").count - 1, 2,
+                       "the folder and session rows hand their tip to the pill")
+        XCTAssertTrue(tree.contains(".disabled(split.busy)\n                .help(help)"),
+                      "the split button carries the folder's tip")
+        for row in ["folder(projectID: folder.id)", "session(entryID: entry.entryId)"] {
+            XCTAssertFalse(tree.contains("rowID(.\(row)))\n            .help(help)"), "a row-wide tooltip on the \(row) row")
+        }
+        let listRow = try Self.text("../TCDesign/Components/ListRow.swift")
+        XCTAssertTrue(listRow.contains(".help(submitHelp)"), "GlassListRow puts the tip on its Submit pill")
+    }
+
     /// The folder row offers Submit all only when the shared table offers
     /// Contribute, with the daemon's counts, and says what it withheld.
     /// Submit all as is the Folder inspector's modal (Task 5 of the #1146

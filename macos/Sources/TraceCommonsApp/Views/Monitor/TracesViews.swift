@@ -1067,6 +1067,7 @@ struct TracesFolderRow: View, Equatable {
                 off: off,
                 expanded: folder.sessions.isEmpty ? nil : open,
                 submitTitle: submitTitle,
+                submitHelp: help,
                 accessory: accessory,
                 // The Automatic switch is on the row again (owner,
                 // 2026-10-30), beside Submit; Never stays in the row menu.
@@ -1079,7 +1080,6 @@ struct TracesFolderRow: View, Equatable {
                 onMenu: onMenu
             )
             .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.folder(projectID: folder.id)))
-            .help(help)
             .disabled(writing)
             .opacity(writing ? TracesRowBusy.opacity : 1)
             .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
@@ -1116,6 +1116,7 @@ struct TracesFolderRow: View, Equatable {
                     onSplitSubmit()
                 }
                 .disabled(split.busy)
+                .help(help)
             }
             if let automatic {
                 Toggle(automaticLabel, isOn: Binding(get: { automatic }, set: { onAutomatic($0) }))
@@ -1175,6 +1176,7 @@ struct TracesSessionRow: View, Equatable {
                 selected: selected,
                 off: off,
                 submitTitle: pill,
+                submitHelp: help,
                 submitFocusable: selected && !acting,
                 accessory: acting ? AnyView(GlassSpinner()) : nil,
                 menuLabel: menuLabel,
@@ -1184,7 +1186,6 @@ struct TracesSessionRow: View, Equatable {
                 onMenu: acting ? nil : onMenu
             )
             .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.session(entryID: entry.entryId)))
-            .help(help)
             .opacity(acting ? TracesRowBusy.opacity : 1)
             .accessibilityHint(toolName)
             .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
