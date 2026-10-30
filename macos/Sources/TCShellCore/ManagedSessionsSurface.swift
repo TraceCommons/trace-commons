@@ -359,6 +359,19 @@ public struct ManagedModelReconcile: Equatable, Sendable {
     }
 }
 
+/// One favorite in Settings' list: its id, and whether NEAR AI stopped
+/// listing it.
+public struct ManagedFavoriteRow: Equatable, Sendable, Identifiable {
+    public let model: String
+    public let unavailable: Bool
+    public var id: String { model }
+
+    public init(model: String, unavailable: Bool) {
+        self.model = model
+        self.unavailable = unavailable
+    }
+}
+
 /// One entry in the Launch sheet's model picker.
 public struct ManagedModelOption: Equatable, Sendable {
     public let title: String
@@ -405,6 +418,27 @@ public extension ManagedSurface {
         guard let model, let catalogue else { return ManagedModelReconcile(model: model, fellBack: false) }
         if catalogue.models.contains(where: { $0.id == model }) { return ManagedModelReconcile(model: model, fellBack: false) }
         return ManagedModelReconcile(model: nil, fellBack: true)
+    }
+
+    /// The stored favorites Settings lists. With a catalogue read for a tool
+    /// offered every NEAR AI model, its two lists together are the whole
+    /// stored list; without one, the settings read's.
+    static func storedFavorites(catalogue: ManagedModelCatalogue?, settings: [String]?) -> [String] {
+        if let catalogue { return catalogue.favorites + catalogue.unavailableFavorites }
+        return settings ?? []
+    }
+
+    /// Settings' favorites list: the listed ones in NEAR AI's order, then
+    /// the ones it stopped listing, marked. Without a catalogue, the stored
+    /// order and nothing marked: unknown is not removed.
+    static func favoriteRows(stored: [String], catalogue: ManagedModelCatalogue?) -> [ManagedFavoriteRow] {
+        guard let catalogue else { return stored.map { ManagedFavoriteRow(model: $0, unavailable: false) } }
+        let unavailable = Set(catalogue.unavailableFavorites)
+        let rank = Dictionary(catalogue.models.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let listed = stored.filter { !unavailable.contains($0) }
+            .sorted { (rank[$0] ?? Int.max, $0) < (rank[$1] ?? Int.max, $1) }
+        return listed.map { ManagedFavoriteRow(model: $0, unavailable: false) }
+            + stored.filter(unavailable.contains).map { ManagedFavoriteRow(model: $0, unavailable: true) }
     }
 
     /// Whether `model` is starred.

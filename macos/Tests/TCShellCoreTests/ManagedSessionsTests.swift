@@ -364,6 +364,30 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.unavailableFavorites(nil), [])
     }
 
+    /// Settings' favorites list: every stored favorite, listed ones in
+    /// NEAR AI's order, then the ones it stopped listing, marked. With no
+    /// catalogue every one is shown as stored and none is marked.
+    func testTheFavoritesListMarksOnlyWhatTheCatalogueDropped() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"b/two"}],"default":"a/one","favorites":["a/one","b/two"],"unavailable_favorites":["gone/model"]}"#.utf8))
+        let stored = ["gone/model", "b/two", "a/one"]
+        XCTAssertEqual(ManagedSurface.favoriteRows(stored: stored, catalogue: catalogue), [
+            ManagedFavoriteRow(model: "a/one", unavailable: false),
+            ManagedFavoriteRow(model: "b/two", unavailable: false),
+            ManagedFavoriteRow(model: "gone/model", unavailable: true),
+        ])
+        XCTAssertEqual(ManagedSurface.favoriteRows(stored: stored, catalogue: nil), [
+            ManagedFavoriteRow(model: "gone/model", unavailable: false),
+            ManagedFavoriteRow(model: "b/two", unavailable: false),
+            ManagedFavoriteRow(model: "a/one", unavailable: false),
+        ])
+        XCTAssertEqual(ManagedSurface.favoriteRows(stored: [], catalogue: catalogue), [])
+        // The stored list Settings shows: the catalogue's two lists when it
+        // has one, else the settings read.
+        XCTAssertEqual(Set(ManagedSurface.storedFavorites(catalogue: catalogue, settings: nil)), Set(stored))
+        XCTAssertEqual(ManagedSurface.storedFavorites(catalogue: nil, settings: ["x/y"]), ["x/y"])
+        XCTAssertEqual(ManagedSurface.storedFavorites(catalogue: nil, settings: nil), [])
+    }
+
     /// A saved or chosen model NEAR AI no longer lists falls back to the
     /// default, and says so. With no catalogue the model is unknown, not
     /// removed: it is kept, and nothing says it is unavailable.

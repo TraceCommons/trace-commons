@@ -15233,6 +15233,204 @@ mod tests {
         assert_eq!(body["defaults"], serde_json::json!([]));
     }
 
+    /// Starring, unstarring and the catalogue's favorite lists, against
+    /// the fixture NEAR AI `managed_sign_in_redeem_hosts_the_proxy_and_ends_it`
+    /// serves. Leaves no favorite stored.
+    async fn managed_favorites_against_the_fixture(s: &DaemonShared) {
+        // Each request boxed, so the futures do not pile up on the stack.
+        async fn boxed_request(s: &DaemonShared, request: &Request) -> Response {
+            Box::pin(handle_request_async(s, request)).await
+        }
+        // Starring a listed model saves it, and the catalogue then names it.
+        let favorite = async |params: serde_json::Value| {
+            boxed_request(s, &req("managed_model_favorite_set", params)).await
+        };
+        let catalogue_lists = async || {
+            let catalogue = boxed_request(
+                s,
+                &req(
+                    "managed_model_catalogue",
+                    serde_json::json!({"tool":"codex"}),
+                ),
+            )
+            .await
+            .result
+            .expect("catalogue");
+            (
+                catalogue["favorites"].clone(),
+                catalogue["unavailable_favorites"].clone(),
+            )
+        };
+        let catalogue_favorites = async || catalogue_lists().await.0;
+        let r = favorite(serde_json::json!({"model":"fixture-other","favorite":true})).await;
+        assert_eq!(
+            r.result.expect("starred"),
+            serde_json::json!({"favorites":["fixture-other"]})
+        );
+        assert_eq!(
+            catalogue_favorites().await,
+            serde_json::json!(["fixture-other"])
+        );
+        // A model NEAR AI does not list is refused before any write.
+        let r = favorite(serde_json::json!({"model":"anthropic/claude-sonnet-9","favorite":true}))
+            .await;
+        assert_eq!(r.error.unwrap().message, "managed-model-unavailable");
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"model":"fixture-model"}),
+            serde_json::json!({"model":"","favorite":true}),
+            serde_json::json!({"model":"","favorite":false}),
+            serde_json::json!({"model":"fixture model","favorite":true}),
+            serde_json::json!({"model":"fixture-model","favorite":"yes"}),
+            serde_json::json!({"model":"fixture-model","favorite":true,"tool":"codex"}),
+        ] {
+            let r = favorite(params.clone()).await;
+            assert_eq!(
+                r.error.unwrap().message,
+                "managed-invalid-request",
+                "{params}"
+            );
+        }
+        // The synchronous entry answers no star: it needs the catalogue.
+        let r = handle_request(
+            s,
+            &req(
+                "managed_model_favorite_set",
+                serde_json::json!({"model":"fixture-model","favorite":true}),
+            ),
+        );
+        assert_eq!(
+            r.error.unwrap().message,
+            "managed-model-favorite-requires-async"
+        );
+        assert_eq!(
+            s.settings.lock().unwrap().managed_favorite_models,
+            ["fixture-other"]
+        );
+        // A favorite NEAR AI stopped offering is kept but not named, and
+        // unstarring it needs no catalogue.
+        let r = handle_request(
+            s,
+            &req(
+                "set_settings",
+                serde_json::json!({"managed_favorite_models":{"gone/model":true}}),
+            ),
+        );
+        assert!(r.error.is_none(), "{r:?}");
+        assert_eq!(
+            catalogue_favorites().await,
+            serde_json::json!(["fixture-other"])
+        );
+        assert_eq!(catalogue_lists().await.1, serde_json::json!(["gone/model"]));
+        // A model NEAR AI lists but Codex is never offered is neither a
+        // Codex favorite nor unavailable: Claude Code's picker shows it.
+        let r = favorite(serde_json::json!({"model":"openai/gpt-6.1-sol","favorite":true})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        assert_eq!(
+            catalogue_lists().await,
+            (
+                serde_json::json!(["fixture-other"]),
+                serde_json::json!(["gone/model"])
+            )
+        );
+        let claude = boxed_request(
+            s,
+            &req(
+                "managed_model_catalogue",
+                serde_json::json!({"tool":"claude"}),
+            ),
+        )
+        .await
+        .result
+        .expect("catalogue");
+        assert_eq!(
+            claude["favorites"],
+            serde_json::json!(["fixture-other", "openai/gpt-6.1-sol"])
+        );
+        assert_eq!(
+            claude["unavailable_favorites"],
+            serde_json::json!(["gone/model"])
+        );
+        let r = favorite(serde_json::json!({"model":"openai/gpt-6.1-sol","favorite":false})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let r = favorite(serde_json::json!({"model":"gone/model","favorite":false})).await;
+        assert_eq!(
+            r.result.expect("unstarred"),
+            serde_json::json!({"favorites":["fixture-other"]})
+        );
+        let r = favorite(serde_json::json!({"model":"fixture-other","favorite":false})).await;
+        assert_eq!(
+            r.result.expect("unstarred"),
+            serde_json::json!({"favorites":[]})
+        );
+        assert_eq!(
+            catalogue_lists().await,
+            (serde_json::json!([]), serde_json::json!([]))
+        );
+        // A stored id NEAR AI lists is a favorite again: nothing pruned it.
+        let r = handle_request(
+            s,
+            &req(
+                "set_settings",
+                serde_json::json!({"managed_favorite_models":{"fixture-model":true}}),
+            ),
+        );
+        assert!(r.error.is_none(), "{r:?}");
+        assert_eq!(
+            catalogue_favorites().await,
+            serde_json::json!(["fixture-model"])
+        );
+        let r = favorite(serde_json::json!({"model":"fixture-model","favorite":false})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        // A full list refuses one more, even a listed model.
+        let full: serde_json::Map<_, _> = (0..crate::daemon::settings::MAX_FAVORITE_MODELS)
+            .map(|n| (format!("m/{n}"), serde_json::json!(true)))
+            .collect();
+        let r = handle_request(
+            s,
+            &req(
+                "set_settings",
+                serde_json::json!({ "managed_favorite_models": full.clone() }),
+            ),
+        );
+        assert!(r.error.is_none(), "{r:?}");
+        let r = favorite(serde_json::json!({"model":"fixture-model","favorite":true})).await;
+        assert_eq!(r.error.unwrap().message, "managed-invalid-request");
+        // Every one of them is a favorite NEAR AI stopped listing. The full
+        // list never stops the tidy-up: each is reported unavailable and
+        // can be removed, and then a listed model can be starred again.
+        let (favorites, unavailable) = catalogue_lists().await;
+        assert_eq!(favorites, serde_json::json!([]));
+        assert_eq!(
+            unavailable.as_array().unwrap().len(),
+            crate::daemon::settings::MAX_FAVORITE_MODELS
+        );
+        let r = favorite(serde_json::json!({"model":"m/0","favorite":false})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let r = favorite(serde_json::json!({"model":"fixture-model","favorite":true})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let (favorites, unavailable) = catalogue_lists().await;
+        assert_eq!(favorites, serde_json::json!(["fixture-model"]));
+        assert_eq!(
+            unavailable.as_array().unwrap().len(),
+            crate::daemon::settings::MAX_FAVORITE_MODELS - 1
+        );
+        let r = favorite(serde_json::json!({"model":"fixture-model","favorite":false})).await;
+        assert!(r.error.is_none(), "{r:?}");
+        let cleared: serde_json::Map<_, _> = full
+            .keys()
+            .map(|k| (k.clone(), serde_json::json!(false)))
+            .collect();
+        let r = handle_request(
+            s,
+            &req(
+                "set_settings",
+                serde_json::json!({ "managed_favorite_models": cleared }),
+            ),
+        );
+        assert!(r.error.is_none(), "{r:?}");
+    }
+
     /// The daemon-hosted proxy for a session on the NEAR AI sign-in: the
     /// launcher is told a loopback port and never the key, the key reaches
     /// NEAR AI through the proxy, an exited session's proxy is shut down,
@@ -15378,173 +15576,9 @@ mod tests {
             assert_eq!(r.error.unwrap().message, "managed-invalid-request");
         }
 
-        // Starring a listed model saves it, and the catalogue then names it.
-        let favorite = async |params: serde_json::Value| {
-            handle_request_async(&s, &req("managed_model_favorite_set", params)).await
-        };
-        let catalogue_lists = async || {
-            let catalogue = handle_request_async(
-                &s,
-                &req(
-                    "managed_model_catalogue",
-                    serde_json::json!({"tool":"codex"}),
-                ),
-            )
-            .await
-            .result
-            .expect("catalogue");
-            (
-                catalogue["favorites"].clone(),
-                catalogue["unavailable_favorites"].clone(),
-            )
-        };
-        let catalogue_favorites = async || catalogue_lists().await.0;
-        let r = favorite(serde_json::json!({"model":"fixture-other","favorite":true})).await;
-        assert_eq!(
-            r.result.expect("starred"),
-            serde_json::json!({"favorites":["fixture-other"]})
-        );
-        assert_eq!(
-            catalogue_favorites().await,
-            serde_json::json!(["fixture-other"])
-        );
-        // A model NEAR AI does not list is refused before any write.
-        let r = favorite(serde_json::json!({"model":"anthropic/claude-sonnet-9","favorite":true}))
-            .await;
-        assert_eq!(r.error.unwrap().message, "managed-model-unavailable");
-        for params in [
-            serde_json::json!({}),
-            serde_json::json!({"model":"fixture-model"}),
-            serde_json::json!({"model":"","favorite":true}),
-            serde_json::json!({"model":"","favorite":false}),
-            serde_json::json!({"model":"fixture model","favorite":true}),
-            serde_json::json!({"model":"fixture-model","favorite":"yes"}),
-            serde_json::json!({"model":"fixture-model","favorite":true,"tool":"codex"}),
-        ] {
-            let r = favorite(params.clone()).await;
-            assert_eq!(
-                r.error.unwrap().message,
-                "managed-invalid-request",
-                "{params}"
-            );
-        }
-        // The synchronous entry answers no star: it needs the catalogue.
-        let r = handle_request(
-            &s,
-            &req(
-                "managed_model_favorite_set",
-                serde_json::json!({"model":"fixture-model","favorite":true}),
-            ),
-        );
-        assert_eq!(
-            r.error.unwrap().message,
-            "managed-model-favorite-requires-async"
-        );
-        assert_eq!(
-            s.settings.lock().unwrap().managed_favorite_models,
-            ["fixture-other"]
-        );
-        // A favorite NEAR AI stopped offering is kept but not named, and
-        // unstarring it needs no catalogue.
-        let r = handle_request(
-            &s,
-            &req(
-                "set_settings",
-                serde_json::json!({"managed_favorite_models":{"gone/model":true}}),
-            ),
-        );
-        assert!(r.error.is_none(), "{r:?}");
-        assert_eq!(
-            catalogue_favorites().await,
-            serde_json::json!(["fixture-other"])
-        );
-        assert_eq!(catalogue_lists().await.1, serde_json::json!(["gone/model"]));
-        // A model NEAR AI lists but Codex is never offered is neither a
-        // Codex favorite nor unavailable: Claude Code's picker shows it.
-        let r = favorite(serde_json::json!({"model":"openai/gpt-6.1-sol","favorite":true})).await;
-        assert!(r.error.is_none(), "{r:?}");
-        assert_eq!(
-            catalogue_lists().await,
-            (
-                serde_json::json!(["fixture-other"]),
-                serde_json::json!(["gone/model"])
-            )
-        );
-        let claude = handle_request_async(
-            &s,
-            &req(
-                "managed_model_catalogue",
-                serde_json::json!({"tool":"claude"}),
-            ),
-        )
-        .await
-        .result
-        .expect("catalogue");
-        assert_eq!(
-            claude["favorites"],
-            serde_json::json!(["fixture-other", "openai/gpt-6.1-sol"])
-        );
-        assert_eq!(
-            claude["unavailable_favorites"],
-            serde_json::json!(["gone/model"])
-        );
-        let r = favorite(serde_json::json!({"model":"openai/gpt-6.1-sol","favorite":false})).await;
-        assert!(r.error.is_none(), "{r:?}");
-        let r = favorite(serde_json::json!({"model":"gone/model","favorite":false})).await;
-        assert_eq!(
-            r.result.expect("unstarred"),
-            serde_json::json!({"favorites":["fixture-other"]})
-        );
-        let r = favorite(serde_json::json!({"model":"fixture-other","favorite":false})).await;
-        assert_eq!(
-            r.result.expect("unstarred"),
-            serde_json::json!({"favorites":[]})
-        );
-        assert_eq!(
-            catalogue_lists().await,
-            (serde_json::json!([]), serde_json::json!([]))
-        );
-        // A stored id NEAR AI lists is a favorite again: nothing pruned it.
-        let r = handle_request(
-            &s,
-            &req(
-                "set_settings",
-                serde_json::json!({"managed_favorite_models":{"fixture-model":true}}),
-            ),
-        );
-        assert!(r.error.is_none(), "{r:?}");
-        assert_eq!(
-            catalogue_favorites().await,
-            serde_json::json!(["fixture-model"])
-        );
-        let r = favorite(serde_json::json!({"model":"fixture-model","favorite":false})).await;
-        assert!(r.error.is_none(), "{r:?}");
-        // A full list refuses one more, even a listed model.
-        let full: serde_json::Map<_, _> = (0..crate::daemon::settings::MAX_FAVORITE_MODELS)
-            .map(|n| (format!("m/{n}"), serde_json::json!(true)))
-            .collect();
-        let r = handle_request(
-            &s,
-            &req(
-                "set_settings",
-                serde_json::json!({ "managed_favorite_models": full.clone() }),
-            ),
-        );
-        assert!(r.error.is_none(), "{r:?}");
-        let r = favorite(serde_json::json!({"model":"fixture-model","favorite":true})).await;
-        assert_eq!(r.error.unwrap().message, "managed-invalid-request");
-        let cleared: serde_json::Map<_, _> = full
-            .keys()
-            .map(|k| (k.clone(), serde_json::json!(false)))
-            .collect();
-        let r = handle_request(
-            &s,
-            &req(
-                "set_settings",
-                serde_json::json!({ "managed_favorite_models": cleared }),
-            ),
-        );
-        assert!(r.error.is_none(), "{r:?}");
+        // Favorites, against the same fixture. Boxed: inline, this test's
+        // future overflows the test thread's stack.
+        Box::pin(managed_favorites_against_the_fixture(&s)).await;
         // A model NEAR AI does not list starts no proxy, and says why.
         let mut named = launch("claude");
         named["model"] = "anthropic/claude-sonnet-9".into();

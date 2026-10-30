@@ -90,6 +90,9 @@
 //!   listing, with a `remove` button whose accessible name is
 //!   `model_favorite_remove_named` "Remove {model} from favorites". Shells
 //!   fill `{model}` with the model id.
+//! - `favorites_title` "Favorite models" -- the card in Settings > Private
+//!   AI that lists every favorite, each with `remove`; one NEAR AI stopped
+//!   listing reads `model_favorite_unavailable` instead of its bare id.
 //! - `folder_model_unavailable` changed from "The saved model is
 //!   unavailable. Choose a model before launching." -- a saved model NEAR AI
 //!   no longer lists now falls back to the default instead of holding the
@@ -173,6 +176,7 @@ pub fn copy() -> serde_json::Value {
             "model_favorite_remove": "Remove from favorites",
             "model_favorite_unavailable": "{model} is no longer available on NEAR AI.",
             "model_favorite_remove_named": "Remove {model} from favorites",
+            "favorites_title": "Favorite models",
             "collect_traces": "Collect this session",
             "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
             "collection_scope": "Collects this session when OpenCode exits, under your existing review and contribution settings. Other sessions created inside OpenCode are not collected.",
@@ -296,6 +300,7 @@ mod tests {
             copy["model_favorite_remove_named"],
             "Remove {model} from favorites"
         );
+        assert_eq!(copy["favorites_title"], "Favorite models");
         // A saved model NEAR AI dropped falls back to the default.
         assert_eq!(
             copy["folder_model_unavailable"],

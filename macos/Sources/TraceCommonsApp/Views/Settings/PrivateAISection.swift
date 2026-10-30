@@ -15,6 +15,9 @@ struct PrivateAISection: View {
     /// The switch and the tools, read through the data contract on this
     /// window's own attachment to the daemon, as the Monitor's tab read them.
     @State private var store = InferenceStore(client: nil)
+    /// NEAR AI's catalogue for the favorites card, read when this opens;
+    /// nil until read, or when it could not be.
+    @State private var favoritesCatalogue: ManagedModelCatalogue?
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -44,6 +47,10 @@ struct PrivateAISection: View {
             if let snapshot = model.managedSnapshot, !snapshot.terminalChoices.isEmpty {
                 GlassCard { ManagedTerminalPicker(snapshot: snapshot) }
             }
+            // The models listed first in the Launch sheet's picker, with
+            // the ones NEAR AI stopped offering marked. Drawn only while
+            // there is one.
+            ManagedFavoritesCard(catalogue: $favoritesCatalogue)
             switch model.routeDisclosureState {
             case .shown(let disclosure):
                 GlassEyebrowCard(disclosure.copy.title) {
@@ -64,6 +71,7 @@ struct PrivateAISection: View {
         .onAppear { model.refreshRouteDisclosure() }
         // The managed snapshot the terminal picker reads.
         .task { model.refreshManagedSessions() }
+        .task { model.managedModelCatalogue(tool: ManagedFavoritesCard.catalogueTool) { favoritesCatalogue = $0 } }
         // Which organization Private AI spends from, read lazily when this
         // section opens and never on the sign-in.
         .task { model.refreshSpendOrganizations() }
