@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use serde_json::json;
 
-use super::super::providers::{collect_codex_in, collect_codex_via, fingerprint};
+use super::super::providers::{collect_codex_via, fingerprint};
 use super::super::{Provider, native_metadata_revision};
 
 const TOKEN: &str = "fixture-access-token-never-logged";
@@ -249,9 +249,10 @@ async fn a_silent_read_never_falls_back_to_the_native_app_server() {
     std::fs::write(dir.path().join("auth.json"), &bytes).unwrap();
     let server = fake_server(200, USAGE).await;
     let login = login(dir.path());
-    let failure = collect_codex_in(&login, false, lease(), &target(&server))
-        .await
-        .unwrap_err();
+    let failure =
+        super::super::providers::collect_codex_in(&login, false, lease(), &target(&server))
+            .await
+            .unwrap_err();
     assert_eq!(failure.reason, "not_checked");
     assert!(server.seen.lock().unwrap().is_empty());
     assert_eq!(std::fs::read(dir.path().join("auth.json")).unwrap(), bytes);
