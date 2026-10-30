@@ -30,3 +30,30 @@ struct ManagedTerminalPicker: View {
         }
     }
 }
+
+/// "Open sessions in", asked in a launch dialog until the person has chosen
+/// a terminal (`ManagedSnapshot.asksForTerminal`): the same label and the
+/// same installed apps as Settings, starting on the current one. Nothing is
+/// written here; the dialog's Open saves the choice before the launch, so
+/// it is remembered and the row is not drawn again. Settings still changes
+/// it later.
+struct ManagedLaunchTerminalRow: View {
+    let snapshot: ManagedSnapshot
+    @Binding var selection: String?
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        let label = model.managedText("terminal_choice")
+        HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+            Text(label)
+            Spacer(minLength: 0)
+            GlassPicker(
+                label,
+                selection: $selection,
+                options: snapshot.terminalChoices.map { GlassPickerOption($0.name, value: $0.id) },
+                placeholder: "")
+            .disabled(model.managedBusy)
+        }
+        .onAppear { if selection == nil { selection = snapshot.proposedTerminal } }
+    }
+}

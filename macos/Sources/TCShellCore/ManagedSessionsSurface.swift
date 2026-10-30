@@ -118,6 +118,9 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         /// The chosen terminal's id; nil from an older daemon, or for a
         /// stored choice the daemon does not know.
         public let terminalCurrent: String?
+        /// Whether the person has chosen the terminal; nil from an older
+        /// daemon, which reads as chosen so nothing asks.
+        public let terminalChosen: Bool?
         /// The terminal apps installed on this Mac; absent from an older
         /// daemon.
         public let terminalChoices: [ManagedTerminalChoice]?
@@ -127,6 +130,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case folderSettings = "folder_settings"
             case nearAiSignin = "near_ai_signin"
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
+            case terminalChosen = "terminal_chosen"
         }
     }
     public var cliOptions: [String: String]?
@@ -421,6 +425,21 @@ public extension ManagedSnapshot {
     /// The terminal apps a picker offers: the installed ones, none from an
     /// older daemon.
     var terminalChoices: [ManagedTerminalChoice] { capabilities.terminalChoices ?? [] }
+
+    /// Whether a launch dialog asks which terminal to open in: until the
+    /// person has chosen one, and only when more than one is installed.
+    /// An older daemon that does not say never asks.
+    var asksForTerminal: Bool {
+        capabilities.terminalChosen == false && terminalChoices.count > 1
+    }
+
+    /// The terminal a launch dialog that asks starts on: the current one
+    /// when it is installed, else the first installed.
+    var proposedTerminal: String? {
+        let ids = terminalChoices.map(\.id)
+        if let current = capabilities.terminalCurrent, ids.contains(current) { return current }
+        return ids.first
+    }
 
     /// The tool's NEAR AI sign-in entry, only while signed in.
     func signInEntry(_ tool: String) -> ManagedAccount? {
