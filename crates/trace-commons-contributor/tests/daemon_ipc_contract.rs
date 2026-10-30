@@ -1730,8 +1730,8 @@ const OVERSIZED_FIXTURE_LIMIT_BYTES: usize =
 /// reports the entry `skipped` (`envelope-too-large`) rather than letting it
 /// vanish from both `approved` and `skipped`. Built for the "every entry
 /// attempted is accounted for" guarantee.
-async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledDaemon, ConfigStore)
-{
+async fn enrolled_daemon_with_one_good_and_one_oversized_session()
+-> (EnrolledDaemon, ConfigStore, Arc<DaemonShared>) {
     let dir = tempfile::tempdir().unwrap();
     let store_dir = dir.path().join("state");
     let store = ConfigStore::open(store_dir.clone()).unwrap();
@@ -1813,9 +1813,10 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
     // the pin, `approve`, `submit` -- reads the lowered limit.
     store.lower_envelope_limit_for_tests(OVERSIZED_FIXTURE_LIMIT_BYTES);
     let shared = Arc::new(DaemonShared::load(store).unwrap());
+    let served = Arc::clone(&shared);
     let listener = bind_store(&store_dir).await;
     tokio::spawn(async move {
-        let _ = serve(listener, shared).await;
+        let _ = serve(listener, served).await;
     });
     let client = connect_to(&store_dir).await;
 
@@ -1825,12 +1826,12 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
         client: tokio::sync::Mutex::new(client),
     };
     let store = ConfigStore::open(store_dir).unwrap();
-    (daemon, store)
+    (daemon, store, shared)
 }
 
 #[tokio::test]
 async fn a_partial_batch_accounts_for_every_entry_it_was_given() {
-    let (daemon, store) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
+    let (daemon, store, _shared) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
     let v = call(&daemon, "approve", serde_json::json!({ "all": true })).await;
     let approved = v["approved"].as_u64().expect("approved");
     let skipped = v["skipped"].as_array().expect("skipped");
@@ -1885,7 +1886,7 @@ async fn a_partial_batch_accounts_for_every_entry_it_was_given() {
 /// approving then does. Both read the state directory's limit.
 #[tokio::test]
 async fn the_preview_and_the_approval_agree_on_an_oversized_entry() {
-    let (daemon, store) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
+    let (daemon, store, shared) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
     let oversized_id = entry_id_for("oversized-fixture-oversized");
     let good_id = entry_id_for("oversized-fixture-good");
 
@@ -1911,6 +1912,19 @@ async fn the_preview_and_the_approval_agree_on_an_oversized_entry() {
     .await;
     assert!(good.get("reason_label").is_none(), "{good}");
     assert!(good["would_send_bytes"].is_u64(), "{good}");
+
+    // The preview sheet (`open_preview`, the shells' in-process full
+    // preview) builds through the pinning path, not the card's; it must say
+    // the same.
+    let (sheet, _body) =
+        trace_commons_contributor::daemon::ipc::open_preview(&shared, oversized_id)
+            .await
+            .expect("the oversized session still builds a preview");
+    assert_eq!(
+        sheet.reason_label,
+        Some("envelope-too-large"),
+        "the preview sheet must warn about the size approve will refuse"
+    );
 
     let v = call(&daemon, "approve", serde_json::json!({ "all": true })).await;
     assert_eq!(v["approved"].as_u64(), Some(1), "{v}");
