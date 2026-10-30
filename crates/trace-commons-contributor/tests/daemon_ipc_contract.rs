@@ -1712,9 +1712,17 @@ async fn approve_reports_counts_a_client_can_show_without_asking_again() {
     assert_eq!(v["skipped"].as_array().unwrap().len(), 0, "{v}");
 }
 
+/// The envelope limit the oversized-session daemon runs under. Far above the
+/// ordinary fixture session's envelope, so that one is still approved, and
+/// far below the production `MAX_ENVELOPE_BYTES` (256 MiB), which a debug
+/// build took minutes to serialize and preview. The production value is
+/// pinned by `envelope::tests::the_production_envelope_limit_is_256_mib`.
+const OVERSIZED_FIXTURE_LIMIT_BYTES: usize = 1024 * 1024;
+
 /// An enrolled daemon with two pending entries in one project: one ordinary
-/// session, and one whose sole event carries content past
-/// `MAX_ENVELOPE_BYTES`. `build_preview` does not size-check the raw
+/// session, and one whose sole event carries content past the daemon's
+/// envelope limit, which this fixture lowers to
+/// `OVERSIZED_FIXTURE_LIMIT_BYTES`. `build_preview` does not size-check the raw
 /// contribution -- only the stored artifact does -- so the build itself
 /// succeeds; `approve` catches the oversize before attempting to pin it and
 /// reports the entry `skipped` (`envelope-too-large`) rather than letting it
@@ -1736,13 +1744,13 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
         "/Users/testuser/code/proj-a",
     );
 
-    // Past `MAX_ENVELOPE_BYTES` (16_000_000). Preview builds this fine --
-    // the size guard `approve` checks (`summary.would_send_bytes`) mirrors
-    // the one `approved_envelope::save` would otherwise apply, not
+    // Past the daemon's envelope limit. Preview builds this fine -- the
+    // size guard `approve` checks (`summary.would_send_bytes`) mirrors the
+    // one `approved_envelope::save` would otherwise apply, not
     // `build_preview` itself -- so this is what drives the entry into the
     // `envelope-too-large` skip rather than a build-time (`preview-failed`)
     // one.
-    let oversized_content = "x".repeat(trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES + 1);
+    let oversized_content = "x".repeat(OVERSIZED_FIXTURE_LIMIT_BYTES + 1);
     let oversized = serde_json::json!({
         "type": "user",
         "message": {"role": "user", "content": oversized_content},
@@ -1799,7 +1807,9 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
     seed("oversized-fixture-oversized", &oversized_ref);
     queue.save(&store).unwrap();
 
-    let shared = Arc::new(DaemonShared::load(store).unwrap());
+    let mut shared = DaemonShared::load(store).unwrap();
+    shared.set_envelope_limit_bytes_for_tests(OVERSIZED_FIXTURE_LIMIT_BYTES);
+    let shared = Arc::new(shared);
     let listener = bind_store(&store_dir).await;
     tokio::spawn(async move {
         let _ = serve(listener, shared).await;
@@ -1817,7 +1827,7 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
 
 #[tokio::test]
 async fn a_partial_batch_accounts_for_every_entry_it_was_given() {
-    let (daemon, _store) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
+    let (daemon, store) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
     let v = call(&daemon, "approve", serde_json::json!({ "all": true })).await;
     let approved = v["approved"].as_u64().expect("approved");
     let skipped = v["skipped"].as_array().expect("skipped");
@@ -1849,6 +1859,22 @@ async fn a_partial_batch_accounts_for_every_entry_it_was_given() {
         );
         assert!(s["entry_id"].is_string(), "{v}");
     }
+    // The refusal happened where production refuses it: the pin's write
+    // (`approved_envelope::save`) declined the oversized envelope, so no
+    // bytes were stored for it, while the good entry's were.
+    let stored = |hash: &str| {
+        trace_commons_contributor::daemon::approved_envelope::load(&store, entry_id_for(hash))
+            .unwrap()
+            .is_some()
+    };
+    assert!(
+        !stored("oversized-fixture-oversized"),
+        "the oversized envelope must not be stored"
+    );
+    assert!(
+        stored("oversized-fixture-good"),
+        "the good envelope must be stored"
+    );
 }
 
 #[tokio::test]

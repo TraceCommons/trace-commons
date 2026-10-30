@@ -338,8 +338,19 @@ pub fn save(
     entry_id: Uuid,
     envelope: &TraceContributionEnvelope,
 ) -> Result<()> {
+    save_within(store, entry_id, envelope, MAX_ENVELOPE_BYTES)
+}
+
+/// [`save`] against an explicit size `limit`. The daemon passes its own
+/// limit, which is `MAX_ENVELOPE_BYTES` in every shipped build.
+pub fn save_within(
+    store: &ConfigStore,
+    entry_id: Uuid,
+    envelope: &TraceContributionEnvelope,
+    limit: usize,
+) -> Result<()> {
     let body = serde_json::to_vec(envelope).context("serializing approved envelope")?;
-    if body.len() > MAX_ENVELOPE_BYTES {
+    if body.len() > limit {
         bail!("approved-envelope-too-large");
     }
     crate::token_bundle::with_review_budget(

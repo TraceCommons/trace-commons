@@ -877,8 +877,14 @@ fn summarize_envelope(
 /// so the contributor hears it before approving; `approve` refuses the
 /// entry under it.
 pub fn size_refusal(would_send_bytes: usize) -> Option<&'static str> {
-    (would_send_bytes > crate::envelope::MAX_ENVELOPE_BYTES)
-        .then_some(super::queue::REASON_TOO_LARGE)
+    size_refusal_over(would_send_bytes, crate::envelope::MAX_ENVELOPE_BYTES)
+}
+
+/// [`size_refusal`] against an explicit `limit`: `envelope-too-large` over
+/// it, `None` at or under it. The daemon passes its own limit, which is
+/// `MAX_ENVELOPE_BYTES` in every shipped build.
+pub fn size_refusal_over(would_send_bytes: usize, limit: usize) -> Option<&'static str> {
+    (would_send_bytes > limit).then_some(super::queue::REASON_TOO_LARGE)
 }
 
 /// Explicit user authorization for a single remote review. Not inferred from
