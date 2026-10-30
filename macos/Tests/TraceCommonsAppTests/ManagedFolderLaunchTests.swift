@@ -50,6 +50,7 @@ final class ManagedFolderLaunchTests: XCTestCase {
 
     /// Launch is held for a model the catalogue does not list, and while
     /// there is no catalogue to check it against; the default always goes.
+    @MainActor
     func testLaunchNeverNamesAModelTheCatalogueDoesNotList() throws {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one"}"#.utf8))
         var draft = ManagedFolderDraft()
