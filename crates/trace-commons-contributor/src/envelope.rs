@@ -1675,10 +1675,11 @@ mod tests {
     }
 
     /// The production limit, pinned. Tests that drive the oversized paths
-    /// lower the limit (`lower_envelope_limit_for_test`, and the daemon's
-    /// `set_envelope_limit_bytes_for_tests`) rather than build a payload this
-    /// size, so this is the test that holds the shipped value. Ingest's body
-    /// limit derives from the same protocol constant.
+    /// lower their state directory's limit
+    /// (`ConfigStore::lower_envelope_limit_for_tests`) or pass a lower one,
+    /// rather than build a payload this size, so this is the test that holds
+    /// the shipped value. Ingest's body limit derives from the same protocol
+    /// constant.
     #[test]
     fn the_production_envelope_limit_is_256_mib() {
         assert_eq!(MAX_ENVELOPE_BYTES, 256 * 1024 * 1024);

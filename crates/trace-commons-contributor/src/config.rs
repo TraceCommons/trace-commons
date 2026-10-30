@@ -1264,7 +1264,11 @@ impl ConfigStore {
     /// test can drive the oversized path without building a 256 MiB session.
     /// Every store opened on the same directory sees it, and no other
     /// directory does, so tests running in parallel do not see each other's
-    /// limits. Compiled only into test builds (`cfg(test)`, or the test-only
+    /// limits. The directory is matched as the store was opened: a store
+    /// opened under another spelling of the same path sees
+    /// `MAX_ENVELOPE_BYTES`, which admits the test's oversized payload and
+    /// fails its refusal assertion rather than passing it. Compiled only into
+    /// test builds (`cfg(test)`, or the test-only
     /// `test-credential-store` feature; see `Cargo.toml`).
     #[cfg(any(test, feature = "test-credential-store"))]
     pub fn lower_envelope_limit_for_tests(&self, limit: usize) {

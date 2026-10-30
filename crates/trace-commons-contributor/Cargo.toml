@@ -15,9 +15,10 @@ repository.workspace = true
 # exposes `ManagedRoute::start_against`, which starts a managed route against
 # a local fixture instead of NEAR AI, for `tests/managed_statusline.rs`, the
 # native-auth wire primitives for the separate client/server contract suite,
-# and `DaemonShared::set_envelope_limit_bytes_for_tests`, which lowers one test
-# daemon's envelope limit so `tests/daemon_ipc_contract.rs` need not build a
-# 256 MiB session.
+# and `ConfigStore::lower_envelope_limit_for_tests` with
+# `envelope::TEST_ENVELOPE_LIMIT_BYTES`, which lower one test state
+# directory's envelope limit so `tests/daemon_ipc_contract.rs` need not build
+# a 256 MiB session.
 #
 # Enabled ONLY by test dev-dependencies: the self dependency below and the
 # unpublished trace-commons-client-server-tests package. Never enable it for
