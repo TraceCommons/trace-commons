@@ -816,20 +816,23 @@ where
     // the balance before anything is committed: a refusal, a cancelled
     // request or a sign-out during the wait leaves no session behind, and
     // `handle` below resolves and checks the request again from scratch.
-    if prepares_on_sign_in(shared, request) {
-        // The balance read is the sign-in's at the time of each read. A
-        // switch to another NEAR AI account during the wait would let one
-        // account's balance pass a launch on the other, so a changed
-        // sign-in is refused as if signed out.
-        let checked = sign_in_key_id(shared);
-        if let Err(error) = funds_for_first_calls(read).await {
-            return respond(request, Err(error.into()));
-        }
-        if sign_in_key_id(shared) != checked {
+    //
+    // The sign-in is read once, and the dry run and `handle` both use it.
+    // The balance read is the sign-in's at the time of each read, so a
+    // switch to another NEAR AI key during the wait, which would let one
+    // account's balance pass a launch on the other, is refused as if
+    // signed out, whatever the balance said.
+    let key = sign_in_key_id(shared);
+    let sign_in = key.is_some();
+    if prepares_on_sign_in(shared, request, sign_in) {
+        let funds = funds_for_first_calls(read).await;
+        if sign_in_key_id(shared) != key {
             return respond(request, Err(ManagedError::NearAiSignInRequired.into()));
         }
+        if let Err(error) = funds {
+            return respond(request, Err(error.into()));
+        }
     }
-    let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
     let mut ended = vec![];
     let result = with_service(shared, |service| {
@@ -846,8 +849,14 @@ where
 /// [`ManagedService::prepares_on_sign_in`] for a prepare or start-again
 /// request, with the service locked directly: a read that publishes
 /// nothing.
-fn prepares_on_sign_in(shared: &DaemonShared, request: &Request) -> bool {
-    let sign_in = sign_in_present(shared);
+fn prepares_on_sign_in(shared: &DaemonShared, request: &Request, sign_in: bool) -> bool {
+    // Every other request skips the lock; `resolve_launch` refuses them too.
+    if !matches!(
+        request.method.as_str(),
+        "managed_launch_prepare" | "managed_session_start_again"
+    ) {
+        return false;
+    }
     let Ok(held) = shared.managed.lock() else {
         return false;
     };

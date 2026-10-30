@@ -15389,12 +15389,20 @@ mod tests {
 
         // Switched to another NEAR AI account while the balance was read:
         // the balance read may not be the new account's, so refused for the
-        // sign-in, and nothing prepared.
+        // sign-in rather than the balance, and nothing prepared.
         let switches = |_fresh: bool| {
             let mut other = sign_in.clone().unwrap();
             other.key_id = "key-2".into();
             s.settings.lock().unwrap().near_ai_inference = Some(other);
-            std::future::ready(BalanceReport::Unavailable)
+            // The old account's balance, too low: the switch still wins.
+            std::future::ready(BalanceReport::Known(BalanceReading {
+                remaining_nanos: Some(0),
+                spend_limit_nanos: None,
+                total_spent_nanos: 0,
+                total_requests: 0,
+                total_tokens: 0,
+                observed_at: chrono::Utc::now(),
+            }))
         };
         let r = crate::daemon::managed::handle_async_with(
             &s,
