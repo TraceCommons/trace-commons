@@ -102,7 +102,9 @@ internal static class NativeMethods
     /// <summary>
     /// Stops the daemon loop. Idempotent, safe from any thread, safe with
     /// NULL. Does NOT free the handle, does NOT end subscriptions, and is NOT
-    /// a teardown barrier for a second concurrent caller.
+    /// a teardown barrier for a second concurrent caller. Waits at most 2
+    /// seconds for the daemon's current pass, then returns with the teardown
+    /// still finishing in the background.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void tc_daemon_stop(IntPtr handle);
@@ -110,7 +112,9 @@ internal static class NativeMethods
     /// <summary>
     /// The only function that reclaims what tc_daemon_start returned. Must run
     /// on a plain thread outside any tokio runtime context, and must not race
-    /// any other call still using the pointer.
+    /// any other call still using the pointer. Waits at most 1 second for
+    /// the runtime's blocking work (plus tc_daemon_stop's 2 if that was not
+    /// called first).
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void tc_handle_free(IntPtr handle);
