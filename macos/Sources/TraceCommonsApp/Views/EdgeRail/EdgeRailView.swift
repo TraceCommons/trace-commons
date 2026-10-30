@@ -467,6 +467,7 @@ struct EdgeRailFolderList: View {
         let split = submits && outcome != nil
         let title = busy ? words.tree.submitting : TracesTreeView.submitTitle(offer.count, words: words)
         let writing = store.writing.contains(folder.id)
+        let submitTip = submits ? TracesTreeView.submitHelp(offer.withheldLine, words: words) : ""
         let floats = rowMenu == .folder(folder.id) || rowMenu == .submit(folder.id)
         GlassListRow(
             depth: .folder, tile: .folder, title: folder.label,
@@ -474,11 +475,13 @@ struct EdgeRailFolderList: View {
             off: folder.mode == .ignore,
             expanded: folder.sessions.isEmpty ? nil : expanded.contains(folder.id),
             submitTitle: submits && !split ? title : nil,
+            submitHelp: submitTip,
             accessory: split ? AnyView(
                 GlassSplitButton(title, menuLabel: outcome?.submitAllAs ?? "", menuOpen: rowMenu == .submit(folder.id),
                                  onMenu: { rowMenu = TracesTreeView.toggled(.submit(folder.id), current: rowMenu) }) {
                     submit(folder)
                 }
+                .actionHelp(submitTip)
                 .disabled(busy)) : nil,
             expandLabel: folder.label,
             menuLabel: menu ? words.tree.folderMenu : "",
@@ -489,7 +492,6 @@ struct EdgeRailFolderList: View {
             onMenu: menu ? { rowMenu = TracesTreeView.toggled(.folder(folder.id), current: rowMenu) } : nil)
             // Its own height: the list's spare room is not the rows'.
             .fixedSize(horizontal: false, vertical: true)
-            .help(submits ? TracesTreeView.submitHelp(offer.withheldLine, words: words) : "")
             .disabled(writing)
             .opacity(writing ? TracesRowBusy.opacity : 1)
             .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
@@ -514,11 +516,12 @@ struct EdgeRailFolderList: View {
             flag: TracesTreeView.flag(entry, ineligible: lines.ineligible != nil, attestation: lines.tone),
             off: off,
             submitTitle: words.tree.submit,
+            // On the pill, which sends it; the row's click opens it.
+            submitHelp: words.tree.submitTraceTip,
             onSelect: { open(.traces(entryId: entry.entryId)) },
             onSubmit: store.maySubmitSession(entry, folderIgnored: off)
                 ? { Task { await store.submitSession(entry, folderIgnored: off) } } : nil)
             .fixedSize(horizontal: false, vertical: true)
-            .help(words.tree.submitTraceTip)
             .disabled(store.acting.contains(entry.entryId))
             .opacity(store.acting.contains(entry.entryId) ? TracesRowBusy.opacity : 1)
     }

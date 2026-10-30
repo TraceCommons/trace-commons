@@ -835,7 +835,16 @@ public struct GlassSplitButton<MenuContent: View>: View {
     private let menu: MenuContent
     private let onMenu: (() -> Void)?
     private let menuOpen: Bool
+    private var actionTip = ""
     @Environment(\.glassGround) private var ground
+
+    /// A hover tip for the action half alone; the chevron keeps its own
+    /// name, so the tip does not claim what the menu does.
+    public func actionHelp(_ text: String) -> Self {
+        var copy = self
+        copy.actionTip = text
+        return copy
+    }
 
     public init(
         _ title: String, menuLabel: String, action: @escaping () -> Void,
@@ -871,6 +880,7 @@ public struct GlassSplitButton<MenuContent: View>: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(GlassPressStyle())
+            .helpIfAny(actionTip)
             Rectangle()
                 .fill(ground == .selection ? GlassTokens.Color.textOnAccent.color.opacity(0.3) : GlassColor.ink(0.14))
                 .frame(width: 1)
@@ -884,6 +894,7 @@ public struct GlassSplitButton<MenuContent: View>: View {
                 .buttonStyle(GlassPressStyle())
                 .fixedSize()
                 .accessibilityLabel(menuLabel)
+                .helpIfAny(menuLabel)
             } else {
                 Menu {
                     menu
@@ -895,6 +906,7 @@ public struct GlassSplitButton<MenuContent: View>: View {
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .accessibilityLabel(menuLabel)
+                .helpIfAny(menuLabel)
             }
         }
         .glassType(metrics.type)

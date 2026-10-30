@@ -596,7 +596,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             submit: "Submit",
             submit_count: "Submit \u{00b7} {count}",
             submitting: "Submitting\u{2026}",
-            submit_tip: "Sends every eligible waiting trace here.",
+            submit_tip: "Submits this folder's eligible traces.",
             submit_trace_tip: "Sends this trace now.",
             eligible_count: "{count} eligible",
             reviewing: "Reviewing",
@@ -1925,6 +1925,16 @@ mod tests {
                 "{table} is missing"
             );
         }
+    }
+
+    /// Owner, 2026-10-30: the folder Submit tip read awkwardly ("Sends
+    /// every eligible waiting trace here."). The core's withheld line
+    /// follows it whenever some traces are held back.
+    #[test]
+    fn the_folder_submit_tip_names_the_folder() {
+        let tree = monitor_traces_copy().tree;
+        assert!(tree.submit_tip.contains("folder"), "{}", tree.submit_tip);
+        assert_ne!(tree.submit_tip, tree.submit_trace_tip);
     }
 
     /// Ron's lines verbatim, with his numbers as `{name}` holes.
