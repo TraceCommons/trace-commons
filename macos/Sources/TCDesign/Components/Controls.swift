@@ -639,12 +639,36 @@ public struct GlassPickerOption<Value: Hashable>: Identifiable {
     public let value: Value
     public let title: String
     public let dot: GlassStatus?
+    /// The heading `GlassPicker` lists it under. Neighbouring options with
+    /// the same heading share one; none lists it without a heading.
+    public let section: String?
     public var id: Value { value }
 
-    public init(_ title: String, value: Value, dot: GlassStatus? = nil) {
+    public init(_ title: String, value: Value, dot: GlassStatus? = nil, section: String? = nil) {
         self.title = title
         self.value = value
         self.dot = dot
+        self.section = section
+    }
+}
+
+/// A run of neighbouring `GlassPickerOption`s under one heading, or none.
+struct GlassPickerRun<Value: Hashable>: Identifiable {
+    let id: Int
+    let section: String?
+    let options: [GlassPickerOption<Value>]
+
+    /// `options` cut where the heading changes, in order.
+    static func runs(_ options: [GlassPickerOption<Value>]) -> [GlassPickerRun] {
+        var runs: [GlassPickerRun] = []
+        for option in options {
+            if let last = runs.last, last.section == option.section {
+                runs[runs.count - 1] = GlassPickerRun(id: last.id, section: last.section, options: last.options + [option])
+            } else {
+                runs.append(GlassPickerRun(id: runs.count, section: option.section, options: [option]))
+            }
+        }
+        return runs
     }
 }
 
@@ -670,8 +694,27 @@ public struct GlassPicker<Value: Hashable>: View {
 
     public var body: some View {
         Menu {
-            ForEach(options) { option in
-                Button(option.title) { selection = option.value }
+            if options.allSatisfy({ $0.section == nil }) {
+                ForEach(options) { option in
+                    Button(option.title) { selection = option.value }
+                }
+            } else {
+                // Headed groups, each a native menu section; a run with no
+                // heading is set apart by a divider instead.
+                ForEach(GlassPickerRun.runs(options)) { run in
+                    if let section = run.section {
+                        Section(section) {
+                            ForEach(run.options) { option in
+                                Button(option.title) { selection = option.value }
+                            }
+                        }
+                    } else {
+                        if run.id > 0 { Divider() }
+                        ForEach(run.options) { option in
+                            Button(option.title) { selection = option.value }
+                        }
+                    }
+                }
             }
         } label: {
             GlassPickerPill(title: current?.title ?? placeholder, dot: current?.dot)

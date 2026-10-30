@@ -200,6 +200,7 @@ mod tests {
         ChatModel {
             id: id.into(),
             name: name.map(Into::into),
+            tier: None,
         }
     }
 

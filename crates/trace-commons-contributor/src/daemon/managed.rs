@@ -710,12 +710,13 @@ fn favorite_models(shared: &DaemonShared) -> Vec<String> {
 
 /// The NEAR AI chat models a launch can name, and the one `tool` gets
 /// when it names none (`managed::models`). The catalogue is public: no
-/// key is read or sent. Answers `{"models":[{"id","name"?}],"default",
+/// key is read or sent. Answers `{"models":[{"id","name"?,"tier"?}],"default",
 /// "favorites","unavailable_favorites"}`: `favorites` is the starred models
 /// among `models`, in NEAR AI's order; `unavailable_favorites` is the
 /// starred ids NEAR AI no longer lists for any tool. Neither prunes the
 /// stored list, so a model NEAR AI offers again is a favorite again. When
 /// NEAR AI cannot be read there is no answer, so nothing is marked.
+/// `tier` is NEAR AI's privacy tier (`models::ModelTier`).
 async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]

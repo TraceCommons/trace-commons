@@ -235,6 +235,7 @@ impl OpenCodeSession {
         let only = [super::models::ChatModel {
             id: model.to_owned(),
             name: None,
+            tier: None,
         }];
         self.command_with_models(model, &only, base_url, key)
     }
@@ -466,6 +467,7 @@ mod tests {
                 &[super::super::models::ChatModel {
                     id: "fixture-model".into(),
                     name: None,
+                    tier: None,
                 }],
                 "http://127.0.0.1:4321/openai/v1",
                 "fixture-key",
@@ -490,6 +492,7 @@ mod tests {
                 &[super::super::models::ChatModel {
                     id: "fixture-model".into(),
                     name: None,
+                    tier: None,
                 }],
                 "https://api.openai.com/v1",
                 "fixture-key",
