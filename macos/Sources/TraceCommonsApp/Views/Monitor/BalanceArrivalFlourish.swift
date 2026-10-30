@@ -2,14 +2,14 @@ import SwiftUI
 import TCDesign
 import TCShellCore
 
-/// Marks NEAR AI credit arriving on the Balance tile: the figure counts up
-/// from the one last shown to the new one while the card's edge lights in
-/// the status green, then the light fades. Under Reduce Motion there is no
-/// count and no fade: the edge is lit, still, for a moment.
+/// Marks NEAR AI credit arriving on the Balance tile: gold coins burst out
+/// of the card's centre like a firework while the figure counts up from the
+/// one last shown to the new one (owner, 2026-10-27, in place of the edge
+/// that lit in the status green). Under Reduce Motion there is no count and
+/// the coins are drawn still, spread round the centre, for a moment.
 ///
-/// Placeholder, pending Ron's design for credit settlement flourishes. It is
-/// one self-contained view so his version can replace it whole: `content`
-/// draws the tile, given the figure to show while counting (nil otherwise).
+/// One self-contained view: `content` draws the tile, given the figure to
+/// show while counting (nil otherwise).
 ///
 /// Whether there is anything to mark is `BalanceArrival.effect`'s call, from
 /// the daemon's `received_total_nanos` -- never from the balance itself,
@@ -23,23 +23,18 @@ struct BalanceArrivalFlourish<Content: View>: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var countingFigure: String?
-    @State private var lit = false
+    /// When the coins burst; nil while none fly.
+    @State private var burst: Date?
 
     /// How long the count runs, in frames of `frame`.
     static var frames: Int { 24 }
     static var frame: Duration { .milliseconds(50) }
-    /// How long the edge stays lit once the count is done.
+    /// How long the still coins stay under Reduce Motion.
     static var hold: Duration { .milliseconds(1600) }
 
     var body: some View {
         content(countingFigure)
-            .overlay {
-                RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
-                    .strokeBorder(GlassTokens.Color.statusOnText.color, lineWidth: 1.5)
-                    .opacity(lit ? 0.9 : 0)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
+            .glassCoinBurst(start: burst, still: reduceMotion)
             .task(id: Run(received: status.receivedTotalNanos, remaining: status.remainingNanos)) {
                 await run()
             }
@@ -59,25 +54,33 @@ struct BalanceArrivalFlourish<Content: View>: View {
         case .none:
             return
         case .highlight:
-            await light()
+            await celebrate()
         case .countUp(let from, let to):
-            withAnimation(GlassMotion.standard(reduceMotion)) { lit = true }
+            // The coins burst as the count starts and fly while it runs.
+            let ends = ContinuousClock.now + Self.burstLength(reduceMotion)
+            burst = .now
             for step in BalanceArrival.countSteps(fromNanos: from, toNanos: to, frames: Self.frames) {
                 guard !Task.isCancelled else { break }
                 countingFigure = calls.amount(1, step, status.scale).flatMap { $0.isEmpty ? nil : $0 }
                 try? await Task.sleep(for: Self.frame)
             }
             countingFigure = nil
-            await light()
+            try? await Task.sleep(until: ends, clock: .continuous)
+            burst = nil
         }
     }
 
-    /// Light the edge, hold, and let it go: faded with motion, at once
-    /// without.
-    private func light() async {
-        withAnimation(GlassMotion.standard(reduceMotion)) { lit = true }
-        try? await Task.sleep(for: Self.hold)
-        withAnimation(GlassMotion.standard(reduceMotion)) { lit = false }
+    /// Burst the coins and let them fall away; still ones held a moment
+    /// under Reduce Motion.
+    private func celebrate() async {
+        burst = .now
+        try? await Task.sleep(for: Self.burstLength(reduceMotion))
+        burst = nil
+    }
+
+    /// How long the coins are drawn: one burst, or `hold` still.
+    private static func burstLength(_ reduceMotion: Bool) -> Duration {
+        reduceMotion ? hold : .seconds(GlassCoinBurst.duration)
     }
 
     // MARK: - What was last shown

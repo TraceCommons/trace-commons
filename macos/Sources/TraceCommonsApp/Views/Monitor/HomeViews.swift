@@ -479,13 +479,14 @@ private struct HomeOverview: View {
 }
 
 /// The Not contributed card (owner, 2026-10-19): half a hero's height; the
-/// label, the count and size, and the core's call to share (owner,
-/// 2026-10-20), over its icon as a watermark on the right, as the tiles'.
-/// It is on the standard card fill with no border, and now and then a soft
-/// light turns once round its edge like a lighthouse's beam
-/// (`GlassCardBeacon`, owner, 2026-10-22; before that a band of light
-/// crossed it, before that it had a solid accent border, and before that a
-/// turning glow edge). The whole card is the button.
+/// label and the count and size on the left, and the core's call to share
+/// (owner, 2026-10-20) on the right in a translucent card of its own
+/// (owner, 2026-10-27), over its icon as a watermark on the right, as the
+/// tiles'. It is on the standard card fill with no border, and now and
+/// then a soft band of light crosses it (`GlassCardShimmer`, owner,
+/// 2026-10-27; before that a soft light turned round its edge, before that
+/// a duller band crossed it, before that it had a solid accent border, and
+/// before that a turning glow edge). The whole card is the button.
 private struct HomeNotContributedCard: View {
     let title: String
     let count: Int
@@ -512,14 +513,22 @@ private struct HomeNotContributedCard: View {
                                 .foregroundStyle(GlassColor.textSecondary)
                         }
                     }
-                    if let detail {
-                        Text(detail)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
                 }
-                Spacer(minLength: 0)
+                .fixedSize()
+                if let detail {
+                    // A card on the card: the nested card's translucent
+                    // fill (`GlassGround`), so the watermark shows through.
+                    Text(detail)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, GlassTokens.Space.s6)
+                        .padding(.vertical, GlassTokens.Space.s4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .glassTier(.cardQuiet)
+                } else {
+                    Spacer(minLength: 0)
+                }
             }
             // The tiles' inset, so its words start where theirs do.
             .padding(.horizontal, 12)
@@ -530,9 +539,9 @@ private struct HomeNotContributedCard: View {
             .glassCardWatermark(HomeStatIcons.uncontributed)
             // The stat tiles' fill and hover.
             .glassTier(.card, hover: GlassTokens.Color.cardHover)
-            // The light turning round its edge, over the fill (owner,
-            // 2026-10-22).
-            .glassCardBeacon()
+            // A soft band of light crossing it, over the fill and the words
+            // (owner, 2026-10-27).
+            .glassCardShimmer()
             .contentShape(shape)
         }
         .buttonStyle(GlassPressStyle())
@@ -1690,7 +1699,6 @@ struct HomeAccountTiles: View {
                     BalanceArrivalFlourish(status: model.balanceStatus, calls: model.balanceCalls) { counting in
                         HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value,
                                      detail: balance.detail, detailInk: balance.detailInk,
-                                     supplementaryDetail: HomeFormat.balanceReceived(model.balanceStatus, calls: model.balanceCalls),
                                      systemImage: HomeStatIcons.balance, valueAccessory: balance.beside,
                                      action: openPrivateAI)
                     }
@@ -1838,8 +1846,6 @@ private struct HomeStatTile: View {
     /// size and estimate), in `detailInk` when it carries a tone.
     var detail: String? = nil
     var detailInk: GlassRGBA? = nil
-    /// A separate neutral fact, such as incoming credit rather than net change.
-    var supplementaryDetail: String? = nil
     /// The tile's icon (`HomeStatIcons`); nil draws none.
     var systemImage: String? = nil
     /// A quieter figure beside the value; nil draws none.
@@ -1854,14 +1860,12 @@ private struct HomeStatTile: View {
     var body: some View {
         if let action {
             Button(action: action) {
-                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk,
-                              supplementaryDetail: supplementaryDetail, systemImage: systemImage,
+                GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
                               valueAccessory: valueAccessory, interactive: true, iconPlacement: .watermark)
             }
             .buttonStyle(GlassPressStyle())
         } else {
-            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk,
-                          supplementaryDetail: supplementaryDetail, systemImage: systemImage,
+            GlassStatCard(label, value: value, detail: detail, detailInk: detailInk, systemImage: systemImage,
                           valueAccessory: valueAccessory, iconPlacement: .watermark)
         }
     }
@@ -1955,14 +1959,6 @@ enum HomeFormat {
         let ink: GlassRGBA? = direction == 0 ? nil
             : (direction > 0 ? GlassTokens.Color.statusOnText : GlassTokens.Color.statusOutsideText)
         return (text, ink)
-    }
-
-    /// A distinct incoming-credit line. Spending never changes this amount.
-    /// Failed or signed-out reads cannot display even an accidentally retained value.
-    static func balanceReceived(_ status: BalanceStatus, calls: BalanceCalls) -> String? {
-        guard BalanceSurface.showsFigures(status, calls: calls) else { return nil }
-        guard status.received24hNanos != nil else { return nil }
-        return status.received24hText
     }
 
     /// The daemon's balance label with no NEAR AI sign-in kept here.
