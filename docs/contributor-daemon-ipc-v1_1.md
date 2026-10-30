@@ -9706,10 +9706,17 @@ launcher reads only `accepted`.
 `near_ai` and `near_ai_signin`, as the session's default model; on
 `subscription` and `api_key` it is still refused (`managed-invalid-request`).
 Absent means the tool's default (see `docs/managed-sessions.md`). It also
-accepts additive `keep_saved_model: boolean` (absent is false): the shell
+accepts `keep_saved_model: boolean` (absent is false): the shell
 fell back to the default because NEAR AI no longer lists the folder's saved
 model, so the launch remembers its other folder choices but keeps the saved
-model. A model NEAR
+model. If the saved model cannot be read (the folder went away, say), the
+launch is refused with `managed-folder-settings-save-failed` rather than
+written over. `managed_session_start_again` of such a launch keeps it too.
+The field is not additive: `managed_launch_prepare` refuses unknown fields,
+so a shell sends it only when the managed snapshot advertises
+`capabilities.keep_saved_model: true` (an older daemon omits it). The session
+registry stores it on the entry, outside the stored request, so an older
+daemon can still read the registry. A model NEAR
 AI does not list as a chat model is refused when the proxy starts, with
 `managed-model-unavailable`: at `managed_launch_redeem` on the sign-in, in the
 launcher on a saved key.
@@ -9743,8 +9750,9 @@ launcher on a saved key.
   id an older or hand-edited settings file holds can always be removed.
   Starring an empty or malformed id, a non-boolean `favorite`, any other
   field, or starring a 33rd favorite is `managed-invalid-request`;
-  unstarring is never refused for the bound or the id's shape. A change
-  publishes `status_changed`, so every window re-reads `get_settings`
+  unstarring is never refused for the bound or the id's shape. A change to
+  the stored list publishes `status_changed` (unstarring an id that was not
+  stored publishes nothing), so every window re-reads `get_settings`
   (`managed_favorite_models`). The list is
   global, not per tool: one favorite shows in each tool's picker that offers
   it. A developer dry run refuses it, as it does `managed_model_catalogue`.

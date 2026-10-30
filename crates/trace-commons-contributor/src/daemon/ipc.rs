@@ -15262,6 +15262,45 @@ mod tests {
         assert_eq!(body["defaults"], serde_json::json!([]));
     }
 
+    /// #1754 review: `managed_model_favorite_set` publishes
+    /// `status_changed` only when the stored list moved. Unstarring an id
+    /// that was never stored wakes no window. Unstarring needs no NEAR AI.
+    #[tokio::test]
+    async fn a_favorite_change_that_changes_nothing_publishes_nothing() {
+        let s = shared();
+        let mut rx = s.events.subscribe();
+        let mut status_changed = || {
+            let mut seen = false;
+            while let Ok(event) = rx.try_recv() {
+                seen |= event.event == EVENT_STATUS_CHANGED;
+            }
+            seen
+        };
+        let unstar = |model: &str| {
+            req(
+                "managed_model_favorite_set",
+                serde_json::json!({"model":model,"favorite":false}),
+            )
+        };
+        let r = handle_request_async(&s, &unstar("never/stored")).await;
+        assert_eq!(
+            r.result.expect("unstarred"),
+            serde_json::json!({"favorites":[]})
+        );
+        assert!(!status_changed(), "a no-op unstar is not a status change");
+        s.settings
+            .lock()
+            .unwrap()
+            .managed_favorite_models
+            .push("stored/model".into());
+        let r = handle_request_async(&s, &unstar("stored/model")).await;
+        assert_eq!(
+            r.result.expect("unstarred"),
+            serde_json::json!({"favorites":[]})
+        );
+        assert!(status_changed(), "a removal is a status change");
+    }
+
     /// Starring, unstarring and the catalogue's favorite lists, against
     /// the fixture NEAR AI `managed_sign_in_redeem_hosts_the_proxy_and_ends_it`
     /// serves. Leaves no favorite stored.

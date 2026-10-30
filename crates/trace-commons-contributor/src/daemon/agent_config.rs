@@ -165,13 +165,14 @@ pub(crate) fn schema() -> Value {
     properties.insert("managed_terminal".into(), terminal);
     properties.insert("managed_favorite_models".into(), json!({
         "type":"object",
-        // JSON Schema counts characters, not bytes, so `maxLength` is only
-        // an upper bound; the description states the daemon's byte limit.
-        "propertyNames":{"minLength":1,"maxLength":settings::MAX_FAVORITE_MODEL_ID_BYTES,"pattern":"^[^\\s\\x00-\\x1f\\x7f]+$"},
+        // No `propertyNames`: it would bind the `false` keys too, which the
+        // daemon takes whatever their shape, and no JSON Schema pattern
+        // matches Rust's whitespace and control classes exactly. The
+        // description states the daemon's rule for a star.
         "additionalProperties":{"type":"boolean"},
         "examples":[{}],
         "description":format!(
-            "Partial update of the models listed first in the managed-session model picker: true stars a NEAR AI model id, false unstars it, omitted ids remain. At most {} favorites. A starred id is at most {} UTF-8 bytes with no whitespace or control characters, which the daemon checks; false removes any stored id. Whether NEAR AI offers an id is not checked here.",
+            "Partial update of the models listed first in the managed-session model picker: true stars a NEAR AI model id, false unstars it, omitted ids remain. At most {} favorites. A starred id is at most {} UTF-8 bytes with no whitespace or control characters, which the daemon checks; false removes any stored id, whatever its shape. Whether NEAR AI offers an id is not checked here.",
             settings::MAX_FAVORITE_MODELS,
             settings::MAX_FAVORITE_MODEL_ID_BYTES
         )
@@ -346,11 +347,44 @@ mod tests {
     }
 
     /// #1754 review: the favorites schema states the daemon's bounds from
-    /// its constants, says the byte bound is the daemon's (JSON Schema's
-    /// `maxLength` counts characters), and its pattern refuses the control
-    /// characters the daemon refuses.
+    /// its constants and says the byte bound is the daemon's. It puts no
+    /// shape on the keys: `propertyNames` would also bind the `false` keys
+    /// the daemon accepts whatever their shape, and no JSON Schema pattern
+    /// matches Rust's whitespace and control-character classes exactly.
     #[test]
     fn favorite_models_schema_states_the_daemons_bounds() {
+        let entry = &schema()["patch_schema"]["properties"]["managed_favorite_models"];
+        assert!(entry.get("propertyNames").is_none(), "{entry}");
+        let description = entry["description"].as_str().unwrap();
+        assert!(
+            description.contains("false removes any stored id, whatever its shape"),
+            "{description}"
+        );
+        // What the description promises, the daemon does.
+        let mut stored = DaemonSettings {
+            managed_favorite_models: vec!["bad id".into(), String::new()],
+            ..Default::default()
+        };
+        settings::apply_settings_object(
+            &mut stored,
+            &json!({"managed_favorite_models":{"bad id":false,"":false}}),
+        )
+        .unwrap();
+        assert!(stored.managed_favorite_models.is_empty());
+        for refused in ["bad id", "", "c1\u{85}id"] {
+            assert!(
+                settings::apply_settings_object(
+                    &mut DaemonSettings::default(),
+                    &json!({"managed_favorite_models":{ refused: true }}),
+                )
+                .is_err(),
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn favorite_models_schema_states_the_daemons_numeric_bounds() {
         let entry = &schema()["patch_schema"]["properties"]["managed_favorite_models"];
         let description = entry["description"].as_str().unwrap();
         assert!(
@@ -367,8 +401,6 @@ mod tests {
             )),
             "{description}"
         );
-        let pattern = entry["propertyNames"]["pattern"].as_str().unwrap();
-        assert_eq!(pattern, "^[^\\s\\x00-\\x1f\\x7f]+$");
     }
 
     #[test]
