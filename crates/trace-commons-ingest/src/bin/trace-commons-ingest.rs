@@ -79991,12 +79991,20 @@ fn write_json_file<T: Serialize + ?Sized>(
     // partial one. Concurrent submits of one tenant scan each other's derived
     // records, and a truncated file failed them. The temporary name starts
     // with a dot and has no `.json` extension, so directory scans skip it; it
-    // is removed if the write fails.
+    // is removed if the write fails. It is created with the mode
+    // `File::create` gives (0o666 less the umask), not tempfile's 0o600.
     //
     // Serialized straight into the file: a body file can be a whole
     // envelope, and buffering it first would be one more copy of it in
     // memory. Same bytes as `to_string_pretty`.
-    let temporary = tempfile::NamedTempFile::new_in(parent)
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o666));
+    }
+    let temporary = builder
+        .tempfile_in(parent)
         .with_context(|| format!("failed to write {} {}", label, path.display()))?;
     let mut writer = std::io::BufWriter::with_capacity(1 << 20, temporary);
     serde_json::to_writer_pretty(&mut writer, value)

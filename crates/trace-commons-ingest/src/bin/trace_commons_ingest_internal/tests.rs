@@ -32787,6 +32787,31 @@ fn write_json_file_never_exposes_a_partial_file_to_a_reader() {
     );
 }
 
+/// The atomic write keeps the file mode a plain `File::create` gives
+/// (`0o666` less the umask), not the temporary file's owner-only `0o600`, so
+/// operator tooling running as another user can still read the records.
+#[cfg(unix)]
+#[test]
+fn write_json_file_keeps_the_umask_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let reference = temp.path().join("reference");
+    std::fs::File::create(&reference).expect("reference file");
+    let path = temp.path().join("record.json");
+    write_json_file(&path, &"value", "probe record").expect("write");
+    let mode = |path: &Path| {
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(
+        format!("{:o}", mode(&path)),
+        format!("{:o}", mode(&reference))
+    );
+}
+
 /// A failed write leaves the previous value in place and no temporary file.
 #[test]
 fn write_json_file_failure_keeps_the_previous_file() {
