@@ -1629,19 +1629,61 @@ jobs:
       - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install a Secret Service provider for credential tests
         run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
-      - name: Install the pinned wallet browser test runtime
-        run: |
-          npm install --prefix "$RUNNER_TEMP/trace-commons-wallet-ci" \
-            --ignore-scripts --omit=optional --no-audit --no-fund --save-exact \
-            playwright@1.63.0 playwright-core@1.63.0
-          node "$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright/cli.js" \
-            install --with-deps chromium
       - name: Run workspace tests with Secret Service
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
             cargo test --workspace
           '
+      - name: Verify real Secret Service storage
+        run: |
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test -p trace-commons-contributor-platform --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
+            cargo test -p trace-commons-contributor-platform --lib real_commons_os_round_trip -- --ignored
+          '
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # Split out of cargo-test-default, which had grown past its 30-minute
+  # timeout: each of these builds its own feature set or package selection,
+  # so in that job each one recompiled crates the workspace run had already
+  # built. Not required status checks; the owner can promote them.
+  cargo-test-staging-channel:
+    name: staging channel tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # Restore-only, from the key cargo-test-default saves on main. This job
+      # saves nothing: the repository's caches sit at GitHub's 10 GB ceiling
+      # (see ./.github/actions/trim-cargo-cache), and a third saved `target`
+      # would evict the others. What it restores is the third-party
+      # dependency graph, which this job's builds mostly share.
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-test-default-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-default-
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install a Secret Service provider for credential tests
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
       # The staging channel's half of the channel checks: its host and
       # identity scan, the production deny-list digests, its refusals of
       # production hosts, its entitlements, its IronWire key gate and its
@@ -1668,13 +1710,37 @@ jobs:
             cargo test --locked -p trace-commons-attestation --features near-ai-staging
             cargo test --locked -p trace-commons-server --features near-ai-staging --bin trace-commons-staging-pins --test staging_pins_tool
           '
-      - name: Verify real Secret Service storage
+
+  cargo-test-wallet-sdk-csp:
+    name: wallet SDK and production CSP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # Restore-only, from the key cargo-test-default saves on main. This job
+      # saves nothing: the repository's caches sit at GitHub's 10 GB ceiling
+      # (see ./.github/actions/trim-cargo-cache), and a third saved `target`
+      # would evict the others. What it restores is the third-party
+      # dependency graph, which this job's builds mostly share.
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-test-default-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-default-
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install the pinned wallet browser test runtime
         run: |
-          dbus-run-session -- sh -eu -c '
-            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test -p trace-commons-contributor-platform --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
-            cargo test -p trace-commons-contributor-platform --lib real_commons_os_round_trip -- --ignored
-          '
+          npm install --prefix "$RUNNER_TEMP/trace-commons-wallet-ci" \
+            --ignore-scripts --omit=optional --no-audit --no-fund --save-exact \
+            playwright@1.63.0 playwright-core@1.63.0
+          node "$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright/cli.js" \
+            install --with-deps chromium
       - name: Verify the real wallet SDK and production CSP
         run: |
           export TC_PLAYWRIGHT_MODULE="$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright"
@@ -1682,18 +1748,6 @@ jobs:
           cargo test --locked -p trace-commons-contributor --lib \
             near_wallet_page::tests::pinned_wallet_controls_obey_production_csp \
             -- --ignored --test-threads=1
-      # Last, so every step above still has its binaries; see the action for
-      # what is removed and why, and for why only a push to main saves.
-      - uses: ./.github/actions/trim-cargo-cache
-      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   preserve-order-guard:
     name: serde_json preserve_order guard

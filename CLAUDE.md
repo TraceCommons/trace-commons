@@ -246,11 +246,14 @@ repository's caches were over GitHub's 10 GB ceiling and a main-written
 cache was evicted within minutes: a pull request's cache is restorable by
 that pull request alone, so saving one only evicted `main`'s. A job that
 adds a `target` cache must follow the same shape, or it re-creates the
-churn, and the jobs in `clients.yml` keep no cache at all. Push-to-main
+churn, and the jobs in `clients.yml` keep no cache at all. A job may
+instead restore another job's key and save nothing, as `staging channel
+tests` and `wallet SDK and production CSP` restore `cargo test (default
+features)`'s: that adds no cache volume. Push-to-main
 runs are exempt from `cancel-in-progress` for the same reason: a cancelled
 job saves no cache, and merges to `main` land close together.
 
-Running is not the same as blocking. **Eleven** of the nineteen are required
+Running is not the same as blocking. **Eleven** of the twenty-three are required
 status checks on `main`, and only those block a merge -- `README.md` lists
 them. `main` is also behind a merge queue (`main merge queue`), so the
 required checks are re-run against `main` at merge time; a PR that never
@@ -275,7 +278,14 @@ receives them times out of the queue instead of merging.
   crate can silently come to need one of this workspace's optional features.
   That is the configuration a third-party harness gets, and this job is the
   only thing that exercises it. See #486.
-- `cargo test (default features)` (with `RUSTFLAGS=-D warnings`).
+- `cargo test (default features)` (with `RUSTFLAGS=-D warnings`). Two
+  parts of it run as their own jobs since 2026-10-30, neither required:
+  `staging channel tests` (the `near-ai-staging` feature build) and
+  `wallet SDK and production CSP` (Playwright/Chromium and the ignored
+  wallet-page test). Each builds a different feature set or package
+  selection, so inside the workspace job each recompiled crates the
+  workspace run had already built, and the job ran into its 30-minute
+  timeout.
 - `pilot-bootstrap smoke` — `scripts/operator/pilot-bootstrap-smoke.sh`,
   exercising the JSONL loader path.
 - `operator-binaries smoke`.
