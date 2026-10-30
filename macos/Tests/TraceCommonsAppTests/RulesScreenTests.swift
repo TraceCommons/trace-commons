@@ -169,19 +169,27 @@ final class RulesScreenTests: XCTestCase {
         XCTAssertEqual(state.rules["p1"], .autoUpload)
     }
 
-    /// Picking the mode the daemon already has is not a change, so nothing
-    /// is sent for it, as Settings does.
-    func test_repickingTheDaemonsModeIsNotSent() {
+    /// Picking Never or Automatic when the daemon already has it is not a
+    /// change, so nothing is sent for it, as Settings does. Ask is
+    /// different: every folder reads Ask on a first run, and an Ask the
+    /// person picked is kept even if they later choose "Automatic,
+    /// including existing history" on Uses (owner decision 2026-10-29,
+    /// #1747). It is recorded so Start sends it after the grant.
+    func test_repickingTheDaemonsModeIsNotSentExceptAsk() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
         var state = FirstRunState(step: .tools, account: .nearAI, enrolledInvite: "INVITE-1")
 
         XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .ask), .applied)
-        XCTAssertTrue(state.rules.isEmpty)
+        XCTAssertEqual(state.rules["p1"], .ask, "an Ask the person picked is recorded")
 
         XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .ignore), .applied)
         XCTAssertEqual(state.rules["p1"], .ignore)
         XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .ask), .applied)
-        XCTAssertTrue(state.rules.isEmpty)
+        XCTAssertEqual(state.rules["p1"], .ask)
+
+        let never = ProjectRow(projectId: "p2", projectLabel: "other", mode: .ignore)
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: never, wanted: .ignore), .applied)
+        XCTAssertNil(state.rules["p2"], "re-picking the daemon's Never sends nothing")
     }
 
     /// A `still_active` row cannot be ticked, whatever the wire said about

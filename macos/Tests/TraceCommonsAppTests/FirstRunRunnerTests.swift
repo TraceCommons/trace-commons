@@ -867,8 +867,14 @@ final class FirstRunRunnerTests: XCTestCase {
 
         await runner.commit(.start)
 
-        XCTAssertEqual(daemon.log.suffix(3), [.grantAutomatic(witness: "witness-1"), .setAskEachTime, .markComplete],
-            "setup still finishes")
+        // The Ask folder's rule and past sessions, planned after the grant,
+        // still go: harmless once every folder asks.
+        XCTAssertEqual(daemon.log.suffix(5), [
+            .grantAutomatic(witness: "witness-1"), .setAskEachTime,
+            .setProjectMode(projectID: "project-a", .ask),
+            .includePastSessions(projectID: "project-a", ["session-1", "session-2"]),
+            .markComplete,
+        ], "setup still finishes")
         XCTAssertEqual(runner.state.sharing, .askMe, "never reported as automatic")
         XCTAssertEqual(runner.failure, .grantRefused(label: "automatic-grant-witness-changed"))
     }

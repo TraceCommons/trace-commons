@@ -316,10 +316,37 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
             .setConsentScopes(["evaluation", "research"]),
             .setProjectMode(projectID: "p1", .autoUpload),
-            .setProjectMode(projectID: "p2", .ask),
             .includePastSessions(projectID: "p1", ["s1", "s2"]),
             .setPrivateAI(true),
             .grantAutomatic(witness: "witness-1"),
+            .setProjectMode(projectID: "p2", .ask),
+            .markComplete,
+        ])
+    }
+
+    /// Owner decision 2026-10-29 (#1747): an Ask picked in the same first
+    /// run as "Automatic, including existing history" is kept. The daemon
+    /// lets the grant replace an Ask set before it and keeps one set after
+    /// it, so Start sends each Ask rule, and that folder's past sessions,
+    /// after the grant. Never still goes before it, so a Never folder is
+    /// never covered by the grant, even for a moment.
+    func test_anAskPickedWithTheGrantIsSentAfterIt() {
+        var state = signedIn()
+        state.scopes = ["research"]
+        state.rules = ["p1": .ask, "p2": .ignore, "p3": .autoUpload]
+        state.pastSelections = ["p1": ["s1"], "p3": ["s3"]]
+        state.sharing = .automatic
+        state.witnessSigningAddress = "witness-1"
+        state.grantReady = true
+
+        XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [
+            .setConsentScopes(["research"]),
+            .setProjectMode(projectID: "p2", .ignore),
+            .setProjectMode(projectID: "p3", .autoUpload),
+            .includePastSessions(projectID: "p3", ["s3"]),
+            .grantAutomatic(witness: "witness-1"),
+            .setProjectMode(projectID: "p1", .ask),
+            .includePastSessions(projectID: "p1", ["s1"]),
             .markComplete,
         ])
     }
