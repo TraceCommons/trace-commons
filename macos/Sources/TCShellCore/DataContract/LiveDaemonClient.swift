@@ -301,21 +301,22 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("insights_week", params: params, as: DaemonData.InsightsWeek.self)
     }
 
-    public func insightsSessions(before: String?, limit: Int?) async throws -> DaemonData.InsightsSessions {
-        var params: [String: Any] = [:]
-        if let before { params["before"] = before }
-        if let limit { params["limit"] = limit }
-        return try await call("insights_sessions", params: params, as: DaemonData.InsightsSessions.self)
-    }
-
-    public func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer {
-        try await call("insights_session_drill",
-                       params: ["session_ref": sessionRef, "tz": TimeZone.current.secondsFromGMT()],
-                       as: DaemonData.InsightsSessionDrillAnswer.self)
-    }
-
     public func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers {
         try await call("insights_model_answers", as: DaemonData.InsightsModelAnswers.self)
+    }
+
+    public func insightsBenchmarks(weeks: Int, population: String) async throws -> DaemonData.InsightsBenchmarks {
+        // The person's own is the daemon's default, so an older daemon that
+        // knows no `population` is still asked as before.
+        var params: [String: Any] = ["weeks": weeks]
+        if population != "own" { params["population"] = population }
+        return try await call("insights_benchmarks", params: params, as: DaemonData.InsightsBenchmarks.self)
+    }
+
+    public func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted {
+        var params: [String: Any] = ["tz": TimeZone.current.secondsFromGMT()]
+        if let weeks { params["weeks"] = weeks }
+        return try await call("insights_submitted", params: params, as: DaemonData.InsightsSubmitted.self)
     }
 
     public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
@@ -342,33 +343,13 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
     }
 
     public func setSubscriptionUsage(provider: String, on: Bool) async throws {
-        guard provider == "codex" else {
-            throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
+        let key: String
+        switch provider {
+        case "codex": key = "subscription_usage_codex_enabled"
+        case "claude": key = "subscription_usage_claude_on"
+        default: throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
         }
-        _ = try await call("set_settings", params: ["subscription_usage_" + provider + "_enabled": on],
-                           as: DaemonData.NudgeAck.self)
-    }
-
-    public func insightsSessionLabel(sessionRef: String, task: DaemonData.InsightsLabelChange,
-                                     outcome: DaemonData.InsightsLabelChange) async throws
-        -> DaemonData.InsightsSessionLabelAnswer {
-        var params: [String: Any] = ["session_ref": sessionRef]
-        // Absent keeps a label, `null` clears it.
-        for (key, change) in [("task", task), ("outcome", outcome)] {
-            switch change {
-            case .keep: break
-            case .clear: params[key] = NSNull()
-            case .set(let word): params[key] = word
-            }
-        }
-        return try await call("insights_session_label", params: params,
-                              as: DaemonData.InsightsSessionLabelAnswer.self)
-    }
-
-    public func insightsAnalyzeSession(sessionRef: String, save: Bool) async throws
-        -> DaemonData.InsightsAnalyzeSessionAnswer {
-        try await call("insights_analyze_session", params: ["session_ref": sessionRef, "save": save],
-                       as: DaemonData.InsightsAnalyzeSessionAnswer.self)
+        _ = try await call("set_settings", params: [key: on], as: DaemonData.NudgeAck.self)
     }
 
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {

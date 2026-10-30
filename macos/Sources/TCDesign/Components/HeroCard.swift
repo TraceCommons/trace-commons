@@ -17,9 +17,18 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     private let title: String
     private let subtitle: String?
     private let actionTitle: String?
-    private let action: () -> Void
+    /// `nil` draws the card as a plain panel: not a button, no hover.
+    private let action: (() -> Void)?
     private let closeLabel: String?
     private let onClose: (() -> Void)?
+    /// The caller's content runs the card's full width, under the graphic,
+    /// while the title and line still stop short of it (owner, 2026-10-29:
+    /// Home's Traces hero draws its three steps across the whole card).
+    private let contentSpansGraphic: Bool
+    /// The action is the pill alone, a button of its own, and the card is
+    /// a plain panel, so the caller's content can hold buttons of its own
+    /// (owner, 2026-10-29: Home's Traces hero's steps each open a tab).
+    private let actionOnPill: Bool
     private let graphic: Graphic
     private let content: Content
     @State private var hovering = false
@@ -27,8 +36,9 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
 
     public init(
         gradient: GlassGradient, title: String, subtitle: String? = nil,
-        actionTitle: String? = nil, action: @escaping () -> Void,
+        actionTitle: String? = nil, action: (() -> Void)? = nil,
         closeLabel: String? = nil, onClose: (() -> Void)? = nil,
+        contentSpansGraphic: Bool = false, actionOnPill: Bool = false,
         @ViewBuilder graphic: () -> Graphic, @ViewBuilder content: () -> Content
     ) {
         self.gradient = gradient
@@ -38,6 +48,8 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
         self.action = action
         self.closeLabel = closeLabel
         self.onClose = onClose
+        self.contentSpansGraphic = contentSpansGraphic
+        self.actionOnPill = actionOnPill
         self.graphic = graphic()
         self.content = content()
     }
@@ -56,19 +68,41 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
     static var titleType: GlassTypeStyle { GlassTokens.TypeScale.display.weight(.heavy) }
 
     public var body: some View {
+        Group {
+            if actionOnPill {
+                card.accessibilityElement(children: .contain)
+            } else if let action {
+                Button(action: action) { card }
+                    .buttonStyle(GlassPressStyle())
+                    .onHover { inside in
+                        withAnimation(GlassMotion.fast(reduceMotion)) { hovering = inside }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isButton)
+            } else {
+                card.accessibilityElement(children: .combine)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if let onClose {
+                GlassHeroClose(label: closeLabel ?? "", action: onClose)
+            }
+        }
+    }
+
+    private var card: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTier.card.radius, style: .continuous)
-        Button(action: action) {
-            words
-                .padding(.trailing, Self.graphicReserve)
-                .frame(maxWidth: .infinity, minHeight: Self.minHeight, alignment: .leading)
-                .background(alignment: .trailing) {
-                    // Behind the words, sized to the card, past its edges.
-                    graphic
-                        .frame(width: Self.graphicReserve + 60)
-                        .frame(maxHeight: .infinity)
-                        .opacity(Self.graphicOpacity)
-                        .accessibilityHidden(true)
-                }
+        return words
+            .padding(.trailing, contentSpansGraphic ? 0 : Self.graphicReserve)
+            .frame(maxWidth: .infinity, minHeight: Self.minHeight, alignment: .leading)
+            .background(alignment: .trailing) {
+                // Behind the words, sized to the card, past its edges.
+                graphic
+                    .frame(width: Self.graphicReserve + 60)
+                    .frame(maxHeight: .infinity)
+                    .opacity(Self.graphicOpacity)
+                    .accessibilityHidden(true)
+            }
             .background {
                 ZStack {
                     shape.fill(gradient.linear)
@@ -84,18 +118,6 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
             }
             .clipShape(shape)
             .contentShape(shape)
-        }
-        .buttonStyle(GlassPressStyle())
-        .onHover { inside in
-            withAnimation(GlassMotion.fast(reduceMotion)) { hovering = inside }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .overlay(alignment: .topTrailing) {
-            if let onClose {
-                GlassHeroClose(label: closeLabel ?? "", action: onClose)
-            }
-        }
     }
 
     private var words: some View {
@@ -113,18 +135,28 @@ public struct GlassHeroCard<Graphic: View, Content: View>: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .padding(.trailing, contentSpansGraphic ? Self.graphicReserve : 0)
             content
             if let actionTitle {
-                Text(actionTitle)
-                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    .foregroundStyle(GlassTokens.Color.heroButtonInk.color)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .background(Capsule().fill(GlassTokens.Color.heroButtonFill.color))
-                    .padding(.top, GlassTokens.Space.s1)
+                if actionOnPill, let action {
+                    Button(action: action) { pill(actionTitle) }
+                        .buttonStyle(GlassPressStyle())
+                } else {
+                    pill(actionTitle)
+                }
             }
         }
         .padding(GlassTokens.Space.cardPaddingHorizontal)
+    }
+
+    private func pill(_ actionTitle: String) -> some View {
+        Text(actionTitle)
+            .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            .foregroundStyle(GlassTokens.Color.heroButtonInk.color)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(GlassTokens.Color.heroButtonFill.color))
+            .padding(.top, GlassTokens.Space.s1)
     }
 }
 

@@ -10,43 +10,35 @@ struct ManagedFolderChoice: Identifiable, Equatable {
 
 /// A tool's launch dialog (owner, 2026-10-19; #1408's explainer before
 /// it): the Start button's own label as the title, a folder sliding into a
-/// terminal, the line that says why a folder is asked for, the folder row
-/// with its Choose folder button, then Cancel and Open {tool}, which is
-/// enabled once a folder is chosen and opens the tool there in the
-/// terminal. Every word is the core's (`managed/copy.rs`).
+/// terminal, the line that says where the tool opens, the folder row with
+/// its "Pick a folder as context" button, then Cancel and Open {tool}.
+/// The folder is optional (owner, 2026-10-29): Open is enabled from the
+/// start and, with none picked, the daemon opens the tool in the person's
+/// home folder. A picked folder can be cleared back to that default. Every
+/// word is the core's (`managed/copy.rs`).
 struct ManagedFolderExplainerSheet: View {
     let tool: String
     let onCancel: () -> Void
-    /// Open, with the chosen folder's path.
-    let onOpen: (String) -> Void
-    let onOpenWithSettings: ((String, ManagedFolderDraft) -> Void)?
+    /// Open, with the chosen folder's path, or nil for the home folder.
+    let onOpen: (String?) -> Void
+    let onOpenWithSettings: ((String?, ManagedFolderDraft) -> Void)?
     @EnvironmentObject private var model: AppModel
     @State private var path: String?
     @State private var draft = ManagedFolderDraft()
     @State private var catalogue: ManagedModelCatalogue?
     private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
     private var canOpen: Bool {
-        guard let path, !model.managedBusy else { return false }
+        guard !model.managedBusy else { return false }
         return !supportsFolderSettings || (draft.matches(tool: tool, cwd: path)
             && ManagedFolderOptions.modelIsAvailable(draft, tool: tool, connection: "near_ai_signin", catalogue: catalogue))
     }
 
-    init(tool: String, onCancel: @escaping () -> Void, onOpen: @escaping (String) -> Void,
-         onOpenWithSettings: ((String, ManagedFolderDraft) -> Void)? = nil) {
+    init(tool: String, onCancel: @escaping () -> Void, onOpen: @escaping (String?) -> Void,
+         onOpenWithSettings: ((String?, ManagedFolderDraft) -> Void)? = nil) {
         self.tool = tool
         self.onCancel = onCancel
         self.onOpen = onOpen
         self.onOpenWithSettings = onOpenWithSettings
-    }
-
-    /// The line, with the tool's name and the terminal the daemon reports.
-    @MainActor
-    static func line(tool: String, model: AppModel) -> String {
-        ManagedSurface.folderChoiceLine(
-            model.managedText("folder_choice"),
-            tool: ManagedWords.tool(tool, model: model) ?? "",
-            destination: model.managedSnapshot?.capabilities.terminalDestination,
-            fallback: model.managedText("terminal"))
     }
 
     /// The dialog's Open button: "Open Claude Code".
@@ -68,11 +60,8 @@ struct ManagedFolderExplainerSheet: View {
             GlassModalBody {
                 ManagedFolderHandoff(tool: ManagedWords.glassTool(tool))
                     .frame(maxWidth: .infinity)
-                Text(Self.line(tool: tool, model: model))
-                    .glassType(GlassTokens.TypeScale.label)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                // The folder, once chosen, and the button that chooses it.
+                // The folder, once picked (else the home default), the button
+                // that picks it and, once picked, the one that clears it.
                 HStack(spacing: GlassTokens.Space.s4) {
                     GlassToolTile(.folder)
                     if let path {
@@ -82,15 +71,25 @@ struct ManagedFolderExplainerSheet: View {
                             .lineLimit(1)
                             .truncationMode(.head)
                             .help(path)
+                    } else {
+                        Text(model.managedText("home_folder"))
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .lineLimit(1)
                     }
                     Spacer(minLength: GlassTokens.Space.s4)
-                    Button(model.managedText("choose_folder")) {
+                    if path != nil {
+                        Button(model.managedText("clear_folder")) { path = nil }
+                            .buttonStyle(GlassButtonStyle(.glass, small: true))
+                            .fixedSize()
+                    }
+                    Button(model.managedText("pick_folder")) {
                         if let chosen = FolderPanel.choose() { path = chosen }
                     }
                     .buttonStyle(GlassButtonStyle(.glass, small: true))
                     .fixedSize()
                 }
-                if path != nil, supportsFolderSettings {
+                if supportsFolderSettings {
                     ManagedFolderOptions(tool: tool, connection: "near_ai_signin", draft: $draft,
                         catalogue: catalogue, supportsFolderSettings: true,
                         retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
@@ -105,13 +104,13 @@ struct ManagedFolderExplainerSheet: View {
     }
 
     private func open() {
-        guard canOpen, let path else { return }
+        guard canOpen else { return }
         if supportsFolderSettings, let onOpenWithSettings { onOpenWithSettings(path, draft) }
         else { onOpen(path) }
     }
 
     private func loadFolderSettings(reset: Bool = false) {
-        guard supportsFolderSettings, let path else { return }
+        guard supportsFolderSettings else { return }
         let token = draft.begin(tool: tool, cwd: path)
         model.managedFolderSettings(tool: tool, cwd: path, reset: reset) { settings in
             if let settings { draft.complete(settings, token: token) }

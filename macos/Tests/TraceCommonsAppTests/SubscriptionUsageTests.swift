@@ -109,7 +109,7 @@ final class SubscriptionUsageTests: XCTestCase {
     }
 
     @MainActor
-    func testClaudeIsAvailableWithoutOptInAndCodexOffDoesNotHideIt() async {
+    func testClaudeStartsOnAndCodexOffDoesNotHideIt() async {
         let log = UsageRequestLog()
         let model = SubscriptionUsageModel(reader: { refresh, interactive, provider, login in
             await log.append("read:\(refresh):\(interactive):\(provider ?? "all"):\(login ?? "all")")
@@ -120,7 +120,7 @@ final class SubscriptionUsageTests: XCTestCase {
         XCTAssertEqual(model.codexEnabled, false)
         XCTAssertEqual(model.supportedProviders.map(\.provider), ["claude"])
         XCTAssertEqual(model.supportedProviders.first?.logins.map(\.id), ["claude-default", "claude-work"])
-        await model.setEnabled("claude", on: true)
+        XCTAssertEqual(model.claudeEnabled, true)
         let lines = await log.lines()
         XCTAssertEqual(lines, ["read:false:false:all:all"])
         XCTAssertFalse(model.canRefresh(provider: "claude", login: nil))
@@ -129,6 +129,38 @@ final class SubscriptionUsageTests: XCTestCase {
         await model.setEnabled("codex", on: false)
         XCTAssertTrue(model.isVisible)
         XCTAssertEqual(model.supportedProviders.map(\.provider), ["claude"])
+    }
+
+    /// 2026-10-27 owner: Claude has its own Settings switch. Off saves the
+    /// choice and hides Claude at once, without reading anything.
+    @MainActor
+    func testClaudeSwitchOffSavesAndHidesClaudeWithoutARead() async {
+        let log = UsageRequestLog()
+        let model = SubscriptionUsageModel(reader: { refresh, interactive, provider, login in
+            await log.append("read:\(refresh):\(interactive):\(provider ?? "all"):\(login ?? "all")")
+            return Self.claudeSnapshot()
+        }, writer: { provider, on in await log.append("set:\(provider):\(on)") })
+        await model.load()
+        let stopping = Task { await model.setEnabled("claude", on: false) }
+        await stopping.value
+        let lines = await log.lines()
+        XCTAssertEqual(lines.first, "read:false:false:all:all")
+        XCTAssertTrue(lines.contains("set:claude:false"))
+        XCTAssertFalse(lines.contains { $0.hasPrefix("read:true") })
+    }
+
+    @MainActor
+    func testADisabledClaudeIsNotShownEvenWithLogins() async {
+        let model = SubscriptionUsageModel(reader: { _, _, _, _ in
+            .init(providers: [
+                .init(provider: "codex", enabled: false),
+                .init(provider: "claude", enabled: false, logins: [
+                    .init(id: "claude-default", label: "Default", defaultLogin: true, state: "unknown")])])
+        }, writer: { _, _ in })
+        await model.load()
+        XCTAssertEqual(model.claudeEnabled, false)
+        XCTAssertFalse(model.isVisible)
+        XCTAssertTrue(model.supportedProviders.isEmpty)
     }
 
     @MainActor
@@ -390,7 +422,9 @@ final class SubscriptionUsageTests: XCTestCase {
             XCTAssertFalse(words.state?.isEmpty ?? true)
         }
         let expired = try XCTUnwrap(copy["analytics_subscriptions_claude_expired"])
-        XCTAssertTrue(expired.contains("Open Claude Code"))
+        // "Claude", not "Claude Code", in usage strings (owner, 2026-10-28).
+        XCTAssertTrue(expired.contains("Open Claude,"))
+        XCTAssertFalse(expired.contains("Claude Code"))
         XCTAssertTrue(expired.contains("Refresh"))
         XCTAssertFalse(expired.lowercased().contains("sign in"))
     }
@@ -456,25 +490,51 @@ final class SubscriptionUsageTests: XCTestCase {
 
     func testCodexConsentStaysInSettingsAndClaudeDisclosurePrecedesScopedOverviewActions() throws {
         let settings = try SettingsParityTests.text("Views/Settings/SubscriptionUsageSettingsSection.swift")
-        let overview = try SettingsParityTests.text("Views/InsightsSubscriptionsCard.swift")
+        // The usage cards replaced the limits card on Overview (product
+        // owner, 2026-10-28); each measured login is a card there.
+        let overview = try SettingsParityTests.text("Views/InsightsUsageCards.swift")
         let content = try SettingsParityTests.text("Views/Settings/GlassSettingsContent.swift")
-        let disclosure = try XCTUnwrap(settings.range(of: "Text(text(\"analytics_subscriptions_codex_detail\"))"))
+        let disclosure = try XCTUnwrap(settings.range(of: "detail(\"analytics_subscriptions_codex_detail\")"))
         let permission = try XCTUnwrap(settings.range(of: "Toggle(text(\"analytics_subscriptions_setting_codex\")"))
         XCTAssertLessThan(disclosure.lowerBound, permission.lowerBound)
+        let claudeDisclosure = try XCTUnwrap(settings.range(of: "detail(\"analytics_subscriptions_claude_detail\")"))
+        let claudeSwitch = try XCTUnwrap(settings.range(of: "Toggle(text(\"analytics_subscriptions_setting_claude\")"))
+        XCTAssertLessThan(claudeDisclosure.lowerBound, claudeSwitch.lowerBound)
         XCTAssertTrue(content.contains("SubscriptionUsageSettingsSection()"))
-        XCTAssertTrue(overview.contains("ForEach(model.supportedProviders)"))
-        XCTAssertTrue(overview.contains("InsightsOverviewWords.fill(text(\"analytics_subscriptions_no_logins\"), [\"harness\": name])"))
+        XCTAssertTrue(overview.contains("InsightsLimitsRows.rows(subscriptions?.supportedProviders ?? []"))
         XCTAssertFalse(overview.contains("setEnabled"))
-        XCTAssertTrue(overview.contains("Text(text(\"analytics_subscriptions_claude_detail\"))"))
-        XCTAssertTrue(overview.contains("model.refresh(provider: provider, login: login)"))
+        XCTAssertTrue(overview.contains("InsightsInfo(row.account, [text(\"analytics_subscriptions_claude_detail\")])"))
+        XCTAssertFalse(overview.contains("Text(text(\"analytics_subscriptions_claude_detail\"))"))
+        XCTAssertTrue(overview.contains("subscriptions?.refresh(provider: row.provider, login: row.loginId)"))
         XCTAssertTrue(overview.contains("analytics_subscriptions_refresh_login_accessibility"))
         XCTAssertFalse(overview.contains("model.refresh()"))
-        XCTAssertFalse(settings.contains("setting_claude"))
+        XCTAssertTrue(settings.contains("Toggle(text(\"analytics_subscriptions_setting_claude\")"))
+        XCTAssertTrue(settings.contains("model.setEnabled(\"claude\", on: on)"))
         XCTAssertFalse(settings.contains("model.refresh()"))
         XCTAssertFalse(settings.contains(".observe()"))
         XCTAssertTrue(settings.contains("app.subscriptionUsageModel"))
         let monitor = try SettingsParityTests.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(monitor.contains("subscriptions: model.subscriptionUsageModel"))
+    }
+
+    /// 2026-10-27 owner review: the Insights card drops its title and the
+    /// Claude paragraphs, keeps the keychain note behind an info button, and
+    /// asks people to Refresh. Settings keeps the title on its own card.
+    /// The usage cards (product owner, 2026-10-28) keep all of it.
+    func testInsightsCardHasNoTitleOrClaudeParagraphsAndAsksForRefresh() throws {
+        let overview = try SettingsParityTests.text("Views/InsightsUsageCards.swift")
+        let settings = try SettingsParityTests.text("Views/Settings/SubscriptionUsageSettingsSection.swift")
+        XCTAssertFalse(overview.contains("analytics_subscriptions_title"))
+        XCTAssertFalse(overview.contains("analytics_subscriptions_claude_captured"))
+        XCTAssertTrue(overview.contains("Text(text(\"analytics_subscriptions_refresh_hint\"))"))
+        // Kristi's #1687 review: no "Refresh..." line without a Refresh button.
+        let gate = try XCTUnwrap(overview.range(of: "if let subscriptions, !logins.isEmpty, !subscriptions.isRefreshing {"))
+        let hint = try XCTUnwrap(overview.range(of: "Text(text(\"analytics_subscriptions_refresh_hint\"))"))
+        XCTAssertLessThan(gate.lowerBound, hint.lowerBound)
+        XCTAssertTrue(settings.contains("analytics_subscriptions_title"))
+        let copy = try uiCopy()
+        XCTAssertEqual(copy["analytics_subscriptions_refresh_hint"], "Refresh to see your latest limits.")
+        XCTAssertNil(copy["analytics_subscriptions_claude_captured"])
     }
 
     func testAnExpiredWindowBecomesUnknownWithoutAFullAllowanceOrNewReset() throws {
@@ -513,7 +573,7 @@ final class SubscriptionUsageTests: XCTestCase {
         let sharedCopy = try uiCopy()
         XCTAssertFalse(sharedCopy["analytics_subscriptions_title"]?.isEmpty ?? true)
         _ = NSApplication.shared
-        try render(InsightsSubscriptionsCard(model: model, copy: sharedCopy),
+        try render(InsightsUsageCards(subscriptions: model, nearAiCredit: nil, copy: sharedCopy),
                    to: target, name: "insights-subscription-limits.png")
         try render(SubscriptionUsageSettingsCard(model: model, copy: sharedCopy),
                    to: target, name: "settings-subscription-usage.png")

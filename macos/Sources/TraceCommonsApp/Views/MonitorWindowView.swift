@@ -19,8 +19,10 @@ struct MonitorWindowView: View {
     static let openFirstRun = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.continueButton ?? ""
     enum Tab: String, CaseIterable, Identifiable {
         case home = "Home"
-        case inference = "Inference"
+        /// Traces second and Private AI third (owner, 2026-10-28: the
+        /// macOS MVP is "contribute traces, earn credit").
         case traces = "Traces"
+        case inference = "Inference"
         /// Insights' own tab (2026-10-15), no longer a Home page. Last, so
         /// the first three keep their shortcuts.
         case insights = "Insights"
@@ -33,8 +35,8 @@ struct MonitorWindowView: View {
             guard let shell = MonitorWords.table?.shell else { return "" }
             return switch self {
             case .home: shell.tabHome
-            case .inference: shell.tabInference
             case .traces: shell.tabTraces
+            case .inference: shell.tabInference
             case .insights: HomeTabView.insightsHeading ?? ""
             }
         }
@@ -50,6 +52,20 @@ struct MonitorWindowView: View {
     /// required, whatever was restored; the restored tab otherwise.
     static func shownTab(_ tab: Tab, requiresOnboarding: Bool) -> Tab {
         requiresOnboarding ? .inference : tab
+    }
+
+    /// The NEAR AI payout rail's streams for Insights' NEAR AI card, read
+    /// off the main actor. Any refusal (no account session, no rail, a
+    /// daemon that predates streams) reads as none, so the card is drawn
+    /// as before.
+    static func payoutStreams(_ client: DaemonClient?) -> (@Sendable () async -> [PayoutStreamStatus]?)? {
+        client.map { client in
+            { @Sendable in
+                await DaemonWork.run {
+                    (try? client.payoutLink.status()).flatMap { PayoutLinkSurface.nearAiRail(in: $0)?.streams }
+                }
+            }
+        }
     }
 
     enum MapTab: String {
@@ -112,9 +128,9 @@ struct MonitorWindowView: View {
     @State private var inference = InferenceStore(client: nil)
     /// Home and History (R9).
     @State private var home = HomeStore(client: nil)
-    /// The Insights Sessions tab's open trace, which the inspector shows
-    /// while Sessions is on screen (Ron's feedback, Insights PM 2026-10-26).
-    @State private var insightsInspector = InsightsInspector()
+    /// Insights Breakdown's details, which the inspector shows while
+    /// Breakdown is on screen (owner, 2026-10-29).
+    @State private var insightsInspector = InsightsBreakdownInspector()
 
     /// Sample data, debug builds only, when `TRACE_COMMONS_SAMPLE` names a
     /// set; nil otherwise, and then the live client is attached below. A
@@ -188,6 +204,14 @@ struct MonitorWindowView: View {
     /// again (`MonitorNotices`).
     @State private var closedNotices: Set<String> = []
 
+    /// The Private AI state every dot in this window draws: the tab, the
+    /// map's Private AI segment and the Private AI heading all read the
+    /// window's `InferenceStore`, so one state is one colour here (owner,
+    /// 2026-10-29). Nil until the store has read it: no dot, not a guess.
+    private var privateAIState: PrivateInferenceState? {
+        inference.privateAI.map { InferenceAccountSection.surfaceState($0.state) }
+    }
+
     var body: some View {
         GlassThreePane(
             showsMap: showsMap, showsInspector: showsInspector && inspectorAvailable, mapWidth: $mapWidth,
@@ -196,11 +220,8 @@ struct MonitorWindowView: View {
         ) {
             MonitorMainPane(
                 tab: $tab,
-                inferenceDot: Self.inferenceDot(model.daemonSettings?.privateInferenceState?.surfaceState,
-                                                calls: model.privateInferenceCalls),
-                inferenceDescription: Self.inferenceDotDescription(
-                    model.daemonSettings?.privateInferenceState?.surfaceState,
-                    calls: model.privateInferenceCalls),
+                inferenceDot: Self.inferenceDot(privateAIState, calls: model.privateInferenceCalls),
+                inferenceDescription: Self.inferenceDotDescription(privateAIState, calls: model.privateInferenceCalls),
                 tracesBadge: tracesBadge,
                 tracesDescription: Self.tracesDescription(traces.decisionsOwed),
                 showsMap: $showsMap, showsInspector: $showsInspector, inspectorAvailable: inspectorAvailable,
@@ -272,7 +293,12 @@ struct MonitorWindowView: View {
                 case .insights:
                     InsightsView(storeSelection: insightsStoreSelection, daemon: home.client,
                                  subscriptions: model.subscriptionUsageModel,
-                                 inspector: insightsInspector)
+                                 inspector: insightsInspector, home: home,
+                                 payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient),
+                                 openTraces: {
+                                     tab = .traces
+                                     tracesPage = .tree
+                                 })
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
@@ -311,10 +337,8 @@ struct MonitorWindowView: View {
         } map: {
             MonitorMapPane(
                 mapTab: $mapTab, privateAILabel: model.privateInferenceCopy?.destination,
-                privateAIDot: Self.inferenceDot(model.daemonSettings?.privateInferenceState?.surfaceState,
-                                                calls: model.privateInferenceCalls),
-                privateAIDescription: Self.inferenceDotDescription(
-                    model.daemonSettings?.privateInferenceState?.surfaceState, calls: model.privateInferenceCalls),
+                privateAIDot: Self.inferenceDot(privateAIState, calls: model.privateInferenceCalls),
+                privateAIDescription: Self.inferenceDotDescription(privateAIState, calls: model.privateInferenceCalls),
                 traces: traces, history: home.history, historyFailure: home.failures["list_history"], inference: inference,
                 focusTool: mapFocus ? selectedTool?.rawValue : nil,
                 selectedTool: selectedTool?.rawValue,
@@ -369,6 +393,9 @@ struct MonitorWindowView: View {
         .onChange(of: model.missionsShown, initial: true) { _, shown in
             homePage = homePage.shown(missions: shown)
         }
+        // The sheet for sent traces without Train coding models, when the
+        // Insights line's Review or the first run raised it.
+        .modifier(SentTracesTrainingPresenter(site: .monitor))
         // Modals and confirmations raised anywhere in the window cover all
         // of it, Settings' sections' own included: the Settings modal sits
         // inside this host.
@@ -403,6 +430,13 @@ struct MonitorWindowView: View {
         // view, picking Traces its Traces view; Home keeps the choice.
         .onChange(of: tab) { _, picked in
             if let view = Self.mapTab(for: picked) { mapTab = view }
+        }
+        // The app's own settings read saw Private AI move (a NEAR AI sign-in
+        // or sign-out landed, a status change, a switch write): this
+        // window's store reads it again now, not on its next event, so the
+        // tab, the map and the heading follow the menu bar together.
+        .onChange(of: model.daemonSettings?.privateInferenceState) { _, _ in
+            Task { await inference.reloadPrivateAI() }
         }
         // The app's live client, re-attached whenever the daemon restarts
         // or start-up ends; with none, each store draws the core as down,
@@ -474,7 +508,7 @@ struct MonitorWindowView: View {
         if !model.onboardingKnown || !inspectorAvailable {
             Color.clear
         } else if shownTab == .insights, let detail = insightsInspector.detail {
-            // Insights' Sessions: the open trace's details, beside the list.
+            // Insights' Breakdown: the picked day's sessions.
             detail()
         } else {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -517,10 +551,10 @@ struct MonitorWindowView: View {
 
     /// Whether the inspector may open on what is shown: on Traces, on
     /// Home's History, whose opened row is the inspector's, and on Insights
-    /// while its Sessions tab hands it the open trace (`insightsDetail`,
-    /// Insights PM 2026-10-26). Never on Home's other pages (owner,
-    /// 2026-10-08), Insights' other tabs or Inference (2026-10-09): they
-    /// have nothing for it to show, and their prompts head their page.
+    /// while its Breakdown tab hands it its details (`insightsDetail`,
+    /// owner 2026-10-29). Never on Home's other pages (owner, 2026-10-08),
+    /// Insights' other tabs or Inference (2026-10-09): they have nothing for
+    /// it to show, and their prompts head their page.
     static func inspectorAvailable(_ shown: Tab, homePage: HomeTabView.Page, insightsDetail: Bool = false) -> Bool {
         switch shown {
         case .traces: true
@@ -551,9 +585,9 @@ struct MonitorWindowView: View {
             // may open: on Home's page they head the main pane.
             .union(Self.promptsInInspector(shownTab, tracesPage: tracesPage) && inspectorAvailable
                 ? InspectorDemand.offerKeys(model: model) : [])
-            // A trace the person opened on Insights' Sessions: its details
-            // live in the inspector, as a selected Traces session's card
-            // does. On every tab, so showing a tab again is no new key.
+            // A day the person picked on Insights' Breakdown: its
+            // sessions live in the inspector, as a selected Traces session's
+            // card does. On every tab, so showing a tab again is no new key.
             .union(insightsInspector.demandKey.map { [$0] } ?? [])
     }
 
@@ -700,13 +734,15 @@ struct MonitorWindowView: View {
 
     /// Inference's dot: what the listener is doing, from the daemon's own
     /// report, never the switch. The switch says what was asked for; a
-    /// switch that is on over a listener that refused to start, or is held,
-    /// is drawn as not working, never as on. Only the core's "clear" tone
-    /// is on; every other is #1146's outside (red). No report, or an
+    /// switch that is on over a listener that refused to start is drawn as
+    /// not working, never as on. The heading's Status row's dot, from the
+    /// same table (`PrivateInferenceIndicator.dot`): green only while
+    /// clear, amber for an On with something to look at (signed out of
+    /// NEAR AI), red for not working, grey otherwise. No report, or an
     /// unreported state, is no dot: unknown is neither on nor off.
     nonisolated static func inferenceDot(_ state: PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus? {
         guard let state, !state.label.isEmpty else { return nil }
-        return PrivateInferenceIndicator.dotStatus(PrivateInferenceSurface.tone(state, calls: calls))
+        return PrivateInferenceIndicator.dot(state, calls: calls)
     }
 
     /// The dot's text equivalent: the core's sentence for the same state.
@@ -1020,7 +1056,7 @@ private struct MonitorMapPane: View {
                 gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
                 contributed: .init(history: history, failure: historyFailure), selectedTool: selectedTool,
                 revealed: revealedFolders, space: space)
-                .addingDevices(devicesOnMap)
+                .addingDevices(devicesOnMap, offersLink: devices.devices != nil && devices.surface != nil)
             FlowMapView(
                 scene: scene,
                 legend: [.autoUpload, .ask, .ignore], zoomable: true,
@@ -1028,7 +1064,14 @@ private struct MonitorMapPane: View {
                 focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder,
                 onReveal: { revealedFolders = FlowMapScene.revealing($0, in: revealedFolders) },
                 transferRun: transfers.run, transferCards: showsTransferCards ? transfers.cards : [],
-                onCloseTransfer: { transfers.close($0) }, mapStyle: mapStyle)
+                onCloseTransfer: { transfers.close($0) }, mapStyle: mapStyle,
+                onAddDevice: {
+                    // Settings' Devices section, which starts linking a
+                    // server on the request (owner, 2026-10-27).
+                    AccountDeviceLinkRequest.shared.ask()
+                    OpenMonitor.request(.settings(.connection))
+                },
+                addDeviceLabel: devices.surface?.copy.linkAccessibilityName ?? "")
         case .privateAI:
             if let privateAILabel {
                 PrivateAIFlowMap(
@@ -1045,7 +1088,8 @@ private struct MonitorMapPane: View {
         guard let surface = devices.surface else { return [] }
         return FlowMapScene.otherDevices(
             devices.devices, name: { surface.name(for: $0) },
-            lastSeen: { surface.lastSeenLine(for: $0, formatted: AccountDevicesView.relative) })
+            lastSeen: { surface.lastSeenLine(for: $0, formatted: AccountDevicesView.relative) },
+            traces: { count in FlowMapScene.words?.tracesCounted(count) ?? String(count) })
     }
 
     /// The Traces map's state (the stack-wide ScreenState rule): core down

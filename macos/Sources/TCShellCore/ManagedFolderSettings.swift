@@ -44,7 +44,8 @@ public struct ManagedFolderDraft: Equatable, Sendable {
     public init() {}
 
     @discardableResult
-    public mutating func begin(tool: String, cwd: String) -> UUID {
+    /// `cwd` nil is the home folder the daemon resolves (owner, 2026-10-29).
+    public mutating func begin(tool: String, cwd: String?) -> UUID {
         let next = UUID()
         self = Self()
         self.tool = tool
@@ -70,11 +71,11 @@ public struct ManagedFolderDraft: Equatable, Sendable {
         if self.token == token { phase = .failed }
     }
 
-    public func matches(tool: String, cwd: String) -> Bool {
+    public func matches(tool: String, cwd: String?) -> Bool {
         self.tool == tool && self.cwd == cwd && phase == .ready
     }
 
-    public mutating func useDefaults(tool: String, cwd: String, cliOptions: String) {
+    public mutating func useDefaults(tool: String, cwd: String?, cliOptions: String) {
         self = Self()
         self.tool = tool
         self.cwd = cwd

@@ -166,6 +166,9 @@ struct SettingsWindowView: View {
             navigation: navigation, paused: model.status.paused,
             onClose: { dismiss() })
             .frame(minWidth: GlassTokens.Size.modalNavWidth * 3, minHeight: 420)
+            // The sheet for sent traces without Train coding models, when
+            // turning it on here raised it.
+            .modifier(SentTracesTrainingPresenter(site: .settings))
             // Confirmations raised by a section cover this window, with
             // #1146's close button in the core's words.
             .glassModalHost()
@@ -256,8 +259,8 @@ struct MonitorCommands: Commands {
     static func shortcut(_ tab: MonitorWindowView.Tab) -> Character {
         switch tab {
         case .home: "1"
-        case .inference: "2"
-        case .traces: "3"
+        case .traces: "2"
+        case .inference: "3"
         case .insights: "4"
         }
     }
@@ -284,6 +287,11 @@ struct MonitorCommands: Commands {
         // Cmd-comma: the Settings window (owner, 2026-10-08).
         CommandGroup(replacing: .appSettings) {
             OpenSettingsButton(navigation: navigation)
+        }
+        // Install, update or remove the command-line tool (owner,
+        // 2026-10-29), like VS Code's "Install 'code' command in PATH".
+        CommandGroup(after: .appSettings) {
+            CliToolMenuItem()
         }
     }
 

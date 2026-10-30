@@ -36,24 +36,20 @@ final class InsightsPaneWidthRenderTests: XCTestCase {
 
         let overview = InsightsOverviewModel(service: service)
         let patterns = InsightsPatternsModel(service: service)
-        let sessions = InsightsSessionsModel(service: service)
         let comparisons = InsightsComparisonsModel(service: service)
         let week = try InsightsSampleWeek.weekOverview
         let pattern = try InsightsSampleWeek.weekPatterns
-        overview.open(); patterns.open(); sessions.open()
+        overview.open(); patterns.open()
         overview.showCounter(week)
         patterns.showCounter(pattern)
-        sessions.sync(snapshotIDs: ["snap-1"])
         comparisons.load(counterWeeks: [], weekStart: week.week_start, recapCardEnabled: true)
-        try await settle { !overview.busy && !patterns.busy && !sessions.busy && !comparisons.busy }
+        try await settle { !overview.busy && !patterns.busy && !comparisons.busy }
         XCTAssertNotNil(comparisons.comparisons?.recap)
-        XCTAssertNotNil(sessions.drill)
 
         let tabs: [(String, CGFloat, AnyView)] = [
             ("overview", 1860, AnyView(InsightsOverviewTab(
-                model: overview, comparisons: comparisons, copy: copy, snapshots: [], patterns: pattern))),
+                model: overview, comparisons: comparisons, copy: copy, snapshots: []))),
             ("patterns", 1900, AnyView(InsightsPatternsTab(model: patterns, comparisons: comparisons, copy: copy))),
-            ("sessions", 1000, AnyView(InsightsSessionsTab(model: sessions, snapshots: [], copy: copy))),
         ]
         for (name, height, view) in tabs {
             for dark in [true, false] {

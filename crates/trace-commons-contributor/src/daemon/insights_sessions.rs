@@ -1,7 +1,8 @@
 //! `insights_sessions` and `insights_session_drill`: the Sessions tab over
 //! the counter pass (feed T).
 //!
-//! Gated exactly as `insights_week` is (owner decision D4, open): off, both
+//! Gated exactly as `insights_week` is (on by default; product owner,
+//! 2026-10-29): off, both
 //! answer `enabled: false` without opening the store or the key; on, a store,
 //! key or folder-rule read that fails answers `readable: false` with its
 //! fixed reason, never an empty list. Sessions in a folder that is Never are
@@ -610,6 +611,7 @@ mod tests {
                     modified_at: written(),
                     started_at: None,
                     group_member_count: 0,
+                    role: crate::daemon::insights_week::CandidateRole::Watched,
                 })
                 .collect();
             self.pass
@@ -1672,6 +1674,7 @@ mod tests {
             );
             let (_dir, mut s) = shared();
             s.dev_dry_run = true;
+            s.settings.lock().unwrap().insights_counter_pass = false;
             let r = super::super::ipc::handle_request(
                 &s,
                 &call(method, serde_json::json!({"session_ref": "t0"})),
@@ -1806,6 +1809,7 @@ mod tests {
                 modified_at: written(),
                 started_at: None,
                 group_member_count: 0,
+                role: crate::daemon::insights_week::CandidateRole::Watched,
             })
             .collect();
         s.insights_counter
@@ -1866,6 +1870,7 @@ mod tests {
                     modified_at: written(),
                     started_at: None,
                     group_member_count: 0,
+                    role: crate::daemon::insights_week::CandidateRole::Watched,
                 })
                 .collect();
             self.pass
@@ -2497,6 +2502,7 @@ mod tests {
         assert!(super::super::ipc::DEV_DRY_RUN_LOCAL_METHODS.contains(&method));
         let (_dir, mut s) = shared();
         s.dev_dry_run = true;
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let params = serde_json::json!({"session_ref": "t0", "task": "docs"});
         let r = super::super::ipc::handle_request(&s, &call(method, params.clone()));
         assert_eq!(

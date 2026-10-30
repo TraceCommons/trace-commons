@@ -40,7 +40,7 @@ pub fn handle_model_answers(shared: &DaemonShared, req: &Request) -> Response {
         .unwrap_or(false);
     // Asked after the settings lock is let go. Only whether a ledger is
     // declared: the answer never reads the ledger itself.
-    let ledger_present = ledger_feed && shared.routing_ledger().is_some();
+    let ledger_present = ledger_feed && super::insights_week::any_ledger(shared);
     Response::ok(
         req.id,
         shared.insights_counter.model_answers_value(
@@ -104,6 +104,7 @@ mod tests {
                 modified_at: written(),
                 started_at: None,
                 group_member_count: 0,
+                role: crate::daemon::insights_week::CandidateRole::Watched,
             };
             self.pass
                 .run_pass(&[candidate], &NeverFolders::NONE, now(), QUIET, &mut |_| {
@@ -127,6 +128,7 @@ mod tests {
                         modified_at: written(),
                         started_at: None,
                         group_member_count: 0,
+                        role: crate::daemon::insights_week::CandidateRole::Watched,
                     }
                 })
                 .collect();
@@ -317,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn off_by_default_without_opening_the_store_or_making_a_key() {
+    fn switched_off_without_opening_the_store_or_making_a_key() {
         let f = Fixture::new();
         let off = f
             .pass
@@ -329,6 +331,7 @@ mod tests {
         assert!(f.pass.key_is_absent_for_test(), "no key made");
         assert!(!f.dir.path().join(COUNTER_ROWS_FILE).exists());
         let (_dir, s) = shared();
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let r = handle_model_answers(&s, &call("insights_model_answers"));
         assert_eq!(
             r.result.unwrap(),
@@ -376,6 +379,7 @@ mod tests {
         assert!(super::super::ipc::DEV_DRY_RUN_LOCAL_METHODS.contains(&method));
         let (_dir, mut s) = shared();
         s.dev_dry_run = true;
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let r = super::super::ipc::handle_request(&s, &call(method));
         assert_eq!(r.result.unwrap()["enabled"], false);
     }
@@ -809,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn insights_week_still_carries_no_price() {
+    fn insights_week_carries_list_prices_only_in_work() {
         let f = Fixture::new();
         f.run();
         let week = f.pass.week_value(
@@ -820,8 +824,14 @@ mod tests {
             &NeverFolders::NONE,
             super::super::insights_week::WeekOptions::default(),
         );
+        // List-price figures cross in `work` only (product owner,
+        // 2026-10-29); NEAR AI money in `near_ai_credit`, null here.
+        assert_eq!(week["work"]["basis"], "api_list");
+        assert_eq!(week["near_ai_credit"], serde_json::Value::Null);
+        let mut rest = week.clone();
+        rest.as_object_mut().unwrap().remove("work");
         let mut all = Vec::new();
-        words(&week, &mut all);
+        words(&rest, &mut all);
         for word in all {
             for banned in ["usd", "price", "cost"] {
                 assert!(!word.contains(banned), "{banned} in {word}");

@@ -10,10 +10,14 @@ mod multitenant_settlement_tests;
 mod account_binding_gate_tests;
 #[path = "tests/activity_missions_tests.rs"]
 mod activity_missions_tests;
+#[path = "tests/large_envelope_tests.rs"]
+mod large_envelope_tests;
 #[path = "tests/legacy_invite_link_tests.rs"]
 mod legacy_invite_link_tests;
 #[path = "tests/mission_catalog_tests.rs"]
 mod mission_catalog_tests;
+#[path = "tests/model_training_consent_tests.rs"]
+mod model_training_consent_tests;
 #[path = "tests/native_passkey_tests.rs"]
 mod native_passkey_tests;
 #[path = "tests/native_session_sliding_expiry_tests.rs"]
@@ -28,6 +32,10 @@ mod payout_rails_tests;
 mod public_run_lifecycle_tests;
 #[path = "tests/public_run_tests.rs"]
 mod public_run_tests;
+#[path = "tests/referral_admin_tests.rs"]
+mod referral_admin_tests;
+#[path = "tests/referral_tests.rs"]
+mod referral_tests;
 #[path = "tests/reward_participant_tests.rs"]
 mod reward_participant_tests;
 #[path = "tests/step_up_page_tests.rs"]
@@ -6840,6 +6848,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         payout_rails: Arc::new(trace_commons_server::payout_worker::PayoutRails::disabled()),
         payout_store: None,
         payout_control_token_hash: None,
+        referral_store: None,
+        referral_config: Default::default(),
+        referral_network_mark_key: None,
         first_run_estimate: Default::default(),
         root,
         near_provisioning_enabled: false,
@@ -6914,6 +6925,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         submit_principal_limits: SubmitPrincipalLimits::default(),
+        large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -30993,6 +31005,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         payout_rails: Arc::new(trace_commons_server::payout_worker::PayoutRails::disabled()),
         payout_store: None,
         payout_control_token_hash: None,
+        referral_store: None,
+        referral_config: Default::default(),
+        referral_network_mark_key: None,
         first_run_estimate: Default::default(),
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
@@ -31067,6 +31082,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         submit_principal_limits: SubmitPrincipalLimits::default(),
+        large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -32665,13 +32681,13 @@ async fn concurrent_submissions_keep_one_audit_chain_in_file_and_db() {
                 submit_trace_handler(State(state), auth_headers("token-a"), submit_body(envelope))
                     .await
                     .map(|_| ())
-                    .map_err(|(status, _)| status)
+                    .map_err(|(status, body)| format!("{status}: {:?}", body.0))
             }));
         }
         for task in tasks {
             task.await
                 .expect("submission task joins")
-                .unwrap_or_else(|status| panic!("{context}: submission failed with {status}"));
+                .unwrap_or_else(|error| panic!("{context}: submission failed with {error}"));
         }
 
         let file_events = read_all_audit_events(temp.path(), "tenant-a").expect("file audit log");
@@ -73677,6 +73693,8 @@ impl_ingest_test_corpus_store! {
                         chunk_count: row.chunk_count,
                         total_chunk_count: row.total_chunk_count,
                         chunks_capped: row.chunks_capped,
+                        perplexity_passed: Some(row.perplexity_passed),
+                        novelty_passed: Some(row.novelty_passed),
                     }
                 })
                 .collect())
@@ -81543,10 +81561,17 @@ async fn large_upload_routes_retain_the_upload_body_ceiling() {
 }
 
 /// The documented maximum is admitted and one byte more is refused, per
-/// route.
+/// route, with real bodies, so this is the route's `DefaultBodyLimit` and not
+/// only the gate's declared-length check
+/// (`upload_routes_admit_their_ceiling_by_declared_length` covers every route
+/// that way). Attachment-sized routes only: an envelope route's ceiling is
+/// hundreds of MB, too much to allocate twice in a default test run.
 #[tokio::test]
 async fn large_upload_routes_admit_exactly_their_ceiling() {
-    for (method, path, ceiling) in large_upload_route_ceilings() {
+    for (method, path, ceiling) in large_upload_route_ceilings()
+        .into_iter()
+        .filter(|(_, _, ceiling)| *ceiling <= 64 * 1024 * 1024)
+    {
         let at_ceiling = authenticated_upload_status(method, path, ceiling).await;
         assert!(
             ![
@@ -95276,6 +95301,8 @@ mod gate_credit_display {
             chunk_count: Some(4),
             total_chunk_count: Some(12),
             chunks_capped: Some(true),
+            perplexity_passed: Some(true),
+            novelty_passed: Some(true),
         }
     }
 
@@ -95290,6 +95317,8 @@ mod gate_credit_display {
             chunk_count: None,
             total_chunk_count: None,
             chunks_capped: None,
+            perplexity_passed: Some(true),
+            novelty_passed: Some(true),
         }
     }
 
@@ -95545,6 +95574,397 @@ mod gate_credit_display {
             "an unscored record has no entry, which the presentation reads as scoring in progress"
         );
         assert!(!decisions.contains_key(&other_tenant.submission_id));
+    }
+
+    /// Staging, 2026-10-28: every submission's `credit_points_final` was
+    /// NULL, so the contributor app showed every decided trace as pending
+    /// forever. The final figure is now the trace's outcome: the award when
+    /// the ledger holds one, else 0 with a reason once the gate has decided
+    /// without one, else still pending.
+    mod credit_outcome {
+        use super::*;
+        use trace_commons_protocol::credit_outcome as reason;
+
+        fn decision_with(
+            record: &TraceCommonsSubmissionRecord,
+            withheld: Option<&str>,
+            perplexity_passed: bool,
+            novelty_passed: bool,
+        ) -> TraceGateCreditDecisionRow {
+            TraceGateCreditDecisionRow {
+                credit_withheld_reason: withheld.map(str::to_string),
+                perplexity_passed: Some(perplexity_passed),
+                novelty_passed: Some(novelty_passed),
+                ..scored_decision(record)
+            }
+        }
+
+        fn status(
+            record: &TraceCommonsSubmissionRecord,
+            events: &[TraceCommonsCreditLedgerRecord],
+            decision: Option<&TraceGateCreditDecisionRow>,
+        ) -> TraceSubmissionStatusUpdate {
+            submission_status_from_record(record, events, NearSettlementMode::Disabled, decision)
+        }
+
+        /// The concrete staging account: an award of 5 points on the
+        /// ledger, `credit_points_final` NULL on the row. The trace reads
+        /// final 5, no reason, and the award is not counted a second time
+        /// in the ledger figure.
+        #[test]
+        fn an_award_on_the_ledger_is_the_final_credit() {
+            let record = accepted_record_with_estimate(0.0);
+            let decision = decision_with(&record, None, true, true);
+            let events = [legacy_scoring_award_event(
+                record.submission_id,
+                "gate-hash",
+                5.0,
+            )];
+
+            let update = status(&record, &events, Some(&decision));
+
+            assert_eq!(update.credit_points_final, Some(5.0));
+            assert_eq!(update.credit_outcome_reason, None);
+            assert_eq!(update.credit_points_ledger, 0.0, "{update:?}");
+            assert_eq!(update.credit_points_total, Some(5.0));
+        }
+
+        /// A decided trace reports nothing pending beside its final figure.
+        /// Daemons before #1703 sum the two, so a gate estimate left beside
+        /// the award would count the trace twice on their Home.
+        #[test]
+        fn a_final_figure_leaves_nothing_pending() {
+            let record = accepted_record_with_estimate(3.0);
+            let decision = decision_with(&record, None, true, true);
+            let events = [legacy_scoring_award_event(
+                record.submission_id,
+                "gate-hash",
+                5.0,
+            )];
+            let awarded = status(&record, &events, Some(&decision));
+            assert_eq!(awarded.credit_points_final, Some(5.0));
+            assert_eq!(awarded.credit_points_pending, 0.0, "{awarded:?}");
+
+            let withheld = decision_with(&record, Some("policy_mismatch"), true, true);
+            let zero = status(&record, &[], Some(&withheld));
+            assert_eq!(zero.credit_points_final, Some(0.0));
+            assert_eq!(zero.credit_points_pending, 0.0, "{zero:?}");
+
+            let waiting = status(&record, &[], Some(&decision));
+            assert_eq!(waiting.credit_points_final, None);
+            assert!(waiting.credit_points_pending > 0.0, "{waiting:?}");
+        }
+
+        /// A withdrawn or revoked trace shows no gate award, as the account
+        /// summary leaves it out and settlement never pays it (owner,
+        /// 2026-10-28): the trace, the summary and the payout agree.
+        #[test]
+        fn a_terminal_trace_shows_no_gate_award() {
+            for terminal in [TraceCorpusStatus::Revoked, TraceCorpusStatus::Expired] {
+                let mut record = accepted_record_with_estimate(3.0);
+                record.status = terminal;
+                assert!(record.is_terminal(), "{terminal:?}");
+                let decision = decision_with(&record, None, true, true);
+                let events = [legacy_scoring_award_event(
+                    record.submission_id,
+                    "gate-hash",
+                    5.0,
+                )];
+                let shown = status(&record, &events, Some(&decision));
+                assert_eq!(shown.credit_points_final, None, "{terminal:?}");
+                assert_eq!(shown.credit_points_ledger, 0.0, "{terminal:?}");
+                assert_eq!(shown.credit_outcome_reason, None, "{terminal:?}");
+            }
+        }
+
+        /// Every withheld label the gate path stamps, and the floors it
+        /// records with none, folds onto the contributor's closed set.
+        #[test]
+        fn a_decision_without_an_award_is_zero_with_its_reason() {
+            let cases: [(Option<&str>, bool, bool, &str); 12] = [
+                (Some("policy_mismatch"), true, true, reason::POLICY_MISMATCH),
+                (Some("skipped_duplicate"), true, true, reason::DUPLICATE),
+                (Some("cached"), true, true, reason::DUPLICATE),
+                (
+                    Some("submission_not_accepted"),
+                    true,
+                    true,
+                    reason::SUBMISSION_NOT_ACCEPTED,
+                ),
+                (
+                    Some("insufficient_coverage"),
+                    false,
+                    true,
+                    reason::INSUFFICIENT_COVERAGE,
+                ),
+                (
+                    Some("central_issuer_denied"),
+                    true,
+                    true,
+                    reason::CREDIT_NOT_ISSUED,
+                ),
+                (
+                    Some("non_production_gate"),
+                    true,
+                    true,
+                    reason::CREDIT_NOT_ISSUED,
+                ),
+                (
+                    Some("credit_check_error"),
+                    true,
+                    true,
+                    reason::CREDIT_NOT_ISSUED,
+                ),
+                (Some("a_label_from_later"), true, true, reason::OTHER),
+                (None, true, false, reason::NOVELTY_FAILED),
+                (None, false, true, reason::PERPLEXITY_FAILED),
+                (None, false, false, reason::NOVELTY_FAILED),
+            ];
+            for (withheld, perplexity_passed, novelty_passed, expected) in cases {
+                let record = accepted_record_with_estimate(0.0);
+                let decision = decision_with(&record, withheld, perplexity_passed, novelty_passed);
+
+                let update = status(&record, &[], Some(&decision));
+
+                assert_eq!(
+                    (
+                        update.credit_points_final,
+                        update.credit_outcome_reason.as_deref()
+                    ),
+                    (Some(0.0), Some(expected)),
+                    "withheld {withheld:?}, floors ({perplexity_passed}, {novelty_passed})"
+                );
+            }
+        }
+
+        /// A passing decision with no withheld label and no award yet is
+        /// the award still being written: pending, not a verdict.
+        #[test]
+        fn a_passing_decision_awaiting_its_award_is_still_pending() {
+            let record = accepted_record_with_estimate(0.0);
+            let decision = decision_with(&record, None, true, true);
+
+            let update = status(&record, &[], Some(&decision));
+
+            assert_eq!(update.credit_points_final, None);
+            assert_eq!(update.credit_outcome_reason, None);
+        }
+
+        /// No decision at all: pending, as before.
+        #[test]
+        fn without_a_decision_the_outcome_is_pending() {
+            let record = accepted_record_with_estimate(0.0);
+
+            let update = status(&record, &[], None);
+
+            assert_eq!(update.credit_points_final, None);
+            assert_eq!(update.credit_outcome_reason, None);
+        }
+
+        /// The retro-consent case: a trace withheld as `policy_mismatch`
+        /// that later receives its award reads the award and loses the
+        /// reason, with nothing written back to the submission row.
+        #[test]
+        fn a_later_award_replaces_a_withheld_outcome() {
+            let record = accepted_record_with_estimate(0.0);
+            let decision = decision_with(&record, Some("policy_mismatch"), true, true);
+            let events = [legacy_scoring_award_event(
+                record.submission_id,
+                "gate-hash",
+                5.0,
+            )];
+
+            let update = status(&record, &events, Some(&decision));
+
+            assert_eq!(update.credit_points_final, Some(5.0));
+            assert_eq!(update.credit_outcome_reason, None);
+        }
+
+        /// A negative `NoveltyUtility` delta (a reversal of the award)
+        /// moves the final figure with it, and never below zero.
+        #[test]
+        fn a_reversed_award_moves_the_final_figure() {
+            let record = accepted_record_with_estimate(0.0);
+            let decision = decision_with(&record, None, true, true);
+            let award = legacy_scoring_award_event(record.submission_id, "gate-hash", 5.0);
+            let mut reversal = award.clone();
+            reversal.event_id = Uuid::new_v4();
+            reversal.credit_points_delta = -5.0;
+
+            let update = status(&record, &[award, reversal], Some(&decision));
+
+            assert_eq!(update.credit_points_final, Some(0.0));
+            assert_eq!(update.credit_outcome_reason, None);
+        }
+
+        /// Another submission's award is not this trace's.
+        #[test]
+        fn another_submissions_award_does_not_count() {
+            let record = accepted_record_with_estimate(0.0);
+            let events = [legacy_scoring_award_event(Uuid::new_v4(), "gate-hash", 5.0)];
+
+            let update = status(&record, &events, None);
+
+            assert_eq!(update.credit_points_final, None);
+        }
+
+        /// A figure the review path stored on the row wins over the
+        /// derivation, so reviewer-owned semantics do not change.
+        #[test]
+        fn a_stored_final_figure_is_kept() {
+            let mut record = accepted_record_with_estimate(0.0);
+            record.credit_points_final = Some(2.0);
+            let decision = decision_with(&record, Some("policy_mismatch"), true, true);
+            let events = [legacy_scoring_award_event(
+                record.submission_id,
+                "gate-hash",
+                5.0,
+            )];
+
+            let update = status(&record, &events, Some(&decision));
+
+            assert_eq!(update.credit_points_final, Some(2.0));
+            assert_eq!(update.credit_outcome_reason, None);
+            assert_eq!(update.credit_points_ledger, 5.0);
+            assert_eq!(update.credit_points_total, Some(7.0));
+        }
+
+        /// Through the status route against PostgreSQL, the path the
+        /// contributor daemon polls: a decision withheld as
+        /// `policy_mismatch` reads final 0 with the reason; a
+        /// `NoveltyUtility` award written to the ledger afterwards (what the
+        /// retro-consent re-award does) reads as the final figure with the
+        /// reason cleared; a reversal of that award brings it back to 0.
+        /// Nothing is written to the submission row at any step.
+        #[tokio::test]
+        async fn the_status_route_reports_the_outcome_from_the_database() {
+            let Some(backend) = required_postgres_backend_for_ingest_test().await else {
+                return;
+            };
+            cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+            let temp = tempfile::tempdir().expect("temp dir");
+            let db_mirror: Arc<dyn Database> = backend.clone();
+            let state = test_state_with_options(
+                temp.path().to_path_buf(),
+                Some(db_mirror),
+                None,
+                true,
+                false,
+                false,
+                false,
+            );
+            let principal = static_token_principal_ref("token-a");
+            let submission_id =
+                insert_account_test_submission(backend.as_ref(), "tenant-a", &principal).await;
+            backend
+                .insert_trace_gate_decision(
+                    "tenant-a",
+                    StorageTraceGateDecisionRow {
+                        decision_id: Uuid::new_v4(),
+                        submission_id,
+                        gate_policy_version: "test-policy".to_string(),
+                        gate_version_hash: "sha256:gate".to_string(),
+                        perplexity_micros: 7_000_000,
+                        tail_fraction_micros: 0,
+                        perplexity_passed: true,
+                        novelty_score_micros: 900_000,
+                        nearest_neighbor_hash: "sha256:neighbor".to_string(),
+                        novelty_passed: true,
+                        embedding_evidence_hash: "sha256:evidence".to_string(),
+                        attestation_chain_hash: "sha256:attestation".to_string(),
+                        decided_at: Utc::now(),
+                        vector_entry_id: None,
+                        credit_withheld_reason: Some("policy_mismatch".to_string()),
+                        peak_perplexity_micros: None,
+                        peak_novelty_micros: None,
+                        chunk_count: None,
+                        total_chunk_count: None,
+                        qualifying_token_fraction_micros: None,
+                        agent_prose_perplexity_micros: None,
+                        agent_prose_tokens: None,
+                        tool_result_perplexity_micros: None,
+                        tool_result_tokens: None,
+                        attributed_token_fraction_micros: None,
+                        chunks_capped: None,
+                        composite_score_micros: None,
+                        vector_index_snapshot_id: None,
+                        index_cardinality_at_scoring: None,
+                    },
+                )
+                .await
+                .expect("gate decision writes");
+
+            let read = || async {
+                let Json(statuses) = submission_status_handler(
+                    State(state.clone()),
+                    auth_headers("token-a"),
+                    Json(TraceSubmissionStatusRequest {
+                        submission_ids: vec![submission_id],
+                    }),
+                )
+                .await
+                .expect("the contributor reads its own status");
+                assert_eq!(statuses.len(), 1, "{statuses:?}");
+                statuses.into_iter().next().unwrap()
+            };
+            let award = |points: f32| StorageTraceCreditEventWrite {
+                credit_event_id: Uuid::new_v4(),
+                tenant_id: "tenant-a".to_string(),
+                submission_id,
+                trace_id: Uuid::new_v4(),
+                credit_account_ref: principal.clone(),
+                event_type: StorageTraceCreditEventType::NoveltyUtility,
+                points_delta: format!("{points}"),
+                reason: "novelty_utility:test-policy".to_string(),
+                external_ref: Some(format!(
+                    "{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}sha256:gate:{submission_id}:{points}"
+                )),
+                actor_principal_ref: "vector-worker".to_string(),
+                actor_role: "vector_worker".to_string(),
+                settlement_state: StorageTraceCreditSettlementState::Final,
+                witness_provenance_class: None,
+            };
+
+            let withheld = read().await;
+            assert_eq!(withheld.credit_points_final, Some(0.0), "{withheld:?}");
+            assert_eq!(
+                withheld.credit_outcome_reason.as_deref(),
+                Some(reason::POLICY_MISMATCH)
+            );
+
+            backend
+                .append_trace_credit_event(award(5.0))
+                .await
+                .expect("award writes");
+            let awarded = read().await;
+            assert_eq!(awarded.credit_points_final, Some(5.0), "{awarded:?}");
+            assert_eq!(awarded.credit_outcome_reason, None);
+            assert_eq!(awarded.credit_points_ledger, 0.0);
+            assert_eq!(awarded.credit_points_total, Some(5.0));
+
+            backend
+                .append_trace_credit_event(award(-5.0))
+                .await
+                .expect("reversal writes");
+            let reversed = read().await;
+            assert_eq!(reversed.credit_points_final, Some(0.0), "{reversed:?}");
+            assert_eq!(reversed.credit_outcome_reason, None);
+
+            cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+        }
+
+        /// A held trace has no outcome yet, whatever an earlier decision
+        /// said.
+        #[test]
+        fn a_quarantined_trace_is_still_pending() {
+            let record = quarantined_record();
+            let decision = decision_with(&record, Some("policy_mismatch"), true, true);
+
+            let update = status(&record, &[], Some(&decision));
+
+            assert_eq!(update.credit_points_final, None);
+            assert_eq!(update.credit_outcome_reason, None);
+        }
     }
 }
 
@@ -101146,12 +101566,50 @@ fn a_withheld_or_never_settled_leg_reports_no_pending_points() {
             projected.credit_points_pending, 0.0,
             "a {internal_settlement_state} leg has no pending points"
         );
-        assert_eq!(projected.credit_points_final, None);
+        // A withheld leg is decided with no award (final 0 and a reason,
+        // as `main`'s document says for the same refusal); a leg nothing
+        // settles has no final figure.
+        let expected_final = (credit == PipelineCreditStatus::Withheld).then_some(0.0);
+        assert_eq!(projected.credit_points_final, expected_final);
+        assert_eq!(
+            projected.credit_outcome_reason.is_some(),
+            credit == PipelineCreditStatus::Withheld
+        );
         assert_eq!(
             projected.pipeline.unwrap().instruments[1].atomic_units,
             InstrumentAmount::Readable(DecimalAtomicUnits::from(2_500_000)),
             "the pipeline block still carries the award"
         );
+    }
+}
+
+/// A withheld leg's reason label folds onto the contributor's closed set;
+/// a leg with no label reads `other`.
+#[test]
+fn a_withheld_leg_reports_its_reason_on_the_contributor_set() {
+    for (label, expected) in [
+        (
+            Some("policy_mismatch"),
+            trace_commons_protocol::credit_outcome::POLICY_MISMATCH,
+        ),
+        (
+            Some("central_issuer_denied"),
+            trace_commons_protocol::credit_outcome::CREDIT_NOT_ISSUED,
+        ),
+        (None, trace_commons_protocol::credit_outcome::OTHER),
+    ] {
+        let mut status = pipeline_contributor_status_fixture();
+        status.credit = PipelineCreditStatus::Withheld;
+        let trace_credit = status
+            .instruments
+            .iter_mut()
+            .find(|instrument| instrument.instrument_id == "trace_credit")
+            .unwrap();
+        trace_credit.internal_settlement_state = "withheld".to_string();
+        trace_credit.reason_label = label.map(str::to_string);
+        let projected = submission_status_from_pipeline(&status);
+        assert_eq!(projected.credit_points_final, Some(0.0));
+        assert_eq!(projected.credit_outcome_reason.as_deref(), Some(expected));
     }
 }
 

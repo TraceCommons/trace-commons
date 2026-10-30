@@ -1,6 +1,8 @@
 //! Explicit, bounded native subscription usage probes. Secrets never form IPC
 //! values or errors. The native CLI owns authentication and may renew its own
-//! credentials, so probes refuse while another native Codex process is running.
+//! credentials, so the native app-server probe refuses while another Codex
+//! process is running. The read-only OAuth reader (`codex_oauth`) runs first
+//! and writes nothing, so it does not.
 
 use std::io::Read;
 use std::path::Path;
@@ -20,20 +22,35 @@ use tokio::sync::OwnedSemaphorePermit;
 use trace_commons_contributor_platform::native_process_group::ProcessGroupGuard;
 
 use super::{
-    Identity, LoginSpec, ProbeFailure, Provider, Reading, Window, native_metadata_revision,
+    Identity, LoginSpec, ProbeFailure, Provider, Reading, Window, codex_oauth,
+    native_metadata_revision,
 };
 
 const MAX_BYTES: usize = 1024 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[cfg(test)]
 pub(super) async fn collect(
     login: &LoginSpec,
     interactive: bool,
     lease: Arc<OwnedSemaphorePermit>,
 ) -> Result<Reading, ProbeFailure> {
+    let deps = super::claude::Deps::for_build(Arc::new(
+        super::claude_token_cache::TokenCache::for_build(),
+    ));
+    collect_with(login, interactive, lease, &deps).await
+}
+
+pub(super) async fn collect_with(
+    login: &LoginSpec,
+    interactive: bool,
+    lease: Arc<OwnedSemaphorePermit>,
+    claude: &super::claude::Deps,
+) -> Result<Reading, ProbeFailure> {
     match login.provider {
         Provider::Codex => collect_codex(login, interactive, lease).await,
-        Provider::Claude => super::claude::collect(login, interactive, lease).await,
+        Provider::Claude => super::claude::collect(login, interactive, lease, claude).await,
     }
 }
 
@@ -69,6 +86,49 @@ pub(super) fn normalize_failure_reason(reason: &'static str) -> &'static str {
     }
 }
 
+/// The fixed client for provider usage requests: HTTPS only, no proxy, no
+/// redirects (a redirect could carry the bearer to another host), bounded.
+pub(super) fn usage_client() -> Result<reqwest::Client, &'static str> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(HTTP_TIMEOUT)
+        .no_proxy()
+        .https_only(true)
+        .user_agent(concat!(
+            "TraceCommons/",
+            env!("CARGO_PKG_VERSION"),
+            " subscription-usage"
+        ))
+        .build()
+        .map_err(|_| "unavailable")
+}
+
+pub(super) fn request_error(error: reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "request_timeout"
+    } else {
+        "unavailable"
+    }
+}
+
+/// A size-capped JSON body. Provider text never reaches an error value.
+pub(super) async fn bounded_json(mut response: reqwest::Response) -> Result<Value, &'static str> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_BYTES as u64)
+    {
+        return Err("invalid_response");
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(request_error)? {
+        if chunk.len() > MAX_BYTES - bytes.len() {
+            return Err("invalid_response");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "invalid_response")
+}
+
 pub(super) fn fingerprint(value: &[u8]) -> String {
     format!("{:x}", Sha256::digest(value))
 }
@@ -94,7 +154,7 @@ pub(super) fn read_file(path: &Path) -> Result<Vec<u8>, &'static str> {
 
 // Stable account evidence rather than file timestamps, so an atomic token
 // renewal for the same identified account does not look like a login swap.
-fn codex_file_identity(bytes: &[u8]) -> Result<(String, Option<String>), &'static str> {
+pub(super) fn codex_file_identity(bytes: &[u8]) -> Result<(String, Option<String>), &'static str> {
     let root: Value = serde_json::from_slice(bytes).map_err(|_| "auth_missing")?;
     if root
         .get("OPENAI_API_KEY")
@@ -116,8 +176,20 @@ fn codex_file_identity(bytes: &[u8]) -> Result<(String, Option<String>), &'stati
         .get("access_token")
         .or_else(|| tokens.get("accessToken"))
         .and_then(Value::as_str);
+    // Without a saved account id, prefer the account the JWT claims carry
+    // (CodexBar `accountIDFromJWT`) over the token itself, so a renewal for
+    // the same account is not mistaken for an account switch.
+    let jwt_account = account.filter(|s| !s.is_empty()).is_none().then(|| {
+        let id_token = tokens
+            .get("id_token")
+            .or_else(|| tokens.get("idToken"))
+            .and_then(Value::as_str);
+        codex_oauth::account_from_jwt([id_token, access])
+    });
+    let jwt_account = jwt_account.flatten();
     let identity = account
         .filter(|s| !s.is_empty())
+        .or(jwt_account.as_deref())
         .or_else(|| access.filter(|s| !s.is_empty()))
         .ok_or("auth_missing")?;
     Ok((
@@ -150,7 +222,7 @@ async fn codex_guard(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CodexStore {
+pub(super) enum CodexStore {
     File,
     Keyring,
     Auto,
@@ -328,9 +400,33 @@ async fn collect_codex(
     _interactive: bool,
     lease: Arc<OwnedSemaphorePermit>,
 ) -> Result<Reading, ProbeFailure> {
-    // Refuse before opening config/auth files or invoking a native CLI. A
-    // global single-probe lease serializes our own collectors; external native
-    // clients do not share that lease, so recheck immediately before each step.
+    let target = codex_oauth::Target::production().map_err(|r| failure(r, None))?;
+    collect_codex_via(login, lease, &target).await
+}
+
+/// CodexBar's preferred order (docs/codex.md at 5f93dc3): read-only OAuth
+/// usage first, then the native app-server only when the saved sign-in needs
+/// renewal or the provider rejects it. Only the native path can rewrite
+/// auth.json, so only that path waits for Codex to be closed.
+pub(super) async fn collect_codex_via(
+    login: &LoginSpec,
+    lease: Arc<OwnedSemaphorePermit>,
+    target: &codex_oauth::Target,
+) -> Result<Reading, ProbeFailure> {
+    // Do not let a usage query create a native profile that does not exist.
+    if !login.root.is_dir() {
+        return Err(failure("auth_missing", None));
+    }
+    // Keyring/auto stores and untrusted endpoints are refused here, before
+    // any credential body is opened on either path.
+    let (_, base_url) = selected_codex_config(&login.root, &lease)
+        .await
+        .map_err(|r| failure(r, None))?;
+    if let Some(reading) = codex_oauth::collect(login, &lease, &base_url, target).await? {
+        return Ok(reading);
+    }
+    // A global single-probe lease serializes our own collectors; external
+    // native clients do not share that lease, so recheck before each step.
     ensure_codex_idle(login, &lease).await?;
     collect_codex_when_idle(login, lease).await
 }
@@ -456,7 +552,7 @@ async fn collect_codex_when_idle(
     })
 }
 
-async fn codex_completion_revision(
+pub(super) async fn codex_completion_revision(
     root: &Path,
     lease: &Arc<OwnedSemaphorePermit>,
     expected_identity: &Option<(String, Option<String>)>,
@@ -696,16 +792,17 @@ fn parse_codex(value: &Value, identity: Identity) -> Result<Reading, &'static st
         banked_resets,
         identity,
         native_revision: None,
+        source: super::ReadingSource::Api,
     })
 }
 
-fn percent(value: Option<&Value>) -> Option<u16> {
+pub(super) fn percent(value: Option<&Value>) -> Option<u16> {
     value
         .and_then(Value::as_f64)
         .filter(|n| n.is_finite() && (0.0..=100.0).contains(n))
         .map(|n| (n * 10.0).round() as u16)
 }
-fn unix_reset(value: Option<&Value>) -> Option<DateTime<Utc>> {
+pub(super) fn unix_reset(value: Option<&Value>) -> Option<DateTime<Utc>> {
     value
         .and_then(Value::as_i64)
         .filter(|n| *n > 0)
@@ -754,9 +851,12 @@ mod tests {
         ));
     }
 
+    // A running Codex no longer blocks a read-only OAuth reading (see
+    // codex_oauth tests). It still refuses the native path, which may renew
+    // and rewrite auth.json, before that path launches anything.
     #[cfg(unix)]
     #[tokio::test]
-    async fn running_codex_refuses_before_auth_reads_or_launch() {
+    async fn running_codex_refuses_native_path_before_launch() {
         struct OwnedChild(std::process::Child);
         impl Drop for OwnedChild {
             fn drop(&mut self) {
@@ -773,17 +873,20 @@ mod tests {
                 .spawn()
                 .unwrap(),
         );
+        // No saved renewal time: the token needs renewal, so only the native
+        // client may handle it.
         std::fs::write(
-            dir.path().join("config.toml"),
-            b"invalid config that must never be read",
+            dir.path().join("auth.json"),
+            br#"{"tokens":{"account_id":"a","access_token":"opaque","refresh_token":"r"}}"#,
         )
         .unwrap();
-        let login = super::super::native_login(
+        let mut login = super::super::native_login(
             Provider::Codex,
             None,
             Some(dir.path().to_string_lossy().into_owned()),
         )
         .unwrap();
+        login.native_executable = Some(dir.path().join("must-never-launch"));
         let lease = Arc::new(
             Arc::new(tokio::sync::Semaphore::new(1))
                 .acquire_owned()

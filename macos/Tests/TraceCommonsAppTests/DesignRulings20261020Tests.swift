@@ -67,8 +67,10 @@ final class DesignRulings20261020Tests: XCTestCase {
                        "About $1.50 to $4.50 of inference in traces on this Mac")
     }
 
-    /// Home's groups are titled, in the owner's order and words: Private
-    /// AI, then Traces, then Account.
+    /// Home's groups are titled, in the owner's words. The order is the
+    /// 2026-10-28 ruling: Traces first, then Account, then Private AI,
+    /// below and smaller than Traces. The Traces hero sits above the Traces
+    /// heading (owner, 2026-10-29), so the heading is over Waiting.
     func test_homesSectionsAreTitledInOrder() throws {
         let words = try XCTUnwrap(MonitorWords.table).homeHistory
         XCTAssertEqual(words.sectionPrivateAI, "Private AI")
@@ -76,12 +78,16 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertEqual(words.sectionAccount, "Account")
         XCTAssertEqual(words.privateAISignIn, "Sign in to NEAR AI to get started.")
         let home = try Self.text("Views/Monitor/HomeViews.swift")
-        let privateAI = try XCTUnwrap(home.range(of: "            privateAI\n            HomeSection(words?.sectionTraces) {"))
-        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
+        let hero = try XCTUnwrap(home.range(of: "            tracesHero\n            HomeSection(words?.sectionTraces) {\n                Grid("))
+        let traces = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionTraces) {"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
+        let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
+        let privateAI = try XCTUnwrap(home.range(of: "                HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)\n            }\n            privateAI\n"))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
-        XCTAssertLessThan(privateAI.lowerBound, waiting.lowerBound)
+        XCTAssertLessThan(hero.lowerBound, traces.lowerBound)
+        XCTAssertLessThan(traces.lowerBound, waiting.lowerBound)
         XCTAssertLessThan(waiting.lowerBound, account.lowerBound)
+        XCTAssertLessThan(account.lowerBound, privateAI.lowerBound)
         XCTAssertLessThan(account.lowerBound, credit.lowerBound)
         XCTAssertEqual(HomeSection<EmptyView>.titleType, GlassTabHeading<EmptyView>.titleType)
     }
@@ -107,9 +113,11 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertFalse(body.contains("glassCardWatermark"), "the sign-in card has an icon again")
         XCTAssertFalse(body.contains("Image(systemName:"), "the sign-in card has an icon again")
         XCTAssertFalse(home.contains("HomePrivateAIConnectCard"))
-        XCTAssertTrue(home.contains("HomeStatTile(label: MonitorWords.calls, value: HomeFormat.count(totals.calls),"))
-        XCTAssertTrue(home.contains(
-            "HomeStatTile(label: InferenceWords.proof(.verified), value: HomeFormat.count(totals.verified),"))
+        // Signed in: one slim row, not tiles (owner, 2026-10-28: smaller
+        // than Traces).
+        XCTAssertTrue(home.contains("(MonitorWords.calls, HomeFormat.count(totals.calls)),"))
+        XCTAssertTrue(home.contains("(InferenceWords.proof(.verified), HomeFormat.count(totals.verified)),"))
+        XCTAssertFalse(home.contains("HomeStatTile(label: MonitorWords.calls"), "Private AI is tiles again")
         XCTAssertFalse(home.contains("answerPrivateInferenceOffer"), "Home turns Private AI on in one press")
         // No store, or one not read yet: dashes, never zero.
         let none = HomePrivateAI.totals(nil)
@@ -131,7 +139,7 @@ final class DesignRulings20261020Tests: XCTestCase {
     func test_thePrivateAIStateFollowsItsTitle() throws {
         let tab = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(tab.contains(
-            "GlassTabHeading(copy.inspectorStatus) {\n                GlassStatusLabel(state.line,"))
+            "GlassTabHeading(copy.inspectorStatus) {\n                GlassStatusLabel(status.word,"))
     }
 
     /// The refresh glyph's ring sits on the circle's centre: its box is
@@ -150,15 +158,15 @@ final class DesignRulings20261020Tests: XCTestCase {
     }
 
     /// An "i" follows its line's last word wherever the line wraps (owner,
-    /// 2026-10-20): Insights' section titles, group headings and coverage
-    /// line flow their words with the "i" on the last.
+    /// 2026-10-20): Insights' section titles and coverage line flow their
+    /// words with the "i" on the last.
     func test_theInfoFollowsTheLastWord() throws {
         XCTAssertEqual(InsightsTextWithInfo.words("Oct 9 \u{b7} Claude Code  trace"),
                        ["Oct", "9", "\u{b7}", "Claude", "Code", "trace"])
         XCTAssertEqual(InsightsTextWithInfo.words(""), [])
         XCTAssertGreaterThan(InsightsTextWithInfo.wordGap(GlassTokens.TypeScale.title), 0)
         let glass = try Self.text("Views/InsightsGlass.swift")
-        XCTAssertEqual(glass.components(separatedBy: "InsightsTextWithInfo(").count - 1, 3)
+        XCTAssertEqual(glass.components(separatedBy: "InsightsTextWithInfo(").count - 1, 2)
         XCTAssertTrue(glass.contains(
             "Text(words.last ?? \"\").accessibilityHidden(true)\n                    InsightsInfo(infoTitle, info)"))
         XCTAssertFalse(glass.contains("            InsightsInfo(title, info)\n            Spacer("), "the title's i is at the row's end again")
@@ -169,8 +177,7 @@ final class DesignRulings20261020Tests: XCTestCase {
     /// bare glyph, and the icon card's beside its title no more.
     func test_everyRefreshIsTheRightAlignedIconButton() throws {
         XCTAssertEqual(GlassRefreshButton.systemImage, "arrow.clockwise")
-        let files = ["Views/ComparisonTasksView.swift", "Views/ComparisonSpecificationsView.swift",
-                     "Views/InsightsEpisodesView.swift", "Views/InsightsView.swift", "Views/MissionDraftsView.swift",
+        let files = ["Views/MissionDraftsView.swift",
                      "Views/Settings/ConsentSection.swift", "Views/Settings/StartupSection.swift",
                      "Views/Settings/WatchingSection.swift"]
         for file in files {

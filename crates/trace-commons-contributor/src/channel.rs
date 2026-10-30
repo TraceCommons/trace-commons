@@ -98,6 +98,7 @@ mod values {
     pub const KEYCHAIN_CLOUD_SERVICE: &str = "trace-commons.near-ai.credentials";
     pub const KEYCHAIN_ACCOUNT_SERVICE: &str = "trace-commons.account.credentials";
     pub const KEYCHAIN_INSIGHTS_SERVICE: &str = "trace-commons.insights.digest-key";
+    pub const KEYCHAIN_CLAUDE_USAGE_SERVICE: &str = "trace-commons.claude-usage.token-cache";
 
     pub const NATIVE_ACCOUNT_ORIGIN: &str = "https://ingest.tracecommons.ai";
     pub const PASSKEY_RP_ID: &str = "tracecommons.ai";
@@ -119,6 +120,8 @@ mod values {
     pub const IRONWIRE_HOME_DIR: &str = ".ironwire";
     pub const IRONWIRE_CONTROL_PORT: Option<u16> = None;
     pub const IRONWIRE_READS_POINTER: bool = true;
+
+    pub const SYSTEMD_UNIT_NAME: &str = "trace-commons-contributor.service";
 }
 
 #[cfg(feature = "near-ai-staging")]
@@ -133,6 +136,8 @@ mod values {
     pub const KEYCHAIN_CLOUD_SERVICE: &str = "trace-commons-staging.near-ai.credentials";
     pub const KEYCHAIN_ACCOUNT_SERVICE: &str = "trace-commons-staging.account.credentials";
     pub const KEYCHAIN_INSIGHTS_SERVICE: &str = "trace-commons-staging.insights.digest-key";
+    pub const KEYCHAIN_CLAUDE_USAGE_SERVICE: &str =
+        "trace-commons-staging.claude-usage.token-cache";
 
     pub const NATIVE_ACCOUNT_ORIGIN: &str = concat!("https://ingest.", staging_host!());
     pub const PASSKEY_RP_ID: &str = staging_host!();
@@ -163,6 +168,10 @@ mod values {
     /// takes the next port so both proxies can run at once.
     pub const IRONWIRE_CONTROL_PORT: Option<u16> = Some(8464);
     pub const IRONWIRE_READS_POINTER: bool = false;
+
+    /// Its own unit, so a staging daemon runs beside a production one on
+    /// the same Linux machine and installing one never replaces the other.
+    pub const SYSTEMD_UNIT_NAME: &str = "trace-commons-contributor-staging.service";
 }
 
 /// `production` or `staging`.
@@ -193,6 +202,7 @@ pub const KEYCHAIN: KeychainIdentity = KeychainIdentity {
     cloud_service: values::KEYCHAIN_CLOUD_SERVICE,
     account_service: values::KEYCHAIN_ACCOUNT_SERVICE,
     insights_digest_key_service: values::KEYCHAIN_INSIGHTS_SERVICE,
+    claude_usage_service: values::KEYCHAIN_CLAUDE_USAGE_SERVICE,
 };
 
 /// The native app's account API: the one origin trusted before any config
@@ -282,6 +292,9 @@ pub const IRONWIRE_CONTROL_PORT: Option<u16> = values::IRONWIRE_CONTROL_PORT;
 /// whatever `IRONWIRE_HOME` says, so a staging build never reads it and
 /// accepts only a control URL and token under its own home.
 pub const IRONWIRE_READS_POINTER: bool = values::IRONWIRE_READS_POINTER;
+
+/// The systemd user unit `daemon install` writes on Linux.
+pub const SYSTEMD_UNIT_NAME: &str = values::SYSTEMD_UNIT_NAME;
 
 /// What `--version` adds after the build identity: the channel, so the
 /// macOS bundle scripts can check the bundled CLI against the bundle's

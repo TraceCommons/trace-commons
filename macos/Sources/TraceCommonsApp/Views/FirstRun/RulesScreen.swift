@@ -96,12 +96,16 @@ enum RulesScreenLayout {
         project.offerableModes
     }
 
-    /// A pick on a folder's picker. The daemon's own mode clears the
-    /// folder's answer, so it is not sent again. Automatic is a grant, so
-    /// it is never silent: it waits for the arming confirmation.
+    /// A pick on a folder's picker. The daemon's own Never or Automatic
+    /// clears the folder's answer, so it is not sent again. Ask is kept
+    /// even when the daemon already reads Ask: an Ask the person picked
+    /// stays an exception to "Automatic, including existing history" chosen
+    /// later on Uses (owner decision 2026-10-29, #1747), and `FirstRunPlan`
+    /// sends it after the grant. Automatic is a grant, so it is never
+    /// silent: it waits for the arming confirmation.
     static func pick(_ state: inout FirstRunState, project: ProjectRow, wanted: ProjectMode) -> PickOutcome {
         let id = project.projectId
-        if wanted == project.mode {
+        if wanted == project.mode, wanted != .ask {
             state.rules[id] = nil
             if wanted == .ignore { state.pastSelections[id] = nil }
             return .applied

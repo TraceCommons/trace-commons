@@ -3933,7 +3933,7 @@ impl RouteFixture {
             );
         }
         let oversized = serde_json::json!({
-            "reason_code": "x".repeat(MAX_INGEST_BODY_BYTES),
+            "reason_code": "x".repeat(pipeline_activation::PIPELINE_ADMIN_BODY_MAX_BYTES + 1),
         });
         let (status, refused) = self
             .call(
@@ -4214,7 +4214,7 @@ async fn the_routes_refuse_without_a_trust_store_or_a_revision() {
             "/v1/admin/pipeline/qualifications",
             Some(serde_json::json!({
                 "signed_package": fixture.signed(&fixture.a),
-                "attestations": ["x".repeat(MAX_INGEST_BODY_BYTES)],
+                "attestations": ["x".repeat(pipeline_activation::PIPELINE_ADMIN_BODY_MAX_BYTES + 1)],
             })),
         )
         .await;

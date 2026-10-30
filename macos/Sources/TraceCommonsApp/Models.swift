@@ -750,8 +750,8 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// nobody set.
     var insightsLedgerFeed: Bool? = nil
     /// Whether the daemon counts tokens in the watched folders for
-    /// Insights (`insights_counter_pass`; owner decision D4, off by
-    /// default). Absent from an older daemon: no switch, never an "off".
+    /// Insights (`insights_counter_pass`; on by default, product owner,
+    /// 2026-10-29). Absent from an older daemon: no switch, never an "off".
     var insightsCounterPass: Bool? = nil
     /// The weekly summary card's switch (`insights_recap_card_enabled`, on
     /// by default); "Hide" on the card turns it off. Absent from an older
@@ -987,12 +987,34 @@ struct NearAiEnrollment: Decodable, Sendable, Equatable {
     let tenantID: String
     let accountID: String
     let deviceKeyID: String
+    /// `applied` or `not_applied`, only when a referral code was sent. Not
+    /// shown at sign-up: Settings > Referrals says whether one is applied.
+    var referral: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case enrolled
         case tenantID = "tenant_id"
         case accountID = "account_id"
         case deviceKeyID = "device_key_id"
+        case referral
+    }
+
+    init(enrolled: Bool, tenantID: String, accountID: String, deviceKeyID: String, referral: String? = nil) {
+        self.enrolled = enrolled
+        self.tenantID = tenantID
+        self.accountID = accountID
+        self.deviceKeyID = deviceKeyID
+        self.referral = referral
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enrolled = try c.decode(Bool.self, forKey: .enrolled)
+        tenantID = try c.decode(String.self, forKey: .tenantID)
+        accountID = try c.decode(String.self, forKey: .accountID)
+        deviceKeyID = try c.decode(String.self, forKey: .deviceKeyID)
+        // Never fails the enrolment it rides on.
+        referral = try? c.decodeIfPresent(String.self, forKey: .referral)
     }
 }
 

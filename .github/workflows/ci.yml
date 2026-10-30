@@ -149,10 +149,15 @@ jobs:
         admission_test_upload_ownership
         admission_test_credit_hold_ownership
         admission_test_activity_missions
+        admission_test_model_training_consent
         admission_test_inference_connection
         admission_test_inference_connection_route
         admission_test_payout_rails
         admission_test_payout_pass
+        admission_test_referral_rewards
+        admission_test_referral_codes
+        admission_test_referral_bonus
+        admission_test_referral_stream
         admission_test_walletv2
         admission_test_legacy_invite_link
         admission_test_device_invite_subject
@@ -356,6 +361,32 @@ jobs:
         run: cargo test -p trace-commons-server --test inference_connection_pg
         env:
           TRACE_COMMONS_INFERENCE_CONNECTION_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection
+      # V142: the referral tables. Forced RLS, one referrer per account, one
+      # code index across tenants, the self-referral check, the resolver's
+      # narrow cross-tenant read, append-only bonus and audit rows, and the
+      # referral payout stream, each refusal checked as trace_ingest_runtime.
+      - name: referral_rewards_pg
+        run: cargo test --locked -p trace-commons-server --test referral_rewards_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_rewards
+      # The referral code store: five live codes per account, the code index
+      # across tenants, listing with referee counts and bonus totals, and
+      # applying a code with every check of spec section 3 in order, the
+      # refusal rate limit and the two-tenant apply, as a real LOGIN role
+      # with the resolver role granted INHERIT FALSE.
+      - name: referral_codes_pg
+        run: cargo test --locked -p trace-commons-server --test referral_codes_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_codes
+      # The referral bonus pass: a tenth of each referee credit written in the
+      # referrer's tenant once, its window and reversals, the referrer-gone
+      # void, the referral-stream holds, code scoring and suspension, the
+      # dry_run trip, and voids taking back only unsent bonus, as
+      # trace_ingest_runtime.
+      - name: referral_bonus_pg
+        run: cargo test --locked -p trace-commons-server --test referral_bonus_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_bonus
       # The payout rail tables (V132): forced RLS, the one-link-per-state and
       # one-pending-line indexes, NUMERIC(39,0) amounts, and the runtime,
       # enumerator and config-writer grants, each exercised as a real LOGIN
@@ -373,6 +404,15 @@ jobs:
         run: cargo test -p trace-commons-server --test payout_pass_pg -- --test-threads=1
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_pass
+      # The referral payout stream (V142 lines and links): the second
+      # program per link, one pending line per stream, per-stream crash
+      # recovery, close with both totals, referral-only holds and ceiling,
+      # and the referral mode. Bonus rows seeded by the migrator; the pass
+      # runs as a real LOGIN role against the #1271 loopback mock.
+      - name: referral_stream_pg
+        run: cargo test --locked -p trace-commons-server --test referral_stream_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_stream
       - name: inference connection HTTP session selection
         run: cargo test -p trace-commons-ingest --lib inference_connection_requires_explicit_account_session_selection -- --test-threads=1
         env:
@@ -473,6 +513,13 @@ jobs:
         run: cargo test --locked -p trace-commons-server --test activity_missions_pg -- --nocapture
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_activity_missions
+      # V141: the model-training grant's eligibility read, add-only write and
+      # withheld-award lookup, run as trace_ingest_runtime (NOBYPASSRLS) on
+      # the migration's own grants.
+      - name: model_training_consent_pg
+        run: cargo test --locked -p trace-commons-server --test model_training_consent_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_model_training_consent
       # The R1 measurement script (scripts/operator/r1-pipeline-measurement.sql)
       # run through the real psql against a current and a pre-V76 schema. The
       # suite creates and drops databases of its own, so the xact_commit guard

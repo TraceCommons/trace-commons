@@ -296,16 +296,17 @@ final class MenuBarGlassPanelTests: XCTestCase {
     /// switch left on over a listener that refused to start, crashed or is
     /// stopping is never drawn On. Unknown is unknown, never Off.
     func test_thePrivateAIPillFollowsTheListenerNotTheSwitch() throws {
-        let running = PrivateInferenceSurface.tone(
-            PrivateInferenceState(label: "running", port: 8080), calls: .testing)
-        XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: running), .on)
+        let calls = PrivateInferenceMenuBarTests.coreCalls
+        let running = PrivateInferenceSurface.menuState(
+            PrivateInferenceState(label: "running", port: 8080), calls: calls)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: true, menu: running), .listener(word: "On", tone: .clear))
         for label in ["port_in_use", "start_failed", "crashed", "stopping", "unknown_state", ""] {
-            let tone = PrivateInferenceSurface.tone(PrivateInferenceState(label: label, port: nil), calls: .testing)
-            XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: tone), .notWorking,
-                           "a switch on over \(label) must not read On")
+            let menu = PrivateInferenceSurface.menuState(PrivateInferenceState(label: label, port: nil), calls: calls)
+            XCTAssertNotEqual(MenuPanelStatus.privateAIDot(MenuPanelStatus.privateAI(on: true, menu: menu)), .on,
+                              "a switch on over \(label) must not read green")
         }
-        XCTAssertEqual(MenuPanelStatus.privateAI(on: false, tone: running), .off)
-        XCTAssertEqual(MenuPanelStatus.privateAI(on: nil, tone: running), .unknown)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: false, menu: running), .off)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: nil, menu: running), .unknown)
         // The pill's fill and value come from that, not from the switch.
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -682,5 +683,23 @@ final class MenuBarGlassPanelTests: XCTestCase {
         // The core's words missing: nothing is drawn.
         XCTAssertNil(MenuPanelStatus.settlementLine(status, available: true, copy: NudgeCopy(table: [:])))
         XCTAssertNil(MenuPanelStatus.settlementLine(status, available: true, copy: nil))
+    }
+
+    /// The popover offers "Check for Updates…" only where Sparkle runs, and
+    /// disabled while the updater cannot check (owner, 2026-10-29).
+    func test_theMenuChecksForUpdatesOnlyWhenSelfUpdating() throws {
+        let panel = try GlassSurfaceRulesTests.text("Views/Monitor/MenuBarGlassPanel.swift")
+        XCTAssertTrue(panel.contains("@ObservedObject private var updates = UpdateController.shared"))
+        XCTAssertTrue(panel.contains("if updates.mode == .selfUpdating, let title = MenuWords.checkForUpdates {"))
+        XCTAssertTrue(panel.contains("updates.checkNow()"))
+        XCTAssertTrue(panel.contains(".disabled(!updates.canCheckNow)"))
+        // Sparkle's window opens in front of a menu-bar app.
+        XCTAssertTrue(panel.contains("NSApp.activate(ignoringOtherApps: true)\n                    updates.checkNow()"))
+    }
+
+    /// The label is the core's word, with a real ellipsis.
+    func test_theUpdateCheckWordComesFromTheCore() throws {
+        let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
+        XCTAssertEqual(copy.checkForUpdates, "Check for Updates\u{2026}")
     }
 }

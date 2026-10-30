@@ -1,25 +1,25 @@
-//! Feed T comparisons for the Insights window: the user's goals marked
-//! against the daemon's weekly figures, the lever of the week, and the weekly
-//! summary card.
+//! Feed T comparisons for the Insights window: the lever of the week and the
+//! weekly summary card. The threshold goals marked here left Insights
+//! (product owner, 2026-10-29); Goals are now the `/goal` goals the daemon's
+//! `insights_week` answer carries.
 //!
 //! The figures are the daemon's (`insights_week`'s `history`), passed through
-//! by the shell: goals and the lever's feedback live in the in-process store,
+//! by the shell: the lever's feedback lives in the in-process store,
 //! which the daemon never reads, and the counter rows live in the daemon,
 //! which this process never reads. Nothing here takes an assumption from the
 //! caller; the figures are measured counts and every rule is a core constant.
 //!
-//! Under feed S nothing is compared: goals are listed without marks, and
-//! there is no lever and no summary card (owner decision D4, open). The lever
-//! is an observation only (owner decision D2, open). Goals carry weekly marks
-//! and never a run of weeks, and the summary card is in the window only, with
-//! no notification (owner decision D1, open).
+//! Under feed S nothing is compared: there is no lever and no summary card
+//! (owner decision D4, open). The lever is an observation only (owner
+//! decision D2, open), and the summary card is in the window only, with no
+//! notification (owner decision D1, open).
 
 use chrono::{Duration, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use super::cache_share::best_week_permille;
 use super::goal_store::GoalState;
-use super::goals::{Goal, GoalMarks, ThresholdCount, WeekFigures, WeekMark, goal_marks};
+use super::goals::{ThresholdCount, WeekFigures};
 use super::lever::{kinds_off, lever};
 use super::patterns::PatternKind;
 use super::week_rollup::{AnalyticsSource, Feed, Unavailable, change_permille};
@@ -29,18 +29,6 @@ use super::week_rollup::{AnalyticsSource, Feed, Unavailable, change_permille};
 pub const MAX_COUNTER_WEEKS: usize = 64;
 /// Items the summary card lists, one per rule.
 pub const MAX_RECAP_ITEMS: usize = 3;
-
-/// One goal as the window shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GoalView {
-    pub id: String,
-    pub goal: Goal,
-    /// The figure in the week on screen; `None` when unknown or not compared.
-    pub figure: Option<u64>,
-    /// Six weekly marks and the change from last week; `None` with a reason.
-    pub marks: Option<GoalMarks>,
-    pub unavailable: Option<Unavailable>,
-}
 
 /// The lever's kind and the figures its line names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,8 +77,6 @@ pub enum RecapItem {
         permille: u64,
         previous_best_permille: u64,
     },
-    /// "Goal met: {goal}." / "Goal not met: {goal}."
-    Goal { id: String, goal: Goal, met: bool },
     /// "{pattern} went up {p}% against your usual week."
     PatternUp {
         pattern: PatternKind,
@@ -116,7 +102,6 @@ pub struct Recap {
 pub struct WeekComparisons {
     pub feed: Feed,
     pub week_start: NaiveDate,
-    pub goals: Vec<GoalView>,
     pub lever: LeverState,
     /// Present only on the first opens after a week closes, while the card
     /// is switched on.
@@ -137,37 +122,6 @@ pub struct ComparisonsRequest {
 fn figures_until(weeks: &[WeekFigures], week_start: NaiveDate) -> &[WeekFigures] {
     let end = weeks.partition_point(|week| week.week_start <= week_start);
     &weeks[..end]
-}
-
-fn goal_views(
-    feed: Feed,
-    weeks: &[WeekFigures],
-    week_start: NaiveDate,
-    state: &GoalState,
-) -> Vec<GoalView> {
-    let shown = figures_until(weeks, week_start);
-    let this = shown.last().filter(|week| week.week_start == week_start);
-    state
-        .goals
-        .iter()
-        .map(|stored| {
-            let result = match this {
-                _ if feed != Feed::CounterPass => Err(Unavailable::NeedsCounterPass),
-                None => Err(Unavailable::InsufficientHistory),
-                Some(_) => goal_marks(feed, &stored.goal, shown),
-            };
-            let figure = this
-                .filter(|week| feed == Feed::CounterPass && week.comparable)
-                .and_then(|week| stored.goal.figure(week));
-            GoalView {
-                id: stored.id.clone(),
-                goal: stored.goal.clone(),
-                figure,
-                unavailable: result.as_ref().err().copied(),
-                marks: result.ok(),
-            }
-        })
-        .collect()
 }
 
 fn lever_state(
@@ -269,22 +223,7 @@ fn recap(weeks: &[WeekFigures], request: ComparisonsRequest, state: &GoalState) 
             break;
         }
     }
-    // Rule 2: the first goal, in the user's order, with a figure that week.
-    if let Some((stored, met)) = state.goals.iter().find_map(|stored| {
-        let marks = goal_marks(Feed::CounterPass, &stored.goal, shown).ok()?;
-        match marks.marks.last()? {
-            WeekMark::Met => Some((stored, true)),
-            WeekMark::NotMet => Some((stored, false)),
-            WeekMark::NoFigure => None,
-        }
-    }) {
-        items.push(RecapItem::Goal {
-            id: stored.id.clone(),
-            goal: stored.goal.clone(),
-            met,
-        });
-    }
-    // Rule 3: the pattern furthest above its usual week, by the lever's rule,
+    // Rule 2: the pattern furthest above its usual week, by the lever's rule,
     // and not while the lever's card is switched off in Settings: the same
     // observation, as a kind's "Not useful" already leaves it out here.
     if !state.lever_card_off
@@ -313,7 +252,7 @@ fn recap(weeks: &[WeekFigures], request: ComparisonsRequest, state: &GoalState) 
     })
 }
 
-/// Goals, the lever and the summary card. `counter_weeks` are the daemon's
+/// The lever and the summary card. `counter_weeks` are the daemon's
 /// weekly figures, oldest first; `None` under feed S.
 pub fn week_comparisons(
     counter_weeks: Option<&[WeekFigures]>,
@@ -327,7 +266,6 @@ pub fn week_comparisons(
     WeekComparisons {
         feed,
         week_start: request.week_start,
-        goals: goal_views(feed, weeks, request.week_start, state),
         lever: lever_state(feed, weeks, request.week_start, state),
         recap: counter_weeks.and_then(|weeks| recap(weeks, request, state)),
     }
@@ -348,8 +286,6 @@ pub fn counter_weeks_valid(weeks: &[WeekFigures]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::insights::goal_store::StoredGoal;
-    use crate::insights::goals::GoalChange;
     use crate::insights::lever::LeverDismissal;
 
     const READS: PatternKind = PatternKind::RepeatedReads;
@@ -386,20 +322,6 @@ mod tests {
         weeks
     }
 
-    fn state(goals: Vec<Goal>) -> GoalState {
-        GoalState {
-            goals: goals
-                .into_iter()
-                .enumerate()
-                .map(|(n, goal)| StoredGoal {
-                    id: format!("goal-{}", n + 1),
-                    goal,
-                })
-                .collect(),
-            ..GoalState::default()
-        }
-    }
-
     fn request(week_start: NaiveDate) -> ComparisonsRequest {
         ComparisonsRequest {
             week_start,
@@ -408,62 +330,20 @@ mod tests {
         }
     }
 
-    const UNDER: Goal = Goal::WeeklyTokensUnder {
-        source: CLAUDE,
-        tokens: 900_000,
-    };
-
     #[test]
-    fn under_feed_s_goals_are_listed_without_marks_and_nothing_is_compared() {
-        let found = week_comparisons(None, request(monday(0)), &state(vec![UNDER]));
+    fn under_feed_s_nothing_is_compared() {
+        let found = week_comparisons(None, request(monday(0)), &GoalState::default());
         assert_eq!(found.feed, Feed::Saved);
-        assert_eq!(found.goals.len(), 1);
-        assert_eq!(found.goals[0].marks, None);
-        assert_eq!(found.goals[0].figure, None);
-        assert_eq!(
-            found.goals[0].unavailable,
-            Some(Unavailable::NeedsCounterPass)
-        );
         assert_eq!(found.lever.unavailable, Some(Unavailable::NeedsCounterPass));
         assert_eq!(found.recap, None);
     }
 
     #[test]
-    fn goals_carry_six_marks_and_the_change_from_last_week() {
+    fn comparisons_carry_no_goals() {
         let weeks = history(week(0, 800_000, 300, 100_000));
-        let found = week_comparisons(Some(&weeks), request(monday(0)), &state(vec![UNDER]));
-        let goal = &found.goals[0];
-        assert_eq!(goal.figure, Some(800_000));
-        let marks = goal.marks.as_ref().unwrap();
-        assert_eq!(
-            marks.marks,
-            vec![
-                WeekMark::NotMet,
-                WeekMark::NotMet,
-                WeekMark::NotMet,
-                WeekMark::NotMet,
-                WeekMark::NotMet,
-                WeekMark::Met
-            ]
-        );
-        assert_eq!(marks.change, Some(GoalChange::Down { from: 1_000_000 }));
-    }
-
-    #[test]
-    fn an_earlier_week_on_screen_is_judged_on_the_weeks_up_to_it() {
-        let weeks = history(week(0, 800_000, 300, 100_000));
-        let found = week_comparisons(Some(&weeks), request(monday(1)), &state(vec![UNDER]));
-        assert_eq!(found.goals[0].figure, Some(1_000_000));
-        assert_eq!(
-            found.goals[0].marks.as_ref().unwrap().marks.last(),
-            Some(&WeekMark::NotMet)
-        );
-        // A week older than the figures cover has no marks.
-        let old = week_comparisons(Some(&weeks), request(monday(20)), &state(vec![UNDER]));
-        assert_eq!(
-            old.goals[0].unavailable,
-            Some(Unavailable::InsufficientHistory)
-        );
+        let found = week_comparisons(Some(&weeks), request(monday(0)), &GoalState::default());
+        let value = serde_json::to_value(&found).unwrap();
+        assert!(value.get("goals").is_none(), "{value}");
     }
 
     #[test]
@@ -540,7 +420,7 @@ mod tests {
     }
 
     /// The closed week (1 ago) with a new best share, more re-reads than
-    /// usual and a met goal; the weeks before it steady.
+    /// usual; the weeks before it steady.
     fn closed_week_history() -> Vec<WeekFigures> {
         let mut weeks: Vec<_> = (2..=7)
             .rev()
@@ -554,7 +434,7 @@ mod tests {
     #[test]
     fn the_summary_card_lists_one_item_per_rule_in_order() {
         let weeks = closed_week_history();
-        let found = week_comparisons(Some(&weeks), request(monday(0)), &state(vec![UNDER]));
+        let found = week_comparisons(Some(&weeks), request(monday(0)), &GoalState::default());
         let recap = found.recap.unwrap();
         assert_eq!(recap.week_start, monday(1));
         assert_eq!(recap.week_end, monday(1) + Duration::days(6));
@@ -575,11 +455,6 @@ mod tests {
                     permille: 450,
                     previous_best_permille: 300
                 },
-                RecapItem::Goal {
-                    id: "goal-1".into(),
-                    goal: UNDER,
-                    met: true
-                },
                 RecapItem::PatternUp {
                     pattern: READS,
                     up_permille: 1_500
@@ -597,25 +472,18 @@ mod tests {
         let weeks = closed_week_history();
         let switched_off = GoalState {
             lever_card_off: true,
-            ..state(vec![UNDER])
+            ..GoalState::default()
         };
         let recap = week_comparisons(Some(&weeks), request(monday(0)), &switched_off)
             .recap
             .unwrap();
         assert_eq!(
             recap.items,
-            vec![
-                RecapItem::BestCacheWeek {
-                    source: CLAUDE,
-                    permille: 450,
-                    previous_best_permille: 300
-                },
-                RecapItem::Goal {
-                    id: "goal-1".into(),
-                    goal: UNDER,
-                    met: true
-                },
-            ]
+            vec![RecapItem::BestCacheWeek {
+                source: CLAUDE,
+                permille: 450,
+                previous_best_permille: 300
+            },]
         );
     }
 

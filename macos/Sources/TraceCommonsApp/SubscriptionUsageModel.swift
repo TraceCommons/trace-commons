@@ -24,6 +24,7 @@ final class SubscriptionUsageModel {
     private var observationSleep: Task<Void, Never>?
     private let activePollInterval: Duration
     private(set) var codexEnabled: Bool?
+    private(set) var claudeEnabled: Bool?
     private var claudeAvailable = false
     private(set) var shown: DaemonData.SubscriptionUsage?
     private(set) var failureKey: String?
@@ -32,7 +33,8 @@ final class SubscriptionUsageModel {
 
     var supportedProviders: [DaemonData.SubscriptionUsageProvider] {
         (shown?.providers ?? []).filter {
-            ($0.provider == "codex" && $0.enabled) || ($0.provider == "claude" && !$0.logins.isEmpty)
+            ($0.provider == "codex" || $0.provider == "claude") && $0.enabled
+                && ($0.provider == "codex" || !$0.logins.isEmpty)
         }
     }
     var isVisible: Bool { reader != nil && !unsupported && (codexEnabled == true || claudeAvailable) }
@@ -144,8 +146,7 @@ final class SubscriptionUsageModel {
                 return
             }
             shown = value
-            codexEnabled = value.providers.first(where: { $0.provider == "codex" })?.enabled
-            claudeAvailable = value.providers.contains { $0.provider == "claude" && !$0.logins.isEmpty }
+            reconcile(value)
             unsupported = false
             failureKey = nil
         } catch {
@@ -188,16 +189,24 @@ final class SubscriptionUsageModel {
         return entry.refreshing ?? row.refreshing
     }
 
+    private func reconcile(_ value: DaemonData.SubscriptionUsage) {
+        codexEnabled = value.providers.first(where: { $0.provider == "codex" })?.enabled
+        let claude = value.providers.first(where: { $0.provider == "claude" })
+        claudeEnabled = claude?.enabled
+        claudeAvailable = claude.map { $0.enabled && !$0.logins.isEmpty } ?? false
+    }
+
     /// Hide disabled data immediately, and invalidate any read from before the
     /// user's choice. The daemon remains authoritative when the write returns.
     func setEnabled(_ provider: String, on: Bool) async {
-        guard let writer, provider == "codex",
+        guard let writer, provider == "codex" || provider == "claude",
               changingProviders.isEmpty else { return }
         let startedObservation = observation
         generation = UUID()
         clearQueuedRefresh()
         changingProviders.insert(provider)
-        if !on { codexEnabled = false }
+        if !on, provider == "codex" { codexEnabled = false }
+        if !on, provider == "claude" { claudeEnabled = false; claudeAvailable = false }
         if !on, let shown {
             self.shown = DaemonData.SubscriptionUsage(schemaVersion: shown.schemaVersion, providers: shown.providers.map { row in
                 row.provider == provider
@@ -226,8 +235,7 @@ final class SubscriptionUsageModel {
             let token = generation
             if let reader, let actual = try? await reader(false, false, nil, nil), generation == token {
                 shown = actual
-                codexEnabled = actual.providers.first(where: { $0.provider == "codex" })?.enabled
-                claudeAvailable = actual.providers.contains { $0.provider == "claude" && !$0.logins.isEmpty }
+                reconcile(actual)
             }
             observationSleep?.cancel()
         }

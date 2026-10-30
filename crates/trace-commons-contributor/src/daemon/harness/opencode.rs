@@ -12,6 +12,10 @@ pub(super) const ID: &str = "opencode";
 const PROVIDER: &str = crate::channel::STATE_DIR_NAME;
 const LIMIT: usize = 1024 * 1024;
 pub(super) const ERR_VERSION: &str = "harness-opencode-version";
+/// No OpenCode executable was found to ask its version, as when the binary
+/// was removed and only its config folder (which alone counts as installed
+/// in `tool`) is left.
+pub(super) const ERR_NO_EXECUTABLE: &str = "harness-opencode-no-executable";
 pub(super) const ERR_MODELS: &str = "harness-models-unavailable";
 
 pub(super) struct Context {
@@ -731,7 +735,7 @@ fn blocking_policy(value: &Value, major: u32) -> Option<String> {
 /// Only a Connect click probes the native version, with isolated standard
 /// directories. Merely listing tools never executes a contributor's binary.
 pub(super) fn native_major() -> Result<u32, &'static str> {
-    let native = profiles::find_native(ToolId::Opencode).map_err(|_| ERR_VERSION)?;
+    let native = profiles::find_native(ToolId::Opencode).map_err(|_| ERR_NO_EXECUTABLE)?;
     let isolated = tempfile::tempdir().map_err(|_| ERR_VERSION)?;
     let mut command = std::process::Command::new(native);
     crate::managed::opencode::isolate(&mut command, isolated.path()).map_err(|_| ERR_VERSION)?;

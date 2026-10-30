@@ -113,7 +113,19 @@ cat >"$stubs/curl" <<'STUB'
 printf '%s\n' "curl $*" >>"$TRACE"
 for arg; do
   case "$arg" in
-    */health) printf '%s' "$FAKE_HEALTH"; exit 0 ;;
+    */health)
+      # FAKE_HEALTH_REFUSALS: the ingest (port 3907) refuses that many
+      # connections first, as one still applying migrations does after its
+      # restart. Other services answer at once.
+      if [ -n "${FAKE_HEALTH_REFUSALS:-}" ] && [[ "$arg" == *:3907/health ]]; then
+        n="$(cat "$TRACE.refused" 2>/dev/null || echo 0)"
+        if [ "$n" -lt "$FAKE_HEALTH_REFUSALS" ]; then
+          echo $((n + 1)) >"$TRACE.refused"
+          echo "curl: (7) Failed to connect" >&2
+          exit 7
+        fi
+      fi
+      printf '%s' "$FAKE_HEALTH"; exit 0 ;;
   esac
 done
 echo '{}'
@@ -179,6 +191,34 @@ elif grep -q 'near_ai_staging' "$scratch/wrong.trace.err" \
 else
   fail "pilot deploy.sh failed for some other reason on a staging /health"
   cat "$scratch/wrong.trace.err" >&2
+fi
+
+# A first install applies every migration, so the ingest may refuse
+# connections for a while after its start: deploy.sh asks again rather than
+# ending on the first refusal, and bounds each ask.
+rm -f "$scratch/slow.trace.refused"
+if run_deploy "$scratch/slow.trace" "$pilot_health" FAKE_HEALTH_REFUSALS=5 \
+  && grep -q 'DEPLOY OK' "$scratch/slow.trace.out"; then
+  pass "pilot deploy.sh waits for a slow ingest's /health"
+else
+  fail "pilot deploy.sh ended on an ingest that was still starting"
+  cat "$scratch/slow.trace.err" >&2
+fi
+if grep -q -- '--connect-timeout 2 --max-time 5 http://127.0.0.1:3907/health' "$scratch/slow.trace"; then
+  pass "pilot deploy.sh bounds each /health ask"
+else
+  fail "pilot deploy.sh asks /health with no time limit"
+fi
+# One that never answers is refused and taken down, never left running.
+rm -f "$scratch/silent.trace.refused"
+if run_deploy "$scratch/silent.trace" "$pilot_health" FAKE_HEALTH_REFUSALS=1000; then
+  fail "pilot deploy.sh carried on with an ingest whose /health never answered"
+elif grep -q 'did not answer' "$scratch/silent.trace.err" \
+  && grep -qx 'sudo systemctl stop trace-commons-ingest.service' "$scratch/silent.trace"; then
+  pass "pilot deploy.sh refuses and stops an ingest whose /health never answers"
+else
+  fail "pilot deploy.sh failed for some other reason when /health never answered"
+  cat "$scratch/silent.trace.err" >&2
 fi
 
 staging_args=(TC_DB_MODE=local TC_DEPLOY_LABEL=STAGING TC_EXPECT_STAGING=1
@@ -321,6 +361,25 @@ if run_pull "$scratch/pull-staging.trace" "$staging_health" TC_EXPECT_STAGING=1;
 else
   fail "pull-and-install.sh with TC_EXPECT_STAGING=1 refused a staging build"
   cat "$scratch/pull-staging.trace.err" >&2
+fi
+# A first boot that applies migrations is not listening yet when the
+# check starts (2026-10-27: V139 and V140 on staging, refused once, and the
+# deploy rolled a good build back). The check waits for /health to answer.
+rm -f "$scratch/pull-slow.trace.refused"
+if run_pull "$scratch/pull-slow.trace" "$staging_health" TC_EXPECT_STAGING=1 FAKE_HEALTH_REFUSALS=5; then
+  if ! grep -qxF "$rollback" "$scratch/pull-slow.trace"; then
+    pass "pull-and-install.sh with TC_EXPECT_STAGING=1 waits for a slow ingest's /health"
+    if grep -q -- '--connect-timeout 2 --max-time 5 http://127.0.0.1:3907/health' "$scratch/pull-slow.trace"; then
+      pass "pull-and-install.sh bounds each /health ask"
+    else
+      fail "pull-and-install.sh asks /health with no time limit"
+    fi
+  else
+    fail "pull-and-install.sh rolled back an ingest that was still starting"
+  fi
+else
+  fail "pull-and-install.sh with TC_EXPECT_STAGING=1 refused an ingest that was still starting"
+  cat "$scratch/pull-slow.trace.err" >&2
 fi
 for health in "$pilot_health" '{"status":"ok"}' ''; do
   if run_pull "$scratch/pull-wrong.trace" "$health" TC_EXPECT_STAGING=1; then
@@ -823,6 +882,232 @@ while IFS= read -r name; do
     fail "the staging render or template does not name $name"
   fi
 done <<<"$rail_names"
+
+# Referral rewards (referral spec sections 3-7). Off by default: no program
+# start, so no code can be made or applied, and the bonus stream disabled.
+# The ingest reads unset as off and a present-but-malformed value as a
+# refusal to boot, so the render writes a setting only when it is given.
+referral_program_keys='^TRACE_COMMONS_REFERRAL_(PROGRAM_START|PROGRAM_END|LATE_DAYS|EARN_DAYS|BONUS_BPS|NETWORK_MARK_KEY|ACCOUNT_CEILING_NANO)='
+expect "$ingest_default" TRACE_COMMONS_NEAR_AI_REFERRAL_MODE disabled
+if grep -Eq "$referral_program_keys|^TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL" "$ingest_default"; then
+  fail "the default staging render sets a referral setting other than the disabled mode"
+else
+  pass "the default staging render leaves referrals off"
+fi
+if render_pilot "$repo/deploy/pilot-gcp/ingest.env.template" \
+  | grep -Eq "$referral_program_keys|^TRACE_COMMONS_NEAR_AI_REFERRAL_(MODE|CREDENTIAL)"; then
+  fail "the pilot render turns a referral setting on"
+else
+  pass "the pilot render leaves referrals off"
+fi
+# Synthetic values only. The mark key is base64 of 33 bytes; the referral
+# credential is an org credential distinct from the reseller key.
+mark_key_ok="$(printf 'bW1t%.0s' $(seq 11))"
+referral_key_ok="oc_$(printf 'e5%.0s' $(seq 32))"
+referral_refused() {
+  # $1: case name; the rest: NAME=value assignments.
+  local name="$1"
+  shift
+  if run_render "referral-$name" "$@"; then
+    fail "render-env.sh accepted referral settings ($name)"
+  elif ! refused "referral-$name"; then
+    fail "render-env.sh failed on referral settings ($name) without refusing"
+    cat "$scratch/referral-$name.err" >&2
+  else
+    pass "render-env.sh refuses referral settings ($name)"
+  fi
+}
+no_secret_printed() {
+  # $1: output stem; the rest: secret values that must not appear.
+  local stem="$1" value
+  shift
+  for value in "$@"; do
+    if grep -q -F "$value" "$scratch/$stem.out" "$scratch/$stem.err"; then
+      fail "render-env.sh printed a referral secret ($stem)"
+      return
+    fi
+  done
+  pass "render-env.sh prints no referral secret ($stem)"
+}
+
+# The program alone (codes, no bonus stream): its start and the network
+# mark key, which the ingest requires whenever referrals are configured.
+program_settings=(
+  TC_REFERRAL_PROGRAM_START=2026-11-01T00:00:00Z
+  "TC_SECRET_tc_staging_referral_network_mark_key=$mark_key_ok"
+)
+if run_render referral-program "${program_settings[@]}" \
+  TC_REFERRAL_PROGRAM_END=2027-11-01T00:00:00Z TC_REFERRAL_LATE_DAYS=30 \
+  TC_REFERRAL_EARN_DAYS=120 TC_REFERRAL_BONUS_BPS=1000; then
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_PROGRAM_START 2026-11-01T00:00:00Z
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_PROGRAM_END 2027-11-01T00:00:00Z
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_LATE_DAYS 30
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_EARN_DAYS 120
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_BONUS_BPS 1000
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY "$mark_key_ok"
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_MODE disabled
+  no_secret_printed referral-program "$mark_key_ok"
+else
+  fail "render-env.sh failed on the referral program with its settings"
+  cat "$scratch/referral-program.err" >&2
+fi
+if run_render referral-program-only-start "${program_settings[@]}"; then
+  if grep -Eq '^TRACE_COMMONS_REFERRAL_(PROGRAM_END|LATE_DAYS|EARN_DAYS|BONUS_BPS)=' "$out/ingest.env"; then
+    fail "render-env.sh wrote an optional referral setting nobody gave"
+  else
+    pass "render-env.sh leaves the optional referral settings to the ingest's defaults"
+  fi
+else
+  fail "render-env.sh failed on the referral program with only its start"
+fi
+referral_refused program-no-mark-key TC_REFERRAL_PROGRAM_START=2026-11-01T00:00:00Z
+if grep -q 'tc-staging-referral-network-mark-key' "$scratch/referral-program-no-mark-key.err"; then
+  pass "the referral refusal names the network mark key secret"
+else
+  fail "the referral refusal does not name the network mark key secret"
+fi
+referral_refused program-bad-start "${program_settings[@]}" TC_REFERRAL_PROGRAM_START=tomorrow
+referral_refused program-bad-earn-days "${program_settings[@]}" TC_REFERRAL_EARN_DAYS=92d
+referral_refused program-bad-mark-key TC_REFERRAL_PROGRAM_START=2026-11-01T00:00:00Z \
+  "TC_SECRET_tc_staging_referral_network_mark_key=short"
+referral_refused program-two-line-mark-key TC_REFERRAL_PROGRAM_START=2026-11-01T00:00:00Z \
+  "TC_SECRET_tc_staging_referral_network_mark_key=$mark_key_ok"$'\n'"TRACE_COMMONS_NEAR_AI_REFERRAL_MODE=live"
+
+# The bonus stream. It rides the NEAR AI rail, so it needs the rail on, and
+# live needs the rail live; the ingest refuses either at boot.
+referral_refused stream-without-rail TC_NEAR_AI_REFERRAL_MODE=dry_run \
+  "TC_SECRET_tc_staging_referral_network_mark_key=$mark_key_ok"
+referral_refused stream-bad-mode "${payout_settings[@]}" \
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  TC_NEAR_AI_REFERRAL_MODE=on \
+  "TC_SECRET_tc_staging_referral_network_mark_key=$mark_key_ok"
+referral_refused stream-no-mark-key "${payout_settings[@]}" \
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  TC_NEAR_AI_REFERRAL_MODE=dry_run
+if run_render referral-dry-run "${payout_settings[@]}" \
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  TC_NEAR_AI_REFERRAL_MODE=dry_run TC_REFERRAL_ACCOUNT_CEILING_NANO=5000 \
+  "TC_SECRET_tc_staging_referral_network_mark_key=$mark_key_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_MODE dry_run
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO 5000
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY "$mark_key_ok"
+  # A dry run sends nothing, so it neither needs nor reads the referral
+  # credential.
+  if grep -q '^TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL' "$out/ingest.env"; then
+    fail "render-env.sh wrote a referral credential for dry_run"
+  else
+    pass "render-env.sh renders the referral stream's dry_run without its credential"
+  fi
+else
+  fail "render-env.sh failed on the referral stream's dry_run with every setting"
+  cat "$scratch/referral-dry-run.err" >&2
+fi
+referral_live=(
+  "${payout_settings[@]}" TC_NEAR_AI_PAYOUT_MODE=live
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok"
+  "TC_SECRET_tc_staging_payout_control_token=$control_token_ok"
+  TC_NEAR_AI_REFERRAL_MODE=live
+  TC_NEAR_AI_REFERRAL_CREDENTIAL_ID=00000000-0000-4000-8000-0000000000c3
+  "TC_SECRET_tc_staging_referral_network_mark_key=$mark_key_ok"
+)
+if run_render referral-live "${referral_live[@]}" \
+  "TC_SECRET_tc_staging_nearai_referral_key=$referral_key_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_MODE live
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL "$referral_key_ok"
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL_ID 00000000-0000-4000-8000-0000000000c3
+  no_secret_printed referral-live "$referral_key_ok" "$mark_key_ok"
+else
+  fail "render-env.sh failed on the referral stream live with every setting"
+  cat "$scratch/referral-live.err" >&2
+fi
+# Staging as configured on 2026-10-29: the own-trace rail live, the program
+# started, the bonus stream in dry_run, and no referral credential.
+mark_key_padded="$(printf 'bW1t%.0s' $(seq 10))bW0="
+if run_render referral-staging-2026-10-29 "${referral_live[@]}" \
+  TC_NEAR_AI_REFERRAL_MODE=dry_run TC_NEAR_AI_REFERRAL_CREDENTIAL_ID= \
+  TC_REFERRAL_PROGRAM_START=2026-10-01T00:00:00Z \
+  "TC_SECRET_tc_staging_referral_network_mark_key=$mark_key_padded"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_MODE live
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_MODE dry_run
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_PROGRAM_START 2026-10-01T00:00:00Z
+  expect "$out/ingest.env" TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY "$mark_key_padded"
+  if grep -q '^TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL' "$out/ingest.env"; then
+    fail "render-env.sh wrote a referral credential for staging's dry_run"
+  else
+    pass "render-env.sh renders staging's referral configuration without a credential"
+  fi
+else
+  fail "render-env.sh refused staging's referral configuration"
+  cat "$scratch/referral-staging-2026-10-29.err" >&2
+fi
+referral_refused live-on-dry-run-rail "${payout_settings[@]}" \
+  "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  TC_NEAR_AI_REFERRAL_MODE=live \
+  TC_NEAR_AI_REFERRAL_CREDENTIAL_ID=00000000-0000-4000-8000-0000000000c3 \
+  "TC_SECRET_tc_staging_nearai_referral_key=$referral_key_ok" \
+  "TC_SECRET_tc_staging_referral_network_mark_key=$mark_key_ok"
+referral_refused live-no-key "${referral_live[@]}"
+if grep -q 'tc-staging-nearai-referral-key' "$scratch/referral-live-no-key.err"; then
+  pass "the referral live refusal names the referral credential secret"
+else
+  fail "the referral live refusal does not name the referral credential secret"
+fi
+# Live with no referral credential sends with the payout credential (owner
+# decision, 2026-10-29): nothing more is rendered and no referral secret is
+# read, even one that is present.
+if run_render referral-live-shared "${referral_live[@]}" TC_NEAR_AI_REFERRAL_CREDENTIAL_ID= \
+  "TC_SECRET_tc_staging_nearai_referral_key=$referral_key_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_MODE live
+  if grep -q '^TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL' "$out/ingest.env"; then
+    fail "render-env.sh wrote a referral credential for a live stream on the payout credential"
+  else
+    pass "render-env.sh renders a live referral stream on the payout credential"
+  fi
+  no_secret_printed referral-live-shared "$referral_key_ok" "$mark_key_ok"
+else
+  fail "render-env.sh refused a live referral stream on the payout credential"
+  cat "$scratch/referral-live-shared.err" >&2
+fi
+# Naming the payout pair explicitly is the same choice, and renders.
+if run_render referral-live-payout-pair "${referral_live[@]}" \
+  TC_NEAR_AI_REFERRAL_CREDENTIAL_ID=00000000-0000-4000-8000-0000000000c1 \
+  "TC_SECRET_tc_staging_nearai_referral_key=$payout_key_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL "$payout_key_ok"
+else
+  fail "render-env.sh refused the payout pair named as the referral credential"
+  cat "$scratch/referral-live-payout-pair.err" >&2
+fi
+referral_refused live-api-key "${referral_live[@]}" \
+  "TC_SECRET_tc_staging_nearai_referral_key=sk-$(printf 'e5%.0s' $(seq 32))"
+# Half of the payout pair beside half of another is a mistake: refused.
+referral_refused live-reseller-key "${referral_live[@]}" \
+  "TC_SECRET_tc_staging_nearai_referral_key=$payout_key_ok"
+referral_refused live-same-credential-id "${referral_live[@]}" \
+  "TC_SECRET_tc_staging_nearai_referral_key=$referral_key_ok" \
+  TC_NEAR_AI_REFERRAL_CREDENTIAL_ID=00000000-0000-4000-8000-0000000000c1
+
+# Every referral setting the ingest reads is one the render and the staging
+# template name, so a setting added later cannot reach a configured program
+# unrendered. The abuse thresholds are tuning with defaults in code and are
+# documented in docs/operator/env-reference.md, not rendered.
+referral_names="$(
+  for f in referral_config.rs near_ai_rail_config.rs referral_network.rs; do
+    grep -E '^pub const [A-Z_]+_ENV: &str' -A1 "$repo/crates/trace-commons-server/src/$f"
+  done | grep -oE '"TRACE_COMMONS_(NEAR_AI_)?REFERRAL_[A-Z0-9_]+"' | tr -d '"' | sort -u
+)"
+if [ "$(printf '%s\n' "$referral_names" | grep -c .)" -lt 10 ]; then
+  fail "found fewer than ten referral settings in the referral config ($(printf '%s\n' "$referral_names" | grep -c .))"
+fi
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  if grep -q "$name" "$repo/deploy/staging-gcp/render-env.sh" \
+    && grep -q "$name" "$repo/deploy/staging-gcp/ingest.env.template" \
+    && grep -q "$name" "$repo/docs/operator/env-reference.md"; then
+    pass "the staging render, template and env reference name $name"
+  else
+    fail "the staging render, template or env reference does not name $name"
+  fi
+done <<<"$referral_names"
 
 # The first run's dollar estimate: unset by default, so the ingest serves no
 # range and the app words its first run in points. Both settings pass

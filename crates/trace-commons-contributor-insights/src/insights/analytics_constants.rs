@@ -96,10 +96,6 @@ pub const LEVER_SUPPRESSION_WEEKS: i64 = 4;
 /// Owner decision D10, open.
 pub const LEVER_DISMISSALS_TO_DISABLE: usize = 3;
 
-/// Weekly marks a goal shows: met, not met, or no figure, one per week. No
-/// run of weeks is counted and no ring is drawn. Owner decision D1, open.
-pub const WEEKLY_MARKS: usize = 6;
-
 /// Weekly bars each Patterns card draws, oldest first, ending at the week on
 /// screen. A week with no figure is a gap, never a zero bar, and no run of
 /// weeks is counted. Owner decisions D1 and D10, open.
@@ -186,8 +182,11 @@ pub const LEDGER_GLANCE_STALE_SECS: i64 = 600;
 /// Whether the daemon setting `insights_counter_pass` starts on. While it is
 /// off the watcher runs no counter pass, nothing is read for Insights, and
 /// `insights_week` answers `enabled: false` without touching the store.
-/// Owner decision D4, open.
-pub const COUNTER_PASS_DEFAULT_ON: bool = false;
+/// On (product owner, 2026-10-29: "counting is on by default, it must be on
+/// always"), which settles owner decision D4: Insights reads the local
+/// session files, nothing is uploaded for it. An install saved before then
+/// is turned on once (`insights_counter_pass_defaulted_on`).
+pub const COUNTER_PASS_DEFAULT_ON: bool = true;
 /// Whether the weekly summary card starts on. It is an in-app card only (no
 /// notification: owner decision D1), and it shows nothing without feed T.
 /// Owner decisions D1 and D4, open.
@@ -252,6 +251,25 @@ pub const COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS: usize = 196_608;
 /// automated tokens. Half the shared cap, so the store grows by at most
 /// half as many rows.
 pub const COUNTER_STORE_MAX_AUTOMATED_SESSIONS: usize = 1_024;
+/// Claude sub-agent transcripts' own allowance (product owner,
+/// 2026-10-29): the transcripts a Claude session's sub-agents and its
+/// workflows' sub-agents wrote (`<session>/subagents/**/agent-*.jsonl`) are
+/// kept as rows of their own, apart from the person's sessions, and count
+/// toward none of the caps above. At most this many are kept, and their
+/// per-turn series at most `..._TURNS` turns and `..._TOOL_CALLS` tool
+/// calls together, the oldest evicted first. They enter only Benchmarks'
+/// sub-agent population: never a week's totals, spend, Sessions or Models.
+///
+/// Sized from the owner's machine on 2026-10-29: 2,672 sub-agent
+/// transcripts in the last four weeks (741 delegated, 1,931 from
+/// workflows), a median of about 45 usage records each. The person's own
+/// session cap, so the store grows by at most as many rows again; a
+/// heavier user keeps their newest three or so weeks of sub-agents.
+pub const COUNTER_STORE_MAX_SPAWNED_SESSIONS: usize = 2_048;
+/// See `COUNTER_STORE_MAX_SPAWNED_SESSIONS`.
+pub const COUNTER_STORE_MAX_SPAWNED_TURNS: usize = 131_072;
+/// See `COUNTER_STORE_MAX_SPAWNED_SESSIONS`.
+pub const COUNTER_STORE_MAX_SPAWNED_TOOL_CALLS: usize = 131_072;
 /// Sessions last written longer ago than this many weeks are not read, and
 /// their rows are dropped: enough for six weekly marks and a four-week
 /// baseline. Owner decision D4, open.
@@ -304,8 +322,13 @@ pub const CODEX_REVIEWER_MODEL: &str = "codex-auto-review";
 /// section 5).
 pub const CLASSIFIER_VERSION: u32 = 1;
 /// Version of the stored session facts. A bump that changes what a scan
-/// collects re-reads each row once.
-pub const SESSION_FACTS_VERSION: u32 = 1;
+/// collects re-reads each row once, its automation included. 2: Codex
+/// `FileChange` items are read as edits, and a spawned Codex thread is
+/// automated whatever `session_meta` follows its own. 3: Claude `/goal`
+/// goals are kept beside the facts (product owner, 2026-10-29). 4: a
+/// Claude session whose only sub-agents ran in a workflow is marked as
+/// having delegated (`delegated_unread`).
+pub const SESSION_FACTS_VERSION: u32 = 4;
 
 /// Sessions a (task type, model) cell needs before its figure is compared
 /// (spec section 6).
@@ -415,8 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn weekly_marks_not_streaks() {
-        assert_eq!(WEEKLY_MARKS, 6);
+    fn pattern_bars_cover_six_weeks() {
         assert_eq!(PATTERN_BAR_WEEKS, 6);
     }
 
@@ -441,7 +463,7 @@ mod tests {
 
     #[test]
     fn counter_pass_constants() {
-        const { assert!(!COUNTER_PASS_DEFAULT_ON) };
+        const { assert!(COUNTER_PASS_DEFAULT_ON) };
         const { assert!(COUNTER_PASS_EXCLUDES_NEVER_FOLDERS) };
         const { assert!(RECAP_CARD_DEFAULT_ON) };
         assert_eq!(COUNTER_STORE_MAX_SESSIONS, 2_048);
@@ -465,12 +487,15 @@ mod tests {
         };
         assert_eq!(COUNTER_STORE_MAX_AUTOMATED_SESSIONS, 1_024);
         const { assert!(COUNTER_STORE_MAX_AUTOMATED_SESSIONS < COUNTER_STORE_MAX_SESSIONS) };
+        assert_eq!(COUNTER_STORE_MAX_SPAWNED_SESSIONS, 2_048);
+        assert_eq!(COUNTER_STORE_MAX_SPAWNED_TURNS, 131_072);
+        assert_eq!(COUNTER_STORE_MAX_SPAWNED_TOOL_CALLS, 131_072);
         assert_eq!(COUNTER_STORE_KEEP_WEEKS, 13);
         assert_eq!(COUNTER_PASS_MAX_READS_PER_TICK, 16);
         assert_eq!(COUNTER_PASS_MAX_BYTES_PER_TICK, 64 * 1024 * 1024);
         assert_eq!(COUNTER_PASS_MAX_LINE_BYTES, 16 * 1024 * 1024);
-        // The kept weeks cover the six weekly marks plus the lever's baseline.
-        const { assert!(COUNTER_STORE_KEEP_WEEKS as usize > WEEKLY_MARKS + LEVER_BASELINE_WEEKS) };
+        // The kept weeks cover six weekly bars plus the lever's baseline.
+        const { assert!(COUNTER_STORE_KEEP_WEEKS as usize > PATTERN_BAR_WEEKS + LEVER_BASELINE_WEEKS) };
     }
 
     #[test]
@@ -500,7 +525,7 @@ mod tests {
     #[test]
     fn task_classifier_constants() {
         assert_eq!(CLASSIFIER_VERSION, 1);
-        assert_eq!(SESSION_FACTS_VERSION, 1);
+        assert_eq!(SESSION_FACTS_VERSION, 4);
         assert_eq!(DOC_EXTENSIONS, ["md", "mdx", "rst", "adoc"]);
         assert_eq!(DOC_DIRS, ["docs", "doc"]);
         assert_eq!(TEST_DIRS, ["tests", "test", "__tests__", "spec"]);

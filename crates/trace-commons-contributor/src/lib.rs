@@ -10,6 +10,7 @@ pub mod attach_copy;
 pub mod brand;
 pub mod channel;
 pub mod cli;
+pub mod cli_tool;
 pub mod commands;
 pub mod commons_credit;
 pub mod compute;
@@ -32,6 +33,7 @@ pub mod health_copy;
 pub mod history_copy;
 pub mod identity;
 pub mod inference_connection;
+pub mod large_session_gate;
 // Insights lives in the `trace-commons-contributor-insights` crate, so client
 // builds that edit the rest of this crate do not recompile it; re-exported at
 // its old path.
@@ -93,6 +95,7 @@ pub mod mission_attempt;
 pub mod mission_catalog;
 pub mod mission_draft;
 pub mod mission_draft_service;
+pub mod model_training_consent;
 pub(crate) mod near_ai_login;
 pub mod nudge_copy;
 pub mod nudge_render;
@@ -108,6 +111,8 @@ pub mod project_copy;
 pub mod quit_copy;
 pub mod redaction_labels;
 pub mod redaction_summary;
+pub mod referral;
+pub mod referral_copy;
 pub mod routing;
 pub mod routing_copy;
 pub mod shell_words_copy;

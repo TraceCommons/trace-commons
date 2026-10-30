@@ -2134,16 +2134,16 @@ mod card_preview_tests {
         let value = serde_json::json!({
             "entry_id": "e2",
             "state": "too_large",
-            "raw_session_bytes": 385_875_968u64,
-            "limit_bytes": 67_108_864u64,
+            "raw_session_bytes": 629_145_600u64,
+            "limit_bytes": 536_870_912u64,
         });
         match parse_preview_outcome(&value) {
             Some(CardOutcome::TooLarge {
                 raw_session_bytes,
                 limit_bytes,
             }) => {
-                assert_eq!(raw_session_bytes, 385_875_968);
-                assert_eq!(limit_bytes, 67_108_864);
+                assert_eq!(raw_session_bytes, 629_145_600);
+                assert_eq!(limit_bytes, 536_870_912);
             }
             other => panic!(
                 "expected TooLarge, got a different outcome: {}",

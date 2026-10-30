@@ -59,14 +59,18 @@ final class AppModel: ObservableObject {
     }
 
     /// Read or reset one folder/agent profile without choosing an account.
-    func managedFolderSettings(tool: String, cwd: String, reset: Bool = false,
+    /// A nil `cwd` is the home folder, which the daemon resolves.
+    func managedFolderSettings(tool: String, cwd: String?, reset: Bool = false,
                                done: @escaping @MainActor (ManagedFolderSettings?) -> Void) {
         guard let client else { return done(nil) }
+        var params: [String: Any] = ["tool": tool]
+        if let cwd { params["cwd"] = cwd }
+        let sent = params
         Task.detached(priority: .userInitiated) {
             let settings = try? { () throws -> ManagedFolderSettings in
                 let response = try client.managedAction(
                     reset ? "managed_folder_settings_reset" : "managed_folder_settings_get",
-                    params: ["tool": tool, "cwd": cwd])
+                    params: sent)
                 return try JSONDecoder().decode(ManagedFolderSettings.self,
                     from: JSONSerialization.data(withJSONObject: response))
             }()
@@ -276,8 +280,12 @@ final class AppModel: ObservableObject {
             guard let invite else { return }
             MainActor.assumeIsolated { self?.inviteLinkArrived(invite) }
         }
+        sentTracesTraining.client = { [weak self] in self?.client }
     }
     private var inviteLinks: AnyCancellable?
+    /// Sent traces without Train coding models: their count, the one-time
+    /// sheet a turn-on raises, and the marks a grant leaves.
+    let sentTracesTraining = SentTracesTrainingModel()
     /// An invite link that arrived before the config directory was known,
     /// so the watch-only marker it takes back is cleared once it is.
     private var inviteAwaitingConfigDirectory: String?
@@ -407,7 +415,9 @@ final class AppModel: ObservableObject {
         stateTone: { TCPrivateInference.stateTone(state: $0) },
         servingLine: { TCPrivateInference.servingLine(port: $0) },
         shouldOffer: { TCPrivateInference.shouldOffer(answered: $0, on: $1) },
-        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) }
+        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) },
+        menuWord: { TCPrivateInference.menuWord(state: $0) },
+        menuTone: { TCPrivateInference.menuTone(state: $0) }
     )
 
     /// What the listener is doing, from the daemon's own report.
@@ -802,7 +812,16 @@ final class AppModel: ObservableObject {
             guard self.client === client,
                   notificationEpoch == self.credentialSignInNotificationEpoch else { return }
             let wasPending = self.credentialSignInPending
+            let previous = self.credentialStatus
             self.publishIfChanged(\.credentialStatus, status)
+            // The key came or went, by whichever path (the browser poll, the
+            // Sign in button's own flow, Forget, an expiry): Private AI's
+            // state is read again now, and every Private AI dot with it
+            // (owner, 2026-10-29: "the color should update if I login to
+            // near.ai"). The windows' stores follow this read.
+            if Self.credentialPresenceMoved(from: previous, to: status) {
+                self.refreshSettings()
+            }
             // The attempt is let go the moment the shared table stops
             // offering a cancel for it. Holding a finished attempt's id
             // would keep polling a ceremony nobody is waiting on.
@@ -840,6 +859,14 @@ final class AppModel: ObservableObject {
             }
         }
         refreshNearAiBalance()
+    }
+
+    /// Whether a credential read says the NEAR AI key came or went. Only
+    /// between two answered reads: the first answer after launch is not a
+    /// sign-in, and the launch already reads settings.
+    nonisolated static func credentialPresenceMoved(from previous: CredentialStatus, to current: CredentialStatus) -> Bool {
+        guard !previous.state.isEmpty, !current.state.isEmpty else { return false }
+        return (previous.state == CredentialSurface.statePresent) != (current.state == CredentialSurface.statePresent)
     }
 
     /// Re-read whenever the key is, because it is the key the balance is
@@ -1741,6 +1768,10 @@ final class AppModel: ObservableObject {
             queueChangeRefreshes.request()
         case .statusChanged:
             refreshStatus()
+            // The daemon says Private AI's listener state moves under this
+            // too (the proxy learning NEAR AI's sign-in on its tick): the
+            // menu bar's dot and the windows' stores follow the settings read.
+            refreshSettings()
             // The listener's own state moves under this, and with it whether
             // any tool has answered yet. Re-read rather than left to age.
             refreshHarnesses()
@@ -2634,14 +2665,29 @@ final class AppModel: ObservableObject {
     /// would still hold the scope that write withdraws.
     func toggleConsentScope(_ scope: ConsentScope, granted: Bool, options: [ConsentScope]) async {
         guard !consentWriteBusy, status.loggedIn, !scope.alwaysOn else { return }
+        let before = status.consentScopes
         let scopes = ConsentScopeRows.nextScopes(
-            reported: status.consentScopes, options: options, toggling: scope, granted: granted)
+            reported: before, options: options, toggling: scope, granted: granted)
         consentWriteRefused = false
         consentWriteBusy = true
-        if case .failed = await setConsentScopes(Array(scopes)) {
+        let outcome = await setConsentScopes(Array(scopes))
+        if case .failed = outcome {
             consentWriteRefused = true
         }
         consentWriteBusy = false
+        offerSentTracesTraining(outcome, before: before, at: .settings)
+    }
+
+    /// Train coding models was just turned on: offer it, once, on the
+    /// traces already sent without it (`SentTracesTrainingModel`). Only
+    /// after the daemon confirmed the write.
+    private func offerSentTracesTraining(
+        _ outcome: SetScopesOutcome, before: [String], at site: SentTracesTrainingSite
+    ) {
+        guard case .succeeded(let confirmed) = outcome,
+            SentTracesTrainingState.turnsOn(before: before, after: confirmed)
+        else { return }
+        Task { await sentTracesTraining.offerAfterTurnOn(at: site) }
     }
 
     /// A Watched folders write is in flight; the card is disabled until it
@@ -2747,8 +2793,9 @@ final class AppModel: ObservableObject {
     enum InsightsDaemonSwitch: String, CaseIterable, Hashable, Sendable {
         /// Count Private AI tokens (`insights_ledger_feed`, on by default).
         case ledgerFeed = "insights_ledger_feed"
-        /// Count tokens in watched folders (`insights_counter_pass`, off
-        /// by default; owner decision D4).
+        /// Count tokens in watched folders (`insights_counter_pass`, on by
+        /// default and always on; product owner, 2026-10-29). Settings draws
+        /// no switch for it.
         case counterPass = "insights_counter_pass"
         /// The weekly summary card (`insights_recap_card_enabled`).
         case recapCard = "insights_recap_card_enabled"
@@ -4364,11 +4411,11 @@ extension AppModel: FirstRunDaemon {
 
     /// Enroll through the near.ai login with no invite. The daemon's label
     /// is passed back for the core's line, never shown.
-    func enrollNearAI() async -> FirstRunNearAIEnrolment {
+    func enrollNearAI(referralCode: String?) async -> FirstRunNearAIEnrolment {
         guard let client else { return .refused(label: "near_ai_enroll_unavailable") }
         let outcome = await Task.detached(priority: .userInitiated) { () -> FirstRunNearAIEnrolment in
             do {
-                return try client.nearAiAccountEnroll().enrolled
+                return try client.nearAiAccountEnroll(referralCode: referralCode).enrolled
                     ? .enrolled : .refused(label: "near_ai_enroll_unavailable")
             } catch let failure as DaemonClient.Failure {
                 return .refused(label: failure.message.isEmpty ? "near_ai_enroll_unavailable" : failure.message)
@@ -4387,7 +4434,12 @@ extension AppModel: FirstRunDaemon {
     }
 
     func saveConsentScopes(_ scopes: [String]) async -> Bool {
+        let before = status.consentScopes
         let outcome = await setConsentScopes(scopes)
+        // The first run's Start: a person who already has sent traces sees
+        // the sheet on the Monitor, which the first run hands off to, not
+        // over the Start that is still running.
+        offerSentTracesTraining(outcome, before: before, at: .monitor)
         if case .succeeded = outcome { return true }
         return false
     }

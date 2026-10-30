@@ -701,9 +701,17 @@ fn weekly_codex_figures_ignore_the_series() {
     let without = [input(None)];
     let monday = chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
     let tz = chrono::FixedOffset::east_opt(0).unwrap();
-    assert_eq!(
-        week_rollup(Feed::Saved, &with, monday, &tz),
-        week_rollup(Feed::Saved, &without, monday, &tz)
+    // Every weekly figure but `codex_by_day`, which is the series split by
+    // day (product owner, 2026-10-28) and so reads it by design.
+    let figures = |sessions: &[SessionInput]| {
+        let mut rollup = week_rollup(Feed::Saved, sessions, monday, &tz);
+        rollup.codex_by_day = None;
+        rollup
+    };
+    assert_eq!(figures(&with), figures(&without));
+    assert_ne!(
+        week_rollup(Feed::Saved, &with, monday, &tz).codex_by_day,
+        week_rollup(Feed::Saved, &without, monday, &tz).codex_by_day
     );
     assert_eq!(
         week_patterns(Feed::Saved, &with, monday, tz, 6),
@@ -725,4 +733,238 @@ fn a_session_with_no_task_start_has_unknown_active_time() {
     ]);
     assert_eq!(f.user_turns, Some(0));
     assert_eq!(f.active_secs, None);
+}
+
+// Codex `FileChange` items (Codex routes its actions through one custom
+// `exec` tool and records each applied patch as an `item_completed` event
+// whose item is a `FileChange`). Every fixture here is synthetic.
+
+/// An `exec` custom tool call: its input a script, here one that applies a
+/// patch, its newlines escaped as Codex writes them.
+fn exec_call(secs: u32, id: &str, script: &str) -> Value {
+    json!({"timestamp": ts(secs), "type": "response_item", "payload": {
+        "type": "custom_tool_call", "name": "exec", "call_id": id, "input": script}})
+}
+
+fn exec_output(secs: u32, id: &str) -> Value {
+    json!({"timestamp": ts(secs), "type": "response_item", "payload": {
+        "type": "custom_tool_call_output", "call_id": id, "output": "PRIVATE_OUTPUT"}})
+}
+
+/// An `item_completed` event holding a `FileChange` item of `status`, its
+/// `changes` keyed by absolute path as Codex writes them.
+fn file_change(secs: u32, id: &str, status: &str, changes: Value) -> Value {
+    json!({"timestamp": ts(secs), "type": "event_msg", "payload": {
+        "type": "item_completed", "thread_id": "PRIVATE-THREAD", "turn_id": "PRIVATE-TURN",
+        "started_at_ms": 1, "completed_at_ms": 2,
+        "item": {"type": "FileChange", "id": id, "status": status,
+            "stdout": "PRIVATE_STDOUT", "stderr": "", "changes": changes}}})
+}
+
+fn diff_change(diff: &str) -> Value {
+    json!({"type": "update", "unified_diff": diff, "move_path": null})
+}
+
+const EXEC_PATCH: &str = "apply_patch(\"*** Begin Patch\\n*** Update File: /w/PRIVATE_PATH/src/x.rs\\n@@\\n-PRIVATE_OLD\\n+PRIVATE_NEW\\n*** End Patch\\n\")";
+
+#[test]
+fn a_completed_file_change_is_an_edit_even_beside_exec() {
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        exec_call(1, "c1", EXEC_PATCH),
+        file_change(
+            2,
+            "exec-1",
+            "completed",
+            json!({
+                "/w/PRIVATE_PATH/src/x.rs": diff_change(
+                    "@@ -1,3 +1,3 @@\n PRIVATE_CTX\n-PRIVATE_OLD\n+PRIVATE_NEW\n+PRIVATE_MORE\n"),
+                "/w/PRIVATE_PATH/tests/x_test.rs": {"type": "add",
+                    "content": "PRIVATE_A\nPRIVATE_B\n"},
+            }),
+        ),
+        exec_output(3, "c1"),
+        tokens(4, 10, 5, 0, 0, 5),
+        complete(5),
+    ]);
+    let a = model(&e, &f, A);
+    // Two file sections; the `exec` call no longer leaves them unseen.
+    assert_eq!(a.edits, Some(2));
+    assert_eq!(f.shape.edited_files.source, 1);
+    assert_eq!(f.shape.edited_files.test, 1);
+    assert_eq!(f.shape.lines_added, Some(4));
+    assert_eq!(f.shape.lines_removed, Some(1));
+    assert_ne!(
+        f.task,
+        crate::insights::session_facts::InferredTask::NoEdits
+    );
+    // An applied change makes the session finishable, as an applied
+    // `apply_patch` does, and a policy that never asks is not prompting.
+    assert_eq!(f.finished, Some(true));
+    assert_eq!(f.edit_mode, EditMode::NotPrompting);
+    // The item is not a tool call; the series holds the `exec` call only.
+    assert_eq!(e.series.tool_calls.len(), 1);
+    assert_eq!(e.series.tool_calls[0].tool, ToolKind::Bash);
+    let bytes = [
+        serde_json::to_vec(&e).unwrap(),
+        serde_json::to_vec(&f).unwrap(),
+    ]
+    .concat();
+    let text = String::from_utf8_lossy(&bytes);
+    for private in ["PRIVATE", "/w/", "exec-1", "FileChange"] {
+        assert!(!text.contains(private), "{private}");
+    }
+}
+
+#[test]
+fn a_failed_or_declined_file_change_is_no_edit() {
+    for status in ["failed", "declined", "in_progress"] {
+        let (e, f) = scan(&[
+            started(0),
+            context(0, A, "never"),
+            exec_call(1, "c1", EXEC_PATCH),
+            file_change(
+                2,
+                "exec-1",
+                status,
+                json!({"/w/src/x.rs": diff_change("@@ -1 +1 @@\n-a\n+b\n")}),
+            ),
+            exec_output(3, "c1"),
+            tokens(4, 10, 5, 0, 0, 5),
+            complete(5),
+        ]);
+        // The `exec` call still leaves the model's edits unseen.
+        assert_eq!(model(&e, &f, A).edits, None, "{status}");
+        assert_eq!(f.shape.edited_files.total(), 0, "{status}");
+        // A patch tried and not applied is still a patch call, as a failed
+        // `apply_patch` is.
+        assert_eq!(f.edit_mode, EditMode::NotPrompting, "{status}");
+    }
+}
+
+#[test]
+fn an_exec_only_session_keeps_its_edits_unknown() {
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        exec_call(1, "c1", EXEC_PATCH),
+        exec_output(2, "c1"),
+        tokens(3, 10, 5, 0, 0, 5),
+        complete(4),
+    ]);
+    assert_eq!(model(&e, &f, A).edits, None);
+    assert_eq!(f.shape.edited_files.total(), 0);
+}
+
+#[test]
+fn file_changes_are_credited_to_the_model_of_their_turn() {
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        exec_call(1, "c1", EXEC_PATCH),
+        file_change(
+            2,
+            "exec-1",
+            "completed",
+            json!({"/w/src/a.rs": diff_change("@@ -1 +1 @@\n-a\n+b\n")}),
+        ),
+        exec_output(3, "c1"),
+        tokens(4, 10, 5, 0, 0, 5),
+        context(5, B, "never"),
+        exec_call(6, "c2", EXEC_PATCH),
+        exec_output(7, "c2"),
+        tokens(8, 20, 5, 0, 0, 5),
+        complete(9),
+    ]);
+    assert_eq!(model(&e, &f, A).edits, Some(1));
+    // B used `exec` and recorded no change: still unseen.
+    assert_eq!(model(&e, &f, B).edits, None);
+
+    // A deleted file's content gives its removed lines; a move is a rename
+    // counted once, as its target.
+    let (e, f) = scan(&[
+        started(0),
+        context(0, B, "never"),
+        file_change(
+            1,
+            "exec-1",
+            "completed",
+            json!({
+                "/w/src/gone.rs": {"type": "delete", "content": "a\nb\nc\n"},
+                "/w/src/old.rs": {"type": "update", "unified_diff": "@@ -1 +1 @@\n-a\n+b\n",
+                    "move_path": "/w/docs/new.md"},
+            }),
+        ),
+        tokens(2, 10, 5, 0, 0, 5),
+        complete(3),
+    ]);
+    assert_eq!(model(&e, &f, B).edits, Some(2));
+    assert_eq!(f.shape.lines_removed, Some(4));
+    assert_eq!(f.shape.lines_added, Some(1));
+    assert_eq!(f.shape.renamed_files, 1);
+    assert_eq!(f.shape.edited_files.doc, 1);
+    assert_eq!(f.shape.edited_files.source, 1);
+}
+
+/// A restore recorded by a later `FileChange` is an undo, as with
+/// `apply_patch`: the diff's hunks are held the same way.
+#[test]
+fn a_file_change_that_restores_an_earlier_one_is_undone() {
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        file_change(
+            1,
+            "exec-1",
+            "completed",
+            json!({"/w/src/x.rs": diff_change("@@ -1,2 +1,2 @@\n ctx\n-a\n+b\n")}),
+        ),
+        tokens(2, 10, 5, 0, 0, 5),
+        complete(3),
+        started(10),
+        context(10, A, "never"),
+        file_change(
+            11,
+            "exec-2",
+            "completed",
+            json!({"/w/src/x.rs": diff_change("@@ -1,2 +1,2 @@\n ctx\n-b\n+a\n")}),
+        ),
+        tokens(12, 20, 5, 0, 0, 5),
+        complete(13),
+    ]);
+    let a = model(&e, &f, A);
+    assert_eq!(a.edits, Some(2));
+    assert_eq!(a.undone, Some(1));
+}
+
+/// A session that records one change both as an `apply_patch` call and as
+/// a `FileChange` counts it once.
+#[test]
+fn a_change_seen_as_apply_patch_and_file_change_counts_once() {
+    let (e, f) = scan(&[
+        started(0),
+        context(0, A, "never"),
+        patch_call(
+            1,
+            "p1",
+            "*** Begin Patch\n*** Update File: src/x.rs\n@@\n-a\n+b\n*** Add File: src/y.rs\n+c\n*** End Patch\n",
+        ),
+        file_change(
+            2,
+            "exec-1",
+            "completed",
+            json!({
+                "/w/src/x.rs": diff_change("@@ -1,2 +1,2 @@\n ctx\n-a\n+b\n"),
+                "/w/src/y.rs": {"type": "add", "content": "c\n"},
+            }),
+        ),
+        output(3, "p1", "Exit code: 0"),
+        tokens(4, 10, 5, 0, 0, 5),
+        complete(5),
+    ]);
+    assert_eq!(model(&e, &f, A).edits, Some(2));
+    assert_eq!(f.shape.edited_files.source, 2);
+    assert_eq!(f.shape.lines_added, Some(2));
+    assert_eq!(f.shape.lines_removed, Some(1));
 }

@@ -245,6 +245,17 @@ public enum FirstRunPlan {
             if state.sharing == .askMe { calls.append(.setAskEachTime) }
             calls.append(.setConsentScopes(state.scopes.sorted()))
         }
+        // Automatic alone is not enough: only the core's ready answer after
+        // both disclosures (`grantReady`) sends the grant.
+        let grants = state.sharing == .automatic && state.grantReady
+            && FirstRunNavigation.canChooseAutomatic(state)
+        // An Ask picked in this first run is kept under the grant (owner
+        // decision 2026-10-29, #1747). The daemon lets the grant replace an
+        // Ask set before it and keeps one set after it, so with a grant each
+        // Ask rule, and its folder's past sessions, is sent after the grant.
+        // Never and Automatic go before it: Never must hold from the start.
+        let afterGrant: (String) -> Bool = { grants && state.rules[$0] == .ask }
+        var later: [FirstRunCall] = []
         for projectID in state.rules.keys.sorted() {
             // A folder's Automatic can be picked and confirmed before sign-in
             // (Ron, 2026-10-22); it is armed here, after the scopes, once the
@@ -257,26 +268,28 @@ public enum FirstRunPlan {
                 mode != .autoUpload
                     || (FirstRunNavigation.canChooseAutomatic(state) && state.sharing != .askMe)
             {
-                calls.append(.setProjectMode(projectID: projectID, mode))
+                let call = FirstRunCall.setProjectMode(projectID: projectID, mode)
+                if afterGrant(projectID) { later.append(call) } else { calls.append(call) }
             }
         }
+        var laterIncludes: [FirstRunCall] = []
         for projectID in state.pastSelections.keys.sorted() {
             // A Never folder contributes nothing, its past sessions
             // included; the daemon would refuse the whole include.
             guard state.rules[projectID] != .ignore,
                 let sessions = state.pastSelections[projectID], !sessions.isEmpty
             else { continue }
-            calls.append(.includePastSessions(projectID: projectID, sessions.sorted()))
+            let call = FirstRunCall.includePastSessions(projectID: projectID, sessions.sorted())
+            if afterGrant(projectID) { laterIncludes.append(call) } else { calls.append(call) }
         }
         // Every first run passes the Private AI step; the switch is sent
         // once the person turned it on. Off is where it starts, and an
         // untouched switch sends nothing that could stop Start.
         if state.privateAI { calls.append(.setPrivateAI(true)) }
-        // Automatic alone is not enough: only the core's ready answer after
-        // both disclosures (`grantReady`) sends the grant.
-        if state.sharing == .automatic, state.grantReady, FirstRunNavigation.canChooseAutomatic(state) {
+        if grants {
             calls.append(.grantAutomatic(witness: state.witnessSigningAddress))
         }
+        calls += later + laterIncludes
         calls.append(watchOnly ? .markWatchOnlyComplete : .markComplete)
         return calls
     }

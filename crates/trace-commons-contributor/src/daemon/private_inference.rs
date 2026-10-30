@@ -165,6 +165,31 @@ impl PrivateInferenceState {
     }
 }
 
+/// Whether NEAR AI answers the proxy's calls, for
+/// [`PrivateInferenceState::label_for`].
+///
+/// `proxy` is the proxy's own reading of its NEAR AI backend; `None` when
+/// it has not been read or its backend list does not mention NEAR AI.
+/// `holds_near_ai_key` is whether this daemon holds the key it hands the
+/// proxy; `None` when it could not read its own credential state.
+///
+/// The proxy's reading wins whenever there is one. Without it, a daemon
+/// that knows it holds no key knows the proxy has none from it either, so
+/// the calls go to the tools' own accounts: the proxy leaves NEAR AI out of
+/// its list exactly when it was handed no key, and reading that as "not
+/// known" told a signed-out contributor something was wrong. A key held
+/// here, or an unread credential state, settles nothing: whether the key
+/// reached the proxy is the proxy's to say, and `Some(true)` is never
+/// inferred from this side.
+#[must_use]
+pub fn destination(proxy: Option<bool>, holds_near_ai_key: Option<bool>) -> Option<bool> {
+    match (proxy, holds_near_ai_key) {
+        (Some(reading), _) => Some(reading),
+        (None, Some(false)) => Some(false),
+        (None, Some(true) | None) => None,
+    }
+}
+
 /// The IronWire home this daemon would use: `$IRONWIRE_HOME`, else
 /// `~/.ironwire`. A staging build reads `$IRONWIRE_STAGING_HOME`, else
 /// `~/.ironwire-staging`, and never production's variable
@@ -2251,12 +2276,23 @@ mod tests {
         host.apply(false).await;
         assert!(host.finish_stop().await);
         assert_eq!(host.state(), PrivateInferenceState::Off);
-        assert!(
-            tokio::net::TcpListener::bind(("127.0.0.1", port))
+        // Windows can hold the port briefly after the listener is dropped
+        // (CI, 2026-10-29: 50 ms was not always enough), so the bind is
+        // retried for a bounded time rather than once.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let released = loop {
+            if tokio::net::TcpListener::bind(("127.0.0.1", port))
                 .await
-                .is_ok(),
-            "turning it off must release the port"
-        );
+                .is_ok()
+            {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert!(released, "turning it off must release the port");
     }
 
     /// A proxy that came up with an empty registry serves health and routes
@@ -2295,6 +2331,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The proxy leaves NEAR AI out of its backend list when it was handed
+    /// no key, so a signed-out contributor read as "not known". The daemon
+    /// knows it handed the proxy no key, and that is enough to say calls go
+    /// to the tools' own accounts. It is never enough to say NEAR AI
+    /// answers: only the proxy's own reading says that.
+    #[test]
+    fn the_daemon_knowing_it_holds_no_key_settles_an_unread_destination() {
+        // The proxy's reading wins whenever there is one.
+        for held in [Some(true), Some(false), None] {
+            assert_eq!(destination(Some(true), held), Some(true), "{held:?}");
+            assert_eq!(destination(Some(false), held), Some(false), "{held:?}");
+        }
+        // Signed out, NEAR AI absent from the proxy's list: answered elsewhere.
+        assert_eq!(destination(None, Some(false)), Some(false));
+        // Signed in, or the daemon could not read its own credential state,
+        // and the proxy did not say: not known, never running.
+        assert_eq!(destination(None, Some(true)), None);
+        assert_eq!(destination(None, None), None);
     }
 
     #[test]

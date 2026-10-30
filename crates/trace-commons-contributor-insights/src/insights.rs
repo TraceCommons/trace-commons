@@ -4,6 +4,7 @@
 //! is a provisional session boundary, never an inferred completed task.
 pub mod analytics_constants;
 pub mod analytics_copy;
+pub mod benchmarks;
 pub mod cache_share;
 pub mod card_presentation;
 pub mod card_store;
@@ -38,6 +39,7 @@ pub mod session_identity;
 pub mod session_labels;
 pub mod session_pricing;
 pub mod session_sparkline;
+pub mod slash_goals;
 pub mod summary;
 pub mod task_attribution;
 pub mod task_classifier;

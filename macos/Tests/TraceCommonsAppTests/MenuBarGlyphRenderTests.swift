@@ -45,10 +45,7 @@ final class MenuBarGlyphRenderTests: XCTestCase {
                 .background(scheme == .dark ? Color.black : Color.white)
                 .environment(\.colorScheme, scheme)
         )
-        renderer.scale = scale
-        guard let image = renderer.nsImage,
-              let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
+        guard let rep = Self.draw(renderer, scale: scale),
               let png = rep.representation(using: .png, properties: [:])
         else { return nil }
         // Ink is anything that is not the background: the bars are colour,
@@ -68,6 +65,26 @@ final class MenuBarGlyphRenderTests: XCTestCase {
             }
         }
         return Rendered(png: png, inked: inked, weight: Int(weight * 100))
+    }
+
+    /// Draws into a bitmap this test owns (sRGB, 8 bits a channel), rather
+    /// than through `nsImage`, whose shared drawing state another test's
+    /// `ImageRenderer` drawing leaves behind.
+    @MainActor
+    private static func draw<Content: View>(_ renderer: ImageRenderer<Content>, scale: CGFloat) -> NSBitmapImageRep? {
+        var bitmap: NSBitmapImageRep?
+        renderer.render(rasterizationScale: scale) { size, paint in
+            let width = Int((size.width * scale).rounded(.up)), height = Int((size.height * scale).rounded(.up))
+            guard width > 0, height > 0,
+                  let space = CGColorSpace(name: CGColorSpace.sRGB),
+                  let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                          space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return }
+            context.scaleBy(x: scale, y: scale)
+            paint(context)
+            bitmap = context.makeImage().map(NSBitmapImageRep.init(cgImage:))
+        }
+        return bitmap
     }
 
     private var outputDirectory: URL {
@@ -110,8 +127,12 @@ final class MenuBarGlyphRenderTests: XCTestCase {
     }
 
     /// A count past 99 draws as 99+, whatever the count (owner, 2026-10-21).
+    /// The two drawings of 99+ match byte for byte.
     @MainActor
     func testACountPastNinetyNineDrawsNinetyNinePlus() throws {
+        XCTAssertEqual(GlassMenuBarStrip.badgeText(100), "99+")
+        XCTAssertEqual(GlassMenuBarStrip.badgeText(4_321), "99+")
+        XCTAssertEqual(GlassMenuBarStrip.badgeText(99), "99")
         for scheme in [ColorScheme.light, .dark] {
             let hundred = try XCTUnwrap(render(.live, badge: 100, scheme: scheme, scale: 2))
             let thousands = try XCTUnwrap(render(.live, badge: 4_321, scheme: scheme, scale: 2))

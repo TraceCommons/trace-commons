@@ -8617,6 +8617,7 @@ dependencies = [
  "windows-native-keyring-store",
  "windows-sys 0.61.2",
  "zbus-secret-service-keyring-store",
+ "zstd",
 ]
 
 [[package]]
@@ -8688,6 +8689,7 @@ dependencies = [
  "tracing",
  "uuid 1.23.1",
  "windows-sys 0.61.2",
+ "zstd",
 ]
 
 [[package]]

@@ -673,10 +673,17 @@ pub struct DaemonSettings {
     /// Whether the watcher runs the Insights counter pass (feed T) over the
     /// sessions it finds, after quiescence, and `insights_week` answers from
     /// its store. Off, the pass never runs and nothing is read for Insights.
-    /// Starts as `insights::analytics_constants::COUNTER_PASS_DEFAULT_ON`,
-    /// owner decision D4, open.
+    /// Starts as `insights::analytics_constants::COUNTER_PASS_DEFAULT_ON`
+    /// (on; product owner, 2026-10-29).
     #[serde(default = "default_insights_counter_pass")]
     pub insights_counter_pass: bool,
+
+    /// Whether `insights_counter_pass` was turned on by the 2026-10-29
+    /// default change. A file saved before it lacks this and is turned on
+    /// once when loaded; after that a saved `false` (unenroll, or an agent
+    /// writing `set_settings`) stays off.
+    #[serde(default)]
+    pub insights_counter_pass_defaulted_on: bool,
 
     /// Whether the Insights window shows the weekly summary card on the first
     /// open after a week closes. The card's only on/off: there is no switch
@@ -687,9 +694,15 @@ pub struct DaemonSettings {
     #[serde(default = "default_insights_recap_card_enabled")]
     pub insights_recap_card_enabled: bool,
 
-    /// Explicit permission to read native Codex subscription usage; display only.
-    #[serde(default)]
+    /// Whether Refresh may read native Codex subscription usage; display
+    /// only. On by default since 2026-10-27 (owner): like Claude, nothing is
+    /// read until Refresh. A saved `false` stays off; no migration.
+    #[serde(default = "default_subscription_usage_on")]
     pub subscription_usage_codex_enabled: bool,
+    /// Whether Refresh may read Claude subscription usage. On by default; the
+    /// Settings switch turns it off (owner, 2026-10-27).
+    #[serde(default = "default_subscription_usage_on")]
+    pub subscription_usage_claude_on: bool,
     /// Legacy cleanup flag; Claude usage no longer requires an opt-in.
     #[serde(default)]
     pub subscription_usage_claude_enabled: bool,
@@ -1321,6 +1334,10 @@ fn default_insights_counter_pass() -> bool {
     crate::insights::analytics_constants::COUNTER_PASS_DEFAULT_ON
 }
 
+fn default_subscription_usage_on() -> bool {
+    true
+}
+
 fn default_insights_recap_card_enabled() -> bool {
     crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON
 }
@@ -1389,8 +1406,10 @@ impl Default for DaemonSettings {
             insights_ledger_feed: default_insights_ledger_feed(),
             insights_context_threshold: None,
             insights_counter_pass: default_insights_counter_pass(),
+            insights_counter_pass_defaulted_on: true,
             insights_recap_card_enabled: default_insights_recap_card_enabled(),
-            subscription_usage_codex_enabled: false,
+            subscription_usage_codex_enabled: default_subscription_usage_on(),
+            subscription_usage_claude_on: default_subscription_usage_on(),
             subscription_usage_claude_enabled: false,
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
@@ -1508,6 +1527,10 @@ impl DaemonSettings {
             .get("scrub_check")
             .is_none_or(serde_json::Value::is_null);
         settings.apply_notify_upgrade(&stored);
+        if !settings.insights_counter_pass_defaulted_on {
+            settings.insights_counter_pass = true;
+            settings.insights_counter_pass_defaulted_on = true;
+        }
         settings.absorb_legacy_roots();
         settings.validate_digest_schedule();
         for field in settings.clamp_numeric_ranges() {
@@ -2179,9 +2202,14 @@ pub fn apply_settings_object(
                 settings.insights_ledger_feed =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
-            // Current provider allowances; each reader is independently opt-in.
+            // Current provider allowances; each reader has its own switch,
+            // on by default, and reads only on Refresh.
             "subscription_usage_codex_enabled" => {
                 settings.subscription_usage_codex_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            "subscription_usage_claude_on" => {
+                settings.subscription_usage_claude_on =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             "subscription_usage_claude_enabled" => {
@@ -2192,7 +2220,7 @@ pub fn apply_settings_object(
                 }
                 settings.subscription_usage_claude_enabled = false;
             }
-            // Insights feed T (owner decision D4, open). Off by default.
+            // Insights feed T. On by default (product owner, 2026-10-29).
             "insights_counter_pass" => {
                 settings.insights_counter_pass =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
@@ -3587,31 +3615,129 @@ mod tests {
         assert!(s.insights_ledger_feed);
     }
 
-    /// The Insights counter pass (feed T, owner decision D4, open) starts
-    /// off, an older settings file loads it off, and it takes a boolean only.
+    /// The Insights counter pass (feed T) starts on (product owner,
+    /// 2026-10-29, settling owner decision D4), a file that never had the
+    /// field loads it on, and it takes a boolean only.
     #[test]
-    fn the_insights_counter_pass_starts_off_and_takes_a_boolean() {
-        assert!(!DaemonSettings::default().insights_counter_pass);
+    fn the_insights_counter_pass_starts_on_and_takes_a_boolean() {
+        assert!(DaemonSettings::default().insights_counter_pass);
         let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
         assert_eq!(
             v.get("insights_counter_pass"),
-            Some(&serde_json::json!(false))
+            Some(&serde_json::json!(true))
         );
         v.as_object_mut().unwrap().remove("insights_counter_pass");
         let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
-        assert!(!settings.insights_counter_pass);
+        assert!(settings.insights_counter_pass);
 
         let mut s = DaemonSettings::default();
         assert_eq!(
-            apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": true})),
+            apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": false})),
             Ok(true)
         );
-        assert!(s.insights_counter_pass);
+        assert!(!s.insights_counter_pass);
         assert_eq!(
             apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": 1})),
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
+        assert!(!s.insights_counter_pass);
+    }
+
+    /// A fresh install starts counting, with the one-time marker already
+    /// set, so nothing is migrated later.
+    #[test]
+    fn a_fresh_default_counts_with_the_marker_set() {
+        let s = DaemonSettings::default();
         assert!(s.insights_counter_pass);
+        assert!(s.insights_counter_pass_defaulted_on);
+        let (_d, store) = temp_store();
+        let loaded = DaemonSettings::load(&store).expect("no file loads the defaults");
+        assert!(loaded.insights_counter_pass);
+        assert!(loaded.insights_counter_pass_defaulted_on);
+    }
+
+    /// A file saved before the 2026-10-29 default change, with counting
+    /// off and no marker, loads on, once, with the marker set.
+    #[test]
+    fn an_older_file_with_counting_off_loads_on_once() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("insights_counter_pass_defaulted_on");
+        v["insights_counter_pass"] = serde_json::json!(false);
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+
+        let loaded = DaemonSettings::load(&store).expect("an older file loads");
+        assert!(loaded.insights_counter_pass);
+        assert!(loaded.insights_counter_pass_defaulted_on);
+    }
+
+    /// Once the marker is set, a saved `false` (unenroll turns counting off)
+    /// stays off across loads.
+    #[test]
+    fn a_saved_off_after_the_marker_stays_off() {
+        let (_d, store) = temp_store();
+        let s = DaemonSettings {
+            insights_counter_pass: false,
+            ..DaemonSettings::default()
+        };
+        s.save(&store).unwrap();
+        let loaded = DaemonSettings::load(&store).expect("a saved file loads");
+        assert!(!loaded.insights_counter_pass);
+        assert!(loaded.insights_counter_pass_defaulted_on);
+        let again = DaemonSettings::load(&store).expect("a saved file loads");
+        assert!(!again.insights_counter_pass);
+    }
+
+    /// Codex usage reading starts on (owner, 2026-10-27), like Claude: it
+    /// reads credentials only on Refresh. A file that never had the field
+    /// loads it on, a saved `false` stays off, and turning it off sticks.
+    #[test]
+    fn codex_subscription_usage_starts_on_and_a_saved_off_stays_off() {
+        assert!(DaemonSettings::default().subscription_usage_codex_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("subscription_usage_codex_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v.clone()).expect("settings load");
+        assert!(settings.subscription_usage_codex_enabled);
+        v.as_object_mut().unwrap().insert(
+            "subscription_usage_codex_enabled".into(),
+            serde_json::json!(false),
+        );
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.subscription_usage_codex_enabled);
+    }
+
+    /// Claude has its own switch, on by default, and an older file loads it on.
+    #[test]
+    fn claude_subscription_usage_has_a_switch_that_starts_on() {
+        assert!(DaemonSettings::default().subscription_usage_claude_on);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("subscription_usage_claude_on");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(settings.subscription_usage_claude_on);
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"subscription_usage_claude_on": false})
+            ),
+            Ok(true)
+        );
+        assert!(!s.subscription_usage_claude_on);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"subscription_usage_claude_on": "on"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
     }
 
     /// The weekly summary card starts as its constant says (owner decisions

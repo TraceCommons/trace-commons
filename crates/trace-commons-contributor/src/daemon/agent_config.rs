@@ -69,12 +69,16 @@ pub(crate) fn schema() -> Value {
         ),
         (
             "subscription_usage_codex_enabled",
-            "Permit explicit Refresh to read file-backed native Codex subscription limits, including saved managed profiles. Codex may renew its own sign-in. Keyring and automatic credential storage are unsupported. No background credential reads, trace upload, or routing change.",
+            "Permit explicit Refresh to read file-backed native Codex subscription limits, including saved managed profiles. Reads usage from ChatGPT with the saved sign-in, which is never modified; a sign-in that needs renewing goes to the Codex app, which may renew it. Keyring and automatic credential storage are unsupported. No background credential reads, trace upload, or routing change.",
+        ),
+        (
+            "subscription_usage_claude_on",
+            "Permit explicit Refresh to read Claude subscription limits with the saved Claude sign-in. On by default. No background credential reads, trace upload, or routing change.",
         ),
         ("insights_ledger_feed", "Enable the Insights ledger feed."),
         (
             "insights_counter_pass",
-            "Enable the optional Insights counter pass.",
+            "Enable the Insights counter pass. On by default.",
         ),
         (
             "insights_recap_card_enabled",

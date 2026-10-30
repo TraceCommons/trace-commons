@@ -7,6 +7,15 @@
 # Reading it before running it is encouraged and is why the two-step form is
 # documented first. The piped form works too.
 #
+# The internal staging CLI, for Linux servers on x86_64 or arm64:
+#
+#   sh install.sh --staging
+#
+# installs the newest staging pre-release as near-ai-staging (and
+# trace-commons-contributor-staging), beside any released CLI. It talks only
+# to the staging servers and NEAR AI staging and keeps its own state. Pass
+# --version with a staging tag (staging-<date>-<commit>-<run>) to pin one.
+#
 # There is deliberately no prettier URL yet: a redirect from tracecommons.ai
 # would be nicer to type and would add a second thing that can be wrong, so
 # this points at the one copy that exists.
@@ -32,6 +41,7 @@ TEAM_ID="KXSWJN7WY8"
 EXPECTED_AUTHORITY="Developer ID Application: Iqlusion Inc ($TEAM_ID)"
 INSTALL_DIR="${TC_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${TC_VERSION:-latest}"
+CHANNEL=production
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install failed: %s\n' "$*" >&2; exit 1; }
@@ -41,7 +51,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dir) INSTALL_DIR="${2:?--dir needs a path}"; shift 2 ;;
     --version) VERSION="${2:?--version needs a version, e.g. 0.1.0}"; shift 2 ;;
-    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    --staging) CHANNEL=staging; shift ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
 done
@@ -53,11 +64,28 @@ need mkdir
 # ---- which build do you need -------------------------------------------
 os="$(uname -s)"
 arch="$(uname -m)"
-case "$os/$arch" in
-  Darwin/arm64)  target=aarch64-apple-darwin ;;
-  Darwin/x86_64) target=x86_64-apple-darwin ;;
-  Linux/x86_64)  target=x86_64-unknown-linux-gnu ;;
-  Linux/aarch64|Linux/arm64)
+if [ "$CHANNEL" = staging ]; then
+  # The staging macOS app ships as a DMG on the same pre-release; this
+  # installer carries only the Linux CLI.
+  case "$os/$arch" in
+    Linux/x86_64)              target=x86_64-unknown-linux-gnu ;;
+    Linux/aarch64|Linux/arm64) target=aarch64-unknown-linux-gnu ;;
+    Darwin/*)
+      die "the staging build for macOS is the Near.ai Staging app. Download the
+.dmg from the newest staging pre-release:
+  https://github.com/$REPO/releases" ;;
+    *)
+      die "no staging build for $os $arch. Staging builds are for Linux on x86_64
+or arm64, and the macOS app." ;;
+  esac
+fi
+
+case "$CHANNEL/$os/$arch" in
+  staging/*) ;;
+  */Darwin/arm64)  target=aarch64-apple-darwin ;;
+  */Darwin/x86_64) target=x86_64-apple-darwin ;;
+  */Linux/x86_64)  target=x86_64-unknown-linux-gnu ;;
+  */Linux/aarch64|*/Linux/arm64)
     die "no published binary for Linux on arm64 yet. Build from source:
   git clone https://github.com/$REPO
   cd trace-commons-server
@@ -66,13 +94,42 @@ case "$os/$arch" in
     die "unsupported platform: $os $arch. See https://docs.tracecommons.ai/cli/quickstart/" ;;
 esac
 
-asset="trace-commons-contributor-$target"
+if [ "$CHANNEL" = staging ]; then
+  asset="trace-commons-contributor-staging-$target"
+  command_name=near-ai-staging
+  compat_name=trace-commons-contributor-staging
+else
+  asset="trace-commons-contributor-$target"
+  command_name=near-ai
+  compat_name=trace-commons-contributor
+fi
 
 # NOT /releases/latest/download. This repository publishes two independent tag
 # streams -- contributor-v* for the CLI and app-v* for the desktop app -- so
 # GitHub's "latest release" is whichever was cut most recently and may hold no
 # CLI assets at all. Resolve the newest contributor-v* tag explicitly.
-if [ "$VERSION" = latest ]; then
+if [ "$CHANNEL" = staging ]; then
+  # Staging builds are pre-releases tagged staging-<date>-<commit>-<run>.
+  # The newest one that carries this platform's CLI is the first asset URL
+  # naming it: the API lists releases newest first, and an older staging
+  # pre-release may hold only the macOS app.
+  if [ "$VERSION" = latest ]; then
+    tag="$(curl -fsSL --proto '=https' --tlsv1.2 \
+        "https://api.github.com/repos/$REPO/releases?per_page=50" 2>/dev/null \
+      | grep -o "\"browser_download_url\":[[:space:]]*\"[^\"]*/download/staging-[^/\"]*/$asset\"" \
+      | head -1 \
+      | sed -e 's#.*/download/\(staging-[^/]*\)/.*#\1#')" || tag=""
+    [ -n "$tag" ] || die "could not find a staging build for $target. GitHub's API
+may be rate-limiting you, or no staging build has been published for this
+platform yet. Pass a staging tag explicitly instead:
+  sh install.sh --staging --version staging-<date>-<commit>-<run>"
+  else
+    case "$VERSION" in
+      staging-*) tag="$VERSION" ;;
+      *) die "--version with --staging takes a staging tag, e.g. staging-20261029-abc1234-12" ;;
+    esac
+  fi
+elif [ "$VERSION" = latest ]; then
   tag="$(curl -fsSL --proto '=https' --tlsv1.2 \
       "https://api.github.com/repos/$REPO/releases?per_page=50" 2>/dev/null \
     | grep -o '"tag_name":[[:space:]]*"contributor-v[^"]*"' \
@@ -86,6 +143,7 @@ else
 fi
 base="https://github.com/$REPO/releases/download/$tag"
 
+say "channel  : $CHANNEL"
 say "release  : $tag"
 say "platform : $os $arch -> $target"
 say "source   : $base/$asset"
@@ -147,14 +205,14 @@ fi
 
 # ---- install ----------------------------------------------------------
 mkdir -p "$INSTALL_DIR" || die "could not create $INSTALL_DIR"
-dest="$INSTALL_DIR/trace-commons-contributor"
+dest="$INSTALL_DIR/$compat_name"
 # Replace rather than write in place: overwriting a running binary is how you
 # get a half-written executable, and a stale file's mode would survive.
 rm -f "$dest"
 cp "$tmp/$asset" "$dest"
 chmod 755 "$dest"
 # Both names dispatch through the same implementation.
-near_ai_dest="$INSTALL_DIR/near-ai"
+near_ai_dest="$INSTALL_DIR/$command_name"
 cp "$dest" "$near_ai_dest.tmp"
 chmod 755 "$near_ai_dest.tmp"
 mv -f "$near_ai_dest.tmp" "$near_ai_dest"
@@ -173,5 +231,14 @@ case ":$PATH:" in
 esac
 
 say ""
-say "next: near-ai login --invite <url>"
-say "docs: https://docs.tracecommons.ai/cli/quickstart/"
+if [ "$CHANNEL" = staging ]; then
+  say "next, on a server with no browser, one of:"
+  say "  $command_name login --code <code>      (code from \`devices add\` on your signed-in computer)"
+  say "  $command_name login --invite <url>     (a staging invite link)"
+  say "  $command_name login --no-browser       (NEAR AI staging sign-in, Google)"
+  say "then: $command_name daemon install && systemctl --user enable --now trace-commons-contributor-staging.service"
+  say "docs: https://github.com/$REPO/blob/main/docs/operator/staging-tester-guide.md"
+else
+  say "next: near-ai login --invite <url>"
+  say "docs: https://docs.tracecommons.ai/cli/quickstart/"
+fi

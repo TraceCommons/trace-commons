@@ -83,14 +83,16 @@ final class HomeViewTests: XCTestCase {
     /// opens where its number lives (owner, 2026-10-12).
     func test_homeStatCardsKeepD6() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
-        // Credit is the total with its change since the last day this Mac
-        // saw (owner, 2026-10-12); the pending condition still sits under
-        // the tiles.
+        // Received and pending side by side (owner, 2026-10-29), both
+        // History's figures; pending under the D6 gate.
         XCTAssertTrue(home.contains(
-            "HomeStatTile(label: HomeFormat.creditPendingWord, "
-                + "value: HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup)), "
-                + "detail: signIn ?? delta?.text, detailInk: signIn == nil ? delta?.ink : nil, "
-                + "systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
+            "let tiles = HomeFormat.creditTiles(final: freshRollup?.creditFinal, "
+                + "pending: freshRollup?.creditPending, credit: freshCredit)"))
+        XCTAssertTrue(home.contains(
+            "HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received, "
+                + "detail: signIn, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
+        XCTAssertTrue(home.contains(
+            "HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending, action: openPrivateAI)"))
         // What is not contributed is an upsell two tiles tall across both
         // columns, under Waiting and Contributed (owner, 2026-10-19), and
         // the NEAR AI balance sits beside Credit.
@@ -132,7 +134,6 @@ final class HomeViewTests: XCTestCase {
         // The credit summary after a failed read is no summary (D6 then
         // shows a dash). The condition gates the figure but is not drawn
         // (owner, 2026-10-13).
-        XCTAssertTrue(home.contains("HomeFormat.creditTotal(HomeStore.totalCredit(credit: freshCredit, rollup: freshRollup))"))
         XCTAssertTrue(home.contains("SummaryFacts.fresh(store.credit, unless: store.failures[\"commons_credit_summary\"])"))
         XCTAssertTrue(home.contains("SummaryFacts.fresh(store.rollup, unless: store.failures[\"history_rollup\"])"))
         XCTAssertFalse(home.contains("Text(condition)"))
@@ -147,6 +148,44 @@ final class HomeViewTests: XCTestCase {
             DaemonData.CommonsCreditSummary.self, from: JSONSerialization.data(withJSONObject: object))
         XCTAssertEqual(HomeFormat.pendingFigure(3, credit: known), HomeFormat.points(3))
         XCTAssertEqual(HomeFormat.pendingFigure(nil, credit: known), "—")
+    }
+
+    /// Once #1703 reports decided credit as final, Home shows History's
+    /// Final figure, with what is still pending under it (owner,
+    /// 2026-10-28: Home and History must not disagree). Before anything is
+    /// decided it stays the pending figure, marked Pending, under D6.
+    func test_homeCreditTileShowsFinalOnceDecided() throws {
+        let reply = try XCTUnwrap(SampleDaemonData.reply("commons_credit_summary", in: .normalDay))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])
+        object["posture_state"] = "known"
+        object["commons_settlement"] = "pending_review"
+        object["commons_settlement_explanation"] = "Scored when the commons reviews it."
+        let known = try DaemonDataDecoding.decoder().decode(
+            DaemonData.CommonsCreditSummary.self, from: JSONSerialization.data(withJSONObject: object))
+
+        let undecided = HomeFormat.creditTile(final: 0, pending: 50.35, accepted: 3, credit: known)
+        XCTAssertEqual(undecided.value, HomeFormat.points(50.35))
+        XCTAssertEqual(undecided.detail, MonitorWords.pending)
+        XCTAssertEqual(HomeFormat.creditTile(final: nil, pending: 50.35, accepted: nil, credit: nil).value, "—")
+
+        let decided = HomeFormat.creditTile(final: 48, pending: 2.35, accepted: 3, credit: known)
+        XCTAssertEqual(decided.value, HomeFormat.points(48))
+        XCTAssertEqual(decided.detail, HomeFormat.creditPendingAccessory(2.35, condition: HomeFormat.pendingCondition(known)))
+        XCTAssertNotEqual(decided.detail, MonitorWords.pending)
+
+        let settled = HomeFormat.creditTile(final: 48, pending: 0, accepted: 3, credit: known)
+        XCTAssertEqual(settled.value, HomeFormat.points(48))
+        XCTAssertEqual(settled.detail, MonitorWords.final)
+        // Every accepted trace decided with no award (#1703: 0 final, 0
+        // pending) reads Final 0, never Pending.
+        let nothingEarned = HomeFormat.creditTile(final: 0, pending: 0, accepted: 22, credit: known)
+        XCTAssertEqual(nothingEarned.value, HomeFormat.points(0))
+        XCTAssertEqual(nothingEarned.detail, MonitorWords.final)
+        // With nothing accepted yet it is still the pending figure.
+        XCTAssertEqual(HomeFormat.creditTile(final: 0, pending: 0, accepted: 0, credit: known).detail,
+                       MonitorWords.pending)
+        // Without the commons' statement, pending is not shown as a figure.
+        XCTAssertEqual(HomeFormat.creditTile(final: 48, pending: 2.35, accepted: 3, credit: nil).detail, MonitorWords.final)
     }
 
     private func creditSummary(reason: String?, pointsState: String = "unknown") throws -> DaemonData.CommonsCreditSummary {
@@ -177,10 +216,20 @@ final class HomeViewTests: XCTestCase {
 
     /// The tile reads the line from the core's payout-link export, not a
     /// string of this shell's.
+    /// Received is History's Final (0 once History answered with nothing
+    /// decided); pending keeps the D6 dash without the commons' statement.
+    func test_creditTilesShowReceivedAndPending() {
+        let decided = HomeFormat.creditTiles(final: 12.5, pending: 3, credit: nil)
+        XCTAssertEqual(decided.received, HomeFormat.points(12.5))
+        XCTAssertEqual(decided.pending, "—")
+        XCTAssertEqual(HomeFormat.creditTiles(final: nil, pending: 3, credit: nil).received, HomeFormat.points(0))
+        XCTAssertEqual(HomeFormat.creditTiles(final: nil, pending: nil, credit: nil).received, "—")
+    }
+
     func test_creditSignInLineIsThePayoutLinkConstant() throws {
         XCTAssertEqual(HomeFormat.creditSignInLine, "Sign in again")
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("detail: signIn ?? delta?.text"))
+        XCTAssertTrue(home.contains("detail: signIn, systemImage: HomeStatIcons.credit"))
         XCTAssertFalse(home.contains("\"Sign in again\""))
     }
 }

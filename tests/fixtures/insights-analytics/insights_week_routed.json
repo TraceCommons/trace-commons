@@ -120,6 +120,15 @@
           "numerator": 24500,
           "denominator": 37115
         },
+        "by_day": [
+          37235,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
         "source": "claude_code",
         "tokens": 37235,
         "state": "partial",
@@ -143,6 +152,7 @@
           "numerator": 40,
           "denominator": 80
         },
+        "by_day": null,
         "source": "codex",
         "tokens": 110,
         "state": "partial",
@@ -167,10 +177,365 @@
           "calls_without_counts": 1
         }
       }
+    ],
+    "codex_by_day": [
+      null,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
     ]
   },
   "routing_available": true,
   "routing_unavailable": null,
+  "near_ai_credit": {
+    "basis": "near_ai_ledger",
+    "week": {
+      "usd_micros": 12500,
+      "sessions": 1,
+      "calls": 1,
+      "calls_without_charge": 0,
+      "from": "2026-09-14T00:00:00+00:00",
+      "to": "2026-09-21T00:00:00+00:00",
+      "by_folder": [
+        {
+          "usd_micros": 12500,
+          "sessions": 1,
+          "calls": 1,
+          "calls_without_charge": 0,
+          "key": null,
+          "tokens": 110,
+          "usd_micros_known": 12500,
+          "usd_partial": false,
+          "tokens_known": 110,
+          "tokens_partial": false
+        }
+      ],
+      "by_model": [
+        {
+          "usd_micros": 12500,
+          "sessions": 1,
+          "calls": 1,
+          "calls_without_charge": 0,
+          "tokens": 110,
+          "usd_micros_known": 12500,
+          "usd_partial": false,
+          "tokens_known": 110,
+          "tokens_partial": false,
+          "key": "zai-org/glm-4.6"
+        }
+      ],
+      "tokens": 110,
+      "usd_micros_known": 12500,
+      "usd_partial": false,
+      "tokens_known": 110,
+      "tokens_partial": false
+    },
+    "today": {
+      "usd_micros": 12500,
+      "sessions": 1,
+      "calls": 1,
+      "calls_without_charge": 0,
+      "from": "2026-09-14T00:00:00+00:00",
+      "to": "2026-09-15T00:00:00+00:00",
+      "tokens": 110,
+      "usd_micros_known": 12500,
+      "usd_partial": false,
+      "tokens_known": 110,
+      "tokens_partial": false
+    },
+    "by_day": [
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-08T00:00:00+00:00",
+        "to": "2026-09-09T00:00:00+00:00",
+        "date": "2026-09-08",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-09T00:00:00+00:00",
+        "to": "2026-09-10T00:00:00+00:00",
+        "date": "2026-09-09",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-10T00:00:00+00:00",
+        "to": "2026-09-11T00:00:00+00:00",
+        "date": "2026-09-10",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-11T00:00:00+00:00",
+        "to": "2026-09-12T00:00:00+00:00",
+        "date": "2026-09-11",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-12T00:00:00+00:00",
+        "to": "2026-09-13T00:00:00+00:00",
+        "date": "2026-09-12",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 0,
+        "sessions": 0,
+        "calls": 0,
+        "calls_without_charge": 0,
+        "from": "2026-09-13T00:00:00+00:00",
+        "to": "2026-09-14T00:00:00+00:00",
+        "date": "2026-09-13",
+        "tokens": 0,
+        "usd_micros_known": 0,
+        "usd_partial": false,
+        "tokens_known": 0,
+        "tokens_partial": false
+      },
+      {
+        "usd_micros": 12500,
+        "sessions": 1,
+        "calls": 1,
+        "calls_without_charge": 0,
+        "from": "2026-09-14T00:00:00+00:00",
+        "to": "2026-09-15T00:00:00+00:00",
+        "date": "2026-09-14",
+        "tokens": 110,
+        "usd_micros_known": 12500,
+        "usd_partial": false,
+        "tokens_known": 110,
+        "tokens_partial": false
+      }
+    ],
+    "last_31_days": {
+      "usd_micros": 12500,
+      "sessions": 1,
+      "calls": 1,
+      "calls_without_charge": 0,
+      "from": "2026-08-15T00:00:00+00:00",
+      "to": "2026-09-15T00:00:00+00:00",
+      "tokens": 110,
+      "usd_micros_known": 12500,
+      "usd_partial": false,
+      "tokens_known": 110,
+      "tokens_partial": false
+    }
+  },
+  "work": {
+    "basis": "api_list",
+    "tables": [],
+    "prices_as_of": null,
+    "week": {
+      "sessions": 2,
+      "priced_sessions": 0,
+      "unpriced_sessions": 2,
+      "usd_micros_known": 0,
+      "usd_partial": true,
+      "cache_savings_usd_micros_known": 0,
+      "edits_known": 1,
+      "edits_undone_known": 0,
+      "edits_denied_known": 0,
+      "edits_partial": true,
+      "edits_count_partial": false,
+      "edits_undone_partial": false,
+      "edits_denied_partial": true,
+      "near_ai_sessions": 0
+    },
+    "last_week": {
+      "sessions": 0,
+      "priced_sessions": 0,
+      "unpriced_sessions": 0,
+      "usd_micros_known": 0,
+      "usd_partial": false,
+      "cache_savings_usd_micros_known": 0,
+      "edits_known": 0,
+      "edits_undone_known": 0,
+      "edits_denied_known": 0,
+      "edits_partial": false,
+      "edits_count_partial": false,
+      "edits_undone_partial": false,
+      "edits_denied_partial": false,
+      "near_ai_sessions": 0
+    },
+    "by_tool": [
+      {
+        "sessions": 1,
+        "priced_sessions": 0,
+        "unpriced_sessions": 1,
+        "usd_micros_known": 0,
+        "usd_partial": true,
+        "cache_savings_usd_micros_known": 0,
+        "edits_known": 1,
+        "edits_undone_known": 0,
+        "edits_denied_known": 0,
+        "edits_partial": true,
+        "edits_count_partial": false,
+        "edits_undone_partial": false,
+        "edits_denied_partial": true,
+        "key": "claude_code",
+        "near_ai_sessions": 0
+      },
+      {
+        "sessions": 1,
+        "priced_sessions": 0,
+        "unpriced_sessions": 1,
+        "usd_micros_known": 0,
+        "usd_partial": true,
+        "cache_savings_usd_micros_known": 0,
+        "edits_known": 0,
+        "edits_undone_known": 0,
+        "edits_denied_known": 0,
+        "edits_partial": true,
+        "edits_count_partial": false,
+        "edits_undone_partial": false,
+        "edits_denied_partial": true,
+        "key": "codex",
+        "near_ai_sessions": 0
+      }
+    ],
+    "by_model": [
+      {
+        "key": "claude-fixture-model",
+        "tool": "claude_code",
+        "sessions": 1,
+        "tokens": 37235,
+        "usd_micros_known": 0,
+        "usd_partial": true
+      }
+    ],
+    "by_folder": [
+      {
+        "sessions": 2,
+        "priced_sessions": 0,
+        "unpriced_sessions": 2,
+        "usd_micros_known": 0,
+        "usd_partial": true,
+        "cache_savings_usd_micros_known": 0,
+        "edits_known": 1,
+        "edits_undone_known": 0,
+        "edits_denied_known": 0,
+        "edits_partial": true,
+        "edits_count_partial": false,
+        "edits_undone_partial": false,
+        "edits_denied_partial": true,
+        "key": null,
+        "near_ai_sessions": 0
+      }
+    ],
+    "by_day": [
+      {
+        "date": "2026-09-14",
+        "usd_micros_known": 0,
+        "usd_partial": true
+      },
+      {
+        "date": "2026-09-15",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-16",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-17",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-18",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-19",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-20",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      }
+    ],
+    "last_week_by_day": [
+      {
+        "date": "2026-09-07",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-08",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-09",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-10",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-11",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-12",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      },
+      {
+        "date": "2026-09-13",
+        "usd_micros_known": 0,
+        "usd_partial": false
+      }
+    ]
+  },
   "overview": {
     "feed": "counter_pass",
     "generation": 0,
@@ -635,5 +1000,48 @@
       "past_threshold": null
     }
   ],
-  "recap_card_enabled": true
+  "recap_card_enabled": true,
+  "usage_by_day": [
+    {
+      "date": "2026-09-08",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-09",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-10",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-11",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-12",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-13",
+      "claude_code": 0,
+      "codex": 0
+    },
+    {
+      "date": "2026-09-14",
+      "claude_code": 37235,
+      "codex": null
+    }
+  ],
+  "goals": {
+    "by_tool": {},
+    "goals": [],
+    "met": 0,
+    "total": 0
+  }
 }

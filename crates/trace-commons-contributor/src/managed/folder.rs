@@ -118,3 +118,60 @@ pub fn apply_patch(
     settings.managed_folder_settings = next;
     Ok(())
 }
+
+/// A request that names no folder runs in the person's home directory. The
+/// daemon resolves it here so no shell guesses at a path. The folder then
+/// meets every check a picked one does: it must exist and be a directory,
+/// it is canonicalized, and the tool's project-config check runs on it.
+pub fn default_cwd(home: Option<PathBuf>) -> Result<PathBuf, ManagedError> {
+    canonical(&home.ok_or(ManagedError::InvalidRequest)?)
+}
+
+/// `params` with a `cwd` of `home` where it names none. A `cwd` that is
+/// present is left for the usual checks, even if it is empty or null.
+pub fn with_default_cwd(
+    mut params: serde_json::Value,
+    home: Option<PathBuf>,
+) -> Result<serde_json::Value, ManagedError> {
+    if let Some(object) = params.as_object_mut()
+        && !object.contains_key("cwd")
+    {
+        object.insert("cwd".into(), serde_json::json!(default_cwd(home)?));
+    }
+    Ok(params)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_request_without_a_folder_gets_the_home_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let out = with_default_cwd(json!({"tool":"claude"}), Some(home.path().into())).unwrap();
+        assert_eq!(
+            out["cwd"],
+            json!(std::fs::canonicalize(home.path()).unwrap())
+        );
+        assert_eq!(out["tool"], "claude");
+    }
+
+    #[test]
+    fn a_named_folder_is_left_alone_for_the_usual_checks() {
+        let home = tempfile::tempdir().unwrap();
+        for named in [json!("/x/y"), json!(""), json!(null)] {
+            let out =
+                with_default_cwd(json!({"cwd": named.clone()}), Some(home.path().into())).unwrap();
+            assert_eq!(out["cwd"], named);
+        }
+    }
+
+    #[test]
+    fn no_home_directory_refuses_instead_of_guessing() {
+        assert!(with_default_cwd(json!({}), None).is_err());
+        assert!(with_default_cwd(json!({}), Some("relative".into())).is_err());
+        let gone = tempfile::tempdir().unwrap().path().join("missing");
+        assert!(with_default_cwd(json!({}), Some(gone)).is_err());
+    }
+}

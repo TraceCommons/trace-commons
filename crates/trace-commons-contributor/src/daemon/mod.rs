@@ -43,6 +43,7 @@ pub mod commons_credit;
 pub mod community;
 pub mod contribution_eligibility;
 pub mod device_codes;
+pub mod model_training_consent;
 pub(crate) mod setup_completion;
 /// Moved to the platform crate, which the Insights crate shares; re-exported
 /// here at its old path.
@@ -58,11 +59,16 @@ pub mod history;
 pub mod inference_connection;
 pub mod inference_map;
 pub mod insights_analyze;
+pub mod insights_benchmarks;
+mod insights_codex_goals;
+pub(crate) mod insights_credit;
 pub mod insights_glance;
 pub mod insights_model_answers;
 pub(crate) mod insights_route_tally;
 pub mod insights_sessions;
+pub mod insights_submitted;
 pub mod insights_week;
+mod insights_week_work;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
@@ -98,6 +104,7 @@ pub mod profile;
 pub mod project_key;
 pub mod public_run;
 pub mod queue;
+pub mod referral;
 pub mod remembered_passkeys;
 pub mod second_look;
 pub mod settings;
@@ -2515,6 +2522,7 @@ mod tests {
                 consent_scopes: vec![],
                 credit_points_pending: 1.0,
                 credit_points_final: None,
+                credit_outcome_reason: None,
                 explanations: vec![],
                 last_refreshed_at: Some(at(0)),
                 withdrawn_at: None,

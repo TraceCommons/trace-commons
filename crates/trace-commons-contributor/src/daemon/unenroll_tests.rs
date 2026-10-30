@@ -534,6 +534,7 @@ fn counted(s: &DaemonShared) {
         modified_at: written,
         started_at: Some(written),
         group_member_count: 0,
+        role: crate::daemon::insights_week::CandidateRole::Watched,
     };
     let summary = s
         .insights_counter
@@ -651,7 +652,7 @@ async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
         ..Default::default()
     };
     let ledger = crate::routing::FixedLedger::new(vec![call_at(1)]);
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &ledger);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&ledger));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
 
     assert!(call(&s).await.error.is_none());
@@ -660,7 +661,7 @@ async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
     assert!(s.settings.lock().unwrap().insights_ledger_feed);
 
     let later = crate::routing::FixedLedger::new(vec![call_at(1), call_at(2)]);
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &later);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&later));
     assert!(!rows_file(&s).exists());
     assert!(s.insights_counter.key_is_absent_for_test());
 }
@@ -685,12 +686,45 @@ async fn the_ledger_fold_runs_off_the_refresh_tick() {
         proof: Some(crate::routing::ProofStatus::Verified),
         ..Default::default()
     }]);
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &ledger);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&ledger));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
     assert_ne!(
         s.insights_counter.fold_thread_for_test(),
         Some(std::thread::current().id())
     );
+}
+
+/// With no shared proxy, the managed routes' ledgers (Private AI sessions
+/// started from the app) are still folded into the route tallies, and
+/// their presence shows routing on `insights_week`.
+#[tokio::test]
+async fn managed_route_ledgers_fold_without_a_shared_proxy() {
+    let s = std::sync::Arc::new(shared());
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.insights_ledger_feed = true;
+    }
+    counted(&s);
+    assert!(!crate::daemon::insights_week::any_ledger(&s));
+    let call = crate::routing::RoutedExchange {
+        id: Some(1),
+        started_at: Utc::now() - chrono::Duration::hours(30),
+        client_session_id: Some("SESSION-SECRET".to_string()),
+        facade: "anthropic".to_string(),
+        path: Some("/v1/messages".to_string()),
+        proof: Some(crate::routing::ProofStatus::Verified),
+        cost_usd: Some(0.25),
+        ..Default::default()
+    };
+    let history = crate::routing::managed_history::ManagedHistory::from_entries(vec![(
+        std::path::PathBuf::from("/managed-routes/route-a"),
+        call,
+    )]);
+    *s.managed_history.write().unwrap() = Ok(Some(std::sync::Arc::new(history)));
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, None);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
+    assert!(crate::daemon::insights_week::any_ledger(&s));
 }
 
 /// The fold is gated on the counter pass as well as the ledger feed: with
@@ -715,19 +749,19 @@ fn no_fold_while_the_counter_pass_is_off_even_with_the_feed_on() {
         ..Default::default()
     };
     let first = crate::routing::FixedLedger::new(vec![call_at(1)]);
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &first);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&first));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
     let before = std::fs::read(rows_file(&s)).unwrap();
 
     s.settings.lock().unwrap().insights_counter_pass = false;
     let second = crate::routing::FixedLedger::new(vec![call_at(1), call_at(2)]);
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &second);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&second));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
     assert_eq!(std::fs::read(rows_file(&s)).unwrap(), before);
 
     // And on again, the call made meanwhile is folded once.
     s.settings.lock().unwrap().insights_counter_pass = true;
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &second);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&second));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 2);
 }
 
@@ -750,7 +784,7 @@ fn no_fold_while_the_ledger_feed_is_off_even_with_the_pass_on() {
             panic!("the ledger is not read while the feed is off");
         }
     }
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &Unread);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&Unread));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 0);
     assert_eq!(std::fs::read(rows_file(&s)).unwrap(), before);
 }

@@ -37,6 +37,11 @@ struct FlowMapView: View {
     /// The Traces map's style: the rocket and station, or the laptop and
     /// the library orb (`TracesMapStyle`, Settings, General).
     var mapStyle: TracesMapStyle = .launch
+    /// The + under the other devices (`FlowMapScene.addDevice`): starts
+    /// linking a server. Nil draws no +.
+    var onAddDevice: (() -> Void)? = nil
+    /// The +'s accessible name and tooltip: the Devices section's own.
+    var addDeviceLabel: String = ""
 
     @State private var zoom: CGFloat = 1
     @State private var hovered: String?
@@ -119,6 +124,10 @@ struct FlowMapView: View {
 
                 ForEach(scene.reveals, id: \.tool) { reveal in
                     revealPill(reveal, fit: fit)
+                }
+
+                if let at = scene.addDevice, let onAddDevice {
+                    addDeviceButton(at: at, fit: fit, action: onAddDevice)
                 }
 
                 // The tool group over the targets: its open card keeps the
@@ -630,6 +639,26 @@ struct FlowMapView: View {
             .frame(width: 0, height: 0, alignment: .trailing)
             .position(x: end, y: column.y)
         }
+    }
+
+    /// The + that links another device: a glass circle in the column, as
+    /// the folder pills are glass, scaled with the map.
+    private func addDeviceButton(at point: CGPoint, fit: FlowMapGeometry, action: @escaping () -> Void) -> some View {
+        let unit = max(fit.scale, Self.labelFloor)
+        let side = 26 * unit
+        return Button(action: action) {
+            Image(systemName: "plus")
+                .font(.system(size: 12 * unit, weight: .semibold))
+                .foregroundStyle(GlassColor.textPrimary)
+                .frame(width: side, height: side)
+                .glassSurface(.control, hover: GlassTokens.Color.controlHover)
+                .clipShape(Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .help(addDeviceLabel)
+        .accessibilityLabel(addDeviceLabel)
+        .position(fit.point(point))
     }
 
     private func card(_ node: FlowMapScene.Node, fit: FlowMapGeometry, in size: CGSize) -> some View {

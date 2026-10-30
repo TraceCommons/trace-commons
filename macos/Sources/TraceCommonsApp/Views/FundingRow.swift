@@ -274,9 +274,7 @@ struct FundingRow: View {
                     return
                 }
                 status = result
-                let accepted = await withCheckedContinuation { continuation in
-                    openURL(url) { continuation.resume(returning: $0) }
-                }
+                let accepted = await openURL.opened(url)
                 // Before the staleness check below: the browser opened whether
                 // or not this row is still on screen.
                 if accepted { model.noteBillingOpened() }

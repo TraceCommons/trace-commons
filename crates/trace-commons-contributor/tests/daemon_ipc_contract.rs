@@ -48,6 +48,53 @@ fn publication_methods_are_documented_with_bounds_and_fixed_errors() {
     }
 }
 #[test]
+fn model_training_consent_methods_are_documented_with_every_label() {
+    use trace_commons_contributor::model_training_consent::ConsentCallError;
+    let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
+    for method in [
+        "model_training_consent_status",
+        "model_training_consent_grant",
+    ] {
+        assert!(METHODS.contains(&method), "not served: {method}");
+        let row = format!("| `{method}` |");
+        assert!(contract.contains(&row), "missing method row: {method}");
+    }
+    for error in [
+        ConsentCallError::NotPermitted,
+        ConsentCallError::Unavailable,
+        ConsentCallError::BadSelection,
+        ConsentCallError::Failed,
+    ] {
+        let label = format!("`{}`", error.label());
+        assert!(contract.contains(&label), "missing label: {label}");
+    }
+    for required in [
+        "`selection-required`",
+        "`submission_ids-invalid`",
+        "`already_granted`",
+        "`not_eligible`",
+        "`credited`",
+        "`pending`",
+        "`remaining_eligible`",
+    ] {
+        assert!(contract.contains(required), "missing: {required}");
+    }
+}
+
+#[test]
+fn the_credit_outcome_reason_is_documented_with_every_label() {
+    let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
+    assert!(contract.contains("### Credit outcome on history rows"));
+    assert!(contract.contains("`credit_outcome_reason`"));
+    for label in trace_commons_protocol::credit_outcome::CREDIT_OUTCOME_REASONS {
+        assert!(
+            contract.contains(&format!("`{label}`")),
+            "missing credit outcome label: {label}"
+        );
+    }
+}
+
+#[test]
 fn first_run_picker_methods_are_documented_with_every_label() {
     use trace_commons_contributor::daemon::past_sessions as past;
     let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
@@ -2460,23 +2507,29 @@ async fn preview_visible_and_cancel_are_safe_to_call_repeatedly() {
 /// `too_large` must be able to trust that no would-send number accompanies
 /// it.
 #[test]
-fn the_admission_cap_admits_the_measured_claude_corpus_and_refuses_the_codex_tail() {
+fn the_admission_cap_admits_the_owners_long_sessions_and_refuses_past_512_mib() {
     // Asked of a real scheduler built the way the daemon builds it, so this
     // tracks the shipped policy rather than restating a constant.
     let sched = trace_commons_contributor::daemon::preview_scheduler::PreviewScheduler::default();
     assert_eq!(sched.admission_cap(), MAX_PREVIEW_SESSION_BYTES);
-    // The corpus behind the incident: Claude sessions topped out at
-    // 29.8 MB, Codex rollouts at 367.5 MB against a 3.5 MB mean.
+    assert_eq!(MAX_PREVIEW_SESSION_BYTES, 536_870_912);
+    // The owner's machine, 2026-10-29: Claude Code sessions up to 186 MB
+    // and Codex rollouts up to 432 MB in the last 28 days, all of which
+    // the old 64 MiB cap refused.
     assert!(
-        sched.admits(29_800_000),
-        "the largest measured Claude session must still be previewable"
+        sched.admits(186_000_000),
+        "the largest recent Claude Code session must be previewable"
+    );
+    assert!(
+        sched.admits(432_000_000),
+        "the largest recent Codex rollout must be previewable"
     );
     assert!(
         sched.admits(3_500_000),
         "the mean Codex rollout must be previewable"
     );
     assert!(
-        !sched.admits(367_500_000),
-        "the largest measured Codex rollout must not be parsed to draw a card"
+        !sched.admits(MAX_PREVIEW_SESSION_BYTES + 1),
+        "a session past the shared 512 MiB cap is not parsed to draw a card"
     );
 }

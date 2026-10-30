@@ -851,6 +851,10 @@ zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = fal
 [dev-dependencies]
 # Itself, for the test-only feature: see `test-credential-store` above.
 trace-commons-contributor = { path = ".", features = ["test-credential-store"] }
+# Test-only: compresses fixture rollouts the way Codex does. Production
+# decoding lives in trace-commons-contributor-sources; same version, no new
+# package.
+zstd = "0.14.3"
 axum = "0.8"
 # Test-only: `daemon::notify`'s evening digest schedule is generic over
 # `chrono::TimeZone` so production can pass `chrono::Local` (the real system

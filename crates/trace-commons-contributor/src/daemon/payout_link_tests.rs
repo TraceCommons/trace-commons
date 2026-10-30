@@ -813,3 +813,26 @@ async fn credit_monitoring_resolves_only_a_fresh_verified_payout_recipient() {
         None
     );
 }
+
+#[tokio::test]
+async fn status_passes_each_stream_through_and_leaves_none_out() {
+    let f = Fixture::new(true).await;
+    let without = status(&f).await;
+    assert!(
+        without["rails"][0].get("streams").is_none(),
+        "no streams keeps the pre-referral shape: {without}"
+    );
+
+    // Shared with the macOS app's test, which decodes the same bytes: the
+    // amounts are decimal strings, as the commons sends them.
+    let streams: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/payout/streams.json"
+    ))
+    .unwrap();
+    let typed: Vec<trace_commons_protocol::payout_link::PayoutStreamStatus> =
+        serde_json::from_value(streams.clone()).expect("the commons's own stream shape");
+    assert_eq!(typed[0].owed, "700");
+    f.ingest.stub.lock().unwrap().streams = Some(streams.clone());
+    let with = status(&f).await;
+    assert_eq!(with["rails"][0]["streams"], streams);
+}

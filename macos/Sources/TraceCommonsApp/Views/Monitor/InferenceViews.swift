@@ -63,21 +63,24 @@ struct InferenceTabView: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The owner's order (2026-10-09, 2026-10-10, 2026-10-19),
                 // with the inspector closed on this tab: the Private AI
-                // status leads (a static dot and the core's sentence; the
-                // owner set aside a switch here on 2026-10-19), then the
-                // NEAR AI balance with billing under it, then the managed
-                // cards (owner ruling O3: in the main pane), then the
-                // calls, and last the card that opens Settings, where the
-                // switch, the tools and the connection are. The offer and
-                // the NEAR AI sign-in are popover notices over the tab
+                // step-by-step card leads until it is closed (product
+                // owner, 2026-10-28), then the status (a static dot and the
+                // core's sentence; the owner set aside a switch here on
+                // 2026-10-19), then the managed cards, whose tool buttons
+                // are how Private AI runs, then the calls, then the NEAR AI
+                // balance with billing under it (product owner, 2026-10-28:
+                // further down), and last the card that opens Settings,
+                // where the switch, the tools and the connection are. The offer and the NEAR AI
+                // sign-in are popover notices over the tab
                 // (`MonitorNotices`).
+                PrivateAIGuideCard()
                 PrivateAIInspectorView(store: store)
                 // Only with several NEAR AI organizations and no choice made
                 // (owner request, 2026-10-23); otherwise draws nothing.
                 SpendOrganizationPrompt(onOpenSettings: onOpenSettings)
-                InferenceBalanceSection()
                 ManagedSessionsSection()
                 ledgerSections
+                InferenceBalanceSection()
                 InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)
             }
         }
@@ -375,6 +378,43 @@ struct InferenceTabView: View {
 /// (owner, 2026-10-09; it was the tab's inspector, as #1146's
 /// `inference-inspector.tsx` draws it, and the inspector now stays closed
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
+/// How Private AI works, step by step (product owner, 2026-10-28): first on
+/// the tab, in the managed copy's words, until it is closed with its X.
+/// Closed, it stays closed on this Mac.
+struct PrivateAIGuideCard: View {
+    static let closedKey = "privateAI.guideClosed"
+    @AppStorage(Self.closedKey) private var closed = false
+    @EnvironmentObject private var model: AppModel
+
+    static let stepKeys = ["guide_step_earn", "guide_step_start", "guide_step_use"]
+
+    var body: some View {
+        if !closed {
+            // The card explains; it has no action, so it is not a button.
+            GlassHeroCard(
+                gradient: GlassTokens.Gradient.heroCampaign,
+                title: model.managedText("guide_title"), subtitle: model.managedText("guide_body"),
+                closeLabel: MonitorWords.close, onClose: { closed = true }
+            ) {
+                GlassHeroSymbol("lock.shield")
+            } content: {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(Array(Self.stepKeys.enumerated()), id: \.offset) { index, key in
+                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
+                            Text(verbatim: "\(index + 1).")
+                                .glassType(GlassTokens.TypeScale.bodyStrong)
+                            Text(model.managedText(key))
+                                .glassType(GlassTokens.TypeScale.body)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .foregroundStyle(GlassTokens.Color.heroInk.color)
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The Status row, then the core's subtitle (owner, 2026-10-27; the main
 /// pane still has none). The row is the listener's state in the core's
 /// sentence (never the switch: what was asked for is not what happened). The credential and
@@ -407,35 +447,51 @@ struct PrivateAIInspectorView: View {
     }
 
     private func summary(_ copy: PrivateInferenceCopy) -> some View {
-        let state = PrivateAISwitchCard.stateLabel(
-            state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
-            calls: model.privateInferenceCalls)
+        let status = Self.statusRow(store.privateAI?.state, copy: copy, calls: model.privateInferenceCalls)
         // The tab's heading row, in the one style every tab's heading
         // takes (owner, 2026-10-19, `GlassTabHeading`), with the state on
-        // the right. #1146: the Status dot is on while working, outside
-        // otherwise, always beside the core's sentence.
+        // the right: the menu bar's one word and dot, the core's full
+        // sentence as the row's help and accessibility hint.
         // The state right after the title (owner, 2026-10-20), not at the
         // row's far end.
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             GlassTabHeading(copy.inspectorStatus) {
-                GlassStatusLabel(state.line, status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
+                GlassStatusLabel(status.word, status: status.dot)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .combine)
-            // What the destination is for, in the core's words.
-            Text(copy.subtitle)
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textSecondary)
+            .help(status.sentence)
+            .accessibilityHint(status.sentence)
+            // What the destination is for, in the core's words, at the
+            // title size (product owner, 2026-10-28: make it bigger).
+            Text(Self.subtitle(copy, state: store.privateAI?.state))
+                .glassType(GlassTokens.TypeScale.title)
+                .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the
-    /// listener is working, outside otherwise.
-    static func statusDot(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus {
-        PrivateInferenceIndicator.dotStatus(
-            PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls))
+    /// The subtitle, with the credit sentence only while NEAR AI answers
+    /// calls (`running`): otherwise calls use the tools' own accounts.
+    static func subtitle(_ copy: PrivateInferenceCopy, state: DaemonData.PrivateInferenceState?) -> String {
+        state?.state == "running" ? copy.subtitle + " " + copy.subtitleCredit : copy.subtitle
+    }
+
+    /// The Status row: the menu bar's one word and dot for the listener's
+    /// state (`PrivateInferenceSurface.menuState`, `MenuPanelStatus.privateAIDot`:
+    /// clear green, attention amber, refused red, otherwise grey), and the
+    /// core's full sentence for the row's help and hint. A core that gave
+    /// no word draws the sentence, on grey.
+    static func statusRow(
+        _ state: DaemonData.PrivateInferenceState?, copy: PrivateInferenceCopy, calls: PrivateInferenceCalls
+    ) -> (word: String, dot: GlassStatus, sentence: String) {
+        let surface = InferenceAccountSection.surfaceState(state)
+        let sentence = PrivateInferenceSurface.stateLine(surface, copy: copy, calls: calls)
+        guard let menu = PrivateInferenceSurface.menuState(surface, calls: calls) else {
+            return (sentence, .off, sentence)
+        }
+        return (menu.word, MenuPanelStatus.privateAIDot(menu.tone), sentence)
     }
 }
 

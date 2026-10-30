@@ -1,5 +1,7 @@
 import SwiftUI
 import XCTest
+import TCBridge
+import TCDesign
 import TCShellCore
 @testable import TraceCommonsApp
 
@@ -10,12 +12,126 @@ final class PrivateInferenceMenuBarTests: XCTestCase {
     /// here: none of these states may be drawn the way a working one is.
     func testTheMenuBarPillFollowsToneNotSwitch() {
         for label in ["port_in_use", "start_failed", "crashed", "stopping", "unknown_state", ""] {
-            let tone = PrivateInferenceSurface.tone(PrivateInferenceState(label: label, port: nil), calls: .testing)
-            XCTAssertFalse(tone.readsAsWorking, "\(label) must not read as working in the menu bar")
+            let menu = PrivateInferenceSurface.menuState(
+                PrivateInferenceState(label: label, port: nil), calls: Self.coreCalls)
+            let state = MenuPanelStatus.privateAI(on: true, menu: menu)
             XCTAssertNotEqual(
-                MenuPanelStatus.privateAI(on: true, tone: tone), .on,
-                "\(label) is drawn On in the menu bar because the switch is on")
+                MenuPanelStatus.privateAIDot(state), .on,
+                "\(label) is drawn green in the menu bar because the switch is on")
         }
+    }
+
+    /// The core's calls, as `AppModel` wires them.
+    static let coreCalls = PrivateInferenceCalls(
+        stateLine: { TCPrivateInference.stateLine(state: $0) },
+        stateTone: { TCPrivateInference.stateTone(state: $0) },
+        servingLine: { TCPrivateInference.servingLine(port: $0) },
+        shouldOffer: { TCPrivateInference.shouldOffer(answered: $0, on: $1) },
+        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) },
+        menuWord: { TCPrivateInference.menuWord(state: $0) },
+        menuTone: { TCPrivateInference.menuTone(state: $0) })
+
+    /// The row is one word, with the dot carrying the difference (owner,
+    /// 2026-10-28): every daemon label, from the core's table.
+    func testTheRowIsOneWordAndTheDotCarriesTheDifference() {
+        let table: [(label: String, word: String, dot: GlassStatus)] = [
+            ("running", "On", .on),
+            ("running_destination_unknown", "On", .ask),
+            ("running_answered_elsewhere", "On", .ask),
+            ("running_no_backends", "On", .ask),
+            ("running_elsewhere", "On", .ask),
+            ("stopping", "Stopping", .off),
+            ("off", "Off", .off),
+            ("port_in_use", "Not working", .outside),
+            ("start_failed", "Not working", .outside),
+            ("crashed", "Not working", .outside),
+            ("", "Unknown", .off),
+            ("a_state_from_a_later_daemon", "Unknown", .off),
+        ]
+        for row in table {
+            let menu = PrivateInferenceSurface.menuState(
+                PrivateInferenceState(label: row.label, port: nil), calls: Self.coreCalls)
+            let state = MenuPanelStatus.privateAI(on: true, menu: menu)
+            XCTAssertEqual(menu?.word, row.word, row.label)
+            XCTAssertEqual(MenuPanelStatus.privateAIDot(state), row.dot, row.label)
+            // Never the sentence the page shows.
+            XCTAssertNotEqual(menu?.word, TCPrivateInference.stateLine(state: row.label), row.label)
+        }
+    }
+
+    /// The popover's destination-unknown row reads "On" on an amber dot, not
+    /// the truncated sentence on a red one.
+    func testDestinationUnknownIsOnAmber() {
+        let menu = PrivateInferenceSurface.menuState(
+            PrivateInferenceState(label: "running_destination_unknown", port: 1), calls: Self.coreCalls)
+        XCTAssertEqual(menu?.word, "On")
+        XCTAssertEqual(menu?.tone, .attention)
+        XCTAssertEqual(MenuPanelStatus.privateAIDot(.attention), .ask)
+        XCTAssertEqual(MenuPanelStatus.privateAIDot(.refused), .outside)
+        XCTAssertEqual(MenuPanelStatus.privateAIDot(.clear), .on)
+        XCTAssertEqual(MenuPanelStatus.privateAIDot(.neutral), .off)
+        XCTAssertEqual(MenuPanelStatus.privateAIDot(.held), .off)
+    }
+
+    /// The Private AI tab's Status row draws the menu bar's word and dot,
+    /// with the page's full sentence kept for its help and hint. Signed out
+    /// of NEAR AI it read "On. Couldn't tell which account is answering."
+    /// on a red dot.
+    @MainActor
+    func testTheTabStatusRowIsTheMenuBarWordAndDot() throws {
+        let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+        let labels = ["running", "running_destination_unknown", "running_answered_elsewhere", "running_no_backends",
+                      "running_elsewhere", "stopping", "off", "port_in_use", "start_failed", "crashed", "",
+                      "a_state_from_a_later_daemon"]
+        for label in labels {
+            let state = DaemonData.PrivateInferenceState(state: label, port: 1)
+            let row = PrivateAIInspectorView.statusRow(state, copy: copy, calls: Self.coreCalls)
+            let menu = try XCTUnwrap(PrivateInferenceSurface.menuState(
+                PrivateInferenceState(label: label, port: 1), calls: Self.coreCalls), label)
+            XCTAssertEqual(row.word, menu.word, label)
+            XCTAssertEqual(row.dot, MenuPanelStatus.privateAIDot(menu.tone), label)
+            XCTAssertEqual(row.sentence, PrivateInferenceSurface.stateLine(
+                PrivateInferenceState(label: label, port: 1), copy: copy, calls: Self.coreCalls), label)
+        }
+        let elsewhere = PrivateAIInspectorView.statusRow(
+            DaemonData.PrivateInferenceState(state: "running_answered_elsewhere", port: 1), copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(elsewhere.word, "On")
+        XCTAssertEqual(elsewhere.dot, .ask, "attention is amber, not red")
+        let unknown = PrivateAIInspectorView.statusRow(
+            DaemonData.PrivateInferenceState(state: "running_destination_unknown", port: 1), copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(unknown.dot, .ask, "attention is amber, not red")
+        let crashed = PrivateAIInspectorView.statusRow(
+            DaemonData.PrivateInferenceState(state: "crashed", port: nil), copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(crashed.dot, .outside, "refused stays red")
+        let running = PrivateAIInspectorView.statusRow(
+            DaemonData.PrivateInferenceState(state: "running", port: 1), copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(running.dot, .on)
+        let unreported = PrivateAIInspectorView.statusRow(nil, copy: copy, calls: Self.coreCalls)
+        XCTAssertEqual(unreported.dot, .off, "no report is grey, never green")
+        // A core that wires no word: the sentence, on grey.
+        let noWord = PrivateAIInspectorView.statusRow(
+            DaemonData.PrivateInferenceState(state: "running", port: 1), copy: copy, calls: .testing)
+        XCTAssertEqual(noWord.word, noWord.sentence)
+        XCTAssertEqual(noWord.dot, .off)
+    }
+
+    /// A caller that wires no word draws no word, not a guessed one.
+    func testNoWordFromTheCoreIsUnknownNotOn() {
+        XCTAssertNil(PrivateInferenceSurface.menuState(
+            PrivateInferenceState(label: "running", port: 1), calls: .testing))
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: true, menu: nil), .unknown)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: false, menu: ("On", .clear)), .off)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: nil, menu: ("On", .clear)), .unknown)
+    }
+
+    /// Clicking the row opens the Private AI page in Settings.
+    func testTheRowOpensPrivateAIInSettings() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("PrivateAIStatusLabel { open(.settings(.privateAI)) }"))
+        XCTAssertEqual(MonitorDestination.settings(.privateAI).settingsSection, .privateAI)
     }
 
     /// The indicator the pill reads tells a refused listener from a clear

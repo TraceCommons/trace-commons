@@ -137,11 +137,11 @@ final class SettingsParityTests: XCTestCase {
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
         Section(glass: "Views/Settings/InsightsSettingsCard.swift",
-                bindings: ["settings.insightsCounterPass", "settings.insightsRecapCardEnabled", "lever.enabled",
-                           "model.setInsightsSwitch(.counterPass,", "model.setInsightsSwitch(.recapCard,",
+                bindings: ["settings.insightsRecapCardEnabled", "lever.enabled",
+                           "model.setInsightsSwitch(.recapCard,",
                            "lever.set(", "model.insightsSwitchBusy", "model.insightsSwitchRefusal", "lever.busy",
                            "lever.refusal", "model.refreshSettings()", "lever.load()"],
-                copySources: ["TCInsights.copy()", "\"analytics_setting_counter_pass\"",
+                copySources: ["TCInsights.copy()",
                               "\"analytics_setting_recap_card\"", "\"analytics_setting_lever\"", "text(\"title\")"],
                 confirmations: [],
                 accessibility: ["GlassToggleStyle(.settings)"]),
@@ -221,7 +221,9 @@ final class SettingsParityTests: XCTestCase {
     /// the core's (`shell_words_copy`), in Ron's words where #1146 has them.
     func test_settingsAndProfileWordsAreTheCoresInRonsWords() {
         XCTAssertEqual(SettingsLegacyWords.optionalEachOne, "Optional data use")
-        XCTAssertEqual(SettingsLegacyWords.alwaysOn, "required")
+        // The core's one tag, matching the first run's "Always on" line
+        // (owner, 2026-10-28), so the two never differ.
+        XCTAssertEqual(SettingsLegacyWords.alwaysOn, "always on")
         XCTAssertTrue(SettingsLegacyWords.appliesFromNow.hasPrefix("Applies to traces sent from now on."))
         XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A trace counts as finished after 30 seconds of quiet.")
         XCTAssertEqual(SettingsLegacyWords.auditSentence("armed-auto-upload", project: "demo"),
@@ -413,6 +415,7 @@ final class SettingsParityTests: XCTestCase {
             ("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead"),
         ]),
         .privateAI: ("PrivateAISection", [("case .loading:", "GlassSpinner(standalone: true)")]),
+        .referrals: ("ReferralsSection", [("if read != .answered {", "SettingsReadNotice(read")]),
         .projects: ("ProjectsSection", [("if model.projectsRead != .answered {", "SettingsReadNotice(model.projectsRead")]),
         .changes: ("ChangesSection", [("if model.auditRead != .answered {", "SettingsReadNotice(model.auditRead")]),
     ]

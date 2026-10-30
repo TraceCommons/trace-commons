@@ -249,6 +249,32 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    assuming it (an enabled rail that reports `payout_store_failed` after the
    grant above is a missing table privilege).
 
+   **Referral resolver grant (before referrals are on).** Migration V142
+   makes `trace_referral_resolver`, the NOLOGIN role that resolves a referral
+   code across tenants, and grants it to no one. Grant it to `app` the same
+   way, before `TRACE_COMMONS_REFERRAL_PROGRAM_START` is set or
+   `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE` leaves `disabled`
+   (`docs/operator/referral-resolver-role.md`):
+
+   ```bash
+   sudo -u postgres psql -d tracecommons -v ON_ERROR_STOP=1 <<'SQL'
+   GRANT trace_referral_resolver TO app WITH INHERIT FALSE, SET TRUE;
+   SQL
+   ```
+
+   This is how it was made on 2026-10-29, as the local `postgres` superuser.
+   `pg_auth_members` must then show inherit `f` and set `t` for `app`.
+   Without it, ingest refuses to start with referrals on
+   (`referral_resolver_unprovisioned`).
+
+   **Referral settings.** The template renders referrals off. Staging runs the
+   program with the bonus stream in `dry_run` (since 2026-10-29). Render with
+   `TC_REFERRAL_PROGRAM_START=2026-10-01T00:00:00Z TC_NEAR_AI_REFERRAL_MODE=dry_run`.
+   That needs the network mark key in Secret Manager as
+   `tc-staging-referral-network-mark-key`, holding the value already on the
+   host. Until the key is stored there, a render drops the referral settings.
+   See `docs/operator/referral-resolver-role.md` ("Staging as configured").
+
 7. **Verify.**
 
    ```bash

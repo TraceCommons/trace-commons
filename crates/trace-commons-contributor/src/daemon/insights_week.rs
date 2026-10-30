@@ -1,9 +1,11 @@
 //! The Insights counter pass (feed T) and `insights_week`.
 //!
-//! Gated on owner decision D4 (open), through the `insights_counter_pass`
-//! setting, off by default. While it is off the watcher runs no pass, nothing
-//! is read for Insights, and `insights_week` answers `enabled: false` without
-//! opening the store or the key.
+//! Gated through the `insights_counter_pass` setting, on by default (product
+//! owner, 2026-10-29, settling owner decision D4; an install saved before
+//! then is turned on once). While it is off -- after unenroll, or an agent
+//! turning it off -- the watcher runs no pass, nothing is read for Insights,
+//! and `insights_week` answers `enabled: false` without opening the store or
+//! the key.
 //!
 //! # The pass
 //!
@@ -29,7 +31,8 @@
 //! counts of edits, declined, undone and interrupted calls, the task shape
 //! and inferred task, active time, and fixed labels, never a path, a
 //! command or a text. The store holds no list price: the Models answers
-//! price stored tokens when they are built. Its one money figure is the
+//! and `insights_week`'s `work` (`insights_week_work`) price stored tokens
+//! when they are built. Its one stored money figure is the
 //! actual NEAR AI charge per session, folded from the proxy ledger's
 //! `cost_usd` into the session's route tally (owner decision D5, settled
 //! 2026-10-20; `insights_route_tally`), in integer USD micros, because the
@@ -40,9 +43,23 @@
 //! own rule or a global Never override, are not read, and rows already
 //! stored for one are dropped (owner decision D4). Nor do they keep a route
 //! tally: the pass names them from their file names, and both the pass and
-//! the ledger fold drop their tallies (`NeverSessions`). A Claude session's delegated transcripts are not read; a
-//! session that has any is marked truncated, so it counts as partial
-//! coverage and never as complete.
+//! the ledger fold drop their tallies (`NeverSessions`). A Claude session's
+//! delegated transcripts (its sub-agents', workflow ones included) are not
+//! read as part of it; a session that has any is marked truncated, so it
+//! counts as partial coverage and never as complete.
+//!
+//! Those sub-agent transcripts are read on their own (product owner,
+//! 2026-10-29), after the person's sessions and within the same per-poll
+//! budget, into `CounterStore::spawned`: rows apart from the person's, under
+//! their own allowance (`COUNTER_STORE_MAX_SPAWNED_SESSIONS`), with no
+//! harness session (a sub-agent records its parent's session ID), no goals
+//! and no `placed_at`. Only Benchmarks' sub-agent population reads them.
+//! The parent's own transcript holds only its own model calls (on the
+//! owner's machine, 2026-10-29: 1 message ID shared between 34 parents and
+//! their sub-agents), so a week's tokens and spend, which stay the person's
+//! sessions alone, never count a sub-agent's call twice, and leave its
+//! calls out. A sub-agent of a session passed over for its managed-profile
+//! copy is passed over with it; one in a Never folder is not read.
 //!
 //! A pass reads a bounded number of files and bytes, newest first, so a first
 //! pass over a large corpus catches up across polls. The first file a pass
@@ -160,7 +177,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -183,9 +200,10 @@ use crate::insights::analytics_constants::{
     CODEX_PER_TURN_SERIES, COUNTER_PASS_EXCLUDES_NEVER_FOLDERS, COUNTER_PASS_MAX_BYTES_PER_TICK,
     COUNTER_PASS_MAX_LINE_BYTES, COUNTER_PASS_MAX_READS_PER_TICK, COUNTER_STORE_KEEP_WEEKS,
     COUNTER_STORE_MAX_AUTOMATED_SESSIONS, COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS,
-    COUNTER_STORE_MAX_CODEX_SERIES_TURNS, COUNTER_STORE_MAX_SESSIONS, COUNTER_STORE_MAX_TOOL_CALLS,
-    COUNTER_STORE_MAX_TURNS, DIGEST_KEY_CUSTODY, DigestKeyCustody, LEDGER_MONEY_IN_INSIGHTS,
-    SESSION_FACTS_VERSION,
+    COUNTER_STORE_MAX_CODEX_SERIES_TURNS, COUNTER_STORE_MAX_SESSIONS,
+    COUNTER_STORE_MAX_SPAWNED_SESSIONS, COUNTER_STORE_MAX_SPAWNED_TOOL_CALLS,
+    COUNTER_STORE_MAX_SPAWNED_TURNS, COUNTER_STORE_MAX_TOOL_CALLS, COUNTER_STORE_MAX_TURNS,
+    DIGEST_KEY_CUSTODY, DigestKeyCustody, LEDGER_MONEY_IN_INSIGHTS, SESSION_FACTS_VERSION,
 };
 use crate::insights::codex_series::{CodexTurnSeriesEvidence, CodexTurnSeriesScan};
 use crate::insights::goals::WeekFigures;
@@ -193,6 +211,7 @@ use crate::insights::model_answers::ModelRoute;
 use crate::insights::session_facts::{ClaudeFactsScan, InferredTask, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
 use crate::insights::session_labels::{LabelledTask, SessionLabel, SessionOutcome};
+use crate::insights::slash_goals::{ClaudeGoal, ClaudeGoalScan, GoalStatus, WeekGoal, WeekGoals};
 use crate::insights::task_classifier::{current_task, reclassify};
 use crate::insights::time_evidence::RecordedTimeScan;
 use crate::insights::turn_series::ClaudeTurnSeriesScan;
@@ -395,6 +414,15 @@ struct CounterRow {
     /// & save runs. Left out of the file while `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     not_analyzable: Option<NotAnalyzable>,
+    /// The goals set with `/goal` in a Claude session, each as its latest
+    /// `goal_status` record left it: status, checks, tokens, time and when
+    /// (`insights::slash_goals`). Never the goal's condition or the reason
+    /// Claude gave. Read with the facts, so a row made before goals were
+    /// kept is read again once (`SESSION_FACTS_VERSION`). Left out of the
+    /// file while empty. Codex goals are not stored: they are read from
+    /// Codex's own database when the week is answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    goals: Vec<ClaudeGoal>,
 }
 
 /// Why Analyze & save cannot analyze a listed session's file: the core's
@@ -406,6 +434,9 @@ pub(crate) enum NotAnalyzable {
     TooLarge,
     /// A Codex file that does not record exactly one `session_meta`.
     NotOneSession,
+    /// A file Analyze & save does not find or read: a session in a NEAR
+    /// AI managed profile, or a compressed Codex rollout.
+    InsightsOnly,
 }
 
 impl NotAnalyzable {
@@ -413,10 +444,13 @@ impl NotAnalyzable {
     /// session records when it is Codex's, would be refused.
     fn of(
         source: AnalyticsSource,
+        insights_only: bool,
         bytes: Option<u64>,
         session_metas: Option<usize>,
     ) -> Option<Self> {
-        if bytes.is_some_and(|bytes| bytes > crate::insights::MAX_SOURCE_BYTES) {
+        if insights_only {
+            Some(NotAnalyzable::InsightsOnly)
+        } else if bytes.is_some_and(|bytes| bytes > crate::insights::MAX_SOURCE_BYTES) {
             Some(NotAnalyzable::TooLarge)
         } else if source == AnalyticsSource::Codex && session_metas.is_some_and(|count| count != 1)
         {
@@ -429,6 +463,11 @@ impl NotAnalyzable {
 
 /// For `skip_serializing_if`.
 fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// For `skip_serializing_if`.
+fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
@@ -636,6 +675,25 @@ struct CounterStore {
     /// `insights_route_tally::fold_plan`).
     #[serde(default)]
     ledger_folded_started: Option<DateTime<Utc>>,
+    /// Where the folds have reached in each managed route's own ledger
+    /// (`<config>/managed-routes/<uuid>/ledger.sqlite`), by the route's
+    /// UUID: each numbers its rows on its own, so each has its own cursor,
+    /// and a call is taken once by its route and id. Absent in a store
+    /// written before managed routes were folded, and left out while empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    managed_folded: BTreeMap<String, StoredCursor>,
+    /// The NEAR AI charge of calls no session could be named for (an
+    /// opencode session through a managed route, a call with no session
+    /// ID), by the hour they started in: counted in `near_ai_credit`'s sums
+    /// and its unknown groups (product owner, 2026-10-28). Aged out by the
+    /// hour with the tallies. Left out of the file while there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    loose_charge: Option<super::insights_route_tally::NearAiCharge>,
+    /// Which fold rules `loose_charge` was kept under: below
+    /// [`LOOSE_EPOCH`], the calls folds passed over before skipped calls'
+    /// charges were kept are taken once more, for their charge only.
+    #[serde(default, skip_serializing_if = "is_zero_epoch")]
+    loose_epoch: u32,
     /// Sessions the caps evicted, by the same keyed session digest as
     /// `rows`, with the observation their row was made from. A candidate
     /// with no row whose last write is no later than the newest of these is
@@ -654,7 +712,61 @@ struct CounterStore {
     /// written before it.
     #[serde(default)]
     generation: u32,
+    /// Claude sub-agent transcripts' rows ([`SpawnedRow`]), keyed by the
+    /// same keyed digest of the harness and the transcript's address as
+    /// `rows`, apart from them so no answer over the person's sessions can
+    /// count one. Left out of the file while empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    spawned: BTreeMap<KeyedDigest, SpawnedRow>,
+    /// The order the next sub-agent row is made in.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    spawned_next_seq: u64,
+    /// The newest last write of a sub-agent transcript the allowance
+    /// evicted: one with no row no newer than it is not read, or it would
+    /// be read and evicted on every poll. Aged out with the rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spawned_floor: Option<DateTime<Utc>>,
 }
+
+/// The fold rules `loose_charge` is kept under (`CounterStore::loose_epoch`).
+const LOOSE_EPOCH: u32 = 1;
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_epoch(epoch: &u32) -> bool {
+    *epoch == 0
+}
+
+/// A [`FoldCursor`] as the store keeps it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCursor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    through: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started: Option<DateTime<Utc>>,
+}
+
+impl From<StoredCursor> for FoldCursor {
+    fn from(cursor: StoredCursor) -> Self {
+        FoldCursor {
+            through: cursor.through,
+            started: cursor.started,
+        }
+    }
+}
+
+impl From<FoldCursor> for StoredCursor {
+    fn from(cursor: FoldCursor) -> Self {
+        StoredCursor {
+            through: cursor.through,
+            started: cursor.started,
+        }
+    }
+}
+
+/// Each managed route's rows by its UUID, as
+/// `ManagedHistory::rows_by_home` hands them out.
+pub(crate) type ManagedRows<'a> = BTreeMap<String, Vec<&'a crate::routing::RoutedExchange>>;
 
 /// The observation an evicted session's row was made from. No path and no
 /// counters: only what tells an unchanged file from a changed one.
@@ -689,8 +801,14 @@ impl CounterStore {
             routing: BTreeMap::new(),
             ledger_folded_through: None,
             ledger_folded_started: None,
+            managed_folded: BTreeMap::new(),
+            loose_charge: None,
+            loose_epoch: LOOSE_EPOCH,
             evicted: BTreeMap::new(),
             generation: new_generation(),
+            spawned: BTreeMap::new(),
+            spawned_next_seq: 0,
+            spawned_floor: None,
         }
     }
 }
@@ -789,17 +907,92 @@ pub(crate) struct CounterCandidate {
     pub size_bytes: u64,
     pub modified_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
-    /// Delegated transcripts beside the session file, which are not read.
+    /// Transcripts the session spawned (Claude's sub-agents, its
+    /// workflows' included), not read as part of it: nonzero marks its
+    /// facts as having delegated (`delegated_unread`). They are read, if at
+    /// all, as rows of their own ([`SpawnedCandidate`]).
     pub group_member_count: u32,
+    /// Where the watcher found it.
+    pub role: CandidateRole,
+}
+
+/// Where a counter-pass candidate was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandidateRole {
+    /// Through the watched sources, as offers are.
+    Watched,
+    /// In a NEAR AI managed profile (`<state>/managed-profiles/<id>/`),
+    /// which only this pass reads. The one copy of its session counted: a
+    /// watched copy of the same session (the post-exit export) is passed
+    /// over. See `superseded_by_profiles`.
+    ManagedProfile,
+}
+
+/// How a Claude sub-agent transcript was started: the session delegated to
+/// it (`<session>/subagents/*.jsonl`), or a workflow the session ran did
+/// (`<session>/subagents/workflows/<run>/agent-*.jsonl`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SpawnedBy {
+    Agent,
+    Workflow,
+}
+
+impl From<crate::source::claude_code::SpawnedKind> for SpawnedBy {
+    fn from(kind: crate::source::claude_code::SpawnedKind) -> Self {
+        match kind {
+            crate::source::claude_code::SpawnedKind::Agent => SpawnedBy::Agent,
+            crate::source::claude_code::SpawnedKind::Workflow => SpawnedBy::Workflow,
+        }
+    }
+}
+
+/// One Claude sub-agent transcript the watcher found beside a candidate.
+#[derive(Debug, Clone)]
+pub(crate) struct SpawnedCandidate {
+    /// Index into the job's candidates of the session that spawned it: a
+    /// sub-agent of a session this pass passes over (a managed profile's
+    /// copy counts instead) is passed over with it.
+    pub parent: usize,
+    pub kind: SpawnedBy,
+    /// The transcript as a candidate. Its `origin` is the parent's, so its
+    /// folder, and whether that folder is Never, are the parent's.
+    pub candidate: CounterCandidate,
+}
+
+/// A Claude sub-agent transcript's row: kept apart from the person's rows
+/// (`CounterStore::spawned`), under its own allowance
+/// (`COUNTER_STORE_MAX_SPAWNED_SESSIONS`), and read by Benchmarks' sub-agent
+/// population only. Never in a week's totals or spend, the Sessions list,
+/// the Models answers, Patterns or goals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnedRow {
+    /// The row key of the session that spawned it.
+    parent: KeyedDigest,
+    kind: SpawnedBy,
+    /// Its counters and facts, as a session's row holds them, with no
+    /// harness session (a sub-agent records its parent's session ID, so it
+    /// would join the parent's route tally), no goals and no `placed_at`.
+    row: CounterRow,
 }
 
 /// What one pass did. Counts only.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct PassSummary {
     pub read: usize,
+    /// Claude sub-agent transcripts read, after the person's own sessions
+    /// and within the same per-poll budget.
+    pub spawned_read: usize,
     /// Left for a later poll by the per-poll budget.
     pub deferred: usize,
     pub dropped: usize,
+    /// Compressed rollouts read whose stream was corrupt or truncated:
+    /// stored as unknown, never as zero.
+    pub compressed_unreadable: usize,
+    /// Compressed rollouts read whose output passed its bound
+    /// (`source::compressed`): stored as unknown, never as zero.
+    pub compressed_too_large: usize,
 }
 
 /// What the daemon's settings add to an `insights_week` answer.
@@ -840,6 +1033,9 @@ pub(crate) type ProjectOf =
 /// borrows from the tick.
 pub(crate) struct CounterJob {
     pub candidates: Vec<CounterCandidate>,
+    /// The Claude sub-agent transcripts the candidates' sessions spawned,
+    /// read as rows of their own ([`SpawnedRow`]).
+    pub spawned: Vec<SpawnedCandidate>,
     pub never_project_keys: NeverFolders,
     pub now: DateTime<Utc>,
     pub quiescence_secs: u64,
@@ -856,6 +1052,9 @@ struct QueuedJob {
 /// left it, and the time it was read.
 struct FoldJob {
     window: Vec<crate::routing::RoutedExchange>,
+    /// The managed routes' ledgers, as the daemon's snapshot holds them;
+    /// `Err` when they could not be read.
+    managed: Result<Option<Arc<crate::routing::managed_history::ManagedHistory>>, ()>,
     now: DateTime<Utc>,
 }
 
@@ -994,6 +1193,7 @@ fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
     }
     let CounterJob {
         candidates,
+        spawned,
         never_project_keys,
         now,
         quiescence_secs,
@@ -1002,6 +1202,7 @@ fn run_counter_job(shared: &DaemonShared, queued: QueuedJob) {
     let mut project_of = |candidate: &CounterCandidate| project_of(shared, candidate);
     let _ = counter.run_pass_from(
         &candidates,
+        &spawned,
         &never_project_keys,
         now,
         quiescence_secs,
@@ -1055,17 +1256,162 @@ impl NeverSessions {
 ///
 /// `None` for any other name, so an unknown shape names no session.
 fn name_session_digest(key: &DigestKey, candidate: &CounterCandidate) -> Option<KeyedDigest> {
-    let stem = candidate.path.file_stem()?.to_str()?;
-    let id = match candidate.source {
-        SOURCE_CLAUDE_CODE => Some(stem).filter(|stem| !stem.is_empty())?,
+    let id = name_session_id(candidate.source, &candidate.path)?;
+    Some(harness_session_digest(key, candidate.source, id))
+}
+
+/// The raw session ID `name_session_digest` digests. A compressed Codex
+/// rollout names its session as its plain twin does.
+fn name_session_id<'p>(source: &str, path: &'p Path) -> Option<&'p str> {
+    let address = row_address(source, path);
+    let stem = Path::new(address).file_stem()?.to_str()?;
+    match source {
+        SOURCE_CLAUDE_CODE => Some(stem).filter(|stem| !stem.is_empty()),
         SOURCE_CODEX => {
             let rest = stem.strip_prefix("rollout-")?;
             let id = rest.get(rest.len().checked_sub(36)?..)?;
-            is_uuid(id).then_some(id)?
+            is_uuid(id).then_some(id)
         }
-        _ => return None,
+        _ => None,
+    }
+}
+
+/// The address a session's row is keyed by: its file's path, except that a
+/// compressed Codex rollout (`<name>.jsonl.zst`) answers as the plain
+/// `<name>.jsonl` Codex compressed it from. So a row first read from the
+/// plain file is replaced, not doubled, when Codex compresses it in place,
+/// and anything that names the session by its plain path (a queue entry)
+/// still finds the row. A path that is not UTF-8 is not stripped.
+fn row_address<'p>(source: &str, path: &'p Path) -> &'p str {
+    let Some(text) = path.to_str() else {
+        return "";
     };
-    Some(harness_session_digest(key, candidate.source, id))
+    // The adapter's own rule (`source::compressed::address_of`); discovery
+    // already hands the address, so this only matters for a path named
+    // some other way.
+    if source == SOURCE_CODEX && crate::source::compressed::is_compressed(path) {
+        text.strip_suffix(crate::source::compressed::COMPRESSED_SUFFIX)
+            .unwrap_or(text)
+    } else {
+        text
+    }
+}
+
+/// The row key of the session at `path`, as the adapter `source` found it:
+/// `session_key` of its `row_address`.
+pub(crate) fn row_key(key: &DigestKey, source: &str, path: &Path) -> KeyedDigest {
+    match path.to_str() {
+        Some(_) => session_key(key, source, row_address(source, path)),
+        None => session_key(key, source, &path.to_string_lossy()),
+    }
+}
+
+/// Whether Analyze & save cannot find or read the candidate's file: a
+/// managed profile's session (never among the watched sessions), or a
+/// compressed Codex rollout (the whole-file analysis reads plain files).
+fn insights_only(candidate: &CounterCandidate) -> bool {
+    candidate.role == CandidateRole::ManagedProfile || compressed_file(candidate).is_some()
+}
+
+/// Whether the candidate's path names a compressed Codex rollout itself
+/// (`<name>.jsonl.zst`) rather than its address.
+fn is_compressed_codex(candidate: &CounterCandidate) -> bool {
+    candidate.source == SOURCE_CODEX && crate::source::compressed::is_compressed(&candidate.path)
+}
+
+/// The compressed file behind a Codex candidate's address, when that is
+/// what is on disk (`source::compressed::on_disk`): the adapter addresses a
+/// compressed rollout by the plain path it replaced.
+fn compressed_file(candidate: &CounterCandidate) -> Option<PathBuf> {
+    if candidate.source != SOURCE_CODEX {
+        return None;
+    }
+    crate::source::compressed::on_disk(&candidate.path)
+        .filter(|file| crate::source::compressed::is_compressed(file))
+}
+
+/// What reading the candidate costs the per-poll budget: its file's size,
+/// or for a compressed rollout what it decompresses to. Delegated
+/// transcripts are counted in `size_bytes` but never read, so are not
+/// charged.
+fn read_cost(candidate: &CounterCandidate) -> u64 {
+    if let Some(file) = compressed_file(candidate) {
+        crate::source::compressed::estimated_decompressed_bytes(&file)
+            .unwrap_or(candidate.size_bytes)
+    } else {
+        std::fs::metadata(&candidate.path)
+            .map(|meta| meta.len())
+            .unwrap_or(candidate.size_bytes)
+    }
+}
+
+/// Which candidates this pass leaves unread because another one is the
+/// same session (by index into `candidates`), and, for each one whose row
+/// should go, the row key of the candidate that replaces it.
+///
+/// - A compressed Codex rollout and its plain twin share a row key; while
+///   both are on disk (Codex between writing one and removing the other)
+///   the plain file is read and the compressed one is not.
+/// - A session found in a managed profile is counted from there. Any other
+///   candidate whose file name names the same session (the post-exit
+///   export, or a copy in the home folder) is not read, and its row is
+///   dropped once the profile's row exists. The newest profile copy wins
+///   among several.
+fn superseded_by_profiles(
+    key: &DigestKey,
+    candidates: &[CounterCandidate],
+) -> (BTreeSet<usize>, Vec<(KeyedDigest, KeyedDigest)>) {
+    let mut skip = BTreeSet::new();
+    let mut by_key: BTreeMap<KeyedDigest, usize> = BTreeMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let row = row_key(key, candidate.source, &candidate.path);
+        match by_key.get(&row) {
+            Some(&kept)
+                if is_compressed_codex(&candidates[kept]) && !is_compressed_codex(candidate) =>
+            {
+                skip.insert(kept);
+                by_key.insert(row, index);
+            }
+            Some(_) => {
+                skip.insert(index);
+            }
+            None => {
+                by_key.insert(row, index);
+            }
+        }
+    }
+    let mut profile: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if candidate.role != CandidateRole::ManagedProfile || skip.contains(&index) {
+            continue;
+        }
+        let Some(id) = name_session_id(candidate.source, &candidate.path) else {
+            continue;
+        };
+        let slot = profile.entry((candidate.source, id)).or_insert(index);
+        if candidates[*slot].modified_at < candidate.modified_at {
+            *slot = index;
+        }
+    }
+    let mut replaced = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some(id) = name_session_id(candidate.source, &candidate.path) else {
+            continue;
+        };
+        let Some(&keeper) = profile.get(&(candidate.source, id)) else {
+            continue;
+        };
+        if keeper == index {
+            continue;
+        }
+        let own = row_key(key, candidate.source, &candidate.path);
+        let keeper_row = row_key(key, candidates[keeper].source, &candidates[keeper].path);
+        if own != keeper_row {
+            replaced.push((own, keeper_row));
+        }
+        skip.insert(index);
+    }
+    (skip, replaced)
 }
 
 /// `8-4-4-4-12` hex digits.
@@ -1111,6 +1457,9 @@ pub struct CounterPass {
     /// A leaf lock, held across a label write, so two writes never
     /// interleave and a cached label is always one the file holds.
     labels: Mutex<Option<LabelsRead>>,
+    /// Codex's goals database (`insights_codex_goals`), read when the week
+    /// is answered; `None` reads no Codex goals.
+    codex_goals_db: Option<PathBuf>,
     /// Signalled when the worker goes idle.
     #[cfg(test)]
     idle: std::sync::Condvar,
@@ -1132,16 +1481,21 @@ struct TestSeams {
     writes_under_cache_lock: std::sync::atomic::AtomicUsize,
     /// The thread the last ledger fold ran on.
     fold_thread: Mutex<Option<std::thread::ThreadId>>,
+    /// The sub-agent allowance in place of the constants: sessions, turns,
+    /// tool calls.
+    spawned_caps: Mutex<Option<(usize, usize, usize)>>,
 }
 
 impl CounterPass {
     /// The pass for a daemon over `store`, with the key custody owner
     /// decision D16 (open) names.
     pub fn for_store(store: &ConfigStore) -> Self {
-        Self::with_keys(
+        let mut pass = Self::with_keys(
             store.daemon_path(COUNTER_ROWS_FILE),
             default_counter_keys(store),
-        )
+        );
+        pass.codex_goals_db = super::insights_codex_goals::codex_goals_path();
+        pass
     }
 
     pub(crate) fn with_keys(
@@ -1161,11 +1515,46 @@ impl CounterPass {
             worker: Mutex::new(WorkerSlot::default()),
             never_sessions: Mutex::new(NeverSessions::default()),
             labels: Mutex::new(None),
+            codex_goals_db: None,
             #[cfg(test)]
             idle: std::sync::Condvar::new(),
             #[cfg(test)]
             test_seams: TestSeams::default(),
         }
+    }
+
+    /// The sub-agent allowance: sessions, turns, tool calls.
+    fn spawned_caps(&self) -> (usize, usize, usize) {
+        #[cfg(test)]
+        if let Some(caps) = *self
+            .test_seams
+            .spawned_caps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            return caps;
+        }
+        (
+            COUNTER_STORE_MAX_SPAWNED_SESSIONS,
+            COUNTER_STORE_MAX_SPAWNED_TURNS,
+            COUNTER_STORE_MAX_SPAWNED_TOOL_CALLS,
+        )
+    }
+
+    /// A sub-agent allowance in place of the constants.
+    #[cfg(test)]
+    pub(crate) fn set_spawned_caps_for_test(&self, sessions: usize, turns: usize, tools: usize) {
+        *self
+            .test_seams
+            .spawned_caps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((sessions, turns, tools));
+    }
+
+    /// Read Codex goals from `path` instead of Codex's home.
+    #[cfg(test)]
+    pub(crate) fn set_codex_goals_db_for_test(&mut self, path: Option<PathBuf>) {
+        self.codex_goals_db = path;
     }
 
     /// Run `hook` before every file the pass reads.
@@ -1239,6 +1628,33 @@ impl CounterPass {
         let cleared = self.cleared.load(Ordering::SeqCst);
         self.run_pass_from(
             candidates,
+            &[],
+            never_project_keys,
+            now,
+            quiescence_secs,
+            project_of,
+            cleared,
+            &|| false,
+        )
+        .map(Option::unwrap_or_default)
+    }
+
+    /// [`Self::run_pass`], with the Claude sub-agent transcripts the
+    /// candidates spawned, as the watcher's job carries them.
+    #[cfg(test)]
+    pub(crate) fn run_pass_spawned(
+        &self,
+        candidates: &[CounterCandidate],
+        spawned: &[SpawnedCandidate],
+        never_project_keys: &NeverFolders,
+        now: DateTime<Utc>,
+        quiescence_secs: u64,
+        project_of: &mut dyn FnMut(&CounterCandidate) -> (String, bool),
+    ) -> Result<PassSummary, &'static str> {
+        let cleared = self.cleared.load(Ordering::SeqCst);
+        self.run_pass_from(
+            candidates,
+            spawned,
             never_project_keys,
             now,
             quiescence_secs,
@@ -1265,6 +1681,7 @@ impl CounterPass {
     fn run_pass_from(
         &self,
         candidates: &[CounterCandidate],
+        spawned: &[SpawnedCandidate],
         never_project_keys: &NeverFolders,
         now: DateTime<Utc>,
         quiescence_secs: u64,
@@ -1278,6 +1695,7 @@ impl CounterPass {
             .fetch_add(1, Ordering::SeqCst);
         let result = self.pass_inner(
             candidates,
+            spawned,
             never_project_keys,
             now,
             quiescence_secs,
@@ -1344,6 +1762,7 @@ impl CounterPass {
     fn pass_inner(
         &self,
         candidates: &[CounterCandidate],
+        spawned: &[SpawnedCandidate],
         never_project_keys: &NeverFolders,
         now: DateTime<Utc>,
         quiescence_secs: u64,
@@ -1405,11 +1824,7 @@ impl CounterPass {
             analytics_source(candidate.source).is_some()
                 && current
                     .rows
-                    .get(&session_key(
-                        &key,
-                        candidate.source,
-                        &candidate.path.to_string_lossy(),
-                    ))
+                    .get(&row_key(&key, candidate.source, &candidate.path))
                     .is_some_and(CounterRow::awaiting_classification)
         });
         let eviction_floor = current
@@ -1473,7 +1888,13 @@ impl CounterPass {
             }
         }
 
-        let mut order: Vec<&CounterCandidate> = candidates.iter().collect();
+        let (skip, replaced) = superseded_by_profiles(&key, candidates);
+        let mut order: Vec<&CounterCandidate> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !skip.contains(index))
+            .map(|(_, candidate)| candidate)
+            .collect();
         order.sort_by_key(|candidate| std::cmp::Reverse(candidate.modified_at));
         let mut reads: Vec<(KeyedDigest, CounterRow)> = Vec::new();
         let mut bytes_budgeted = 0u64;
@@ -1487,7 +1908,7 @@ impl CounterPass {
             if candidate.modified_at < cutoff {
                 continue;
             }
-            let session = session_key(&key, candidate.source, &candidate.path.to_string_lossy());
+            let session = row_key(&key, candidate.source, &candidate.path);
             if now
                 .signed_duration_since(candidate.modified_at)
                 .num_seconds()
@@ -1545,13 +1966,10 @@ impl CounterPass {
                     .extend(name_session_digest(&key, candidate));
                 continue;
             }
-            // Charged by the one file read, not the group: delegated
-            // transcripts are counted in `size_bytes` but never read. The
+            // Charged by the one file read (`read_cost`), decompressed. The
             // first read of a poll is always allowed, so a file over the
             // whole budget is read alone rather than starved.
-            let cost = std::fs::metadata(&candidate.path)
-                .map(|meta| meta.len())
-                .unwrap_or(candidate.size_bytes);
+            let cost = read_cost(candidate);
             if reads.len() >= COUNTER_PASS_MAX_READS_PER_TICK
                 || (!reads.is_empty()
                     && bytes_budgeted.saturating_add(cost) > COUNTER_PASS_MAX_BYTES_PER_TICK)
@@ -1569,6 +1987,15 @@ impl CounterPass {
             #[cfg(test)]
             self.run_before_read_hook();
             let read = read_body(source, candidate, &key);
+            match read.compressed_failure {
+                Some(crate::source::compressed::CompressedFailure::Undecodable) => {
+                    summary.compressed_unreadable += 1;
+                }
+                Some(crate::source::compressed::CompressedFailure::TooLarge) => {
+                    summary.compressed_too_large += 1;
+                }
+                None => {}
+            }
             reads.push((
                 session,
                 CounterRow {
@@ -1590,15 +2017,147 @@ impl CounterPass {
                     automation: read.automation,
                     automation_read: true,
                     not_analyzable: read.not_analyzable,
+                    goals: read.goals,
                 },
             ));
         }
         summary.read = reads.len();
 
+        // Claude's sub-agent transcripts, after the person's own sessions and
+        // within what is left of the same budget, into their own rows.
+        let parent_keys: Vec<KeyedDigest> = candidates
+            .iter()
+            .map(|candidate| row_key(&key, candidate.source, &candidate.path))
+            .collect();
+        let passed_over: BTreeSet<KeyedDigest> =
+            skip.iter().map(|index| parent_keys[*index]).collect();
+        let mut spawned_removals: BTreeSet<KeyedDigest> = current
+            .spawned
+            .iter()
+            .filter(|(_, spawned)| {
+                never.contains(&spawned.row.project)
+                    || spawned.row.modified_at < cutoff
+                    || passed_over.contains(&spawned.parent)
+            })
+            .map(|(session, _)| *session)
+            .collect();
+        let spawned_floor = current.spawned_floor.filter(|floor| *floor >= cutoff);
+        let mut spawned_order: Vec<&SpawnedCandidate> = spawned
+            .iter()
+            .filter(|spawned| spawned.parent < candidates.len() && !skip.contains(&spawned.parent))
+            .collect();
+        spawned_order.sort_by_key(|spawned| std::cmp::Reverse(spawned.candidate.modified_at));
+        let mut spawned_reads: Vec<(KeyedDigest, SpawnedRow)> = Vec::new();
+        // Each parent's folder, resolved once.
+        let mut parent_folders: BTreeMap<usize, (String, bool)> = BTreeMap::new();
+        for spawned in spawned_order {
+            let candidate = &spawned.candidate;
+            if analytics_source(candidate.source) != Some(AnalyticsSource::ClaudeCode)
+                || candidate.modified_at < cutoff
+                || now
+                    .signed_duration_since(candidate.modified_at)
+                    .num_seconds()
+                    < i64::try_from(quiescence_secs).unwrap_or(i64::MAX)
+            {
+                continue;
+            }
+            let session = row_key(&key, candidate.source, &candidate.path);
+            let stored = current.spawned.get(&session);
+            let unchanged = stored.is_some_and(|stored| {
+                stored.row.size_bytes == candidate.size_bytes
+                    && stored.row.modified_at == candidate.modified_at
+                    && stored.row.facts_version == SESSION_FACTS_VERSION
+            });
+            if unchanged && !spawned_removals.contains(&session) {
+                continue;
+            }
+            if stored.is_none() && spawned_floor.is_some_and(|floor| candidate.modified_at <= floor)
+            {
+                continue;
+            }
+            let (project_key, never_folder) = parent_folders
+                .entry(spawned.parent)
+                .or_insert_with(|| project_of(candidate))
+                .clone();
+            if never_folder && COUNTER_PASS_EXCLUDES_NEVER_FOLDERS {
+                if stored.is_some() {
+                    spawned_removals.insert(session);
+                }
+                continue;
+            }
+            let cost = read_cost(candidate);
+            let read_so_far = reads.len() + spawned_reads.len();
+            if read_so_far >= COUNTER_PASS_MAX_READS_PER_TICK
+                || (read_so_far > 0
+                    && bytes_budgeted.saturating_add(cost) > COUNTER_PASS_MAX_BYTES_PER_TICK)
+            {
+                summary.deferred += 1;
+                continue;
+            }
+            if should_stop() {
+                return Ok(None);
+            }
+            bytes_budgeted = bytes_budgeted.saturating_add(cost);
+            spawned_removals.remove(&session);
+            let read = read_body(AnalyticsSource::ClaudeCode, candidate, &key);
+            spawned_reads.push((
+                session,
+                SpawnedRow {
+                    parent: parent_keys[spawned.parent],
+                    kind: spawned.kind,
+                    row: CounterRow {
+                        size_bytes: candidate.size_bytes,
+                        modified_at: candidate.modified_at,
+                        placed_at: None,
+                        first_event_at: read.first_event_at,
+                        project: project_digest(&key, &project_key),
+                        seq: 0,
+                        body: read.body,
+                        harness_session: None,
+                        harness_session_read: true,
+                        earliest_event_at: read.span.map(|(earliest, _)| earliest),
+                        latest_event_at: read.span.map(|(_, latest)| latest),
+                        event_span_read: true,
+                        streamed: true,
+                        facts: read.facts,
+                        facts_version: SESSION_FACTS_VERSION,
+                        automation: Automation::Unknown,
+                        automation_read: true,
+                        not_analyzable: None,
+                        goals: Vec::new(),
+                    },
+                },
+            ));
+        }
+        summary.spawned_read = spawned_reads.len();
+        if summary.compressed_unreadable + summary.compressed_too_large > 0 {
+            // Counts only: never a path or a session.
+            tracing::warn!(
+                unreadable = summary.compressed_unreadable,
+                too_large = summary.compressed_too_large,
+                "insights counter pass could not read compressed sessions; counted as unknown"
+            );
+        }
+        // A copy of a managed-profile session goes once the profile's own
+        // row exists, so the session is never missing in between.
+        for (copy, keeper) in replaced {
+            let keeper_kept = (current.rows.contains_key(&keeper) && !removals.contains(&keeper))
+                || reads.iter().any(|(session, _)| *session == keeper);
+            if keeper_kept && current.rows.contains_key(&copy) {
+                removals.insert(copy);
+            }
+        }
+
         // A v1 store is written back as v2 even when nothing else changed.
         let upgrade = current.schema != COUNTER_STORE_SCHEMA;
         let purge = never_sessions.touches(&current.routing);
-        let unchanged = reads.is_empty() && removals.is_empty() && !restart && !upgrade && !purge;
+        let unchanged = reads.is_empty()
+            && removals.is_empty()
+            && spawned_reads.is_empty()
+            && spawned_removals.is_empty()
+            && !restart
+            && !upgrade
+            && !purge;
         // Asked with no lock of this pass held: it reads the settings.
         if should_stop() {
             return Ok(None);
@@ -1657,6 +2216,22 @@ impl CounterPass {
             COUNTER_STORE_MAX_CODEX_SERIES_TURNS,
             COUNTER_STORE_MAX_CODEX_SERIES_TOOL_CALLS,
         );
+        for session in &spawned_removals {
+            store.spawned.remove(session);
+        }
+        for (session, mut spawned) in spawned_reads {
+            spawned.row.seq = store.spawned_next_seq;
+            store.spawned_next_seq += 1;
+            store.spawned.insert(session, spawned);
+        }
+        let (max_spawned, max_spawned_turns, max_spawned_tools) = self.spawned_caps();
+        enforce_spawned_caps(
+            &mut store,
+            max_spawned,
+            max_spawned_turns,
+            max_spawned_tools,
+        );
+        store.spawned_floor = store.spawned_floor.filter(|floor| *floor >= cutoff);
         never_sessions.purge(&mut store.routing);
         prune_routing(&mut store, &gone, cutoff);
         self.stage_into(&mut cached, store);
@@ -1885,6 +2460,29 @@ impl CounterPass {
             _ => Vec::new(),
         };
         let week_start = week.unwrap_or_else(|| local_week_start(&now, &tz));
+        let goals = match (&key, &store) {
+            (Some(key), Some(store)) if store.key_fingerprint == key_fingerprint(key) => {
+                week_goals(
+                    store,
+                    key,
+                    &never_digests(key, never_project_keys),
+                    &folder_labels_by_digest(key, folders),
+                    self.codex_goals_db.as_deref(),
+                    (week_start, tz),
+                )
+            }
+            _ => WeekGoals::default(),
+        };
+        let credit = match (&key, &store) {
+            (Some(key), Some(store))
+                if routing_unavailable.is_none()
+                    && LEDGER_MONEY_IN_INSIGHTS
+                    && store.key_fingerprint == key_fingerprint(key) =>
+            {
+                near_ai_credit_value(store, key, never_project_keys, folders, week_start, tz, now)
+            }
+            _ => serde_json::Value::Null,
+        };
         let this = week_rollup(Feed::CounterPass, &inputs, week_start, &tz);
         let last = week_rollup(
             Feed::CounterPass,
@@ -1938,6 +2536,26 @@ impl CounterPass {
             })
             .filter(|week| week.coverage.sessions() > 0)
             .collect();
+        // Claude and Codex spend at API list prices, lines and edits
+        // (product owner, 2026-10-29); `null` with no row, as
+        // `near_ai_credit` is with no store.
+        let work = if inputs.is_empty() {
+            serde_json::Value::Null
+        } else {
+            let folders: BTreeMap<String, Option<String>> = joined
+                .iter()
+                .map(|(reference, join)| (reference.clone(), join.folder.map(str::to_owned)))
+                .collect();
+            super::insights_week_work::work_value(
+                &inputs,
+                &folders,
+                crate::insights::pricing_catalog::shared_pricing_catalog(),
+                this.week_start,
+                tz,
+                current - Duration::weeks(COUNTER_STORE_KEEP_WEEKS - 1),
+                &near_ai_routes(&joined, routing_unavailable.is_none()),
+            )
+        };
         let picker = dated_weeks(&inputs, &tz);
         let overview = counter_overview(&this, &earlier, tz.local_minus_utc(), picker.clone());
         // The Patterns cards describe how the person works: automated
@@ -1981,10 +2599,14 @@ impl CounterPass {
             "rollup": rollup_value(&this, &joined, routing_unavailable.is_none()),
             "routing_available": routing_unavailable.is_none(),
             "routing_unavailable": routing_unavailable,
+            "near_ai_credit": credit,
+            "work": work,
+            "usage_by_day": usage_by_day_value(&inputs, now, tz),
             "overview": overview,
             "patterns": patterns,
             "history": history,
             "recap_card_enabled": options.recap_card_enabled,
+            "goals": goals,
         })
     }
 
@@ -2327,12 +2949,10 @@ impl CounterPass {
             .enumerate()
             .find_map(|(index, (adapter, path))| {
                 let source = analytics_source(adapter)?;
-                (session_key(&key, adapter, &path.to_string_lossy()) == session).then_some(
-                    Located {
-                        index,
-                        format: source_format(source),
-                    },
-                )
+                (row_key(&key, adapter, path) == session).then_some(Located {
+                    index,
+                    format: source_format(source),
+                })
             }))
     }
 
@@ -2401,7 +3021,7 @@ impl CounterPass {
             &routes,
             &charges,
             &labels,
-            &crate::insights::pricing_catalog::production_pricing_catalog(),
+            crate::insights::pricing_catalog::shared_pricing_catalog(),
             now,
         );
         let tables: Vec<serde_json::Value> = answers
@@ -2569,6 +3189,7 @@ impl CounterPass {
     /// meanwhile keeps its tallies and cursor; were the pass to write its
     /// starting store back, the next fold would take the rows still in the
     /// window again.
+    #[cfg(test)]
     pub(crate) fn fold_ledger(
         &self,
         enabled: &dyn Fn() -> bool,
@@ -2576,11 +3197,26 @@ impl CounterPass {
         speakers: &mut dyn FnMut() -> Speakers,
         now: DateTime<Utc>,
     ) -> Result<FoldSummary, &'static str> {
+        self.fold_ledgers(enabled, ledger, None, speakers, now)
+    }
+
+    /// [`Self::fold_ledger`], and each managed route's ledger in `managed`
+    /// by its own cursor. `managed` is `None` when the managed routes could
+    /// not be read: their cursors are then kept as they are. A route no
+    /// longer in a read `managed` loses its cursor.
+    pub(crate) fn fold_ledgers(
+        &self,
+        enabled: &dyn Fn() -> bool,
+        ledger: &dyn crate::routing::RoutingLedger,
+        managed: Option<&ManagedRows<'_>>,
+        speakers: &mut dyn FnMut() -> Speakers,
+        now: DateTime<Utc>,
+    ) -> Result<FoldSummary, &'static str> {
         let cleared = self.cleared.load(Ordering::SeqCst);
         if !enabled() {
             return Ok(FoldSummary::default());
         }
-        let result = self.fold_inner(cleared, ledger, speakers, now);
+        let result = self.fold_inner(cleared, ledger, managed, speakers, now);
         let failure = result.as_ref().err().copied();
         if let Ok(mut last) = self.last_fold_failure.lock() {
             if *last != failure {
@@ -2598,6 +3234,7 @@ impl CounterPass {
         &self,
         cleared: u64,
         ledger: &dyn crate::routing::RoutingLedger,
+        managed: Option<&ManagedRows<'_>>,
         speakers: &mut dyn FnMut() -> Speakers,
         now: DateTime<Utc>,
     ) -> Result<FoldSummary, &'static str> {
@@ -2610,14 +3247,13 @@ impl CounterPass {
         // A first look, without the lock, to learn whether anything is new
         // and the tools need reading.
         let peek = self.load_cached()?;
-        let cursor = peek
-            .as_ref()
-            .map_or_else(FoldCursor::default, |store| store.fold_cursor());
-        let plan = fold_plan(&window, cursor);
-        if plan.rows.is_empty() && plan.next == cursor {
+        let empty = CounterStore::empty(KeyedDigest([0; 32]));
+        let peeked = peek.as_deref().unwrap_or(&empty);
+        let plans = FoldPlans::new(&window, managed, peeked);
+        if plans.is_idle() && !loose_upgrade_due(peeked, managed) {
             return Ok(FoldSummary::default());
         }
-        let speakers = if plan.needs_speakers() {
+        let speakers = if plans.needs_speakers() || loose_upgrade_due(peeked, managed) {
             speakers()
         } else {
             Vec::new()
@@ -2638,26 +3274,74 @@ impl CounterPass {
             Some(_) => return Ok(FoldSummary::default()),
             None => CounterStore::empty(fingerprint),
         };
-        // Planned again under the lock, from the cursor as it now stands.
-        let plan = fold_plan(&window, store.fold_cursor());
-        if plan.rows.is_empty() && plan.next == store.fold_cursor() {
+        // Planned again under the lock, from the cursors as they now stand.
+        let plans = FoldPlans::new(&window, managed, &store);
+        let upgrade = loose_upgrade_due(&store, managed);
+        if plans.is_idle() && !upgrade {
             return Ok(FoldSummary::default());
         }
-        let summary = fold_into(
-            &mut store.routing,
-            &key,
-            &plan,
-            &speakers,
-            LEDGER_MONEY_IN_INSIGHTS,
-        );
+        if upgrade {
+            // Calls folded before skipped calls' charges were kept: those
+            // a fold skipped then add their charge now, once. The calls it
+            // folded then add nothing again.
+            let taken = |plan: &super::insights_route_tally::FoldPlan<'_>| -> BTreeSet<i64> {
+                plan.rows.iter().filter_map(|row| row.id).collect()
+            };
+            let shared_taken = taken(&plans.shared);
+            let before: Vec<&crate::routing::RoutedExchange> = window
+                .iter()
+                .filter(|row| row.id.is_some_and(|id| !shared_taken.contains(&id)))
+                .collect();
+            super::insights_route_tally::fold_loose_only(
+                &mut store.loose_charge,
+                &before,
+                &speakers,
+                LEDGER_MONEY_IN_INSIGHTS,
+            );
+            for (home, rows) in managed.into_iter().flatten() {
+                let done = plans.managed.get(home).map(taken).unwrap_or_default();
+                let before: Vec<&crate::routing::RoutedExchange> = rows
+                    .iter()
+                    .copied()
+                    .filter(|row| row.id.is_some_and(|id| !done.contains(&id)))
+                    .collect();
+                super::insights_route_tally::fold_loose_only(
+                    &mut store.loose_charge,
+                    &before,
+                    &speakers,
+                    LEDGER_MONEY_IN_INSIGHTS,
+                );
+            }
+            store.loose_epoch = LOOSE_EPOCH;
+        }
+        let mut summary = FoldSummary::default();
+        for plan in std::iter::once(&plans.shared).chain(plans.managed.values()) {
+            let folded = fold_into(
+                &mut store.routing,
+                &mut store.loose_charge,
+                &key,
+                plan,
+                &speakers,
+                LEDGER_MONEY_IN_INSIGHTS,
+            );
+            summary.folded += folded.folded;
+            summary.skipped += folded.skipped;
+        }
         // A Never folder leaves nothing: a session the last pass found in
         // one keeps no tally, charge or model label.
         self.never_sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .purge(&mut store.routing);
-        store.ledger_folded_through = plan.next.through;
-        store.ledger_folded_started = plan.next.started;
+        store.ledger_folded_through = plans.shared.next.through;
+        store.ledger_folded_started = plans.shared.next.started;
+        if managed.is_some() {
+            store.managed_folded = plans
+                .managed
+                .iter()
+                .map(|(home, plan)| (home.clone(), StoredCursor::from(plan.next)))
+                .collect();
+        }
         prune_routing(
             &mut store,
             &BTreeSet::new(),
@@ -2692,6 +3376,72 @@ fn source_format(source: AnalyticsSource) -> SourceFormat {
     match source {
         AnalyticsSource::ClaudeCode => SourceFormat::ClaudeCode,
         AnalyticsSource::Codex => SourceFormat::Codex,
+    }
+}
+
+/// Whether the calls folded before skipped calls' charges were kept are
+/// still to be taken once more for their charge (`CounterStore::loose_epoch`).
+/// Only once the managed routes could be read, so none is missed.
+fn loose_upgrade_due(store: &CounterStore, managed: Option<&ManagedRows<'_>>) -> bool {
+    managed.is_some() && store.loose_epoch < LOOSE_EPOCH
+}
+
+/// One fold's plans: the shared ledger's, and each managed route's by its
+/// own cursor.
+struct FoldPlans<'a> {
+    shared: super::insights_route_tally::FoldPlan<'a>,
+    managed: BTreeMap<String, super::insights_route_tally::FoldPlan<'a>>,
+    /// Whether the shared cursor moves.
+    shared_moved: bool,
+    /// Whether any managed cursor moves or goes.
+    managed_moved: bool,
+}
+
+impl<'a> FoldPlans<'a> {
+    fn new(
+        window: &'a [crate::routing::RoutedExchange],
+        managed: Option<&ManagedRows<'a>>,
+        store: &CounterStore,
+    ) -> Self {
+        let shared = fold_plan(window, store.fold_cursor());
+        let mut moved = false;
+        let managed: BTreeMap<String, super::insights_route_tally::FoldPlan<'a>> = managed
+            .map(|homes| {
+                moved |= store
+                    .managed_folded
+                    .keys()
+                    .any(|home| !homes.contains_key(home));
+                homes
+                    .iter()
+                    .map(|(home, rows)| {
+                        let cursor: FoldCursor = store
+                            .managed_folded
+                            .get(home)
+                            .copied()
+                            .unwrap_or_default()
+                            .into();
+                        let plan = super::insights_route_tally::fold_plan_refs(rows, cursor);
+                        moved |= !plan.rows.is_empty() || plan.next != cursor;
+                        (home.clone(), plan)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        FoldPlans {
+            shared_moved: shared.next != store.fold_cursor(),
+            shared,
+            managed,
+            managed_moved: moved,
+        }
+    }
+
+    /// Nothing to fold and no cursor to move.
+    fn is_idle(&self) -> bool {
+        self.shared.rows.is_empty() && !self.shared_moved && !self.managed_moved
+    }
+
+    fn needs_speakers(&self) -> bool {
+        self.shared.needs_speakers() || self.managed.values().any(|plan| plan.needs_speakers())
     }
 }
 
@@ -2768,22 +3518,53 @@ fn never_digests(key: &DigestKey, never: &NeverFolders) -> NeverDigests {
 /// none or more than one, as a saved snapshot's identity does. The file is
 /// read line by line ([`scan_session`]), never held whole.
 fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &DigestKey) -> ReadBody {
-    let file = std::fs::File::open(&candidate.path).ok();
-    // The one file's own size, as the analysis reads it: delegated
-    // transcripts are counted in the candidate's, never read.
-    let bytes = file
-        .as_ref()
-        .and_then(|file| file.metadata().ok())
-        .map(|meta| meta.len());
-    let scanned = file.and_then(|file| {
-        scan_session(
-            source,
-            std::io::BufReader::new(file),
-            key,
-            COUNTER_PASS_MAX_LINE_BYTES,
-            CODEX_PER_TURN_SERIES,
-        )
-    });
+    let insights_only = insights_only(candidate);
+    let mut compressed_failure = None;
+    let (bytes, scanned) = if let Some(file) = compressed_file(candidate) {
+        // Streamed through the bounded decoder, never to memory whole or a
+        // temp file; the line cap below applies to decompressed lines.
+        match crate::source::compressed::BoundedDecoder::open(&file) {
+            Ok(mut decoder) => {
+                let scanned = scan_session(
+                    source,
+                    std::io::BufReader::new(&mut decoder),
+                    key,
+                    COUNTER_PASS_MAX_LINE_BYTES,
+                    CODEX_PER_TURN_SERIES,
+                );
+                compressed_failure = decoder.failure();
+                // A stream that failed part way is unknown, never the part
+                // read before it failed.
+                let scanned = scanned.filter(|_| compressed_failure.is_none());
+                (Some(decoder.produced()), scanned)
+            }
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    compressed_failure =
+                        Some(crate::source::compressed::CompressedFailure::of(&error));
+                }
+                (None, None)
+            }
+        }
+    } else {
+        let file = std::fs::File::open(&candidate.path).ok();
+        // The one file's own size, as the analysis reads it: delegated
+        // transcripts are counted in the candidate's, never read.
+        let bytes = file
+            .as_ref()
+            .and_then(|file| file.metadata().ok())
+            .map(|meta| meta.len());
+        let scanned = file.and_then(|file| {
+            scan_session(
+                source,
+                std::io::BufReader::new(file),
+                key,
+                COUNTER_PASS_MAX_LINE_BYTES,
+                CODEX_PER_TURN_SERIES,
+            )
+        });
+        (bytes, scanned)
+    };
     let Some(scanned) = scanned else {
         return ReadBody {
             body: RowBody::Unknown {
@@ -2795,7 +3576,9 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             span: None,
             facts: None,
             automation: Automation::Unknown,
-            not_analyzable: NotAnalyzable::of(source, bytes, None),
+            not_analyzable: NotAnalyzable::of(source, insights_only, bytes, None),
+            compressed_failure,
+            goals: Vec::new(),
         };
     };
     let mut facts = scanned.facts;
@@ -2859,7 +3642,14 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
         first_event_at: scanned.first_event_at,
         span: scanned.span,
         automation: scanned.automation,
-        not_analyzable: NotAnalyzable::of(source, bytes, Some(scanned.session_metas)),
+        not_analyzable: NotAnalyzable::of(
+            source,
+            insights_only,
+            bytes,
+            Some(scanned.session_metas),
+        ),
+        compressed_failure,
+        goals: scanned.goals,
     }
 }
 
@@ -2876,6 +3666,10 @@ struct ReadBody {
     facts: Option<SessionFacts>,
     automation: Automation,
     not_analyzable: Option<NotAnalyzable>,
+    /// Why a compressed rollout could not be read to its end.
+    compressed_failure: Option<crate::source::compressed::CompressedFailure>,
+    /// Claude's `/goal` goals, status and counters only.
+    goals: Vec<ClaudeGoal>,
 }
 
 /// The extractors' results for one transcript, from one pass over its lines.
@@ -2895,6 +3689,8 @@ struct ScannedSession {
     /// Lines longer than the bound, passed over unread (an inlined image,
     /// say). Nonzero, the caller marks the session partial.
     long_lines_skipped: u32,
+    /// Claude's `/goal` goals (`insights::slash_goals`); empty for Codex.
+    goals: Vec<ClaudeGoal>,
 }
 
 /// Tells a Codex session its harness started from one the person started,
@@ -2905,16 +3701,20 @@ struct ScannedSession {
 /// `vscode`, `exec`, `mcp`) otherwise. Only the shape is read, never a
 /// value inside it.
 ///
-/// The first `session_meta` decides. A spawned thread forked from its
-/// parent can carry the parent's `session_meta` after its own; when a
-/// later one is not spawned too, the session reads as unknown rather than
-/// automated, so a mixed transcript is never set aside. No `session_meta`,
-/// no `source`, or `source: "unknown"` is unknown. `exec` and `mcp`
-/// sessions read as the person's: a person can start either.
+/// The first `session_meta` decides, and a later one never changes it. A
+/// thread an agent spawned is written with its own `session_meta` and then
+/// a copy of its parent's (`source: "vscode"`, say): that copy does not
+/// make the thread the person's, nor unknown. Search of 2026-10-29 over
+/// 907 local Codex transcripts: every one with more than one
+/// `session_meta` opens with a spawned thread's and has the second within
+/// its first three lines (121 then a person-started label, 10 then another
+/// spawned thread), and none opens with a person-started one, so no
+/// transcript that is the person's own is set aside by this rule. No
+/// `session_meta`, no `source`, or `source: "unknown"` is unknown. `exec`
+/// and `mcp` sessions read as the person's: a person can start either.
 #[derive(Default)]
 struct CodexAutomationScan {
     first: Option<Automation>,
-    mixed: bool,
 }
 
 impl CodexAutomationScan {
@@ -2933,19 +3733,11 @@ impl CodexAutomationScan {
             Some(serde_json::Value::String(label)) if label == "unknown" => Automation::Unknown,
             Some(_) => Automation::Person,
         };
-        match self.first {
-            None => self.first = Some(class),
-            Some(Automation::Automated) if class != Automation::Automated => self.mixed = true,
-            Some(_) => {}
-        }
+        self.first.get_or_insert(class);
     }
 
     fn finish(self) -> Automation {
-        if self.mixed {
-            Automation::Unknown
-        } else {
-            self.first.unwrap_or_default()
-        }
+        self.first.unwrap_or_default()
     }
 }
 
@@ -3009,6 +3801,8 @@ fn scan_session(
         (source == AnalyticsSource::Codex).then(|| CodexTurnSeriesScan::new(key));
     let mut time = Some(RecordedTimeScan::new(format));
     let mut automation = (source == AnalyticsSource::Codex).then(CodexAutomationScan::default);
+    // Lenient: it never fails, and sees every record that parses.
+    let mut goals = (source == AnalyticsSource::ClaudeCode).then(ClaudeGoalScan::new);
     let mut session_metas = 0usize;
     let mut line: Vec<u8> = Vec::new();
     // One-based physical line number, blank lines counted.
@@ -3066,6 +3860,9 @@ fn scan_session(
         };
         identity.observe(&record);
         if let Some(scan) = automation.as_mut() {
+            scan.observe(&record);
+        }
+        if let Some(scan) = goals.as_mut() {
             scan.observe(&record);
         }
         if source == AnalyticsSource::Codex && record["type"] == "session_meta" {
@@ -3144,6 +3941,7 @@ fn scan_session(
         automation: automation.map_or(Automation::Unknown, CodexAutomationScan::finish),
         session_metas,
         long_lines_skipped,
+        goals: goals.map(ClaudeGoalScan::finish).unwrap_or_default(),
     })
 }
 
@@ -3335,6 +4133,15 @@ fn find_listed<'s>(
 
 /// Age out and cap the route tallies against the rows the store keeps.
 fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff: DateTime<Utc>) {
+    // The loose charge ages out by the hour, as a tally does by its last
+    // call; gone entirely once no hour is left.
+    if let Some(loose) = store.loose_charge.as_mut() {
+        let first = super::insights_route_tally::unix_hour(cutoff);
+        loose.by_hour.retain(|hour, _| *hour >= first);
+        if loose.by_hour.is_empty() {
+            store.loose_charge = None;
+        }
+    }
     let matched: BTreeSet<KeyedDigest> = store
         .rows
         .values()
@@ -3351,7 +4158,8 @@ fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff:
 
 /// After the routing ledger's refresh: fold its new calls into the route
 /// tallies, only while both `insights_ledger_feed` (owner decision D3, on by
-/// default) and `insights_counter_pass` (D4, open) are on. Gated on the pass too
+/// default) and `insights_counter_pass` (on by default; product owner,
+/// 2026-10-29) are on. Gated on the pass too
 /// because the tallies live in its store: unenroll turns the pass off and
 /// clears the store, and a fold gated on the feed alone would write it back.
 /// A poisoned settings lock reads as off. Failures are logged inside, by
@@ -3361,23 +4169,50 @@ fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff:
 /// the watcher tick: this reads the switches and, when both are on, the
 /// ledger's 24-hour window (already in memory), hands both to the worker
 /// and returns. The worker asks the switches again before it folds.
+///
+/// The managed routes' ledgers (`<config>/managed-routes/<uuid>`, the
+/// Private AI sessions started from the app) are folded too, from the
+/// daemon's managed-history snapshot, each by its own cursor, with or
+/// without a shared `ledger`. They keep their rows, so the whole of each
+/// is planned, not a 24-hour window.
 pub(crate) fn fold_ledger_after_refresh(
     shared: &Arc<DaemonShared>,
-    ledger: &dyn crate::routing::RoutingLedger,
+    ledger: Option<&dyn crate::routing::RoutingLedger>,
 ) {
     if !fold_enabled(shared) {
         return;
     }
     let now = Utc::now();
-    let window = ledger
-        .exchanges_since(now - Duration::hours(crate::routing::ironwire::REFRESH_WINDOW_HOURS));
-    submit_ledger_fold(shared, FoldJob { window, now });
+    let window = ledger.map_or_else(Vec::new, |ledger| {
+        ledger
+            .exchanges_since(now - Duration::hours(crate::routing::ironwire::REFRESH_WINDOW_HOURS))
+    });
+    let managed = super::managed_history::snapshot(shared);
+    if ledger.is_none() && !matches!(managed, Ok(Some(_))) {
+        return;
+    }
+    submit_ledger_fold(
+        shared,
+        FoldJob {
+            window,
+            managed,
+            now,
+        },
+    );
     // A test waits for the fold, unless it asked to watch it run on its
     // own; the daemon never does.
     #[cfg(test)]
     if !shared.insights_counter.detached_for_test() {
         shared.insights_counter.await_idle_for_test();
     }
+}
+
+/// Whether any proxy ledger feeds the route tallies: the shared proxy's,
+/// or a managed route's (the Private AI sessions started from the app),
+/// which are folded with or without a shared one.
+pub(crate) fn any_ledger(shared: &DaemonShared) -> bool {
+    shared.routing_ledger().is_some()
+        || matches!(super::managed_history::snapshot(shared), Ok(Some(_)))
 }
 
 /// Both switches the fold needs, `insights_ledger_feed` and
@@ -3396,9 +4231,18 @@ fn run_fold_job(shared: &DaemonShared, job: FoldJob) {
     let mut speakers =
         || super::inference_map::speakers_from_rows(&super::harness::rows_now(shared));
     let ledger = crate::routing::FixedLedger::new(job.window);
-    let _ = shared
-        .insights_counter
-        .fold_ledger(&enabled, &ledger, &mut speakers, job.now);
+    let homes = match &job.managed {
+        Ok(Some(history)) => Some(history.rows_by_home()),
+        Ok(None) => Some(ManagedRows::new()),
+        Err(()) => None,
+    };
+    let _ = shared.insights_counter.fold_ledgers(
+        &enabled,
+        &ledger,
+        homes.as_ref(),
+        &mut speakers,
+        job.now,
+    );
 }
 
 /// Drop the oldest sessions, by last write and then by the order they were
@@ -3510,6 +4354,40 @@ fn enforce_caps(
 /// is unchanged, because the pass's unchanged test does not look at the
 /// series. A file that changes is read again whole, series and all, as the
 /// newest Codex row, and the budget then trims older ones.
+/// Holds the sub-agent rows to their allowance: past any of the three
+/// bounds the oldest (by last write, then order made) go first, and the
+/// newest last write evicted becomes the floor below which a transcript with
+/// no row is not read. Never touches the person's rows.
+fn enforce_spawned_caps(
+    store: &mut CounterStore,
+    max_sessions: usize,
+    max_turns: usize,
+    max_tools: usize,
+) {
+    let mut oldest_first: Vec<(DateTime<Utc>, u64, KeyedDigest)> = store
+        .spawned
+        .iter()
+        .map(|(session, spawned)| (spawned.row.modified_at, spawned.row.seq, *session))
+        .collect();
+    oldest_first.sort();
+    let mut turns: usize = store.spawned.values().map(|s| s.row.turns()).sum();
+    let mut tools: usize = store.spawned.values().map(|s| s.row.tool_calls()).sum();
+    for (modified_at, _, session) in oldest_first {
+        if store.spawned.len() <= max_sessions && turns <= max_turns && tools <= max_tools {
+            break;
+        }
+        if let Some(evicted) = store.spawned.remove(&session) {
+            turns -= evicted.row.turns();
+            tools -= evicted.row.tool_calls();
+            store.spawned_floor = Some(
+                store
+                    .spawned_floor
+                    .map_or(modified_at, |f| f.max(modified_at)),
+            );
+        }
+    }
+}
+
 fn trim_codex_series(store: &mut CounterStore, max_turns: usize, max_tools: usize) {
     let mut turns: usize = store
         .rows
@@ -3647,6 +4525,111 @@ fn session_row_value(
     })
 }
 
+/// The week's `/goal` goals (product owner, 2026-10-29): each goal whose
+/// last update falls in the local week starting `week_start`, on a row the
+/// Sessions list shows (not automated, not in a Never folder), with that
+/// row's folder label and listed reference, so the Sessions drill opens it.
+///
+/// Claude's goals are the row's stored ones. Codex's are read now from its
+/// goals database and joined to a Codex row by the keyed digest of the
+/// thread ID, which is the session ID the row's `harness_session` names; a
+/// goal no listed row matches (its rollout aged out, was archived or is in
+/// a Never folder) is left out. Only status, tokens, time, checks and the
+/// time of the update are answered, never a goal's text.
+///
+/// A goal is counted once however many rows hold it: a resumed Claude
+/// transcript repeats the goal records of the one it continues, told apart
+/// by when the goal was set, and a Codex thread is one goal by its digest.
+/// Of the copies, the one updated last is answered.
+fn week_goals(
+    store: &CounterStore,
+    key: &DigestKey,
+    never: &NeverDigests,
+    folders: &BTreeMap<KeyedDigest, &str>,
+    codex_goals_db: Option<&std::path::Path>,
+    (week_start, tz): (NaiveDate, FixedOffset),
+) -> WeekGoals {
+    let listed = || store.rows.values().filter(|row| is_listed(row, never));
+    let any_codex = listed()
+        .any(|row| row.harness_session.is_some() && matches!(row.body, RowBody::Codex { .. }));
+    let codex = match codex_goals_db {
+        Some(path) if any_codex => super::insights_codex_goals::read_codex_goals(path, key),
+        _ => BTreeMap::new(),
+    };
+    let in_week =
+        |at: Option<DateTime<Utc>>| at.filter(|at| local_week_start(at, &tz) == week_start);
+    let tag = store_tag_of(key, store);
+    let mut goals = Vec::new();
+    // One per Claude goal set time and per Codex thread, the latest update.
+    let mut claude_once: BTreeMap<DateTime<Utc>, WeekGoal> = BTreeMap::new();
+    // A Codex goal is one database row: on two rows, the reference is the
+    // one written last.
+    let mut codex_once: BTreeMap<KeyedDigest, (DateTime<Utc>, WeekGoal)> = BTreeMap::new();
+    let keep_latest = |slot: Option<&WeekGoal>, goal: &WeekGoal| {
+        slot.is_none_or(|kept| goal.updated_at > kept.updated_at)
+    };
+    for row in listed() {
+        let folder = folders.get(&row.project).map(|label| (*label).to_owned());
+        for goal in &row.goals {
+            let Some(updated_at) = in_week(goal.updated_at) else {
+                continue;
+            };
+            let status = GoalStatus::from(goal.status);
+            let answered = WeekGoal {
+                tool: AnalyticsSource::ClaudeCode,
+                status,
+                met: status.met(),
+                tokens: goal.tokens,
+                time_secs: goal.duration_ms.map(|ms| ms / 1_000),
+                iterations: goal.iterations,
+                folder: folder.clone(),
+                session_ref: row.listed_reference(tag),
+                updated_at,
+            };
+            match goal.set_at {
+                Some(set_at) => {
+                    if keep_latest(claude_once.get(&set_at), &answered) {
+                        claude_once.insert(set_at, answered);
+                    }
+                }
+                None => goals.push(answered),
+            }
+        }
+        if !matches!(row.body, RowBody::Codex { .. }) {
+            continue;
+        }
+        let Some((digest, goal)) = row
+            .harness_session
+            .and_then(|digest| codex.get(&digest).map(|goal| (digest, goal)))
+        else {
+            continue;
+        };
+        let Some(updated_at) = in_week(goal.updated_at) else {
+            continue;
+        };
+        let answered = WeekGoal {
+            tool: AnalyticsSource::Codex,
+            status: goal.status,
+            met: goal.status.met(),
+            tokens: goal.tokens_used,
+            time_secs: goal.time_used_secs,
+            iterations: None,
+            folder,
+            session_ref: row.listed_reference(tag),
+            updated_at,
+        };
+        if codex_once
+            .get(&digest)
+            .is_none_or(|(written, _)| row.modified_at > *written)
+        {
+            codex_once.insert(digest, (row.modified_at, answered));
+        }
+    }
+    goals.extend(claude_once.into_values());
+    goals.extend(codex_once.into_values().map(|(_, goal)| goal));
+    WeekGoals::new(goals)
+}
+
 /// What the answer joins to one engine row, by its `t{seq}` reference.
 /// An answer for a store or key that could not be read: never empty, never
 /// zero.
@@ -3696,7 +4679,9 @@ struct RowJoin<'a> {
 /// - `session_ref` is `CounterRow::reference()`, never a native session ID;
 ///   `folder` is the Sessions list's resolved display label. Both are null
 ///   when no matching metadata is present.
-/// - Never a native ID, a digest, a path, a backend, a model, a price or a title.
+/// - Never a native ID, a digest, a path, a backend, a model, a price or a
+///   title. The NEAR AI charge crosses beside the rollup, in
+///   `near_ai_credit`, never on a row.
 fn rollup_value(
     rollup: &WeekRollup,
     joined: &BTreeMap<String, RowJoin<'_>>,
@@ -3764,6 +4749,35 @@ pub(crate) fn never_folders(policy: &super::policy::ProjectPolicy) -> NeverFolde
     )
 }
 
+/// The sessions sent through NEAR AI, by the engine's session reference,
+/// for `work` to leave their list estimate out of the spend (D5). None
+/// while routing is unavailable: no tally is read then (D3).
+fn near_ai_routes(
+    joined: &BTreeMap<String, RowJoin<'_>>,
+    routing_available: bool,
+) -> BTreeMap<String, super::insights_week_work::NearAiRoute> {
+    use super::insights_route_tally::{RouteCategory, route_category};
+    use super::insights_week_work::NearAiRoute;
+    if !routing_available {
+        return BTreeMap::new();
+    }
+    joined
+        .iter()
+        .filter_map(|(reference, join)| {
+            let route = match route_category(join.tally).0 {
+                RouteCategory::RoutedVerified
+                | RouteCategory::RoutedUnverified
+                | RouteCategory::CheckFailed => NearAiRoute::Wholly,
+                RouteCategory::Mixed => NearAiRoute::Partly,
+                RouteCategory::Unobserved | RouteCategory::Unrecorded | RouteCategory::Outside => {
+                    return None;
+                }
+            };
+            Some((reference.clone(), route))
+        })
+        .collect()
+}
+
 /// Each row's route for the Models answers, by the engine's session
 /// reference: the category of its session's tally. While routing is
 /// unavailable (the ledger feed off, or no proxy ledger declared) every row
@@ -3798,11 +4812,26 @@ fn route_map(
         .collect()
 }
 
+/// The tool a stored row was read from, as the rollup's `source` spells
+/// it (`claude_code`, `codex`).
+fn row_tool(row: &CounterRow) -> &'static str {
+    let source = match &row.body {
+        RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
+        RowBody::Codex { .. } => AnalyticsSource::Codex,
+        RowBody::Unknown { source, .. } => *source,
+    };
+    match source {
+        AnalyticsSource::ClaudeCode => "claude_code",
+        AnalyticsSource::Codex => "codex",
+    }
+}
+
 /// Each row's NEAR AI charge for the Models answers, by the engine's
 /// session reference: absent when its session sent no call through NEAR AI
 /// (or routing is unavailable, as in `route_map`). Empty while
 /// `ledger_money` (`LEDGER_MONEY_IN_INSIGHTS`, owner decision D5) is held,
-/// so no stored charge is read.
+/// so no stored charge is read. The week's `near_ai_credit`
+/// (`near_ai_credit_value`) reads the same charges by window.
 fn charge_map(
     rows: &[&CounterRow],
     routing: &BTreeMap<KeyedDigest, RouteTally>,
@@ -3818,6 +4847,148 @@ fn charge_map(
             Some((row.reference(), session_charge(tally)?))
         })
         .collect()
+}
+
+/// `insights_week`'s `near_ai_credit`: where NEAR AI credit went
+/// (product owner, 2026-10-28), from every route tally's charge
+/// (`insights_credit`). `week` is the selected local week, by folder and
+/// served model; `today`, `by_day` (the last 7 local days, oldest first) and
+/// `last_31_days` (today and the 30 local days before it) are sums only,
+/// and do not move with the selected week.
+///
+/// A tally is grouped by the folder of its session's stored row, matched
+/// by the keyed harness-session digest; a tally with no row (a session the
+/// pass has not read, or whose row aged out) is in the sums and in the
+/// unknown folder. A row in a Never folder is not read; its tally is
+/// already gone (`NeverSessions`).
+fn near_ai_credit_value(
+    store: &CounterStore,
+    key: &DigestKey,
+    never_project_keys: &NeverFolders,
+    folders: &[(String, String)],
+    week_start: NaiveDate,
+    tz: FixedOffset,
+    now: DateTime<Utc>,
+) -> serde_json::Value {
+    use super::insights_credit::{CreditSession, window_value};
+    let never = never_digests(key, never_project_keys);
+    let labels = folder_labels_by_digest(key, folders);
+    let by_session: BTreeMap<KeyedDigest, &CounterRow> = store
+        .rows
+        .values()
+        .filter(|row| !never.contains(&row.project))
+        .filter_map(|row| Some((row.harness_session?, row)))
+        .collect();
+    let mut sessions: Vec<CreditSession<'_>> = store
+        .routing
+        .iter()
+        .filter_map(|(digest, tally)| {
+            let charge = tally.charge.as_ref()?;
+            let row = by_session.get(digest);
+            Some(CreditSession {
+                charge,
+                last_call_at: tally.last_call_at,
+                folder: row.and_then(|row| labels.get(&row.project).copied()),
+                counts_session: true,
+            })
+        })
+        .collect();
+    // Spend no session could be named for: in every sum and in each
+    // unknown group, as no trace.
+    if let Some(loose) = store.loose_charge.as_ref() {
+        sessions.push(CreditSession {
+            charge: loose,
+            last_call_at: now,
+            folder: None,
+            counts_session: false,
+        });
+    }
+    let midnight = |date: NaiveDate| {
+        date.and_hms_opt(0, 0, 0)
+            .and_then(|local| local.and_local_timezone(tz).single())
+            .map_or(now, |at| at.with_timezone(&Utc))
+    };
+    let today = now.with_timezone(&tz).date_naive();
+    let tomorrow = midnight(today + Duration::days(1));
+    // The last 7 local days, oldest first, today last (owner, 2026-10-28:
+    // the NEAR AI card's spend by day).
+    let by_day: Vec<serde_json::Value> = (0..7)
+        .rev()
+        .map(|back| {
+            let day = today - Duration::days(back);
+            let mut value = window_value(
+                &sessions,
+                midnight(day),
+                midnight(day + Duration::days(1)),
+                false,
+            );
+            value["date"] = serde_json::json!(day.to_string());
+            value
+        })
+        .collect();
+    serde_json::json!({
+        "basis": "near_ai_ledger",
+        "week": window_value(
+            &sessions,
+            midnight(week_start),
+            midnight(week_start + Duration::days(7)),
+            true,
+        ),
+        "today": window_value(&sessions, midnight(today), tomorrow, false),
+        "by_day": by_day,
+        "last_31_days": window_value(
+            &sessions,
+            midnight(today - Duration::days(30)),
+            tomorrow,
+            false,
+        ),
+    })
+}
+
+/// `insights_week`'s `usage_by_day` (product owner, 2026-10-28): Claude and
+/// Codex tokens on each of the last 7 local days, oldest first, today last,
+/// for the usage cards' bars. It does not move with the week on screen.
+/// Claude's are the four series a day stacks on "Tokens by day"; Codex's
+/// are its per-turn series split by day (`WeekRollup::codex_by_day`). A day
+/// is `null` (unknown, never 0) when a session on it could not be counted
+/// or split; a week with no session of that tool is a true 0.
+fn usage_by_day_value(
+    inputs: &[SessionInput],
+    now: DateTime<Utc>,
+    tz: FixedOffset,
+) -> serde_json::Value {
+    let today = now.with_timezone(&tz).date_naive();
+    let this = local_week_start(&now, &tz);
+    let weeks = [this - Duration::days(7), this]
+        .map(|start| week_rollup(Feed::CounterPass, inputs, start, &tz));
+    let has = |week: &WeekRollup, source: AnalyticsSource| {
+        week.sources.iter().any(|line| line.source == source)
+    };
+    let days: Vec<serde_json::Value> = (0..7)
+        .rev()
+        .map(|back| {
+            let day = today - Duration::days(back);
+            let week = weeks
+                .iter()
+                .find(|week| day >= week.week_start && day < week.week_start + Duration::days(7));
+            let (claude, codex) = week.map_or((None, None), |week| {
+                let offset = usize::try_from((day - week.week_start).num_days()).unwrap_or(0);
+                let claude = match &week.by_day {
+                    Some(days) => days
+                        .get(offset)
+                        .map(|d| d.uncached + d.cache_read + d.cache_write + d.output),
+                    None => (!has(week, AnalyticsSource::ClaudeCode)).then_some(0),
+                };
+                let codex = match &week.codex_by_day {
+                    Some(days) => days.get(offset).copied().flatten(),
+                    None => (!has(week, AnalyticsSource::Codex)).then_some(0),
+                };
+                (claude, codex)
+            });
+            serde_json::json!({"date": day.to_string(), "claude_code": claude, "codex": codex})
+        })
+        .collect();
+    serde_json::Value::Array(days)
 }
 
 /// `insights_week`.
@@ -3857,7 +5028,7 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
     };
     // Asked after the settings lock is let go. Only whether a ledger is
     // declared: the answer never reads the ledger itself.
-    options.ledger_present = options.ledger_feed && shared.routing_ledger().is_some();
+    options.ledger_present = options.ledger_feed && any_ledger(shared);
     let never = if enabled {
         match never_project_keys(shared) {
             Some(keys) => keys,
@@ -3894,12 +5065,22 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
     )
 }
 
+mod benchmarks;
+pub(crate) mod submitted;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
     use std::path::Path;
     use trace_commons_protocol::insights_usage_series::InMemoryDigestKeyStore;
+
+    // `insights_week/tests/compressed_tests.rs`: compressed Codex rollouts
+    // and managed-profile sessions, over this module's fixture.
+    mod compressed_tests;
+    // `insights_week/tests/spawned_tests.rs`: Claude sub-agent transcripts
+    // as rows of their own.
+    mod spawned_tests;
 
     const QUIET: u64 = 1_800;
     const PROJECT: &str = "/Users/PRIVATE_USER/code/PRIVATE_REPO";
@@ -4075,6 +5256,7 @@ mod tests {
             modified_at: written(),
             started_at: Some(written() - Duration::hours(1)),
             group_member_count: 0,
+            role: CandidateRole::Watched,
         }
     }
 
@@ -4585,8 +5767,10 @@ mod tests {
             span,
             facts: None,
             automation: Automation::Unknown,
+            goals: Vec::new(),
             not_analyzable: NotAnalyzable::of(
                 source,
+                false,
                 Some(bytes.len() as u64),
                 Some(
                     bytes
@@ -4596,6 +5780,7 @@ mod tests {
                         .count(),
                 ),
             ),
+            compressed_failure: None,
         }
     }
 
@@ -4604,6 +5789,7 @@ mod tests {
     /// automation class, which the automated-session tests cover.
     fn without_facts(mut read: ReadBody) -> ReadBody {
         read.facts = None;
+        read.goals = Vec::new();
         read.automation = Automation::Unknown;
         if let RowBody::Codex { series, .. } = &mut read.body {
             *series = None;
@@ -4946,6 +6132,7 @@ mod tests {
                     automation: Automation::Unknown,
                     automation_read: true,
                     not_analyzable: None,
+                    goals: Vec::new(),
                 },
             );
         }
@@ -5020,6 +6207,7 @@ mod tests {
                     automation: Automation::Unknown,
                     automation_read: true,
                     not_analyzable: None,
+                    goals: Vec::new(),
                 },
             );
         }
@@ -5106,6 +6294,7 @@ mod tests {
             automation: Automation::Unknown,
             automation_read: true,
             not_analyzable: None,
+            goals: Vec::new(),
         }
     }
 
@@ -5603,6 +6792,27 @@ mod tests {
     }
 
     #[test]
+    fn the_week_carries_work_at_list_prices_once_there_are_rows() {
+        let f = Fixture::new();
+        assert_eq!(f.week(&[])["work"], serde_json::Value::Null);
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let value = f.week(&[]);
+        let work = &value["work"];
+        assert_eq!(work["basis"], "api_list");
+        assert_eq!(work["week"]["sessions"], 1);
+        assert_eq!(work["by_tool"][0]["key"], "claude_code");
+        assert_eq!(work["by_day"].as_array().unwrap().len(), 7);
+        assert_eq!(work["by_day"][0]["date"], "2026-09-14");
+        assert!(work["last_week"].is_object());
+        // Every row in a Never folder: no row, no figure.
+        assert_eq!(
+            f.week(&[PROJECT.to_string()])["work"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn nothing_identifying_crosses() {
         let f = Fixture::new();
         let path = f.write("PRIVATE-SESSION.jsonl", &claude_bytes());
@@ -5651,6 +6861,96 @@ mod tests {
             path.to_str().unwrap(),
         ] {
             assert!(!text.contains(forbidden), "{forbidden} crossed: {text}");
+        }
+    }
+
+    /// Product owner, 2026-10-28: the week answers where NEAR AI credit
+    /// went, by task, tool and the local folder label, and today and the
+    /// last 31 days as sums; a call with no charge makes every figure it
+    /// is in unknown, never zero.
+    #[test]
+    fn the_week_answers_where_near_ai_credit_went() {
+        let f = Fixture::new();
+        let codex = f.write("codex.jsonl", &codex_bytes_for("SESSION-SECRET"));
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        let mut charged = ledger_call(1, 30, "SESSION-SECRET");
+        charged.cost_usd = Some(0.25);
+        assert_eq!(fold_with(&f.pass, true, vec![charged]).unwrap().folded, 1);
+        let folders = [(PROJECT.to_string(), "app".to_string())];
+        let week = |options| {
+            f.pass.week_value_with_folders(
+                true,
+                Some(monday()),
+                utc(),
+                now(),
+                &NeverFolders::NONE,
+                (options, &folders),
+            )
+        };
+        let value = week(routed());
+        let credit = &value["near_ai_credit"];
+        assert_eq!(credit["basis"], "near_ai_ledger");
+        assert_eq!(credit["today"]["usd_micros"], 250_000);
+        assert_eq!(credit["last_31_days"]["usd_micros"], 250_000);
+        assert!(credit["today"].get("by_folder").is_none());
+        let days = credit["by_day"].as_array().unwrap();
+        assert_eq!(days.len(), 7);
+        assert_eq!(days[6]["date"], "2026-09-14", "today last");
+        assert_eq!(days[0]["date"], "2026-09-08");
+        assert_eq!(days[6]["usd_micros"], 250_000);
+        assert_eq!(
+            days[5]["usd_micros"], 0,
+            "a day with no call is a true zero"
+        );
+        let this = &credit["week"];
+        assert_eq!(this["usd_micros"], 250_000);
+        assert_eq!(this["sessions"], 1);
+        assert!(this.get("by_tool").is_none(), "by tool was removed");
+        assert!(this.get("by_task").is_none(), "by task was removed");
+        assert_eq!(this["by_folder"][0]["key"], "app");
+        assert_eq!(this["by_folder"][0]["usd_micros"], 250_000);
+
+        // Another call with no charge: unknown, never zero.
+        assert_eq!(
+            fold_with(&f.pass, true, vec![ledger_call(2, 20, "SESSION-SECRET")])
+                .unwrap()
+                .folded,
+            1
+        );
+        let value = week(routed());
+        let this = &value["near_ai_credit"]["week"];
+        assert_eq!(this["usd_micros"], serde_json::Value::Null);
+        assert_eq!(this["calls_without_charge"], 1);
+        assert_eq!(this["by_folder"][0]["usd_micros"], serde_json::Value::Null);
+        assert_eq!(
+            value["near_ai_credit"]["today"]["usd_micros"],
+            serde_json::Value::Null
+        );
+
+        // The week before has none of it; a true zero.
+        let before = f.pass.week_value_with_folders(
+            true,
+            Some(monday() - Duration::days(7)),
+            utc(),
+            now(),
+            &NeverFolders::NONE,
+            (routed(), &folders),
+        );
+        assert_eq!(before["near_ai_credit"]["week"]["usd_micros"], 0);
+        assert_eq!(before["near_ai_credit"]["week"]["sessions"], 0);
+        // Today does not move with the week on screen.
+        assert_eq!(
+            before["near_ai_credit"]["today"]["calls"],
+            value["near_ai_credit"]["today"]["calls"]
+        );
+
+        // No money where routing is not shown.
+        for options in [WeekOptions::default(), {
+            let mut no_ledger = routed();
+            no_ledger.ledger_present = false;
+            no_ledger
+        }] {
+            assert_eq!(week(options)["near_ai_credit"], serde_json::Value::Null);
         }
     }
 
@@ -5728,6 +7028,34 @@ mod tests {
             sessions_of(&week)[0]["last_event_at"],
             "2026-09-14T09:01:00+00:00"
         );
+    }
+
+    #[test]
+    fn breakdown_rows_split_claude_by_day_and_leave_codex_null() {
+        let f = Fixture::new();
+        let claude = f.write("a.jsonl", &claude_bytes());
+        let codex = f.write("c.jsonl", &codex_bytes());
+        f.run(&[
+            candidate(SOURCE_CLAUDE_CODE, &claude),
+            candidate(SOURCE_CODEX, &codex),
+        ]);
+        let week = f.week(&[]);
+        let days = week["rollup"]["by_day"].as_array().unwrap();
+        for session in sessions_of(&week) {
+            if session["source"] == "codex" {
+                assert_eq!(session["by_day"], serde_json::Value::Null);
+                continue;
+            }
+            let by_day = session["by_day"].as_array().unwrap();
+            assert_eq!(by_day.len(), 7);
+            for (amount, day) in by_day.iter().zip(days) {
+                let total: u64 = ["uncached", "cache_read", "cache_write", "output"]
+                    .iter()
+                    .map(|series| day[series].as_u64().unwrap())
+                    .sum();
+                assert_eq!(amount.as_u64(), Some(total));
+            }
+        }
     }
 
     #[test]
@@ -5849,13 +7177,17 @@ mod tests {
         let mut outside = ledger_call(2, 20, "PRIVATE-CODEX-ID");
         outside.proof = Some(crate::routing::ProofStatus::Outside);
         outside.output_tokens = None;
-        fold_with(
-            &f.pass,
-            true,
-            vec![ledger_call(1, 30, "PRIVATE-CODEX-ID"), outside],
-        )
-        .unwrap();
+        // A charged call through NEAR AI, so `near_ai_credit` has a known
+        // figure, by model too; the outside call adds no charge.
+        let mut charged = ledger_call(1, 30, "PRIVATE-CODEX-ID");
+        charged.cost_usd = Some(0.0125);
+        charged.served_model = Some("zai-org/GLM-4.6".to_string());
+        fold_with(&f.pass, true, vec![charged, outside]).unwrap();
         let value = f.week_routed();
+        assert_eq!(
+            value["near_ai_credit"]["week"]["by_model"][0]["key"],
+            "zai-org/glm-4.6"
+        );
         let mut categories: Vec<String> = sessions_of(&value)
             .iter()
             .map(|row| row["routing"]["category"].as_str().unwrap().to_string())
@@ -5865,6 +7197,9 @@ mod tests {
         // The shells decode this answer from the committed fixture, so the
         // fixture is this answer, rows in order: a change to the wire fails
         // here first.
+        println!("BEGIN insights_week");
+        println!("{}", serde_json::to_string_pretty(&value).unwrap());
+        println!("END insights_week");
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/insights-analytics/insights_week_routed.json"
         ))
@@ -5874,9 +7209,6 @@ mod tests {
             "re-record tests/fixtures/insights-analytics/insights_week_routed.json \
              from this test's --nocapture output"
         );
-        println!("BEGIN insights_week");
-        println!("{}", serde_json::to_string_pretty(&value).unwrap());
-        println!("END insights_week");
     }
 
     /// `started_at` is the transcript's first recorded event (owner question
@@ -6207,8 +7539,9 @@ mod tests {
     }
 
     #[test]
-    fn the_method_answers_off_by_default_and_refuses_bad_params() {
+    fn the_method_answers_off_when_switched_off_and_refuses_bad_params() {
         let (_dir, s) = shared();
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let r = handle_week(&s, &call(serde_json::json!({})));
         assert_eq!(
             r.result.unwrap(),
@@ -6653,6 +7986,186 @@ mod tests {
         call
     }
 
+    /// Kristi, 2026-10-28: Private AI sessions started from the app go
+    /// through managed routes, whose ledgers sit apart from the shared
+    /// proxy's. Each is folded by its own cursor, so two routes' calls with
+    /// the same id both count, a second fold takes neither again, and a
+    /// call older than the shared ledger's 24-hour window still counts.
+    #[test]
+    fn managed_route_ledgers_fold_each_call_once_by_route_and_id() {
+        let f = Fixture::new();
+        f.pass.keys_load_or_create_for_test();
+        let mut old = charged_call(1, 60 * 48, "SESSION-SECRET");
+        old.cost_usd = Some(0.5);
+        let other = charged_call(1, 30, "SESSION-SECRET");
+        let mut homes = ManagedRows::new();
+        homes.insert("route-a".to_string(), vec![&old]);
+        homes.insert("route-b".to_string(), vec![&other]);
+        let none = crate::routing::FixedLedger::new(Vec::new());
+        let fold = |homes: &ManagedRows<'_>| {
+            f.pass
+                .fold_ledgers(&|| true, &none, Some(homes), &mut Vec::new, now())
+                .unwrap()
+        };
+        assert_eq!(fold(&homes).folded, 2);
+        let charge = |pass: &CounterPass| {
+            let all = tallies(pass);
+            assert_eq!(all.len(), 1);
+            all.values().next().unwrap().charge.clone().unwrap()
+        };
+        assert_eq!(charge(&f.pass).known(), Some(750_000));
+        assert_eq!(fold(&homes).folded, 0, "each call once");
+        assert_eq!(charge(&f.pass).charged_calls, 2);
+
+        // A new call on one route is the only one taken.
+        let next = charged_call(2, 10, "SESSION-SECRET");
+        homes.get_mut("route-b").unwrap().push(&next);
+        assert_eq!(fold(&homes).folded, 1);
+        assert_eq!(charge(&f.pass).known(), Some(1_000_000));
+
+        // A route that is gone loses its cursor; unreadable routes keep
+        // theirs.
+        homes.remove("route-a");
+        fold(&homes);
+        let cursors = |pass: &CounterPass| {
+            pass.load_cached()
+                .unwrap()
+                .unwrap()
+                .managed_folded
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cursors(&f.pass), ["route-b"]);
+        f.pass
+            .fold_ledgers(&|| true, &none, None, &mut Vec::new, now())
+            .unwrap();
+        assert_eq!(cursors(&f.pass), ["route-b"]);
+        assert!(!f.rows_text().contains("SESSION-SECRET"));
+    }
+
+    /// The owner's staging data, 2026-10-28: managed routes on the
+    /// `nearai` backend with no proof label, called by a tool no session
+    /// is named for (opencode), two days before the week on screen, some
+    /// calls refused with no charge. Before the fix every call was skipped
+    /// and no NEAR AI card showed.
+    fn owner_route_call(id: i64, cost: Option<f64>, status: i64) -> crate::routing::RoutedExchange {
+        crate::routing::RoutedExchange {
+            id: Some(id),
+            started_at: now() - Duration::days(2) + Duration::minutes(id),
+            client_session_id: Some("OPENCODE-SESSION".to_string()),
+            facade: "openai".to_string(),
+            path: Some("/v1/chat/completions".to_string()),
+            backend: "nearai".to_string(),
+            cost_usd: cost,
+            status,
+            proof: None,
+            ..Default::default()
+        }
+    }
+
+    fn credit_now(f: &Fixture) -> serde_json::Value {
+        f.pass.week_value_with_folders(
+            true,
+            Some(monday()),
+            utc(),
+            now(),
+            &NeverFolders::NONE,
+            (routed(), &[]),
+        )["near_ai_credit"]
+            .clone()
+    }
+
+    #[test]
+    fn spend_no_session_is_named_for_still_counts_in_the_sums() {
+        let f = Fixture::new();
+        f.pass.keys_load_or_create_for_test();
+        let a = [owner_route_call(1, Some(0.058), 200)];
+        let b = [
+            owner_route_call(1, Some(4.72), 200),
+            // Refused, not billed: a known $0.
+            owner_route_call(2, None, 429),
+            owner_route_call(3, None, 503),
+        ];
+        let mut homes = ManagedRows::new();
+        homes.insert("route-a".to_string(), a.iter().collect());
+        homes.insert("route-b".to_string(), b.iter().collect());
+        let none = crate::routing::FixedLedger::new(Vec::new());
+        let summary = f
+            .pass
+            .fold_ledgers(&|| true, &none, Some(&homes), &mut Vec::new, now())
+            .unwrap();
+        assert_eq!(summary.skipped, 4, "no session is named for these calls");
+        assert_eq!(tallies(&f.pass).len(), 0);
+
+        let credit = credit_now(&f);
+        // Nothing this week: a true zero.
+        assert_eq!(credit["week"]["usd_micros"], 0);
+        assert_eq!(credit["week"]["calls"], 0);
+        let month = &credit["last_31_days"];
+        assert_eq!(month["usd_micros"], 4_778_000);
+        assert_eq!(month["calls"], 4);
+        assert_eq!(month["calls_without_charge"], 0);
+        assert_eq!(month["sessions"], 0, "no trace is counted for them");
+        assert_eq!(credit["by_day"][4]["usd_micros"], 4_778_000);
+        assert_eq!(credit["by_day"][4]["date"], "2026-09-12");
+
+        // A completed call with no charge makes the sum unknown.
+        let c = [owner_route_call(1, None, 200)];
+        homes.insert("route-c".to_string(), c.iter().collect());
+        f.pass
+            .fold_ledgers(&|| true, &none, Some(&homes), &mut Vec::new, now())
+            .unwrap();
+        let month = &credit_now(&f)["last_31_days"];
+        assert_eq!(month["usd_micros"], serde_json::Value::Null);
+        assert_eq!(month["calls_without_charge"], 1);
+        // Owner, 2026-10-28: the owner's data (refused calls, one completed
+        // call with no charge) reads "at least" the known sum.
+        assert_eq!(month["usd_micros_known"], 4_778_000);
+        assert_eq!(month["usd_partial"], true);
+    }
+
+    /// A store a build before this one folded (its cursors past the calls
+    /// it skipped) takes those calls once more, for their charge only, and
+    /// never counts a folded call twice.
+    #[test]
+    fn calls_skipped_before_the_loose_charge_are_taken_once_more() {
+        let f = Fixture::new();
+        f.pass.keys_load_or_create_for_test();
+        let rows = [
+            owner_route_call(1, Some(0.25), 200),
+            owner_route_call(2, Some(0.5), 200),
+        ];
+        let mut homes = ManagedRows::new();
+        homes.insert("route-a".to_string(), rows.iter().collect());
+        let none = crate::routing::FixedLedger::new(Vec::new());
+        let fold = |homes: &ManagedRows<'_>| {
+            f.pass
+                .fold_ledgers(&|| true, &none, Some(homes), &mut Vec::new, now())
+                .unwrap()
+        };
+        fold(&homes);
+        // As the earlier build left it: cursor moved, no loose charge.
+        {
+            let mut cached = f.pass.cached.lock().unwrap();
+            let mut store = (*f.pass.load_into(&mut cached).unwrap().unwrap()).clone();
+            assert_eq!(store.loose_epoch, LOOSE_EPOCH);
+            store.loose_charge = None;
+            store.loose_epoch = 0;
+            f.pass.stage_into(&mut cached, store);
+        }
+        f.pass.flush().unwrap();
+        assert_eq!(credit_now(&f)["last_31_days"]["calls"], 0);
+        fold(&homes);
+        assert_eq!(credit_now(&f)["last_31_days"]["usd_micros"], 750_000);
+        fold(&homes);
+        assert_eq!(
+            credit_now(&f)["last_31_days"]["usd_micros"],
+            750_000,
+            "once"
+        );
+    }
+
     /// A session in a Never folder has no row (it is never read), so the
     /// row-driven drop above never reaches its tally. It leaves no tally,
     /// charge or served-model label: calls folded before the pass learns its
@@ -6746,6 +8259,7 @@ mod tests {
         assert!(super::super::ipc::DEV_DRY_RUN_LOCAL_METHODS.contains(&"insights_week"));
         let (_dir, mut s) = shared();
         s.dev_dry_run = true;
+        s.settings.lock().unwrap().insights_counter_pass = false;
         let r = super::super::ipc::handle_request(&s, &call(serde_json::json!({})));
         assert_eq!(r.result.unwrap()["enabled"], false);
     }
@@ -7135,6 +8649,9 @@ mod tests {
                 WeekOptions::default(),
             );
             value.as_object_mut().unwrap().remove("updated_at");
+            // `work` prices the per-turn series and counts the facts, so it
+            // moves with them by design; every other figure must not.
+            value.as_object_mut().unwrap().remove("work");
             value
         };
         let weeks = [Some(monday()), NaiveDate::from_ymd_opt(2026, 1, 5)];
@@ -7590,12 +9107,35 @@ mod tests {
 
     #[test]
     fn a_codex_session_its_harness_spawned_is_automated() {
-        for source in [
-            spawned(),
-            serde_json::json!({"subagent": "review"}),
-            serde_json::json!({"subagent": {"other": "synthetic-reviewer"}}),
+        for (sources, source) in [
+            (vec![Some(spawned())], "spawned"),
+            (
+                vec![Some(serde_json::json!({"subagent": "review"}))],
+                "review",
+            ),
+            (
+                vec![Some(
+                    serde_json::json!({"subagent": {"other": "synthetic-reviewer"}}),
+                )],
+                "other",
+            ),
+            (
+                vec![Some(serde_json::json!({"subagent": {"other": "guardian"}}))],
+                "guardian",
+            ),
+            // A spawned thread followed by its parent's copied
+            // `session_meta`: still the agent's, not the person's.
+            (
+                vec![Some(spawned()), Some(serde_json::json!("vscode"))],
+                "spawned then vscode",
+            ),
+            (
+                vec![Some(spawned()), Some(serde_json::json!("cli"))],
+                "spawned then cli",
+            ),
+            (vec![Some(spawned()), Some(spawned())], "spawned twice"),
         ] {
-            let row = codex_row_of(&codex_bytes_from(&[Some(source.clone())]));
+            let row = codex_row_of(&codex_bytes_from(&sources));
             assert_eq!(row.automation, Automation::Automated, "{source}");
             assert!(row.automation_read);
             assert!(row.session_input().automated, "{source}");
@@ -7620,15 +9160,13 @@ mod tests {
     }
 
     /// Unknown is never automated: no `session_meta` source, Codex's own
-    /// `unknown`, a spawned thread carrying a person-started
-    /// `session_meta` after its own, or a Claude Code session.
+    /// `unknown`, or a Claude Code session.
     #[test]
     fn an_undeterminable_session_is_unknown_and_not_automated() {
         for bytes in [
             codex_bytes(),
             codex_bytes_from(&[None]),
             codex_bytes_from(&[Some(serde_json::json!("unknown"))]),
-            codex_bytes_from(&[Some(spawned()), Some(serde_json::json!("cli"))]),
         ] {
             let row = codex_row_of(&bytes);
             assert_eq!(row.automation, Automation::Unknown);
@@ -7641,6 +9179,34 @@ mod tests {
         let row = only_row(&f.pass);
         assert_eq!(row.automation, Automation::Unknown);
         assert!(!row.session_input().automated);
+    }
+
+    /// A spawned thread stored as unknown under the older facts version (the
+    /// rule that read its parent's copied `session_meta` as mixed) is read
+    /// once more, though its file is unchanged and its automation was
+    /// looked for, and comes back automated.
+    #[test]
+    fn a_stored_spawned_thread_read_as_unknown_is_read_again_as_automated() {
+        let f = Fixture::new();
+        let path = f.write(
+            "s.jsonl",
+            &codex_bytes_from(&[Some(spawned()), Some(serde_json::json!("vscode"))]),
+        );
+        let candidates = [candidate(SOURCE_CODEX, &path)];
+        assert_eq!(f.run(&candidates).read, 1);
+        assert_eq!(f.run(&candidates).read, 0);
+        let mut store = (*f.pass.load_cached().unwrap().unwrap()).clone();
+        for row in store.rows.values_mut() {
+            row.facts_version = SESSION_FACTS_VERSION - 1;
+            row.automation = Automation::Unknown;
+            assert!(row.automation_read);
+        }
+        f.pass.save(store).unwrap();
+        assert_eq!(f.run(&candidates).read, 1);
+        let row = only_row(&f.pass);
+        assert_eq!(row.automation, Automation::Automated);
+        assert_eq!(row.facts_version, SESSION_FACTS_VERSION);
+        assert_eq!(f.run(&candidates).read, 0);
     }
 
     fn codex_body() -> RowBody {
@@ -7893,6 +9459,234 @@ mod tests {
                 assert_eq!(located.unwrap().unwrap().index, 0);
             }
         }
+    }
+
+    /// The text a `/goal` carries in the fixtures: Claude's condition, the
+    /// command's arguments and the reason, and Codex's objective. None of it
+    /// may reach the store, the week's answer or the Sessions answers.
+    fn assert_no_goal_text(text: &str) {
+        for secret in [
+            "PRIVATE-GOAL",
+            super::super::insights_codex_goals::tests::OBJECTIVE,
+            "make the tests pass",
+            "all green",
+        ] {
+            assert!(!text.contains(secret), "{secret} leaked: {text}");
+        }
+    }
+
+    #[test]
+    fn claude_goals_are_kept_per_session_and_answered_without_their_text() {
+        let f = Fixture::new();
+        let path = f.write("goals.jsonl", &fixture("claude-slash-goals/session.jsonl"));
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let row = only_row(&f.pass);
+        assert_eq!(
+            row.goals,
+            vec![
+                ClaudeGoal {
+                    status: crate::insights::slash_goals::ClaudeGoalStatus::Met,
+                    set_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 8, 59, 59).unwrap()),
+                    updated_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 9, 8, 30).unwrap()),
+                    iterations: Some(2),
+                    duration_ms: Some(30_065),
+                    tokens: Some(5_926),
+                },
+                ClaudeGoal {
+                    status: crate::insights::slash_goals::ClaudeGoalStatus::Open,
+                    set_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 9, 9, 0).unwrap()),
+                    updated_at: Some(Utc.with_ymd_and_hms(2026, 9, 14, 9, 9, 0).unwrap()),
+                    iterations: None,
+                    duration_ms: None,
+                    tokens: None,
+                },
+            ]
+        );
+        // The goals sit beside the counters; the series still reads.
+        assert!(matches!(row.body, RowBody::Claude { .. }), "{:?}", row.body);
+        assert_no_goal_text(&f.rows_text());
+
+        let value = f.week(&[]);
+        let goals = &value["goals"];
+        assert_eq!(goals["met"], 1, "{goals}");
+        assert_eq!(goals["total"], 2);
+        assert_eq!(
+            goals["by_tool"],
+            serde_json::json!({"claude_code": {"met": 1, "total": 2}})
+        );
+        let reference = row.listed_reference(f.pass.store_tag());
+        // Newest update first: the goal set last, not checked yet.
+        assert_eq!(goals["goals"][0]["status"], "open");
+        assert_eq!(goals["goals"][0]["met"], false);
+        assert_eq!(
+            goals["goals"][1],
+            serde_json::json!({
+                "tool": "claude_code",
+                "status": "met",
+                "met": true,
+                "tokens": 5_926,
+                "time_secs": 30,
+                "iterations": 2,
+                "folder": null,
+                "session_ref": reference,
+                "updated_at": "2026-09-14T09:08:30Z",
+            })
+        );
+        assert_no_goal_text(&value.to_string());
+        // The reference is the one the Sessions drill takes.
+        let drill = f
+            .pass
+            .drill_value(true, &reference, &NeverFolders::NONE, utc())
+            .unwrap();
+        assert_eq!(drill["readable"], true, "{drill}");
+        assert_no_goal_text(&drill.to_string());
+        assert_no_goal_text(
+            &f.pass
+                .sessions_value(true, &NeverFolders::NONE, &[], 10)
+                .to_string(),
+        );
+
+        // Another week has none, and a Never folder's session shows none.
+        let other = f.week_with(
+            Some(monday() + Duration::weeks(1)),
+            &[],
+            WeekOptions::default(),
+        );
+        assert_eq!(other["goals"]["total"], 0, "{}", other["goals"]);
+        assert_eq!(other["goals"]["goals"], serde_json::json!([]));
+        let never = f.week(&[PROJECT.to_string()]);
+        assert_eq!(never["goals"]["total"], 0);
+    }
+
+    /// A resumed Claude transcript repeats the goal records of the one it
+    /// continues: each goal is counted once, as last updated.
+    #[test]
+    fn a_goal_repeated_in_a_resumed_transcript_counts_once() {
+        let f = Fixture::new();
+        let bytes = fixture("claude-slash-goals/session.jsonl");
+        let first = f.write("first.jsonl", &bytes);
+        // The resumed transcript: the same records, and the open goal met.
+        let mut resumed = bytes.clone();
+        resumed.extend_from_slice(
+            serde_json::json!({
+                "type": "attachment",
+                "timestamp": "2026-09-14T11:00:00.000Z",
+                "sessionId": "11111111-2222-4333-8444-PRIVATESESS2",
+                "attachment": {"type": "goal_status", "met": true,
+                    "condition": "PRIVATE-GOAL-CONDITION-TWO ship the release",
+                    "reason": "PRIVATE-GOAL-REASON done", "iterations": 1,
+                    "durationMs": 1_000, "tokens": 10},
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        resumed.push(b'\n');
+        let second = f.write("second.jsonl", &resumed);
+        let mut later = candidate(SOURCE_CLAUDE_CODE, &second);
+        later.size_bytes = resumed.len() as u64;
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &first), later]);
+        assert_eq!(stored_rows(&f.pass).len(), 2);
+        let value = f.week(&[]);
+        let goals = &value["goals"];
+        assert_eq!(goals["total"], 2, "{goals}");
+        assert_eq!(goals["met"], 2, "the later check wins: {goals}");
+        assert_no_goal_text(&value.to_string());
+    }
+
+    #[test]
+    fn a_row_made_before_goals_were_kept_loads_and_is_read_again() {
+        let f = Fixture::new();
+        let path = f.write("goals.jsonl", &fixture("claude-slash-goals/session.jsonl"));
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        // As a daemon before goals wrote it: no `goals`, an older version.
+        edit_stored_rows(&f, |row| {
+            assert!(row.remove("goals").is_some());
+            row.insert("facts_version".into(), serde_json::json!(2));
+        });
+        let reopened = f.reopened();
+        let before = reopened.week_value(
+            true,
+            Some(monday()),
+            utc(),
+            now(),
+            &NeverFolders::NONE,
+            WeekOptions::default(),
+        );
+        assert_eq!(before["readable"], true, "{before}");
+        assert_eq!(before["goals"]["total"], 0);
+        run_with(
+            &reopened,
+            &[candidate(SOURCE_CLAUDE_CODE, &path)],
+            &[],
+            false,
+        );
+        assert_eq!(only_row(&reopened).goals.len(), 2);
+    }
+
+    #[test]
+    fn codex_goals_join_their_session_by_thread_and_carry_no_text() {
+        let mut f = Fixture::new();
+        let thread = "019e4769-7501-7bf3-bf74-b8b5d8e33a9b";
+        let path = f.write("codex.jsonl", &codex_bytes_for(thread));
+        f.run(&[candidate(SOURCE_CODEX, &path)]);
+        let db = f.dir.path().join("goals_1.sqlite");
+        let at = |hour| {
+            Utc.with_ymd_and_hms(2026, 9, 14, hour, 30, 0)
+                .unwrap()
+                .timestamp_millis()
+        };
+        super::super::insights_codex_goals::tests::write_goals_db(
+            &db,
+            &[
+                (thread, "complete", 42_000, 600, at(11)),
+                // A thread no row matches: its rollout is gone.
+                (
+                    "019e0000-0000-7000-8000-000000000000",
+                    "paused",
+                    1,
+                    1,
+                    at(11),
+                ),
+            ],
+        );
+        // No database configured: no Codex goals.
+        assert_eq!(f.week(&[])["goals"]["total"], 0);
+        f.pass.set_codex_goals_db_for_test(Some(db.clone()));
+        let value = f.week(&[]);
+        let goals = &value["goals"];
+        assert_eq!(goals["total"], 1, "{goals}");
+        assert_eq!(goals["met"], 1);
+        let row = only_row(&f.pass);
+        assert_eq!(
+            goals["goals"][0],
+            serde_json::json!({
+                "tool": "codex",
+                "status": "complete",
+                "met": true,
+                "tokens": 42_000,
+                "time_secs": 600,
+                "iterations": null,
+                "folder": null,
+                "session_ref": row.listed_reference(f.pass.store_tag()),
+                "updated_at": "2026-09-14T11:30:00Z",
+            })
+        );
+        assert_no_goal_text(&value.to_string());
+        assert_no_goal_text(&f.rows_text());
+        assert!(!f.rows_text().contains(thread));
+        // A goal last updated in another week is not this week's.
+        let next = f.week_with(
+            Some(monday() + Duration::weeks(1)),
+            &[],
+            WeekOptions::default(),
+        );
+        assert_eq!(next["goals"]["total"], 0);
+        // Never written: the database is only read.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM thread_goals", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
     }
 
     #[test]

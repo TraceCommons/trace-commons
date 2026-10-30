@@ -332,6 +332,25 @@ char*       tc_settings_ranges_json(void);
  */
 char*       tc_build_channel_json(void);
 
+/* The command-line tool's state for the app at bundle_path, as a JSON
+ * object:
+ *
+ * {"command_name":"near-ai","link_path":"/usr/local/bin/near-ai",
+ *  "state":"not_installed","install_script":"do shell script ...",
+ *  "uninstall_script":null}
+ *
+ * state is "not_installed", "installed", "stale" (our link to an app that
+ * moved), "foreign" (something this app did not create; no script is
+ * offered) or "unavailable" (bundle_path is not an app bundle with an
+ * executable Contents/MacOS/near-ai). Each script is present only when its
+ * action is offered: one "do shell script ... with administrator
+ * privileges" statement of fixed text and single-quoted, validated paths.
+ * Reads without following the link and writes nothing. NULL or a non-UTF-8
+ * bundle_path reads as "unavailable". Returns an owned string; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_cli_tool_json(const char* bundle_path);
+
 /* The sentence the app shows instead of starting when its bundle and this
  * library disagree on the channel. Returns an owned string; free it with
  * tc_string_free. NULL only on a caught panic.
@@ -857,6 +876,26 @@ int32_t     tc_private_inference_quit_needs_notice(int32_t requested_on, const c
  * panic.
  */
 char*       tc_private_inference_state_line(const char* state);
+
+/* The menu-bar popover's one word for one private_inference_state label: "On",
+ * "Off", "Stopping", "Not working", or "Unknown" for an unreported or
+ * unfamiliar label. The full sentence stays at tc_private_inference_state_line.
+ * A shell must not re-implement this mapping. Its dot is
+ * tc_private_inference_menu_tone.
+ *
+ * An empty, NULL or non-UTF-8 label answers the unknown word. Returns an owned
+ * string; free it with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_private_inference_menu_word(const char* state);
+
+/* The tone of the dot beside tc_private_inference_menu_word's word: one of the
+ * TC_PRIVATE_INFERENCE_TONE_* values. CLEAR is green, ATTENTION amber, REFUSED
+ * red, NEUTRAL grey.
+ *
+ * Answers TC_PRIVATE_INFERENCE_TONE_NEUTRAL for a label this build has never
+ * heard of, for a NULL or non-UTF-8 state, and on a caught panic.
+ */
+int32_t     tc_private_inference_menu_tone(const char* state);
 
 /* The Private AI runtime tile's word for one private_inference_state label:
  * every running label is "On", a stopped one "Off", and an unreported or
@@ -2226,11 +2265,11 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * session's per-turn counters (an unknown turn is null, never 0) and lettered
  * markers; Codex series is null as not_recorded. No path, digest or what-if.
  * Comparisons (feed T): comparisons {counter_weeks?,week_start?,tz,
- * recap_card_enabled?} marks each goal over the daemon's insights_week
- * history passed through, and returns the lever and the weekly summary card;
- * without counter_weeks nothing is compared. goal_set {id?,goal},
- * goal_delete {id}, lever_feedback {kind,week_start,action?} and
- * recap_opened {week_start} write rule IDs and Monday dates only.
+ * recap_card_enabled?} reads the daemon's insights_week history passed
+ * through, and returns the lever and the weekly summary card; without
+ * counter_weeks nothing is compared. Goals are the daemon's (insights_week
+ * goals). lever_feedback {kind,week_start,action?} and recap_opened
+ * {week_start} write rule IDs and Monday dates only.
  * lever_card {enabled} is the Settings switch for the lever's card; on, it
  * turns back on every kind repeated "Not useful" turned off. Its state is
  * comparisons' lever.card_enabled.
@@ -2652,11 +2691,30 @@ char*       tc_inference_connection_copy_json(void);
  */
 char*       tc_payout_link_copy_json(void);
 
+/* The referral words (referral_copy::referral_copy): the Settings Referrals
+ * section, the code field on the NEAR AI sign-in step and the Insights
+ * credit split, every one a draft for owner review. Templates carry {code},
+ * {n}, {date} or {amount}. NULL only on a caught panic.
+ */
+char*       tc_referral_copy_json(void);
+
+/* A typed referral code as it is shown, TC-XXXXX-XXXXX, read the way the
+ * daemon reads it before sending one. NULL for text that is not a code, a
+ * NULL or non-UTF-8 typed, and on a caught panic.
+ */
+char*       tc_referral_code_display(const char* typed);
+
 /* The Devices section's words (consent_copy::account_devices_copy), every
  * one a draft for owner review. Templates carry {device}, {code} or {when}.
  * NULL only on a caught panic.
  */
 char*       tc_account_devices_copy_json(void);
+
+/* The words for adding Train coding models to traces already sent
+ * (consent_copy::sent_traces_training_copy), every one a draft for owner
+ * review. Count templates carry {count}. NULL only on a caught panic.
+ */
+char*       tc_sent_traces_training_copy_json(void);
 
 /* The Flow 1 grant screens' sentences for the configuration in config_dir
  * (consent_copy::automatic_contribution_copy). The core chooses the

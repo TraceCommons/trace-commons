@@ -19,7 +19,7 @@ The goal is that Insights answers the questions developers actually ask:
 
 The answers come from the user's own sessions, on their own machine.
 
-1. **Models card on Overview** (new).
+1. **Models card on Overview** (new; removed again by the product owner on 2026-10-28).
    - **What:** shows the six answers from the #1510 engine (`insights_model_answers`). Each row shows a leader and a runner-up, their session counts, and the basis (for example "undone edits we could see"). When there isn't enough evidence it shows "Not enough traces yet" or "No clear difference", and an (i) explains which sessions were left out and why. Money is labelled "at API prices".
    - **Why:** #1510 computed the answers, but no screen showed them.
 
@@ -52,7 +52,7 @@ Analyze asks you to **pick a session file by hand** (`~/.claude/projects/<folder
 - It never runs on Never folders, nothing goes over the network, and no file path is sent to the app.
 - A session the daemon can't analyze (over the core's size limit, or a Codex file without exactly one session) says so in place of the button.
 
-**"Choose file" stays.** Analyze & save needs watched-folder counting, which is off by default, a running daemon and the standard store. Without them (and in sample data mode) Choose file is the only way to add a trace, so it's always on Analyze. The line under Analyze's title names only buttons you can see: "Open a trace in Sessions and choose Analyze & save" only while Sessions offers it, otherwise the old "Choose a file to analyze".
+**"Choose file" stays.** Analyze & save needs watched-folder counting, which is on by default (product owner, 2026-10-29), a running daemon and the standard store. Without them (and in sample data mode) Choose file is the only way to add a trace, so it's always on Analyze. The line under Analyze's title names only buttons you can see: "Open a trace in Sessions and choose Analyze & save" only while Sessions offers it, otherwise the old "Choose a file to analyze".
 
 Known gaps:
 - With a custom `--insights-store` the button is hidden, because the daemon writes only the standard store.

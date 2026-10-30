@@ -113,16 +113,18 @@ final class InferenceParityTests: XCTestCase {
         stateTone: { TCPrivateInference.stateTone(state: $0) },
         servingLine: { TCPrivateInference.servingLine(port: $0) },
         shouldOffer: { TCPrivateInference.shouldOffer(answered: $0, on: $1) },
-        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) })
+        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) },
+        menuWord: { TCPrivateInference.menuWord(state: $0) },
+        menuTone: { TCPrivateInference.menuTone(state: $0) })
 
-    /// The state label reads the listener's report alone: a refusal asks,
+    /// The state label reads the listener's report alone: a refusal is red,
     /// an unreported state is never on, and a line the core could not give
     /// falls back to its unknown sentence.
     func test_theStateLabelReadsTheReportNeverTheSwitch() throws {
         let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
         let refused = PrivateAISwitchCard.stateLabel(
             state: PrivateInferenceState(label: "port_in_use", port: nil), copy: copy, calls: Self.coreCalls)
-        XCTAssertEqual(refused.status, .ask)
+        XCTAssertEqual(refused.status, .outside)
         XCTAssertEqual(refused.line, TCPrivateInference.stateLine(state: "port_in_use"))
         let unreported = PrivateAISwitchCard.stateLabel(
             state: PrivateInferenceState(label: "", port: nil), copy: copy, calls: Self.coreCalls)
@@ -287,20 +289,26 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(source.contains("wallet?.commons ?? \"\""), "an absent word must not draw an unlabelled field")
     }
 
-    /// The window's Inference dot, the map's Private AI segment and the
-    /// inspector's Status row take #1146's rule: on while working, outside
-    /// (red) for every other tone, never grey.
+    /// Every Private AI dot takes one rule (owner, 2026-10-29): the tab,
+    /// the map, the heading and the menu bar paint one state one colour.
     func test_theDotReadsTheIndicator() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains(
-            "return PrivateInferenceIndicator.dotStatus(PrivateInferenceSurface.tone(state, calls: calls))"))
-        XCTAssertEqual(PrivateInferenceIndicator.dotStatus(.clear), .on)
-        for tone: PrivateInferenceTone in [.neutral, .held, .attention, .refused] {
-            XCTAssertEqual(PrivateInferenceIndicator.dotStatus(tone), .outside, "\(tone)")
+        XCTAssertTrue(window.contains("return PrivateInferenceIndicator.dot(state, calls: calls)"))
+        XCTAssertFalse(window.contains("PrivateInferenceSurface.tone("),
+                       "the tab's dot reads the listener tone table again, not the heading's")
+        let expected: [(PrivateInferenceTone, GlassStatus)] = [
+            (.clear, .on), (.attention, .ask), (.refused, .outside), (.neutral, .off), (.held, .off),
+        ]
+        for (tone, status) in expected {
+            XCTAssertEqual(PrivateInferenceIndicator.status(tone), status, "\(tone)")
+            XCTAssertEqual(MenuPanelStatus.privateAIDot(tone), status, "\(tone)")
         }
         let inspector = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(inspector.contains(
-            "status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))"))
+            "Self.statusRow(store.privateAI?.state, copy: copy, calls: model.privateInferenceCalls)"))
+        XCTAssertTrue(inspector.contains("MenuPanelStatus.privateAIDot(menu.tone)"))
+        XCTAssertFalse(inspector.contains("PrivateInferenceSurface.tone("),
+                       "the Status row reads a second tone table")
     }
 
     /// No write without the preview, and a first connect asks the exposure
@@ -497,14 +505,17 @@ final class InferenceParityTests: XCTestCase {
         let calls = try XCTUnwrap(views.range(of: "                ledgerSections\n"))
         let page = try XCTUnwrap(views.range(of: "InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)"))
         let balance = try XCTUnwrap(views.range(of: "                InferenceBalanceSection()\n"))
-        // The switch leads the page, then the balance with billing under
-        // it (owner, 2026-10-19), then the managed cards.
+        // The step-by-step card leads, then the status, then the managed
+        // cards with the tool buttons, then the calls, then the balance
+        // with billing under it (product owner, 2026-10-28).
         let scroll = try XCTUnwrap(views.range(of: "        ScrollView {\n"))
-        XCTAssertLessThan(scroll.lowerBound, toggle.lowerBound)
-        XCTAssertLessThan(toggle.lowerBound, balance.lowerBound, "the status leads the page")
-        XCTAssertLessThan(balance.lowerBound, managed.lowerBound, "the balance sits under the switch")
-        XCTAssertLessThan(managed.lowerBound, calls.lowerBound, "the calls follow the managed cards")
-        XCTAssertLessThan(calls.lowerBound, page.lowerBound, "the account cards follow the calls")
+        let guide = try XCTUnwrap(views.range(of: "                PrivateAIGuideCard()\n"))
+        XCTAssertLessThan(scroll.lowerBound, guide.lowerBound)
+        XCTAssertLessThan(guide.lowerBound, toggle.lowerBound, "the step-by-step card leads the page")
+        XCTAssertLessThan(toggle.lowerBound, managed.lowerBound, "the status follows the steps")
+        XCTAssertLessThan(managed.lowerBound, calls.lowerBound, "the tool buttons sit under the status")
+        XCTAssertLessThan(calls.lowerBound, balance.lowerBound, "the balance follows the calls")
+        XCTAssertLessThan(balance.lowerBound, page.lowerBound, "the account cards follow the balance")
         XCTAssertFalse(views.contains("InspectorPrompts("), "the prompts are drawn inline again")
         // The balance card is the account section's alone.
         XCTAssertEqual(views.components(separatedBy: "PrivateAIBalanceCard(").count - 1, 0, "the balance card is drawn twice")
@@ -570,9 +581,15 @@ final class InferenceParityTests: XCTestCase {
         // shared heading over the core's dot and sentence.
         XCTAssertTrue(views.contains("GlassTabHeading(copy.inspectorStatus) {"))
         // The core's subtitle sits under the Status row, once (owner, 2026-10-27).
-        XCTAssertEqual(views.components(separatedBy: "Text(copy.subtitle)").count - 1, 1,
+        // Through `subtitle(_:state:)`, which adds the credit sentence only
+        // while NEAR AI answers (2026-10-28).
+        XCTAssertEqual(views.components(separatedBy: "Text(Self.subtitle(copy, state: store.privateAI?.state))").count - 1, 1,
                        "the inspector summary draws the core's subtitle once")
-        XCTAssertTrue(views.contains("GlassStatusLabel(state.line, status: Self.statusDot("))
+        // One word and the menu bar's dot, the full sentence as help and
+        // hint (2026-10-28).
+        XCTAssertTrue(views.contains("GlassStatusLabel(status.word, status: status.dot)"))
+        XCTAssertTrue(views.contains(".help(status.sentence)"))
+        XCTAssertTrue(views.contains(".accessibilityHint(status.sentence)"))
         XCTAssertEqual(views.components(separatedBy: "GlassTabHeading(").count - 1, 1,
                        "the summary draws a row besides Status")
         for needle in ["copy.inspectorCredential", "copy.inspectorConnectedTools", "copy.inspectorConnected,",
@@ -730,4 +747,33 @@ final class InferenceParityTests: XCTestCase {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
     }
+
+    /// The credit sentence follows the subtitle only while NEAR AI answers
+    /// calls; with NEAR AI not connected, calls use the tools' own accounts.
+    func testTheSubtitleSaysCreditOnlyWhileNearAIAnswers() throws {
+        let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+        let running = DaemonData.PrivateInferenceState(state: "running", port: 1)
+        let elsewhere = DaemonData.PrivateInferenceState(state: "running_answered_elsewhere", port: 1)
+        XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: running), copy.subtitle + " " + copy.subtitleCredit)
+        XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: elsewhere), copy.subtitle)
+        XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: nil), copy.subtitle)
+    }
+
+    /// The step-by-step card explains and is not a button: no action.
+    func testTheGuideCardIsNotAButton() throws {
+        let views = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/InferenceViews.swift"), encoding: .utf8)
+        let guide = try XCTUnwrap(views.range(of: "struct PrivateAIGuideCard: View {"))
+        let next = try XCTUnwrap(views.range(of: "struct PrivateAIInspectorView: View {"))
+        let card = String(views[guide.lowerBound..<next.lowerBound])
+        XCTAssertFalse(card.contains("action:"), "the guide card has no action")
+        XCTAssertTrue(card.contains("closeLabel: MonitorWords.close"))
+        let hero = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TCDesign/Components/HeroCard.swift"), encoding: .utf8)
+        XCTAssertTrue(hero.contains("if let action {"))
+        XCTAssertTrue(hero.contains("card.accessibilityElement(children: .combine)"))
+    }
+
 }

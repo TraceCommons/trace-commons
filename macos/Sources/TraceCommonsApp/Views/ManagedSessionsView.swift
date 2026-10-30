@@ -72,7 +72,8 @@ struct ManagedSessionsSection: View {
     // MARK: NEAR AI sign-in
 
     /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12), drawn
-    /// only while signed in. A button for each tool, its logo and name, in
+    /// only while signed in, under a title naming the tools that run
+    /// Private AI (product owner, 2026-10-28). A button for each tool, its logo and name, in
     /// a row at the foot of the card (owner, 2026-10-19): Claude Code,
     /// Codex and, once OpenCode is installed, OpenCode. Each opens the
     /// launch dialog, where a folder is chosen and the tool opened in the
@@ -82,7 +83,7 @@ struct ManagedSessionsSection: View {
     private func signInCard(_ snapshot: ManagedSnapshot) -> some View {
         GlassIconCard(
             systemImage: "sparkles",
-            title: model.managedText("near_ai"),
+            title: model.managedText("sign_in_title"),
             subtitle: [ManagedSurface.signInScope(
                 model.managedText("sign_in_scope"),
                 destination: snapshot.capabilities.terminalDestination,
@@ -158,14 +159,15 @@ struct ManagedSessionsSection: View {
         }
     }
 
-    /// A tool's launch dialog: its folder, then Open.
+    /// A tool's launch dialog: an optional folder, then Open.
     private func start(_ tool: String) {
         guard !model.managedBusy else { return }
         launching = ManagedFolderChoice(tool: tool)
     }
 
-    /// The launch, in the folder chosen in the dialog.
-    private func launch(_ tool: String, in path: String, settings: ManagedFolderDraft? = nil) {
+    /// The launch, in the folder chosen in the dialog; with none, the daemon
+    /// starts it in the person's home folder.
+    private func launch(_ tool: String, in path: String?, settings: ManagedFolderDraft? = nil) {
         guard !model.managedBusy,
               var params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }
@@ -450,8 +452,8 @@ struct ManagedLaunchSheet: View {
     private var toolAvailable: Bool { selectedAccount.map { model.managedSnapshot?.canLaunch(tool: $0.tool) == true } ?? false }
     private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
     private var folderReady: Bool {
-        guard let account = selectedAccount, let project, loadedAccountID == accountID else { return false }
-        return folderDraft.matches(tool: account.tool, cwd: project.path)
+        guard let account = selectedAccount, loadedAccountID == accountID else { return false }
+        return folderDraft.matches(tool: account.tool, cwd: project?.path)
             && ManagedFolderOptions.modelIsAvailable(folderDraft, tool: account.tool, connection: account.connection, catalogue: catalogue)
     }
 
@@ -511,14 +513,19 @@ struct ManagedLaunchSheet: View {
                         retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
                 }
                 HStack(spacing: GlassTokens.Space.s4) {
-                    Text(project?.path ?? model.managedText("project_placeholder"))
+                    Text(project?.path ?? model.managedText("home_folder"))
                         .glassType(project == nil ? GlassTokens.TypeScale.label.weight(.regular) : GlassTokens.TypeScale.mono)
                         .foregroundStyle(project == nil ? GlassColor.textTertiary : GlassColor.textPrimary)
                         .lineLimit(2)
                         .truncationMode(.middle)
                         .textSelection(.enabled)
                     Spacer(minLength: 0)
-                    GlassFolderButton(model.managedText("choose_folder")) {
+                    if project != nil {
+                        Button(model.managedText("clear_folder")) { project = nil }
+                            .buttonStyle(GlassButtonStyle(.glass, small: true))
+                            .fixedSize()
+                    }
+                    GlassFolderButton(model.managedText("pick_folder")) {
                         if let path = FolderPanel.choose() { project = URL(fileURLWithPath: path, isDirectory: true) }
                     }
                 }
@@ -531,9 +538,9 @@ struct ManagedLaunchSheet: View {
     }
 
     private func launch() {
-        guard toolAvailable, folderReady, !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }), let project else { return }
+        guard toolAvailable, folderReady, !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }) else { return }
         var params = ManagedSurface.launchParams(
-            account: account, cwd: project.path, requestID: UUID().uuidString,
+            account: account, cwd: project?.path, requestID: UUID().uuidString,
             generation: snapshot.generations[account.tool] ?? 0,
             model: folderDraft.model, collectTraces: folderDraft.collectTraces)
         if supportsFolderSettings { params = folderDraft.applying(to: params) }
@@ -542,15 +549,16 @@ struct ManagedLaunchSheet: View {
     }
 
     private func loadFolderSettings(reset: Bool = false) {
-        guard let account = selectedAccount, let project else { return }
+        guard let account = selectedAccount else { return }
         loadedAccountID = accountID
+        let cwd = project?.path
         if !supportsFolderSettings {
-            folderDraft.useDefaults(tool: account.tool, cwd: project.path,
+            folderDraft.useDefaults(tool: account.tool, cwd: cwd,
                 cliOptions: model.managedSnapshot?.cliOptions?[account.tool] ?? "")
             return
         }
-        let token = folderDraft.begin(tool: account.tool, cwd: project.path)
-        model.managedFolderSettings(tool: account.tool, cwd: project.path, reset: reset) { settings in
+        let token = folderDraft.begin(tool: account.tool, cwd: cwd)
+        model.managedFolderSettings(tool: account.tool, cwd: cwd, reset: reset) { settings in
             if let settings { folderDraft.complete(settings, token: token) }
             else { folderDraft.fail(token: token) }
         }

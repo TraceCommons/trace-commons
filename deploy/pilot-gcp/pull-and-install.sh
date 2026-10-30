@@ -109,8 +109,17 @@ install_one() {
   sleep 8
   echo "[$bin] $(systemctl is-active "$svc")"
   if [ "$bin" = trace-commons-ingest ] && [ "$EXPECT_STAGING" = 1 ]; then
-    local health
-    health="$(curl -sfS http://127.0.0.1:3907/health || true)"
+    local health="" _
+    # Asked until it answers, for up to a minute: a first boot that applies
+    # migrations is not listening yet (2026-10-27, V139 and V140 on staging,
+    # rolled a good build back on one refused connection). Each ask is
+    # bounded too, so an ingest that accepts the connection and never
+    # answers cannot hang the install.
+    for _ in $(seq 1 30); do
+      health="$(curl -sfS --connect-timeout 2 --max-time 5 http://127.0.0.1:3907/health || true)"
+      [ -n "$health" ] && break
+      sleep 2
+    done
     if ! printf '%s' "$health" | grep -Eq '"near_ai_staging"[[:space:]]*:[[:space:]]*true'; then
       echo "[$bin] REFUSING: TC_EXPECT_STAGING=1 but /health does not report near_ai_staging=true." >&2
       echo "[$bin] Putting back ${dest}.bak-${stamp}." >&2

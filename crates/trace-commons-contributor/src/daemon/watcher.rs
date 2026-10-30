@@ -231,7 +231,7 @@ fn tick_over(
     // Insights feed T, after the offers: a full pass only, and only while
     // the contributor has switched it on. Only the job is made here; the
     // pass reads on its own thread, after this tick has moved on.
-    let counter_job = counter_pass_job(shared, now, &discovered, &source_indices);
+    let counter_job = counter_pass_job(shared, now, &discovered, &source_indices, sources.len());
     // Only when every source listed cleanly: a source whose discovery failed
     // would otherwise lose its sessions from the count until it recovers.
     if discovered.len() == sources.len() {
@@ -258,7 +258,8 @@ fn tick_over(
 }
 
 /// The Insights counter pass (feed T), gated on the `insights_counter_pass`
-/// setting (owner decision D4, open). Off, it makes no job and nothing is
+/// setting (on by default; product owner, 2026-10-29). Off, it makes no job
+/// and nothing is
 /// read. On, it collects every Claude Code and Codex session this pass
 /// discovered for `insights_week`, which reads only quiet sessions whose
 /// rows are missing or stale, within a per-poll budget. It is not tied to
@@ -276,11 +277,23 @@ fn tick_over(
 /// session whose source gave no group time; a session's folder is resolved
 /// later, on the pass's thread, and only for a session about to be read or
 /// one that may hold a Never folder's route tally.
+///
+/// Beside the tick's own listing (which includes Codex's compressed
+/// rollouts, under the plain addresses they replaced), the job takes every
+/// NEAR AI managed profile's Claude Code `projects/` and Codex `sessions/`
+/// (`NativeProfiles::existing_roots`), read by sources this job owns and
+/// never offered, queued or uploaded. A managed session is counted from its
+/// profile only; a watched copy of it is passed over
+/// (`insights_week::CandidateRole`).
+///
+/// A Never folder is left out whichever root a session lives in: its
+/// folder is resolved from the session's own cwd, as for any session.
 fn counter_pass_job(
     shared: &DaemonShared,
     now: DateTime<Utc>,
     discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
     source_indices: &[usize],
+    tick_sources: usize,
 ) -> Option<CounterJobDraft> {
     let (enabled, quiescence_secs) = {
         let s = shared.settings.lock().expect("settings lock");
@@ -289,8 +302,8 @@ fn counter_pass_job(
     if !enabled {
         return None;
     }
-    let mut origins: Vec<(usize, SessionRef, Observation)> = Vec::new();
-    let mut candidates = Vec::new();
+    use super::insights_week::CandidateRole;
+    let mut job = CounterCandidates::default();
     for ((source, refs), &source_index) in discovered.iter().zip(source_indices) {
         if !matches!(
             source.name(),
@@ -300,6 +313,77 @@ fn counter_pass_job(
         }
         // `source_index` is which of the tick's own sources this is, so the
         // job can own it.
+        job.add(source_index, refs, CandidateRole::Watched, false, now);
+    }
+    let mut extra_sources: Vec<Box<dyn TraceSource>> = Vec::new();
+    for root in crate::managed::profiles::NativeProfiles::new(&shared.store).existing_roots() {
+        let profile: [Box<dyn TraceSource>; 2] = [
+            Box::new(crate::source::claude_code::ClaudeCodeSource::new(
+                root.join("projects"),
+            )),
+            Box::new(crate::source::codex::CodexSource::new(
+                root.join("sessions"),
+            )),
+        ];
+        for source in profile {
+            let index = tick_sources + extra_sources.len();
+            if let Ok(refs) = source.discover() {
+                job.add(index, &refs, CandidateRole::ManagedProfile, true, now);
+            }
+            extra_sources.push(source);
+        }
+    }
+    let CounterCandidates {
+        candidates,
+        spawned,
+        origins,
+    } = job;
+    let never_project_keys =
+        super::insights_week::never_folders(&shared.policy.lock().expect("policy lock"));
+    Some(CounterJobDraft {
+        candidates,
+        spawned,
+        origins,
+        extra_sources,
+        never_project_keys,
+        now,
+        quiescence_secs,
+    })
+}
+
+/// Where one counter-pass candidate came from.
+struct CounterOrigin {
+    /// Its source: an index into the tick's sources, then the job's own.
+    source_index: usize,
+    session_ref: SessionRef,
+    observation: Observation,
+    /// Read by the counter pass alone (a managed profile's session): its
+    /// folder is resolved without the watcher's
+    /// cwd cache, which counts the sessions the watcher offers per folder.
+    insights_only: bool,
+}
+
+/// The candidates a counter-pass job is built from, and their origins.
+#[derive(Default)]
+struct CounterCandidates {
+    candidates: Vec<super::insights_week::CounterCandidate>,
+    /// The Claude sub-agent transcripts each Claude Code candidate spawned
+    /// (`claude_code::spawned_transcripts_for`), workflow ones included:
+    /// Insights only, never offered, queued or uploaded, and the upload
+    /// group (`SessionRef::group_member_count`) is not changed by them.
+    spawned: Vec<super::insights_week::SpawnedCandidate>,
+    origins: Vec<CounterOrigin>,
+}
+
+impl CounterCandidates {
+    fn add(
+        &mut self,
+        source_index: usize,
+        refs: &[SessionRef],
+        role: super::insights_week::CandidateRole,
+        insights_only: bool,
+        now: DateTime<Utc>,
+    ) {
         for session_ref in refs {
             let modified_at = match session_ref.group_modified_at {
                 Some(at) => at,
@@ -308,43 +392,75 @@ fn counter_pass_job(
                     Err(_) => continue,
                 },
             };
-            candidates.push(super::insights_week::CounterCandidate {
-                origin: origins.len(),
-                source: session_ref.source,
-                path: session_ref.path.clone(),
-                size_bytes: session_ref.size_bytes,
-                modified_at,
-                started_at: session_ref.started_at,
-                group_member_count: session_ref.group_member_count,
-            });
-            origins.push((
+            let origin = self.origins.len();
+            let parent = self.candidates.len();
+            // Sessions the pass would not read (older than the kept weeks)
+            // are not listed: their sub-agents are no newer.
+            let spawned = if session_ref.source == crate::source::SOURCE_CLAUDE_CODE
+                && modified_at
+                    >= now
+                        - chrono::Duration::weeks(
+                            crate::insights::analytics_constants::COUNTER_STORE_KEEP_WEEKS,
+                        ) {
+                crate::source::claude_code::spawned_transcripts_for(&session_ref.path)
+            } else {
+                Vec::new()
+            };
+            let spawned_count = u32::try_from(spawned.len()).unwrap_or(u32::MAX);
+            self.candidates
+                .push(super::insights_week::CounterCandidate {
+                    origin,
+                    source: session_ref.source,
+                    path: session_ref.path.clone(),
+                    size_bytes: session_ref.size_bytes,
+                    modified_at,
+                    started_at: session_ref.started_at,
+                    // Workflow sub-agents are not upload-group members, but
+                    // the session delegated to them all the same.
+                    group_member_count: session_ref.group_member_count.max(spawned_count),
+                    role,
+                });
+            for transcript in spawned {
+                let Some(at) = transcript.modified_at else {
+                    continue;
+                };
+                self.spawned.push(super::insights_week::SpawnedCandidate {
+                    parent,
+                    kind: transcript.kind.into(),
+                    candidate: super::insights_week::CounterCandidate {
+                        origin,
+                        source: crate::source::SOURCE_CLAUDE_CODE,
+                        path: transcript.path,
+                        size_bytes: transcript.size_bytes,
+                        modified_at: at,
+                        started_at: None,
+                        group_member_count: 0,
+                        role,
+                    },
+                });
+            }
+            self.origins.push(CounterOrigin {
                 source_index,
-                session_ref.clone(),
-                Observation {
+                session_ref: session_ref.clone(),
+                observation: Observation {
                     path: session_ref.path.clone(),
                     size_bytes: session_ref.size_bytes,
                     modified_at,
                 },
-            ));
+                insights_only,
+            });
         }
     }
-    let never_project_keys =
-        super::insights_week::never_folders(&shared.policy.lock().expect("policy lock"));
-    Some(CounterJobDraft {
-        candidates,
-        origins,
-        never_project_keys,
-        now,
-        quiescence_secs,
-    })
 }
 
 /// A counter-pass job before the tick's sources move into it.
 struct CounterJobDraft {
     candidates: Vec<super::insights_week::CounterCandidate>,
-    /// Per candidate (`CounterCandidate::origin`): the index of its source
-    /// in the tick's sources, its session and its observation.
-    origins: Vec<(usize, SessionRef, Observation)>,
+    spawned: Vec<super::insights_week::SpawnedCandidate>,
+    /// Per candidate (`CounterCandidate::origin`).
+    origins: Vec<CounterOrigin>,
+    /// Sources only this job reads (managed profiles), after the tick's.
+    extra_sources: Vec<Box<dyn TraceSource>>,
     never_project_keys: super::insights_week::NeverFolders,
     now: DateTime<Utc>,
     quiescence_secs: u64,
@@ -353,16 +469,28 @@ struct CounterJobDraft {
 impl CounterJobDraft {
     /// The job, owning `sources` so the pass's thread can resolve a
     /// session's folder through the same cwd cache the watcher uses.
-    fn into_job(self, sources: Vec<Box<dyn TraceSource>>) -> super::insights_week::CounterJob {
+    fn into_job(self, mut sources: Vec<Box<dyn TraceSource>>) -> super::insights_week::CounterJob {
         let origins = self.origins;
+        sources.extend(self.extra_sources);
         // The folder's resolved rule, the contribution override included
         // (owner decision D4): a global Never leaves every folder out, as
         // it does from sending. The state and policy locks are each taken
         // briefly, with nothing of the pass's held.
         let project_of =
             move |shared: &DaemonShared, candidate: &super::insights_week::CounterCandidate| {
-                let (source_index, session_ref, obs) = &origins[candidate.origin];
-                let cwd = resolve_cwd(shared, sources[*source_index].as_ref(), session_ref, obs);
+                let origin = &origins[candidate.origin];
+                let source = sources[origin.source_index].as_ref();
+                let cwd = if origin.insights_only {
+                    // Discovery peeked it; else the adapter's own load.
+                    origin.session_ref.cwd.clone().or_else(|| {
+                        source
+                            .load(&origin.session_ref)
+                            .ok()
+                            .and_then(|transcript| transcript.cwd)
+                    })
+                } else {
+                    resolve_cwd(shared, source, &origin.session_ref, &origin.observation)
+                };
                 let (project_key, _) = project_for(cwd.as_deref());
                 let never = shared
                     .policy
@@ -374,6 +502,7 @@ impl CounterJobDraft {
             };
         super::insights_week::CounterJob {
             candidates: self.candidates,
+            spawned: self.spawned,
             never_project_keys: self.never_project_keys,
             now: self.now,
             quiescence_secs: self.quiescence_secs,
@@ -2372,6 +2501,69 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// A Claude session's sub-agent transcripts, workflow ones included,
+    /// become the job's spawned candidates under the session's own origin
+    /// (its folder and Never rule), and mark it as having delegated. The
+    /// `SessionRef` the offers and uploads use is not changed.
+    #[test]
+    fn a_claude_sessions_sub_agents_join_the_counter_job_beside_it() {
+        let session = "44444444-4444-4444-8444-444444444444";
+        let dir = tempfile::tempdir().unwrap();
+        let line = format!("{{\"type\":\"user\",\"sessionId\":\"{session}\"}}\n");
+        let parent = dir.path().join(format!("{session}.jsonl"));
+        std::fs::write(&parent, &line).unwrap();
+        let workflow = dir.path().join(session).join("subagents/workflows/run-1");
+        std::fs::create_dir_all(&workflow).unwrap();
+        std::fs::write(workflow.join("agent-w.jsonl"), &line).unwrap();
+        std::fs::write(workflow.join("journal.jsonl"), "{}\n").unwrap();
+        let session_ref = SessionRef {
+            source: crate::source::SOURCE_CLAUDE_CODE,
+            declared_source: None,
+            path: parent.clone(),
+            project: None,
+            cwd: None,
+            started_at: None,
+            size_bytes: line.len() as u64,
+            group_modified_at: Some(Utc::now()),
+            group_member_count: 0,
+        };
+        let mut job = CounterCandidates::default();
+        job.add(
+            3,
+            std::slice::from_ref(&session_ref),
+            super::super::insights_week::CandidateRole::Watched,
+            false,
+            Utc::now(),
+        );
+        assert_eq!(job.candidates.len(), 1);
+        assert_eq!(job.candidates[0].group_member_count, 1);
+        assert_eq!(job.spawned.len(), 1, "the journal is not a transcript");
+        let spawned = &job.spawned[0];
+        assert_eq!(spawned.parent, 0);
+        assert_eq!(
+            spawned.kind,
+            super::super::insights_week::SpawnedBy::Workflow
+        );
+        assert_eq!(spawned.candidate.origin, job.candidates[0].origin);
+        assert_eq!(job.origins.len(), 1, "no origin of its own");
+        assert_eq!(job.origins[0].session_ref.group_member_count, 0);
+
+        // A Codex session lists none.
+        let mut job = CounterCandidates::default();
+        let codex = SessionRef {
+            source: crate::source::SOURCE_CODEX,
+            ..session_ref
+        };
+        job.add(
+            0,
+            &[codex],
+            super::super::insights_week::CandidateRole::Watched,
+            false,
+            Utc::now(),
+        );
+        assert!(job.spawned.is_empty());
+    }
+
     #[test]
     fn session_observation_accepts_virtual_paths_and_preserves_file_fallback() {
         let dir = tempfile::tempdir().unwrap();
@@ -2805,9 +2997,10 @@ mod tests {
         assert_eq!(f.states(), vec![QueueState::Pending]);
     }
 
-    /// Insights feed T (owner decision D4, open): with the setting on, a
-    /// full pass stores counter rows for quiet sessions, leaving out a Never
-    /// folder; with it off, nothing is read and no key is made.
+    /// Insights feed T (on by default; product owner, 2026-10-29): with the
+    /// setting on, a full pass stores counter rows for quiet sessions,
+    /// leaving out a Never folder; switched off, nothing is read and no key
+    /// is made.
     #[tokio::test]
     async fn the_counter_pass_runs_only_when_switched_on_and_skips_never_folders() {
         let f = WatcherFixture::new();
@@ -2828,6 +3021,7 @@ mod tests {
                 .clone()
         };
 
+        f.shared.settings.lock().unwrap().insights_counter_pass = false;
         f.settle(later).await;
         assert!(
             !f.shared
@@ -2892,6 +3086,232 @@ mod tests {
         );
         tick(&f.shared, later).await.unwrap();
         assert_eq!(stored(&f), 2, "read again once the override is cleared");
+    }
+
+    /// The counter pass reads Codex's compressed rollouts, and every NEAR AI
+    /// managed profile's sessions, which nothing offers, queues or uploads.
+    /// A managed session copied into a watched folder is counted once, from
+    /// its profile; a Never folder is left out wherever the session file
+    /// lives.
+    #[tokio::test]
+    async fn the_counter_pass_reads_compressed_rollouts_and_managed_profiles() {
+        let f = WatcherFixture::new();
+        f.write_session("home", "11111111-1111-1111-1111-111111111111", 0);
+        let claude_body = |project: &str, id: &str| {
+            let cwd = abs_json(&format!("Users/testuser/code/{project}"));
+            format!(
+                "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}},\
+                 \"cwd\":\"{cwd}\",\"timestamp\":\"2026-08-08T10:00:00Z\",\
+                 \"version\":\"2.0.1\",\"sessionId\":\"{id}\",\"uuid\":\"a1\"}}\n"
+            )
+        };
+        // A managed Claude profile's session, and its copy in the watched
+        // folder (as the post-exit export would make).
+        let managed_id = "22222222-2222-2222-2222-222222222222";
+        let profile = f
+            .shared
+            .store
+            .dir()
+            .join("managed-profiles")
+            .join(uuid::Uuid::new_v4().to_string());
+        let profile_project = profile.join("projects/-Users-testuser-code-managed");
+        std::fs::create_dir_all(&profile_project).unwrap();
+        let profile_session = profile_project.join(format!("{managed_id}.jsonl"));
+        std::fs::write(&profile_session, claude_body("managed", managed_id)).unwrap();
+        let copy_project = f.claude_root.join("-Users-testuser-code-managed");
+        std::fs::create_dir_all(&copy_project).unwrap();
+        std::fs::write(
+            copy_project.join(format!("{managed_id}.jsonl")),
+            claude_body("managed", managed_id),
+        )
+        .unwrap();
+        // A compressed rollout in the watched Codex folder, and one in the
+        // profile's Codex folder.
+        let rollout = |project: &str, id: &str| {
+            let cwd = abs_json(&format!("Users/testuser/code/{project}"));
+            let meta = format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{cwd}\"}}}}\n"
+            );
+            zstd::bulk::compress(meta.as_bytes(), 3).unwrap()
+        };
+        let codex_day = f._dir.path().join("codex-sessions/2026/08/08");
+        std::fs::create_dir_all(&codex_day).unwrap();
+        std::fs::write(
+            codex_day
+                .join("rollout-2026-08-08T10-00-00-33333333-3333-3333-3333-333333333333.jsonl.zst"),
+            rollout("zipped", "33333333-3333-3333-3333-333333333333"),
+        )
+        .unwrap();
+        let profile_day = profile.join("sessions/2026/08/08");
+        std::fs::create_dir_all(&profile_day).unwrap();
+        std::fs::write(
+            profile_day
+                .join("rollout-2026-08-08T11-00-00-44444444-4444-4444-4444-444444444444.jsonl.zst"),
+            rollout("managed", "44444444-4444-4444-4444-444444444444"),
+        )
+        .unwrap();
+
+        let later = Utc::now() + chrono::Duration::hours(2);
+        let stored = |f: &WatcherFixture| {
+            f.shared.insights_counter.week_value(
+                true,
+                None,
+                chrono::FixedOffset::east_opt(0).unwrap(),
+                later,
+                &crate::daemon::insights_week::NeverFolders::NONE,
+                crate::daemon::insights_week::WeekOptions::default(),
+            )["sessions_stored"]
+                .clone()
+        };
+        f.shared.settings.lock().unwrap().insights_counter_pass = true;
+        f.settle(later).await;
+        tick(&f.shared, later).await.unwrap();
+        // home, the managed Claude session once, and two compressed rollouts.
+        assert_eq!(stored(&f), 4);
+        // No managed-profile session was offered, and a compressed rollout
+        // is offered under its plain address.
+        for entry in f.shared.queue.lock().unwrap().all() {
+            let path = entry.path.to_string_lossy().to_string();
+            assert!(!path.contains("managed-profiles"), "{path}");
+            assert!(!path.ends_with(".zst"), "{path}");
+        }
+        assert!(
+            f.shared
+                .state
+                .lock()
+                .unwrap()
+                .cwd_cache
+                .keys()
+                .all(|path| !path.contains("managed-profiles") && !path.ends_with(".zst")),
+            "the per-folder session counts never see them"
+        );
+
+        // A Never folder is left out, whichever root its sessions are in.
+        f.set_mode("managed", ProjectMode::Ignore);
+        tick(&f.shared, later).await.unwrap();
+        assert_eq!(stored(&f), 2);
+    }
+
+    /// A Codex rollout in the fixture's watched Codex folder, addressed by
+    /// its plain path: written plain, or compressed as Codex leaves it.
+    fn write_rollout(f: &WatcherFixture, project: &str, id: &str, compressed: bool) -> PathBuf {
+        let day = f._dir.path().join("codex-sessions/2026/08/08");
+        std::fs::create_dir_all(&day).unwrap();
+        let address = day.join(format!("rollout-2026-08-08T10-00-00-{id}.jsonl"));
+        let cwd = abs_json(&format!("Users/testuser/code/{project}"));
+        let bytes = format!(
+            "{{\"timestamp\":\"2026-08-08T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{cwd}\",\"cli_version\":\"0.150.0\"}}}}\n\
+             {{\"timestamp\":\"2026-08-08T10:00:01Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"hello\"}}]}}}}\n\
+             {{\"timestamp\":\"2026-08-08T10:00:02Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"hi\"}}]}}}}\n"
+        );
+        std::fs::write(&address, bytes).unwrap();
+        if compressed {
+            compress_in_place(&address);
+        }
+        address
+    }
+
+    /// What Codex does to an older rollout: the plain file replaced by
+    /// `<name>.zst`, its last write kept.
+    fn compress_in_place(address: &std::path::Path) {
+        let bytes = std::fs::read(address).unwrap();
+        let written = std::fs::metadata(address).unwrap().modified().unwrap();
+        let mut compressed = address.as_os_str().to_os_string();
+        compressed.push(".zst");
+        std::fs::write(&compressed, zstd::bulk::compress(&bytes, 3).unwrap()).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&compressed)
+            .unwrap()
+            .set_modified(written)
+            .unwrap();
+        std::fs::remove_file(address).unwrap();
+    }
+
+    fn codex_entries(f: &WatcherFixture) -> Vec<QueueEntry> {
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .all()
+            .iter()
+            .filter(|entry| entry.source == crate::source::SOURCE_CODEX)
+            .cloned()
+            .collect()
+    }
+
+    /// Owner decision 2026-10-29: a compressed Codex rollout is offered for
+    /// contribution like a plain one, under the plain path it replaced.
+    #[tokio::test]
+    async fn a_compressed_rollout_is_discovered_and_offered() {
+        let f = WatcherFixture::new();
+        let address = write_rollout(&f, "zipped", "33333333-3333-4333-8333-333333333333", true);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let entries = codex_entries(&f);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].state, QueueState::Pending);
+        assert_eq!(entries[0].path, address);
+    }
+
+    /// A rollout offered as a plain file and compressed afterwards is the
+    /// same offer: not offered again, not superseded, its observation as
+    /// it was.
+    #[tokio::test]
+    async fn a_rollout_compressed_after_it_was_offered_is_not_offered_twice() {
+        let f = WatcherFixture::new();
+        let address = write_rollout(&f, "zipped", "44444444-4444-4444-8444-444444444444", false);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let before = codex_entries(&f);
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].state, QueueState::Pending);
+
+        compress_in_place(&address);
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        let after = codex_entries(&f);
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert_eq!(after[0].entry_id, before[0].entry_id);
+        assert_eq!(after[0].state, QueueState::Pending);
+        assert_eq!(after[0].size_bytes, before[0].size_bytes);
+        assert_eq!(
+            after[0].observed_modified_at,
+            before[0].observed_modified_at
+        );
+    }
+
+    /// A session already sent and then compressed is not sent again.
+    #[tokio::test]
+    async fn an_uploaded_rollout_compressed_afterwards_is_not_re_sent() {
+        let f = WatcherFixture::new();
+        let address = write_rollout(&f, "zipped", "55555555-5555-4555-8555-555555555555", false);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let id = codex_entries(&f)[0].entry_id;
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .set_state(id, QueueState::Uploaded, None);
+
+        compress_in_place(&address);
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        let after = codex_entries(&f);
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert_eq!(after[0].state, QueueState::Uploaded);
+    }
+
+    /// A Never folder leaves a compressed rollout out, as any session.
+    #[tokio::test]
+    async fn a_never_folder_excludes_a_compressed_rollout() {
+        let f = WatcherFixture::new();
+        f.set_mode("zipped", ProjectMode::Ignore);
+        write_rollout(&f, "zipped", "66666666-6666-4666-8666-666666666666", true);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let entries = codex_entries(&f);
+        assert!(
+            entries
+                .iter()
+                .all(|e| !matches!(e.state, QueueState::Pending | QueueState::Approved)),
+            "{entries:?}"
+        );
     }
 
     /// A session still being written is not read by the counter pass.
@@ -4477,35 +4897,60 @@ mod tests {
         assert_eq!(state_at(&f, &path), (QueueState::Approved, true));
     }
 
+    /// Owner decision 2026-10-29 (Ron's staging report): Ask is offered on
+    /// every real folder under the include-existing grant, beside Automatic
+    /// and Never. The unknown bucket keeps its own two.
     #[tokio::test]
-    async fn onboarding_broad_grant_offers_only_effective_modes_and_refuses_stale_ask() {
+    async fn onboarding_broad_grant_offers_ask_and_refuses_only_a_from_now_arming() {
         let f = WatcherFixture::new();
         f.shared
             .store
             .save_config(&grant_test_cfg(&["debugging_evaluation"]))
             .unwrap();
         f.write_session("old", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session_with_cwd(
+            "no-cwd",
+            "relative/dir",
+            "22222222-2222-2222-2222-222222222222",
+        );
         grant_automatic_with_existing(&f);
         f.settle(Utc::now() + chrono::Duration::hours(30)).await;
         let key = project_key_for(Some(&abs("Users/testuser/code/old")));
-        let listed = ipc_call(&f, "list_projects", serde_json::json!({}))
-            .result
-            .unwrap();
+        let listed = ipc_call(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        )
+        .result
+        .unwrap();
         let rows = listed["projects"].as_array().unwrap();
         let id = crate::daemon::policy::project_id_for(&key);
         let row = rows.iter().find(|row| row["project_id"] == id).unwrap();
         assert_eq!(
             row["offerable_modes"],
-            serde_json::json!(["auto_upload", "ignore"])
+            serde_json::json!(["notify_only", "auto_upload", "ignore"])
+        );
+        let unknown_id =
+            crate::daemon::policy::project_id_for(crate::daemon::policy::UNKNOWN_PROJECT_KEY);
+        let unknown = rows
+            .iter()
+            .find(|row| row["project_id"] == unknown_id)
+            .unwrap_or_else(|| panic!("no unknown bucket row in {rows:?}"));
+        assert_eq!(
+            unknown["offerable_modes"],
+            serde_json::json!(["notify_only", "ignore"])
         );
         let before = f.shared.policy.lock().unwrap().clone();
-        for params in [
-            serde_json::json!({"project_id": id, "mode": "notify_only"}),
-            serde_json::json!({"project_id": id, "mode": "auto_upload", "include_backlog": false}),
-        ] {
-            assert!(ipc_call(&f, "set_project_mode", params).error.is_some());
-            assert_eq!(*f.shared.policy.lock().unwrap(), before);
-        }
+        assert!(
+            ipc_call(
+                &f,
+                "set_project_mode",
+                serde_json::json!({"project_id": id, "mode": "auto_upload", "include_backlog": false}),
+            )
+            .error
+            .is_some()
+        );
+        assert_eq!(*f.shared.policy.lock().unwrap(), before);
         // Re-sending Automatic must not introduce a new history hold.
         assert!(
             ipc_call(
@@ -4533,6 +4978,285 @@ mod tests {
             .is_none()
         );
         assert_eq!(mode_of(&f, "old"), (ProjectMode::Ignore, true));
+    }
+
+    /// A folder set to Ask after the include-existing grant is an exception
+    /// to it: what it had approved unattended goes back to waiting, its new
+    /// sessions wait for a person, and every other folder under the grant
+    /// stays automatic. Setting it back to Automatic resumes, backlog
+    /// included, as the grant's own arming did.
+    #[tokio::test]
+    async fn a_folder_set_to_ask_under_the_broad_grant_waits_while_the_rest_stay_automatic() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let old_ask = f.write_session("ask", "11111111-1111-1111-1111-111111111111", 0);
+        let old_auto = f.write_session("auto", "22222222-2222-2222-2222-222222222222", 0);
+        grant_automatic_with_existing(&f);
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(state_at(&f, &old_ask), (QueueState::Approved, true));
+        assert_eq!(state_at(&f, &old_auto), (QueueState::Approved, true));
+
+        let key = project_key_for(Some(&abs("Users/testuser/code/ask")));
+        let id = crate::daemon::policy::project_id_for(&key);
+        let set = ipc_call(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": id, "mode": "notify_only"}),
+        );
+        assert!(set.error.is_none(), "{:?}", set.error);
+        assert_eq!(set.result.unwrap()["retracted"], 1);
+        assert_eq!(state_at(&f, &old_ask).0, QueueState::Pending);
+
+        let new_ask = f.write_session("ask", "33333333-3333-3333-3333-333333333333", 0);
+        let new_auto = f.write_session("auto", "44444444-4444-4444-4444-444444444444", 0);
+        f.settle(Utc::now() + chrono::Duration::hours(31)).await;
+        assert_eq!(mode_of(&f, "ask"), (ProjectMode::NotifyOnly, true));
+        assert_eq!(state_at(&f, &old_ask), (QueueState::Pending, false));
+        assert_eq!(state_at(&f, &new_ask), (QueueState::Pending, false));
+        assert_eq!(state_at(&f, &new_auto), (QueueState::Approved, true));
+        assert!(
+            f.shared
+                .policy
+                .lock()
+                .unwrap()
+                .includes_existing_automatically()
+        );
+        let status = ipc_call(&f, "status", serde_json::json!({}))
+            .result
+            .unwrap();
+        assert_eq!(status["decisions_owed"], 2, "{status}");
+
+        let set = ipc_call(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": id, "mode": "auto_upload"}),
+        );
+        assert!(set.error.is_none(), "{:?}", set.error);
+        assert_eq!(set.result.unwrap()["from_now"], false);
+        f.settle(Utc::now() + chrono::Duration::hours(32)).await;
+        assert_eq!(mode_of(&f, "ask"), (ProjectMode::AutoUpload, true));
+        assert_eq!(state_at(&f, &old_ask), (QueueState::Approved, true));
+        assert_eq!(state_at(&f, &new_ask), (QueueState::Approved, true));
+    }
+
+    /// The `list_projects` row for `project` (a folder under the fixture's
+    /// code directory) in `listed`.
+    fn listed_row(listed: &serde_json::Value, project: &str) -> serde_json::Value {
+        let key = project_key_for(Some(&abs(&format!("Users/testuser/code/{project}"))));
+        let id = crate::daemon::policy::project_id_for(&key);
+        listed["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["project_id"] == id)
+            .unwrap_or_else(|| panic!("no row for {project} in {listed}"))
+            .clone()
+    }
+
+    /// Finding 2 on #1747: under the include-existing grant a folder the
+    /// grant will arm on its next pass -- one set to Ask before the grant,
+    /// one with a session queued before it, one only found on disk -- lists
+    /// as the mode the daemon will apply, Automatic, not as Ask. Its
+    /// sessions are then approved unattended, as the row said. The pill's
+    /// roll-up reads the same value, so it says Automatic, not Mixed.
+    #[tokio::test]
+    async fn a_folder_the_broad_grant_will_arm_lists_as_automatic() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        let queued = f.write_session("queued", "11111111-1111-1111-1111-111111111111", 0);
+        let pre = f.write_session("pre", "22222222-2222-2222-2222-222222222222", 0);
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            let key = project_key_for(Some(&abs("Users/testuser/code/pre")));
+            policy
+                .set_mode(&key, ProjectMode::NotifyOnly, Utc::now())
+                .unwrap();
+        }
+        f.settle(Utc::now() + chrono::Duration::hours(29)).await;
+        assert_eq!(state_at(&f, &queued), (QueueState::Pending, false));
+        grant_automatic_with_existing(&f);
+        let found = f.write_session("found", "33333333-3333-3333-3333-333333333333", 0);
+
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        for (project, configured) in [("pre", true), ("queued", false), ("found", false)] {
+            let row = listed_row(&listed, project);
+            assert_eq!(row["configured"], configured, "{project}: {row}");
+            assert_eq!(row["mode"], "auto_upload", "{project}: {row}");
+            assert_eq!(row["folder_mode"], "auto_upload", "{project}: {row}");
+        }
+        let status = ipc_ok(&f, "status", serde_json::json!({}));
+        assert_eq!(status["contribution_mode"], "auto_upload", "{status}");
+
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        for path in [&queued, &pre, &found] {
+            assert_eq!(state_at(&f, path), (QueueState::Approved, true), "{path:?}");
+        }
+    }
+
+    /// Every row that reads `auto_upload` carries the K6
+    /// `automatic_disclosure` and `from_now`, which macOS and Tauri need to
+    /// draw what an Automatic folder's sessions have removed -- a discovered
+    /// or found row the grant will arm as much as a configured one.
+    #[tokio::test]
+    async fn a_grant_armed_unconfigured_row_carries_the_automatic_disclosure() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic_with_existing(&f);
+        f.write_session("found", "11111111-1111-1111-1111-111111111111", 0);
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        let row = listed_row(&listed, "found");
+        assert_eq!(row["configured"], false, "{row}");
+        assert_eq!(row["mode"], "auto_upload", "{row}");
+        assert!(row.get("automatic_disclosure").is_some(), "{row}");
+        assert_eq!(row["from_now"], false, "{row}");
+    }
+
+    /// `list_past_sessions` reports the folder's rule as `list_projects`
+    /// does: a folder the include-existing grant will arm is
+    /// `auto_upload`, not the `notify_only` it has no entry for.
+    #[tokio::test]
+    async fn past_sessions_report_the_mode_the_broad_grant_will_apply() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic_with_existing(&f);
+        f.write_session("found", "11111111-1111-1111-1111-111111111111", 0);
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        let row = listed_row(&listed, "found");
+        assert_eq!(row["mode"], "auto_upload", "{row}");
+        let past = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": row["project_id"]}),
+        );
+        assert_eq!(past["project_mode"], "auto_upload", "{past}");
+    }
+
+    /// On such a row, picking Ask differs from the mode shown, so a shell
+    /// sends it, and it makes the folder an exception to the grant: its
+    /// session waits for a person and the row then reads Ask.
+    #[tokio::test]
+    async fn picking_ask_on_a_folder_the_broad_grant_will_arm_makes_the_exception() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic_with_existing(&f);
+        let path = f.write_session("found", "11111111-1111-1111-1111-111111111111", 0);
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        let row = listed_row(&listed, "found");
+        assert_eq!(row["mode"], "auto_upload", "{row}");
+
+        ipc_ok(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": row["project_id"], "mode": "notify_only"}),
+        );
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        assert_eq!(state_at(&f, &path), (QueueState::Pending, false));
+        assert_eq!(mode_of(&f, "found"), (ProjectMode::NotifyOnly, true));
+        let listed = ipc_ok(&f, "list_projects", serde_json::json!({}));
+        let row = listed_row(&listed, "found");
+        assert_eq!(row["mode"], "notify_only", "{row}");
+        assert_eq!(row["folder_mode"], "notify_only", "{row}");
+    }
+
+    /// What the grant does not arm still lists as itself under it: Never
+    /// reads Never, an Ask set after the grant reads Ask, and the unknown
+    /// bucket reads Ask and is never armed. One Ask exception is enough for
+    /// the pill to read Mixed.
+    #[tokio::test]
+    async fn under_the_broad_grant_never_a_later_ask_and_the_unknown_bucket_list_as_themselves() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        f.write_session("never", "11111111-1111-1111-1111-111111111111", 0);
+        f.write_session("post", "22222222-2222-2222-2222-222222222222", 0);
+        f.write_session("auto", "33333333-3333-3333-3333-333333333333", 0);
+        f.write_session_with_cwd(
+            "no-cwd",
+            "relative/dir",
+            "44444444-4444-4444-4444-444444444444",
+        );
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            let key = project_key_for(Some(&abs("Users/testuser/code/never")));
+            policy
+                .set_mode(&key, ProjectMode::Ignore, Utc::now())
+                .unwrap();
+        }
+        grant_automatic_with_existing(&f);
+        {
+            let mut policy = f.shared.policy.lock().unwrap();
+            let key = project_key_for(Some(&abs("Users/testuser/code/post")));
+            policy
+                .set_mode(&key, ProjectMode::NotifyOnly, Utc::now())
+                .unwrap();
+        }
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        for (project, mode) in [
+            ("never", "ignore"),
+            ("post", "notify_only"),
+            ("auto", "auto_upload"),
+        ] {
+            let row = listed_row(&listed, project);
+            assert_eq!(row["mode"], mode, "{project}: {row}");
+            assert_eq!(row["folder_mode"], mode, "{project}: {row}");
+        }
+        f.settle(Utc::now() + chrono::Duration::hours(30)).await;
+        let listed = ipc_ok(&f, "list_projects", serde_json::json!({}));
+        let unknown_id =
+            crate::daemon::policy::project_id_for(crate::daemon::policy::UNKNOWN_PROJECT_KEY);
+        let unknown = listed["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["project_id"] == unknown_id)
+            .unwrap_or_else(|| panic!("no unknown bucket row in {listed}"))
+            .clone();
+        assert_eq!(unknown["mode"], "notify_only", "{unknown}");
+        assert_eq!(unknown["folder_mode"], "notify_only", "{unknown}");
+        assert_eq!(
+            mode_of(&f, "post"),
+            (ProjectMode::NotifyOnly, true),
+            "a later Ask is never armed"
+        );
+        let status = ipc_ok(&f, "status", serde_json::json!({}));
+        assert_eq!(status["contribution_mode"], "mixed", "{status}");
     }
 
     #[tokio::test]
@@ -7744,14 +8468,14 @@ mod tests {
     }
 
     /// The refusal `source::codex` raises for a rollout past its byte
-    /// budget, built here rather than by writing a 64 MB file: this is a
+    /// budget, built here rather than by writing a 512 MiB file: this is a
     /// test about what the *watcher* does with the refusal, and the refusal
     /// itself is pinned in `source::codex`'s own suite.
     fn too_large() -> anyhow::Error {
         crate::source::SessionTooLarge {
             label: "rollout-too-large",
-            declared_bytes: 70_000_000,
-            budget_bytes: 64_000_000,
+            declared_bytes: crate::source::MAX_SESSION_BYTES + 1,
+            budget_bytes: crate::source::MAX_SESSION_BYTES,
         }
         .into()
     }

@@ -821,6 +821,50 @@ pub extern "C" fn tc_build_channel_json() -> *mut c_char {
     })
 }
 
+/// The command-line tool's state for the app at `bundle_path`
+/// (`cli_tool::probe`): the link this build's channel installs in
+/// `/usr/local/bin`, what is there now, and the AppleScript that changes it.
+///
+/// ```json
+/// {"command_name":"near-ai","link_path":"/usr/local/bin/near-ai",
+///  "state":"not_installed","install_script":"do shell script ...",
+///  "uninstall_script":null}
+/// ```
+///
+/// `state` is `not_installed`, `installed`, `stale` (our link to an app that
+/// moved), `foreign` (something this app did not create; no script is
+/// offered) or `unavailable` (`bundle_path` is not an app bundle with an
+/// executable `Contents/MacOS/near-ai`, as under `swift run`). Each script is
+/// present only when its action is offered, and is one `do shell script ...
+/// with administrator privileges` statement built from fixed text and
+/// single-quoted, validated paths. Reads the link path and the bundle
+/// without following the link, and writes nothing.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+///
+/// # Safety
+/// `bundle_path`, if non-null, must point to a valid, NUL-terminated C
+/// string. NULL or a non-UTF-8 path reads as `unavailable`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_cli_tool_json(bundle_path: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        use trace_commons_contributor::cli_tool;
+        let bundle = if bundle_path.is_null() {
+            String::new()
+        } else {
+            unsafe { borrow_str(bundle_path) }
+                .map(str::to_owned)
+                .unwrap_or_default()
+        };
+        let status = cli_tool::probe(
+            std::path::Path::new(&bundle),
+            std::path::Path::new(cli_tool::LINK_DIR),
+        );
+        Ok(to_owned_cstring(&serde_json::to_string(&status)?))
+    })
+}
+
 /// The sentence the app shows instead of starting when its bundle and this
 /// library disagree on the channel: `health_copy::CHANNEL_MISMATCH`.
 ///
@@ -3781,6 +3825,65 @@ pub unsafe extern "C" fn tc_private_inference_state_line(state: *const c_char) -
     })
 }
 
+/// The menu-bar popover's one word for one `private_inference_state` label
+/// (`private_inference_copy::menu_state`): "On", "Off", "Stopping", "Not
+/// working", or "Unknown" for an unreported or unfamiliar label. The full
+/// sentence stays at [`tc_private_inference_state_line`].
+///
+/// Exported so no shell re-implements the label-to-word mapping. Its dot is
+/// [`tc_private_inference_menu_tone`].
+///
+/// An empty, NULL or non-UTF-8 label answers the unknown word. Returns an
+/// owned string; free it with [`tc_string_free`]. NULL only on a caught
+/// panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_private_inference_menu_word(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::menu_state(state).0,
+        ))
+    })
+}
+
+/// The tone of the dot beside [`tc_private_inference_menu_word`]'s word, as a
+/// `TC_PRIVATE_INFERENCE_TONE_*` value: CLEAR green, ATTENTION amber, REFUSED
+/// red, NEUTRAL grey.
+///
+/// Answers `TC_PRIVATE_INFERENCE_TONE_NEUTRAL` for a label this build has
+/// never heard of, for a NULL or non-UTF-8 `state`, and on a caught panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_private_inference_menu_tone(state: *const c_char) -> i32 {
+    use trace_commons_contributor::private_inference_copy::PrivateInferenceTone;
+    guard(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(
+            match trace_commons_contributor::private_inference_copy::menu_state(state).1 {
+                PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+                PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+                PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+                PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+                PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+            },
+        )
+    })
+    .unwrap_or(TC_PRIVATE_INFERENCE_TONE_NEUTRAL)
+}
+
 /// The Private AI runtime tile's word for one `private_inference_state`
 /// label (`private_inference_copy::runtime_word`): every running label is
 /// "On", a stopped one "Off", and an unreported or unfamiliar label
@@ -6068,6 +6171,50 @@ pub extern "C" fn tc_payout_link_copy_json() -> *mut c_char {
     })
 }
 
+/// The referral words (`referral_copy::referral_copy`): the Settings
+/// Referrals section, the code field on the NEAR AI sign-in step and the
+/// Insights credit split, as a JSON object of `ReferralCopy`'s fields. Every
+/// string is a draft for owner review; templates carry `{code}`, `{n}`,
+/// `{date}` or `{amount}`, which the shell fills.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_referral_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::referral_copy::referral_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// A typed referral code as it is shown, `TC-XXXXX-XXXXX`
+/// (`trace_commons_protocol::referral::normalize_referral_code`, then
+/// `format_referral_code`): the same reading the daemon applies before it
+/// sends one, so a shell can check a field before anything is sent. Case,
+/// `-` and spaces do not matter, `I` and `L` read as `1`, `O` as `0`, and the
+/// `TC` prefix is optional.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL for text
+/// that is not a code, for a NULL or non-UTF-8 `typed`, and on a caught
+/// panic.
+///
+/// # Safety
+/// `typed`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_referral_code_display(typed: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        // NULL and non-UTF-8 are not codes either.
+        let Ok(typed) = (unsafe { borrow_str(typed) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        Ok(
+            trace_commons_protocol::referral::normalize_referral_code(typed)
+                .and_then(|code| trace_commons_protocol::referral::format_referral_code(&code))
+                .map_or(std::ptr::null_mut(), |shown| to_owned_cstring(&shown)),
+        )
+    })
+}
+
 /// The Devices section's words (`consent_copy::account_devices_copy`), as
 /// a JSON object of `AccountDevicesCopy`'s fields. Every string is a draft
 /// for owner review; templates carry `{device}`, `{code}` or `{when}`.
@@ -6078,6 +6225,21 @@ pub extern "C" fn tc_payout_link_copy_json() -> *mut c_char {
 pub extern "C" fn tc_account_devices_copy_json() -> *mut c_char {
     guarded_string_no_err(|| {
         let copy = trace_commons_contributor::consent_copy::account_devices_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
+/// The words for adding Train coding models to traces already sent
+/// (`consent_copy::sent_traces_training_copy`), as a JSON object of
+/// `SentTracesTrainingCopy`'s fields. Every string is a draft for owner
+/// review; count templates carry `{count}`.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_sent_traces_training_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::consent_copy::sent_traces_training_copy();
         Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
     })
 }

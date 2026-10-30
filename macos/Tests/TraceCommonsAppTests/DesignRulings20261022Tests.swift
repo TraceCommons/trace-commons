@@ -69,7 +69,7 @@ final class DesignRulings20261022Tests: XCTestCase {
             "if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn,",
             "let name = model.privateInferenceCopy?.destination",
             "GlassEyebrowCard(name, accessory: {",
-            "PrivateAIStatusLabel()",
+            "PrivateAIStatusLabel { open(.settings(.privateAI)) }",
             "if MenuPanelStatus.showsToolButtons(snapshot) {",
             "model.pendingManagedLaunch = tool",
             "open(.inference)",
@@ -78,7 +78,7 @@ final class DesignRulings20261022Tests: XCTestCase {
         }
         // On or Off, shared with the edge rail's Private AI peek.
         for needle in [
-            "case .on: MenuWords.on",
+            "case .listener(let word, _): word",
             "case .off: MonitorWords.off",
             "on: model.daemonSettings?.privateInference,",
             "GlassStatusLabel(MenuPanelStatus.privateAIValue(state, model: model), status: MenuPanelStatus.privateAIDot(state))",
@@ -90,8 +90,8 @@ final class DesignRulings20261022Tests: XCTestCase {
     /// The dot is on only while Private AI is On; a switch on over a
     /// listener that is not working is outside, never on.
     func test_theDotIsOnOnlyWhilePrivateAIIsOn() {
-        XCTAssertEqual(MenuPanelStatus.privateAIDot(.on), .on)
-        XCTAssertEqual(MenuPanelStatus.privateAIDot(.notWorking), .outside)
+        XCTAssertEqual(MenuPanelStatus.privateAIDot(.listener(word: "On", tone: .clear)), .on)
+        XCTAssertEqual(MenuPanelStatus.privateAIDot(.listener(word: "Not working", tone: .refused)), .outside)
         XCTAssertEqual(MenuPanelStatus.privateAIDot(.off), .off)
         XCTAssertEqual(MenuPanelStatus.privateAIDot(.unknown), .off)
     }
@@ -138,11 +138,14 @@ final class DesignRulings20261022Tests: XCTestCase {
         let overview = try GlassSurfaceRulesTests.text("Views/InsightsOverviewTab.swift")
         XCTAssertFalse(overview.contains("drillButton(\"sessions\")"), "the Sessions figure drills again")
         XCTAssertFalse(overview.contains("if model.drills(\"sessions\") { GlassChevron() }"))
-        XCTAssertTrue(overview.contains("header(overview)\n                    sessionsBreakdown\n"))
+        // Off Overview (product owner, 2026-10-28), with Tokens by day: on
+        // Breakdown a picked day shows that day's sessions, in the window's
+        // inspector since the owner's 2026-10-29 ruling.
+        XCTAssertFalse(overview.contains("sessionsBreakdown"))
         XCTAssertFalse(overview.contains("model.counterInputs"))
-        let breakdown = try Self.section("    private var sessionsBreakdown: some View {", in: overview)
-        XCTAssertTrue(breakdown.contains("if !sessions.rows.isEmpty {"))
-        XCTAssertTrue(breakdown.contains("let inputs = model.sessionsInputs, !inputs.sessions.isEmpty"))
+        let detail = try GlassSurfaceRulesTests.text("Views/InsightsBreakdownInspector.swift")
+        XCTAssertTrue(detail.contains("if let sessions = overview.counterSessions { return !sessions.rows.isEmpty }"))
+        XCTAssertTrue(detail.contains("return !(overview.sessionsInputs?.sessions.isEmpty ?? true)"))
     }
 
     /// A Traces menu row lights as every menu row does: the menu's accent

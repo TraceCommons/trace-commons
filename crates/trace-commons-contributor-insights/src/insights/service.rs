@@ -328,7 +328,8 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("outcome", "Outcome"), ("recorded_at", "Recorded at"),
         ("unknown", "Unknown"), ("working", "Working…"),
         ("no_file", "No file selected"), ("cost", "Estimated cost"),
-        ("codex", "Codex rollout"), ("claude_code", "Claude Code trace"), ("trajectory", "Trajectory"),
+        // "Claude", not "Claude Code", in Insights (owner, approved 2026-10-28).
+        ("codex", "Codex rollout"), ("claude_code", "Claude trace"), ("trajectory", "Trajectory"),
         ("metric_sessions", "Traces"), ("metric_events", "Events"),
         ("metric_input_tokens", "Input tokens"), ("metric_output_tokens", "Output tokens"),
         ("metric_tool_calls", "Tool calls"), ("metric_tool_failures", "Reported tool failures"),
@@ -634,12 +635,12 @@ pub enum LocalInsightsOperation {
         snapshot_id: String,
         tz: i32,
     },
-    /// Feed T comparisons: each goal with its six weekly marks, the lever of
-    /// the week and the weekly summary card. `counter_weeks` is the daemon's
+    /// Feed T comparisons: the lever of the week and the weekly summary
+    /// card. `counter_weeks` is the daemon's
     /// `insights_week` `history`, passed through unchanged, and absent under
     /// feed S; `recap_card_enabled` is the daemon's
-    /// `insights_recap_card_enabled`, passed through. Goals and the lever's
-    /// feedback live here and the counter rows in the daemon, so neither side
+    /// `insights_recap_card_enabled`, passed through. The lever's feedback
+    /// lives here and the counter rows in the daemon, so neither side
     /// can compare alone. Measured figures only; no rate, path or assumption.
     /// A read: an absent store is not created.
     Comparisons {
@@ -650,15 +651,6 @@ pub enum LocalInsightsOperation {
         tz: i32,
         #[serde(default)]
         recap_card_enabled: bool,
-    },
-    /// Add a goal, or replace the one with `id`.
-    GoalSet {
-        #[serde(default)]
-        id: Option<String>,
-        goal: super::goals::Goal,
-    },
-    GoalDelete {
-        id: String,
     },
     /// "Not useful" on the lever's kind in the week shown (its Monday), or,
     /// with `action: reenable`, the kind turned back on. Stored as the kind
@@ -838,12 +830,6 @@ pub enum LocalInsightsResponse {
     },
     Comparisons {
         comparisons: Box<super::recap::WeekComparisons>,
-    },
-    GoalSet {
-        state: Box<super::goal_store::GoalState>,
-    },
-    GoalDelete {
-        state: Box<super::goal_store::GoalState>,
     },
     LeverFeedback {
         state: Box<super::goal_store::GoalState>,
@@ -1485,18 +1471,6 @@ fn execute_inner(
                 )),
             }
         }
-        LocalInsightsOperation::GoalSet { id, goal } => LocalInsightsResponse::GoalSet {
-            state: Box::new(store()?.goal_set(id.as_deref(), goal)?),
-        },
-        LocalInsightsOperation::GoalDelete { id } => {
-            let state = match existing_store(request.store_dir.as_deref())? {
-                Some(store) => store.goal_delete(&id)?,
-                None => return Err(super::goal_store::GoalStoreError::NotFound.into()),
-            };
-            LocalInsightsResponse::GoalDelete {
-                state: Box::new(state),
-            }
-        }
         LocalInsightsOperation::LeverFeedback {
             kind,
             week_start,
@@ -1641,6 +1615,7 @@ mod tests {
             cloud_service: "example.cloud",
             account_service: "example.account",
             insights_digest_key_service: "example.insights",
+            claude_usage_service: "example.claude-usage",
         },
         state_dir_name: "example-channel",
     };
@@ -1725,6 +1700,39 @@ mod tests {
         }
     }
 
+    /// The owner's plain-words pass (2026-10-29): the coverage line is the
+    /// count alone with its breakdown behind an "i", and the Benchmarks
+    /// header and cards read plainly. The removed keys stay removed.
+    #[test]
+    fn the_coverage_and_benchmarks_words_are_the_plain_ones() {
+        let copy = ui_copy();
+        for (key, words) in [
+            ("analytics_coverage_line", "{n} traces"),
+            ("analytics_coverage_info_known", "Full details for {k}."),
+            ("analytics_coverage_info_partial", "Some missing for {p}."),
+            (
+                "analytics_coverage_info_unknown",
+                "None for {u}; these aren't counted as zero.",
+            ),
+            ("analytics_bench_intro", "Compared on {n} of your traces"),
+            ("analytics_bench_quality", "Quality"),
+            ("analytics_bench_value", "Value"),
+            ("analytics_bench_speed", "Speed"),
+            ("analytics_bench_quality_detail", "Share of edits you kept"),
+            (
+                "analytics_bench_value_detail",
+                "Cost per trace at API prices",
+            ),
+            ("analytics_bench_speed_detail", "Time per trace"),
+            ("analytics_bench_not_enough", "Waiting for more data"),
+        ] {
+            assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
+        }
+        for key in ["analytics_bench_min", "analytics_bench_empty"] {
+            assert!(!copy.contains_key(key), "{key} was removed");
+        }
+    }
+
     /// Ron's owner review of #1287 (D17, adopted by the owner 2026-10-11):
     /// his table's approved words, the two new strings and the four removed
     /// keys. The route split is pinned in the test above with its fifth,
@@ -1736,9 +1744,12 @@ mod tests {
         for (key, words) in [
             ("analytics_lever_title", "Higher than usual"),
             ("analytics_goals_title", "Goals"),
+            ("analytics_coverage_line", "{n} traces"),
+            ("analytics_coverage_info_known", "Full details for {k}."),
+            ("analytics_coverage_info_partial", "Some missing for {p}."),
             (
-                "analytics_coverage_line",
-                "Counts known for {k} of {n} traces · {p} partial · {u} unknown, not counted as zero",
+                "analytics_coverage_info_unknown",
+                "None for {u}; these aren't counted as zero.",
             ),
             (
                 "analytics_coverage_undated",
@@ -1843,11 +1854,9 @@ mod tests {
             ("analytics_from_counters", "from token counts"),
             (
                 "analytics_claude_sessions_only",
-                "Claude Code traces only: {k} of {n}.",
+                "Claude traces only: {k} of {n}.",
             ),
             ("analytics_see_sessions", "Show {n} traces"),
-            ("analytics_goal_cache_share", "Cache share at least {p}%"),
-            ("analytics_goal_delete", "Delete"),
             ("analytics_lever_show_reads", "Show reads"),
             (
                 "analytics_lever_off",
@@ -1902,6 +1911,12 @@ mod tests {
                 "analytics_setting_counter_pass",
                 "Count tokens in watched folders",
             ),
+            // Owner, 2026-10-28: "Claude", never "Claude Code", in the
+            // drill-down; one trace is singular; an unmeasured login's
+            // card says this.
+            ("analytics_credit_tool_claude_code", "Claude"),
+            ("analytics_projects_traces_one", "{n} trace"),
+            ("analytics_limits_refresh_to_see", "Refresh to see limits"),
         ] {
             assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
         }
@@ -1924,6 +1939,13 @@ mod tests {
             "analytics_analyze_how",
             "analytics_tip_context",
             "analytics_subscriptions_session",
+            // The quota's Session window again, on the usage cards.
+            "analytics_limits_session_left",
+            "analytics_usage_session_resets",
+            // The get-started steps, in the owner's words (2026-10-29):
+            // what Claude Code and Codex record on this Mac.
+            "analytics_start_step_use_detail",
+            "analytics_start_step_fill_detail",
         ];
         assert_eq!(copy["analytics_subscriptions_session"], "Session");
         for (key, words) in ANALYTICS_COPY {
@@ -2020,77 +2042,6 @@ mod tests {
         }
     }
 
-    /// The Models card (model answers spec section 8): a row name and a
-    /// fact for every question the engine answers, on either basis; a word
-    /// for every left-out reason it counts; and no ranking word anywhere
-    /// on the card.
-    #[test]
-    fn the_models_card_has_words_for_every_answer_and_no_ranking_word() {
-        use super::super::model_answers::{LeftOut, ModelQuestion};
-        let copy = ui_copy();
-        for question in ModelQuestion::ALL {
-            let wire = serde_json::to_value(question).unwrap();
-            let name = wire.as_str().unwrap();
-            for key in [
-                format!("analytics_models_row_{name}"),
-                format!("analytics_models_lead_{name}"),
-            ] {
-                assert!(copy.contains_key(&key), "missing {key}");
-            }
-            if name.contains("rejected") {
-                let key = format!("analytics_models_lead_{name}_undone");
-                assert!(copy[&key].contains("undone"), "{key}");
-                // The figure is a share of the model's edits, so the
-                // model with the lowest share can still have the most
-                // rejected edits: the fact names a share, never a count.
-                for key in [format!("analytics_models_lead_{name}"), key] {
-                    let words = &copy[&key];
-                    assert!(words.starts_with("Lowest share of edits"), "{key}");
-                    assert!(!words.to_lowercase().contains("fewest"), "{key}");
-                }
-            }
-        }
-        let left_out = serde_json::to_value(LeftOut::default()).unwrap();
-        for reason in left_out.as_object().unwrap().keys() {
-            let key = format!("analytics_models_left_out_{reason}");
-            assert!(copy.get(&key).is_some_and(|w| w.contains("{n}")), "{key}");
-        }
-        for (key, words) in [
-            ("analytics_card_models", "Models"),
-            (
-                "analytics_models_scope",
-                "In your traces \u{b7} labels as recorded \u{b7} task type yours, else inferred",
-            ),
-            ("analytics_models_cost", "{x} at API prices"),
-            ("analytics_models_basis_undone", "Undone edits we could see"),
-            ("analytics_models_not_enough", "Not enough traces yet"),
-            (
-                "analytics_models_no_clear_difference",
-                "No clear difference",
-            ),
-            ("analytics_models_not_priced", "Not priced"),
-        ] {
-            assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
-        }
-        for (key, words) in &copy {
-            if key.starts_with("analytics_models_") || key == "analytics_card_models" {
-                let lower = words.to_lowercase();
-                for banned in ["best", "better", "fastest", "winner", "benchmark"] {
-                    assert!(!lower.contains(banned), "{key} says {banned}");
-                }
-            }
-        }
-        // Money is never a figure on its own: each `{x}` that holds an
-        // amount sits in a sentence naming which price it is.
-        for key in ["analytics_models_cost", "analytics_models_charge"] {
-            let words = &copy[key];
-            assert!(
-                words.contains("API prices") || words.contains("Charged through Private AI"),
-                "{key}"
-            );
-        }
-    }
-
     #[test]
     fn ui_copy_carries_the_analytics_words_and_none_of_the_held_ones() {
         use super::super::analytics_copy::{ANALYTICS_COPY, ANALYTICS_PLACEHOLDERS};
@@ -2117,10 +2068,7 @@ mod tests {
                 "analytics_by_project_unavailable",
                 "Not available for analyzed files",
             ),
-            (
-                "analytics_coverage_line",
-                "Counts known for {k} of {n} traces \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
-            ),
+            ("analytics_coverage_line", "{n} traces"),
             ("analytics_glance_tokens_only", "{tokens} tokens"),
             // A saved session's picker and drill-down label, never its id.
             (
@@ -3126,7 +3074,7 @@ mod tests {
         assert_eq!(found["type"], "comparisons");
         let found = &found["comparisons"];
         assert_eq!(found["feed"], "saved");
-        assert_eq!(found["goals"], serde_json::json!([]));
+        assert!(found.get("goals").is_none());
         assert_eq!(found["lever"]["unavailable"], "needs_counter_pass");
         assert_eq!(found["recap"], serde_json::Value::Null);
         // Feed T figures over an absent store: compared, nothing created.
@@ -3157,9 +3105,16 @@ mod tests {
                 serde_json::json!({"type": "comparisons", "tz": 0, "rate": 3}),
                 "insights-request-invalid",
             ),
+            // The threshold goals left Insights: their writes are refused.
             (
                 serde_json::json!({"type": "goal_delete", "id": "goal-1"}),
-                "insights_goal_not_found",
+                "insights-request-invalid",
+            ),
+            (
+                serde_json::json!({"type": "goal_set", "goal": {
+                    "kind": "weekly_tokens_under", "source": "claude_code", "tokens": 900_000
+                }}),
+                "insights-request-invalid",
             ),
         ] {
             assert_eq!(
@@ -3230,18 +3185,9 @@ mod tests {
     }
 
     #[test]
-    fn goal_and_lever_writes_feed_the_comparisons() {
+    fn lever_writes_feed_the_comparisons() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("store");
-        let set = analytics_call(
-            &directory,
-            serde_json::json!({"type": "goal_set", "goal": {
-                "kind": "weekly_tokens_under", "source": "claude_code", "tokens": 900_000
-            }}),
-        )
-        .unwrap();
-        assert_eq!(set["type"], "goal_set");
-        let id = set["state"]["goals"][0]["id"].as_str().unwrap().to_string();
         let compared = analytics_call(
             &directory,
             serde_json::json!({
@@ -3250,22 +3196,10 @@ mod tests {
             }),
         )
         .unwrap();
-        let goal = &compared["comparisons"]["goals"][0];
-        assert_eq!(goal["id"], id.as_str());
-        assert_eq!(goal["figure"], 800_000);
-        assert_eq!(
-            goal["marks"]["marks"],
-            serde_json::json!(["not_met", "not_met", "not_met", "not_met", "not_met", "met"])
-        );
-        assert_eq!(
-            goal["marks"]["change"],
-            serde_json::json!({"direction": "down", "from": 1_000_000})
-        );
         let recap = &compared["comparisons"]["recap"];
         let closed = recap["week_start"].as_str().unwrap().to_string();
 
         for bad in [
-            serde_json::json!({"type": "goal_set", "goal": {"kind": "long_context_under", "tokens": 0}}),
             serde_json::json!({"type": "lever_feedback", "kind": "repeated_reads", "week_start": "2026-10-06"}),
             serde_json::json!({"type": "recap_opened", "week_start": "2026-10-06"}),
         ] {
@@ -3296,11 +3230,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(after["comparisons"]["recap"], serde_json::Value::Null);
-        let deleted = analytics_call(
-            &directory,
-            serde_json::json!({"type": "goal_delete", "id": id}),
-        )
-        .unwrap();
-        assert_eq!(deleted["state"]["goals"], serde_json::json!([]));
+        assert!(opened["state"].get("goals").is_none());
     }
 }

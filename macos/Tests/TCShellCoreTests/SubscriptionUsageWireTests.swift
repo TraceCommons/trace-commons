@@ -34,8 +34,9 @@ final class SubscriptionUsageWireTests: XCTestCase {
         XCTAssertTrue(answer.providers.isEmpty)
         _ = try await client.subscriptionUsage(refresh: true, interactive: true, provider: "codex")
         try await client.setSubscriptionUsage(provider: "codex", on: true)
+        try await client.setSubscriptionUsage(provider: "claude", on: false)
         let calls = transport.recorded()
-        XCTAssertEqual(calls.map(\.0), ["subscription_usage", "subscription_usage", "set_settings"])
+        XCTAssertEqual(calls.map(\.0), ["subscription_usage", "subscription_usage", "set_settings", "set_settings"])
         let read = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[0].1.utf8)) as? [String: Bool])
         XCTAssertEqual(read, ["refresh": false, "interactive": false])
         let scoped = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[1].1.utf8)) as? [String: Any])
@@ -44,13 +45,13 @@ final class SubscriptionUsageWireTests: XCTestCase {
         XCTAssertEqual(scoped["provider"] as? String, "codex")
         let set = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[2].1.utf8)) as? [String: Bool])
         XCTAssertEqual(set, ["subscription_usage_codex_enabled": true])
-        for provider in ["claude", "unrecognized"] {
-            do {
-                try await client.setSubscriptionUsage(provider: provider, on: true)
-                XCTFail("only Codex retains an app opt-in setting")
-            } catch let error as DaemonDataError {
-                XCTAssertEqual(error, .daemon(code: "bad_params", message: "subscription-provider-invalid"))
-            }
+        let claude = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calls[3].1.utf8)) as? [String: Bool])
+        XCTAssertEqual(claude, ["subscription_usage_claude_on": false])
+        do {
+            try await client.setSubscriptionUsage(provider: "unrecognized", on: true)
+            XCTFail("only Codex and Claude have a setting")
+        } catch let error as DaemonDataError {
+            XCTAssertEqual(error, .daemon(code: "bad_params", message: "subscription-provider-invalid"))
         }
         do {
             _ = try await client.subscriptionUsage(refresh: true, interactive: true, provider: "unrecognized")
@@ -58,7 +59,7 @@ final class SubscriptionUsageWireTests: XCTestCase {
         } catch let error as DaemonDataError {
             XCTAssertEqual(error, .daemon(code: "bad_params", message: "subscription-provider-invalid"))
         }
-        XCTAssertEqual(transport.recorded().count, 3)
+        XCTAssertEqual(transport.recorded().count, 4)
     }
 
     func testClaudeRefreshSendsExactLoginAndRejectsMissingOrUnboundedSelectors() async throws {
@@ -101,6 +102,18 @@ final class SubscriptionUsageWireTests: XCTestCase {
             let window = try decoder.decode(DaemonData.SubscriptionUsageWindow.self, from: Data(json.utf8))
             XCTAssertNil(window.durationMins)
         }
+    }
+
+    func testReadingSourceIsOptionalAndToleratesOlderDaemons() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let cli = Data(#"{"id":"claude-default","label":"Claude","default_login":true,"state":"observed","stale":false,"windows":[],"source":"cli"}"#.utf8)
+        XCTAssertEqual(try decoder.decode(DaemonData.SubscriptionUsageLogin.self, from: cli).source, "cli")
+        let none = Data(#"{"id":"claude-default","label":"Claude","default_login":true,"state":"unknown","stale":false,"windows":[],"source":null}"#.utf8)
+        XCTAssertNil(try decoder.decode(DaemonData.SubscriptionUsageLogin.self, from: none).source)
+        let older = Data(#"{"id":"claude-default","label":"Claude","default_login":true,"state":"unknown","stale":false,"windows":[]}"#.utf8)
+        XCTAssertNil(try decoder.decode(DaemonData.SubscriptionUsageLogin.self, from: older).source)
+        let malformed = Data(#"{"id":"claude-default","label":"Claude","default_login":true,"state":"observed","stale":false,"windows":[],"source":7}"#.utf8)
+        XCTAssertNil(try decoder.decode(DaemonData.SubscriptionUsageLogin.self, from: malformed).source)
     }
 
     func testInvalidOptionalMeasurementDoesNotDiscardValidNeighbors() throws {

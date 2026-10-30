@@ -31,12 +31,18 @@ mod file_witness;
 mod inference_connection_routes;
 #[path = "trace_commons_ingest_internal/legacy_invite_link.rs"]
 mod legacy_invite_link_routes;
+#[path = "trace_commons_ingest_internal/model_training_consent.rs"]
+mod model_training_consent;
 #[path = "trace_commons_ingest_internal/payout_link.rs"]
 mod payout_link_routes;
 #[path = "trace_commons_ingest_internal/payout_rails.rs"]
 mod payout_rails;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
+#[path = "trace_commons_ingest_internal/referral_admin.rs"]
+mod referral_admin;
+#[path = "trace_commons_ingest_internal/referral.rs"]
+mod referral_routes;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
 mod rewards;
 #[path = "trace_commons_ingest_internal/token_bundles.rs"]
@@ -733,6 +739,8 @@ const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
 /// See `SubmitPrincipalLimits`.
 const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN: &str =
     "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN";
+/// Deployment-wide upload byte budget; see [`parse_large_body_byte_budget`].
+const TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET: &str = "TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET";
 /// `POST /v1/traces` submissions one principal may have in flight at once.
 const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY: &str =
     "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY";
@@ -1768,6 +1776,20 @@ struct AppState {
     /// rail-wide payout controls (halt, resume, hold clearing) accept. `None`
     /// when unset: those routes then refuse every caller. Never the token.
     payout_control_token_hash: Option<String>,
+    /// The referral code store (referral spec sections 2 and 3): the
+    /// database mirror's PostgreSQL backend, or `None` without one. The
+    /// referral routes then answer `referral_unavailable`, and a sign-up
+    /// code is not applied.
+    referral_store: Option<Arc<dyn trace_commons_server::db::ReferralStore>>,
+    /// The referral program's settings (`TRACE_COMMONS_REFERRAL_*`),
+    /// validated at boot. Unset means the program has not started.
+    referral_config: Arc<trace_commons_server::referral_config::ReferralConfig>,
+    /// The key network marks are made under
+    /// (`TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY`). Required, at boot,
+    /// whenever the referral program or its bonus is configured; `None`
+    /// otherwise, and then no mark is recorded.
+    referral_network_mark_key:
+        Option<Arc<trace_commons_server::referral_network::ReferralNetworkMarkKey>>,
     /// The first run's dollar estimate `GET /v1/public/first-run-estimate`
     /// serves: from the operator's two settings, validated at boot, or
     /// empty when neither is set.
@@ -1950,6 +1972,10 @@ struct AppState {
     max_export_items_per_request: usize,
     /// Per-principal `POST /v1/traces` rate and in-flight caps.
     submit_principal_limits: SubmitPrincipalLimits,
+    /// Deployment-wide budget of upload body bytes in flight, taken by
+    /// [`authenticate_large_body_request`] for each upload by its declared
+    /// size. Shared by every clone of the state.
+    large_body_bytes: Arc<tokio::sync::Semaphore>,
     analytics_min_cell_count: usize,
     analytics_broad_release_noise: Option<TraceAnalyticsNoiseConfig>,
     analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
@@ -4226,6 +4252,11 @@ impl AppState {
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let submit_principal_limits = parse_submit_principal_limits_from_env()?;
+        let large_body_byte_budget = parse_large_body_byte_budget(
+            std::env::var(TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET)
+                .ok()
+                .as_deref(),
+        )?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
         let community_tenant_ids =
             parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_COMMUNITY_TENANT_IDS)?
@@ -5039,17 +5070,49 @@ impl AppState {
         let payout_store = db_connections.as_ref().map(|connections| {
             connections.postgres.clone() as Arc<dyn trace_commons_server::db::PayoutStore>
         });
-        let payout_rails = Arc::new(
+        // The referral bonus rides the near_ai pass; `disabled`, the
+        // default, attaches nothing.
+        let payout_rails = Arc::new(referral_admin::with_referral_bonus_from_env(
             payout_rails::payout_rails_from_env(
                 credit_settlement_table.as_deref(),
                 payout_store.as_deref(),
             )
             .await?,
-        );
+            db_connections
+                .as_ref()
+                .map(|connections| connections.postgres.clone()),
+        )?);
         // Any live rail needs the operator's control token, or its kill
         // switch would be unreachable.
         let payout_control_token_hash =
             payout_rails::payout_control_token_hash_from_env(&payout_rails)?;
+        // Referral codes (referral spec section 3): the settings refuse boot
+        // when malformed, naming the setting, never its value.
+        let referral_config = Arc::new(
+            trace_commons_server::referral_config::ReferralConfig::from_env()
+                .map_err(|error| anyhow::anyhow!("{}: {}", error.label(), error.setting()))?,
+        );
+        // Server-observed network marks (owner decision 2026-10-29): with the
+        // program or its bonus configured, a missing key refuses the start
+        // rather than run the abuse checks without the network signal.
+        let referral_network_mark_key =
+            trace_commons_server::referral_network::ReferralNetworkMarkKey::from_env(
+                referral_config.program_start.is_some() || payout_rails.referral_bonus().is_some(),
+            )
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.label(), error.setting()))?
+            .map(Arc::new);
+        // The operator's grant of trace_referral_resolver, checked once at
+        // boot while referrals are on (fail closed, safe label).
+        referral_admin::require_referral_resolver(
+            db_connections
+                .as_ref()
+                .map(|connections| connections.postgres.as_ref()),
+            referral_config.program_start.is_some() || payout_rails.referral_bonus().is_some(),
+        )
+        .await?;
+        let referral_store = db_connections.as_ref().map(|connections| {
+            connections.postgres.clone() as Arc<dyn trace_commons_server::db::ReferralStore>
+        });
         // A finalized pipeline credit batch wakes every enabled rail.
         if let Some(service) = pipeline_service.as_ref() {
             service.attach_payout_notifier(payout_rails.notifier());
@@ -5129,6 +5192,7 @@ impl AppState {
             tenant_rollout_gates,
             max_export_items_per_request,
             submit_principal_limits,
+            large_body_bytes: Arc::new(tokio::sync::Semaphore::new(large_body_byte_budget)),
             analytics_min_cell_count,
             analytics_broad_release_noise,
             analytics_broad_release_privacy_accounting,
@@ -5251,6 +5315,9 @@ impl AppState {
             payout_rails,
             payout_store,
             payout_control_token_hash,
+            referral_store,
+            referral_config,
+            referral_network_mark_key,
             first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             attestation_signing,
             legacy_invite_link,
@@ -8672,6 +8739,9 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         // status on the signed-in account session; no passkey (owner,
         // 2026-10-23).
         .merge(payout_link_routes::routes())
+        // Referral codes and applying one (referral spec section 6), on the
+        // signed-in account session as the payout links are.
+        .merge(referral_routes::routes())
         // The devices linked to the account: list, rename, revoke.
         .merge(account_devices_routes::routes())
         // One-time codes that link a headless device: mint and status.
@@ -8836,8 +8906,16 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 }
 
 fn app(state: Arc<AppState>) -> Router {
-    let large_body_auth =
-        axum::middleware::from_fn_with_state(state.clone(), authenticate_large_body_request);
+    // One gate per body ceiling, so a declared length over the route's own
+    // ceiling is refused before any bytes are budgeted or read.
+    let large_body_auth = axum::middleware::from_fn_with_state(
+        state.clone(),
+        authenticate_large_body_request::<MAX_INGEST_BODY_BYTES>,
+    );
+    let large_attachment_auth = axum::middleware::from_fn_with_state(
+        state.clone(),
+        authenticate_large_body_request::<MAX_TOKEN_BUNDLE_BODY_BYTES>,
+    );
     Router::new()
         .route("/v1/reward-offers/{program_id}", get(rewards::offer))
         .route("/v1/missions", get(rewards::mission_catalog))
@@ -8860,7 +8938,7 @@ fn app(state: Arc<AppState>) -> Router {
             get(token_bundles::capabilities).merge(
                 post(token_bundles::begin)
                     .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
-                    .layer(large_body_auth.clone()),
+                    .layer(large_attachment_auth.clone()),
             ),
         )
         .route(
@@ -8876,7 +8954,7 @@ fn app(state: Arc<AppState>) -> Router {
             get(token_bundles::read).merge(
                 axum::routing::put(token_bundles::put)
                     .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
-                    .layer(large_body_auth.clone()),
+                    .layer(large_attachment_auth),
             ),
         )
         .route("/health", get(health_handler))
@@ -8944,6 +9022,13 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/contributors/me/submission-status",
             post(submission_status_handler),
+        )
+        // Add the model_training use to traces already sent, and re-run
+        // the scoring award withheld for lack of it.
+        .route(
+            trace_commons_protocol::model_training_consent::MODEL_TRAINING_CONSENT_PATH,
+            get(model_training_consent::eligibility_handler)
+                .post(model_training_consent::grant_handler),
         )
         .route(
             "/v1/contributors/me/score-attestation",
@@ -9486,6 +9571,26 @@ fn app(state: Arc<AppState>) -> Router {
             post(payout_rails::payout_link_release_handler),
         )
         .route(
+            "/v1/admin/referrals/suspended",
+            get(referral_admin::referral_suspended_handler),
+        )
+        .route(
+            "/v1/admin/referrals/codes/clear",
+            post(referral_admin::referral_code_clear_handler),
+        )
+        .route(
+            "/v1/admin/referrals/codes/void",
+            post(referral_admin::referral_code_void_handler),
+        )
+        .route(
+            "/v1/admin/referrals/void",
+            post(referral_admin::referral_void_handler),
+        )
+        .route(
+            "/v1/admin/referrals/dry-run-report",
+            post(referral_admin::referral_dry_run_report_handler),
+        )
+        .route(
             "/v1/admin/near-attestation-drill",
             post(near_attestation_drill_handler),
         )
@@ -9712,7 +9817,11 @@ fn app(state: Arc<AppState>) -> Router {
 /// `MAX_ATTACHMENTS` attachments, uploaded one `put` at a time, so any rate a
 /// legitimate bundle fits under bounds nothing. Memory is what an in-flight
 /// cap bounds.
-async fn authenticate_large_body_request(
+///
+/// `LIMIT` is the route's body ceiling (its `DefaultBodyLimit`). A declared
+/// `Content-Length` over it is refused here with 413, before any budget is
+/// taken: axum's own limit only trips once that many bytes have been read.
+async fn authenticate_large_body_request<const LIMIT: usize>(
     State(state): State<Arc<AppState>>,
     request: Request,
     next: Next,
@@ -9729,17 +9838,80 @@ async fn authenticate_large_body_request(
     let Some(_slots) = large_body_slots_for(&ACCOUNT_RATE_LIMITER, &principal_key) else {
         return large_body_concurrency_refusal();
     };
+    // Bytes, not just requests: at the envelope cap one upload is hundreds of
+    // MB and ingest holds several copies of it, so a count of 32 bounds
+    // nothing. Weighed from `Content-Length` before the body is polled.
+    let exact_length = axum::body::HttpBody::size_hint(request.body()).exact();
+    let Some(weight) = large_body_weight(request.headers(), exact_length, LIMIT) else {
+        return api_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+    };
+    let Some(_bytes) = large_body_byte_permit(&state.large_body_bytes, weight) else {
+        return large_body_concurrency_refusal();
+    };
+    // The handler authenticates again, after the body is buffered. A large
+    // upload can outlive a five-minute upload claim, and the claim was valid
+    // when this request began, so the handler is handed the context
+    // established here rather than refusing the same request it admitted.
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(PreBodyAuthenticated(tenant));
     next.run(request).await
+}
+
+/// The context [`authenticate_large_body_request`] authenticated before the
+/// body was read. Only that middleware inserts it.
+#[derive(Clone)]
+struct PreBodyAuthenticated(TenantCtx);
+
+/// What one upload weighs against [`AppState::large_body_bytes`]: its
+/// declared `Content-Length`, else the body's exact length when it knows one
+/// (`exact_length`, its size hint), else the route's ceiling `limit`, since a
+/// body of unknown length can be that large. `None` when the length is over
+/// `limit`: that request is refused outright rather than buffered up to the
+/// limit first.
+fn large_body_weight(headers: &HeaderMap, exact_length: Option<u64>, limit: usize) -> Option<u32> {
+    // Every upload ceiling fits a u32 (asserted at compile time).
+    let limit = limit.min(MAX_INGEST_BODY_BYTES) as u64;
+    let declared = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or(exact_length)
+        .unwrap_or(limit);
+    (declared <= limit).then_some(declared.max(1) as u32)
+}
+
+/// Take `weight` bytes from the deployment-wide upload budget, or `None` when
+/// that many are not free right now. Never waits: the caller is refused with
+/// `Retry-After` and keeps the upload queued.
+fn large_body_byte_permit(
+    budget: &Arc<tokio::sync::Semaphore>,
+    weight: u32,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    budget.clone().try_acquire_many_owned(weight).ok()
 }
 
 /// Most upload bodies one principal may have in flight at once, across every
 /// large-body route. Above the submit handler's own concurrency of 2, so a
 /// contributor submitting while a bundle uploads is never refused here first.
 const LARGE_BODY_PER_PRINCIPAL_CONCURRENCY: u32 = 4;
-/// Most upload bodies in flight across the deployment. Bounds what uploads can
-/// make ingest buffer to about this many times `MAX_INGEST_BODY_BYTES`
-/// (~650 MB), whatever the number of valid tokens.
+/// Most upload bodies in flight across the deployment, whatever their size.
+/// Memory is bounded by [`LARGE_BODY_GLOBAL_BYTES`], not by this count.
 const LARGE_BODY_GLOBAL_CONCURRENCY: u32 = 32;
+/// Default deployment-wide budget of upload body bytes in flight, by declared
+/// `Content-Length` (`TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET` overrides it).
+///
+/// One maximal upload plus 128 MiB for everything else. Ingest holds several
+/// copies of a body while it is processed (parsed envelope, serialized and
+/// encrypted artifact), so resident memory for uploads is a multiple of this
+/// budget, not the budget itself; size it against the host's memory with that
+/// multiple, measured in `large_envelope_tests`.
+const LARGE_BODY_GLOBAL_BYTES: usize = MAX_INGEST_BODY_BYTES + 128 * 1024 * 1024;
+/// A budget below one maximal body would refuse that upload forever.
+const _: () = assert!(LARGE_BODY_GLOBAL_BYTES >= MAX_INGEST_BODY_BYTES);
+/// Upload weights are `u32` permits.
+const _: () = assert!(MAX_INGEST_BODY_BYTES <= u32::MAX as usize);
 const LARGE_BODY_GLOBAL_KEY: &str = "large-body-global";
 
 fn large_body_principal_key(
@@ -15985,25 +16157,46 @@ async fn claim_legacy_receipt(
 /// The handler keeps `ApiResult` so its tests can call it directly.
 async fn submit_trace_route(
     state: State<Arc<AppState>>,
+    pre_body: Option<axum::Extension<PreBodyAuthenticated>>,
     headers: HeaderMap,
     body: SubmitBody,
 ) -> axum::response::Response {
-    match submit_trace_handler(state, headers, body).await {
+    let pre_body = pre_body.map(|axum::Extension(PreBodyAuthenticated(tenant))| tenant);
+    match submit_trace_handler_authenticated(state, headers, body, pre_body).await {
         Ok(receipt) => receipt.into_response(),
         Err(error) => api_error_response_with_retry_after(error),
     }
 }
 
+/// [`submit_trace_handler_authenticated`] that authenticates the request
+/// itself: tests, and bundle `finalize`, which calls it in-process.
 async fn submit_trace_handler(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: SubmitBody,
+) -> ApiResult<Json<TraceSubmissionReceipt>> {
+    submit_trace_handler_authenticated(state, headers, body, None).await
+}
+
+/// `pre_body` is the context the large-body middleware authenticated before
+/// the body was read, when it ran. A credential that expired while the body
+/// was uploading is still the credential this request began with, so the
+/// handler uses that context instead of re-checking expiry after the fact;
+/// without one (a direct call) it authenticates here.
+async fn submit_trace_handler_authenticated(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: SubmitBody,
+    pre_body: Option<TenantCtx>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
     let SubmitBody {
         mut envelope,
         raw: raw_body,
     } = body;
-    let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
+    let authenticated_tenant = match pre_body {
+        Some(tenant) => tenant,
+        None => authenticate_ctx(state.as_ref(), &headers)?,
+    };
 
     // Submission work includes the server re-scrub and gate preparation, so
     // bound it before the tenant-access-grant query, envelope validation, or any
@@ -16301,7 +16494,17 @@ async fn submit_trace_handler(
                 )
                 .await?;
         }
-        let residual_risk_basis = rescrub_trace_envelope(&mut envelope)
+        // CPU-bound and linear in the envelope, which at the cap is hundreds
+        // of MB: on a blocking thread, so it cannot hold a runtime worker
+        // (and every request queued behind it) for the duration.
+        let (rescrubbed, residual_risk_basis) = tokio::task::spawn_blocking(move || {
+            let basis = rescrub_trace_envelope(&mut envelope);
+            (envelope, basis)
+        })
+        .await
+        .map_err(|_| internal_error("rescrub task failed"))?;
+        let mut envelope = rescrubbed;
+        let residual_risk_basis = residual_risk_basis
             .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
         bind_envelope_server_tenant_scope_for_storage(&mut envelope, tenant.tenant_id());
         let existing_revocations = read_revocations_for_submit(state.as_ref(), tenant.tenant_id())
@@ -16411,14 +16614,19 @@ async fn submit_trace_handler(
             .as_ref()
             .filter(|_| db_first)
             .map(|prior| quarantine_remediation_prior_snapshot(state.as_ref(), prior));
-        let stored_envelope = store_envelope(
-            &state,
-            tenant.tenant_id(),
-            corpus_status,
-            artifact_label,
-            &envelope,
-        )
-        .map_err(internal_error)?;
+        // Serialize, encrypt and write: as the rescrub, off the runtime.
+        let (stored_envelope, envelope) = {
+            let state = state.clone();
+            let tenant_id = tenant.tenant_id().to_string();
+            tokio::task::spawn_blocking(move || {
+                let stored =
+                    store_envelope(&state, &tenant_id, corpus_status, artifact_label, &envelope);
+                (stored, envelope)
+            })
+            .await
+            .map_err(|_| internal_error("envelope store task failed"))?
+        };
+        let stored_envelope = stored_envelope.map_err(internal_error)?;
         let derived_record = build_derived_record(
             tenant.tenant_id(),
             corpus_status,
@@ -18296,6 +18504,8 @@ fn compatibility_credit_decision(
         chunk_count: count(quality.chunk_count),
         total_chunk_count: count(quality.total_chunk_count),
         chunks_capped: quality.chunks_capped,
+        perplexity_passed: None,
+        novelty_passed: None,
     })
 }
 
@@ -18423,18 +18633,37 @@ fn submission_status_from_pipeline(
     } else {
         Vec::new()
     };
+    // A leg `main`'s credit checks withheld is decided with no award: final
+    // 0, and the withheld reason on the contributor's closed set, as `main`'s
+    // own document says for the same refusal (`trace_credit_outcome`).
+    let withheld_reason = (status.credit == PipelineCreditStatus::Withheld).then(|| {
+        status
+            .instruments
+            .iter()
+            .find(|instrument| instrument.instrument_id == "trace_credit")
+            .and_then(|instrument| instrument.reason_label.as_deref())
+            .map_or(
+                trace_commons_protocol::credit_outcome::OTHER,
+                credit_outcome_reason_for_withheld_label,
+            )
+    });
+    let credit_points_final = match status.credit {
+        PipelineCreditStatus::Finalized => Some(trace_credit_points),
+        PipelineCreditStatus::Withheld => Some(0.0),
+        _ => None,
+    };
     TraceSubmissionStatusUpdate {
         submission_id: status.submission_id,
         trace_id: status.trace_id,
         status: main_status_for_pipeline(status).to_string(),
         credit_points_pending,
-        credit_points_final: (status.credit == PipelineCreditStatus::Finalized)
-            .then_some(trace_credit_points),
+        credit_points_final,
         credit_points_ledger: 0.0,
         credit_points_total: None,
         explanation,
         delayed_credit_explanations: Vec::new(),
         consent_scopes: Vec::new(),
+        credit_outcome_reason: withheld_reason.map(str::to_string),
         pipeline: Some(pipeline_status_for_protocol(status)),
     }
 }
@@ -22060,6 +22289,28 @@ impl Default for SubmitPrincipalLimits {
     }
 }
 
+/// `TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET`: the deployment-wide upload byte
+/// budget, from [`MAX_INGEST_BODY_BYTES`] (one maximal upload) to
+/// `u32::MAX`. Unset is [`LARGE_BODY_GLOBAL_BYTES`]. Anything else refuses
+/// startup, naming the variable: a budget under one maximal body would turn
+/// the largest accepted upload into a permanent 429.
+fn parse_large_body_byte_budget(configured: Option<&str>) -> anyhow::Result<usize> {
+    let Some(configured) = configured else {
+        return Ok(LARGE_BODY_GLOBAL_BYTES);
+    };
+    let min = MAX_INGEST_BODY_BYTES;
+    let max = u32::MAX as usize;
+    let parsed = configured.trim().parse::<usize>().with_context(|| {
+        format!("{TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET} must be an integer from {min} to {max}")
+    })?;
+    if !(min..=max).contains(&parsed) {
+        anyhow::bail!(
+            "{TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET} must be an integer from {min} to {max}"
+        );
+    }
+    Ok(parsed)
+}
+
 fn parse_submit_principal_limits_from_env() -> anyhow::Result<SubmitPrincipalLimits> {
     fn read(name: &str) -> anyhow::Result<Option<String>> {
         match std::env::var(name) {
@@ -22600,6 +22851,18 @@ static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
 /// never used for authorization.
 fn client_ip_for_rate_limit(headers: &HeaderMap) -> String {
     lookup_client_key(
+        headers,
+        &axum::http::HeaderName::from_static("x-forwarded-for"),
+    )
+}
+
+/// The client address the trusted edge observed, for a referral network
+/// mark: the same hop, and the same trust assumption, as
+/// [`client_ip_for_rate_limit`], but the address itself, so the mark can
+/// take its /24 or /48. `None` when unattributed or malformed: nothing is
+/// recorded then. Never a client-set field, and never logged.
+fn client_ip_for_referral_mark(headers: &HeaderMap) -> Option<std::net::IpAddr> {
+    trace_commons_server::invite_lookup::trusted_edge_hop(
         headers,
         &axum::http::HeaderName::from_static("x-forwarded-for"),
     )
@@ -26107,6 +26370,7 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | AUDIT_CHAIN_REPAIR_AUDIT_KIND
             | TOMBSTONE_REPAIR_AUDIT_KIND
             | PIPELINE_ACTIVATION_AUDIT_KIND
+            | model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND
             | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
@@ -66067,15 +66331,22 @@ fn submission_status_from_record(
         .iter()
         .filter(|event| event.submission_id == record.submission_id)
         .collect::<Vec<_>>();
+    let outcome = trace_credit_outcome(record, gate_decision, &delayed_events);
+    // An award the outcome already reports as final is not counted again
+    // in the ledger figure, so `total` stays `final + ledger`.
     let ledger_points = if delayed_credit_applies_to_record(record) {
         delayed_events
             .iter()
+            .filter(|event| {
+                !(outcome.absorbs_scoring_awards
+                    && event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+            })
             .map(|event| event.credit_points_delta)
             .sum::<f32>()
     } else {
         0.0
     };
-    let base_final = record.credit_points_final.unwrap_or(0.0);
+    let base_final = outcome.credit_points_final.unwrap_or(0.0);
     let credit_points_total = if delayed_events.is_empty() || record.is_terminal() {
         None
     } else {
@@ -66109,17 +66380,140 @@ fn submission_status_from_record(
         trace_id: record.trace_id,
         status: record.status.as_str().to_string(),
         // The receipt already resolved estimate-vs-gate figure; the two
-        // surfaces must never disagree about the same record.
-        credit_points_pending: receipt
-            .credit_points_pending
-            .unwrap_or(record.credit_points_pending),
-        credit_points_final: record.credit_points_final,
+        // surfaces must never disagree about the same record. Once the
+        // outcome is final nothing is pending: daemons before #1703 add
+        // pending and final together, so sending both counts a decided
+        // trace twice on their Home.
+        credit_points_pending: if outcome.credit_points_final.is_some() {
+            0.0
+        } else {
+            receipt
+                .credit_points_pending
+                .unwrap_or(record.credit_points_pending)
+        },
+        credit_points_final: outcome.credit_points_final,
         credit_points_ledger: ledger_points,
         credit_points_total,
         explanation: receipt.explanation,
         delayed_credit_explanations,
         consent_scopes: record.consent_scopes.clone(),
+        credit_outcome_reason: outcome.reason.map(str::to_string),
         pipeline: None,
+    }
+}
+
+/// A trace's credit outcome as the contributor's status read-back reports
+/// it: the final figure, and, when that figure is 0 because the trace was
+/// decided without an award, why.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TraceCreditOutcome {
+    /// `None` while the trace is still pending.
+    credit_points_final: Option<f32>,
+    /// One of `trace_commons_protocol::credit_outcome::CREDIT_OUTCOME_REASONS`,
+    /// only beside a final figure of 0 with no award.
+    reason: Option<&'static str>,
+    /// Whether `credit_points_final` is the sum of the trace's
+    /// `NoveltyUtility` events, which the ledger figure then leaves out.
+    absorbs_scoring_awards: bool,
+}
+
+/// The one place a trace's final credit is derived, at read time, from the
+/// three things that decide it: the submission row, the trace's latest gate
+/// decision, and its ledger events (`events` is already this submission's).
+///
+/// Derived rather than stored. The row's `credit_points_final` belongs to
+/// the review and retention paths (approve clears it, reject and the
+/// terminal statuses set 0), and the tenant credit summary adds it to the
+/// ledger figure, so writing the gate's award there would count it twice.
+/// Every writer of an award (the gate worker route, the scoring driver, a
+/// compatibility pipeline run, a later award once the contributor adds a
+/// use the award needed) writes the ledger, so reading the ledger here
+/// covers them all, and a later award or reversal is reflected on the next
+/// read with nothing to backfill.
+///
+/// In order:
+/// 1. A figure the row already carries wins, unchanged.
+/// 2. A terminal trace (withdrawn, revoked, purged, expired): the row's
+///    figure as it stands (none unless review stored one), never its gate
+///    award, which the account summary and the ledger figure leave out and
+///    settlement never pays (owner, 2026-10-28: the trace, the summary and
+///    the payout agree).
+/// 3. Any `NoveltyUtility` event: the final figure is their signed sum,
+///    never below 0, with no reason.
+/// 4. A held or non-crediting status: still pending.
+/// 5. A decision with a withheld label, or one that failed a floor: 0 and
+///    the reason. A passing decision with neither is its award still being
+///    written: pending.
+/// 6. No decision: pending.
+fn trace_credit_outcome(
+    record: &TraceCommonsSubmissionRecord,
+    decision: Option<&StorageTraceGateCreditDecisionRow>,
+    events: &[&TraceCommonsCreditLedgerRecord],
+) -> TraceCreditOutcome {
+    let pending = TraceCreditOutcome {
+        credit_points_final: record.credit_points_final,
+        reason: None,
+        absorbs_scoring_awards: false,
+    };
+    if record.credit_points_final.is_some() {
+        return pending;
+    }
+    if record.is_terminal() {
+        return pending;
+    }
+    let awards = events
+        .iter()
+        .filter(|event| event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+        .map(|event| event.credit_points_delta)
+        .collect::<Vec<_>>();
+    if !awards.is_empty() {
+        return TraceCreditOutcome {
+            credit_points_final: Some(awards.iter().sum::<f32>().max(0.0)),
+            reason: None,
+            absorbs_scoring_awards: true,
+        };
+    }
+    if record.status != TraceCorpusStatus::Accepted {
+        return pending;
+    }
+    let Some(decision) = decision else {
+        return pending;
+    };
+    let reason = match decision.credit_withheld_reason.as_deref() {
+        Some(label) => Some(credit_outcome_reason_for_withheld_label(label)),
+        None if decision.novelty_passed == Some(false) => {
+            Some(trace_commons_protocol::credit_outcome::NOVELTY_FAILED)
+        }
+        None if decision.perplexity_passed == Some(false) => {
+            Some(trace_commons_protocol::credit_outcome::PERPLEXITY_FAILED)
+        }
+        None => None,
+    };
+    match reason {
+        Some(reason) => TraceCreditOutcome {
+            credit_points_final: Some(0.0),
+            reason: Some(reason),
+            absorbs_scoring_awards: false,
+        },
+        None => pending,
+    }
+}
+
+/// Folds a gate decision's `credit_withheld_reason` (or a withheld pipeline
+/// leg's reason label) onto the contributor's closed reason set. A label
+/// this build does not map is `other`, never passed through: the finer
+/// labels name operator configuration a contributor has no use for.
+fn credit_outcome_reason_for_withheld_label(label: &str) -> &'static str {
+    use trace_commons_protocol::credit_outcome as reason;
+    match label {
+        "policy_mismatch" => reason::POLICY_MISMATCH,
+        "skipped_duplicate" | "cached" => reason::DUPLICATE,
+        "submission_not_accepted" => reason::SUBMISSION_NOT_ACCEPTED,
+        INSUFFICIENT_COVERAGE_LABEL => reason::INSUFFICIENT_COVERAGE,
+        "central_issuer_denied" | "non_production_gate" | CREDIT_CHECK_ERROR_LABEL => {
+            reason::CREDIT_NOT_ISSUED
+        }
+        _ => reason::OTHER,
     }
 }
 
@@ -66287,9 +66681,9 @@ fn trace_object_ref_write_from_record(
     record: &TraceCommonsSubmissionRecord,
     envelope: &TraceContributionEnvelope,
 ) -> anyhow::Result<(StorageTraceObjectRefWrite, String)> {
-    let envelope_json = serde_json::to_string_pretty(envelope)
+    // Hashed and measured as it is serialized; the pretty JSON is never held.
+    let (plaintext_sha256, envelope_json_len) = pretty_json_sha256_prefixed_and_len(envelope)
         .context("failed to serialize trace envelope for DB mirror hashing")?;
-    let plaintext_sha256 = sha256_prefixed(&envelope_json);
     let (object_store, object_key, content_sha256) =
         if let Some(receipt) = record.artifact_receipt.as_ref() {
             (
@@ -66314,7 +66708,7 @@ fn trace_object_ref_write_from_record(
             object_key,
             content_sha256: content_sha256.clone(),
             encryption_key_ref: format!("tenant:{}", tenant_storage_ref(&record.tenant_id)),
-            size_bytes: i64::try_from(envelope_json.len()).unwrap_or(i64::MAX),
+            size_bytes: i64::try_from(envelope_json_len).unwrap_or(i64::MAX),
             compression: None,
             created_by_job_id: None,
         },
@@ -77070,7 +77464,10 @@ fn audit_backfill_storage_projection(
             StorageTraceAuditAction::BenchmarkConvert
         }
         "process_evaluation" => StorageTraceAuditAction::ProcessEvaluate,
-        "tenant_policy_update" | "tenant_access_grant_update" | PIPELINE_ACTIVATION_AUDIT_KIND => {
+        "tenant_policy_update"
+        | "tenant_access_grant_update"
+        | PIPELINE_ACTIVATION_AUDIT_KIND
+        | model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND => {
             StorageTraceAuditAction::PolicyUpdate
         }
         "export_job_recovery" => StorageTraceAuditAction::ExportJobRecovery,
@@ -77189,6 +77586,7 @@ fn audit_backfill_storage_projection(
         | AUDIT_CHAIN_REPAIR_AUDIT_KIND
         | TOMBSTONE_REPAIR_AUDIT_KIND
         | PIPELINE_ACTIVATION_AUDIT_KIND
+        | model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -79586,10 +79984,51 @@ fn write_json_file<T: Serialize + ?Sized>(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {} dir {}", label, parent.display()))?;
     }
-    let body = serde_json::to_string_pretty(value)
+    // Serialized straight into the file: a body file can be a whole
+    // envelope, and buffering it first would be one more copy of it in
+    // memory. Same bytes as `to_string_pretty`.
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("failed to write {} {}", label, path.display()))?;
+    let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+    serde_json::to_writer_pretty(&mut writer, value)
         .with_context(|| format!("failed to serialize {label}"))?;
-    std::fs::write(path, body)
+    writer
+        .flush()
         .with_context(|| format!("failed to write {} {}", label, path.display()))
+}
+
+/// A `Write` that keeps only a SHA-256 and a byte count of what passes
+/// through it, so a hash and length of a serialization can be taken without
+/// materializing the serialization.
+#[derive(Default)]
+struct Sha256CountingWriter {
+    hasher: Sha256,
+    bytes: u64,
+}
+
+impl std::io::Write for Sha256CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.hasher.update(buf);
+        self.bytes += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `sha256_prefixed` and the length of `serde_json::to_string_pretty(value)`,
+/// without building that string.
+fn pretty_json_sha256_prefixed_and_len<T: Serialize + ?Sized>(
+    value: &T,
+) -> serde_json::Result<(String, u64)> {
+    let mut writer = Sha256CountingWriter::default();
+    serde_json::to_writer_pretty(&mut writer, value)?;
+    Ok((
+        format!("sha256:{}", hex::encode(writer.hasher.finalize())),
+        writer.bytes,
+    ))
 }
 
 fn tenant_storage_key(tenant_id: &str) -> String {
@@ -83459,6 +83898,36 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: Some(record.export_job_id),
             decision_inputs_hash: Some(reason_hash.to_string()),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// One model-training grant on one trace
+    /// (`model_training_consent`): the kind's label as the purpose
+    /// (hashed), and `granted` as the one count. The event names the trace
+    /// and the actor's principal ref, and no consent text.
+    fn model_training_consent(auth: &TenantAuth, submission_id: Uuid) -> Self {
+        let kind = model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND;
+        let purpose_hash = sha256_prefixed(kind);
+        let action_counts = BTreeMap::from([("granted".to_string(), 1)]);
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: kind.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
+                false,
+                &action_counts,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
             previous_event_hash: None,
             event_hash: None,
         }

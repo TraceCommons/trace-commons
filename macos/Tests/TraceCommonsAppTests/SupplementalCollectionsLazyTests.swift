@@ -76,25 +76,6 @@ final class SupplementalCollectionsLazyTests: XCTestCase {
         XCTAssertLessThanOrEqual(large.views, small.views + 100)
     }
 
-    func testOverviewModelLabelsAreViewportBounded() throws {
-        func view(_ count: Int) throws -> some View {
-            var object = InsightsSampleWeek.overview
-            object["sources"] = [[String: Any]]()
-            object["by_model"] = (0..<count).map { ["label": "Model \($0)", "tokens": 100] as [String: Any] }
-            let week = try JSONDecoder().decode(InsightsWeekOverview.self, from: JSONSerialization.data(withJSONObject: object))
-            let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
-            model.showCounter(week)
-            let comparisons = InsightsComparisonsModel(service: { _ in throw InsightsError.invalidResponse })
-            return InsightsOverviewTab(model: model, comparisons: comparisons,
-                                       copy: try InsightsSessionRouteTests.coreCopy(), snapshots: [])
-        }
-        // Short model rows need more than ten rows to fill the prefetch region.
-        let small = measure(try view(50), collection: "supplementalModels")
-        let large = measure(try view(500), collection: "supplementalModels", last: "499")
-        XCTAssertLessThanOrEqual(large.rows, small.rows + 25)
-        XCTAssertLessThanOrEqual(large.views, small.views + 100)
-    }
-
     private func json(_ object: Any) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
     }

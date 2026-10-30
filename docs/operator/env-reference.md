@@ -133,6 +133,7 @@ procedure.
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR` | optional | — | Rate-limit budget per principal. |
 | `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` | optional | `30` | In-process `POST /v1/traces` limit per authenticated principal per 60 s fixed window, applied before any other submit work. Integer `1`–`600`; anything else refuses startup. Over it, ingest answers `429` `{"error":"submit_rate_limited","retry_after_seconds":N}` with a matching `Retry-After: N` header, where `N` is the whole seconds until the principal's window turns (at least 1). Read once at startup; single-instance only. |
 | `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY` | optional | `2` | `POST /v1/traces` requests one principal may have in flight at once. Integer `1`–`4`; anything else refuses startup. The ceiling is the large-body upload middleware's own per-principal cap of 4, which runs first: a higher submit cap could never be reached. Over it, the same `429` `submit_rate_limited` answer with `retry_after_seconds` `2` and `Retry-After: 2`; the large-body middleware's own in-flight refusal (submit and token-bundle uploads) answers the same way. |
+| `TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET` | optional | `MAX_INGEST_BODY_BYTES` + 128 MiB (406,847,488) | Deployment-wide budget of upload body bytes in flight (`POST /v1/traces` and the token-bundle upload routes), taken per upload by its declared `Content-Length` (a body without one is weighed at its route's ceiling) before the body is read. An upload that does not fit is refused with the same `429` `submit_rate_limited` answer and `Retry-After: 2`; a declared length over the route's ceiling is refused with `413` at once. Integer from `MAX_INGEST_BODY_BYTES` (272,629,760: one maximal upload) to 4,294,967,295; anything else refuses startup. Ingest holds several copies of a body while it is processed, so resident memory for uploads is a multiple of this budget (measured 2026-10-29 at 200 MB, debug build: about 7.5x through a local encrypted store, 8.7x through the pilot's legacy shape -- remote store plus PostgreSQL mirror -- and about 12x through the pipeline receipt path including its worker's first steps; see `large_envelope_tests`); size it against the host's memory with that multiple. |
 | `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` | optional | `false` | When `true`, accepts medium residual-risk submissions after server-side re-scrub. High residual-risk submissions still quarantine. Intended for tightly scoped pilots where message text/tool payloads are included. Governs both paths: the legacy path accepts every Medium; a tenant routed to the versioned pipeline has Admission admit only a Medium whose server-side basis is `found_and_removed` (alone or with `consent_content_flag`), recorded under the Admission rule `minimal_admission_v1_accept_found_and_removed`; any other Medium is still quarantined `privacy_review_required`. See [`pipeline-activation.md`](pipeline-activation.md#admission-and-trace_commons_accept_medium_risk_submissions). |
 | `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` | optional, emergency only | `false` | When `true`, `POST /v1/admin/audit-chain-repair` may resume the DB audit chain across a legacy segment (`"accept_legacy_segment": true`) after a rollback to a pre-#1043 build. Off, a non-dry run that asks for it is refused `409` `legacy_segment_resume_disabled` and writes nothing; the dry run still diagnoses `file_ahead_through_legacy_rows`. Read once at startup. Off by default since 2026-10-02, when the pilot's pre-#1043 rollback target was retired. See [`audit-trail-forensics.md`](audit-trail-forensics.md). |
 | `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | optional | (none, driver fails closed) | Separate connection string for the narrow `trace_gate_driver` role pool used by the perplexity-scoring driver (Task 5/6). Mirrors `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`'s shape: points at a LOGIN role granted membership in `trace_gate_driver` (V36 policies + V42 column-scoped SELECT). See [`perplexity-scoring-driver.md`](perplexity-scoring-driver.md). |
@@ -613,6 +614,49 @@ See [legacy invite migration](./legacy-invite-migration.md).
 | `TRACE_COMMONS_PAYOUT_CONTROL_TOKEN` | R when any rail is `live` | (none) | The operator's payout control token, at least 32 characters; only its hash is kept. It is the only credential `POST /v1/admin/payout-rails/{rail_id}/halt` and `.../resume` and the hold list and clear routes accept; tenant tokens, a tenant admin's included, are refused. Shorter than 32 characters fails startup. Unset fails startup when any rail is `live` (`payout_control_token_unconfigured`), because the kill switch would be unreachable. A `dry_run` rail sends nothing and starts without it, logging the same label; the controls then answer 503 `payout_control_unconfigured`. Rotate by env reload and restart. |
 
 See the [payout design](../superpowers/specs/2026-10-21-nearai-credit-payout-design.md).
+
+## Referral rewards (default off)
+
+Unset means off: with no `TRACE_COMMONS_REFERRAL_PROGRAM_START` no code can
+be made or applied, and with `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE` unset or
+`disabled` the bonus pass and the referral payout stream do not run. A value
+that is present but malformed or out of range (an empty one included) fails
+startup with the setting's name and a label, never the value; nothing falls
+back to a default. Referrals count as configured when a program start is set
+or the mode is not `disabled`; then startup also requires the network mark
+key and a login that can assume `trace_referral_resolver`
+(`referral_resolver_unprovisioned`, see
+[referral-resolver role](./referral-resolver-role.md)). On staging,
+`deploy/staging-gcp/render-env.sh` writes these from `TC_REFERRAL_*` and
+`TC_NEAR_AI_REFERRAL_*`.
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_REFERRAL_PROGRAM_START` | optional | (unset: not started) | RFC 3339. The program accepts codes from this time. Malformed fails startup (`referral_config_invalid`). |
+| `TRACE_COMMONS_REFERRAL_PROGRAM_END` | optional | (none) | RFC 3339, after the start. |
+| `TRACE_COMMONS_REFERRAL_LATE_DAYS` | optional | `30` | How long after its creation an account may still apply a code, 1 to 365. |
+| `TRACE_COMMONS_REFERRAL_EARN_DAYS` | optional | `92` | How long after a referee's account creation the referrer earns, 92 to 3650. Under 92 fails startup (`referral_earn_days_below_promise`). Stamped on each referral when applied; a referral earns until the later of that and the current setting, so raising it extends live referrals and lowering it never shortens one. |
+| `TRACE_COMMONS_REFERRAL_BONUS_BPS` | optional | `1000` | The referrer's bonus in basis points of each referee accrual, 1 to 10000. |
+| `TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY` | R when referrals are configured | (none) | Base64 of at least 32 bytes (`openssl rand -base64 32`), the HMAC key for network marks; never reaches the database. Missing fails startup (`referral_network_mark_key_missing`), malformed (`referral_network_mark_key_invalid`). Never logged. |
+| `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE` | optional | `disabled` | `disabled`, `dry_run` or `live` for the referral payout stream. Anything else fails startup (`near_ai_referral_mode_invalid`). `dry_run` and `live` need `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` on, and `live` needs it `live` (`near_ai_referral_config_missing`). `dry_run` writes bonus rows and sends nothing. `live` sends with the payout credential unless the two settings below name a dedicated one. Shared, both streams have one lifetime budget and one send window, so referral sends draw down the contributor payout budget. |
+| `TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL` | optional, with its id | (the payout credential) | A dedicated NEAR AI org credential (`oc_` and 64 hex) for the referral stream, so a NEAR AI-side cap on it bounds referrals alone. Unset with its id, a `live` stream sends with the payout credential; set to the payout credential with the payout id, the same. Set without its id, or half of the payout pair beside half of another, fails startup (`near_ai_referral_config_missing`). Never logged. |
+| `TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL_ID` | optional, with the credential | (the payout credential's) | The credential's UUID. Set without the credential fails startup. |
+| `TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO` | optional | `250000000000` | Per-account referral ceiling in nano-USD, above zero; owed referral credit over it is held. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_MIN_REFEREES` | optional | `5` | A code is scored once it has this many referees, 1 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_REFUSED_SHARE_BPS` | optional | `4000` | Refused-referee share that suspends a code, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_REFUSED_MIN_SUBMISSIONS` | optional | `5` | Submissions before a referee counts toward the refused share, 1 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_CREDIT_HOLD_SHARE_BPS` | optional | `2000` | Credit-hold share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_ADVANCE_FORFEIT_SHARE_BPS` | optional | `2000` | Advance-forfeit share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_SHARED_IDENTITY_CLUSTER` | optional | `3` | Referees in one identity cluster, 2 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_DUPLICATE_SHARE_BPS` | optional | `2000` | Duplicate-trace share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_BURST_COUNT` | optional | `20` | More referees than this in 24 hours trips, 1 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_NEVER_SETTLES_SHARE_BPS` | optional | `6000` | Never-settles share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_NEVER_SETTLES_DAYS` | optional | `30` | Days after joining before a referee can count as never settling, 1 to 3650. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_TRIP_CODES` | optional | `2` | More codes suspended than this in 24 hours switches the stream to `dry_run`, 1 to 100000. |
+
+The abuse thresholds fail startup with `referral_abuse_setting_invalid` when
+set but not a plain decimal in range. See the
+[referral rewards design](../superpowers/specs/2026-10-29-referral-rewards-design.md).
 
 ## Build-time features (Cargo)
 
