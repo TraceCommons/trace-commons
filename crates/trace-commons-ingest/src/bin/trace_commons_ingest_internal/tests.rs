@@ -32706,6 +32706,104 @@ async fn concurrent_submissions_keep_one_audit_chain_in_file_and_db() {
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// Reads the target file while it is being serialized, so a test sees what a
+/// concurrent reader (a submit's derived-record scan) would see mid-write.
+struct ReadsTargetWhileSerialized {
+    path: PathBuf,
+    fail: bool,
+    seen: std::sync::Mutex<Option<Option<Vec<u8>>>>,
+}
+
+impl ReadsTargetWhileSerialized {
+    fn new(path: &Path, fail: bool) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            fail,
+            seen: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn seen(&self) -> Option<Vec<u8>> {
+        self.seen
+            .lock()
+            .expect("probe lock")
+            .clone()
+            .expect("the value was serialized")
+    }
+}
+
+impl Serialize for ReadsTargetWhileSerialized {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        *self.seen.lock().expect("probe lock") = Some(std::fs::read(&self.path).ok());
+        if self.fail {
+            return Err(serde::ser::Error::custom("probe failure"));
+        }
+        serializer.serialize_str("new")
+    }
+}
+
+fn json_dir_entries(dir: &Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(dir)
+        .expect("read dir")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+/// A reader never sees a half-written JSON file: while the new value is
+/// being written, the path is absent (first write) or still holds the
+/// previous value. A truncate-then-stream write showed concurrent submits an
+/// empty derived record, which failed them with a 500.
+#[test]
+fn write_json_file_never_exposes_a_partial_file_to_a_reader() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("records").join("record.json");
+
+    let first = ReadsTargetWhileSerialized::new(&path, false);
+    write_json_file(&path, &first, "probe record").expect("first write");
+    assert_eq!(first.seen(), None, "a first write is invisible until done");
+    assert_eq!(std::fs::read(&path).expect("written"), b"\"new\"");
+
+    std::fs::write(&path, b"\"old\"").expect("prior value");
+    let overwrite = ReadsTargetWhileSerialized::new(&path, false);
+    write_json_file(&path, &overwrite, "probe record").expect("overwrite");
+    assert_eq!(
+        overwrite.seen().as_deref(),
+        Some(&b"\"old\""[..]),
+        "an overwrite keeps the previous value readable until it is replaced"
+    );
+    assert_eq!(std::fs::read(&path).expect("written"), b"\"new\"");
+    assert_eq!(
+        json_dir_entries(path.parent().expect("parent")),
+        vec!["record.json".to_string()],
+        "no temporary file is left behind"
+    );
+}
+
+/// A failed write leaves the previous value in place and no temporary file.
+#[test]
+fn write_json_file_failure_keeps_the_previous_file() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("record.json");
+    std::fs::write(&path, b"\"old\"").expect("prior value");
+
+    let failing = ReadsTargetWhileSerialized::new(&path, true);
+    write_json_file(&path, &failing, "probe record").expect_err("serialization fails");
+    assert_eq!(std::fs::read(&path).expect("kept"), b"\"old\"");
+    assert_eq!(
+        json_dir_entries(temp.path()),
+        vec!["record.json".to_string()],
+        "no temporary file is left behind"
+    );
+}
+
 /// The PII backstop's status transitions -- retry-exhaustion quarantine,
 /// re-queue, release, and the stale-prior-risk re-hold -- are file events
 /// mirrored to the DB, in both dual-write modes. The re-queue pass still

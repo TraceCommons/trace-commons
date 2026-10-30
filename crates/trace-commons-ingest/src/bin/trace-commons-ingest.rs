@@ -79980,21 +79980,36 @@ fn write_json_file<T: Serialize + ?Sized>(
     value: &T,
     label: &str,
 ) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {} dir {}", label, parent.display()))?;
-    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {} dir {}", label, parent.display()))?;
+    // Written to a temporary file in the same directory and renamed over the
+    // path, so a reader sees the previous file or the whole new one, never a
+    // partial one. Concurrent submits of one tenant scan each other's derived
+    // records, and a truncated file failed them. The temporary name starts
+    // with a dot and has no `.json` extension, so directory scans skip it; it
+    // is removed if the write fails.
+    //
     // Serialized straight into the file: a body file can be a whole
     // envelope, and buffering it first would be one more copy of it in
     // memory. Same bytes as `to_string_pretty`.
-    let file = std::fs::File::create(path)
+    let temporary = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("failed to write {} {}", label, path.display()))?;
-    let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+    let mut writer = std::io::BufWriter::with_capacity(1 << 20, temporary);
     serde_json::to_writer_pretty(&mut writer, value)
         .with_context(|| format!("failed to serialize {label}"))?;
-    writer
-        .flush()
-        .with_context(|| format!("failed to write {} {}", label, path.display()))
+    let temporary = writer
+        .into_inner()
+        .map_err(|error| error.into_error())
+        .with_context(|| format!("failed to write {} {}", label, path.display()))?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to write {} {}", label, path.display()))?;
+    Ok(())
 }
 
 /// A `Write` that keeps only a SHA-256 and a byte count of what passes
