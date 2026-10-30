@@ -17,6 +17,9 @@ public struct GlassListRow: View {
     private let off: Bool
     private let expanded: Bool?
     private let submitTitle: String?
+    /// The Submit pill's tooltip; empty for none. On the pill alone, never
+    /// the row, so it cannot cover the controls beside it.
+    private let submitHelp: String
     private let submitDone: Bool
     private let submitFocusable: Bool
     private let watched: Binding<Bool>?
@@ -53,6 +56,7 @@ public struct GlassListRow: View {
         off: Bool = false,
         expanded: Bool? = nil,
         submitTitle: String? = nil,
+        submitHelp: String = "",
         submitDone: Bool = false,
         submitFocusable: Bool = true,
         watched: Binding<Bool>? = nil,
@@ -76,6 +80,7 @@ public struct GlassListRow: View {
         self.off = off
         self.expanded = expanded
         self.submitTitle = submitTitle
+        self.submitHelp = submitHelp
         self.submitDone = submitDone
         self.submitFocusable = submitFocusable
         self.watched = watched
@@ -188,14 +193,19 @@ public struct GlassListRow: View {
             // grid `16 24 1fr auto 38 22`, with placeholders): a session's
             // Review pill lines up with its folder's Submit pill.
             if let submitTitle {
-                Button(submitTitle) { onSubmit?() }
-                    .buttonStyle(GlassButtonStyle(.submit(done: submitDone)))
-                    // One line at its full width ("Submit all (12)" at the
-                    // 360pt left pane): the title gives way, never the count.
-                    .lineLimit(1)
-                    .fixedSize()
-                    .disabled(onSubmit == nil)
-                    .focusable(submitFocusable)
+                // The tip sits on a wrapper that is not disabled: the pill is
+                // often turned off, and a disabled button shows no tooltip.
+                HStack(spacing: 0) {
+                    Button(submitTitle) { onSubmit?() }
+                        .buttonStyle(GlassButtonStyle(.submit(done: submitDone)))
+                        // One line at its full width ("Submit all (12)" at the
+                        // 360pt left pane): the title gives way, never the count.
+                        .lineLimit(1)
+                        .fixedSize()
+                        .disabled(onSubmit == nil)
+                        .focusable(submitFocusable)
+                }
+                .helpIfAny(submitHelp)
             } else {
                 Color.clear.frame(width: 0, height: 0)
             }
@@ -289,4 +299,13 @@ public extension EnvironmentValues {
     /// The depth a tree's top-level rows have: `.tool` by default, `.folder`
     /// for a tree with no tool level.
     @Entry var glassTreeRoot: GlassListRow.Depth = .tool
+}
+
+extension View {
+    /// A hover tip, when there is text for one. An empty `.help("")` still
+    /// takes the hover from an ancestor's tip, so none is applied.
+    @ViewBuilder
+    public func helpIfAny(_ text: String) -> some View {
+        if text.isEmpty { self } else { help(text) }
+    }
 }

@@ -159,7 +159,7 @@ struct FolderInspector: View {
                     ) {
                         Task { await store.contributeFolder(folder, verdict: nil) }
                     }
-                    .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
+                    .actionHelp(TracesTreeView.submitHelp(offer.withheldLine, words: words))
                     .overlay(alignment: .topTrailing) {
                         if submitMenuOpen {
                             TracesSubmitMenu(
