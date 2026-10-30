@@ -4574,11 +4574,13 @@ fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
     };
     let rows = super::past_sessions::rows_for(shared, &discovered, &project_key, Utc::now());
     let (rows, not_listed) = super::past_sessions::listed_page(rows);
+    // As `list_projects` reports `mode`: a folder the include-existing
+    // grant will arm reads `auto_upload` (`ProjectPolicy::shown_mode`).
     let mode = shared
         .policy
         .lock()
         .expect("policy lock")
-        .resolve(&project_key);
+        .shown_mode(&project_key);
     Response::ok(
         req.id,
         serde_json::json!({
@@ -4971,6 +4973,28 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
         }
         row
     };
+    // K6: an armed row says which arming disclosure its sessions have
+    // earned. Absent, not null, on every other row, as with the counts
+    // above: only an armed row has one. Every row kind that reads
+    // `auto_upload` carries it -- configured, discovered or found, armed by
+    // its own rule, an override, or the include-existing grant -- because
+    // each of them uploads unattended.
+    let with_armed = |mut row: serde_json::Value, key: &str, mode: ProjectMode| {
+        if mode == ProjectMode::AutoUpload {
+            row["automatic_disclosure"] = serde_json::Value::from(
+                match super::automatic_gate::project_disclosure(&policy, key) {
+                    super::automatic_gate::Disclosure::ModelScrubbed => "model_scrubbed",
+                    super::automatic_gate::Disclosure::PatternsOnly => "patterns_only",
+                },
+            );
+            // K5: whether the arming left the backlog waiting
+            // (`set_project_mode` reply `from_now: true`). Armed rows only,
+            // like the disclosure. Also true for a folder an "Automatic"
+            // override arms: its backlog waits the same way (#1173).
+            row["from_now"] = serde_json::Value::Bool(policy.armed_from_now_at(key).is_some());
+        }
+        row
+    };
     let discovered: std::collections::BTreeMap<String, Option<String>> = queue
         .all()
         .iter()
@@ -4998,7 +5022,7 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
             // reads Automatic (`ProjectPolicy::shown_mode`), so a shell shows
             // the choice in force and can offer Ask on it as a change.
             let mode = policy.shown_mode(key);
-            let mut row = with_counts(
+            let row = with_counts(
                 serde_json::json!({
                 "project_id": project_id_for(key),
                 "project_label": labels.label(key, entry.display_path.as_deref()),
@@ -5011,54 +5035,41 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
                 }),
                 key,
             );
-            // K6: an armed project says which arming disclosure its
-            // sessions have earned. Absent, not null, on every other row,
-            // as with the counts above: only an armed project has one.
-            if mode == ProjectMode::AutoUpload {
-                row["automatic_disclosure"] = serde_json::Value::from(
-                    match super::automatic_gate::project_disclosure(&policy, key) {
-                        super::automatic_gate::Disclosure::ModelScrubbed => "model_scrubbed",
-                        super::automatic_gate::Disclosure::PatternsOnly => "patterns_only",
-                    },
-                );
-                // K5: whether the arming left the backlog waiting
-                // (`set_project_mode` reply `from_now: true`). Armed rows
-                // only, like the disclosure.
-                // Also true for a folder an "Automatic" override
-                // arms: its backlog waits the same way (#1173).
-                row["from_now"] = serde_json::Value::Bool(policy.armed_from_now_at(key).is_some());
-            }
-            row
+            with_armed(row, key, mode)
         })
         .chain(discovered.iter().map(|(key, shown)| {
-            with_counts(
+            let mode = policy.shown_mode(key);
+            let row = with_counts(
                 serde_json::json!({
                 "project_id": project_id_for(key),
                 "project_label": labels.label(key, shown.as_deref()),
                 "project_path": display_path(shown.as_deref().unwrap_or(key)),
-                "mode": policy.shown_mode(key),
+                "mode": mode,
                 "folder_mode": policy.shown_folder_mode(key),
                 "added_at": serde_json::Value::Null,
                 "configured": false,
                 "is_unresolved_bucket": key == UNKNOWN_PROJECT_KEY,
                 }),
                 key,
-            )
+            );
+            with_armed(row, key, mode)
         }))
         .chain(found_only.iter().map(|key| {
-            with_counts(
+            let mode = policy.shown_mode(key);
+            let row = with_counts(
                 serde_json::json!({
                 "project_id": project_id_for(key),
                 "project_label": labels.label(key, None),
                 "project_path": display_path(key),
-                "mode": policy.shown_mode(key),
+                "mode": mode,
                 "folder_mode": policy.shown_folder_mode(key),
                 "added_at": serde_json::Value::Null,
                 "configured": false,
                 "is_unresolved_bucket": false,
                 }),
                 key,
-            )
+            );
+            with_armed(row, key, mode)
         }))
         .collect();
     // K7's suggestion. See `queue::unpurposed_traces`, which `status` shares

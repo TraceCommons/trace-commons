@@ -98,6 +98,11 @@ impl ProjectMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectEntry {
     pub mode: ProjectMode,
+    /// When this mode was set. While a Flow 1 grant is in force it is
+    /// never earlier than the grant's `granted_at`, though the clock be
+    /// behind it (see [`ProjectPolicy::set_mode`]); and a rekey merge keeps
+    /// the earlier of two. So it orders a mode after its grant, not on the
+    /// wall clock alone.
     pub added_at: DateTime<Utc>,
     /// Display name for consumers. Shells render this; they never render the
     /// key, which is a full local path.
@@ -1289,7 +1294,8 @@ impl ProjectPolicy {
     /// A project qualifies when it has contributed at least
     /// [`ARMING_SUGGESTION_THRESHOLD`] times, is still ask-first (an armed
     /// project has nothing to offer and an ignored one has been answered
-    /// already), can be armed at all, and has not been declined inside
+    /// already) and not about to be armed by the include-existing grant
+    /// ([`Self::grant_will_arm`]), can be armed at all, and has not been declined inside
     /// [`ARMING_DECLINE_COOLDOWN_DAYS`].
     pub fn arming_suggestion(&self, now: DateTime<Utc>) -> Option<ArmingSuggestion> {
         let cooldown = Duration::days(ARMING_DECLINE_COOLDOWN_DAYS);
@@ -1302,6 +1308,10 @@ impl ProjectPolicy {
                     // is to set that, and an override must neither hide an
                     // Ask folder nor offer to arm an armed one.
                     && self.folder_mode(key) == ProjectMode::NotifyOnly
+                    // Nor one the include-existing grant will arm: it
+                    // already reads Automatic (`shown_folder_mode`), so the
+                    // offer would contradict the row it is about.
+                    && !self.grant_will_arm(key)
                     && match self.arming_declined_at.get(*key) {
                         // A clock that went backwards lands here as "still
                         // inside the cooldown", which can only ever suppress
@@ -1916,11 +1926,20 @@ impl ProjectPolicy {
             .retain(|n| n.project_key != project_key);
         let shown = display_path_for_key(project_key);
         let set_under_grant = self.grant_generation_in_force();
+        // Under a grant, never earlier than it, even when the clock has
+        // stepped back since: a #1747 daemon, on a downgrade, reads an Ask
+        // as an exception to the grant by `added_at > granted_at` alone, and
+        // must agree with `set_under_grant` here or it arms a folder that
+        // was asking. A later `derive_grant_exceptions` agrees with it too.
+        let added_at = match &self.automatic_grant {
+            Some(grant) => now.max(grant.granted_at + Duration::microseconds(1)),
+            None => now,
+        };
         self.projects.insert(
             project_key.to_string(),
             ProjectEntry {
                 mode,
-                added_at: now,
+                added_at,
                 label: project_label_for(shown.as_deref().unwrap_or(project_key)),
                 display_path: shown,
                 // A fresh entry on every mode change: leaving automatic
@@ -3287,6 +3306,54 @@ mod tests {
         assert_eq!(p.projects.len(), 1, "the two spellings merged");
         assert!(p.asks_despite_grant(&key));
         assert!(!p.arms_by_default(&key, "/s/a.jsonl", SRC));
+    }
+
+    /// A downgrade to the #1747 daemon reads an Ask exception by
+    /// `added_at > granted_at`. An Ask this build recorded under the grant
+    /// with a stepped-back clock must still read as post-grant to that
+    /// build, or the downgrade arms a folder that was asking.
+    #[test]
+    fn a_downgrade_to_the_1747_daemon_keeps_a_stepped_clock_ask_asking() {
+        let (_d, store) = temp_store();
+        let mut p = granted_including_existing();
+        p.set_mode(
+            "/w/stepped-back",
+            ProjectMode::NotifyOnly,
+            t("2026-10-29T11:59:59Z"),
+        )
+        .unwrap();
+        assert!(p.asks_despite_grant("/w/stepped-back"));
+        p.save(&store).unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(
+            &store
+                .read_daemon_file(DAEMON_PROJECTS_FILE)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let granted_at: DateTime<Utc> =
+            serde_json::from_value(raw["automatic_grant"]["granted_at"].clone()).unwrap();
+        let added_at: DateTime<Utc> =
+            serde_json::from_value(raw["projects"]["/w/stepped-back"]["added_at"].clone()).unwrap();
+        assert!(
+            added_at > granted_at,
+            "the #1747 daemon would read this Ask as pre-grant and arm the folder"
+        );
+    }
+
+    /// The arming offer (`arming_suggestion`) never offers to turn on
+    /// Automatic for a folder whose `list_projects` row already reads
+    /// Automatic because the include-existing grant will arm it.
+    #[test]
+    fn no_arming_offer_for_a_folder_the_broad_grant_will_arm() {
+        let mut p = granted_including_existing();
+        p.contributed
+            .insert("/w/pre".to_string(), ARMING_SUGGESTION_THRESHOLD);
+        assert_eq!(p.shown_folder_mode("/w/pre"), ProjectMode::AutoUpload);
+        assert!(
+            p.arming_suggestion(t("2026-10-29T13:00:00Z")).is_none(),
+            "offered to arm a folder already shown as Automatic"
+        );
     }
 
     /// What a shell shows for a folder is what the daemon will do with it:

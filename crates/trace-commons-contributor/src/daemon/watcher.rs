@@ -5103,6 +5103,58 @@ mod tests {
         }
     }
 
+    /// Every row that reads `auto_upload` carries the K6
+    /// `automatic_disclosure` and `from_now`, which macOS and Tauri need to
+    /// draw what an Automatic folder's sessions have removed -- a discovered
+    /// or found row the grant will arm as much as a configured one.
+    #[tokio::test]
+    async fn a_grant_armed_unconfigured_row_carries_the_automatic_disclosure() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic_with_existing(&f);
+        f.write_session("found", "11111111-1111-1111-1111-111111111111", 0);
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        let row = listed_row(&listed, "found");
+        assert_eq!(row["configured"], false, "{row}");
+        assert_eq!(row["mode"], "auto_upload", "{row}");
+        assert!(row.get("automatic_disclosure").is_some(), "{row}");
+        assert_eq!(row["from_now"], false, "{row}");
+    }
+
+    /// `list_past_sessions` reports the folder's rule as `list_projects`
+    /// does: a folder the include-existing grant will arm is
+    /// `auto_upload`, not the `notify_only` it has no entry for.
+    #[tokio::test]
+    async fn past_sessions_report_the_mode_the_broad_grant_will_apply() {
+        let f = WatcherFixture::new();
+        f.shared
+            .store
+            .save_config(&grant_test_cfg(&["debugging_evaluation"]))
+            .unwrap();
+        grant_automatic_with_existing(&f);
+        f.write_session("found", "11111111-1111-1111-1111-111111111111", 0);
+        let listed = ipc_ok(
+            &f,
+            "list_projects",
+            serde_json::json!({"include_found": true}),
+        );
+        let row = listed_row(&listed, "found");
+        assert_eq!(row["mode"], "auto_upload", "{row}");
+        let past = ipc_ok(
+            &f,
+            "list_past_sessions",
+            serde_json::json!({"project_id": row["project_id"]}),
+        );
+        assert_eq!(past["project_mode"], "auto_upload", "{past}");
+    }
+
     /// On such a row, picking Ask differs from the mode shown, so a shell
     /// sends it, and it makes the folder an exception to the grant: its
     /// session waits for a person and the row then reads Ask.

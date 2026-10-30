@@ -2183,8 +2183,10 @@ trajectory's declaration).
 `project_id-invalid`; an id that resolves to no project the daemon knows --
 the usual known set plus every project a declared source lists now -- is
 `bad_params` / `project-id-unrecognized`. An unknown folder is refused, never
-answered with an empty list. `project_mode` is the folder's resolved rule
-(`notify_only`, `auto_upload` or `ignore`).
+answered with an empty list. `project_mode` is the folder's rule in force
+(`notify_only`, `auto_upload` or `ignore`), the same value as the folder's
+`list_projects` `mode`: under the include-existing grant a folder the grant
+will arm reads `auto_upload` (since 2026-10-29).
 
 Each row's `state`:
 
@@ -2932,9 +2934,11 @@ to `ignore`, one set to `notify_only` after the grant, and the unknown bucket
 read as their own mode. With no grant, or a grant without
 `include_existing`, nothing changes. `status.contribution_mode` rolls up the
 same value, so it reads `auto_upload`, not `mixed`, when every folder will
-upload. Such a configured row also carries `automatic_disclosure`
-(`patterns_only` until its sessions earn more) and `from_now: false`, as an
-armed row does. No field is added; a client reads `mode` as before.
+upload. Such a row, configured, discovered or found, also carries
+`automatic_disclosure` (`patterns_only` until its sessions earn more) and
+`from_now: false`, as an armed row does; so does a discovered or found row an
+"Auto contribute" override arms. No field is added; a client reads `mode` as
+before.
 
 An armed row also carries `from_now`: `true` when it was armed from now
 (`include_backlog: false`), so its backlog waits for the contributor, and
