@@ -80,6 +80,30 @@ final class SharingChoiceTests: XCTestCase {
                        "setup keeps a folder's own Ask")
     }
 
+    private func folder(_ id: String, _ mode: ProjectMode?, offers: [ProjectMode] = [.ask, .autoUpload, .ignore])
+        -> TracesTree.FolderNode
+    {
+        TracesTree.FolderNode(id: id, label: id, mode: mode, offerableModes: offers, sessions: [])
+    }
+
+    /// The Traces tab (owner, 2026-10-30): a switch on each folder beside
+    /// Submit, on at Automatic and off at Ask; none at Never, which stays
+    /// in the row menu.
+    func testEachFolderRowSwitchesBetweenAutomaticAndAsk() {
+        XCTAssertEqual(TracesTreeView.automaticSwitch(folder("a", .autoUpload)), true)
+        XCTAssertEqual(TracesTreeView.automaticSwitch(folder("b", .ask)), false)
+        XCTAssertNil(TracesTreeView.automaticSwitch(folder("c", .ignore)))
+        XCTAssertNil(TracesTreeView.automaticSwitch(folder("d", nil)))
+        XCTAssertNil(TracesTreeView.automaticSwitch(folder("e", .ask, offers: [.ask, .ignore])),
+                     "no switch to a mode the core does not offer")
+    }
+
+    func testTheTabSwitchCountsTheFoldersThatSendOnTheirOwn() {
+        let folders = [folder("a", .autoUpload), folder("b", .ask), folder("c", .ignore), folder("d", .autoUpload)]
+        XCTAssertEqual(SharingChoice.automaticCount(folders, words: "{count} of {total}"), "2 of 3",
+                       "Never is left out of the total")
+    }
+
     func testTheCardIsAtTheTopOfProjects() throws {
         let source = try InsightsGlassConventionsTests.text("Views/Settings/ProjectsSection.swift")
         XCTAssertTrue(source.contains("SharingChoiceCard()\n            GlassEyebrowCard(SettingsWords.projects)"))

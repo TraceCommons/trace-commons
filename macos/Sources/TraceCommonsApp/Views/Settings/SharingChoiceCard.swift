@@ -27,6 +27,16 @@ enum SharingChoice {
         projects.filter { $0.configured && !$0.isUnresolvedBucket && ($0.folderMode ?? $0.mode) == .ask }.count
     }
 
+    /// The Traces tab's line under its switch: how many of the folders it
+    /// lists send on their own, of those it lists that may send (Never
+    /// left out, shown or not).
+    static func automaticCount(_ folders: [TracesTree.FolderNode], words: String) -> String {
+        let listed = folders.filter { $0.mode != nil && $0.mode != .ignore }
+        let automatic = listed.filter { $0.mode == .autoUpload }.count
+        return words.replacingOccurrences(of: "{count}", with: String(automatic))
+            .replacingOccurrences(of: "{total}", with: String(listed.count))
+    }
+
     /// What pressing Automatic shows first.
     enum Step: Equatable {
         /// The question about the folders set to Ask.
@@ -50,8 +60,21 @@ enum SharingChoice {
     }
 }
 
-/// The card at the top of Settings > Projects. Every word is the core's.
+/// The card at the top of Settings > Projects, and the switch at the top
+/// of the Traces tab (owner, 2026-10-30): one choice, the same steps from
+/// either. Every word is the core's.
 struct SharingChoiceCard: View {
+    /// The Traces tab's switch: its words, and the folders it lists.
+    struct Switch {
+        let accessibleName: String
+        let line: String
+        /// Re-reads the tab once the choice is saved.
+        let saved: () async -> Void
+    }
+
+    /// Nil for Settings' radios.
+    var asSwitch: Switch?
+
     @EnvironmentObject private var model: AppModel
     @State private var grantCopy: AutomaticGrantCopy?
     @State private var keepAsksCount: Int?
@@ -64,7 +87,7 @@ struct SharingChoiceCard: View {
 
     var body: some View {
         if let copy = Self.copy {
-            card(copy)
+            content(copy)
                 .task {
                     model.refreshRouteDisclosure()
                     if grantCopy == nil {
@@ -87,6 +110,42 @@ struct SharingChoiceCard: View {
                             .environmentObject(model)
                     }
                 }
+        }
+    }
+
+    @ViewBuilder
+    private func content(_ copy: FirstRunCopy) -> some View {
+        if let asSwitch { switchRow(copy, asSwitch) } else { card(copy) }
+    }
+
+    /// The Traces tab's row: Automatic, the count under it, and the switch.
+    private func switchRow(_ copy: FirstRunCopy, _ words: Switch) -> some View {
+        let title = ProjectModeWords.table?.label(for: .autoUpload) ?? ""
+        return GlassCard {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(title)
+                            .glassType(GlassTokens.TypeScale.bodyStrong)
+                            .foregroundStyle(GlassColor.textPrimary)
+                        Text(words.line)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                    if working { GlassSpinner() }
+                    Toggle(words.accessibleName, isOn: Binding(
+                        get: { SharingChoice.current(model.automaticGrant) == .automatic },
+                        set: { choose($0 ? .automatic : .askMe) }))
+                        .toggleStyle(GlassToggleStyle(.settings, showsLabel: false))
+                        .help(words.accessibleName)
+                        .disabled(working || model.automaticGrant == nil || grantCopy == nil)
+                }
+                if let refusal {
+                    GlassAlert(refusal)
+                }
+            }
         }
     }
 
@@ -133,6 +192,7 @@ struct SharingChoiceCard: View {
             working = true
             Task {
                 if !(await model.setAskEachTime()) { refusal = Self.copy?.uses.sharingSaveFailed }
+                await asSwitch?.saved()
                 working = false
             }
         case .automatic:
@@ -164,6 +224,7 @@ struct SharingChoiceCard: View {
             if case .refused = await model.grantAutomatic(witness: request.witnessSigningAddress, keepFolderAsks: keep) {
                 refusal = Self.copy?.uses.sharingRefused
             }
+            await asSwitch?.saved()
             working = false
         }
     }
