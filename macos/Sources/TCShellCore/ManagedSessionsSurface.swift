@@ -247,6 +247,10 @@ public enum ManagedSurface {
         // A named model NEAR AI does not offer: the line that says so.
         let modelUnavailable = "managed-model-unavailable"
         if code == modelUnavailable || message == modelUnavailable { return "model_unavailable" }
+        // A NEAR AI balance too low for the first calls: the line that
+        // asks for funds.
+        let balanceTooLow = "managed-near-ai-balance-too-low"
+        if code == balanceTooLow || message == balanceTooLow { return "balance_too_low" }
         return "action_failed"
     }
 

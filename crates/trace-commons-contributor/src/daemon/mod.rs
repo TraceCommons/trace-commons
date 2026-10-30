@@ -2956,12 +2956,9 @@ mod tests {
                 }),
             ))
             .await;
+            // Refused at once, and never a port another test can be handed.
             let ingest = if ingest_unreachable {
-                // Bound and released, so nothing answers on it.
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let addr = listener.local_addr().unwrap();
-                drop(listener);
-                format!("http://{addr}")
+                format!("http://{}", crate::config::tests_support::refusing_addr())
             } else {
                 ingest
             };
@@ -4504,6 +4501,34 @@ mod tests {
         let mut gone = entries[0].clone();
         gone.path = h.session_path.with_file_name("not-a-session.jsonl");
         assert!(listed.find(&sources, &gone).is_none());
+    }
+
+    /// The unreachable ingest address is one no other test can be handed.
+    /// A port bound and released went back to the pool, and a server
+    /// another test bound to port 0 could take it and answer: the upload
+    /// then failed as `http-failure` instead of `ingest-unreachable` (Linux
+    /// CI, #1759). Below 1024 is outside every platform's ephemeral range,
+    /// and the connection is refused outright rather than left to time out.
+    #[tokio::test]
+    async fn the_unreachable_ingest_is_a_port_no_test_is_handed() {
+        let h = TransientRetryHarness::with_ingest_unreachable().await;
+        let cfg = h.shared.store.load_config().unwrap().unwrap();
+        let addr: std::net::SocketAddr = cfg
+            .ingest_url
+            .trim_start_matches("http://")
+            .parse()
+            .unwrap();
+        assert!(addr.port() < 1024, "{addr} is in the ephemeral range");
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .expect("refused, not left to time out");
+        assert_eq!(
+            refused.unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionRefused
+        );
     }
 
     /// Ingest down altogether: the in-call retries run out on transport

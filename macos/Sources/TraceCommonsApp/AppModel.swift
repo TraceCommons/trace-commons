@@ -369,6 +369,10 @@ final class AppModel: ObservableObject {
     /// alongside `projects`, because every reason the project list changes
     /// is also a reason this answer might have.
     @Published private(set) var armingOffer: ArmingOffer?
+    /// The standing Automatic grant, for Settings' sharing choice (#1753
+    /// A2). Nil until `automatic_grant` has answered, which the choice draws
+    /// as nothing picked. Refreshed alongside `projects`.
+    @Published private(set) var automaticGrant: AutomaticGrant?
     @Published private(set) var consentScopes: [ConsentScope] = []
     /// Whether missions are shown anywhere (`missions_enabled`); off until
     /// the daemon says so, and off before its settings have arrived.
@@ -1960,6 +1964,7 @@ final class AppModel: ObservableObject {
     func refreshProjects() {
         perform("list_projects", work: { try $0.listProjects() }) { self.publishIfChanged(\.projects, $0) }
         refreshArmingOffer()
+        perform("automatic_grant", work: { try $0.automaticGrant() }) { self.publishIfChanged(\.automaticGrant, $0) }
     }
 
     /// The daemon decides whether there is an offer and what it says; this
@@ -4458,6 +4463,7 @@ extension AppModel: FirstRunDaemon {
     func setAskEachTime() async -> Bool {
         guard case .success = await firstRunCall({ try $0.setAskEachTime() }) else { return false }
         refreshStatus()
+        refreshProjects()
         return true
     }
 
@@ -4511,10 +4517,18 @@ extension AppModel: FirstRunDaemon {
         return true
     }
 
+    /// The first run's grant: a folder set to Ask keeps asking (#1753's
+    /// ruling that a folder's own rule always wins).
     func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer {
-        switch await firstRunCall({ try $0.grantAutomatic(witnessSigningAddress: witness) }) {
+        await grantAutomatic(witness: witness, keepFolderAsks: true)
+    }
+
+    /// The grant, from the first run or Settings' sharing choice.
+    func grantAutomatic(witness: String?, keepFolderAsks: Bool) async -> FirstRunGrantAnswer {
+        switch await firstRunCall({ try $0.grantAutomatic(witnessSigningAddress: witness, keepFolderAsks: keepFolderAsks) }) {
         case .success(let grant) where grant.granted:
             refreshStatus()
+            refreshProjects()
             return .granted
         case .failure(let failure as DaemonClient.Failure) where !failure.message.isEmpty:
             return .refused(label: failure.message)

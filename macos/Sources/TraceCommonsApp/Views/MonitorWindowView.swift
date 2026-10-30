@@ -17,14 +17,17 @@ struct MonitorWindowView: View {
     /// The gate's button, which opens first run: the core's first-run
     /// Continue. With no table the word is empty, never a Swift fallback.
     static let openFirstRun = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.continueButton ?? ""
+    /// The window's tabs, in their default order. Home is always first;
+    /// the person drags the other three into any order (owner, 2026-10-30,
+    /// `ordered(_:)`).
     enum Tab: String, CaseIterable, Identifiable {
         case home = "Home"
-        /// Traces second and Private AI third (owner, 2026-10-28: the
-        /// macOS MVP is "contribute traces, earn credit").
+        /// Traces second and Private AI third by default (owner,
+        /// 2026-10-28: the macOS MVP is "contribute traces, earn credit";
+        /// kept 2026-10-30 while the default is decided).
         case traces = "Traces"
         case inference = "Inference"
-        /// Insights' own tab (2026-10-15), no longer a Home page. Last, so
-        /// the first three keep their shortcuts.
+        /// Insights' own tab (2026-10-15), no longer a Home page.
         case insights = "Insights"
 
         /// The raw value is an identity (scene storage restores the tab by
@@ -41,10 +44,49 @@ struct MonitorWindowView: View {
             }
         }
 
-        /// The tabs the strip shows: all three once onboarding is done, and
-        /// Inference alone before, where Private AI sign-in is (R-38).
-        static func shown(requiresOnboarding: Bool) -> [Tab] {
-            requiresOnboarding ? [.inference] : allCases
+        /// The tabs the strip shows: every tab in the person's order once
+        /// onboarding is done, and Inference alone before, where Private
+        /// AI sign-in is (R-38).
+        static func shown(requiresOnboarding: Bool, order: String = "") -> [Tab] {
+            requiresOnboarding ? [.inference] : ordered(order)
+        }
+
+        /// Where the person's tab order is kept, for every window: the
+        /// movable tabs' raw values, comma-separated.
+        static let orderKey = "monitor.tabOrder"
+
+        /// Whether the person can drag the tab (owner, 2026-10-30): every
+        /// tab but Home, which always opens first.
+        var movable: Bool { self != .home }
+
+        /// The tabs in the person's order: Home, then the movable tabs as
+        /// stored, then any the stored order does not name (one added since)
+        /// in their default order. An unknown or repeated name is skipped.
+        static func ordered(_ stored: String) -> [Tab] {
+            var movable: [Tab] = []
+            for name in stored.split(separator: ",") {
+                if let tab = Tab(rawValue: String(name)), tab.movable, !movable.contains(tab) {
+                    movable.append(tab)
+                }
+            }
+            movable += allCases.filter { $0.movable && !movable.contains($0) }
+            return [.home] + movable
+        }
+
+        /// The stored form of an order: its movable tabs, by raw value.
+        static func stored(_ order: [Tab]) -> String {
+            order.filter(\.movable).map(\.rawValue).joined(separator: ",")
+        }
+
+        /// The order after dragging `tab` onto `target`'s place. Home never
+        /// moves and nothing takes its place.
+        static func moving(_ tab: Tab, to target: Tab, in order: [Tab]) -> [Tab] {
+            guard tab.movable, target.movable, tab != target,
+                  let from = order.firstIndex(of: tab), let to = order.firstIndex(of: target) else { return order }
+            var moved = order
+            moved.remove(at: from)
+            moved.insert(tab, at: to)
+            return moved
         }
     }
 
@@ -574,7 +616,7 @@ struct MonitorWindowView: View {
     }
 
     private var inspectorAvailable: Bool {
-        Self.inspectorAvailable(shownTab, homePage: homePage, insightsDetail: insightsInspector.detail != nil)
+        Self.inspectorAvailable(shownTab, homePage: homePage, insightsDetail: insightsInspector.offered)
     }
 
     /// What the inspector must show right now (`InspectorDemand`); the
@@ -759,6 +801,9 @@ struct MonitorWindowView: View {
 /// footer. The tabs' screens are R6 (Traces), R8 (Inference) and R9 (Home).
 private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View {
     @Binding var tab: MonitorWindowView.Tab
+    /// The person's tab order (`Tab.ordered(_:)`), shared by every window
+    /// and the View menu's shortcuts.
+    @AppStorage(MonitorWindowView.Tab.orderKey) private var tabOrder = ""
     let inferenceDot: GlassStatus?
     let inferenceDescription: String?
     let tracesBadge: GlassBadgeValue?
@@ -868,7 +913,8 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
                             selection: Binding(
                                 get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
                                 set: { tab = $0 }),
-                            segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
+                            segments: MonitorWindowView.Tab.shown(
+                                requiresOnboarding: model.requiresOnboarding, order: tabOrder).map { item in
                                 GlassSegment(
                                     item.title, value: item,
                                     badgeValue: item == .traces ? tracesBadge : nil,
@@ -876,7 +922,14 @@ private struct MonitorMainPane<Content: View, Footer: View, Notices: View>: View
                                     accessibilityValue: item == .inference
                                         ? inferenceDescription : item == .traces ? tracesDescription : nil)
                             },
-                            bleed: GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge)
+                            bleed: GlassRuleTabs<MonitorWindowView.Tab>.toPaneEdge,
+                            // Dragging a tab moves it (owner, 2026-10-30):
+                            // every tab but Home. A click only opens it.
+                            movable: { $0.movable },
+                            onMove: { item, target in
+                                let Tab = MonitorWindowView.Tab.self
+                                tabOrder = Tab.stored(Tab.moving(item, to: target, in: Tab.ordered(tabOrder)))
+                            })
                     }
                 }
                 .padding(.horizontal, MonitorWindowView.mainInset)

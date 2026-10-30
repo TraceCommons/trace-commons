@@ -701,6 +701,12 @@ pub async fn handle_async(shared: &DaemonShared, request: &Request) -> Response 
     if request.method == "managed_model_favorite_set" {
         return favorite_set(shared, request).await;
     }
+    if launches_on_sign_in(shared, request) {
+        let report = crate::daemon::nearai_credential::balance::read(shared, false).await;
+        if let Err(error) = funds_for_first_calls(&report) {
+            return respond(request, Err(error.into()));
+        }
+    }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
     let mut ended = vec![];
@@ -733,6 +739,64 @@ fn favorite_models(shared: &DaemonShared) -> Vec<String> {
         .lock()
         .map(|s| s.managed_favorite_models.clone())
         .unwrap_or_default()
+}
+
+/// The least a NEAR AI balance must hold for a launch on the sign-in, in
+/// nano-dollars: $0.10. Enough for the first few calls of a coding session
+/// (a Claude Code turn sends a system prompt and tool list of tens of
+/// thousands of tokens), so a session does not open only to fail on its
+/// first request.
+const MIN_LAUNCH_BALANCE_NANOS: i64 = 100_000_000;
+
+/// Whether `request` would start or restart a session billed to the NEAR
+/// AI sign-in. Only that account's balance can be read here: a saved NEAR
+/// AI key may belong to another account.
+fn launches_on_sign_in(shared: &DaemonShared, request: &Request) -> bool {
+    match request.method.as_str() {
+        "managed_launch_prepare" => {
+            request.params.get("connection").and_then(Value::as_str) == Some("near_ai_signin")
+        }
+        "managed_session_start_again" => {
+            let Some(id) = request
+                .params
+                .get("session_id")
+                .and_then(|id| serde_json::from_value::<Uuid>(id.clone()).ok())
+            else {
+                return false;
+            };
+            shared.managed.lock().is_ok_and(|held| {
+                held.as_ref().is_ok_and(|service| {
+                    matches!(
+                        service.sessions.describe(id),
+                        Some((ConnectionKind::NearAiSignIn, _))
+                    )
+                })
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Refuse a launch only on a balance known to be below
+/// [`MIN_LAUNCH_BALANCE_NANOS`]. Every other state lets it through: no
+/// session, an expired one or an unreachable service says nothing about
+/// the money, and a null remaining means no limit was ever set. NEAR AI
+/// still refuses calls it will not pay for; this only stops a session
+/// that would fail at once.
+fn funds_for_first_calls(
+    report: &crate::daemon::nearai_credential::balance::BalanceReport,
+) -> Result<(), ManagedError> {
+    use crate::daemon::nearai_credential::balance::BalanceReport;
+    match report {
+        BalanceReport::Known(reading)
+            if reading
+                .remaining_nanos
+                .is_some_and(|remaining| remaining < MIN_LAUNCH_BALANCE_NANOS) =>
+        {
+            Err(ManagedError::NearAiBalanceTooLow)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The NEAR AI chat models a launch can name, and the one `tool` gets
@@ -965,6 +1029,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::InvalidCliOptions => "managed-cli-options-invalid",
         ManagedError::TerminalNotFound => "managed-terminal-not-found",
         ManagedError::ModelUnavailable => "managed-model-unavailable",
+        ManagedError::NearAiBalanceTooLow => "managed-near-ai-balance-too-low",
     }
 }
 
@@ -972,6 +1037,43 @@ fn label(error: ManagedError) -> &'static str {
 mod tests {
     use super::*;
     use crate::managed::{sessions::PreparedLaunch, terminal::TerminalHandle};
+
+    #[test]
+    fn a_launch_on_the_sign_in_needs_enough_balance_for_its_first_calls() {
+        use crate::daemon::nearai_credential::balance::{BalanceReading, BalanceReport};
+        let known = |remaining_nanos| {
+            BalanceReport::Known(BalanceReading {
+                remaining_nanos,
+                spend_limit_nanos: None,
+                total_spent_nanos: 0,
+                total_requests: 0,
+                total_tokens: 0,
+                observed_at: chrono::Utc::now(),
+            })
+        };
+        for refused in [Some(0), Some(-5), Some(MIN_LAUNCH_BALANCE_NANOS - 1)] {
+            assert!(matches!(
+                funds_for_first_calls(&known(refused)),
+                Err(ManagedError::NearAiBalanceTooLow)
+            ));
+        }
+        assert!(funds_for_first_calls(&known(Some(MIN_LAUNCH_BALANCE_NANOS))).is_ok());
+        assert!(funds_for_first_calls(&known(Some(12_500_000_000))).is_ok());
+        // No limit set, or nothing known: the launch goes ahead.
+        assert!(funds_for_first_calls(&known(None)).is_ok());
+        for unknown in [
+            BalanceReport::NoSession,
+            BalanceReport::SessionExpired,
+            BalanceReport::NoOrganization,
+            BalanceReport::Unavailable,
+        ] {
+            assert!(funds_for_first_calls(&unknown).is_ok());
+        }
+        assert_eq!(
+            label(ManagedError::NearAiBalanceTooLow),
+            "managed-near-ai-balance-too-low"
+        );
+    }
 
     fn service() -> (tempfile::TempDir, ConfigStore, ManagedService) {
         let home = tempfile::tempdir().unwrap();

@@ -304,6 +304,13 @@ pub struct MonitorTreeCopy {
     /// The folder and tool switches' accessible names.
     pub watch_folder: &'static str,
     pub watch_tool: &'static str,
+    /// The Automatic switch on each folder row, its accessible name with
+    /// `{label}`; the tab's switch for every folder, its accessible name;
+    /// and the line under it (owner, 2026-10-30: auto on and off on the
+    /// Traces tab, beside Submit). DRAFT, NEEDS APPROVAL.
+    pub automatic_folder: &'static str,
+    pub automatic_all: &'static str,
+    pub automatic_count: &'static str,
     /// The session row menu's one item, and its confirmation.
     pub dismiss_session: &'static str,
     pub dismiss_session_title: &'static str,
@@ -599,6 +606,10 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             folder_menu: "Directory options",
             watch_folder: "Watch this folder",
             watch_tool: "Watch {tool}",
+            // DRAFT, NEEDS APPROVAL (2026-10-30).
+            automatic_folder: "Automatic for {label}",
+            automatic_all: "Automatic for every folder",
+            automatic_count: "{count} of {total} folders automatic. A folder set to Ask keeps asking.",
             dismiss_session: "Dismiss trace",
             dismiss_session_title: "Dismiss this trace?",
             dismiss_session_body: "{when} \u{00b7} {size}. Dismissing removes it from the traces \

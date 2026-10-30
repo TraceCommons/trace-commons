@@ -246,6 +246,8 @@ struct MonitorScene: Scene {
 struct MonitorCommands: Commands {
     @ObservedObject var model: AppModel
     let navigation: MainWindowNavigation
+    /// The person's tab order, so Cmd-N follows the strip as dragged.
+    @AppStorage(MonitorWindowView.Tab.orderKey) private var tabOrder = ""
 
     /// Cmd-N for the Nth tab.
     static let tabModifiers: EventModifiers = [.command]
@@ -255,14 +257,11 @@ struct MonitorCommands: Commands {
     static let toggleModifiers: EventModifiers = [.command, .shift]
     static let toggleKey: Character = "m"
 
-    /// The tab's shortcut: its position in the tab strip.
-    static func shortcut(_ tab: MonitorWindowView.Tab) -> Character {
-        switch tab {
-        case .home: "1"
-        case .traces: "2"
-        case .inference: "3"
-        case .insights: "4"
-        }
+    /// The tab's shortcut: its position in the tab strip, in the person's
+    /// order (Home is always Cmd-1).
+    static func shortcut(_ tab: MonitorWindowView.Tab, order: String = "") -> Character {
+        let position = MonitorWindowView.Tab.ordered(order).firstIndex(of: tab) ?? 0
+        return Character(String(position + 1))
     }
 
     /// Where the tab's item goes. Home lands on its overview.
@@ -277,9 +276,9 @@ struct MonitorCommands: Commands {
 
     var body: some Commands {
         CommandGroup(after: .sidebar) {
-            ForEach(MonitorWindowView.Tab.allCases) { tab in
+            ForEach(MonitorWindowView.Tab.ordered(tabOrder)) { tab in
                 Button(tab.title) { OpenMonitor.request(Self.destination(tab)) }
-                    .keyboardShortcut(KeyEquivalent(Self.shortcut(tab)), modifiers: Self.tabModifiers)
+                    .keyboardShortcut(KeyEquivalent(Self.shortcut(tab, order: tabOrder)), modifiers: Self.tabModifiers)
             }
             Divider()
             toggle

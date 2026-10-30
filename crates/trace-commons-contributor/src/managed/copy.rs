@@ -97,6 +97,12 @@
 //!   unavailable. Choose a model before launching." -- a saved model NEAR AI
 //!   no longer lists now falls back to the default instead of holding the
 //!   launch, and this line says so.
+//!
+//! Refusing a launch on the NEAR AI sign-in whose balance is too low for its
+//! first calls. Proposed 2026-10-30, not yet approved:
+//! - `balance_too_low` "Add funds to your NEAR AI balance to start a
+//!   session." The line a shell shows for the refusal
+//!   `managed-near-ai-balance-too-low`.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "My Private AI sessions",
@@ -177,6 +183,7 @@ pub fn copy() -> serde_json::Value {
             "model_favorite_unavailable": "{model} is no longer available on NEAR AI.",
             "model_favorite_remove_named": "Remove {model} from favorites",
             "favorites_title": "Favorite models",
+            "balance_too_low": "Add funds to your NEAR AI balance to start a session.",
             "collect_traces": "Collect this session",
             "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
             "collection_scope": "Collects this session when OpenCode exits, under your existing review and contribution settings. Other sessions created inside OpenCode are not collected.",

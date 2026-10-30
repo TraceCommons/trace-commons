@@ -781,7 +781,7 @@ keyring-core = "=1.0.0"
 # IronWire #66: opt-in NEAR Responses-to-Chat tool compatibility, preserving
 # namespaces, tool-result replay and complete Responses streaming lifecycles.
 # The native replay fix from #65 remains; no packages or dependencies are added.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "bf8b90ba7b2e3b4da3011e1107a8a2068c8085bc" }
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "7ac9251bdde1ac8037b153f7b767d479905c9bbe" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -795,8 +795,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "bf8b90ba7b
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "bf8b90ba7b2e3b4da3011e1107a8a2068c8085bc" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "bf8b90ba7b2e3b4da3011e1107a8a2068c8085bc" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "7ac9251bdde1ac8037b153f7b767d479905c9bbe" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "7ac9251bdde1ac8037b153f7b767d479905c9bbe" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"

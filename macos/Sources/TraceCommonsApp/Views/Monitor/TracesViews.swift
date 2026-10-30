@@ -186,6 +186,10 @@ struct TracesTreeView: View, Equatable {
                 VStack(spacing: 0) {
                     TracesListControls(store: store, openHistory: openHistory)
                         .padding(.bottom, GlassTokens.Space.s2)
+                    if let automatic = automaticSwitch {
+                        SharingChoiceCard(asSwitch: automatic)
+                            .padding(.bottom, GlassTokens.Space.s2)
+                    }
                     tree
                 }
             }
@@ -357,6 +361,20 @@ struct TracesTreeView: View, Equatable {
         }
     }
 
+    /// Automatic for every folder, over the tree (owner, 2026-10-30): the
+    /// Settings choice as one switch, with its count. Nil without the
+    /// core's words.
+    private var automaticSwitch: SharingChoiceCard.Switch? {
+        guard let tree = store.words?.tree, let name = tree.automaticAll, let line = tree.automaticCount else {
+            return nil
+        }
+        let store = store
+        return SharingChoiceCard.Switch(
+            accessibleName: name,
+            line: SharingChoice.automaticCount(store.tree.folders, words: line),
+            saved: { await store.load() })
+    }
+
     /// A mode change's confirmation, in the core's words for that folder.
     private func confirmation(_ pending: Confirmation) -> GlassConfirmation {
         let cancel = { confirming = nil }
@@ -415,6 +433,18 @@ struct TracesTreeView: View, Equatable {
     private func apply(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) {
         confirming = nil
         Task { await store.setFolderMode(folder, mode, promised: folder.sessions.count) }
+    }
+
+    /// A folder row's Automatic switch (owner, 2026-10-30): on at
+    /// Automatic, off at Ask, when the core offers the other; nil at Never
+    /// or for a folder the core lists no mode for. Turning it on arms the
+    /// folder through `modeChange`, so the core's arming question is asked.
+    nonisolated static func automaticSwitch(_ folder: TracesTree.FolderNode) -> Bool? {
+        switch folder.mode {
+        case .autoUpload: folder.offerableModes.contains(.ask) ? true : nil
+        case .ask: folder.offerableModes.contains(.autoUpload) ? false : nil
+        case .ignore, nil: nil
+        }
     }
 
     static func status(_ mode: ProjectMode) -> GlassStatus {
@@ -603,6 +633,7 @@ struct TracesTreeView: View, Equatable {
         // offers others; and Ignore.
         let rulable = folder.mode != nil && !folder.offerableModes.isEmpty
         let menu = rulable || ignorable
+        let automatic = words?.tree.automaticFolder == nil ? nil : Self.automaticSwitch(folder)
         // Submit is the Folder inspector's split button (owner, 2026-10-19):
         // the action, and a chevron to Submit all as, when the core's
         // outcome words are read; else the plain pill.
@@ -634,6 +665,8 @@ struct TracesTreeView: View, Equatable {
                 menuOpen: rowMenu == .submit(folder.id), busy: busy) : nil,
             menuLabel: menu ? words?.tree.folderMenu ?? "" : "",
             menuOpen: rowMenu == .folder(folder.id),
+            automatic: automatic,
+            automaticLabel: words?.tree.automaticFolder.map { $0.replacingOccurrences(of: "{label}", with: folder.label) } ?? "",
             floats: (menu && rowMenu == .folder(folder.id)) || (split && rowMenu == .submit(folder.id)),
             help: submits ? Self.submitHelp(offer.withheldLine, words: words) : "",
             writing: writing,
@@ -646,6 +679,7 @@ struct TracesTreeView: View, Equatable {
             onSplitSubmit: { Task { await store.contributeFolder(folder, verdict: nil) } },
             onSplitMenu: { rowMenu = Self.toggled(.submit(folder.id), current: rowMenu) },
             onMenu: menu ? { rowMenu = Self.toggled(.folder(folder.id), current: rowMenu) } : nil,
+            onAutomatic: { on in request(folder, on ? .autoUpload : .ask) },
             spoken: $spoken
         )
         .equatable()
@@ -983,6 +1017,11 @@ struct TracesFolderRow: View, Equatable {
     let split: Split?
     let menuLabel: String
     let menuOpen: Bool
+    /// The folder's Automatic switch beside Submit (owner, 2026-10-30): on
+    /// for Automatic, off for Ask; nil for a folder it cannot switch
+    /// (Never, or a mode the core does not offer). Its accessible name.
+    let automatic: Bool?
+    let automaticLabel: String
     /// One of this row's menus is open: it publishes its bounds for it.
     let floats: Bool
     let help: String
@@ -995,6 +1034,7 @@ struct TracesFolderRow: View, Equatable {
     let onSplitSubmit: () -> Void
     let onSplitMenu: () -> Void
     let onMenu: (() -> Void)?
+    let onAutomatic: (Bool) -> Void
     /// The tree's VoiceOver focus, put on the `GlassListRow`: the element
     /// VoiceOver lands on, an accessibility container. Left out of `==`:
     /// it is the same focus state for every row.
@@ -1005,7 +1045,8 @@ struct TracesFolderRow: View, Equatable {
         MainActor.assumeIsolated {
             lhs.folder == rhs.folder && lhs.sub == rhs.sub && lhs.selected == rhs.selected && lhs.off == rhs.off
                 && lhs.open == rhs.open && lhs.submitTitle == rhs.submitTitle && lhs.split == rhs.split
-                && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen && lhs.floats == rhs.floats
+                && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen && lhs.automatic == rhs.automatic
+                && lhs.automaticLabel == rhs.automaticLabel && lhs.floats == rhs.floats
                 && lhs.help == rhs.help && lhs.writing == rhs.writing && lhs.spins == rhs.spins && lhs.notes == rhs.notes
                 && (lhs.onSubmit == nil) == (rhs.onSubmit == nil) && (lhs.onMenu == nil) == (rhs.onMenu == nil)
         }
@@ -1027,8 +1068,8 @@ struct TracesFolderRow: View, Equatable {
                 expanded: folder.sessions.isEmpty ? nil : open,
                 submitTitle: submitTitle,
                 accessory: accessory,
-                // No watch switch on the row (owner, 2026-10-08): a folder's
-                // mode is in the row menu and the Folder inspector's picker.
+                // The Automatic switch is on the row again (owner,
+                // 2026-10-30), beside Submit; Never stays in the row menu.
                 expandLabel: folder.label,
                 menuLabel: menuLabel,
                 menuOpen: menuOpen,
@@ -1063,10 +1104,11 @@ struct TracesFolderRow: View, Equatable {
     }
 
     /// The row's Submit as the Folder inspector's split button (owner,
-    /// 2026-10-19): Submit all, and a chevron to Submit all as; and the
-    /// spinner while a mode change is in flight.
+    /// 2026-10-19): Submit all, and a chevron to Submit all as; the
+    /// spinner while a mode change is in flight; and the Automatic switch
+    /// after them (owner, 2026-10-30).
     private var accessory: AnyView? {
-        guard split != nil || spins else { return nil }
+        guard split != nil || spins || automatic != nil else { return nil }
         return AnyView(HStack(spacing: GlassTokens.Space.s3) {
             if spins { GlassSpinner() }
             if let split {
@@ -1074,6 +1116,11 @@ struct TracesFolderRow: View, Equatable {
                     onSplitSubmit()
                 }
                 .disabled(split.busy)
+            }
+            if let automatic {
+                Toggle(automaticLabel, isOn: Binding(get: { automatic }, set: { onAutomatic($0) }))
+                    .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
+                    .help(automaticLabel)
             }
         })
     }

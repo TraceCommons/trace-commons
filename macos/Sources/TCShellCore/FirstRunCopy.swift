@@ -182,6 +182,13 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let rewardOpportunities: String?
         public let automaticScope: String?
         public let askEachTime: String?
+        /// Settings > Projects' sharing choice: its note, and the question
+        /// Automatic asks when folders are set to Ask (`{count}`).
+        public let settingsSharingNote: String?
+        public let keepAsksTitle: String?
+        public let keepAsksBody: String?
+        public let keepAsksKeep: String?
+        public let keepAsksAll: String?
         /// `{count}`, and `{selected}` in the third.
         public let optionalAllOn: String
         public let optionalAllOff: String

@@ -3853,10 +3853,30 @@ arms it with its backlog (`include_backlog: false` is refused with
 `pending` is approved on the next pass. Adopting the contributor's chosen
 data uses (`adopt_chosen_scopes`, #1739) keeps the grant and its exceptions.
 
+`keep_folder_asks` (optional, only with `include_existing`; owner, 2026-10-30)
+says what happens to folders already set to `notify_only`. `true` keeps every
+one as an exception to this grant, however long before it was set, so they
+keep asking and every other folder is armed. `false` clears them, so every
+folder except `ignore` is armed and a later grant that keeps Ask marks does
+not bring them back. Absent keeps the rule above. Anything else is refused with
+`keep-folder-asks-invalid`.
+
 Widened terms void the grant itself as well as the projects it armed, with an
 `automatic-grant-voided` entry. `withdraw_automatic_grant` returns
 `{"withdrawn": bool}` and leaves the projects the grant armed as they are;
-each is withdrawn with `set_project_mode`. `automatic_grant` returns
+each is withdrawn with `set_project_mode`. With `return_folders_to_ask: true`
+(Settings' "Ask each time", #1753) it also puts every project the grant armed
+back to no rule of its own, which reads `notify_only`; a project the
+contributor set to `auto_upload` themselves, and every `ignore` and
+`notify_only`, is left as it is. A non-boolean is refused with
+`return-folders-to-ask-invalid`.
+
+A policy file written before #1753's fix that holds a `notify_only`
+contribution override (the macOS setup's "Ask each time" wrote one) is
+migrated once on load: every folder whose own mode is `auto_upload` is set to
+`notify_only`, the grant is withdrawn and the override cleared, so every folder
+keeps showing Ask and a folder set to `auto_upload` afterwards sends. An
+`ignore` override, and a file a current build wrote, are left alone. `automatic_grant` returns
 `{"granted": false}` when none is in force. None of the three returns a path
 or a count of them.
 
