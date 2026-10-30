@@ -98,6 +98,11 @@ impl ProjectMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectEntry {
     pub mode: ProjectMode,
+    /// When this mode was set. While a Flow 1 grant is in force it is
+    /// never earlier than the grant's `granted_at`, though the clock be
+    /// behind it (see [`ProjectPolicy::set_mode`]); and a rekey merge keeps
+    /// the earlier of two. So it orders a mode after its grant, not on the
+    /// wall clock alone.
     pub added_at: DateTime<Utc>,
     /// Display name for consumers. Shells render this; they never render the
     /// key, which is a full local path.
@@ -145,6 +150,18 @@ pub struct ProjectEntry {
     /// wording.
     #[serde(default)]
     pub automatic_redaction: AutomaticRedactionTally,
+    /// The generation ([`AutomaticGrant::generation`]) of the Flow 1 grant
+    /// in force when this mode was set, or `None` when none was. Written by
+    /// [`ProjectPolicy::set_mode`] on every mode change and never by the
+    /// clock, so a folder's Ask is an exception to the grant it was set
+    /// under ([`ProjectPolicy::asks_despite_grant`]) however the wall clock
+    /// moved in between, and to no later grant.
+    ///
+    /// `#[serde(default)]` so an older file loads; a file written before
+    /// this existed has it derived once on load
+    /// ([`ProjectPolicy::derive_grant_exceptions`]).
+    #[serde(default)]
+    pub set_under_grant: Option<u64>,
 }
 
 /// How many unattended sessions from one armed project had a certified full
@@ -382,6 +399,18 @@ pub struct ProjectPolicy {
     /// that build already marked `scrub_check_upgrade_recorded`.
     #[serde(default)]
     pub notify_kinds_known: bool,
+    /// The last [`AutomaticGrant::generation`] handed out. Only ever
+    /// incremented, so no two fresh global choices share one. `0` on a
+    /// file written before generations existed.
+    #[serde(default)]
+    pub grant_generation: u64,
+    /// Whether every folder's [`ProjectEntry::set_under_grant`] was written
+    /// by a build that records it. Set by [`ProjectPolicy::new`]; a file the
+    /// #1747 build wrote reads `false`, and
+    /// [`ProjectPolicy::derive_grant_exceptions`] derives the field once
+    /// from that build's rule on load, then sets this.
+    #[serde(default)]
+    pub grant_exceptions_derived: bool,
 }
 
 /// The key the contribution override's arming record is listed under in
@@ -529,6 +558,17 @@ pub struct AutomaticGrant {
     /// Projects with a session on disk in a recorded source.
     #[serde(default)]
     pub projects_on_disk: BTreeSet<String>,
+    /// This grant's identity as a fresh global choice: a new value from
+    /// [`ProjectPolicy::grant_generation`] on every
+    /// [`ProjectPolicy::grant_automatic`] and every
+    /// [`ProjectPolicy::include_existing_under_grant`]. A folder's Ask is an
+    /// exception only to the generation it was set under
+    /// ([`ProjectEntry::set_under_grant`]); a later fresh choice supersedes
+    /// it. An identity, not an instant, so a clock that steps backwards
+    /// cannot reorder the two. `0` only on a grant an older build wrote,
+    /// which [`ProjectPolicy::derive_grant_exceptions`] replaces on load.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 impl Default for ProjectPolicy {
@@ -560,6 +600,8 @@ impl ProjectPolicy {
             next_arming_record: 0,
             contribution_override: None,
             notify_kinds_known: true,
+            grant_generation: 0,
+            grant_exceptions_derived: true,
         }
     }
 
@@ -657,7 +699,9 @@ impl ProjectPolicy {
     /// they differ ("Mixed").
     ///
     /// "Every folder" is every configured folder and every key in
-    /// `discovered` (the queue's), by its own mode ([`Self::folder_mode`]),
+    /// `discovered` (the queue's), by its own mode as shown
+    /// ([`Self::shown_folder_mode`], so a folder the include-existing grant
+    /// will arm counts as Automatic, as its row reads),
     /// excluding the unknown bucket, which can never be armed and so would
     /// make any all-automatic set read as mixed. With no folders it is
     /// `NotifyOnly`, the default every unruled folder resolves to.
@@ -702,7 +746,43 @@ impl ProjectPolicy {
     }
 
     fn folder_mode_unless_unknown(&self, project_key: &str) -> Option<ProjectMode> {
-        (project_key != UNKNOWN_PROJECT_KEY).then(|| self.folder_mode(project_key))
+        (project_key != UNKNOWN_PROJECT_KEY).then(|| self.shown_folder_mode(project_key))
+    }
+
+    /// Whether the include-existing grant in force will arm `project_key`
+    /// on its next pass: a real folder whose own mode is Ask and that is not
+    /// an exception to the grant ([`Self::asks_despite_grant`]) -- one set
+    /// to Ask before the grant, or one with no entry yet. The same test as
+    /// [`Self::arms_by_default`]'s include-existing branch, less the
+    /// recorded source, which a listing has no session to name. Reading
+    /// Automatic before the source is recorded only ever says more is sent
+    /// than is, never less.
+    pub fn grant_will_arm(&self, project_key: &str) -> bool {
+        self.includes_existing_automatically()
+            && project_key != UNKNOWN_PROJECT_KEY
+            && self.folder_mode(project_key) == ProjectMode::NotifyOnly
+            && !self.asks_despite_grant(project_key)
+    }
+
+    /// [`Self::folder_mode`] as a shell shows it: Automatic for a folder the
+    /// include-existing grant will arm ([`Self::grant_will_arm`]), because
+    /// that is what the daemon will do with its sessions. Showing it as Ask
+    /// would say a person decides while the grant sends, and a shell could
+    /// not offer Ask on it as a change. Never, a post-grant Ask, and the
+    /// unknown bucket read as their own mode; with no include-existing grant
+    /// this is `folder_mode`.
+    pub fn shown_folder_mode(&self, project_key: &str) -> ProjectMode {
+        if self.grant_will_arm(project_key) {
+            ProjectMode::AutoUpload
+        } else {
+            self.folder_mode(project_key)
+        }
+    }
+
+    /// [`Self::resolve`] as a shell shows it: the contribution override read
+    /// over [`Self::shown_folder_mode`] by the same rules.
+    pub fn shown_mode(&self, project_key: &str) -> ProjectMode {
+        self.resolve_over(self.shown_folder_mode(project_key), project_key)
     }
 
     /// The arming-from-now record that holds `project_key`'s backlog, if
@@ -974,13 +1054,29 @@ impl ProjectPolicy {
         // about something else.
         self.grant_voids
             .retain(|n| n.project_key.is_some() || n.contribution_override);
+        let generation = self.next_grant_generation();
         self.automatic_grant = Some(AutomaticGrant {
             granted_at: now,
             granted_under: terms,
             include_existing: false,
             recorded_sources: BTreeSet::new(),
             projects_on_disk: BTreeSet::new(),
+            generation,
         });
+    }
+
+    /// A [`AutomaticGrant::generation`] no grant has had: one past the last
+    /// handed out, and recorded as handed out. Never `0`, which marks a
+    /// grant an older build wrote.
+    fn next_grant_generation(&mut self) -> u64 {
+        self.grant_generation = self.grant_generation.saturating_add(1);
+        self.grant_generation
+    }
+
+    /// The identity of the Flow 1 grant in force, if any. See
+    /// [`AutomaticGrant::generation`].
+    pub fn grant_generation_in_force(&self) -> Option<u64> {
+        self.automatic_grant.as_ref().map(|g| g.generation)
     }
 
     /// Whether the confirmed onboarding grant covers existing history.
@@ -996,10 +1092,17 @@ impl ProjectPolicy {
     /// decision remain in force. A folder set to Ask after this is an
     /// exception to it, as Never is ([`Self::asks_despite_grant`]).
     pub fn include_existing_under_grant(&mut self) {
+        if self.automatic_grant.is_none() {
+            return;
+        }
+        // A fresh global choice, so a fresh identity: every folder Ask set
+        // under the grant before this is superseded by it.
+        let generation = self.next_grant_generation();
         let Some(grant) = self.automatic_grant.as_mut() else {
             return;
         };
         grant.include_existing = true;
+        grant.generation = generation;
         self.clear_contribution_override();
         let projects = &self.projects;
         self.armed_from_now.retain(|key, _| {
@@ -1084,15 +1187,19 @@ impl ProjectPolicy {
     /// staging). The grant does not arm it ([`Self::arms_by_default`]), so it
     /// resolves to Ask and its sessions wait for a person.
     ///
-    /// "After" is the folder's own `added_at`, which [`Self::set_mode`]
-    /// writes on every mode change, strictly later than the grant's
-    /// `granted_at`. So an Ask from before the grant is superseded by it --
-    /// the fresh global choice replaces old folder modes at the moment it is
+    /// "After" is by identity, never by clock: the folder's
+    /// [`ProjectEntry::set_under_grant`], which [`Self::set_mode`] writes on
+    /// every mode change, is the generation of the grant in force
+    /// ([`AutomaticGrant::generation`]). A clock stepped backwards, or a
+    /// tie, cannot reorder the two. An Ask from before the grant was set
+    /// under no grant or an earlier generation, so it is superseded -- the
+    /// fresh global choice replaces old folder modes at the moment it is
     /// made, as [`Self::include_existing_under_grant`] says -- and a later
-    /// include-existing grant supersedes this one's exceptions the same way.
+    /// fresh choice supersedes this one's exceptions the same way.
     /// A folder the grant armed and a sweep then voided back to Ask
-    /// ([`Self::sweep_grants`]) counts too: it was armed after the grant, so
-    /// it keeps asking rather than being re-armed on its next session.
+    /// ([`Self::sweep_grants`]) counts too: it was armed under this grant,
+    /// and the void keeps that record, so it keeps asking rather than being
+    /// re-armed on its next session.
     pub fn asks_despite_grant(&self, project_key: &str) -> bool {
         let Some(grant) = self
             .automatic_grant
@@ -1102,7 +1209,7 @@ impl ProjectPolicy {
             return false;
         };
         self.projects.get(project_key).is_some_and(|entry| {
-            entry.mode == ProjectMode::NotifyOnly && entry.added_at > grant.granted_at
+            entry.mode == ProjectMode::NotifyOnly && entry.set_under_grant == Some(grant.generation)
         })
     }
 
@@ -1187,7 +1294,8 @@ impl ProjectPolicy {
     /// A project qualifies when it has contributed at least
     /// [`ARMING_SUGGESTION_THRESHOLD`] times, is still ask-first (an armed
     /// project has nothing to offer and an ignored one has been answered
-    /// already), can be armed at all, and has not been declined inside
+    /// already) and not about to be armed by the include-existing grant
+    /// ([`Self::grant_will_arm`]), can be armed at all, and has not been declined inside
     /// [`ARMING_DECLINE_COOLDOWN_DAYS`].
     pub fn arming_suggestion(&self, now: DateTime<Utc>) -> Option<ArmingSuggestion> {
         let cooldown = Duration::days(ARMING_DECLINE_COOLDOWN_DAYS);
@@ -1200,6 +1308,10 @@ impl ProjectPolicy {
                     // is to set that, and an override must neither hide an
                     // Ask folder nor offer to arm an armed one.
                     && self.folder_mode(key) == ProjectMode::NotifyOnly
+                    // Nor one the include-existing grant will arm: it
+                    // already reads Automatic (`shown_folder_mode`), so the
+                    // offer would contradict the row it is about.
+                    && !self.grant_will_arm(key)
                     && match self.arming_declined_at.get(*key) {
                         // A clock that went backwards lands here as "still
                         // inside the cooldown", which can only ever suppress
@@ -1236,6 +1348,9 @@ impl ProjectPolicy {
     /// moves. See [`MovedArming`].
     pub fn rekey_with(&mut self, moved_arming: MovedArming) {
         let renamed = normalize_policy_key;
+        // The grant a merged Ask may be an exception to. Read before the
+        // loop: only `projects` is taken out of `self`.
+        let in_force = self.grant_generation_in_force();
 
         let mut projects: BTreeMap<String, ProjectEntry> = BTreeMap::new();
         for (key, mut entry) in std::mem::take(&mut self.projects) {
@@ -1260,6 +1375,15 @@ impl ProjectPolicy {
                     // The earlier of the two: the contributor's decision
                     // about this project is as old as its oldest half.
                     existing.added_at = existing.added_at.min(entry.added_at);
+                    // An exception to the grant in force survives the merge
+                    // when either half was one (fail closed): the merged
+                    // folder keeps asking rather than being armed by it.
+                    if in_force.is_some()
+                        && (existing.set_under_grant == in_force
+                            || entry.set_under_grant == in_force)
+                    {
+                        existing.set_under_grant = in_force;
+                    }
                     existing.label = label.clone();
                     existing.display_path = shown.clone();
                     // Terms only mean anything while the merged project is
@@ -1294,6 +1418,7 @@ impl ProjectPolicy {
                     display_path: shown,
                     armed_under: entry.armed_under,
                     automatic_redaction: entry.automatic_redaction,
+                    set_under_grant: entry.set_under_grant,
                 });
         }
         self.projects = projects;
@@ -1347,6 +1472,9 @@ impl ProjectPolicy {
         // an older build persisted is never reported. The next save writes
         // the empty list.
         policy.arming_rewordings.clear();
+        // Before the rekey below, which merges `added_at`: the derivation
+        // reads each folder's own.
+        policy.derive_grant_exceptions();
         // Migrate in memory on every load rather than rewriting the file
         // here: `load` has no business writing, and the next `save` -- which
         // every mutation already performs -- persists the v2 form. A file
@@ -1358,6 +1486,44 @@ impl ProjectPolicy {
             policy.rekey();
         }
         Ok(policy)
+    }
+
+    /// Give a policy file written before grant generations existed (the
+    /// #1747 build) the identities this build reads, once, from the rule
+    /// that build applied: a folder whose mode was set after the grant's
+    /// `granted_at` was set under that grant. So every Ask that build kept
+    /// as an exception to an include-existing grant stays one, and every
+    /// Ask it let the grant supersede stays superseded -- an upgrade never
+    /// arms a folder that was asking. A folder the grant armed is recorded
+    /// too, so a void back to Ask keeps asking as it did.
+    ///
+    /// Runs only while `grant_exceptions_derived` is false, which is only a
+    /// file an older build wrote: on a file this build wrote, a folder with
+    /// no recorded grant was set under none, and the clock must not decide
+    /// otherwise. In memory, like the rekey; the next save persists it.
+    pub fn derive_grant_exceptions(&mut self) {
+        if self.grant_exceptions_derived {
+            return;
+        }
+        self.grant_exceptions_derived = true;
+        if self
+            .automatic_grant
+            .as_ref()
+            .is_none_or(|g| g.generation != 0)
+        {
+            return;
+        }
+        let generation = self.next_grant_generation();
+        let Some(grant) = self.automatic_grant.as_mut() else {
+            return;
+        };
+        grant.generation = generation;
+        let granted_at = grant.granted_at;
+        for entry in self.projects.values_mut() {
+            if entry.set_under_grant.is_none() && entry.added_at > granted_at {
+                entry.set_under_grant = Some(generation);
+            }
+        }
     }
 
     pub fn save(&self, store: &ConfigStore) -> Result<()> {
@@ -1380,7 +1546,12 @@ impl ProjectPolicy {
     /// An `AutoUpload` override's hold on what was already on disk is not
     /// here but in [`Self::waits_for_a_person`], beside the other holds.
     pub fn resolve(&self, project_key: &str) -> ProjectMode {
-        let own = self.folder_mode(project_key);
+        self.resolve_over(self.folder_mode(project_key), project_key)
+    }
+
+    /// The override read over `own`, the folder's mode, as [`Self::resolve`]
+    /// describes.
+    fn resolve_over(&self, own: ProjectMode, project_key: &str) -> ProjectMode {
         let Some(o) = self.contribution_override.as_ref() else {
             return own;
         };
@@ -1754,11 +1925,21 @@ impl ProjectPolicy {
         self.arming_rewordings
             .retain(|n| n.project_key != project_key);
         let shown = display_path_for_key(project_key);
+        let set_under_grant = self.grant_generation_in_force();
+        // Under a grant, never earlier than it, even when the clock has
+        // stepped back since: a #1747 daemon, on a downgrade, reads an Ask
+        // as an exception to the grant by `added_at > granted_at` alone, and
+        // must agree with `set_under_grant` here or it arms a folder that
+        // was asking. A later `derive_grant_exceptions` agrees with it too.
+        let added_at = match &self.automatic_grant {
+            Some(grant) => now.max(grant.granted_at + Duration::microseconds(1)),
+            None => now,
+        };
         self.projects.insert(
             project_key.to_string(),
             ProjectEntry {
                 mode,
-                added_at: now,
+                added_at,
                 label: project_label_for(shown.as_deref().unwrap_or(project_key)),
                 display_path: shown,
                 // A fresh entry on every mode change: leaving automatic
@@ -1766,6 +1947,9 @@ impl ProjectPolicy {
                 armed_under: None,
                 // And the redaction record: it covers one arming only.
                 automatic_redaction: AutomaticRedactionTally::default(),
+                // The grant this decision was made under, if any: what makes
+                // an Ask an exception to it (`asks_despite_grant`).
+                set_under_grant,
             },
         );
         Ok(())
@@ -2268,6 +2452,7 @@ mod tests {
                 display_path: None,
                 armed_under: None,
                 automatic_redaction: Default::default(),
+                set_under_grant: None,
             },
         );
         assert_eq!(p.resolve(UNKNOWN_PROJECT_KEY), ProjectMode::NotifyOnly);
@@ -2833,6 +3018,7 @@ mod tests {
                     display_path: None,
                     armed_under: None,
                     automatic_redaction: AutomaticRedactionTally::default(),
+                    set_under_grant: None,
                 },
             );
         }
@@ -2993,6 +3179,234 @@ mod tests {
         assert!(p.record_source(again, SRC, BTreeSet::new(), BTreeSet::new()));
         assert!(!p.asks_despite_grant("/w/post"));
         assert!(p.arms_by_default("/w/post", "/s/c.jsonl", SRC));
+    }
+
+    /// Finding 1 on #1747: an Ask set after the grant is an exception to it
+    /// however the clock moved in between. A clock stepped back (an NTP
+    /// correction, a dual-boot RTC, a restored VM snapshot) stamps the Ask
+    /// earlier than the grant, and an exact tie stamps it at the same
+    /// instant; neither may let the grant arm the folder.
+    #[test]
+    fn a_folder_set_to_ask_after_the_grant_is_an_exception_whatever_the_clock_says() {
+        let mut p = granted_including_existing();
+        p.set_mode(
+            "/w/stepped-back",
+            ProjectMode::NotifyOnly,
+            t("2026-10-29T11:59:59Z"),
+        )
+        .unwrap();
+        p.set_mode("/w/tie", ProjectMode::NotifyOnly, t("2026-10-29T12:00:00Z"))
+            .unwrap();
+        for key in ["/w/stepped-back", "/w/tie"] {
+            assert!(p.asks_despite_grant(key), "{key}");
+            assert!(!p.arms_by_default(key, "/s/a.jsonl", SRC), "{key}");
+            assert_eq!(p.resolve(key), ProjectMode::NotifyOnly, "{key}");
+        }
+    }
+
+    /// A policy file the #1747 daemon wrote records no grant generation:
+    /// that build ordered a folder's Ask against the grant by wall clock.
+    /// Loading it derives the generation once from that build's rule, so a
+    /// folder that was an exception keeps asking -- an upgrade never arms a
+    /// folder that was asking -- and one that was not stays superseded.
+    #[test]
+    fn an_ask_the_1747_daemon_kept_as_an_exception_survives_the_upgrade() {
+        let (_d, store) = temp_store();
+        let narrow = grant_terms_with("https://ingest.invalid");
+        let mut p = granted_including_existing();
+        p.set_mode(
+            "/w/post",
+            ProjectMode::NotifyOnly,
+            t("2026-10-29T13:00:00Z"),
+        )
+        .unwrap();
+        p.arm_by_grant("/w/api", t("2026-10-29T13:00:00Z"), narrow.clone())
+            .unwrap();
+        // As the #1747 build wrote it: none of the generation fields.
+        let mut old = serde_json::to_value(&p).unwrap();
+        let top = old.as_object_mut().unwrap();
+        top.remove("grant_generation");
+        top.remove("grant_exceptions_derived");
+        top["automatic_grant"]
+            .as_object_mut()
+            .unwrap()
+            .remove("generation");
+        for entry in top["projects"].as_object_mut().unwrap().values_mut() {
+            entry.as_object_mut().unwrap().remove("set_under_grant");
+        }
+        store
+            .write_daemon_file(DAEMON_PROJECTS_FILE, &serde_json::to_vec(&old).unwrap())
+            .unwrap();
+
+        let mut loaded = ProjectPolicy::load(&store).unwrap();
+        let generation = loaded.automatic_grant.as_ref().unwrap().generation;
+        assert_ne!(generation, 0, "the loaded grant has an identity");
+        assert_eq!(loaded.projects["/w/post"].set_under_grant, Some(generation));
+        assert!(loaded.asks_despite_grant("/w/post"));
+        assert!(!loaded.arms_by_default("/w/post", "/s/a.jsonl", SRC));
+        assert!(
+            loaded.arms_by_default("/w/pre", "/s/b.jsonl", SRC),
+            "an Ask from before the grant is still superseded by it"
+        );
+
+        // A folder the grant armed, voided after the upgrade while the grant
+        // survives, keeps asking as it would have before it.
+        let mut wide = narrow;
+        wide.consent_scopes.insert("model_training".to_string());
+        loaded.automatic_grant.as_mut().unwrap().granted_under = wide.clone();
+        let sweep = loaded.sweep_grants(&wide, t("2026-10-29T14:00:00Z"));
+        assert_eq!(sweep.voided.len(), 1);
+        assert!(!loaded.arms_by_default("/w/api", "/s/c.jsonl", SRC));
+
+        // Derived once: saving and loading again changes nothing.
+        loaded.save(&store).unwrap();
+        assert_eq!(ProjectPolicy::load(&store).unwrap(), loaded);
+
+        // A fresh include-existing grant after the upgrade supersedes it.
+        let again = t("2026-10-29T16:00:00Z");
+        loaded.grant_automatic(again, grant_terms_with("https://ingest.invalid"));
+        loaded.include_existing_under_grant();
+        assert!(loaded.record_source(again, SRC, BTreeSet::new(), BTreeSet::new()));
+        assert!(!loaded.asks_despite_grant("/w/post"));
+        assert!(loaded.arms_by_default("/w/post", "/s/a.jsonl", SRC));
+    }
+
+    /// A rekey that merges two spellings of one folder keeps an Ask that is
+    /// an exception to the grant in force if either half was one: merging
+    /// may only ever ask more permission than before, never less.
+    #[test]
+    fn a_rekey_merge_keeps_an_ask_made_under_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let root_key = root.to_string_lossy().to_string();
+        let sub_key = sub.to_string_lossy().to_string();
+
+        // The root's Ask is from before the grant, the subdirectory's after.
+        let mut p = ProjectPolicy::new();
+        p.set_mode(
+            &root_key,
+            ProjectMode::NotifyOnly,
+            t("2026-10-29T11:00:00Z"),
+        )
+        .unwrap();
+        let at = t("2026-10-29T12:00:00Z");
+        p.grant_automatic(at, grant_terms_with("https://ingest.invalid"));
+        p.include_existing_under_grant();
+        assert!(p.record_source(at, SRC, BTreeSet::new(), BTreeSet::new()));
+        p.set_mode(&sub_key, ProjectMode::NotifyOnly, t("2026-10-29T13:00:00Z"))
+            .unwrap();
+        p.schema_version = DAEMON_PROJECTS_SCHEMA_V1.to_string();
+
+        p.rekey();
+        let key = project_key_for(Some(root.to_str().unwrap()));
+        assert_eq!(p.projects.len(), 1, "the two spellings merged");
+        assert!(p.asks_despite_grant(&key));
+        assert!(!p.arms_by_default(&key, "/s/a.jsonl", SRC));
+    }
+
+    /// A downgrade to the #1747 daemon reads an Ask exception by
+    /// `added_at > granted_at`. An Ask this build recorded under the grant
+    /// with a stepped-back clock must still read as post-grant to that
+    /// build, or the downgrade arms a folder that was asking.
+    #[test]
+    fn a_downgrade_to_the_1747_daemon_keeps_a_stepped_clock_ask_asking() {
+        let (_d, store) = temp_store();
+        let mut p = granted_including_existing();
+        p.set_mode(
+            "/w/stepped-back",
+            ProjectMode::NotifyOnly,
+            t("2026-10-29T11:59:59Z"),
+        )
+        .unwrap();
+        assert!(p.asks_despite_grant("/w/stepped-back"));
+        p.save(&store).unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(
+            &store
+                .read_daemon_file(DAEMON_PROJECTS_FILE)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let granted_at: DateTime<Utc> =
+            serde_json::from_value(raw["automatic_grant"]["granted_at"].clone()).unwrap();
+        let added_at: DateTime<Utc> =
+            serde_json::from_value(raw["projects"]["/w/stepped-back"]["added_at"].clone()).unwrap();
+        assert!(
+            added_at > granted_at,
+            "the #1747 daemon would read this Ask as pre-grant and arm the folder"
+        );
+    }
+
+    /// The arming offer (`arming_suggestion`) never offers to turn on
+    /// Automatic for a folder whose `list_projects` row already reads
+    /// Automatic because the include-existing grant will arm it.
+    #[test]
+    fn no_arming_offer_for_a_folder_the_broad_grant_will_arm() {
+        let mut p = granted_including_existing();
+        p.contributed
+            .insert("/w/pre".to_string(), ARMING_SUGGESTION_THRESHOLD);
+        assert_eq!(p.shown_folder_mode("/w/pre"), ProjectMode::AutoUpload);
+        assert!(
+            p.arming_suggestion(t("2026-10-29T13:00:00Z")).is_none(),
+            "offered to arm a folder already shown as Automatic"
+        );
+    }
+
+    /// What a shell shows for a folder is what the daemon will do with it:
+    /// under the include-existing grant a folder the grant will arm reads
+    /// Automatic, and nothing else moves. With no grant, or a legacy
+    /// from-now grant, the shown mode is the resolved one.
+    #[test]
+    fn a_folder_the_grant_will_arm_shows_as_automatic_and_nothing_else_moves() {
+        let mut p = granted_including_existing();
+        p.set_mode(
+            "/w/post",
+            ProjectMode::NotifyOnly,
+            t("2026-10-29T13:00:00Z"),
+        )
+        .unwrap();
+        p.set_mode("/w/never", ProjectMode::Ignore, t("2026-10-29T13:00:00Z"))
+            .unwrap();
+        for (key, shown) in [
+            ("/w/pre", ProjectMode::AutoUpload),
+            ("/w/none", ProjectMode::AutoUpload),
+            ("/w/post", ProjectMode::NotifyOnly),
+            ("/w/never", ProjectMode::Ignore),
+            (UNKNOWN_PROJECT_KEY, ProjectMode::NotifyOnly),
+        ] {
+            assert_eq!(p.shown_folder_mode(key), shown, "{key}");
+            assert_eq!(p.shown_mode(key), shown, "{key}");
+            assert_eq!(
+                p.grant_will_arm(key),
+                shown == ProjectMode::AutoUpload,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            p.resolve("/w/pre"),
+            ProjectMode::NotifyOnly,
+            "stored mode untouched"
+        );
+        // An Ask override still reads Ask over a folder the grant will arm.
+        p.set_contribution_override(ProjectMode::NotifyOnly, t("2026-10-29T14:00:00Z"), None)
+            .unwrap();
+        assert_eq!(p.shown_mode("/w/pre"), ProjectMode::NotifyOnly);
+        assert_eq!(p.shown_folder_mode("/w/pre"), ProjectMode::AutoUpload);
+
+        for p in [ProjectPolicy::new(), granted_with_disk(&[], &[])] {
+            let mut p = p;
+            p.set_mode("/w/ask", ProjectMode::NotifyOnly, t("2026-10-29T13:00:00Z"))
+                .unwrap();
+            for key in ["/w/ask", "/w/none"] {
+                assert!(!p.grant_will_arm(key), "{key}");
+                assert_eq!(p.shown_mode(key), p.resolve(key), "{key}");
+                assert_eq!(p.shown_folder_mode(key), p.folder_mode(key), "{key}");
+            }
+        }
     }
 
     /// The exception belongs to the include-existing grant: under a legacy
@@ -3502,6 +3916,7 @@ mod tests {
                 display_path: None,
                 armed_under: None,
                 automatic_redaction: Default::default(),
+                set_under_grant: None,
             },
         );
         p.projects.insert(
@@ -3513,6 +3928,7 @@ mod tests {
                 display_path: None,
                 armed_under: None,
                 automatic_redaction: Default::default(),
+                set_under_grant: None,
             },
         );
 
@@ -3586,6 +4002,7 @@ mod tests {
                 display_path: None,
                 armed_under: None,
                 automatic_redaction: Default::default(),
+                set_under_grant: None,
             },
         );
         p.save(&store).unwrap();
@@ -3701,6 +4118,7 @@ mod tests {
                 display_path: None,
                 armed_under: None,
                 automatic_redaction: Default::default(),
+                set_under_grant: None,
             },
         );
         p.rekey();
