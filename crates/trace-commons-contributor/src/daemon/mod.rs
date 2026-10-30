@@ -2815,6 +2815,9 @@ mod tests {
         witness_calls: Arc<std::sync::Mutex<Vec<Option<String>>>>,
         /// Non-zero makes the claim issuer answer with that status.
         issuer_status: Arc<AtomicU16>,
+        /// The unreachable ingest's port, bound and never listening, so it
+        /// refuses connections and no other test's server can take it.
+        _unreachable: Option<tokio::net::TcpSocket>,
     }
 
     impl TransientRetryHarness {
@@ -2956,14 +2959,16 @@ mod tests {
                 }),
             ))
             .await;
-            let ingest = if ingest_unreachable {
-                // Bound and released, so nothing answers on it.
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let addr = listener.local_addr().unwrap();
-                drop(listener);
-                format!("http://{addr}")
-            } else {
-                ingest
+            // Bound and never listening, so connections are refused; held
+            // for the harness's life so the port cannot be reused.
+            let unreachable = ingest_unreachable.then(|| {
+                let socket = tokio::net::TcpSocket::new_v4().unwrap();
+                socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+                socket
+            });
+            let ingest = match &unreachable {
+                Some(socket) => format!("http://{}", socket.local_addr().unwrap()),
+                None => ingest,
             };
             store
                 .save_config(&crate::config::ContributorConfig {
@@ -3057,6 +3062,7 @@ mod tests {
                 witness_saturated,
                 witness_calls,
                 issuer_status,
+                _unreachable: unreachable,
             }
         }
 
@@ -4504,6 +4510,22 @@ mod tests {
         let mut gone = entries[0].clone();
         gone.path = h.session_path.with_file_name("not-a-session.jsonl");
         assert!(listed.find(&sources, &gone).is_none());
+    }
+
+    /// The unreachable ingest address stays reserved for the harness's
+    /// life. Released, the port went back to the pool, and a server another
+    /// test started could take it and answer: the upload then failed as
+    /// `http-failure` instead of `ingest-unreachable` (Linux CI, #1759).
+    #[tokio::test]
+    async fn the_unreachable_ingest_port_is_held_for_the_harness() {
+        let h = TransientRetryHarness::with_ingest_unreachable().await;
+        let cfg = h.shared.store.load_config().unwrap().unwrap();
+        let addr = cfg.ingest_url.trim_start_matches("http://").to_string();
+        assert!(
+            tokio::net::TcpListener::bind(&addr).await.is_err(),
+            "{addr} was free for another server to take"
+        );
+        assert!(tokio::net::TcpStream::connect(&addr).await.is_err());
     }
 
     /// Ingest down altogether: the in-call retries run out on transport
