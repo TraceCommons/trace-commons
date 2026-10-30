@@ -181,8 +181,18 @@ fn action(app: &Rc<App>, method: &str, params: Value, terminal: bool) {
             }));
             window.present();
         }
-        Err(_) => app.toast(&text("action_failed")),
+        Err(error) => app.toast(&text(refusal_key(&error))),
     });
+}
+
+/// The copy key for a refused managed action: a NEAR AI balance too low
+/// for a session's first calls asks for funds; anything else is the
+/// general failure.
+fn refusal_key(label: &str) -> &'static str {
+    match label {
+        "managed-near-ai-balance-too-low" => "balance_too_low",
+        _ => "action_failed",
+    }
 }
 
 pub fn refresh(app: &Rc<App>) {
@@ -513,6 +523,16 @@ mod tests {
             launch_refusal("managed-launch-unknown", Some("Konsole")),
             super::text("launch_unknown")
         );
+    }
+
+    #[test]
+    fn a_low_balance_asks_for_funds() {
+        assert_eq!(
+            refusal_key("managed-near-ai-balance-too-low"),
+            "balance_too_low"
+        );
+        assert!(!super::text("balance_too_low").is_empty());
+        assert_eq!(refusal_key("managed-conflict"), "action_failed");
     }
 
     #[test]

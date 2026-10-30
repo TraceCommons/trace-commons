@@ -15256,6 +15256,108 @@ mod tests {
         assert_eq!(body["defaults"], serde_json::json!([]));
     }
 
+    /// A launch on the NEAR AI sign-in reads the balance only once the
+    /// request would prepare a new session, and is refused when the balance
+    /// cannot pay for its first calls. A replay of a prepared request is
+    /// answered as before, whatever the balance now says.
+    #[tokio::test]
+    async fn a_sign_in_launch_needs_balance_for_its_first_calls() {
+        use crate::daemon::nearai_credential::balance::{BalanceReading, BalanceReport};
+        let s = shared();
+        let cwd = tempfile::tempdir().unwrap();
+        let request_id = uuid::Uuid::new_v4();
+        let launch = |connection: &str| {
+            serde_json::json!({
+                "request_id": request_id,
+                "tool": "claude",
+                "connection": connection,
+                "account_id": crate::managed::signin::account_id(crate::managed::ToolId::Claude),
+                "cwd": cwd.path(),
+                "expected_generation": 0,
+            })
+        };
+        let reads = std::sync::Mutex::new(0_usize);
+        let balance = |remaining: i64| {
+            let reads = &reads;
+            move |_fresh: bool| {
+                *reads.lock().unwrap() += 1;
+                std::future::ready(BalanceReport::Known(BalanceReading {
+                    remaining_nanos: Some(remaining),
+                    spend_limit_nanos: None,
+                    total_spent_nanos: 0,
+                    total_requests: 0,
+                    total_tokens: 0,
+                    observed_at: chrono::Utc::now(),
+                }))
+            }
+        };
+        let prepare = |params| req("managed_launch_prepare", params);
+
+        // Signed out: refused for the sign-in, and no balance is read.
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            balance(0),
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-sign-in-required");
+        assert_eq!(*reads.lock().unwrap(), 0);
+
+        let sign_in = Some(crate::daemon::settings::NearAiInferenceCredential {
+            key: "sk-fixture".into(),
+            key_id: "key-1".into(),
+            key_prefix: "sk-fix".into(),
+            organization_id: "org-1".into(),
+            workspace_id: "ws-1".into(),
+            minted_at: chrono::Utc::now(),
+        });
+        s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
+        // A saved NEAR AI account that does not exist: refused as before,
+        // and its balance is not the sign-in's to read.
+        let r =
+            crate::daemon::managed::handle_async_with(&s, &prepare(launch("near_ai")), balance(0))
+                .await;
+        assert!(r.error.is_some());
+        assert_eq!(*reads.lock().unwrap(), 0);
+
+        // Out of money: refused after a cached and a fresh read.
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            balance(0),
+        )
+        .await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-balance-too-low");
+        assert_eq!(*reads.lock().unwrap(), 2);
+
+        // Funded: prepared.
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            balance(12_500_000_000),
+        )
+        .await;
+        let prepared = r.result.expect("prepared");
+        *reads.lock().unwrap() = 0;
+        // Preparing saved this folder's settings, which reloads settings
+        // from a disk this fixture never wrote the sign-in to.
+        s.settings.lock().unwrap().near_ai_inference = sign_in.clone();
+
+        // The same request again after the balance ran out: the session
+        // already prepared, with no read.
+        let r = crate::daemon::managed::handle_async_with(
+            &s,
+            &prepare(launch("near_ai_signin")),
+            balance(0),
+        )
+        .await;
+        assert_eq!(
+            r.result.expect("replayed")["session_id"],
+            prepared["session_id"]
+        );
+        assert_eq!(*reads.lock().unwrap(), 0);
+    }
+
     /// The daemon-hosted proxy for a session on the NEAR AI sign-in: the
     /// launcher is told a loopback port and never the key, the key reaches
     /// NEAR AI through the proxy, an exited session's proxy is shut down,

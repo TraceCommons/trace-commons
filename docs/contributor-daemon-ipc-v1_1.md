@@ -9683,6 +9683,15 @@ focusable or stoppable.
   folder, `managed-not-found` for a removed account, and
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.
 
+Before preparing a new session on `near_ai_signin`, `managed_launch_prepare`
+and `managed_session_start_again` read the sign-in's NEAR AI balance (waiting
+at most 5 seconds) and refuse with `managed-near-ai-balance-too-low` when it is
+known to be under $0.10, after a fresh read agrees with the cached one. A
+request refused for another reason, or a replay of one already prepared, reads
+no balance. An unknown, unreachable or no-limit balance lets the launch
+through. A saved `near_ai` key is not checked: its account's balance is not
+readable here.
+
 `managed_session_report` answers `{accepted: true, stop: bool}`; an older
 launcher reads only `accepted`.
 
