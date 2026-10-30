@@ -75,56 +75,31 @@ final class BalanceArrivalHomeTests: XCTestCase {
         XCTAssertEqual(alternateScale.detailInk, GlassTokens.Color.statusOnText)
     }
 
-    func testIncomingCreditIsIndependentOfSpendingAndZeroIsKnown() {
-        let model = AppModel()
-        let received = BalanceStatus.parse(fromJSON: """
-            {"state":"known","scale":9,"remaining_nanos":8200000000,
-             "change_24h_nanos":-2000000000,"change_24h_text":"-$2.00 in the last 24 hours",
-             "received_24h_nanos":1250000000,"received_24h_text":"$1.25 received in the last 24 hours"}
-            """)
-        XCTAssertEqual(HomeFormat.balanceReceived(received, calls: model.balanceCalls),
-                       "$1.25 received in the last 24 hours")
-        let zero = BalanceStatus.parse(fromJSON: """
-            {"state":"known","scale":9,"remaining_nanos":8200000000,
-             "received_24h_nanos":0,"received_24h_text":"$0.00 received in the last 24 hours"}
-            """)
-        XCTAssertEqual(HomeFormat.balanceReceived(zero, calls: model.balanceCalls),
-                       "$0.00 received in the last 24 hours")
-        for state in ["no_session", "unreachable", ""] {
-            let hidden = BalanceStatus(state: state, received24hNanos: 1_250_000_000,
-                                       received24hText: "$1.25 received in the last 24 hours")
-            XCTAssertNil(HomeFormat.balanceReceived(hidden, calls: model.balanceCalls))
-        }
-        let orphan = BalanceStatus(state: "known", received24hText: "$1.25 received in the last 24 hours")
-        XCTAssertNil(HomeFormat.balanceReceived(orphan, calls: model.balanceCalls))
-    }
-
     func testUnavailableHistoryDrawsNothingWithoutInventingZero() throws {
         let status = BalanceStatus.parse(fromJSON: """
             {"state":"known","scale":9,"remaining_nanos":8200000000,
              "change_24h_nanos":null,"change_24h_text":null,
-             "change_24h_unavailable_text":"24-hour balance change unavailable",
-             "received_24h_nanos":null,"received_24h_text":null,
-             "received_24h_unavailable_text":"Amount received in 24 hours unavailable"}
+             "change_24h_unavailable_text":"24-hour balance change unavailable"}
             """)
         let model = AppModel()
         let copy = try XCTUnwrap(model.privateInferenceCopy)
         let rendered = HomeFormat.balance(status, copy: copy, calls: model.balanceCalls)
         XCTAssertNil(rendered.detail)
         XCTAssertNil(rendered.detailInk)
-        XCTAssertNil(HomeFormat.balanceReceived(status, calls: model.balanceCalls))
-        XCTAssertNil(status.received24hNanos)
         XCTAssertNil(status.change24hNanos)
     }
 
-    /// The flourish is one self-contained view, marked as a placeholder, and
-    /// it reads Reduce Motion.
-    func test_theFlourishIsOneSwappablePlaceholderThatReadsReduceMotion() throws {
+    /// The flourish is one self-contained view: gold coins burst from the
+    /// tile (owner, 2026-10-27, in place of the green edge), and it reads
+    /// Reduce Motion.
+    func test_theFlourishBurstsCoinsAndReadsReduceMotion() throws {
         let source = try String(
             contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent(
                 "Views/Monitor/BalanceArrivalFlourish.swift"),
             encoding: .utf8)
-        XCTAssertTrue(source.contains("Placeholder"))
+        XCTAssertTrue(source.contains(".glassCoinBurst(start: burst, still: reduceMotion, trailingRoom: Self.edgeRoom)"))
+        XCTAssertFalse(source.contains("strokeBorder"), "the lit edge is back")
+        XCTAssertFalse(source.contains("statusOnText"), "the green edge is back")
         XCTAssertTrue(source.contains("accessibilityReduceMotion"))
         XCTAssertTrue(source.contains("BalanceArrival.effect("))
         let home = try String(
@@ -132,5 +107,27 @@ final class BalanceArrivalHomeTests: XCTestCase {
                 "Views/Monitor/HomeViews.swift"),
             encoding: .utf8)
         XCTAssertTrue(home.contains("BalanceArrivalFlourish("))
+    }
+
+    /// A balance refresh mid-count neither cancels the count nor the coins:
+    /// the count has a task of its own, keyed on the count and not on the
+    /// balance, and the coins clear on a `.task(id: burst)`, not on a task
+    /// the check begins.
+    func test_aRefreshMidCountLeavesTheCountAndCoinsToFinish() throws {
+        let source = try String(
+            contentsOf: GlassSurfaceRulesTests.root.appendingPathComponent(
+                "Views/Monitor/BalanceArrivalFlourish.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(source.contains(".task(id: count) {"))
+        XCTAssertTrue(source.contains(".task(id: burst) {"))
+        XCTAssertTrue(source.contains("count = Count(from: from, to: to)"))
+        XCTAssertFalse(source.contains("Task {"), "no unstructured task")
+        XCTAssertFalse(source.contains("burst == mine"), "no Date check by hand")
+        // The check task starts the count and returns; it does not run it.
+        let check = try XCTUnwrap(source.range(of: "private func check() {"))
+        XCTAssertFalse(source[check.upperBound...].contains("Task.sleep"))
+        XCTAssertEqual(BalanceArrivalFlourish<EmptyView>.coinsStay(reduceMotion: true), .milliseconds(1600))
+        XCTAssertEqual(BalanceArrivalFlourish<EmptyView>.coinsStay(reduceMotion: false),
+                       .seconds(GlassCoinBurst.duration))
     }
 }

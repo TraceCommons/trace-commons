@@ -20,6 +20,26 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(snapshot.terminalChoices, [ManagedTerminalChoice(id: "terminal", name: "Terminal"), ManagedTerminalChoice(id: "ghostty", name: "Ghostty")])
     }
 
+    /// The launch dialog asks for a terminal until one is chosen, only with
+    /// more than one installed, and never for an older daemon that does not
+    /// say; it starts on the current app when installed, else the first.
+    func testTheLaunchDialogAsksForATerminalUntilOneIsChosen() throws {
+        func snapshot(chosen: String, current: String, choices: [String]) throws -> ManagedSnapshot {
+            let list = choices.map { #"{"id":"\#($0)","name":"\#($0)"}"# }.joined(separator: ",")
+            let json = #"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_current":\#(current),\#(chosen)"terminal_choices":[\#(list)]}}"#
+            return try JSONDecoder().decode(ManagedSnapshot.self, from: Data(json.utf8))
+        }
+        let asking = try snapshot(chosen: #""terminal_chosen":false,"#, current: #""ghostty""#, choices: ["terminal", "ghostty"])
+        XCTAssertTrue(asking.asksForTerminal)
+        XCTAssertEqual(asking.proposedTerminal, "ghostty")
+        XCTAssertFalse(try snapshot(chosen: #""terminal_chosen":true,"#, current: #""ghostty""#, choices: ["terminal", "ghostty"]).asksForTerminal)
+        XCTAssertFalse(try snapshot(chosen: "", current: #""ghostty""#, choices: ["terminal", "ghostty"]).asksForTerminal)
+        XCTAssertFalse(try snapshot(chosen: #""terminal_chosen":false,"#, current: #""terminal""#, choices: ["terminal"]).asksForTerminal)
+        let missing = try snapshot(chosen: #""terminal_chosen":false,"#, current: "null", choices: ["kitty", "wezterm"])
+        XCTAssertTrue(missing.asksForTerminal)
+        XCTAssertEqual(missing.proposedTerminal, "kitty")
+    }
+
     func testAnOlderSnapshotOffersNoTerminalChoice() throws {
         let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Terminal"}}"#.utf8))
         XCTAssertNil(snapshot.capabilities.terminalCurrent)

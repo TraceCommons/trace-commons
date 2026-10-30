@@ -103,10 +103,11 @@ final class HomeViewTests: XCTestCase {
         // (owner, 2026-10-20: it had no fill and a turning glow edge).
         XCTAssertTrue(home.contains("detail: uncontributed.detail(words), action: openTraces)"))
         XCTAssertTrue(home.contains(".glassTier(.card, hover: GlassTokens.Color.cardHover)"))
-        // No border; a light turns round its edge instead (owner,
-        // 2026-10-22; a shimmer crossed it from 2026-10-20).
-        XCTAssertTrue(home.contains(".glassCardBeacon()"))
-        XCTAssertFalse(home.contains("glassCardShimmer"), "the shimmer is back")
+        // No border; light glances across it instead (owner, 2026-10-27;
+        // a duller shimmer crossed it from 2026-10-20, and a light turned
+        // round its edge from 2026-10-22).
+        XCTAssertTrue(home.contains(".glassCardShimmer()"))
+        XCTAssertFalse(home.contains("glassCardBeacon"), "the beacon is back")
         XCTAssertFalse(home.contains("strokeBorder(Self.border"), "the border is back")
         XCTAssertFalse(home.contains(".overlay(GlassGlowEdge("), "the glow edge is back")
         // Its icon is the card's watermark, as the tiles' (owner, 2026-10-20).
@@ -114,11 +115,12 @@ final class HomeViewTests: XCTestCase {
         let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
         XCTAssertFalse(home[card.upperBound...].prefix(2500).contains("Gradient.heroMissions"), "the dark gradient is back")
         // The figure counts while credit arrives (`BalanceArrivalFlourish`),
-        // and the 24-hour change sits under it in its ink (owner, 2026-10-23).
+        // and the 24-hour change sits under it in its ink (owner,
+        // 2026-10-23), with no second line of what was received (owner,
+        // 2026-10-27).
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: copy.balanceTitle, value: counting ?? balance.value, "
                 + "detail: balance.detail, detailInk: balance.detailInk, "
-                + "supplementaryDetail: HomeFormat.balanceReceived(model.balanceStatus, calls: model.balanceCalls), "
                 + "systemImage: HomeStatIcons.balance, valueAccessory: balance.beside, "
                 + "action: openPrivateAI)"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))

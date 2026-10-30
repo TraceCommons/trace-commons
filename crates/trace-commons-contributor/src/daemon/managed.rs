@@ -198,13 +198,15 @@ impl ManagedService {
     }
 
     /// `sign_in` says only whether the daemon holds a NEAR AI sign-in;
-    /// `choice` is the terminal the settings name.
+    /// `terminal` is the terminal the settings name, and whether the person
+    /// chose it.
     fn handle(
         &mut self,
         request: &Request,
         sign_in: bool,
-        choice: TerminalSetting,
+        terminal: TerminalChoice,
     ) -> Result<Value, ManagedError> {
+        let choice = terminal.setting;
         match request.method.as_str() {
             "managed_snapshot" => {
                 let mut sessions = self.sessions.views()?;
@@ -235,7 +237,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
                 )
             }
             "managed_tool_setup" => {
@@ -496,13 +498,29 @@ fn sign_in_key(shared: &DaemonShared) -> Option<String> {
         .map(|c| c.key.clone())
 }
 
-/// The terminal the settings name, read per request like the sign-in.
-fn terminal_choice(shared: &DaemonShared) -> TerminalSetting {
+/// The terminal the settings name, and whether the person chose it
+/// (`managed_terminal_chosen`). A shell asks for a terminal in the launch
+/// dialog until they have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalChoice {
+    setting: TerminalSetting,
+    chosen: bool,
+}
+
+/// The terminal choice, read per request like the sign-in. Unreadable
+/// settings name no app, and count as chosen so nothing asks over them.
+fn terminal_choice(shared: &DaemonShared) -> TerminalChoice {
     shared
         .settings
         .lock()
-        .map(|s| s.managed_terminal)
-        .unwrap_or(TerminalSetting::Unrecognized)
+        .map(|s| TerminalChoice {
+            setting: s.managed_terminal,
+            chosen: s.managed_terminal_chosen,
+        })
+        .unwrap_or(TerminalChoice {
+            setting: TerminalSetting::Unrecognized,
+            chosen: true,
+        })
 }
 
 /// The terminal choice changed: move the revision so every shell re-reads
@@ -991,6 +1009,17 @@ mod tests {
         sign_in: bool,
         choice: TerminalSetting,
     ) -> Result<Value, ManagedError> {
+        call_choosing(service, method, params, sign_in, choice, false)
+    }
+
+    fn call_choosing(
+        service: &mut ManagedService,
+        method: &str,
+        params: Value,
+        sign_in: bool,
+        setting: TerminalSetting,
+        chosen: bool,
+    ) -> Result<Value, ManagedError> {
         service.handle(
             &Request {
                 id: 1,
@@ -998,7 +1027,7 @@ mod tests {
                 params,
             },
             sign_in,
-            choice,
+            TerminalChoice { setting, chosen },
         )
     }
 
@@ -1432,6 +1461,25 @@ mod tests {
         .unwrap();
         assert_eq!(unknown["capabilities"]["terminal_current"], Value::Null);
         assert_eq!(unknown["capabilities"]["terminal_destination"], Value::Null);
+    }
+
+    /// The snapshot says whether the person has chosen a terminal, so a
+    /// shell asks in the launch dialog until they have.
+    #[test]
+    fn the_snapshot_says_whether_the_terminal_was_chosen() {
+        let (_home, _store, mut service) = service();
+        for chosen in [false, true] {
+            let snapshot = call_choosing(
+                &mut service,
+                "managed_snapshot",
+                json!({}),
+                false,
+                TerminalSetting::default(),
+                chosen,
+            )
+            .unwrap();
+            assert_eq!(snapshot["capabilities"]["terminal_chosen"], chosen);
+        }
     }
 
     /// Off macOS, no offered terminal found means no Launch, rather than a

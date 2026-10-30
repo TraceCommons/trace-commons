@@ -29,21 +29,21 @@ final class DesignRulings20261020Tests: XCTestCase {
     }
 
     /// The Not contributed card has no border. A shimmer crossed it from
-    /// 2026-10-20; since 2026-10-22 a soft light turns round its edge
-    /// instead (`DesignRulings20261022Tests`), over its fill and
-    /// watermark.
-    func test_aLightTurnsRoundTheNotContributedCard() throws {
+    /// 2026-10-20, a soft light turned round its edge from 2026-10-22, and
+    /// since 2026-10-27 a brighter light glances across it
+    /// (`DesignRulings20261027Tests`), over its fill and watermark.
+    func test_lightGlancesAcrossTheNotContributedCard() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         let card = try XCTUnwrap(home.range(of: "private struct HomeNotContributedCard: View {"))
         let end = try XCTUnwrap(home.range(of: "\n}\n", range: card.upperBound..<home.endIndex))
         let body = home[card.upperBound..<end.lowerBound]
         XCTAssertFalse(body.contains("strokeBorder"), "the border is back")
-        XCTAssertFalse(body.contains("glassCardShimmer"), "the shimmer is back")
+        XCTAssertFalse(body.contains("glassCardBeacon"), "the beacon is back")
         let mark = try XCTUnwrap(body.range(of: ".glassCardWatermark("))
-        let tier = try XCTUnwrap(body.range(of: ".glassTier(.card"))
-        let beacon = try XCTUnwrap(body.range(of: ".glassCardBeacon()"))
+        let tier = try XCTUnwrap(body.range(of: ".glassTier(.card,"))
+        let shimmer = try XCTUnwrap(body.range(of: ".glassCardShimmer()"))
         XCTAssertLessThan(mark.lowerBound, tier.lowerBound)
-        XCTAssertLessThan(tier.lowerBound, beacon.lowerBound, "the light sits over the card's fill")
+        XCTAssertLessThan(tier.lowerBound, shimmer.lowerBound, "the light sits over the card's fill")
     }
 
     /// The card's line is the core's call to share; an older core's plain
@@ -82,7 +82,8 @@ final class DesignRulings20261020Tests: XCTestCase {
         let traces = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionTraces) {"))
         let waiting = try XCTUnwrap(home.range(of: "HomeStatTile(label: MonitorWords.waiting"))
         let account = try XCTUnwrap(home.range(of: "HomeSection(words?.sectionAccount) {"))
-        let privateAI = try XCTUnwrap(home.range(of: "                HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)\n            }\n            privateAI\n"))
+        let tiles = try XCTUnwrap(home.range(of: "                HomeAccountTiles(store: store, openPrivateAI: openPrivateAI)\n            }\n"))
+        let privateAI = try XCTUnwrap(home.range(of: "            privateAI\n", range: tiles.upperBound..<home.endIndex))
         let credit = try XCTUnwrap(home.range(of: "HomeStatTile(label: HomeFormat.creditPendingWord"))
         XCTAssertLessThan(hero.lowerBound, traces.lowerBound)
         XCTAssertLessThan(traces.lowerBound, waiting.lowerBound)
