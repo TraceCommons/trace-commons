@@ -42,9 +42,11 @@
  * TEARDOWN BOUNDS: neither tc_daemon_stop nor tc_handle_free waits on
  * daemon work without a deadline, so a host may call them on its UI
  * thread while quitting. tc_daemon_stop waits at most 2 seconds for the
- * daemon's current pass to end; a pass checks for stop only between steps,
- * and a step can block for longer. Past that it returns, and the rest of
- * the teardown finishes on its own thread: the daemon keeps its exclusive
+ * daemon's loop to end: its current pass, which checks for stop only
+ * between steps (a step can block for longer), then the private AI
+ * listener's drain of in-flight model calls. Past the 2 seconds it
+ * returns, and the rest of the teardown finishes on its own thread: the
+ * daemon keeps its exclusive
  * lock on the state directory until that pass has ended, so a new
  * tc_daemon_start on the same directory fails, as against any running
  * daemon, until then. tc_handle_free waits at most 1 second more, for

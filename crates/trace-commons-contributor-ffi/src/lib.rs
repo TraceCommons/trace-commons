@@ -1145,8 +1145,8 @@ pub unsafe extern "C" fn tc_daemon_start_with_settings(
 }
 
 /// Tear down the embedded daemon (idempotent) from a dedicated OS thread
-/// that carries no tokio context of its own, so blocking on it with a plain
-/// `JoinHandle::join` is always safe regardless of the calling thread's own
+/// that carries no tokio context of its own, so waiting on it (now with a
+/// deadline, through a channel) is always safe regardless of the calling thread's own
 /// context -- including from inside a `tc_subscribe` callback running on
 /// this handle's own runtime, where calling `handle.rt.block_on(..)`
 /// directly on the calling thread previously panicked ("cannot start a
@@ -1253,8 +1253,10 @@ fn stop_embedded(handle: &tc_handle) {
     let _ = done_rx.recv_timeout(STOP_WAIT_BOUND);
 }
 
-/// How long `tc_daemon_stop` waits for the running pass to end before it
-/// returns and leaves the rest of the teardown to run in the background.
+/// How long `tc_daemon_stop` waits for the supervise loop to end -- its
+/// current pass, then the private-inference proxy's drain after it (whose
+/// own budget is five seconds) -- before it returns and leaves the rest of
+/// the teardown to run in the background.
 ///
 /// A pass checks the shutdown flag only between steps, and a step can block
 /// for seconds (a session-root scan, an account-admission read, an upload).
@@ -1989,8 +1991,8 @@ pub unsafe extern "C" fn tc_unsubscribe(handle: *mut tc_handle, token: u64) {
         };
         if let Some(jh) = jh {
             jh.abort();
-            // A dedicated OS thread and a plain `JoinHandle::join`, exactly
-            // as `stop_embedded` uses -- safe to block on regardless of
+            // A dedicated OS thread and a plain `JoinHandle::join`, as
+            // `stop_embedded` uses (it adds a deadline) -- safe to block on regardless of
             // this calling thread's own context, and the only way to give
             // "no callback after this returns" a real guarantee rather
             // than an incidental one.
@@ -7419,7 +7421,7 @@ mod bounded_teardown_tests {
     /// daemon on the same directory cannot overlap it.
     #[test]
     fn an_abandoned_pass_keeps_the_lock_until_it_ends() {
-        const SHORT_PASS: Duration = Duration::from_secs(5);
+        const SHORT_PASS: Duration = Duration::from_secs(8);
         let dir = tempfile::tempdir().unwrap();
         let h = handle_with_supervisor(dir.path(), |rt| {
             rt.spawn(async {
