@@ -6060,8 +6060,10 @@ with `managed-terminal-not-found`.
 Launch sheet's model picker, merging like `notify`: `{"<model id>": true}`
 stars an id, `false` unstars it, and omitted ids stay. An id must be
 non-empty, at most 256 UTF-8 bytes, and free of whitespace and control
-characters; a value that is not a boolean, a bad id, or a list past 32
-entries refuses the whole patch with `bad_params` / `settings-invalid-value`.
+characters; a value that is not a boolean, a bad id, or a patch that grows
+the list past 32 entries refuses the whole patch with `bad_params` /
+`settings-invalid-value`. A favorite NEAR AI stopped listing still counts
+toward the 32, but a removal is never refused for the bound.
 `set_settings` does not check that NEAR AI offers the id;
 `managed_model_favorite_set` does, and is what shells call. The settings
 answer carries the stored list as `managed_favorite_models` (`[string]`, in no
@@ -9694,10 +9696,16 @@ launcher on a saved key.
   is public; no key is read or sent. `managed-model-unavailable` when NEAR AI
   cannot be read; `managed-invalid-request` for other parameters. It also
   carries `favorites` (`[string]`): the starred models NEAR AI offers `tool`,
-  in its order. A starred model it no longer offers is kept but not named. An
-  older daemon omits the field, which reads as none. Shells list favorites
-  after the default option and before the other models, and do not repeat
-  them.
+  in its order; and `unavailable_favorites` (`[string]`): the starred ids
+  NEAR AI no longer lists for any tool. A starred model it lists but `tool`
+  is never offered (Codex's refused models) is in neither. Nothing is pruned:
+  a model NEAR AI lists again is a favorite again. When NEAR AI cannot be
+  read the method fails, so nothing is ever marked unavailable for want of
+  a catalogue. An older daemon omits both fields, which read as none. Shells
+  list favorites after the default option and before the other models, do
+  not repeat them, never offer an unavailable favorite, and show each one
+  apart with a way to unstar it. A saved model the catalogue does not list
+  falls back to the default option, visibly; with no catalogue it is kept.
 - `managed_model_favorite_set {model, favorite}` (async only) stars
   (`favorite: true`) or unstars one model and answers `{favorites: [string]}`,
   the whole stored list in no particular order. Starring reads NEAR AI's chat
@@ -9705,7 +9713,8 @@ launcher on a saved key.
   `managed-model-unavailable`, also the answer when NEAR AI cannot be read;
   nothing is written. Unstarring reads nothing and always succeeds for a
   well-formed id. An empty or malformed id, a non-boolean `favorite`, any
-  other field, or a 33rd favorite is `managed-invalid-request`. The list is
+  other field, or starring a 33rd favorite is `managed-invalid-request`;
+  unstarring is never refused for the bound. The list is
   global, not per tool: one favorite shows in each tool's picker that offers
   it. A developer dry run refuses it, as it does `managed_model_catalogue`.
 - Session views' `model` is the model the session starts on: the one named,

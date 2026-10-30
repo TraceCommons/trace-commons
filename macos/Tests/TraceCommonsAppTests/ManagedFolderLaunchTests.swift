@@ -48,6 +48,24 @@ final class ManagedFolderLaunchTests: XCTestCase {
         XCTAssertTrue(ManagedFolderOptions.modelIsAvailable(draft, tool: "codex", connection: "near_ai_signin", catalogue: nil))
     }
 
+    /// Launch is held for a model the catalogue does not list, and while
+    /// there is no catalogue to check it against; the default always goes.
+    func testLaunchNeverNamesAModelTheCatalogueDoesNotList() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one"}"#.utf8))
+        var draft = ManagedFolderDraft()
+        draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
+        for connection in ["near_ai", "near_ai_signin"] {
+            draft.model = nil
+            XCTAssertTrue(ManagedFolderOptions.modelIsAvailable(draft, tool: "claude", connection: connection, catalogue: catalogue))
+            XCTAssertTrue(ManagedFolderOptions.modelIsAvailable(draft, tool: "claude", connection: connection, catalogue: nil))
+            draft.model = "a/one"
+            XCTAssertTrue(ManagedFolderOptions.modelIsAvailable(draft, tool: "claude", connection: connection, catalogue: catalogue))
+            XCTAssertFalse(ManagedFolderOptions.modelIsAvailable(draft, tool: "claude", connection: connection, catalogue: nil))
+            draft.model = "gone/model"
+            XCTAssertFalse(ManagedFolderOptions.modelIsAvailable(draft, tool: "claude", connection: connection, catalogue: catalogue))
+        }
+    }
+
     @MainActor
     func testFolderScreenShowsCollectionOptionsForAllThreeAgents() throws {
         _ = NSApplication.shared

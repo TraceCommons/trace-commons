@@ -711,8 +711,11 @@ fn favorite_models(shared: &DaemonShared) -> Vec<String> {
 /// The NEAR AI chat models a launch can name, and the one `tool` gets
 /// when it names none (`managed::models`). The catalogue is public: no
 /// key is read or sent. Answers `{"models":[{"id","name"?}],"default",
-/// "favorites"}`, where `favorites` is the starred models among `models`,
-/// in NEAR AI's order.
+/// "favorites","unavailable_favorites"}`: `favorites` is the starred models
+/// among `models`, in NEAR AI's order; `unavailable_favorites` is the
+/// starred ids NEAR AI no longer lists for any tool. Neither prunes the
+/// stored list, so a model NEAR AI offers again is a favorite again. When
+/// NEAR AI cannot be read there is no answer, so nothing is marked.
 async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -723,11 +726,10 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
         Ok(p) => p,
         Err(error) => return respond(request, Err(error.into())),
     };
-    let offered = fetch_chat_models()
-        .await
-        .map(|models| models::offered(p.tool, models));
-    let result = match offered {
-        Some(models) if !models.is_empty() => {
+    let listed = fetch_chat_models().await;
+    let offered = listed.clone().map(|models| models::offered(p.tool, models));
+    let result = match (listed, offered) {
+        (Some(listed), Some(models)) if !models.is_empty() => {
             let default = models::default_for(p.tool, &models).map(|m| m.id.clone());
             let starred = favorite_models(shared);
             let favorites: Vec<&str> = models
@@ -735,7 +737,15 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
                 .map(|m| m.id.as_str())
                 .filter(|id| starred.iter().any(|s| s == id))
                 .collect();
-            Ok(json!({"models":models,"default":default,"favorites":favorites}))
+            let unavailable: Vec<&str> = starred
+                .iter()
+                .map(String::as_str)
+                .filter(|id| !listed.iter().any(|m| m.id == *id))
+                .collect();
+            Ok(json!({
+                "models":models,"default":default,"favorites":favorites,
+                "unavailable_favorites":unavailable,
+            }))
         }
         _ => Err(ManagedError::ModelUnavailable.into()),
     };

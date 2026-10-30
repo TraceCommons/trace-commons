@@ -15,6 +15,10 @@ struct ManagedFolderOptions: View {
     @EnvironmentObject private var model: AppModel
     @State private var favoriteBusy = false
     @State private var favoriteRefused = false
+    /// The saved or chosen model was dropped by NEAR AI and the picker fell
+    /// back to the default. Set only by that fallback, never for a missing
+    /// catalogue, and cleared when the person picks again.
+    @State private var fellBack = false
 
     static func modelIsAvailable(_ draft: ManagedFolderDraft, tool: String, connection: String,
                                  catalogue: ManagedModelCatalogue?) -> Bool {
@@ -53,7 +57,7 @@ struct ManagedFolderOptions: View {
                 HStack(spacing: GlassTokens.Space.s2) {
                     GlassPicker(model.managedText("model_choice"), selection: Binding(
                         get: { draft.model ?? ManagedSurface.defaultModel },
-                        set: { draft.model = $0.flatMap { $0.isEmpty ? nil : $0 }; favoriteRefused = false }),
+                        set: { draft.model = $0.flatMap { $0.isEmpty ? nil : $0 }; favoriteRefused = false; fellBack = false }),
                         options: modelOptions, placeholder: model.managedText("model_default_unknown"))
                     if let chosen = draft.model, ManagedSurface.offersFavorite(chosen, in: catalogue) {
                         favoriteStar(chosen)
@@ -61,12 +65,19 @@ struct ManagedFolderOptions: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // The catalogue may arrive before or after the folder settings:
+            // this runs when the fields appear and on every new catalogue.
+            .onChange(of: catalogue, initial: true) { _, _ in reconcileModel() }
+            .onDisappear { fellBack = false }
+            ForEach(ManagedSurface.unavailableFavorites(catalogue), id: \.self) { stale in
+                unavailableFavoriteRow(stale)
+            }
             if favoriteRefused {
                 Text(model.managedText("model_unavailable"))
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
             }
-            if !Self.modelIsAvailable(draft, tool: tool, connection: connection, catalogue: catalogue) {
+            if fellBack {
                 Text(model.managedText("folder_model_unavailable"))
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
@@ -100,6 +111,36 @@ struct ManagedFolderOptions: View {
             Toggle(model.managedText("collect_traces"), isOn: $draft.collectTraces)
                 .toggleStyle(GlassToggleStyle(.settings))
             Text(model.managedText("collection_scope")).glassType(GlassTokens.TypeScale.caption)
+        }
+    }
+
+    /// A model NEAR AI no longer lists falls back to the default, visibly.
+    /// Without a catalogue nothing changes: unknown is not removed.
+    private func reconcileModel() {
+        let reconciled = ManagedSurface.reconciledModel(draft.model, in: catalogue)
+        guard reconciled.fellBack else { return }
+        draft.model = reconciled.model
+        fellBack = true
+    }
+
+    /// A favorite NEAR AI no longer lists, and its removal.
+    private func unavailableFavoriteRow(_ stale: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(model.managedText("model_favorite_unavailable").replacingOccurrences(of: "{model}", with: stale))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            Button(model.managedText("remove")) {
+                favoriteBusy = true
+                model.setFavoriteModel(stale, favorite: false) { favorites in
+                    favoriteBusy = false
+                    if let favorites { catalogue = catalogue?.withFavorites(favorites) }
+                }
+            }
+            .buttonStyle(GlassButtonStyle(.link))
+            .disabled(favoriteBusy)
+            .accessibilityLabel(model.managedText("model_favorite_remove_named").replacingOccurrences(of: "{model}", with: stale))
         }
     }
 

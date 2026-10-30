@@ -2184,7 +2184,9 @@ pub fn apply_settings_object(
             }
             // Favorite models merge like `notify`: `{"<id>": true}` stars an
             // id, `false` unstars it, omitted ids stay. One bad entry, or a
-            // list past the bound, refuses the whole patch. Also reachable as
+            // patch that grows the list past the bound, refuses the whole
+            // patch. A removal is never refused for the bound, so a person
+            // can always tidy a full list. Also reachable as
             // `managed_model_favorite_set`, which writes through here.
             "managed_favorite_models" => {
                 let entries = value.as_object().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
@@ -2203,7 +2205,9 @@ pub fn apply_settings_object(
                         candidate.push(id.clone());
                     }
                 }
-                if candidate.len() > MAX_FAVORITE_MODELS {
+                if candidate.len() > MAX_FAVORITE_MODELS
+                    && candidate.len() > settings.managed_favorite_models.len()
+                {
                     return Err(ERR_SETTINGS_INVALID_VALUE);
                 }
                 settings.managed_favorite_models = candidate;
@@ -3585,6 +3589,36 @@ mod tests {
             Ok(true)
         );
         assert_eq!(full.managed_favorite_models.len(), MAX_FAVORITE_MODELS);
+
+        // A list already past the bound (only a hand-edited file holds one)
+        // can always shrink, never grow.
+        let mut over = DaemonSettings {
+            managed_favorite_models: (0..MAX_FAVORITE_MODELS + 8)
+                .map(|n| format!("m/{n}"))
+                .collect(),
+            ..DaemonSettings::default()
+        };
+        assert_eq!(
+            apply_settings_object(&mut over, &patch(serde_json::json!({"m/0": false}))),
+            Ok(true)
+        );
+        assert_eq!(over.managed_favorite_models.len(), MAX_FAVORITE_MODELS + 7);
+        assert_eq!(
+            apply_settings_object(
+                &mut over.clone(),
+                &patch(serde_json::json!({"m/1": false, "m/new": true, "m/newer": true}))
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        // Swapping one for one keeps it the same length: allowed.
+        assert_eq!(
+            apply_settings_object(
+                &mut over,
+                &patch(serde_json::json!({"m/1": false, "m/new": true}))
+            ),
+            Ok(true)
+        );
+        assert_eq!(over.managed_favorite_models.len(), MAX_FAVORITE_MODELS + 7);
 
         let home = tempfile::tempdir().unwrap();
         let store = crate::config::ConfigStore::open(home.path().to_path_buf()).unwrap();

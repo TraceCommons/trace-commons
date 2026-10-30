@@ -340,6 +340,49 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertFalse(ManagedSurface.offersFavorite("a/one", in: nil))
     }
 
+    /// A favorite NEAR AI no longer lists is reported apart, for its own
+    /// row with a way to remove it. Removing it drops the row without a
+    /// re-read. An older daemon sends none, and no catalogue (offline, or
+    /// the read failed) marks nothing: unknown is not removed.
+    func testUnavailableFavoritesAreListedApartAndNeverGuessed() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"},{"id":"b/two"}],"default":"a/one","favorites":["b/two"],"unavailable_favorites":["gone/model","gone/other"]}"#.utf8))
+        XCTAssertEqual(ManagedSurface.unavailableFavorites(catalogue), ["gone/model", "gone/other"])
+        // Never in the picker.
+        XCTAssertFalse(ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }.map(\.value).contains("gone/model"))
+
+        // The stored list after removing one stale favorite.
+        let removed = catalogue.withFavorites(["gone/other", "b/two"])
+        XCTAssertEqual(ManagedSurface.unavailableFavorites(removed), ["gone/other"])
+        XCTAssertEqual(removed.favorites, ["b/two"])
+        // Starring a listed model never makes it unavailable.
+        let starred = removed.withFavorites(["gone/other", "b/two", "a/one"])
+        XCTAssertEqual(ManagedSurface.unavailableFavorites(starred), ["gone/other"])
+        XCTAssertEqual(Set(starred.favorites), ["a/one", "b/two"])
+
+        let older = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":null}"#.utf8))
+        XCTAssertEqual(older.unavailableFavorites, [])
+        XCTAssertEqual(ManagedSurface.unavailableFavorites(nil), [])
+    }
+
+    /// A saved or chosen model NEAR AI no longer lists falls back to the
+    /// default, and says so. With no catalogue the model is unknown, not
+    /// removed: it is kept, and nothing says it is unavailable.
+    func testAModelNoLongerListedFallsBackToTheDefault() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"a/one"}],"default":"a/one"}"#.utf8))
+        XCTAssertEqual(ManagedSurface.reconciledModel("a/one", in: catalogue), ManagedModelReconcile(model: "a/one", fellBack: false))
+        XCTAssertEqual(ManagedSurface.reconciledModel("gone/model", in: catalogue), ManagedModelReconcile(model: nil, fellBack: true))
+        XCTAssertEqual(ManagedSurface.reconciledModel(nil, in: catalogue), ManagedModelReconcile(model: nil, fellBack: false))
+        XCTAssertEqual(ManagedSurface.reconciledModel("gone/model", in: nil), ManagedModelReconcile(model: "gone/model", fellBack: false))
+
+        // The launch after a fallback names no model: the tool's default.
+        var draft = ManagedFolderDraft()
+        draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
+        draft.model = "gone/model"
+        draft.model = ManagedSurface.reconciledModel(draft.model, in: catalogue).model
+        let params = draft.applying(to: ["tool": "claude", "connection": "near_ai"])
+        XCTAssertNil(params["model"] as? String)
+    }
+
     /// The `managed_model_favorite_set` request: the model and the new
     /// state, nothing else.
     func testTheFavoriteRequestNamesTheModelAndTheState() {

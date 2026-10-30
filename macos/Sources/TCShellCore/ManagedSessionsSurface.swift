@@ -312,25 +312,50 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
     public let `default`: String?
     /// The person's favorite model ids. An older daemon sends none.
     public let favorites: [String]
+    /// Favorites NEAR AI no longer lists, kept in case it offers them again.
+    /// An older daemon sends none.
+    public let unavailableFavorites: [String]
 
-    private enum CodingKeys: String, CodingKey { case models, `default`, favorites }
+    private enum CodingKeys: String, CodingKey {
+        case models, `default`, favorites
+        case unavailableFavorites = "unavailable_favorites"
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         models = try container.decode([ManagedModel].self, forKey: .models)
         `default` = try container.decodeIfPresent(String.self, forKey: .default)
         favorites = try container.decodeIfPresent([String].self, forKey: .favorites) ?? []
+        unavailableFavorites = try container.decodeIfPresent([String].self, forKey: .unavailableFavorites) ?? []
     }
 
-    private init(models: [ManagedModel], default: String?, favorites: [String]) {
+    private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String]) {
         self.models = models
         self.default = `default`
         self.favorites = favorites
+        self.unavailableFavorites = unavailableFavorites
     }
 
-    /// This catalogue with the list `managed_model_favorite_set` answered.
-    public func withFavorites(_ favorites: [String]) -> ManagedModelCatalogue {
-        ManagedModelCatalogue(models: models, default: `default`, favorites: favorites)
+    /// This catalogue with the stored list `managed_model_favorite_set`
+    /// answered: a listed model is a favorite, and a stale one stays
+    /// unavailable until it is removed. Nothing is re-read.
+    public func withFavorites(_ stored: [String]) -> ManagedModelCatalogue {
+        ManagedModelCatalogue(
+            models: models, default: `default`,
+            favorites: stored.filter { id in models.contains { $0.id == id } },
+            unavailableFavorites: unavailableFavorites.filter(stored.contains))
+    }
+}
+
+/// `ManagedSurface.reconciledModel`'s answer: the picker's value, and
+/// whether it fell back to the default because NEAR AI dropped the model.
+public struct ManagedModelReconcile: Equatable, Sendable {
+    public let model: String?
+    public let fellBack: Bool
+
+    public init(model: String?, fellBack: Bool) {
+        self.model = model
+        self.fellBack = fellBack
     }
 }
 
@@ -365,6 +390,21 @@ public extension ManagedSurface {
         let ordered = models.filter { favorites.contains($0.id) } + models.filter { !favorites.contains($0.id) }
         return [ManagedModelOption(title: first, value: defaultModel)]
             + ordered.map { ManagedModelOption(title: $0.id, value: $0.id) }
+    }
+
+    /// The favorites NEAR AI no longer lists, each shown with a way to
+    /// remove it. None without a catalogue: unknown is not removed.
+    static func unavailableFavorites(_ catalogue: ManagedModelCatalogue?) -> [String] {
+        catalogue?.unavailableFavorites ?? []
+    }
+
+    /// The picker's value once the catalogue is known. A model it does not
+    /// list falls back to the default (`fellBack`), which the sheet says;
+    /// with no catalogue the model is kept, unknown rather than removed.
+    static func reconciledModel(_ model: String?, in catalogue: ManagedModelCatalogue?) -> ManagedModelReconcile {
+        guard let model, let catalogue else { return ManagedModelReconcile(model: model, fellBack: false) }
+        if catalogue.models.contains(where: { $0.id == model }) { return ManagedModelReconcile(model: model, fellBack: false) }
+        return ManagedModelReconcile(model: nil, fellBack: true)
     }
 
     /// Whether `model` is starred.
