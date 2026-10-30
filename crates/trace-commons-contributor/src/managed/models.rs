@@ -45,9 +45,8 @@ pub const EXCLUDED: &[&str] = &["rerank", "privacy-filter", "embedding", "whispe
 pub enum ModelTier {
     /// "Incognito": a vendor's model (OpenAI, Anthropic, Google, ...) on
     /// the vendor's servers, sent through NEAR AI's gateway under NEAR AI's
-    /// account. `owned_by` is the vendor's name, but only the vendors in
-    /// `INCOGNITO_OWNERS` are recognised: an owner the code does not know
-    /// has no tier, so the picker never claims a tier NEAR AI did not give.
+    /// account. `owned_by` is the vendor's name. The default for any named
+    /// owner not known to be a privacy provider, since it claims the least.
     Incognito,
     /// "Confidential TEE": NEAR AI's own GPUs, in a TEE. `owned_by` is
     /// `nearai`.
@@ -61,25 +60,22 @@ pub enum ModelTier {
     Unknown,
 }
 
-/// The `owned_by` vendors NEAR AI's docs name as Incognito (OpenAI,
-/// Anthropic, Google), matched case-insensitively. Other owners in the
-/// catalogue (`system`, `organization-owner`, ...) carry no tier.
-const INCOGNITO_OWNERS: &[&str] = &["openai", "anthropic", "google"];
-
 impl ModelTier {
-    /// The tier `owned_by` positively names; none for an absent, blank or
-    /// unrecognised owner.
+    /// The tier `owned_by` names: NEAR AI or `Attested 3P` only when the
+    /// owner says so, otherwise Incognito (the least private) for any named
+    /// owner. None only for an absent or blank one.
     fn from_owner(owned_by: Option<&str>) -> Option<Self> {
         let owner = owned_by?.trim();
+        if owner.is_empty() {
+            return None;
+        }
         let is = |name: &str| owner.eq_ignore_ascii_case(name);
         if ["nearai", "near-ai", "near ai"].into_iter().any(is) {
             Some(Self::NearAi)
         } else if is("attested 3p") {
             Some(Self::External)
-        } else if INCOGNITO_OWNERS.iter().copied().any(is) {
-            Some(Self::Incognito)
         } else {
-            None
+            Some(Self::Incognito)
         }
     }
 }
@@ -453,9 +449,9 @@ mod tests {
                 ("Qwen/Qwen3.8-27B", Some(ModelTier::NearAi)),
                 ("z-ai/glm-5.3", Some(ModelTier::External)),
                 ("moonshotai/kimi-k3", Some(ModelTier::External)),
-                ("x-ai/grok-4.7", None),
-                ("a/b", None),
-                ("c/d", None),
+                ("x-ai/grok-4.7", Some(ModelTier::Incognito)),
+                ("a/b", Some(ModelTier::Incognito)),
+                ("c/d", Some(ModelTier::Incognito)),
                 ("e/f", Some(ModelTier::NearAi)),
                 ("g/h", Some(ModelTier::NearAi)),
                 ("i/j", Some(ModelTier::NearAi)),
