@@ -2510,8 +2510,7 @@ mod tests {
         let witness =
             crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
 
-        let transport =
-            transport.with_envelope_limit(crate::envelope::TEST_ENVELOPE_LIMIT_BYTES);
+        let transport = transport.with_envelope_limit(crate::envelope::TEST_ENVELOPE_LIMIT_BYTES);
         let mut oversized = raw_with_secret();
         oversized.events[0].content =
             Some("x".repeat(crate::envelope::TEST_ENVELOPE_LIMIT_BYTES + 1));

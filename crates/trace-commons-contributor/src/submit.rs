@@ -1721,8 +1721,14 @@ impl<'a> SubmitContext<'a> {
                     // this is byte for byte what it was before the feature
                     // existed.
                     None => {
-                        match checked_local_redaction(&redactor, raw, self.canary_checked, envelope_limit)
-                            .await {
+                        match checked_local_redaction(
+                            &redactor,
+                            raw,
+                            self.canary_checked,
+                            envelope_limit,
+                        )
+                        .await
+                        {
                             Ok(e) => {
                                 // Recorded, rather than left at whatever the
                                 // previous submission set: a shell asking "what
@@ -7115,7 +7121,11 @@ mod json_output_tests {
         // stops a future change from surfacing a response body or path to a
         // caller that logs this output.
         let out = outcomes_to_json(
-            &[refused_for_size("sha256:test", 1_600_000, MAX_ENVELOPE_BYTES)],
+            &[refused_for_size(
+                "sha256:test",
+                1_600_000,
+                MAX_ENVELOPE_BYTES,
+            )],
             true,
             &["preview notice"],
         );

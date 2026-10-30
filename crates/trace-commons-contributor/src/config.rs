@@ -1158,8 +1158,9 @@ pub struct ConfigStore {
 /// `ConfigStore::lower_envelope_limit_for_tests`.
 #[cfg(any(test, feature = "test-credential-store"))]
 fn test_envelope_limits() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, usize>> {
-    static LIMITS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>> =
-        std::sync::OnceLock::new();
+    static LIMITS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>,
+    > = std::sync::OnceLock::new();
     LIMITS.get_or_init(Default::default)
 }
 

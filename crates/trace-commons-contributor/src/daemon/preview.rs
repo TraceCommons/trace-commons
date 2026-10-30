@@ -710,17 +710,16 @@ pub async fn build_preview_card(
     // See `build_preview_with_correction`: one large session builds at a
     // time, and a small one never waits.
     let _large_session = crate::large_session_gate::admit(session_ref.size_bytes).await;
-    let (core, _envelope) =
-        build_preview_core(
-            cfg,
-            near_ai,
-            source,
-            session_ref,
-            None,
-            attested_bodies,
-            store.envelope_limit_bytes(),
-        )
-        .await?;
+    let (core, _envelope) = build_preview_core(
+        cfg,
+        near_ai,
+        source,
+        session_ref,
+        None,
+        attested_bodies,
+        store.envelope_limit_bytes(),
+    )
+    .await?;
     Ok(core)
 }
 
@@ -1617,17 +1616,16 @@ mod tests {
         let redactor =
             trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
                 .unwrap();
-        let summary =
-            summarize_envelope(
-                &envelope,
-                0,
-                &transcript,
-                "fixture".into(),
-                true,
-                &redactor,
-                crate::envelope::MAX_ENVELOPE_BYTES,
-            )
-            .unwrap();
+        let summary = summarize_envelope(
+            &envelope,
+            0,
+            &transcript,
+            "fixture".into(),
+            true,
+            &redactor,
+            crate::envelope::MAX_ENVELOPE_BYTES,
+        )
+        .unwrap();
 
         // Non-vacuity: the secret really is still in what would be sent, and
         // the pipeline really did not count it as something it removed.
@@ -1888,7 +1886,8 @@ mod tests {
 
         let mut over = summary.clone();
         over.would_send_bytes = crate::envelope::MAX_ENVELOPE_BYTES + 1;
-        over.reason_label = size_refusal(over.would_send_bytes, crate::envelope::MAX_ENVELOPE_BYTES);
+        over.reason_label =
+            size_refusal(over.would_send_bytes, crate::envelope::MAX_ENVELOPE_BYTES);
         let value = serde_json::to_value(&over).unwrap();
         assert_eq!(value["reason_label"], "envelope-too-large", "{value}");
     }

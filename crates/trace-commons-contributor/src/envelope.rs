@@ -1691,8 +1691,14 @@ mod tests {
     #[test]
     fn a_limit_above_the_production_one_is_clamped() {
         assert_eq!(clamp_envelope_limit(usize::MAX), MAX_ENVELOPE_BYTES);
-        assert_eq!(clamp_envelope_limit(MAX_ENVELOPE_BYTES + 1), MAX_ENVELOPE_BYTES);
-        assert_eq!(clamp_envelope_limit(TEST_ENVELOPE_LIMIT_BYTES), TEST_ENVELOPE_LIMIT_BYTES);
+        assert_eq!(
+            clamp_envelope_limit(MAX_ENVELOPE_BYTES + 1),
+            MAX_ENVELOPE_BYTES
+        );
+        assert_eq!(
+            clamp_envelope_limit(TEST_ENVELOPE_LIMIT_BYTES),
+            TEST_ENVELOPE_LIMIT_BYTES
+        );
     }
 
     /// The predicates refuse exactly over the limit they are given.

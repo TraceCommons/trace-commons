@@ -1611,16 +1611,9 @@ jobs:
         run: node scripts/ci/test-step-up-page.cjs
       - uses: dtolnay/rust-toolchain@stable
       - id: cargo-cache
-        uses: actions/cache/restore@v5
+        uses: ./.github/actions/restore-cargo-test-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-test-default-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-default-
+          key-prefix: cargo-test-default
       # Whole workspace, not a hand-maintained crate list. Naming crates
       # individually meant trace-commons-protocol (45 tests, including the
       # redaction and secret-detection suites) and trace-commons-operator-client
@@ -1658,7 +1651,9 @@ jobs:
   # Split out of cargo-test-default, which had grown past its 30-minute
   # timeout: each of these builds its own feature set or package selection,
   # so in that job each one recompiled crates the workspace run had already
-  # built. Not required status checks; the owner can promote them.
+  # built. Both are required status checks (owner decision, 2026-10-30), as
+  # the steps were while they ran inside cargo-test-default; keep their
+  # `name:` values stable, since branch protection matches on them.
   cargo-test-staging-channel:
     name: staging channel tests
     runs-on: ubuntu-latest
@@ -1666,21 +1661,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      # Restore-only, from the key cargo-test-default saves on main. This job
-      # saves nothing: the repository's caches sit at GitHub's 10 GB ceiling
-      # (see ./.github/actions/trim-cargo-cache), and a third saved `target`
-      # would evict the others. What it restores is the third-party
-      # dependency graph, which this job's builds mostly share.
-      - uses: actions/cache/restore@v5
+      # Its own cache, saved on main below: this job's package and feature
+      # selection resolves some third-party crates (the tokio/hyper/zbus
+      # chain) with different features from the workspace run, and those
+      # are not in cargo-test-default's cache. Falls back to that cache,
+      # whose graph it otherwise shares, when its own is missing.
+      - id: cargo-cache
+        uses: ./.github/actions/restore-cargo-test-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-test-default-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-default-
+          key-prefix: cargo-test-staging-channel
+          fallback-prefix: cargo-test-default
       - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install a Secret Service provider for credential tests
         run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
@@ -1698,8 +1688,8 @@ jobs:
       # pin label and its reconcile twin), the attestation crate's signed
       # pin-set verifier, whose unit tests no other crate's run reaches, and
       # the server's pin re-sign tool (`trace-commons-staging-pins`), which
-      # requires the feature. None of them is compiled into the default build
-      # above.
+      # requires the feature. None of them is compiled into the
+      # `cargo test (default features)` build.
       - name: Staging channel tests
         run: |
           dbus-run-session -- sh -eu -c '
@@ -1710,6 +1700,18 @@ jobs:
             cargo test --locked -p trace-commons-attestation --features near-ai-staging
             cargo test --locked -p trace-commons-server --features near-ai-staging --bin trace-commons-staging-pins --test staging_pins_tool
           '
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   cargo-test-wallet-sdk-csp:
     name: wallet SDK and production CSP
@@ -1718,21 +1720,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      # Restore-only, from the key cargo-test-default saves on main. This job
-      # saves nothing: the repository's caches sit at GitHub's 10 GB ceiling
-      # (see ./.github/actions/trim-cargo-cache), and a third saved `target`
-      # would evict the others. What it restores is the third-party
-      # dependency graph, which this job's builds mostly share.
-      - uses: actions/cache/restore@v5
+      # Its own cache, saved on main below: this job's package and feature
+      # selection resolves some third-party crates (the tokio/hyper/zbus
+      # chain) with different features from the workspace run, and those
+      # are not in cargo-test-default's cache. Falls back to that cache,
+      # whose graph it otherwise shares, when its own is missing.
+      - id: cargo-cache
+        uses: ./.github/actions/restore-cargo-test-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-test-default-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-default-
+          key-prefix: cargo-test-wallet-sdk-csp
+          fallback-prefix: cargo-test-default
       - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install the pinned wallet browser test runtime
         run: |
@@ -1748,6 +1745,18 @@ jobs:
           cargo test --locked -p trace-commons-contributor --lib \
             near_wallet_page::tests::pinned_wallet_controls_obey_production_csp \
             -- --ignored --test-threads=1
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   preserve-order-guard:
     name: serde_json preserve_order guard
