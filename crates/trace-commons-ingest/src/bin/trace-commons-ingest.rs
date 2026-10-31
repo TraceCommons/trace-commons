@@ -741,6 +741,10 @@ const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN: &str =
     "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN";
 /// Deployment-wide upload byte budget; see [`parse_large_body_byte_budget`].
 const TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET: &str = "TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET";
+/// Most of that budget one principal may hold; see
+/// [`parse_large_body_principal_byte_share`].
+const TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES: &str =
+    "TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES";
 /// `POST /v1/traces` submissions one principal may have in flight at once.
 const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY: &str =
     "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY";
@@ -1976,6 +1980,9 @@ struct AppState {
     /// [`authenticate_large_body_request`] for each upload by its declared
     /// size. Shared by every clone of the state.
     large_body_bytes: Arc<tokio::sync::Semaphore>,
+    /// Upload body bytes each principal holds of [`Self::large_body_bytes`],
+    /// and the most it may hold. Shared by every clone of the state.
+    large_body_principal_bytes: Arc<LargeBodyPrincipalBytes>,
     analytics_min_cell_count: usize,
     analytics_broad_release_noise: Option<TraceAnalyticsNoiseConfig>,
     analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
@@ -4257,6 +4264,12 @@ impl AppState {
                 .ok()
                 .as_deref(),
         )?;
+        let large_body_principal_byte_share = parse_large_body_principal_byte_share(
+            std::env::var(TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES)
+                .ok()
+                .as_deref(),
+            large_body_byte_budget,
+        )?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
         let community_tenant_ids =
             parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_COMMUNITY_TENANT_IDS)?
@@ -5193,6 +5206,9 @@ impl AppState {
             max_export_items_per_request,
             submit_principal_limits,
             large_body_bytes: Arc::new(tokio::sync::Semaphore::new(large_body_byte_budget)),
+            large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(
+                large_body_principal_byte_share,
+            )),
             analytics_min_cell_count,
             analytics_broad_release_noise,
             analytics_broad_release_privacy_accounting,
@@ -8989,6 +9005,12 @@ fn app(state: Arc<AppState>) -> Router {
                 .merge(
                     post(submit_trace_route)
                         .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                        // Inner to `large_body_auth`, which it reads the
+                        // pre-body context from.
+                        .layer(axum::middleware::from_fn_with_state(
+                            state.clone(),
+                            admit_submit_before_body,
+                        ))
                         .layer(large_body_auth),
                 ),
         )
@@ -9845,6 +9867,14 @@ async fn authenticate_large_body_request<const LIMIT: usize>(
     let Some(weight) = large_body_weight(request.headers(), exact_length, LIMIT) else {
         return api_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
     };
+    // The principal's share before the deployment's budget, so a principal
+    // at its share never takes bytes from the shared budget.
+    let Some(_share) = state
+        .large_body_principal_bytes
+        .try_take(&principal_key, weight)
+    else {
+        return large_body_concurrency_refusal();
+    };
     let Some(_bytes) = large_body_byte_permit(&state.large_body_bytes, weight) else {
         return large_body_concurrency_refusal();
     };
@@ -9863,6 +9893,67 @@ async fn authenticate_large_body_request<const LIMIT: usize>(
 /// body was read. Only that middleware inserts it.
 #[derive(Clone)]
 struct PreBodyAuthenticated(TenantCtx);
+
+/// `POST /v1/traces` only, inside [`authenticate_large_body_request`]: take
+/// the per-principal submission rate and in-flight slot before the body is
+/// read, with the same refusals the handler gives (429,
+/// `submit_rate_limited`, `Retry-After`). The slot is held until the handler
+/// returns. The handler is told through [`SubmitAdmittedBeforeBody`] and
+/// does not count the request again; a request without it (a direct call,
+/// or a route this did not run on) is admitted by the handler as before.
+///
+/// It runs after the large-body gate's own slots and byte budget, so an
+/// upload refused there is not counted against the principal's window.
+async fn admit_submit_before_body(
+    State(state): State<Arc<AppState>>,
+    mut request: Request,
+    next: Next,
+) -> axum::response::Response {
+    let Some(PreBodyAuthenticated(tenant)) = request.extensions().get().cloned() else {
+        return next.run(request).await;
+    };
+    let _submit_slot = match admit_submit_principal(&tenant, state.submit_principal_limits) {
+        Ok(slot) => slot,
+        Err(refusal) => return api_error_response_with_retry_after(refusal),
+    };
+    request.extensions_mut().insert(SubmitAdmittedBeforeBody);
+    next.run(request).await
+}
+
+/// Set by [`admit_submit_before_body`] once the request holds its
+/// submission rate count and in-flight slot.
+#[derive(Clone, Copy)]
+struct SubmitAdmittedBeforeBody;
+
+/// Count one submission against the principal's window and take one of its
+/// in-flight slots, or the refusal to answer with. Both refusals name
+/// themselves (`submit_rate_limited`) and say when to come back, so a client
+/// keeps the upload queued instead of giving it up.
+///
+/// Length-prefixing the authenticated tenant, method, and principal
+/// components makes every authentication boundary unambiguous. Static-token
+/// configuration has no stable caller identity beyond the credential, so
+/// that path is necessarily per credential; overlapping rotation
+/// credentials receive separate budgets.
+fn admit_submit_principal(
+    tenant: &TenantCtx,
+    configured: SubmitPrincipalLimits,
+) -> ApiResult<ConcurrencyGuard<'static>> {
+    let submit_key = submit_principal_rate_limit_key(
+        tenant.tenant_id(),
+        tenant.safe_auth_method(),
+        tenant.principal_ref(),
+    );
+    let (rate, concurrency) = submit_rate_limits(&submit_key, configured);
+    if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, rate) {
+        return Err(submit_rate_limited(
+            ACCOUNT_RATE_LIMITER.principal_retry_after_seconds(&submit_key),
+        ));
+    }
+    ACCOUNT_RATE_LIMITER
+        .acquire(&submit_key, concurrency)
+        .ok_or_else(|| submit_rate_limited(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS))
+}
 
 /// What one upload weighs against [`AppState::large_body_bytes`]: its
 /// declared `Content-Length`, else the body's exact length when it knows one
@@ -9890,6 +9981,77 @@ fn large_body_byte_permit(
     weight: u32,
 ) -> Option<tokio::sync::OwnedSemaphorePermit> {
     budget.clone().try_acquire_many_owned(weight).ok()
+}
+
+/// Upload body bytes each principal holds of the deployment's budget, by the
+/// same weight [`large_body_byte_permit`] takes, and the most one principal
+/// may hold at once (`cap`). Entries exist only while bytes are held, so the
+/// table is bounded by the uploads in flight.
+struct LargeBodyPrincipalBytes {
+    cap: u64,
+    held: std::sync::Mutex<HashMap<String, u64>>,
+}
+
+impl LargeBodyPrincipalBytes {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap: cap as u64,
+            held: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Add `weight` bytes to `key`'s holding, or `None` when that would take
+    /// it past `cap`. Never waits: the caller is refused with `Retry-After`.
+    fn try_take(self: &Arc<Self>, key: &str, weight: u32) -> Option<LargeBodyPrincipalBytesGuard> {
+        let weight = u64::from(weight);
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = held.get(key).copied().unwrap_or(0);
+        let next = current
+            .checked_add(weight)
+            .filter(|next| *next <= self.cap)?;
+        held.insert(key.to_string(), next);
+        Some(LargeBodyPrincipalBytesGuard {
+            table: self.clone(),
+            key: key.to_string(),
+            weight,
+        })
+    }
+
+    #[cfg(test)]
+    fn held_for_test(&self, key: &str) -> u64 {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// RAII release of bytes taken by [`LargeBodyPrincipalBytes::try_take`].
+struct LargeBodyPrincipalBytesGuard {
+    table: Arc<LargeBodyPrincipalBytes>,
+    key: String,
+    weight: u64,
+}
+
+impl Drop for LargeBodyPrincipalBytesGuard {
+    fn drop(&mut self) {
+        let mut held = self
+            .table
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(current) = held.get_mut(&self.key) {
+            *current = current.saturating_sub(self.weight);
+            if *current == 0 {
+                held.remove(&self.key);
+            }
+        }
+    }
 }
 
 /// Most upload bodies one principal may have in flight at once, across every
@@ -16158,11 +16320,15 @@ async fn claim_legacy_receipt(
 async fn submit_trace_route(
     state: State<Arc<AppState>>,
     pre_body: Option<axum::Extension<PreBodyAuthenticated>>,
+    admitted: Option<axum::Extension<SubmitAdmittedBeforeBody>>,
     headers: HeaderMap,
     body: SubmitBody,
 ) -> axum::response::Response {
     let pre_body = pre_body.map(|axum::Extension(PreBodyAuthenticated(tenant))| tenant);
-    match submit_trace_handler_authenticated(state, headers, body, pre_body).await {
+    let admitted_before_body = admitted.is_some();
+    match submit_trace_handler_authenticated(state, headers, body, pre_body, admitted_before_body)
+        .await
+    {
         Ok(receipt) => receipt.into_response(),
         Err(error) => api_error_response_with_retry_after(error),
     }
@@ -16175,7 +16341,7 @@ async fn submit_trace_handler(
     headers: HeaderMap,
     body: SubmitBody,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
-    submit_trace_handler_authenticated(state, headers, body, None).await
+    submit_trace_handler_authenticated(state, headers, body, None, false).await
 }
 
 /// `pre_body` is the context the large-body middleware authenticated before
@@ -16183,11 +16349,16 @@ async fn submit_trace_handler(
 /// was uploading is still the credential this request began with, so the
 /// handler uses that context instead of re-checking expiry after the fact;
 /// without one (a direct call) it authenticates here.
+///
+/// `admitted_before_body` is true when [`admit_submit_before_body`] already
+/// counted this request and holds its in-flight slot; otherwise the handler
+/// takes both itself, as the first submit work.
 async fn submit_trace_handler_authenticated(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: SubmitBody,
     pre_body: Option<TenantCtx>,
+    admitted_before_body: bool,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
     let SubmitBody {
         mut envelope,
@@ -16200,33 +16371,23 @@ async fn submit_trace_handler_authenticated(
 
     // Submission work includes the server re-scrub and gate preparation, so
     // bound it before the tenant-access-grant query, envelope validation, or any
-    // submission-record read. Length-prefixing the authenticated tenant, method,
-    // and principal components makes every authentication boundary unambiguous.
-    // Static-token configuration has no stable caller identity beyond the
-    // credential, so that path is necessarily per credential; overlapping
-    // rotation credentials receive separate budgets.
-    let submit_key = submit_principal_rate_limit_key(
+    // submission-record read. Through the router this was done before the
+    // body was read; see `admit_submit_before_body`.
+    let _submit_slot = if admitted_before_body {
+        None
+    } else {
+        Some(admit_submit_principal(
+            &authenticated_tenant,
+            state.submit_principal_limits,
+        )?)
+    };
+    #[cfg(test)]
+    pause_submit_after_rate_limit_for_test(&submit_principal_rate_limit_key(
         authenticated_tenant.tenant_id(),
         authenticated_tenant.safe_auth_method(),
         authenticated_tenant.principal_ref(),
-    );
-    let (submit_rate_limit, submit_concurrency_limit) =
-        submit_rate_limits(&submit_key, state.submit_principal_limits);
-    // Both refusals name themselves (`submit_rate_limited`) and say when to
-    // come back, so a client keeps the upload queued instead of giving it up.
-    if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, submit_rate_limit) {
-        return Err(submit_rate_limited(
-            ACCOUNT_RATE_LIMITER.principal_retry_after_seconds(&submit_key),
-        ));
-    }
-    let _submit_slot = match ACCOUNT_RATE_LIMITER.acquire(&submit_key, submit_concurrency_limit) {
-        Some(guard) => guard,
-        None => {
-            return Err(submit_rate_limited(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS));
-        }
-    };
-    #[cfg(test)]
-    pause_submit_after_rate_limit_for_test(&submit_key).await;
+    ))
+    .await;
     if state.account_admission.is_some() {
         validate_envelope(&envelope)?;
     }
@@ -22311,6 +22472,34 @@ fn parse_large_body_byte_budget(configured: Option<&str>) -> anyhow::Result<usiz
     Ok(parsed)
 }
 
+/// `TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES`: the most of the upload
+/// byte budget (`budget`) one principal may hold at once, from
+/// [`MAX_INGEST_BODY_BYTES`] (one maximal upload) to `budget`. Unset is half
+/// the budget, but never less than one maximal upload, so the largest
+/// accepted upload always fits a principal's share. Anything else refuses
+/// startup, naming the variable.
+fn parse_large_body_principal_byte_share(
+    configured: Option<&str>,
+    budget: usize,
+) -> anyhow::Result<usize> {
+    let min = MAX_INGEST_BODY_BYTES;
+    let max = budget.max(min);
+    let Some(configured) = configured else {
+        return Ok((budget / 2).max(min).min(max));
+    };
+    let parsed = configured.trim().parse::<usize>().with_context(|| {
+        format!(
+            "{TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES} must be an integer from {min} to {max}"
+        )
+    })?;
+    if !(min..=max).contains(&parsed) {
+        anyhow::bail!(
+            "{TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES} must be an integer from {min} to {max}"
+        );
+    }
+    Ok(parsed)
+}
+
 fn parse_submit_principal_limits_from_env() -> anyhow::Result<SubmitPrincipalLimits> {
     fn read(name: &str) -> anyhow::Result<Option<String>> {
         match std::env::var(name) {
@@ -22326,8 +22515,8 @@ fn parse_submit_principal_limits_from_env() -> anyhow::Result<SubmitPrincipalLim
 
 /// Bounded: the rate is `1..=SUBMIT_PER_PRINCIPAL_RATE_MAX`, and the
 /// concurrency is `1..=LARGE_BODY_PER_PRINCIPAL_CONCURRENCY`, because the
-/// large-body middleware holds its own per-principal slot before this
-/// handler runs: a submit cap above it could never be reached, and the
+/// large-body middleware takes its own per-principal slot before the submit
+/// slot is taken: a submit cap above it could never be reached, and the
 /// refusal would come from the middleware instead. Anything else refuses
 /// startup, naming the variable.
 fn parse_submit_principal_limits(
