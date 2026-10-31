@@ -392,7 +392,6 @@ pub struct MonitorSummaryCopy {
     pub tools_watched: &'static str,
     pub waiting_for_you: &'static str,
     pub worth_a_second_look: &'static str,
-    pub uploads_today: &'static str,
     pub statistics: &'static str,
     pub top_projects: &'static str,
     pub top_tools: &'static str,
@@ -498,22 +497,15 @@ pub struct MonitorUndoCopy {
 }
 
 /// The queue's safeguards panel (`queue-status-panel.tsx`): the labels
-/// `HealthCopy`, `DailyBudgetCopy` and `routing_copy` do not already hold.
+/// `HealthCopy` and `routing_copy` do not already hold.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct MonitorSafeguardsCopy {
     pub eyebrow: &'static str,
     pub heading: &'static str,
-    pub daily_limit: &'static str,
     pub inference_routing: &'static str,
     pub daemon_owned: &'static str,
     pub rows_unavailable_one: &'static str,
     pub rows_unavailable: &'static str,
-    /// The daily limit row: uploads and megabytes left today. The shell
-    /// fills both numbers and adds no unit.
-    pub remaining: &'static str,
-    /// Approved sessions the spent limit holds back: one, then counted.
-    pub held_by_limit_one: &'static str,
-    pub held_by_limit: &'static str,
     /// `witness_capacity` was reported but could not be read: never "none
     /// waiting".
     pub capacity_unreadable: &'static str,
@@ -667,7 +659,6 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             tools_watched: "{count} of {total} tools watched",
             waiting_for_you: "{count} waiting for you",
             worth_a_second_look: "{count} worth a second look",
-            uploads_today: "{count} of {max} uploads today",
             statistics: "Statistics",
             top_projects: "Top projects",
             top_tools: "Top tools",
@@ -1534,14 +1525,10 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         safeguards: MonitorSafeguardsCopy {
             eyebrow: "RUNTIME",
             heading: "Contribution safeguards",
-            daily_limit: "Daily limit",
             inference_routing: "Inference routing",
             daemon_owned: "daemon-owned",
             rows_unavailable_one: "1 row unavailable",
             rows_unavailable: "{count} rows unavailable",
-            remaining: "{uploads} uploads left \u{00b7} {megabytes} MB left",
-            held_by_limit_one: "1 queued trace held by limit",
-            held_by_limit: "{count} queued traces held by limit",
             capacity_unreadable: "Some approved traces may be waiting and have not been sent, \
                 but this build could not read how many or why.",
             routing_not_declared: "Not declared",
@@ -1960,15 +1947,6 @@ mod tests {
         assert_eq!(traces.inspector.submit_all_eligible, "Submit {count}");
         assert_eq!(traces.inspector.waiting_sessions, "{count} waiting traces");
         assert_eq!(traces.inspector.waiting_sessions_one, "1 waiting trace");
-        // `queue-status-panel.tsx`'s daily limit row and its held line.
-        assert_eq!(
-            monitor_screens_copy().safeguards.remaining,
-            "{uploads} uploads left \u{00b7} {megabytes} MB left"
-        );
-        assert_eq!(
-            monitor_screens_copy().safeguards.held_by_limit,
-            "{count} queued traces held by limit"
-        );
         assert_eq!(traces.optional_automation, "OPTIONAL AUTOMATION");
         assert_eq!(
             traces.inspector.apply_outcome,

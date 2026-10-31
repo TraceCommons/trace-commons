@@ -559,16 +559,11 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         table(json!(privacy_scan_copy::privacy_scan_copy())),
     );
     // The health banner (R6/R7, #1173): every label's words and the
-    // core-down banner. `daily-cap-reached` is left out: its title is
-    // `DAILY_BUDGET_TITLE`, which `DailyBudgetCopy.swift` holds as Swift
-    // until the budget banner has an export of its own.
+    // core-down banner.
     {
         use trace_commons_contributor::{daemon::health::ALL_LABELS, health_copy};
         let mut lines = table(json!(health_copy::core_down_copy()));
-        for label in ALL_LABELS
-            .iter()
-            .filter(|label| **label != "daily-cap-reached")
-        {
+        for label in ALL_LABELS.iter() {
             lines.extend(table(json!(health_copy::health_copy_for_label(
                 label, None
             ))));

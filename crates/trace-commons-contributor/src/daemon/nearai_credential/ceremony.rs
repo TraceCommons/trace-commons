@@ -681,7 +681,7 @@ mod tests {
         // the whole document back, so a read-modify-write that read the wrong
         // copy would revert it.
         let mut settings = DaemonSettings::load_with_cloud_credentials(&store).unwrap();
-        settings.max_uploads_per_day = 7;
+        settings.max_reuploads = 7;
         settings.save_for_test(&store).unwrap();
 
         persist(
@@ -692,7 +692,7 @@ mod tests {
         )
         .unwrap();
         let stored = DaemonSettings::load_with_cloud_credentials(&store).unwrap();
-        assert_eq!(stored.max_uploads_per_day, 7);
+        assert_eq!(stored.max_reuploads, 7);
         let credential = stored.near_ai_inference.unwrap();
         assert_eq!(credential.key, "sk-minted-secret");
         assert_eq!(credential.key_id, "key-1");
