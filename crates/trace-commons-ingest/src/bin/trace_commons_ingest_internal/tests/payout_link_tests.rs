@@ -154,7 +154,7 @@ fn near_ai_rails(base: &str, mode: PayoutMode) -> PayoutRails {
             mode,
             credentials: NearAiTransferCredentials {
                 token: SecretString::from(CREDENTIAL),
-                credential_id: Uuid::from_u128(2),
+                credential_id: Some(Uuid::from_u128(2)),
                 sender_org: Uuid::from_u128(3),
                 source: NearAiCreditSource::Payment,
             },
@@ -1027,7 +1027,7 @@ async fn status_splits_own_and_referral_credit_once_the_referral_stream_runs() {
             mode: PayoutMode::DryRun,
             credentials: NearAiTransferCredentials {
                 token: SecretString::from(CREDENTIAL),
-                credential_id: Uuid::from_u128(2),
+                credential_id: Some(Uuid::from_u128(2)),
                 sender_org: Uuid::from_u128(3),
                 source: NearAiCreditSource::Payment,
             },

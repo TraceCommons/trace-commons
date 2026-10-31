@@ -366,18 +366,16 @@ struct TracesTreeView: View, Equatable {
     }
 
     /// Automatic for every folder, over the tree (owner, 2026-10-30): the
-    /// Settings choice as one switch, with what it does. Nil without the
+    /// Settings choice as one switch, with its count. Nil without the
     /// core's words.
     private var automaticSwitch: SharingChoiceCard.Switch? {
-        guard let tree = store.words?.tree, let name = tree.automaticAll,
-            let title = tree.automaticTitle, let line = tree.automaticLine else {
+        guard let tree = store.words?.tree, let name = tree.automaticAll, let line = tree.automaticCount else {
             return nil
         }
         let store = store
         return SharingChoiceCard.Switch(
             accessibleName: name,
-            title: title,
-            line: line,
+            line: SharingChoice.automaticCount(store.tree.folders, words: line),
             saved: { await store.load() })
     }
 

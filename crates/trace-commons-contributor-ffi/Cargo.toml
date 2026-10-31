@@ -19,5 +19,16 @@ anyhow = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
+[features]
+# Test builds only. Skips installing the daemon's location-only panic hook
+# (`daemon::diagnostics_log`) so a failing assertion in this crate's own
+# tests still prints its message and left/right values. Enabled solely by
+# the self dev-dependency below: with resolver 2, dev-dependency features
+# apply only when building tests, examples and benches, never to
+# `cargo build -p trace-commons-contributor-ffi`, which is what the app
+# links. Never enable it anywhere else.
+test-keep-panic-messages = []
+
 [dev-dependencies]
+trace-commons-contributor-ffi = { path = ".", features = ["test-keep-panic-messages"] }
 tempfile = "3"

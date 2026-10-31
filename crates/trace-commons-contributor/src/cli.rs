@@ -867,7 +867,15 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             AccountAction::Logout => commands::account_logout(&store).await,
         },
         Command::Daemon { action } => match action {
-            DaemonAction::Run { dry_run } => crate::daemon::run(store, dry_run).await,
+            DaemonAction::Run { dry_run } => {
+                // The dry-run store first (a no-op when already applied), so
+                // a dev dry run never writes the real state directory.
+                let store = crate::daemon::dev_dry_run_store(store)?;
+                crate::daemon::diagnostics_log::install(
+                    &store.daemon_path(crate::daemon::diagnostics_log::DIAGNOSTICS_LOG_FILE),
+                );
+                crate::daemon::run(store, dry_run).await
+            }
             DaemonAction::TokenStorage {
                 cleanup,
                 discard,

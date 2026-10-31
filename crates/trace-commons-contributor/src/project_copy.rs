@@ -112,9 +112,8 @@ pub const ARMING_BODY: &str = ARMING_BODY_WITH_BACKLOG;
 /// too little.
 pub const ARMING_BODY_WITH_BACKLOG: &str = AUTOMATIC_DETAILS;
 
-/// What Auto does, in the owner's words (2026-10-31): the line under the
-/// Traces tab's Auto switch and the body of every folder's Auto
-/// confirmation, so the two always read the same.
+/// What Auto does, in the owner's words (2026-10-31): the Details of the
+/// arming offer and the body of every folder's Auto confirmation.
 pub const AUTOMATIC_DETAILS: &str = "With Auto enabled, traces are submitted automatically. \
      You don't need to approve each one manually. You can change this setting anytime.";
 
