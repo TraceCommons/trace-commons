@@ -142,6 +142,8 @@ pub enum UploadDecision {
 /// rather than leaning on the server's `429` to slow it. Not a quota: the
 /// window slides, and nothing is counted beyond it.
 pub const BURST_MAX_UPLOADS: usize = 25;
+// Ingest admits 30 submissions a minute per principal by default.
+const _: () = assert!(BURST_MAX_UPLOADS < 30);
 
 /// The span [`BURST_MAX_UPLOADS`] is measured over.
 pub const BURST_WINDOW: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
@@ -845,9 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn the_burst_guard_stays_under_ingests_default_submission_rate() {
-        // Ingest admits 30 submissions a minute per principal by default.
-        assert!(BURST_MAX_UPLOADS < 30);
+    fn the_burst_guard_is_measured_over_ingests_one_minute_window() {
         assert_eq!(BURST_WINDOW, chrono::TimeDelta::seconds(60));
     }
 
