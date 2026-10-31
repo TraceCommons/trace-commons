@@ -502,9 +502,6 @@ if [ -f "$ingest" ]; then
   expect "$ingest" TRACE_COMMONS_COMMUNITY_LEADERBOARD_ENABLED false
   expect "$ingest" TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS 0
   expect "$ingest" TRACE_COMMONS_GATE_POLICY_VERSION staging-2026-10
-  expect "$ingest" TRACE_COMMONS_WEBAUTHN_RP_ID "$H"
-  expect "$ingest" TRACE_COMMONS_WEBAUTHN_RP_ORIGIN "https://$H,https://ingest.$H"
-  expect "$ingest" TRACE_COMMONS_WEBAUTHN_RP_NAME '"Near.ai Staging"'
   expect "$ingest" TRACE_COMMONS_SIGNED_TOKEN_ISSUER "https://issuer.$H"
   expect "$ingest" TRACE_COMMONS_SIGNED_TOKEN_EDDSA_KEYSET_URL_ALLOWED_HOSTS "issuer.$H"
   expect "$ingest" DATABASE_URL postgres://app:dummystagingdbpassword@127.0.0.1:5432/tracecommons

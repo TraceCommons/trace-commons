@@ -25,7 +25,7 @@ fork (design 3.6). This directory holds only what is staging's own.
   `ingest.` and `issuer.staging.tracecommons.ai`). Serves
   `/.well-known/apple-app-site-association` and
   `/near-ai-pins/current.json`; everything else is 404.
-- `apple-app-site-association` -- the passkey association for
+- `apple-app-site-association` -- the webcredentials association (unused since passkeys were removed) for
   `KXSWJN7WY8.ai.tracecommons.shell.staging`.
 - `render-env.sh` -- reads the `tc-staging-*` secrets from Secret Manager on
   the VM and writes `/etc/tracecommons/ingest.env`, `issuer.env` and the
@@ -284,7 +284,6 @@ directories `/etc/tracecommons`, `/var/log/tracecommons` and
    # The v2 contract reports the staging login path ready:
    # "near_ai_login_ready": true.
    curl -fsS https://ingest.staging.tracecommons.ai/v1/account/near/provision/capabilities/v2
-   scripts/check-aasa.sh https://staging.tracecommons.ai KXSWJN7WY8.ai.tracecommons.shell.staging
    # 200, not 503 attestation_signing_key_unconfigured: proves systemd read
    # the multi-line attestation keys out of ingest.env. This is the only
    # check of that; no CI job parses ingest.env the way systemd does. Do not

@@ -52,7 +52,7 @@ issuer.tracecommons.ai  <--Caddy-->  127.0.0.1:3917  trace-commons-upload-claim-
 
 ## Contributor accounts provisioning (Slices 1-3b)
 
-The contributor-account feature (accounts, passkeys, login-with-NEAR, credit
+The contributor-account feature (accounts, login-with-NEAR, credit
 consolidation) ships its schema in migrations V30-V34, which apply automatically
 on `trace-commons-ingest` boot (`run_migrations` runs before the HTTP bind). Two
 manual prerequisites must be in place or the feature fail-closes:
@@ -68,14 +68,11 @@ manual prerequisites must be in place or the feature fail-closes:
   GRANT trace_login_resolver TO tc_login_resolver_login;
   ```
   Then set `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` (in `ingest.env.template`)
-  to that role. If unset, every device-link / passkey / NEAR login redeem returns
+  to that role. If unset, every device-link / NEAR login redeem returns
   400 and no browser session resolves.
-- **Passkey RP config (REQUIRED for passkeys).** Set `TRACE_COMMONS_WEBAUTHN_RP_ID`
-  / `_RP_ORIGIN` / `_RP_NAME` (all three together) to the browser origin that serves
-  the account login UI. Partial config disables passkeys with a startup warning.
-  The template takes the RP ID and origin from `TC_WEBAUTHN_RP_ID` (the apex,
-  `tracecommons.ai`), independent of `TC_PUBLIC_HOST`. Changing the RP ID
-  invalidates every registered passkey, so do not change it after launch.
+- **No passkey configuration.** Passkeys were removed in V144; the
+  `TRACE_COMMONS_WEBAUTHN_RP_*` settings are ignored and the template no
+  longer renders them. See [`deployment.md`](deployment.md#v144-passkey-removal).
 
 Optional / posture:
 - **NEAR login** (`TRACE_COMMONS_NEAR_RPC_URL` / `_NEAR_NETWORK` /
@@ -121,7 +118,6 @@ export TC_GCP_PROJECT=tracecommons-pilot-2026
 export TC_GCP_REGION=us-central1
 export TC_CLOUD_SQL_INSTANCE=tc-pilot
 export TC_PUBLIC_HOST=tracecommons.ai
-export TC_WEBAUTHN_RP_ID=tracecommons.ai   # apex; changing it invalidates every registered passkey
 export TC_LE_EMAIL=ops@example.com
 export TC_KMS_KEY_NAME=projects/$TC_GCP_PROJECT/locations/$TC_GCP_REGION/keyRings/tc-pilot/cryptoKeys/kek-v1
 export TC_GCS_BUCKET=tc-pilot-artifacts-<DATE>

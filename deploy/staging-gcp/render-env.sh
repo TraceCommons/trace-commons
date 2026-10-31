@@ -188,7 +188,6 @@ command -v envsubst >/dev/null || refuse "envsubst (gettext-base) is not install
 TC_GCS_BUCKET=tc-staging-artifacts-20261021
 TC_KMS_KEY_NAME="projects/$TC_GCP_PROJECT/locations/$TC_KMS_LOCATION/keyRings/tc-staging/cryptoKeys/kek-v1"
 TC_RUNTIME_SA="tc-staging-runtime@$TC_GCP_PROJECT.iam.gserviceaccount.com"
-TC_WEBAUTHN_RP_ID="$TC_PUBLIC_HOST"
 
 # A private directory for gcloud's error output, removed on exit with the
 # render's working directory.
@@ -608,7 +607,7 @@ if [ "$referral_on" = 1 ]; then
 fi
 
 export TC_PUBLIC_HOST TC_GCP_PROJECT TC_GCP_REGION TC_LE_EMAIL TC_GCS_BUCKET \
-  TC_KMS_KEY_NAME TC_RUNTIME_SA TC_WEBAUTHN_RP_ID TC_DB_PASSWORD \
+  TC_KMS_KEY_NAME TC_RUNTIME_SA TC_DB_PASSWORD \
   TC_LOGIN_RESOLVER_PASSWORD TC_NEAR_AI_API_KEY TC_GATE_MASTER_KEY_HEX \
   TC_ARTIFACT_KEY_HEX TC_NEAR_ACCOUNT_INDEX_PEPPER TC_NEAR_ACCOUNT_NAME_KEK_KEY \
   TC_ISSUER_SIGNING_KID TC_SITE_ROOT
@@ -620,7 +619,7 @@ export TC_PII_BACKSTOP_DRIVER_PASSWORD="" TC_TENANT_ID=""
 # Only these names are substituted, so nothing else in a template that looks
 # like a variable is touched. envsubst takes them literally, unexpanded.
 # shellcheck disable=SC2016
-ingest_vars='${TC_DB_PASSWORD} ${TC_GCP_PROJECT} ${TC_GCP_REGION} ${TC_KMS_KEY_NAME} ${TC_GCS_BUCKET} ${TC_RUNTIME_SA} ${TC_PUBLIC_HOST} ${TC_WEBAUTHN_RP_ID} ${TC_GATE_MASTER_KEY_HEX} ${TC_NEAR_AI_API_KEY} ${TC_ARTIFACT_KEY_HEX} ${TC_LOGIN_RESOLVER_PASSWORD} ${TC_PII_BACKSTOP_DRIVER_PASSWORD} ${TC_TENANT_ID} ${TC_NEAR_ACCOUNT_INDEX_PEPPER} ${TC_NEAR_ACCOUNT_NAME_KEK_KEY}'
+ingest_vars='${TC_DB_PASSWORD} ${TC_GCP_PROJECT} ${TC_GCP_REGION} ${TC_KMS_KEY_NAME} ${TC_GCS_BUCKET} ${TC_RUNTIME_SA} ${TC_PUBLIC_HOST} ${TC_GATE_MASTER_KEY_HEX} ${TC_NEAR_AI_API_KEY} ${TC_ARTIFACT_KEY_HEX} ${TC_LOGIN_RESOLVER_PASSWORD} ${TC_PII_BACKSTOP_DRIVER_PASSWORD} ${TC_TENANT_ID} ${TC_NEAR_ACCOUNT_INDEX_PEPPER} ${TC_NEAR_ACCOUNT_NAME_KEK_KEY}'
 # shellcheck disable=SC2016
 issuer_vars='${TC_PUBLIC_HOST} ${TC_ISSUER_SIGNING_KID} ${TC_DB_PASSWORD}'
 # shellcheck disable=SC2016

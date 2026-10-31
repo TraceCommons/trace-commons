@@ -27,7 +27,7 @@ Legacy and invited identities that use their independent compatibility admission
 
 ## Endpoint and client behavior
 
-`GET /v1/account/upload-allowance` uses normal native bearer or account-cookie authentication and session rotation. Unbound and closed accounts are refused. Successful responses carry `Cache-Control: no-store` and either:
+`GET /v1/account/upload-allowance` uses normal native bearer or account-cookie authentication and session rotation. Closed accounts are refused. Successful responses carry `Cache-Control: no-store` and either:
 
 ```json
 {"allowance":{"schema_version":1,"max_uploads_per_day":200,"max_bytes_per_day":2147483648}}
