@@ -99,14 +99,15 @@
 //!   launch, and this line says so.
 //!
 //! The model picker's group headings, one per NEAR AI privacy tier
-//! (`managed::models::ModelTier`). Named by the owner 2026-10-30:
-//! - `model_group_incognito` "Incognito models" -- a vendor's model on the
-//!   vendor's servers, reached through NEAR AI's gateway (NEAR AI's
-//!   term).
+//! (`managed::models::ModelTier`). Named by the owner 2026-10-30; the
+//! picker lists them most private first (owner, 2026-10-31):
 //! - `model_group_near_ai` "NEAR AI private models" -- NEAR AI's own TEEs
 //!   (its "Confidential TEE").
 //! - `model_group_external` "External private models" -- a third party's
 //!   TEE (its "3P Confidential TEE").
+//! - `model_group_incognito` "Incognito models" -- a vendor's model on the
+//!   vendor's servers, reached through NEAR AI's gateway (NEAR AI's
+//!   term).
 //!
 //! Refusing a launch on the NEAR AI sign-in whose balance is too low for its
 //! first calls. Proposed 2026-10-30, not yet approved:
