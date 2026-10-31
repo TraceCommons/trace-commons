@@ -332,8 +332,10 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
     /// An older daemon sends none.
     public let unavailableFavorites: [String]
     /// The privacy tiers the picker groups by, most private first, as the
-    /// core orders them (`tier_order`). The shell keeps no order of its
-    /// own: a tier the core does not list, or no list, groups nothing.
+    /// core orders them (`tier_order`): a tier the core does not list
+    /// groups nothing. A daemon from before `tier_order` sends none, which
+    /// reads as `ManagedSurface.knownTierOrder`, so its tiered models are
+    /// still grouped; an empty list sent by the core is followed.
     public let tierOrder: [String]
 
     private enum CodingKeys: String, CodingKey {
@@ -348,7 +350,7 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         `default` = try container.decodeIfPresent(String.self, forKey: .default)
         favorites = try container.decodeIfPresent([String].self, forKey: .favorites) ?? []
         unavailableFavorites = try container.decodeIfPresent([String].self, forKey: .unavailableFavorites) ?? []
-        tierOrder = try container.decodeIfPresent([String].self, forKey: .tierOrder) ?? []
+        tierOrder = try container.decodeIfPresent([String].self, forKey: .tierOrder) ?? ManagedSurface.knownTierOrder
     }
 
     private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String], tierOrder: [String]) {
@@ -453,15 +455,31 @@ public struct ManagedFavoriteRow: Equatable, Sendable, Identifiable {
 public struct ManagedModelOption: Equatable, Sendable {
     public let title: String
     public let value: String
-    /// The heading of the group it is listed under; none for the default
-    /// and for a model with no known tier.
+    /// The heading of the group it is listed under; none for the default,
+    /// a favorite, and a model with no known tier.
     public var section: String? = nil
-    /// The tier id (`near_ai`, `external`, `incognito`) of a favorite, which
-    /// heads no group and so shows its tier another way; none otherwise.
+    /// The tier id (`near_ai`, `external`, `incognito`, or one a newer core
+    /// orders) of the model, grouped or favorite, or of the model the
+    /// default row names; none for a model whose tier the order lacks.
     public var tier: String? = nil
-    /// The existing heading of `tier`'s group, for the favorite's
-    /// accessibility value; none when `tier` is none.
+    /// The existing heading of `tier`'s group, shown and spoken with the
+    /// model wherever no heading above it says the tier; none when `tier`
+    /// is none or the copy has no heading for it.
     public var tierHeading: String? = nil
+
+    /// What `tier` means, for a shell to draw: none for an unknown tier.
+    public var privacy: ManagedModelPrivacy? { ManagedSurface.modelPrivacy(tier) }
+}
+
+/// How private a model's tier is. The core reads the tier id; each shell
+/// draws the meaning in its own palette.
+public enum ManagedModelPrivacy: Equatable, Sendable {
+    /// NEAR AI's own TEEs (`near_ai`).
+    case nearAIPrivate
+    /// A third party's TEE (`external`).
+    case externalPrivate
+    /// A vendor's servers, through NEAR AI's gateway (`incognito`).
+    case incognito
 }
 
 /// Choosing the model of a NEAR AI session in the Launch sheet.
@@ -480,39 +498,65 @@ public extension ManagedSurface {
     /// The copy key of a tier's group heading: `model_group_` and the tier id.
     static func modelGroupKey(_ tier: String) -> String { "model_group_" + tier }
 
+    /// The core's tier order (`ModelTier::ORDER`), for a daemon from before
+    /// it sent `tier_order`: most private first.
+    static let knownTierOrder = ["near_ai", "external", "incognito"]
+
+    /// What a tier id means; none for a tier this build does not know.
+    static func modelPrivacy(_ tier: String?) -> ManagedModelPrivacy? {
+        switch tier {
+        case "near_ai": .nearAIPrivate
+        case "external": .externalPrivate
+        case "incognito": .incognito
+        default: nil
+        }
+    }
+
     /// The picker's options: the default first, which names the model it
     /// will be when the catalogue says, then the favorites, then the other
     /// chat models grouped by privacy tier in the core's order
     /// (`catalogue.tierOrder`, most private first), each in NEAR AI's
-    /// order. Favorites head no group but carry their tier and its
-    /// heading; a model with no known tier comes last, under no heading. A
-    /// favorite NEAR AI does not list is not shown. With no catalogue, only
-    /// the default.
+    /// order. Every model whose tier is in the order carries it and its
+    /// heading, and so does the default row for the model it names; a
+    /// model with no known tier comes last, under no heading. A favorite
+    /// NEAR AI does not list is not shown. With no catalogue, only the
+    /// default.
     static func modelOptions(_ catalogue: ManagedModelCatalogue?, copy: (String) -> String) -> [ManagedModelOption] {
         let first = catalogue?.default.map { copy("model_default").replacingOccurrences(of: "{model}", with: $0) }
             ?? copy("model_default_unknown")
         let models = catalogue?.models ?? []
         let order = catalogue?.tierOrder ?? []
         let favorites = Set(catalogue?.favorites ?? [])
+        // A tier's place in the order and its heading; a heading the copy
+        // lacks is none, never an empty one.
+        let heading = { (index: Int) -> String? in
+            let text = copy(modelGroupKey(order[index]))
+            return text.isEmpty ? nil : text
+        }
+        let place = { (model: ManagedModel?) -> Int? in model?.tier.flatMap { order.firstIndex(of: $0) } }
+        let named = place(catalogue?.default.flatMap { id in models.first { $0.id == id } })
+        let head = ManagedModelOption(
+            title: first, value: defaultModel,
+            tier: named.map { order[$0] }, tierHeading: named.flatMap(heading))
         // One pass: favorites first, then each tier in the core's order,
         // then models with no known tier under no heading.
         var favored: [ManagedModelOption] = []
         var byTier = [[ManagedModelOption]](repeating: [], count: order.count)
         var rest: [ManagedModelOption] = []
         for model in models {
-            let index = model.tier.flatMap { order.firstIndex(of: $0) }
+            let index = place(model)
+            let tier = index.map { order[$0] }
+            let tierHeading = index.flatMap(heading)
             if favorites.contains(model.id) {
-                favored.append(ManagedModelOption(
-                    title: model.id, value: model.id,
-                    tier: index.map { _ in model.tier! },
-                    tierHeading: index.map { copy(modelGroupKey(order[$0])) }))
+                favored.append(ManagedModelOption(title: model.id, value: model.id, tier: tier, tierHeading: tierHeading))
             } else if let index {
-                byTier[index].append(ManagedModelOption(title: model.id, value: model.id, section: copy(modelGroupKey(order[index]))))
+                byTier[index].append(ManagedModelOption(
+                    title: model.id, value: model.id, section: tierHeading, tier: tier, tierHeading: tierHeading))
             } else {
                 rest.append(ManagedModelOption(title: model.id, value: model.id))
             }
         }
-        return [ManagedModelOption(title: first, value: defaultModel)] + favored + byTier.flatMap { $0 } + rest
+        return [head] + favored + byTier.flatMap { $0 } + rest
     }
 
     /// The favorites NEAR AI no longer lists, each shown with a way to

@@ -201,22 +201,24 @@ struct ManagedFolderOptions: View {
         Self.pickerOptions(catalogue, chosen: draft.model, copy: model.managedText)
     }
 
-    /// The status a tier's dot takes on a favorite, which heads no group.
-    static func tierDot(_ tier: String?) -> GlassStatus? {
-        switch tier {
-        case "near_ai": .on
-        case "external": .ask
-        case "incognito": .outside
-        default: nil
+    /// The dot a model's privacy takes (owner, 2026-10-31): NEAR AI private
+    /// is on, External is ask, Incognito is outside. The core reads the
+    /// tier (`ManagedSurface.modelPrivacy`); this is only the palette.
+    static func tierDot(_ privacy: ManagedModelPrivacy?) -> GlassStatus? {
+        switch privacy {
+        case .nearAIPrivate: .on
+        case .externalPrivate: .ask
+        case .incognito: .outside
+        case nil: nil
         }
     }
 
-    /// The picker's options with a favorite's tier shown by its dot and, as
-    /// its accessibility value, the tier's existing group heading. A chosen
-    /// model the catalogue does not list is kept, with no tier.
+    /// The picker's options with every tiered model's tier, and the default
+    /// row's, shown by its dot and its tier's existing group heading. A
+    /// chosen model the catalogue does not list is kept, with no tier.
     static func pickerOptions(_ catalogue: ManagedModelCatalogue?, chosen: String?, copy: (String) -> String) -> [GlassPickerOption<String>] {
         var values = ManagedSurface.modelOptions(catalogue, copy: copy)
-            .map { GlassPickerOption($0.title, value: $0.value, dot: tierDot($0.tier), section: $0.section, detail: $0.tierHeading) }
+            .map { GlassPickerOption($0.title, value: $0.value, dot: tierDot($0.privacy), section: $0.section, detail: $0.tierHeading) }
         if let chosen, !values.contains(where: { $0.value == chosen }) {
             values.append(GlassPickerOption(chosen, value: chosen))
         }

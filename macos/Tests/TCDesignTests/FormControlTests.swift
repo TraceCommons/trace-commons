@@ -83,6 +83,51 @@ final class FormControlTests: XCTestCase {
         XCTAssertEqual(GlassPicker<Int>.spoken(detailed), "B, Heading")
     }
 
+    /// The open menu shows an option's tier too, not only the closed pill
+    /// (#1797 review): its dot is a colour image that is not a template,
+    /// which a menu would draw in its own monochrome, at the pill's dot
+    /// size; an option with no heading of its own carries its detail as the
+    /// item's subtitle.
+    func test_aPickerMenuItemDrawsItsDotInColourAndItsDetail() throws {
+        for status in [GlassStatus.on, .ask, .outside] {
+            let image = GlassPickerDot.image(status)
+            XCTAssertFalse(image.isTemplate)
+            XCTAssertEqual(image.size, NSSize(width: GlassTokens.Size.dot, height: GlassTokens.Size.dot))
+            for name in [NSAppearance.Name.aqua, .darkAqua] {
+                let appearance = try XCTUnwrap(NSAppearance(named: name))
+                let drawn = try Self.centre(appearance) { image.draw(in: $0) }
+                let expected = try Self.centre(appearance) { rect in
+                    status.rgba.dynamicNSColor.setFill()
+                    rect.fill()
+                }
+                XCTAssertEqual(drawn, expected, "\(status) \(name.rawValue)")
+            }
+        }
+        let headless = GlassPickerOption("m", value: 1, dot: .on, detail: "Heading")
+        let grouped = GlassPickerOption("m", value: 2, dot: .on, section: "Heading", detail: "Heading")
+        XCTAssertEqual(GlassPicker<Int>.menuDetail(headless), "Heading")
+        XCTAssertNil(GlassPicker<Int>.menuDetail(grouped))
+        XCTAssertNil(GlassPicker<Int>.menuDetail(GlassPickerOption("m", value: 3)))
+    }
+
+    /// The centre pixel of `draw` in `appearance`, as RGBA bytes.
+    private static func centre(_ appearance: NSAppearance, _ draw: (NSRect) -> Void) throws -> [Int] {
+        let side = 21
+        let rep = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        appearance.performAsCurrentDrawingAppearance {
+            draw(NSRect(x: 0, y: 0, width: side, height: side))
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        var pixel = [Int](repeating: 0, count: 4)
+        rep.getPixel(&pixel, atX: side / 2, y: side / 2)
+        return pixel
+    }
+
     /// The arrow keys move between the enabled options, wrapping, as a
     /// native radio group does.
     func test_theArrowKeysMoveBetweenEnabledRadios() {

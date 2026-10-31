@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Buttons
@@ -656,6 +657,23 @@ public struct GlassPickerOption<Value: Hashable>: Identifiable {
     }
 }
 
+/// An option's dot as a menu item's image. A menu draws a template image in
+/// its own monochrome, so this one is not a template: it keeps the status
+/// colour, resolved for the menu's light or dark appearance when drawn.
+enum GlassPickerDot {
+    static func image(_ status: GlassStatus) -> NSImage {
+        let side = GlassTokens.Size.dot
+        let color = status.rgba.dynamicNSColor
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: rect).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+}
+
 /// A run of neighbouring `GlassPickerOption`s under one heading, or none.
 struct GlassPickerRun<Value: Hashable>: Identifiable {
     let id: Int
@@ -702,10 +720,33 @@ public struct GlassPicker<Value: Hashable>: View {
         option.detail.map { option.title + ", " + $0 } ?? option.title
     }
 
+    /// The subtitle of an option's menu item: its detail, unless a heading
+    /// above it in the menu already says the same.
+    static func menuDetail(_ option: GlassPickerOption<Value>) -> String? {
+        option.section == nil ? option.detail : nil
+    }
+
+    /// Each item draws its dot as the closed pill does, and an option with
+    /// no heading above it carries its detail as the item's subtitle, so the
+    /// open menu says what the dot means too.
     private func buttons(_ options: [GlassPickerOption<Value>]) -> some View {
         ForEach(options) { option in
-            Button(option.title) { selection = option.value }
-                .accessibilityValue(option.detail ?? "")
+            Button {
+                selection = option.value
+            } label: {
+                Label {
+                    Text(option.title)
+                    if let detail = Self.menuDetail(option) {
+                        Text(detail)
+                    }
+                } icon: {
+                    if let dot = option.dot {
+                        Image(nsImage: GlassPickerDot.image(dot))
+                            .renderingMode(.original)
+                    }
+                }
+            }
+            .accessibilityValue(option.detail ?? "")
         }
     }
 
