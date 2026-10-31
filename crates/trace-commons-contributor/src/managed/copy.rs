@@ -99,7 +99,7 @@
 //!   launch, and this line says so.
 //!
 //! The background model picker, under the model picker for Claude Code and
-//! OpenCode on NEAR AI. Proposed 2026-10-31, not yet approved:
+//! OpenCode on NEAR AI. Approved by the owner 2026-10-31:
 //! - `background_model_title` "Background model" -- the field's visible
 //!   label above the picker.
 //! - `background_model_choice` "Model for background tasks" -- the

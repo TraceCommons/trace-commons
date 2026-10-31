@@ -250,7 +250,8 @@ pub const CODEX_REFUSED: &[&str] = &["openai/gpt-6.1-sol", "openai/gpt-6-astra"]
 /// `supported_features` and a window of 128,000 tokens or more
 /// (`/v1/models`, read 2026-10-31); none is abliterated or vision-only.
 /// Not yet run with either tool's own tool schema: a product choice the
-/// owner approves, not a measured one like [`CODEX_PREFERRED`].
+/// owner approved on 2026-10-31, not a measured one like
+/// [`CODEX_PREFERRED`].
 pub const PRIVATE_PREFERRED: &[&str] = &[
     // NEAR AI private.
     "Qwen/Qwen3.8-27B",
@@ -335,7 +336,7 @@ fn preferred<'a>(tool: ToolId, models: &[&'a ChatModel]) -> Option<&'a ChatModel
 /// Claude Code's and OpenCode's background model by default in a NEAR AI
 /// private pool, first listed first ([`background_default`]): the small,
 /// fast chat models NEAR AI lists with `tools` (`/v1/models`, read
-/// 2026-10-31). A product choice the owner approves, like
+/// 2026-10-31). A product choice the owner approved on 2026-10-31, like
 /// [`PRIVATE_PREFERRED`].
 pub const BACKGROUND_PREFERRED: &[&str] = &[
     "z-ai/glm-5.3-flash",
