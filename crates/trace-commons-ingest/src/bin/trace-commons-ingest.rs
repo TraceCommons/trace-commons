@@ -22168,7 +22168,8 @@ struct ConfirmLoginBody {
 const REDEEM_MIN_LATENCY: StdDuration = StdDuration::from_millis(250);
 
 /// Fixed-window length for all account-surface rate limiters.
-const ACCOUNT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
+const ACCOUNT_RATE_WINDOW: StdDuration =
+    StdDuration::from_secs(trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS);
 
 /// Per-IP cap on `GET /account/login` interstitial renders per window.
 const INTERSTITIAL_PER_IP_LIMIT: u32 = 120;
@@ -22242,7 +22243,8 @@ const CONTENT_PER_ACCOUNT_CONCURRENCY: u32 = 4;
 /// Per-principal cap on `POST /v1/traces` submissions per window. A submission
 /// performs more work than a content read, so this is half the content limit of
 /// 60 and matches the existing confirm-attempt ceiling of 30.
-const SUBMIT_PER_PRINCIPAL_LIMIT: u32 = 30;
+const SUBMIT_PER_PRINCIPAL_LIMIT: u32 =
+    trace_commons_protocol::submit_rate::SUBMIT_PER_PRINCIPAL_LIMIT;
 /// Concurrency cap on in-flight submissions per principal. The re-scrub and gate
 /// path gets half the content-read concurrency allowance of 4.
 const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;

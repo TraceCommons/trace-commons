@@ -24,9 +24,8 @@ old behaviour, because no application has shipped against `v1` yet. See
 - The daily upload limit is retired. `set_settings` accepts
   `max_uploads_per_day` and `max_bytes_per_day` and ignores them, so a
   shell built while the limit existed can still save its other settings;
-  `get_settings` no longer returns them. `status.daily_budget` keeps its
-  shape, never blocked, for one release (see
-  [`daily_budget` (retired)](#daily_budget-retired)), and the health label
+  `get_settings` no longer returns them. `status.daily_budget` is no longer
+  sent (see [`daily_budget` (retired)](#daily_budget-retired)), and the health label
   `daily-cap-reached` is never set.
 - `project_id` is an opaque, daemon-issued handle for a project. It appears
   on every queue entry (`list_pending`, the `snapshot` event) and on every
@@ -748,18 +747,6 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "idle_sessions": { "count": 0, "tools": [], "threshold_days": 3 },
   "next_digest_at": null,
   "health": { "last_error_label": null, "since": null },
-  "daily_budget": {
-    "bytes_today": 0,
-    "max_bytes_per_day": 0,
-    "bytes_remaining": 0,
-    "uploads_today": 0,
-    "max_uploads_per_day": 0,
-    "uploads_remaining": 0,
-    "resets_at": "2026-08-22T00:00:00Z",
-    "blocked": false,
-    "blocked_entries": 0,
-    "blocked_bytes": 0
-  },
   "routing": { "state": "not_declared", "last_refresh_at": null },
   "grant_voids": [],
   "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
@@ -843,12 +830,11 @@ Otherwise it is the next occurrence of the configured local hour.
 
 #### `daily_budget` (retired)
 
-Deprecated. The daemon has no daily upload limit, so nothing is counted
-per day and nothing approved is ever held for one. The field keeps the
-shape it had, with every count `0`, `blocked` `false` and `resets_at` the
-next UTC midnight, for one release, so a shell built while the limit
-existed still decodes `status`. No shell in this tree reads it; a new
-client must not. It will be removed in a later revision.
+Removed. The daemon has no daily upload limit, so nothing is counted
+per day, nothing approved is ever held for one, and `status` no longer
+carries the field. Every shell built while the limit existed decodes its
+absence and hides the lines that showed it. A new client must not expect
+it.
 
 The daemon also stopped asking the server for an upload allowance
 (`GET /v1/account/upload-allowance`, which now always answers

@@ -63,13 +63,6 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         // labels no screen draws yet. A production daemon never sends them.
         let status: Set<String> = [
             "near_ai_pins", "near_ai_attestation",
-            // Retired with the daily upload limit: sent never blocked, for
-            // one release, for shells built before it was retired. No
-            // screen reads it.
-            "daily_budget", "daily_budget.bytes_today", "daily_budget.max_bytes_per_day",
-            "daily_budget.bytes_remaining", "daily_budget.uploads_today", "daily_budget.max_uploads_per_day",
-            "daily_budget.uploads_remaining", "daily_budget.resets_at", "daily_budget.blocked",
-            "daily_budget.blocked_entries", "daily_budget.blocked_bytes",
         ]
         return ["get_settings": settings, "set_settings": settings, "status": status]
     }()

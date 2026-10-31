@@ -2892,11 +2892,6 @@ impl DaemonShared {
                 "last_error_label": health.last_error_label,
                 "since": health.since,
             },
-            // Deprecated. There is no daily upload limit any more; this keeps
-            // its shape, never blocked, for one release so a shell built
-            // while there was one still decodes `status`. No shell in this
-            // tree reads it. See `retired_daily_budget`.
-            "daily_budget": retired_daily_budget(now),
             // Additive, and three-valued on purpose. `health` reports
             // faults; none of these three is one, so this sits beside it
             // rather than inside it.
@@ -9946,29 +9941,6 @@ pub(crate) fn signer_attestor_for(
     )))
 }
 
-/// `status.daily_budget` as it is sent now that there is no daily upload
-/// limit: the shape a shell built while there was one decodes, saying
-/// nothing is counted and nothing is held. Kept for one release; see the
-/// IPC doc's "`status.daily_budget` (retired)".
-fn retired_daily_budget(now: chrono::DateTime<Utc>) -> serde_json::Value {
-    let resets_at = (now.date_naive() + chrono::Duration::days(1))
-        .and_hms_opt(0, 0, 0)
-        .expect("midnight is a valid time")
-        .and_utc();
-    serde_json::json!({
-        "bytes_today": 0,
-        "max_bytes_per_day": 0,
-        "bytes_remaining": 0,
-        "uploads_today": 0,
-        "max_uploads_per_day": 0,
-        "uploads_remaining": 0,
-        "resets_at": resets_at,
-        "blocked": false,
-        "blocked_entries": 0,
-        "blocked_bytes": 0,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     mod missions {
@@ -14789,10 +14761,6 @@ mod tests {
         }
     }
 
-    fn approved_entry(size_bytes: u64) -> super::super::queue::QueueEntry {
-        approved_entry_n(0, size_bytes)
-    }
-
     #[test]
     fn status_queue_at_capacity_counts_approved_and_excludes_person_included_and_history() {
         let s = shared();
@@ -14844,11 +14812,10 @@ mod tests {
         assert_eq!(status["queue_at_capacity"], false);
     }
 
-    /// There is no daily upload limit. `status.daily_budget` keeps the
-    /// shape an older shell decodes for one release, and never says
-    /// anything is held, however much approved work is waiting.
+    /// There is no daily upload limit, so `status` carries no
+    /// `daily_budget` at all, however much approved work is waiting.
     #[test]
-    fn status_keeps_the_retired_daily_budget_shape_and_never_blocks() {
+    fn status_carries_no_daily_budget() {
         let s = shared();
         {
             let mut q = s.queue.lock().unwrap();
@@ -14861,38 +14828,7 @@ mod tests {
             .parse::<chrono::DateTime<Utc>>()
             .unwrap();
         let v = s.status_value_at(now);
-        assert_eq!(
-            v["daily_budget"],
-            serde_json::json!({
-                "bytes_today": 0,
-                "max_bytes_per_day": 0,
-                "bytes_remaining": 0,
-                "uploads_today": 0,
-                "max_uploads_per_day": 0,
-                "uploads_remaining": 0,
-                "resets_at": "2026-10-01T00:00:00Z",
-                "blocked": false,
-                "blocked_entries": 0,
-                "blocked_bytes": 0,
-            })
-        );
-    }
-
-    #[test]
-    fn the_daily_budget_carries_no_identifier_of_any_kind() {
-        // Counts and timestamps only: no entry id, no hash, no path.
-        let s = shared();
-        {
-            let mut q = s.queue.lock().unwrap();
-            let max = s.settings.lock().unwrap().max_queue_entries;
-            q.upsert(approved_entry(1_024), max).unwrap();
-        }
-        let v = handle_request(&s, &req("status", serde_json::json!({})))
-            .result
-            .unwrap();
-        let body = serde_json::to_string(&v["daily_budget"]).unwrap();
-        assert!(!body.contains("sha256"), "{body}");
-        assert!(!body.contains('/'), "{body}");
+        assert!(v.get("daily_budget").is_none(), "{v}");
     }
 
     #[test]

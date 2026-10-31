@@ -142,11 +142,15 @@ pub enum UploadDecision {
 /// rather than leaning on the server's `429` to slow it. Not a quota: the
 /// window slides, and nothing is counted beyond it.
 pub const BURST_MAX_UPLOADS: usize = 25;
-// Ingest admits 30 submissions a minute per principal by default.
-const _: () = assert!(BURST_MAX_UPLOADS < 30);
+// Ingest's default per-principal submission rate, from the shared protocol
+// constant, so a change there fails this build rather than going unnoticed.
+const _: () = assert!(
+    BURST_MAX_UPLOADS < trace_commons_protocol::submit_rate::SUBMIT_PER_PRINCIPAL_LIMIT as usize
+);
 
 /// The span [`BURST_MAX_UPLOADS`] is measured over.
-pub const BURST_WINDOW: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
+pub const BURST_WINDOW: chrono::TimeDelta =
+    chrono::TimeDelta::seconds(trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS as i64);
 
 /// Whole seconds until another upload fits the burst window, or `None` when
 /// one may start now. Drops attempts that have left the window as it goes.
@@ -164,6 +168,9 @@ pub fn burst_wait(state: &mut DaemonState, now: DateTime<Utc>) -> Option<u32> {
     {
         state.recent_upload_attempts.pop_front();
     }
+    // An attempt stamped after `now` means the wall clock stepped back; it
+    // would otherwise hold the window full until the clock caught up.
+    state.recent_upload_attempts.retain(|at| *at <= now);
     if state.recent_upload_attempts.len() < BURST_MAX_UPLOADS {
         return None;
     }
@@ -848,7 +855,23 @@ mod tests {
 
     #[test]
     fn the_burst_guard_is_measured_over_ingests_one_minute_window() {
-        assert_eq!(BURST_WINDOW, chrono::TimeDelta::seconds(60));
+        assert_eq!(
+            BURST_WINDOW.num_seconds() as u64,
+            trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS
+        );
+    }
+
+    #[test]
+    fn the_burst_guard_forgets_attempts_stamped_after_now() {
+        let mut st = DaemonState::new();
+        let start = at("2026-08-08T20:00:00Z");
+        for _ in 0..BURST_MAX_UPLOADS {
+            st.recent_upload_attempts.push_back(start);
+        }
+        // The clock stepped back an hour after the burst.
+        let now = start - chrono::TimeDelta::hours(1);
+        assert_eq!(burst_wait(&mut st, now), None);
+        assert!(st.recent_upload_attempts.is_empty());
     }
 
     #[test]
