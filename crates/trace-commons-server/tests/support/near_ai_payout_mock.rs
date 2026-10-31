@@ -407,7 +407,7 @@ impl Mock {
 pub fn credentials() -> NearAiTransferCredentials {
     NearAiTransferCredentials {
         token: SecretString::from(TOKEN.to_string()),
-        credential_id: Uuid::from_u128(0xc4ed_0000_0000_4000_8000_0000_0000_0002),
+        credential_id: Some(Uuid::from_u128(0xc4ed_0000_0000_4000_8000_0000_0000_0002)),
         sender_org: sender(),
         source: NearAiCreditSource::Payment,
     }

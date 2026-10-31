@@ -333,7 +333,7 @@ mod tests {
             base,
             NearAiTransferCredentials {
                 token: SecretString::from(CREDENTIAL),
-                credential_id: Uuid::from_u128(2),
+                credential_id: Some(Uuid::from_u128(2)),
                 sender_org: Uuid::from_u128(3),
                 source: NearAiCreditSource::Payment,
             },

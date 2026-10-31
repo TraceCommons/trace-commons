@@ -293,10 +293,9 @@ pub struct MonitorTreeCopy {
     /// Submit). DRAFT, NEEDS APPROVAL.
     pub automatic_folder: &'static str,
     pub automatic_all: &'static str,
-    /// The tab switch's title and the line under it, in the owner's words
-    /// (2026-10-31).
-    pub automatic_title: &'static str,
-    pub automatic_line: &'static str,
+    /// The line under the tab switch, with `{count}` and `{total}`: the
+    /// owner's approved Proposal A mockup, verbatim (2026-10-31).
+    pub automatic_count: &'static str,
     /// The titles over the tree's columns while the Automatic switches
     /// show: the folders, their Submit, and their Automatic switch (owner,
     /// 2026-10-30, Proposal A). DRAFT, NEEDS APPROVAL.
@@ -593,9 +592,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             // DRAFT, NEEDS APPROVAL (2026-10-30).
             automatic_folder: "Automatic for {label}",
             automatic_all: "Automatic for every folder",
-            // The owner's words (2026-10-31).
-            automatic_title: "Details",
-            automatic_line: crate::project_copy::AUTOMATIC_DETAILS,
+            automatic_count: "Every folder sends on its own, except folders set to Ask or Never. \
+                {count} of {total} folders automatic.",
             column_folders: "Folders on this Mac",
             column_submit: "Submit",
             column_automatic: "Auto",

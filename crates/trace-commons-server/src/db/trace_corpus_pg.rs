@@ -2516,6 +2516,53 @@ impl TraceCorpusStore for PgBackend {
         records
     }
 
+    async fn recent_trace_submission_window(
+        &self,
+        tenant_id: &str,
+        principal_refs: Option<&[String]>,
+        submission_id: Uuid,
+        since: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<crate::trace_corpus_storage::RecentTraceSubmissionWindow, DatabaseError> {
+        let limit = limit.max(0);
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The `recent` scan walks idx_trace_submissions_account_keyset (V31,
+        // `(tenant_id, received_at DESC, ...)`) from the newest row and stops
+        // at `limit`, so for the whole tenant (an account tenant) the read is
+        // bounded by the ceiling, not by the tenant's history. With a
+        // principal filter (a pooled tenant) the filter applies during the
+        // walk, so the read is bounded by the tenant's last-hour volume.
+        // The known-id test is a primary-key probe.
+        // `$4::text[] IS NULL` counts the whole tenant.
+        let row = tx
+            .query_one(
+                "WITH recent AS (
+                     SELECT received_at
+                       FROM trace_submissions
+                      WHERE tenant_id = $1
+                        AND received_at > $3
+                        AND ($4::text[] IS NULL OR auth_principal_ref = ANY($4))
+                      ORDER BY received_at DESC
+                      LIMIT $5
+                 )
+                 SELECT (SELECT COUNT(*) FROM recent) AS counted,
+                        (SELECT MIN(received_at) FROM recent) AS oldest_counted_at,
+                        EXISTS(SELECT 1 FROM trace_submissions
+                                WHERE tenant_id = $1 AND submission_id = $2) AS submission_known",
+                &[&tenant_id, &submission_id, &since, &principal_refs, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let window = crate::trace_corpus_storage::RecentTraceSubmissionWindow {
+            counted: row.get("counted"),
+            oldest_counted_at: row.get("oldest_counted_at"),
+            submission_known: row.get("submission_known"),
+        };
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(window)
+    }
+
     async fn account_activity_days(
         &self,
         tenant_id: &str,

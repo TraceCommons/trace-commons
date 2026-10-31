@@ -789,7 +789,51 @@ keyring-core = "=1.0.0"
 # call's arguments as `input_json_delta` instead of in
 # `content_block_start.input`, which Claude Code discards; without it every
 # tool call in a Private AI Claude Code session reached the tool empty.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "7ac9251bdde1ac8037b153f7b767d479905c9bbe" }
+#
+# ADVANCE TO c9201c93 (2026-10-31). Three commits in the range, verified with
+# `git log --oneline 7ac9251b..c9201c93`:
+#   * nearai/ironwire#70 (5189d70) sizes a NEAR AI request by the model's own
+#     context window, read from the `/v1/models` answer the startup probe
+#     already fetches (128K for an unlisted model), where routing used a fixed
+#     128K and so refused GLM 5.3 (1,048,576 tokens) above it. Each facade
+#     gets an explicit 32 MiB body limit, answered with a 413 in the facade's
+#     JSON error envelope.
+#   * nearai/ironwire#68 (f42fd96) answers a panicking facade handler with a
+#     500 in that envelope instead of dropping the socket, never sending or
+#     logging the panic text. With #1786's panic-location log, this is for a
+#     Private AI opencode session that stalled on ECONNRESET.
+#   * nearai/ironwire#71 (c9201c9) records every failed facade request in the
+#     ledger: a nullable `failure` column on `exchanges` that older readers
+#     ignore, failure rows left out of IronWire's own summaries, and failure
+#     rows still listed on `/log`. This crate already skips those rows when it
+#     reads `/log` (#1787).
+#
+# COST. Zero new packages. No manifest or lock changed upstream in the range;
+# it touches source, tests, `docs/PROTOCOL.md` and the `ironwire` binary's
+# `src/render.rs`. All three locks were re-resolved through `cargo metadata`;
+# each diff is exactly 22 changed lines, all of them the eleven `ironwire_*`
+# source strings. Lock entries are 968 root, 546 GTK and 735 Tauri before and
+# after.
+#
+# MSRV. Unmoved: upstream's root `rust-version` reads `1.96` at both revs.
+#
+# SURFACE. None for this crate. `git diff 7ac9251b c9201c93 --
+# crates/ironwire_proxy/src/embed.rs crates/ironwire_agents
+# crates/ironwire_catalog crates/ironwire_pointer` is empty, and so is the
+# same diff on `ironwire_proxy`'s `proof` and `statusline`. The new public
+# items are `ironwire_proxy::facade::MAX_REQUEST_BODY_BYTES`,
+# `ironwire_core::policy::Candidate::context_windows`, a defaulted
+# `ironwire_upstream::Backend::context_windows` and
+# `ironwire_ledger::Exchange::failure`; this crate names none of them (it
+# reads the ledger over `/log`, not through `ironwire_ledger`). All three
+# changes are behaviour inside the embedded proxy.
+#
+# FLATPAK. `cargo-sources.json` was regenerated with
+# `flatpak-cargo-generator.py` from flatpak/flatpak-builder-tools at
+# 74697c75, run with `python3 -I` from a temporary venv. It moves 14 lines,
+# all of them the ironwire revision (2 full, 12 short-hash vendor lines).
+# `grep -c 7ac9251` on the file is 0.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "c9201c93bbc6bb44aa29ad90820777875f4726e6" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -803,8 +847,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "7ac9251bdd
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "7ac9251bdde1ac8037b153f7b767d479905c9bbe" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "7ac9251bdde1ac8037b153f7b767d479905c9bbe" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "c9201c93bbc6bb44aa29ad90820777875f4726e6" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "c9201c93bbc6bb44aa29ad90820777875f4726e6" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"

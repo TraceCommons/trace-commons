@@ -452,7 +452,7 @@ impl Mock {
 fn credentials() -> NearAiTransferCredentials {
     NearAiTransferCredentials {
         token: SecretString::from(TOKEN.to_string()),
-        credential_id: credential_id(),
+        credential_id: Some(credential_id()),
         sender_org: sender(),
         source: NearAiCreditSource::Grant,
     }

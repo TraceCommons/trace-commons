@@ -643,7 +643,7 @@ mod tests {
             mode,
             credentials: NearAiTransferCredentials {
                 token: SecretString::from(format!("oc_{}", "ab".repeat(32))),
-                credential_id: Uuid::from_u128(2),
+                credential_id: Some(Uuid::from_u128(2)),
                 sender_org: Uuid::from_u128(1),
                 source: NearAiCreditSource::Payment,
             },
@@ -831,7 +831,7 @@ mod tests {
             mode,
             credentials: with_credential.then(|| NearAiTransferCredentials {
                 token: SecretString::from(format!("oc_{}", "cd".repeat(32))),
-                credential_id: Uuid::from_u128(3),
+                credential_id: Some(Uuid::from_u128(3)),
                 sender_org: Uuid::from_u128(1),
                 source: NearAiCreditSource::Payment,
             }),
