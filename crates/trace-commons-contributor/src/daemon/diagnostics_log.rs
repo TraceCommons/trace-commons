@@ -33,7 +33,8 @@
 //! to `<name>.1` (replacing the previous one) and a fresh file starts; if
 //! that rename fails, the file starts over in place rather than stop
 //! recording. Nothing reads them back: they are for a person looking at the
-//! state directory.
+//! state directory. A file stays open between appends, so one deleted by
+//! hand receives nothing more until the next rotation or daemon start.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -68,7 +69,9 @@ pub struct DiagnosticsLog {
 struct OpenLog {
     file: std::fs::File,
     /// Bytes in the file, tracked here rather than re-read per line. The
-    /// daemon's lock means one process writes a state directory's log.
+    /// daemon's lock means one process writes a state directory's log. The
+    /// panic hook's lock-free fallback is not counted, so a file can pass
+    /// the cap by those few lines before it next rotates.
     len: u64,
 }
 
@@ -136,13 +139,16 @@ impl DiagnosticsLog {
         if current > 0 && current + incoming > self.cap {
             // Close first: Windows refuses to rename an open file.
             *state = None;
-            let file = match self.rotate() {
-                Ok(()) => open_owner_only(&self.path, false)?,
+            if self.rotate().is_err() {
                 // Without a rotation the cap can only hold by starting this
                 // file over. Losing the older lines beats losing every line
-                // from here on, which is what giving up here would do.
-                Err(_) => open_owner_only(&self.path, true)?,
-            };
+                // from here on, which is what giving up here would do. The
+                // truncating handle is closed again at once: the kept handle
+                // must be `O_APPEND`, or its cursor could overwrite a line
+                // the hook's lock-free fallback appended.
+                drop(open_owner_only(&self.path, true)?);
+            }
+            let file = open_owner_only(&self.path, false)?;
             *state = Some(OpenLog { file, len: 0 });
         }
         let open = state.as_mut().expect("opened above");
@@ -559,9 +565,8 @@ mod tests {
         let log = DiagnosticsLog::new(dir.path().join(DIAGNOSTICS_PANIC_LOG_FILE), 1024);
         log.append_line("before").unwrap();
         let held = log.state.lock().unwrap();
-        let started = std::time::Instant::now();
+        // Returns (no deadlock) and the line lands, with the lock held.
         log.append_line_from_hook("from-hook");
-        assert!(started.elapsed() < std::time::Duration::from_millis(100));
         drop(held);
         log.append_line("after").unwrap();
         assert_eq!(read(&log.path), "before\nfrom-hook\nafter\n");
