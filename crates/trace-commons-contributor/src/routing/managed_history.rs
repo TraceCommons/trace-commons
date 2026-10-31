@@ -116,7 +116,21 @@ impl ManagedHistory {
             )?;
             conn.busy_timeout(Duration::from_millis(50))?;
             conn.progress_handler(1000, Some(move || Instant::now() >= deadline));
-            let mut stmt = conn.prepare("SELECT id, started_at, client_session_id, total_ms, facade, path, backend, requested_model, served_model, upstream_id, request_sha256, response_sha256, body_ref, rung, attempts, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, cost_usd, status, proof FROM exchanges ORDER BY id LIMIT ?1")?;
+            // Newer IronWire ledgers write a `failure` code for a request that
+            // failed inside the proxy. Those are not calls. Older ledgers have
+            // no such column and every row is read as before.
+            let has_failure_column = conn
+                .prepare("PRAGMA table_info(exchanges)")?
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .any(|name| name == "failure");
+            let filter = if has_failure_column {
+                "WHERE failure IS NULL "
+            } else {
+                ""
+            };
+            let mut stmt = conn.prepare(&format!("SELECT id, started_at, client_session_id, total_ms, facade, path, backend, requested_model, served_model, upstream_id, request_sha256, response_sha256, body_ref, rung, attempts, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, cost_usd, status, proof FROM exchanges {filter}ORDER BY id LIMIT ?1"))?;
             let mut rows = stmt.query([
                 i64::try_from(MAX_ROWS - entries.len() + 1).map_err(|_| ManagedHistoryError)?
             ])?;
@@ -438,6 +452,59 @@ pub(crate) mod tests {
                 .rows(),
             rows
         );
+    }
+    const FAILURE_CODES: [&str; 6] = [
+        "panic",
+        "body_rejected",
+        "invalid_json",
+        "unknown_login",
+        "client_disconnected",
+        "unrecorded",
+    ];
+    #[test]
+    fn failed_request_rows_are_not_counted_as_calls() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fixture(temp.path(), "verified");
+        let conn = Connection::open(home.join("ledger.sqlite")).unwrap();
+        conn.execute_batch("ALTER TABLE exchanges ADD COLUMN failure TEXT;")
+            .unwrap();
+        for (i, code) in FAILURE_CODES.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO exchanges (id, started_at, facade, backend, rung, attempts, status, failure) VALUES (?1, '2026-10-24T00:00:00Z', 'openai', 'none', 'none', 0, 500, ?2)",
+                rusqlite::params![i as i64 + 2, code],
+            )
+            .unwrap();
+        }
+        // A refusal carries no failure code and stays a counted call.
+        conn.execute("INSERT INTO exchanges (id, started_at, facade, backend, rung, attempts, status) VALUES (100, '2026-10-24T00:00:00Z', 'openai', 'nearai', 'native', 1, 503)", [])
+            .unwrap();
+        drop(conn);
+        let start = DateTime::UNIX_EPOCH;
+        let history = ManagedHistory::load_root(temp.path(), start)
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.rows().len(), 2);
+        let summary = history.summary(start).unwrap();
+        let calls = summary.routed.calls + summary.outside.calls + summary.unknown.calls;
+        assert_eq!(calls, 2);
+        assert_eq!(summary.routed.calls, 1);
+        assert_eq!(summary.unknown.calls, 1);
+    }
+    #[test]
+    fn ledger_without_a_failure_column_counts_every_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fixture(temp.path(), "verified");
+        let conn = Connection::open(home.join("ledger.sqlite")).unwrap();
+        conn.execute("INSERT INTO exchanges (id, started_at, facade, backend, rung, attempts, status) VALUES (2, '2026-10-24T00:00:00Z', 'openai', 'nearai', 'native', 1, 503)", [])
+            .unwrap();
+        drop(conn);
+        let start = DateTime::UNIX_EPOCH;
+        let history = ManagedHistory::load_root(temp.path(), start)
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.rows().len(), 2);
+        let summary = history.summary(start).unwrap();
+        assert_eq!(summary.routed.calls + summary.unknown.calls, 2);
     }
     #[test]
     fn invalid_cost_refuses_instead_of_fabricating_zero() {
