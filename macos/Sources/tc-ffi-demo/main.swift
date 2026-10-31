@@ -60,8 +60,6 @@ func seedSettings(configDir: String) throws {
         "growth_factor": 2.0,
         "growth_min_new_bytes": 65536,
         "max_reuploads": 3,
-        "max_uploads_per_day": 50,
-        "max_bytes_per_day": 209_715_200,
         "max_queue_entries": 500,
         "history_poll_secs": 1800,
         "canary_interval_secs": 3600,

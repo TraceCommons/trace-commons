@@ -265,12 +265,6 @@ struct DaemonStatus: Decodable, Equatable {
     let decisionsOwed: Int?
     let nextDigestAt: Date?
     let health: DaemonHealth
-    /// The daily volume caps and what they are holding back.
-    ///
-    /// Decoded with a fallback rather than as an optional: a daemon that
-    /// predates the field reports an unspent budget blocking nothing, which
-    /// is the only safe reading of silence here.
-    let dailyBudget: DailyBudget
     /// What the daemon is seeing from the declared local proxy, in three
     /// states. Not part of `health`: none of the three is a fault.
     let routing: RoutingStatus
@@ -303,7 +297,6 @@ struct DaemonStatus: Decodable, Equatable {
         case decisionsOwed = "decisions_owed"
         case nextDigestAt = "next_digest_at"
         case health
-        case dailyBudget = "daily_budget"
         case routing
         case grantVoids = "grant_voids"
         case witnessCapacity = "witness_capacity"
@@ -324,7 +317,6 @@ struct DaemonStatus: Decodable, Equatable {
         decisionsOwed: Int? = nil,
         nextDigestAt: Date?,
         health: DaemonHealth,
-        dailyBudget: DailyBudget = .unknown,
         routing: RoutingStatus = .notDeclared,
         grantVoids: [GrantVoidWire] = [],
         witnessCapacity: WitnessCapacity = .none,
@@ -343,7 +335,6 @@ struct DaemonStatus: Decodable, Equatable {
         self.decisionsOwed = decisionsOwed
         self.nextDigestAt = nextDigestAt
         self.health = health
-        self.dailyBudget = dailyBudget
         self.routing = routing
         self.grantVoids = grantVoids
         self.witnessCapacity = witnessCapacity
@@ -366,7 +357,6 @@ struct DaemonStatus: Decodable, Equatable {
         nextDigestAt = try c.decodeIfPresent(Date.self, forKey: .nextDigestAt)
         health = try c.decodeIfPresent(DaemonHealth.self, forKey: .health)
             ?? DaemonHealth(lastErrorLabel: nil, since: nil)
-        dailyBudget = try c.decodeIfPresent(DailyBudget.self, forKey: .dailyBudget) ?? .unknown
         // A daemon that predates this field has declared no proxy, which is
         // exactly what the fallback says.
         routing = try c.decodeIfPresent(RoutingStatus.self, forKey: .routing) ?? .notDeclared
@@ -696,7 +686,6 @@ struct DaemonSettingsView: Decodable, Equatable {
     let localNotifications: Bool
     let queueTtlDays: Int
     let maxQueueEntries: Int
-    let maxUploadsPerDay: Int
     let nearAIConfigured: Bool
     let claudeRootConfigured: Bool
     let codexRootConfigured: Bool
@@ -786,7 +775,6 @@ struct DaemonSettingsView: Decodable, Equatable {
         case localNotifications = "local_notifications"
         case queueTtlDays = "queue_ttl_days"
         case maxQueueEntries = "max_queue_entries"
-        case maxUploadsPerDay = "max_uploads_per_day"
         case nearAIConfigured = "near_ai_configured"
         case claudeRootConfigured = "claude_root_configured"
         case codexRootConfigured = "codex_root_configured"
