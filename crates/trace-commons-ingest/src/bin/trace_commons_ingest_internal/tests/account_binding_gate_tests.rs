@@ -978,7 +978,7 @@ async fn upload_allowance_requires_authentication_and_defaults_to_no_allowance()
 }
 
 #[tokio::test]
-async fn upload_allowance_returns_configured_policy_and_refuses_unbound_accounts() {
+async fn upload_allowance_advertises_no_daily_limit_and_refuses_unbound_accounts() {
     for transport in [Transport::Native, Transport::Cookie] {
         for binding in [
             AccountBindingState::Legacy,
@@ -987,14 +987,7 @@ async fn upload_allowance_returns_configured_policy_and_refuses_unbound_accounts
             AccountBindingState::Closed,
         ] {
             let (db, _) = gate_db(Some(binding));
-            let (_temp, mut state) = native_test_state(db);
-            Arc::get_mut(&mut state).unwrap().client_upload_allowance = Some(
-                trace_commons_protocol::upload_allowance::DailyUploadAllowance {
-                    schema_version: 1,
-                    max_uploads_per_day: 200,
-                    max_bytes_per_day: 2_147_483_648,
-                },
-            );
+            let (_temp, state) = native_test_state(db);
             let response = production_account_router(&state)
                 .oneshot(gate_request(
                     "GET",
@@ -1010,9 +1003,10 @@ async fn upload_allowance_returns_configured_policy_and_refuses_unbound_accounts
                 let bytes = axum::body::to_bytes(response.into_body(), 1024)
                     .await
                     .unwrap();
-                let body: trace_commons_protocol::upload_allowance::UploadAllowanceResponse =
-                    serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(body.allowance, state.client_upload_allowance);
+                // An explicit null, never a missing field: older clients
+                // read a missing field as malformed.
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body, serde_json::json!({"allowance": null}));
             }
         }
     }

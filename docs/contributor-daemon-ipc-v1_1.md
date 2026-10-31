@@ -21,10 +21,12 @@ old behaviour, because no application has shipped against `v1` yet. See
 
 **New in this revision (additive, no existing field or shape changed):**
 
-- `set_settings` now accepts `max_uploads_per_day` and `max_bytes_per_day`,
-  each validated against a fixed ceiling rather than left open (see
-  [`set_settings`](#set_settings)). Before this, the only way to raise either
-  cap was to stop the daemon and hand-edit `daemon-settings.json`.
+- The daily upload limit is retired. `set_settings` accepts
+  `max_uploads_per_day` and `max_bytes_per_day` and ignores them, so a
+  shell built while the limit existed can still save its other settings;
+  `get_settings` no longer returns them. `status.daily_budget` is no longer
+  sent (see [`daily_budget` (retired)](#daily_budget-retired)), and the health label
+  `daily-cap-reached` is never set.
 - `project_id` is an opaque, daemon-issued handle for a project. It appears
   on every queue entry (`list_pending`, the `snapshot` event) and on every
   `list_projects` row, and `set_project_mode` accepts it in place of
@@ -745,18 +747,6 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "idle_sessions": { "count": 0, "tools": [], "threshold_days": 3 },
   "next_digest_at": null,
   "health": { "last_error_label": null, "since": null },
-  "daily_budget": {
-    "bytes_today": 204659969,
-    "max_bytes_per_day": 209715200,
-    "bytes_remaining": 5055231,
-    "uploads_today": 12,
-    "max_uploads_per_day": 50,
-    "uploads_remaining": 38,
-    "resets_at": "2026-08-22T00:00:00Z",
-    "blocked": true,
-    "blocked_entries": 14,
-    "blocked_bytes": 137283584
-  },
   "routing": { "state": "not_declared", "last_refresh_at": null },
   "grant_voids": [],
   "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
@@ -838,67 +828,26 @@ nothing to say), it is that target, at or before now -- already due, the
 same reading `interval` gives when last-plus-interval is in the past.
 Otherwise it is the next occurrence of the configured local hour.
 
-#### `daily_budget`
+#### `daily_budget` (retired)
 
-Added in `trace_commons.daemon.v1_1` as an additive field. It reports the
-daily volume caps and, crucially, how much already-approved work they are
-holding back.
+Removed. The daemon has no daily upload limit, so nothing is counted
+per day, nothing approved is ever held for one, and `status` no longer
+carries the field. Every shell built while the limit existed decodes its
+absence and hides the lines that showed it. A new client must not expect
+it.
 
-These are the effective caps used by upload enforcement. A supporting daemon
-refreshes the authenticated account's upload allowance on the first active
-pass and every five minutes while an armed folder/automatic grant or an
-approved queued session can contribute, including while capped. Idle,
-paused, update-quiesced and dry-run clients make no allowance request or
-OS-credential read. Resuming activity can refresh immediately; skipped
-polls do not consume the cadence. Explicit approvals do not require an
-armed project or an anchored tenant for this refresh. The server scales
-both daily caps by
-the account's validated applied admission `effective_allowance` divided by
-`bounded_allowance`, rounding down and clipping at 1,000 uploads and 5 GiB.
-Operator-configured caps are the base; when absent, earned growth above 1
-uses 50 uploads and 200 MiB. Without a configured base or validated earned
-growth, the server returns null. Existing external and tiered trust modes
-retain their admission validation, freshness, and generation safeguards;
-legacy/invited compatibility paths retain the configured base unchanged.
+The daemon also stopped asking the server for an upload allowance
+(`GET /v1/account/upload-allowance`, which now always answers
+`{"allowance": null}`; see
+[the operator contract](operator/client-upload-allowance.md)).
 
-The allowance can raise untouched count and byte defaults independently;
-explicit local choices remain in force. `get_settings` still returns the
-saved local values, so its caps can differ from `status.daily_budget`.
-Send `null` for either cap in `set_settings` to reset that dimension to its
-shared default and follow server allowances again. Persisted per-cap
-provenance flags are internal: they are omitted from `get_settings` and
-`set_settings` responses, and writing them is rejected as an unknown field.
-Refreshing an allowance never resets `bytes_today` or `uploads_today`.
-A successful null response, including trust fallback with no configured
-base, removes a previous uplift; transient refresh failures retain it for
-the current identity. These daily volume caps do not establish submission
-readiness: server processing-cost admission uses its own period and units.
-See [the operator contract](operator/client-upload-allowance.md).
-
-It is deliberately **not** routed through `health`. The daemon does set
-`daily-cap-reached` when a cap refuses an upload, but that label sits at the
-bottom of the precedence order, so any other condition, including the full
-queue that prompted this field, occupies the single
-`health.last_error_label` slot and the cap becomes invisible. A client that
-only reads `health` therefore cannot tell a spent budget from a broken
-daemon. Read `daily_budget` independently of `health`.
-
-| field | meaning |
-| --- | --- |
-| `bytes_today` / `uploads_today` | consumed so far in the current UTC day |
-| `max_bytes_per_day` / `max_uploads_per_day` | the caps in force |
-| `bytes_remaining` / `uploads_remaining` | what is left, saturating at zero |
-| `resets_at` | the next UTC midnight, when the counters zero. Derived from the daemon's own day bucket, so a client may state it |
-| `blocked` | whether at least one approved entry cannot be uploaded before `resets_at` |
-| `blocked_entries` / `blocked_bytes` | how many, and their combined on-disk size |
-
-`blocked_entries` counts every approved entry that will not go out today,
-not only the ones that individually overflow the budget: the upload pass
-stops at the first entry that does not fit rather than skipping past it, so
-a small entry queued behind a large one waits as well.
-
-`blocked` is false when the budget is spent but nothing is approved and
-waiting. No contributor action is pending in that case.
+What still paces uploads: a local burst guard holds a daemon to at most 25
+upload attempts in any sixty seconds, under ingest's default per-principal
+submission rate. A pass that reaches it, like one the server turns away
+with `429`, leaves the entry approved with `reason_label`
+`rate-limited` and a `retry_after`, sets no health label, and stops the
+pass. Server admission still applies its own weekly account budget, which
+reports through `admission-limit-reached`.
 
 #### `witness_capacity`
 
@@ -924,7 +873,7 @@ the same pass that would need the witness is held until the same time
 without being sent, so a busy witness is asked once per pass, not once per
 session. There is no attempt limit: a busy witness never costs a session.
 
-It is beside `health` for the reason `daily_budget` is: the daemon also
+It is beside `health` because the daemon also
 sets `witness-saturated` in the health slot, set and retracted from the
 queue on every upload pass, but a higher-precedence label can mask it.
 Render the condition from this object. The words are
@@ -1262,8 +1211,8 @@ do not depend on history and still lead while history is stale.
 whenever any of these holds: `paused`; `consent_hold` is non-null; not
 `logged_in` (no live enrollment); suggestions switched off
 (`suggestions_enabled`, see `set_settings`). It is `unknown` while the daemon
-is unhealthy -- `health.last_error_label` is set or `daily_budget.blocked` is
-true -- because its view may not be current. **Decisions owed come first:**
+is unhealthy -- `health.last_error_label` is set -- because its view may not
+be current. **Decisions owed come first:**
 while `arming_suggestion` would return an offer, `review_backlog` is hidden
 (`none`), because "decide on these" beside "arm this folder" is two asks at
 once. The arming offer hides `idle_sessions` too.
@@ -1330,7 +1279,7 @@ decides where it draws, and it never replaces or hides a higher state.
 | `news` | Something new to look at, nothing to decide: a hollow ring in the badge's slot, below paused | `decisions_owed` is 0, every gate below is open, the history poll is fresh, and verdict news is waiting unacknowledged and its newest verdict is less than 72 hours old (DRAFT, owner decision 19) |
 | `ready` | Some of the decisions owed are idle sessions: a halo around the badge. The number is unchanged | `decisions_owed` is above 0, every gate below is open, `status.idle_sessions.count` is at least 1, `notify.idle_sessions` is on, and no in-app "Not now" for `idle_sessions` or `review_backlog` is in force |
 | `none` | Nothing is lit | otherwise, or a gate below is closed |
-| `unknown` | The daemon cannot say | the daemon is unhealthy (`health.last_error_label` set or `daily_budget.blocked`), or, with nothing owed, the history poll is stale (as for `state`) |
+| `unknown` | The daemon cannot say | the daemon is unhealthy (`health.last_error_label` set), or, with nothing owed, the history poll is stale (as for `state`) |
 
 - **Never both.** `news` needs `decisions_owed == 0` and `ready` needs it
   above 0, so the two cannot hold together. When a decision becomes owed the
@@ -2009,7 +1958,7 @@ with three waiting and one approved by hand loses three and still uploads
 one. A client MUST say so rather than let a contributor discover it.
 
 An unattended approval that was `uploading` at the moment of the change and
-did not complete -- the daily cap, a fail-closed precondition, a restart --
+did not complete -- a rate limit, a fail-closed precondition, a restart --
 returns to `approved`. It is not sent: the upload pass re-checks the
 project's mode before sending any unattended approval, refuses it as
 `"project-ignored"` if the project is now `ignore`, returns it to `pending`
@@ -5501,7 +5450,7 @@ it with the same parser, against a cloned in-memory snapshot. It returns:
   "schema_version": "trace_commons.settings_preview.v1",
   "applied": false,
   "changes": [
-    {"key": "max_uploads_per_day", "before": 50, "after": 12, "redacted": false}
+    {"key": "quiescence_secs", "before": 1800, "after": 600, "redacted": false}
   ]
 }
 ```
@@ -5992,7 +5941,8 @@ Takes a JSON object whose top-level keys must come from
 `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`,
 `menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending`, `idle_offer_pending`,
-`max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
+`max_uploads_per_day` and `max_bytes_per_day` (retired: accepted and
+ignored, see below), `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
 `insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` --
 a key this method does
@@ -6228,9 +6178,9 @@ shell's own command layer clamping before the call ever reached
 same label-only `settings-invalid-value` the other numeric fields already
 use.
 
-Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`,
-`digest_interval_secs`, `max_uploads_per_day` and `max_bytes_per_day`, all in
-the unit `set_settings` itself stores and validates (seconds or bytes, never
+Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`
+and `digest_interval_secs`, all in
+the unit `set_settings` itself stores and validates (seconds, never
 a shell's own minute/hour/megabyte control granularity) -- are available
 without guessing or hard-coding a second copy: the C ABI's
 `tc_settings_ranges_json` returns them as one JSON object, so a shell can
@@ -7183,30 +7133,12 @@ sentence says the check only counts what was removed and does not check that
 the scrubbing was right: it is not a model or quality check (the
 connect-and-forget design's R1).
 
-Each daily cap also accepts `null`: reset the saved value to the shared
-50-upload/200-MiB default for that dimension and follow server allowances
-again. A numeric write remains an explicit local choice, even when equal
-to the default. Resetting one cap preserves the other cap's choice. The
-saved provenance flags are internal and cannot be read or written through
-these IPC methods.
-
-`max_uploads_per_day` and `max_bytes_per_day` each take a positive integer,
-validated against a fixed ceiling (1,000 uploads; 5 GiB) rather than
-accepted as an open field. The cap exists to bound a runaway client -- an
-app that decided to upload everything should not be able to -- so making it
-freely settable to any value would give up exactly the protection it was
-added for. A value below the built-in default (50 uploads; 200 MiB) is
-accepted with no floor beyond non-zero: a contributor throttling their own
-uploads is legitimate and is not what the ceiling guards against. Zero is
-refused (`bad_params` / `settings-invalid-value`) rather than treated as
-"stop uploading" -- that state already exists and is spelled `pause`, which
-is visibly temporary in a way a cap of zero would not be. A value above
-either ceiling is refused the same way. Like the other numeric knobs, the
-new setting is read at each upload pass, so a change reaches an
-already-running daemon -- including one that reached its old cap with
-approved traces still waiting -- without a restart, and it is written to
-the persisted settings file in the same call, so the raised value survives
-one.
+`max_uploads_per_day` and `max_bytes_per_day` are retired with the daily
+upload limit. Either is accepted, whatever its value, and changes nothing,
+so a shell built while the limit existed can still save its other
+settings in the same call; an unknown key beside them is still refused.
+`get_settings` no longer returns them, and a settings file that still
+holds them loads and drops them on the next save.
 
 ### History provenance (K7)
 
@@ -9278,7 +9210,6 @@ nothing for an interval that is not whole hours.
 | `pii-filter-unavailable` | filter configured but unreachable | yes |
 | `claim-mint-failed` | issuer refused or failed | yes |
 | `ingest-unreachable` | upload failed after retries | yes |
-| `daily-cap-reached` | volume cap in force until the day rolls | yes |
 | `near-ai-notice-not-acknowledged` | first-use notice not delivered interactively | yes |
 | `privacy-filter-canary-failed` | canary self-test failed | yes |
 | `queue-full` | queue at its configured maximum | no |
@@ -9308,8 +9239,7 @@ listed highest first:
 8. `witness-saturated`
 9. `automatic-contribution-held`
 10. `admission-limit-reached`
-11. `daily-cap-reached`
-12. `session-too-large`
+11. `session-too-large`
 
 `session-too-large` sits last on purpose: every label above it describes the
 daemon, and this one describes a single file on disk. It must never mask an
@@ -9322,11 +9252,8 @@ permission or IO error -- does not raise it: that is expected to succeed on
 the next poll, and a flag a blip pins on a healthy daemon is one nobody will
 trust.
 
-Because `daily-cap-reached` is last, it is the label most often masked by
-another condition. That is why the daily caps are also reported in full on
-`status.daily_budget`, outside the precedence order described above. A client
-should render the budget condition from `daily_budget`, not by waiting for
-`daily-cap-reached` to reach the health slot.
+`daily-cap-reached` is retired with the daily upload limit: no daemon in
+this revision sets it. A client may still map it, for an older daemon.
 
 Rationale: states the contributor can act on outrank states they can only
 wait out. An application should not attempt to infer or reconstruct this

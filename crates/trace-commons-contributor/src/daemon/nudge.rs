@@ -609,8 +609,8 @@ pub struct LeadInputs {
     pub consent_hold: bool,
     /// An enrollment is live (`status.logged_in`): config and device key.
     pub enrolled: bool,
-    /// No health label is set and the daily budget is not blocking uploads:
-    /// the same health that turns the menu-bar strip to attention.
+    /// No health label is set: the same health that turns the menu-bar
+    /// strip to attention.
     pub healthy: bool,
     /// The `suggestions_enabled` setting.
     pub suggestions_enabled: bool,

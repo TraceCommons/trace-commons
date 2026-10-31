@@ -2119,9 +2119,6 @@ struct AppState {
     witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
     account_admission: Option<admission::AccountAdmissionConfig>,
-    client_upload_allowance: Option<trace_commons_protocol::upload_allowance::DailyUploadAllowance>,
-    /// Independent earned daily upload caps; neither admission ledger is enabled.
-    client_upload_trust_policy: Option<Arc<upload_allowance::ClientUploadTrustPolicy>>,
     /// Optional narrow nonowner trust pool; the ingest source pool is unchanged.
     client_upload_trust_database: Option<Arc<dyn Database>>,
     /// A candidate earned-trust growth policy for the shadow evaluator. Never
@@ -4775,7 +4772,6 @@ impl AppState {
             witness_bypass.as_ref(),
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
-        let client_upload_allowance = upload_allowance::config_from_env()?;
         let account_admission = admission::account_config_from_env(
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
@@ -5292,8 +5288,6 @@ impl AppState {
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
             admission,
             account_admission,
-            client_upload_allowance,
-            client_upload_trust_policy,
             client_upload_trust_database,
             account_trust_shadow_policy,
             near_ai_starter_mode,
@@ -22398,7 +22392,8 @@ struct ConfirmLoginBody {
 const REDEEM_MIN_LATENCY: StdDuration = StdDuration::from_millis(250);
 
 /// Fixed-window length for all account-surface rate limiters.
-const ACCOUNT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
+const ACCOUNT_RATE_WINDOW: StdDuration =
+    StdDuration::from_secs(trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS);
 
 /// Per-IP cap on `GET /account/login` interstitial renders per window.
 const INTERSTITIAL_PER_IP_LIMIT: u32 = 120;
@@ -22472,7 +22467,8 @@ const CONTENT_PER_ACCOUNT_CONCURRENCY: u32 = 4;
 /// Per-principal cap on `POST /v1/traces` submissions per window. A submission
 /// performs more work than a content read, so this is half the content limit of
 /// 60 and matches the existing confirm-attempt ceiling of 30.
-const SUBMIT_PER_PRINCIPAL_LIMIT: u32 = 30;
+const SUBMIT_PER_PRINCIPAL_LIMIT: u32 =
+    trace_commons_protocol::submit_rate::SUBMIT_PER_PRINCIPAL_LIMIT;
 /// Concurrency cap on in-flight submissions per principal. The re-scrub and gate
 /// path gets half the content-read concurrency allowance of 4.
 const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;

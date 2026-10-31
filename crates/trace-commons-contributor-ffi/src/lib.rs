@@ -789,9 +789,7 @@ pub unsafe extern "C" fn tc_daemon_attach(
 /// ```json
 /// {"quiescence_secs":{"min":0,"max":14400},
 ///  "approval_hold_secs":{"min":0,"max":300},
-///  "digest_interval_secs":{"min":3600,"max":86400},
-///  "max_uploads_per_day":{"min":1,"max":1000},
-///  "max_bytes_per_day":{"min":1,"max":5368709120}}
+///  "digest_interval_secs":{"min":3600,"max":86400}}
 /// ```
 ///
 /// Reads nothing and writes nothing; the same object for every caller on
@@ -1066,7 +1064,7 @@ unsafe fn apply_pre_start_settings(
 /// `settings_json` accepts exactly the fields `tc_call(handle,
 /// "set_settings", ...)` does -- `quiescence_secs`, `digest_interval_secs`,
 /// `approval_hold_secs`, `local_notifications`, `claude_root`,
-/// `codex_root`, `max_uploads_per_day`, `max_bytes_per_day` -- validated by the
+/// `codex_root` -- validated by the
 /// same function (`daemon::settings::apply_settings_object`), so there is
 /// one definition of "a valid settings object", not two that can drift. An
 /// unrecognized top-level key, or a recognized key holding the wrong JSON
@@ -4753,33 +4751,6 @@ pub extern "C" fn tc_contribution_group_withheld_count(pending: i64, contributab
         )
     })
     .unwrap_or(0)
-}
-
-/// K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
-/// limit X of Y", the WYSIWYG design's Flow 2/3 example.
-///
-/// `uploads_today` and `max_uploads_per_day` are `status.daily_budget`'s
-/// fields of the same names; `decisions_owed` is `status.decisions_owed`
-/// (K6, a separate branch). All three are clamped to 0 on a negative value,
-/// which no honest caller sends.
-///
-/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
-/// caught panic.
-#[unsafe(no_mangle)]
-pub extern "C" fn tc_toast_sent_text(
-    uploads_today: i64,
-    max_uploads_per_day: i64,
-    decisions_owed: i64,
-) -> *mut c_char {
-    guarded_string_no_err(|| {
-        Ok(to_owned_cstring(
-            &trace_commons_contributor::consent_copy::toast_sent_text(
-                u64::try_from(uploads_today).unwrap_or(0),
-                u64::try_from(max_uploads_per_day).unwrap_or(0),
-                u64::try_from(decisions_owed).unwrap_or(0),
-            ),
-        ))
-    })
 }
 
 /// The sentence for one `near_ai_balance` `state`.

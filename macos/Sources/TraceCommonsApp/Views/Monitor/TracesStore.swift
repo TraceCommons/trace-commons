@@ -856,14 +856,6 @@ final class TracesStore {
         // The health slot may retain an earlier watcher failure after the
         // queue has room. Only the authoritative capacity read clears it.
         if status.queueAtCapacity == false { said.insert("queue-full") }
-        if status.dailyBudget?.blocked != nil { said.insert("daily-cap-reached") }
-        if let budget = status.dailyBudget, budget.blocked == true {
-            out.append(Safeguard(
-                title: DailyBudgetCopy.title,
-                body: DailyBudgetCopy.detail(blockedEntries: budget.blockedEntries ?? 0, resetsAt: budget.resetsAt),
-                severity: .waiting, condition: "daily-cap-reached"))
-            said.insert("daily-cap-reached")
-        }
         if let capacity = status.witnessCapacity {
             // Reported but not readable (no count, a negative one, or one
             // the core could not word) is never "none waiting" (Ron's

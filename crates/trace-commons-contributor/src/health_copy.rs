@@ -98,12 +98,6 @@ impl HealthLineCopy {
     }
 }
 
-/// The banner title for a spent daily budget. Shared with the real-numbers
-/// banner a shell draws instead when it has `status.daily_budget`
-/// (`daemon::uploader`'s daily-cap accounting); this is only the fallback for
-/// a daemon that reported the label without that object.
-pub const DAILY_BUDGET_TITLE: &str = "Today's upload limit is used up.";
-
 /// The banner for a daemon that cannot be reached
 /// at all -- no IPC call is answering, so there is no label to read and
 /// nothing a shell's own liveness probe can do but say so. New wording: no
@@ -216,11 +210,6 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
                 Some(("Review", HealthActionKind::ReviewQueue)),
             )
         }
-        health::LABEL_DAILY_CAP_REACHED => HealthLineCopy::waiting(
-            DAILY_BUDGET_TITLE,
-            "Approved traces are waiting. Nothing has been lost -- they go out when the limit \
-             resets.",
-        ),
         _ => on_hold_copy(),
     }
 }
@@ -408,7 +397,6 @@ mod tests {
             health::LABEL_PII_FILTER_UNAVAILABLE,
             health::LABEL_CLAIM_MINT_FAILED,
             health::LABEL_INGEST_UNREACHABLE,
-            health::LABEL_DAILY_CAP_REACHED,
             health::LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED,
         ] {
             assert!(
@@ -457,7 +445,6 @@ mod tests {
                 Actionable,
             ),
             (health::LABEL_QUEUE_FULL, Actionable),
-            (health::LABEL_DAILY_CAP_REACHED, Waiting),
             ("a-future-label", Waiting),
         ] {
             assert_eq!(

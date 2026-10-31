@@ -675,25 +675,19 @@ final class TracesQueueStateTests: XCTestCase {
         return try DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: data)
     }
 
-    private static func spend(_ object: inout [String: Any]) {
-        var budget = object["daily_budget"] as? [String: Any] ?? [:]
-        budget["blocked"] = true
-        budget["blocked_entries"] = 2
-        object["daily_budget"] = budget
-    }
-
-    /// A spent budget says so, in the words the main window uses for it; a
-    /// healthy queue says nothing.
-    func test_aSpentBudgetIsSaid() async throws {
+    /// A healthy queue says nothing. Nor does a blocked `daily_budget` from
+    /// an older daemon: the daily upload limit is retired.
+    func test_aHealthyQueueAndARetiredBudgetSayNothing() async throws {
         let healthy = try await status()
         XCTAssertTrue(TracesStore.safeguards(healthy).isEmpty)
-        let spent = try await status(Self.spend)
-        XCTAssertEqual(TracesStore.safeguards(spent).map(\.title), [DailyBudgetCopy.title])
+        let blocked = try await status {
+            $0["daily_budget"] = ["blocked": true, "blocked_entries": 2]
+        }
+        XCTAssertTrue(TracesStore.safeguards(blocked).isEmpty)
         XCTAssertTrue(TracesStore.safeguards(nil).isEmpty)
     }
 
-    /// The health label is said when nothing more specific already says it,
-    /// and not twice when the budget does.
+    /// The health label is said when nothing more specific already says it.
     func test_theHealthLabelIsNotSaidTwice() async throws {
         let full = try await status {
             $0["health"] = ["last_error_label": "queue-full"]
@@ -701,11 +695,6 @@ final class TracesQueueStateTests: XCTestCase {
             $0["queue_capacity_used"] = 500
         }
         XCTAssertEqual(TracesStore.safeguards(full).map(\.title), [HealthCopy.core(label: "queue-full", maxQueueEntries: nil).title])
-        let capped = try await status {
-            $0["health"] = ["last_error_label": "daily-cap-reached"]
-            Self.spend(&$0)
-        }
-        XCTAssertEqual(TracesStore.safeguards(capped).map(\.title), [DailyBudgetCopy.title])
     }
 
     func testExplicitSpareCapacitySuppressesOnlyTheStaleQueueFullLabel() async throws {
@@ -720,21 +709,17 @@ final class TracesQueueStateTests: XCTestCase {
         }
     }
 
-    func testSpareQueueCapacityPreservesOtherHealthAndIndependentSafeguards() async throws {
-        let blocked = try await status {
+    func testSpareQueueCapacityPreservesOtherHealth() async throws {
+        let other = try await status {
             $0["queue_at_capacity"] = false
             $0["health"] = ["last_error_label": "privacy-filter-canary-failed"]
-            Self.spend(&$0)
         }
-        let conditions = TracesStore.safeguards(blocked).map(\.condition)
-        XCTAssertTrue(conditions.contains("privacy-filter-canary-failed"))
-        XCTAssertTrue(conditions.contains("daily-cap-reached"))
+        XCTAssertTrue(TracesStore.safeguards(other).map(\.condition).contains("privacy-filter-canary-failed"))
         let stale = try await status {
             $0["queue_at_capacity"] = false
             $0["health"] = ["last_error_label": "queue-full"]
-            Self.spend(&$0)
         }
-        XCTAssertEqual(TracesStore.safeguards(stale).map(\.condition), ["daily-cap-reached"])
+        XCTAssertFalse(TracesStore.safeguards(stale).map(\.condition).contains("queue-full"))
     }
 
     func testCapacityAloneDoesNotIntroduceANewQueueBanner() async throws {

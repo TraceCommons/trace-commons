@@ -309,7 +309,6 @@ public struct MonitorSummaryCopy: MonitorWordTable {
     public let toolsWatched: String
     public let waitingForYou: String
     public let worthASecondLook: String
-    public let uploadsToday: String
     public let statistics: String
     public let topProjects: String
     public let topTools: String
@@ -320,7 +319,6 @@ public struct MonitorSummaryCopy: MonitorWordTable {
         case toolsWatched = "tools_watched"
         case waitingForYou = "waiting_for_you"
         case worthASecondLook = "worth_a_second_look"
-        case uploadsToday = "uploads_today"
         case statistics
         case topProjects = "top_projects"
         case topTools = "top_tools"
@@ -489,18 +487,14 @@ public struct MonitorUndoCopy: MonitorWordTable {
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
 }
 
-/// The queue's safeguards panel labels that `HealthCopy`, `DailyBudgetCopy` and the routing copy do not already hold.
+/// The queue's safeguards panel labels that `HealthCopy` and the routing copy do not already hold.
 public struct MonitorSafeguardsCopy: MonitorWordTable {
     public let eyebrow: String
     public let heading: String
-    public let dailyLimit: String
     public let inferenceRouting: String
     public let daemonOwned: String
     public let rowsUnavailableOne: String
     public let rowsUnavailable: String
-    public let remaining: String
-    public let heldByLimitOne: String
-    public let heldByLimit: String
     public let capacityUnreadable: String
     public let routingNotDeclared: String
     public let routingAwaitingRows: String
@@ -511,14 +505,10 @@ public struct MonitorSafeguardsCopy: MonitorWordTable {
     enum CodingKeys: String, CodingKey, CaseIterable {
         case eyebrow
         case heading
-        case dailyLimit = "daily_limit"
         case inferenceRouting = "inference_routing"
         case daemonOwned = "daemon_owned"
         case rowsUnavailableOne = "rows_unavailable_one"
         case rowsUnavailable = "rows_unavailable"
-        case remaining
-        case heldByLimitOne = "held_by_limit_one"
-        case heldByLimit = "held_by_limit"
         case capacityUnreadable = "capacity_unreadable"
         case routingNotDeclared = "routing_not_declared"
         case routingAwaitingRows = "routing_awaiting_rows"

@@ -3061,7 +3061,6 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
             "Content changed; review again before sending"
         }
         health::LABEL_NOT_LOGGED_IN => "Waiting for you to reconnect",
-        health::LABEL_DAILY_CAP_REACHED => "Waiting for the daily upload limit to reset",
         health::LABEL_QUEUE_FULL => "Queue was full",
         health::LABEL_INGEST_UNREACHABLE | health::LABEL_CLAIM_MINT_FAILED => {
             "Could not reach the commons"
@@ -3307,7 +3306,6 @@ mod tests {
             queue::REASON_SCOPES_CHANGED,
             "envelope-changed-after-approval",
             health::LABEL_NOT_LOGGED_IN,
-            health::LABEL_DAILY_CAP_REACHED,
             health::LABEL_QUEUE_FULL,
             health::LABEL_INGEST_UNREACHABLE,
             health::LABEL_CLAIM_MINT_FAILED,

@@ -3145,7 +3145,7 @@ async fn contribution_status_reports_the_accounts_own_growth() {
     assert_eq!(
         upload_allowance(state.clone(), token).await,
         serde_json::json!({"allowance":null}),
-        "no evaluation leaves the default daily limits unchanged"
+        "no client daily limit is advertised"
     );
 
     // A fresh applied evaluation at tier 1, and 10 already spent this period.
@@ -3236,10 +3236,8 @@ async fn contribution_status_reports_the_accounts_own_growth() {
 
     assert_eq!(
         upload_allowance(state.clone(), token).await,
-        serde_json::json!({
-            "allowance": {"schema_version":1,"max_uploads_per_day":150,"max_bytes_per_day":629145600u64}
-        }),
-        "a validated threefold account allowance raises both daily limits threefold"
+        serde_json::json!({"allowance":null}),
+        "earned trust grows the server budget; no client daily limit is advertised"
     );
     let unchanged_spend: i64 = client.query_one(
         "SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2",
@@ -3247,7 +3245,7 @@ async fn contribution_status_reports_the_accounts_own_growth() {
     ).await.unwrap().get(0);
     assert_eq!(
         unchanged_spend, 10,
-        "publishing a larger daily limit does not erase server spend"
+        "reading the allowance does not erase server spend"
     );
 
     // Stale: older than evaluation_max_age_seconds reads as tier 0, and the
@@ -3278,17 +3276,11 @@ async fn contribution_status_reports_the_accounts_own_growth() {
     assert_eq!(
         upload_allowance(state.clone(), token).await,
         serde_json::json!({"allowance":null}),
-        "stale earned trust withdraws the daily uplift"
+        "stale earned trust advertises no client daily limit either"
     );
 
-    // Independent client trust can consume the same validated applied rule
-    // while both admission ledgers remain off. It never reserves/debits.
-    let growth =
-        trace_commons_server::account_trust_rule::parse_growth_policy(&tiered, &[version.as_str()])
-            .unwrap();
-    let bounded =
-        trace_commons_server::account_trust::parse_bounded_policy(&tiered, &[version.as_str()])
-            .unwrap();
+    // With both admission ledgers off, the independent trust pool neither
+    // reserves nor debits, and no client daily limit is advertised.
     // Optional explicit isolated worker login exercises the operator bootstrap's
     // real status-read permissions while auth/source storage stays on admin.
     let independent_database =
@@ -3323,19 +3315,14 @@ async fn contribution_status_reports_the_accounts_own_growth() {
     independent_mut.client_upload_trust_database = independent_database;
     independent_mut.admission = None;
     independent_mut.account_admission = None;
-    independent_mut.client_upload_trust_policy =
-        Some(Arc::new(upload_allowance::ClientUploadTrustPolicy {
-            bounded,
-            growth,
-        }));
     client.execute(
         "UPDATE trace_account_trust_evaluations SET as_of=clock_timestamp() WHERE tenant_id=$1 AND account_id=$2",
         &[&tenant, &account_id],
     ).await.unwrap();
     assert_eq!(
         upload_allowance(independent.clone(), token).await,
-        serde_json::json!({"allowance":{"schema_version":1,"max_uploads_per_day":150,"max_bytes_per_day":629145600u64}}),
-        "client upload trust applies while both admission ledgers remain off"
+        serde_json::json!({"allowance":null}),
+        "no client daily limit with both admission ledgers off"
     );
     let (code, bytes) = status(independent.clone(), token).await;
     assert_eq!(code, StatusCode::OK);
@@ -3358,7 +3345,7 @@ async fn contribution_status_reports_the_accounts_own_growth() {
     assert_eq!(
         upload_allowance(independent, token).await,
         serde_json::json!({"allowance":null}),
-        "independent trust retains freshness fallback"
+        "a stale evaluation advertises no client daily limit either"
     );
 
     // A legacy-namespace session is still refused before any read.

@@ -933,7 +933,7 @@ pub struct GateHeld {
 /// first, collect what it gives, release it, and lock in order. Watch for a
 /// guard that lives longer than it looks: one bound with `let` across a call
 /// to a helper that locks for itself (`decisions_owed_value`,
-/// `daily_budget`, `status_value`, `publish_if_decisions_owed_changed`), or a
+/// `status_value`, `publish_if_decisions_owed_changed`), or a
 /// temporary in a `match` scrutinee, which lives for the whole `match`.
 pub struct DaemonShared {
     pub(crate) native_identity: Mutex<super::native_identity::Ceremonies>,
@@ -1046,7 +1046,6 @@ pub struct DaemonShared {
     /// What ingest last said about account admission, for the gate's R3.
     /// In memory only; see `account_admission`.
     pub(crate) account_admission: super::account_admission::AccountAdmissionState,
-    pub(crate) upload_allowance: super::upload_allowance::UploadAllowanceState,
     /// The one IronWire this daemon may host, when a home could be resolved
     /// for it at all.
     ///
@@ -1557,7 +1556,6 @@ impl DaemonShared {
             gate_held_logged: Mutex::new((0, Vec::new())),
             gate_held: Mutex::new(GateHeld::default()),
             account_admission: Default::default(),
-            upload_allowance: Default::default(),
             // Constructed, never started. Nothing binds until the reconcile
             // pass reads `private_inference` out of settings and finds it
             // on -- a daemon that has never been asked hosts nothing.
@@ -2485,42 +2483,13 @@ impl DaemonShared {
         state.paused
     }
 
-    /// Today's volume budget, and how much approved work it is holding.
-    ///
-    /// Read-only: `budget_snapshot` rolls the day on a copy, so polling
-    /// `status` cannot move the daemon's own counters.
-    ///
-    /// Approved entries never appear on `list_pending` -- that method
-    /// returns `Pending` only -- so a shell has no row it could annotate.
-    /// A count and a byte total on `status` are the only place the
-    /// condition can be told, which is why it lands here rather than on a
-    /// queue entry.
-    ///
-    /// Only entries a pass would try now are simulated: an approved entry
-    /// paced behind a future `retry_after` (a transient classifier failure,
-    /// a witness at capacity) is not held by the cap until it is due.
-    pub fn daily_budget(&self, now: chrono::DateTime<Utc>) -> super::uploader::DailyBudget {
-        let approved: Vec<super::queue::QueueEntry> = {
-            let queue = self.queue.lock().expect("queue lock");
-            queue
-                .all()
-                .iter()
-                .filter(|e| e.ready_for_upload(now))
-                .cloned()
-                .collect()
-        };
-        let settings = super::upload_allowance::effective_settings(self);
-        let state = self.state.lock().expect("state lock");
-        super::uploader::budget_snapshot(&approved, &state, &settings, now)
-    }
-
     /// How many approved sessions are held because the witness is at
     /// capacity, and the earliest instant one of them will be tried again.
     ///
     /// Derived from the queue on every call rather than kept beside it, so
     /// it cannot disagree with the rows it counts. Approved rows are never on
-    /// `list_pending`, so, like `daily_budget`, this is the only place a
-    /// shell can learn the condition.
+    /// `list_pending`, so this is the only place a shell can learn the
+    /// condition.
     pub fn witness_capacity(&self) -> WitnessCapacity {
         let queue = self.queue.lock().expect("queue lock");
         let waiting: Vec<&super::queue::QueueEntry> = queue
@@ -2649,12 +2618,8 @@ impl DaemonShared {
 
     /// [`Self::status_value`] as of `now`.
     pub(crate) fn status_value_at(&self, now: chrono::DateTime<Utc>) -> serde_json::Value {
-        // Taken before the queue lock below, and released with it, because
-        // `daily_budget` takes the queue, state, and settings locks itself.
-        let budget = self.daily_budget(now);
-        // Taken before the locks below for the same reason as `budget`:
-        // this reads the routing lock, and taking locks in one order
-        // everywhere is what keeps that safe.
+        // Taken before the locks below: this reads the routing lock, and
+        // taking locks in one order everywhere is what keeps that safe.
         let routing = self.routing_value();
         // Taken before the locks below for the same reason as `routing`:
         // one lock order everywhere.
@@ -2793,7 +2758,7 @@ impl DaemonShared {
                 enrolled: logged_in,
                 // The health that turns the strip to attention, plus a
                 // reached daily cap: either way nothing is going out.
-                healthy: health.last_error_label.is_none() && !budget.blocked(),
+                healthy: health.last_error_label.is_none(),
                 suggestions_enabled: nudge_snapshot.suggestions_enabled,
                 arming_offer_present,
                 unpurposed_traces: Some(unpurposed_traces),
@@ -2927,24 +2892,9 @@ impl DaemonShared {
                 "last_error_label": health.last_error_label,
                 "since": health.since,
             },
-            // Additive. The daily cap is enforced whatever else is wrong,
-            // and `health` can only carry one label at a time, so this is
-            // reported independently of it -- see `DailyBudget`.
-            "daily_budget": {
-                "bytes_today": budget.bytes_today,
-                "max_bytes_per_day": budget.max_bytes_per_day,
-                "bytes_remaining": budget.bytes_remaining,
-                "uploads_today": budget.uploads_today,
-                "max_uploads_per_day": budget.max_uploads_per_day,
-                "uploads_remaining": budget.uploads_remaining,
-                "resets_at": budget.resets_at,
-                "blocked": budget.blocked(),
-                "blocked_entries": budget.blocked_entries,
-                "blocked_bytes": budget.blocked_bytes,
-            },
             // Additive, and three-valued on purpose. `health` reports
-            // faults; none of these three is one, so like `daily_budget`
-            // this sits beside it rather than inside it.
+            // faults; none of these three is one, so this sits beside it
+            // rather than inside it.
             "routing": routing,
             // Also additive, and deliberately not folded into `routing`:
             // routing is about reading a proxy's ledger, this is about
@@ -2959,7 +2909,7 @@ impl DaemonShared {
             "grant_voids": grant_voids,
             // Additive. Approved sessions held because the witness is at
             // capacity, and when the first of them is tried again. Beside
-            // `health` for the reason `daily_budget` is: the health slot
+            // `health` because the health slot
             // holds one label, and a busy witness must still be sayable
             // while something outranks it. Always present, zero when none.
             "witness_capacity": {
@@ -9206,10 +9156,6 @@ fn envelope_is_for_enrollment(
 pub(super) fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
     let mut v = serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
-        // Limit provenance belongs to persisted settings. Clients reset a
-        // cap through its existing key with null, never by echoing flags.
-        obj.remove("max_uploads_per_day_explicit");
-        obj.remove("max_bytes_per_day_explicit");
         let configured = s.near_ai.is_some();
         obj.remove("near_ai");
         obj.insert(
@@ -10127,7 +10073,7 @@ mod tests {
             &req(
                 "preview_settings",
                 serde_json::json!({
-                    "private_inference":true, "scrub_check":"manual", "max_uploads_per_day":13
+                    "private_inference":true, "scrub_check":"manual", "approval_hold_secs":13
                 }),
             ),
         );
@@ -14815,10 +14761,6 @@ mod tests {
         }
     }
 
-    fn approved_entry(size_bytes: u64) -> super::super::queue::QueueEntry {
-        approved_entry_n(0, size_bytes)
-    }
-
     #[test]
     fn status_queue_at_capacity_counts_approved_and_excludes_person_included_and_history() {
         let s = shared();
@@ -14870,21 +14812,11 @@ mod tests {
         assert_eq!(status["queue_at_capacity"], false);
     }
 
+    /// There is no daily upload limit, so `status` carries no
+    /// `daily_budget` at all, however much approved work is waiting.
     #[test]
-    fn status_reports_the_daily_budget_with_the_real_numbers() {
-        // The condition that made a working app look broken: the byte
-        // budget all but spent, 14 approved entries waiting, and a health
-        // slot occupied by something else entirely -- so the cap was
-        // invisible. `daily_budget` is reported independently of `health`
-        // for exactly that reason, and this pins the numbers rather than
-        // the presence of a key.
+    fn status_carries_no_daily_budget() {
         let s = shared();
-        {
-            let mut state = s.state.lock().unwrap();
-            state.day_bucket = Some(Utc::now().format("%Y-%m-%d").to_string());
-            state.bytes_today = 204_659_969;
-            state.uploads_today = 12;
-        }
         {
             let mut q = s.queue.lock().unwrap();
             let max = s.settings.lock().unwrap().max_queue_entries;
@@ -14892,144 +14824,11 @@ mod tests {
                 q.upsert(approved_entry_n(n, 14_900_000), max).unwrap();
             }
         }
-        // Something else already holds the single health slot, exactly as
-        // `queue-full` did on the machine this came from.
-        s.health
-            .lock()
-            .unwrap()
-            .fail(crate::daemon::health::LABEL_QUEUE_FULL, Utc::now());
-
-        let r = handle_request(&s, &req("status", serde_json::json!({})));
-        let v = r.result.unwrap();
-        let b = &v["daily_budget"];
-        assert_eq!(v["health"]["last_error_label"], "queue-full");
-        assert_eq!(b["blocked"], true);
-        assert_eq!(b["blocked_entries"], 14);
-        assert_eq!(b["blocked_bytes"], 14_900_000u64 * 14);
-        assert_eq!(b["bytes_today"], 204_659_969u64);
-        assert_eq!(b["max_bytes_per_day"], 209_715_200u64);
-        assert_eq!(b["bytes_remaining"], 5_055_231u64);
-        assert_eq!(b["uploads_today"], 12);
-        assert_eq!(b["max_uploads_per_day"], 50);
-        assert_eq!(b["uploads_remaining"], 38);
-        assert!(!b["resets_at"].is_null());
-    }
-
-    #[test]
-    fn a_scheduled_retry_does_not_count_as_blocked_by_the_daily_cap() {
-        // An entry waiting out a transient classifier failure is approved,
-        // but no pass will try it before its `retry_after`. Counting it
-        // against today's cap reports pressure, or blocked entries, that no
-        // upload is actually facing yet. Once it is due it counts again.
-        let s = shared();
-        // Stay within one UTC day: near midnight, +31 minutes correctly
-        // resets the real daily cap and used to make this test fail.
         let now = "2026-09-30T12:00:00Z"
             .parse::<chrono::DateTime<Utc>>()
             .unwrap();
-        {
-            let mut state = s.state.lock().unwrap();
-            state.day_bucket = Some(now.format("%Y-%m-%d").to_string());
-            state.uploads_today = 50;
-        }
-        let mut waiting = approved_entry(1_024);
-        waiting.discovered_at = now;
-        waiting.reason_label = Some(crate::submit::REASON_TRANSIENT_REDACTION.into());
-        waiting.retry_after = Some(now + chrono::Duration::minutes(30));
-        {
-            let mut q = s.queue.lock().unwrap();
-            let max = s.settings.lock().unwrap().max_queue_entries;
-            q.upsert(waiting, max).unwrap();
-        }
-        let budget = s.daily_budget(now);
-        assert_eq!(budget.uploads_remaining, 0);
-        assert_eq!(
-            budget.blocked_entries, 0,
-            "a retry scheduled for later is not held by the cap now"
-        );
-        assert_eq!(
-            s.daily_budget(now + chrono::Duration::minutes(31))
-                .blocked_entries,
-            1,
-            "once due, the same entry is held by the spent cap"
-        );
-    }
-
-    #[test]
-    fn status_reports_an_unspent_budget_as_not_blocking_anything() {
-        let s = shared();
-        {
-            let mut q = s.queue.lock().unwrap();
-            let max = s.settings.lock().unwrap().max_queue_entries;
-            q.upsert(approved_entry(1_024), max).unwrap();
-        }
-        let v = handle_request(&s, &req("status", serde_json::json!({})))
-            .result
-            .unwrap();
-        assert_eq!(v["daily_budget"]["blocked"], false);
-        assert_eq!(v["daily_budget"]["blocked_entries"], 0);
-        assert_eq!(v["daily_budget"]["bytes_today"], 0);
-        assert_eq!(v["daily_budget"]["bytes_remaining"], 209_715_200u64);
-    }
-
-    #[test]
-    fn polling_status_does_not_hand_back_a_fresh_budget() {
-        // `budget_snapshot` rolls the day on a copy. If it rolled the real
-        // one, a client polling `status` across midnight -- or a state file
-        // left from yesterday -- would silently reset the counters the cap
-        // is enforced against.
-        let s = shared();
-        {
-            let mut state = s.state.lock().unwrap();
-            state.day_bucket = Some("2020-01-01".to_string());
-            state.bytes_today = 204_659_969;
-            state.uploads_today = 12;
-        }
-        let _ = handle_request(&s, &req("status", serde_json::json!({})));
-        let state = s.state.lock().unwrap();
-        assert_eq!(state.bytes_today, 204_659_969);
-        assert_eq!(state.uploads_today, 12);
-        assert_eq!(state.day_bucket.as_deref(), Some("2020-01-01"));
-    }
-
-    #[test]
-    fn a_stale_day_bucket_reports_todays_budget_as_untouched() {
-        // The counters on disk belong to a day that has passed, so what
-        // `status` reports is a full budget rather than yesterday's spend.
-        let s = shared();
-        {
-            let mut state = s.state.lock().unwrap();
-            state.day_bucket = Some("2020-01-01".to_string());
-            state.bytes_today = 209_715_200;
-            state.uploads_today = 50;
-        }
-        {
-            let mut q = s.queue.lock().unwrap();
-            let max = s.settings.lock().unwrap().max_queue_entries;
-            q.upsert(approved_entry(14_900_000), max).unwrap();
-        }
-        let v = handle_request(&s, &req("status", serde_json::json!({})))
-            .result
-            .unwrap();
-        assert_eq!(v["daily_budget"]["bytes_today"], 0);
-        assert_eq!(v["daily_budget"]["blocked"], false);
-    }
-
-    #[test]
-    fn the_daily_budget_carries_no_identifier_of_any_kind() {
-        // Counts and timestamps only: no entry id, no hash, no path.
-        let s = shared();
-        {
-            let mut q = s.queue.lock().unwrap();
-            let max = s.settings.lock().unwrap().max_queue_entries;
-            q.upsert(approved_entry(1_024), max).unwrap();
-        }
-        let v = handle_request(&s, &req("status", serde_json::json!({})))
-            .result
-            .unwrap();
-        let body = serde_json::to_string(&v["daily_budget"]).unwrap();
-        assert!(!body.contains("sha256"), "{body}");
-        assert!(!body.contains('/'), "{body}");
+        let v = s.status_value_at(now);
+        assert!(v.get("daily_budget").is_none(), "{v}");
     }
 
     #[test]
@@ -17020,7 +16819,7 @@ mod tests {
         for method in ["get_settings", "set_settings"] {
             let response = handle_request(
                 &s,
-                &req(method, serde_json::json!({"max_uploads_per_day": 200})),
+                &req(method, serde_json::json!({"quiescence_secs": 600})),
             );
             assert_eq!(
                 response.result.unwrap()["admission_evidence_required"],
@@ -17036,38 +16835,13 @@ mod tests {
         assert_eq!(r.error.unwrap().code, ERR_BAD_PARAMS);
     }
 
+    /// An older shell may still send the retired daily limit keys; they
+    /// are accepted and change nothing, and `get_settings` no longer
+    /// reports them.
     #[test]
-    fn upload_limit_provenance_is_internal_and_not_echoed_as_settings() {
-        let settings = DaemonSettings::default();
-        let public = redacted_settings(&settings);
-        assert!(public.get("max_uploads_per_day_explicit").is_none());
-        assert!(public.get("max_bytes_per_day_explicit").is_none());
-        let persisted = serde_json::to_value(&settings).unwrap();
-        assert_eq!(persisted["max_uploads_per_day_explicit"], false);
-        assert_eq!(persisted["max_bytes_per_day_explicit"], false);
-    }
-
-    #[test]
-    fn set_settings_raises_the_daily_caps_persists_and_the_next_upload_pass_sees_it() {
-        // The scenario this exists for: a contributor whose byte budget was
-        // already spent, with approved traces waiting, raises the cap
-        // through `set_settings` -- no restart, no hand-edited file.
+    fn set_settings_accepts_the_retired_daily_limit_keys_and_get_settings_omits_them() {
         let s = shared();
-        {
-            let mut state = s.state.lock().unwrap();
-            state.uploads_today =
-                super::super::settings::DaemonSettings::default().max_uploads_per_day;
-            state.bytes_today = 204_659_969;
-        }
-        assert!(
-            !super::super::uploader::cap_check(
-                &s.state.lock().unwrap(),
-                1,
-                &s.settings.lock().unwrap(),
-            ),
-            "sanity: the default budget is exhausted before the raise"
-        );
-
+        let before = serde_json::to_value(&*s.settings.lock().unwrap()).unwrap();
         let r = handle_request(
             &s,
             &req(
@@ -17076,27 +16850,21 @@ mod tests {
             ),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
-        let body = r.result.unwrap();
-        assert_eq!(body["max_uploads_per_day"], 200);
-        assert_eq!(body["max_bytes_per_day"], 2_147_483_648u64);
-
-        // Live: the in-memory settings the next upload pass reads are
-        // already updated, with no restart.
-        assert!(
-            super::super::uploader::cap_check(
-                &s.state.lock().unwrap(),
-                1,
-                &s.settings.lock().unwrap(),
-            ),
-            "the raised cap must be visible to the very next cap check"
+        assert_eq!(
+            serde_json::to_value(&*s.settings.lock().unwrap()).unwrap(),
+            before
         );
-
-        // Persisted: reloading from disk (what a restart does) must agree
-        // with the live value, or a restart would silently revert what the
-        // contributor just did.
-        let reloaded = super::super::settings::DaemonSettings::load(&s.store).unwrap();
-        assert_eq!(reloaded.max_uploads_per_day, 200);
-        assert_eq!(reloaded.max_bytes_per_day, 2_147_483_648);
+        let got = handle_request(&s, &req("get_settings", serde_json::json!({})))
+            .result
+            .unwrap();
+        for key in [
+            "max_uploads_per_day",
+            "max_bytes_per_day",
+            "max_uploads_per_day_explicit",
+            "max_bytes_per_day_explicit",
+        ] {
+            assert!(got.get(key).is_none(), "{key}");
+        }
     }
 
     #[test]
@@ -18367,26 +18135,6 @@ mod tests {
         assert_eq!(
             status["private_inference_state"],
             serde_json::json!({ "state": "off", "port": null })
-        );
-    }
-
-    #[test]
-    fn set_settings_rejects_a_daily_cap_above_the_ceiling() {
-        let s = shared();
-        let r = handle_request(
-            &s,
-            &req(
-                "set_settings",
-                serde_json::json!({"max_uploads_per_day": 1_000_001u64}),
-            ),
-        );
-        let err = r.error.expect("an out-of-range cap must be refused");
-        assert_eq!(err.code, ERR_BAD_PARAMS);
-        assert_eq!(err.message, "settings-invalid-value");
-        // Unchanged: the default is untouched by the rejected write.
-        assert_eq!(
-            s.settings.lock().unwrap().max_uploads_per_day,
-            super::super::settings::DaemonSettings::default().max_uploads_per_day
         );
     }
 
@@ -20122,10 +19870,7 @@ mod tests {
 
         let r = handle_request(
             &s,
-            &req(
-                "set_settings",
-                serde_json::json!({"max_uploads_per_day": 7}),
-            ),
+            &req("set_settings", serde_json::json!({"quiescence_secs": 600})),
         );
         assert!(r.error.is_none(), "{:?}", r.error);
         let after = s.routing_ledger().expect("still declared");
