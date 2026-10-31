@@ -189,21 +189,21 @@ final class ThreePaneTests: XCTestCase {
         XCTAssertEqual(GlassPaneLayout(windowWidth: 2000, showsMap: true, showsInspector: false).main, main)
     }
 
-    /// The window grows on its right with its top and leading edge fixed;
-    /// near the screen's edge it moves left only as far as it must; wider
-    /// than the screen it is held to the screen.
-    func test_theWindowGrowsRightAndStaysOnScreen() {
+    /// The on-screen rule: the window grows on its right with its top and
+    /// leading edge fixed; near the screen's edge it moves left only as far
+    /// as it must; wider than the screen it is held to the screen.
+    func test_theOnScreenRuleGrowsRightAndStaysOnScreen() {
         let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let frame = CGRect(x: 100, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(frame, width: 1280, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: frame, width: 1280, visible: screen),
                        CGRect(x: 100, y: 200, width: 1280, height: 760))
         let nearEdge = CGRect(x: 1000, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 1280, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: nearEdge, width: 1280, visible: screen),
                        CGRect(x: 640, y: 200, width: 1280, height: 760))
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 2400, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: nearEdge, width: 2400, visible: screen),
                        CGRect(x: 0, y: 200, width: 1920, height: 760))
         // Shrinking keeps the leading edge.
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 380, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: nearEdge, width: 380, visible: screen),
                        CGRect(x: 1000, y: 200, width: 380, height: 760))
     }
 
