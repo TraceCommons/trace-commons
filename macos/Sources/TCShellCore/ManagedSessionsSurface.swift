@@ -331,10 +331,15 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
     /// Favorites NEAR AI no longer lists, kept in case it offers them again.
     /// An older daemon sends none.
     public let unavailableFavorites: [String]
+    /// The privacy tiers the picker groups by, most private first, as the
+    /// core orders them (`tier_order`). The shell keeps no order of its
+    /// own: a tier the core does not list, or no list, groups nothing.
+    public let tierOrder: [String]
 
     private enum CodingKeys: String, CodingKey {
         case models, `default`, favorites
         case unavailableFavorites = "unavailable_favorites"
+        case tierOrder = "tier_order"
     }
 
     public init(from decoder: Decoder) throws {
@@ -343,13 +348,15 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         `default` = try container.decodeIfPresent(String.self, forKey: .default)
         favorites = try container.decodeIfPresent([String].self, forKey: .favorites) ?? []
         unavailableFavorites = try container.decodeIfPresent([String].self, forKey: .unavailableFavorites) ?? []
+        tierOrder = try container.decodeIfPresent([String].self, forKey: .tierOrder) ?? []
     }
 
-    private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String]) {
+    private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String], tierOrder: [String]) {
         self.models = models
         self.default = `default`
         self.favorites = favorites
         self.unavailableFavorites = unavailableFavorites
+        self.tierOrder = tierOrder
     }
 
     /// This catalogue with `managed_model_favorite_set`'s answer, the
@@ -362,7 +369,8 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         return ManagedModelCatalogue(
             models: models, default: `default`,
             favorites: models.map(\.id).filter(held.contains),
-            unavailableFavorites: unavailableFavorites.filter(held.contains))
+            unavailableFavorites: unavailableFavorites.filter(held.contains),
+            tierOrder: tierOrder)
     }
 }
 
@@ -448,6 +456,12 @@ public struct ManagedModelOption: Equatable, Sendable {
     /// The heading of the group it is listed under; none for the default
     /// and for a model with no known tier.
     public var section: String? = nil
+    /// The tier id (`near_ai`, `external`, `incognito`) of a favorite, which
+    /// heads no group and so shows its tier another way; none otherwise.
+    public var tier: String? = nil
+    /// The existing heading of `tier`'s group, for the favorite's
+    /// accessibility value; none when `tier` is none.
+    public var tierHeading: String? = nil
 }
 
 /// Choosing the model of a NEAR AI session in the Launch sheet.
@@ -463,36 +477,37 @@ public extension ManagedSurface {
         ["claude", "codex"].contains(tool) && connection == "near_ai"
     }
 
-    /// NEAR AI's privacy tiers in the picker's order, most private first
-    /// (owner, 2026-10-31): NEAR AI's own TEEs, then a third party's, then
-    /// Incognito. Each with the copy key of its heading.
-    static let modelTiers = [
-        ("near_ai", "model_group_near_ai"),
-        ("external", "model_group_external"),
-        ("incognito", "model_group_incognito"),
-    ]
+    /// The copy key of a tier's group heading: `model_group_` and the tier id.
+    static func modelGroupKey(_ tier: String) -> String { "model_group_" + tier }
 
     /// The picker's options: the default first, which names the model it
     /// will be when the catalogue says, then the favorites, then the other
-    /// chat models grouped by privacy tier in `modelTiers` order, each in
-    /// NEAR AI's order. Favorites head no group; a model with no known tier
-    /// comes last, under no heading. A favorite NEAR AI does not list is not
-    /// shown. With no catalogue, only the default.
+    /// chat models grouped by privacy tier in the core's order
+    /// (`catalogue.tierOrder`, most private first), each in NEAR AI's
+    /// order. Favorites head no group but carry their tier and its
+    /// heading; a model with no known tier comes last, under no heading. A
+    /// favorite NEAR AI does not list is not shown. With no catalogue, only
+    /// the default.
     static func modelOptions(_ catalogue: ManagedModelCatalogue?, copy: (String) -> String) -> [ManagedModelOption] {
         let first = catalogue?.default.map { copy("model_default").replacingOccurrences(of: "{model}", with: $0) }
             ?? copy("model_default_unknown")
         let models = catalogue?.models ?? []
+        let order = catalogue?.tierOrder ?? []
         let favorites = Set(catalogue?.favorites ?? [])
-        // One pass: favorites first, then each known tier in `modelTiers`
-        // order, then models with no known tier under no heading.
+        // One pass: favorites first, then each tier in the core's order,
+        // then models with no known tier under no heading.
         var favored: [ManagedModelOption] = []
-        var byTier = [[ManagedModelOption]](repeating: [], count: modelTiers.count)
+        var byTier = [[ManagedModelOption]](repeating: [], count: order.count)
         var rest: [ManagedModelOption] = []
         for model in models {
+            let index = model.tier.flatMap { order.firstIndex(of: $0) }
             if favorites.contains(model.id) {
-                favored.append(ManagedModelOption(title: model.id, value: model.id))
-            } else if let index = modelTiers.firstIndex(where: { $0.0 == model.tier }) {
-                byTier[index].append(ManagedModelOption(title: model.id, value: model.id, section: copy(modelTiers[index].1)))
+                favored.append(ManagedModelOption(
+                    title: model.id, value: model.id,
+                    tier: index.map { _ in model.tier! },
+                    tierHeading: index.map { copy(modelGroupKey(order[$0])) }))
+            } else if let index {
+                byTier[index].append(ManagedModelOption(title: model.id, value: model.id, section: copy(modelGroupKey(order[index]))))
             } else {
                 rest.append(ManagedModelOption(title: model.id, value: model.id))
             }

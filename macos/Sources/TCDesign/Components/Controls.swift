@@ -642,13 +642,17 @@ public struct GlassPickerOption<Value: Hashable>: Identifiable {
     /// The heading `GlassPicker` lists it under. Neighbouring options with
     /// the same heading share one; none lists it without a heading.
     public let section: String?
+    /// What the dot means, in words, spoken after the title: a dot is never
+    /// the only signal. Already in the person's language, from the core.
+    public let detail: String?
     public var id: Value { value }
 
-    public init(_ title: String, value: Value, dot: GlassStatus? = nil, section: String? = nil) {
+    public init(_ title: String, value: Value, dot: GlassStatus? = nil, section: String? = nil, detail: String? = nil) {
         self.title = title
         self.value = value
         self.dot = dot
         self.section = section
+        self.detail = detail
     }
 }
 
@@ -693,9 +697,15 @@ public struct GlassPicker<Value: Hashable>: View {
         options.first { $0.value == selection }
     }
 
+    /// An option as assistive tech speaks it: its title, then its detail.
+    static func spoken(_ option: GlassPickerOption<Value>) -> String {
+        option.detail.map { option.title + ", " + $0 } ?? option.title
+    }
+
     private func buttons(_ options: [GlassPickerOption<Value>]) -> some View {
         ForEach(options) { option in
             Button(option.title) { selection = option.value }
+                .accessibilityValue(option.detail ?? "")
         }
     }
 
@@ -721,7 +731,7 @@ public struct GlassPicker<Value: Hashable>: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel(label)
-        .accessibilityValue(current?.title ?? placeholder)
+        .accessibilityValue(current.map(Self.spoken) ?? placeholder)
     }
 }
 

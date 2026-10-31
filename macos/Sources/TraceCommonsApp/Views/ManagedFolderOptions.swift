@@ -198,9 +198,26 @@ struct ManagedFolderOptions: View {
     }
 
     private var modelOptions: [GlassPickerOption<String>] {
-        var values = ManagedSurface.modelOptions(catalogue, copy: model.managedText)
-            .map { GlassPickerOption($0.title, value: $0.value, section: $0.section) }
-        if let chosen = draft.model, !values.contains(where: { $0.value == chosen }) {
+        Self.pickerOptions(catalogue, chosen: draft.model, copy: model.managedText)
+    }
+
+    /// The status a tier's dot takes on a favorite, which heads no group.
+    static func tierDot(_ tier: String?) -> GlassStatus? {
+        switch tier {
+        case "near_ai": .on
+        case "external": .ask
+        case "incognito": .outside
+        default: nil
+        }
+    }
+
+    /// The picker's options with a favorite's tier shown by its dot and, as
+    /// its accessibility value, the tier's existing group heading. A chosen
+    /// model the catalogue does not list is kept, with no tier.
+    static func pickerOptions(_ catalogue: ManagedModelCatalogue?, chosen: String?, copy: (String) -> String) -> [GlassPickerOption<String>] {
+        var values = ManagedSurface.modelOptions(catalogue, copy: copy)
+            .map { GlassPickerOption($0.title, value: $0.value, dot: tierDot($0.tier), section: $0.section, detail: $0.tierHeading) }
+        if let chosen, !values.contains(where: { $0.value == chosen }) {
             values.append(GlassPickerOption(chosen, value: chosen))
         }
         return values
