@@ -81880,6 +81880,62 @@ async fn submit_rate_limit_refuses_before_reading_the_body() {
     server.abort();
 }
 
+/// Bundle finalize runs the same submission work, so it takes the same
+/// per-principal rate before its body is read, and counts once.
+#[tokio::test]
+async fn token_bundle_finalize_refuses_past_the_submit_rate_before_reading_the_body() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).submit_principal_limits = SubmitPrincipalLimits {
+        rate_per_window: 1,
+        concurrency: SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+    };
+    let path = format!("/v1/token-bundles/{}/r1", Uuid::nil());
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+    let first = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(path.as_str())
+                .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&invalid).expect("envelope serialises"),
+                ))
+                .expect("finalize request builds"),
+        )
+        .await
+        .expect("first response");
+    assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        submit_rate_limit_count_for_test(
+            "tenant-a",
+            TraceAuthMethod::StaticToken,
+            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
+        ),
+        1
+    );
+
+    let (addr, server) = serve_ingest_for_test(state).await;
+    let mut refused =
+        send_upload_headers_without_body(addr, "POST", &path, Some(SUBMIT_RATE_LIMIT_TOKEN_A))
+            .await;
+    assert_eq!(
+        response_status_within(&mut refused, StdDuration::from_secs(2))
+            .await
+            .as_deref(),
+        Some("HTTP/1.1 429 Too Many Requests"),
+        "a principal past its rate is refused without its finalize body being read"
+    );
+    server.abort();
+}
+
 /// The submission in-flight cap is also taken before the body is read: with
 /// the principal's slots held by stalled uploads, the next one is answered
 /// at once with the concurrency refusal.

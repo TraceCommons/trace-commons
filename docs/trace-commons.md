@@ -816,8 +816,8 @@ audit-event ID gaps, control-plane drift, object-ref integrity, and compact
 | `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY` | `POST /v1/traces` requests one principal may have in flight (1-4). | 2 |
 
 The two per-principal submit limits are in-process and checked before any
-other submit work; through the router they are checked before the request
-body is read, after the upload middleware's own in-flight and byte checks
+other submit work; through the router (`POST /v1/traces` and token-bundle
+finalize) they are checked before the request body is read, after the upload middleware's own in-flight and byte checks
 (`TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET` and its per-principal share
 `TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES`, which answer the same way).
 A request over either is answered `429`

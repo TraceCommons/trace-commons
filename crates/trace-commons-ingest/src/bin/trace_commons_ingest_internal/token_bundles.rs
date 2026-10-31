@@ -234,6 +234,7 @@ pub(super) async fn finalize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath((submission, revision)): AxumPath<(Uuid, String)>,
+    admitted: Option<axum::Extension<SubmitAdmittedBeforeBody>>,
     body: SubmitBody,
 ) -> ApiResult<Json<DurableBundleReceipt>> {
     let (store, server_id) = gate(&state)?;
@@ -311,7 +312,15 @@ pub(super) async fn finalize(
     }
     // Existing admission, tenant scope, witness, PII and consent checks all run.
     // A normal upload status is not the bundle's durable receipt.
-    let _ = submit_trace_handler(State(state.clone()), headers, body).await?;
+    // Counted by `admit_submit_before_body` when it ran on this route.
+    let _ = submit_trace_handler_authenticated(
+        State(state.clone()),
+        headers,
+        body,
+        None,
+        admitted.is_some(),
+    )
+    .await?;
     let record = tenant
         .read_submission_record(&state.root, submission)
         .map_err(internal_error)?

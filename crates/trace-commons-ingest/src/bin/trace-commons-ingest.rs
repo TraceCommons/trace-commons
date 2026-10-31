@@ -8962,6 +8962,12 @@ fn app(state: Arc<AppState>) -> Router {
             get(token_bundles::status).merge(
                 post(token_bundles::finalize)
                     .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                    // Finalize runs the submit work, so it takes the same
+                    // per-principal admission before its body is read.
+                    .layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        admit_submit_before_body,
+                    ))
                     .layer(large_body_auth.clone()),
             ),
         )
@@ -9894,7 +9900,7 @@ async fn authenticate_large_body_request<const LIMIT: usize>(
 #[derive(Clone)]
 struct PreBodyAuthenticated(TenantCtx);
 
-/// `POST /v1/traces` only, inside [`authenticate_large_body_request`]: take
+/// `POST /v1/traces` and bundle finalize, inside [`authenticate_large_body_request`]: take
 /// the per-principal submission rate and in-flight slot before the body is
 /// read, with the same refusals the handler gives (429,
 /// `submit_rate_limited`, `Retry-After`). The slot is held until the handler
@@ -16335,7 +16341,8 @@ async fn submit_trace_route(
 }
 
 /// [`submit_trace_handler_authenticated`] that authenticates the request
-/// itself: tests, and bundle `finalize`, which calls it in-process.
+/// itself: tests.
+#[cfg(test)]
 async fn submit_trace_handler(
     state: State<Arc<AppState>>,
     headers: HeaderMap,
