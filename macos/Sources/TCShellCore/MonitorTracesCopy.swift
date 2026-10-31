@@ -173,12 +173,11 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let folderMenu: String
     public let watchFolder: String
     public let watchTool: String
-    /// The Automatic switches: a folder row's (`{label}`) and the tab's for
-    /// every folder; the tab switch's title and the line under it.
+    /// The Automatic switches: a folder row's (`{label}`), the tab's for
+    /// every folder, and the line under the tab's.
     public let automaticFolder: String?
     public let automaticAll: String?
-    public let automaticTitle: String?
-    public let automaticLine: String?
+    public let automaticCount: String?
     /// The titles over the tree's columns while the Automatic switches show.
     public let columnFolders: String?
     public let columnSubmit: String?
@@ -221,8 +220,7 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case watchTool = "watch_tool"
         case automaticFolder = "automatic_folder"
         case automaticAll = "automatic_all"
-        case automaticTitle = "automatic_title"
-        case automaticLine = "automatic_line"
+        case automaticCount = "automatic_count"
         case columnFolders = "column_folders"
         case columnSubmit = "column_submit"
         case columnAutomatic = "column_automatic"
