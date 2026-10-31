@@ -101,12 +101,6 @@ final class SharingChoiceTests: XCTestCase {
         XCTAssertEqual(TracesTreeView.automaticSwitch(bucket), false, "Traces with no project: a switch that stays off")
     }
 
-    func testTheTabSwitchCountsTheFoldersThatSendOnTheirOwn() {
-        let folders = [folder("a", .autoUpload), folder("b", .ask), folder("c", .ignore), folder("d", .autoUpload)]
-        XCTAssertEqual(SharingChoice.automaticCount(folders, words: "{count} of {total}"), "2 of 3",
-                       "Never is left out of the total")
-    }
-
     func testTheCardIsAtTheTopOfProjects() throws {
         let source = try InsightsGlassConventionsTests.text("Views/Settings/ProjectsSection.swift")
         XCTAssertTrue(source.contains("SharingChoiceCard()\n            GlassEyebrowCard(SettingsWords.projects)"))

@@ -107,11 +107,8 @@ final class CoreCopyExportTests: XCTestCase {
     func testTheArmingBodyIsTheAgreedWording() throws {
         XCTAssertEqual(
             try armingCopy(0).body,
-            "Traces from this project will be scrubbed and contributed without asking "
-                + "you, including any already waiting. You won't review them first.\n\nNo "
-                + "trace is sent until it has been quiet for a day.\n\nYou can turn this off "
-                + "at any time. Anything it hasn't sent yet goes back to waiting for you, and "
-                + "anything already sent stays sent."
+            "With Auto enabled, traces are submitted automatically. You don't need to "
+                + "approve each one manually. You can change this setting anytime."
         )
     }
 

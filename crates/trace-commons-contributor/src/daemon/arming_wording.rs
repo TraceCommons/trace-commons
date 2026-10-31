@@ -19,12 +19,13 @@
 //!   per-folder answer K6 adds beside it), and
 //! - the arming copy each disclosure is given ([`project_arming_claim`]).
 //!
-//! Today every folder armed from a project's arming offer was shown
-//! `project_copy::ARMING_BODY`, "Traces from this project will be scrubbed
-//! and contributed", whatever the disclosure, and every shell still shows it.
-//! So [`project_arming_claim`] answers [`ArmingClaim::ModelScrubbed`] for
-//! both disclosures, and no notice is raised: nothing has been reworded yet,
-//! so there is nothing to tell. When the arming copy becomes
+//! Until 2026-10-31 every folder armed from a project's arming offer was
+//! shown `project_copy::ARMING_BODY` as "Traces from this project will be
+//! scrubbed and contributed", whatever the disclosure. Its words now (the
+//! owner's) say nothing about scrubbing, so they take back nothing the old
+//! ones promised. So [`project_arming_claim`] answers
+//! [`ArmingClaim::ModelScrubbed`] for both disclosures, and no notice is
+//! raised. When the arming copy becomes
 //! disclosure-dependent (the "deterministic-only arming disclosure" on the
 //! spec's Open list, and K13), the change is made in [`project_arming_claim`]
 //! together with the shells' copy, and every folder armed under the old
@@ -86,8 +87,9 @@ pub fn legacy_claim(armed_by_grant: bool) -> ArmingClaim {
 /// What a project's arming offer says, for a folder with this disclosure.
 ///
 /// Every shell shows `project_copy::ARMING_BODY` for every folder, which
-/// says its sessions "will be scrubbed", so this is
-/// [`ArmingClaim::ModelScrubbed`] whatever the disclosure. **Change this in
+/// said its sessions "will be scrubbed" and now says nothing about
+/// scrubbing, so this stays [`ArmingClaim::ModelScrubbed`] whatever the
+/// disclosure. **Change this in
 /// the same PR that makes the arming offer's copy depend on the disclosure**:
 /// that change is what rewords already-armed folders, and this function is
 /// what tells them.
@@ -168,21 +170,19 @@ pub(crate) fn reword_patterns_only_for_test(claim: Option<ArmingClaim>) {
 mod tests {
     use super::*;
 
-    /// Today's arming offer says "will be scrubbed" for every folder, so
-    /// the claim does not move with the disclosure and nothing is reworded.
+    /// The arming offer's words (the owner's, 2026-10-31) say nothing about
+    /// scrubbing, so they promise no more than "will be scrubbed" did. The
+    /// claim stays `ModelScrubbed`, the stronger one, for every disclosure:
+    /// nothing armed under the old words is owed a notice by the change, and
+    /// a folder armed under the new ones can only be told too much.
     #[test]
     fn todays_arming_offer_claims_scrubbing_whatever_the_disclosure() {
         for d in [Disclosure::PatternsOnly, Disclosure::ModelScrubbed] {
             assert_eq!(project_arming_claim(d), ArmingClaim::ModelScrubbed);
         }
-        assert_eq!(
-            crate::project_copy::ARMING_BODY
-                .split_whitespace()
-                .take(7)
-                .collect::<Vec<_>>()
-                .join(" "),
-            "Traces from this project will be scrubbed",
-            "if the arming offer stops saying this, project_arming_claim must change with it"
+        assert!(
+            !crate::project_copy::ARMING_BODY.contains("pattern"),
+            "if the arming offer starts naming patterns only, project_arming_claim must change with it"
         );
     }
 
