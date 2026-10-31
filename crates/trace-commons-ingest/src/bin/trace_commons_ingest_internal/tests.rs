@@ -6744,9 +6744,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
         // The whole budget: fixture principals are shared across parallel
         // tests, and the focused share tests set their own.
-        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(
-            LARGE_BODY_GLOBAL_BYTES,
-        )),
+        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(LARGE_BODY_GLOBAL_BYTES)),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -31028,9 +31026,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
         // The whole budget: fixture principals are shared across parallel
         // tests, and the focused share tests set their own.
-        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(
-            LARGE_BODY_GLOBAL_BYTES,
-        )),
+        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(LARGE_BODY_GLOBAL_BYTES)),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
