@@ -363,19 +363,9 @@ pub const METHODS: &[&str] = &[
     "managed_account_verify",
     "managed_model_catalogue",
     "managed_model_favorite_set",
-    "account_bind",
-    "account_binding",
     "account_session_status",
     "account_sign_in",
     "account_sign_out",
-    "passkey_add_begin",
-    "passkey_add_complete",
-    "passkey_cancel",
-    "passkey_create_begin",
-    "passkey_create_complete",
-    "passkey_login_begin",
-    "passkey_login_complete",
-    "passkey_state",
     "account_contribution_status",
     "account_invite_redeem",
     "account_devices_list",
@@ -543,7 +533,7 @@ pub const METHODS: &[&str] = &[
 /// witness or near.ai: `enroll`, `near_ai_account_enroll`,
 /// `legacy_invite_migrate`, `near_account_start`, `native_wallet_flow`,
 /// `prepare_admission_session`, `near_account_capabilities`, the
-/// `account_*` and `passkey_*` methods, the `near_ai_credential_*` start,
+/// `account_*` methods, the `near_ai_credential_*` start,
 /// migrate, balance and funding calls, `invite_lookup`, `inference_summary`,
 /// `model_spend`, `set_private_ai`, `publish_public_run`,
 /// `unpublish_public_run`, `set_public_profile`, `clear_public_profile`,
@@ -936,7 +926,6 @@ pub struct GateHeld {
 /// `status_value`, `publish_if_decisions_owed_changed`), or a
 /// temporary in a `match` scrutinee, which lives for the whole `match`.
 pub struct DaemonShared {
-    pub(crate) native_identity: Mutex<super::native_identity::Ceremonies>,
     pub(crate) managed: Mutex<Result<super::managed::ManagedService, crate::managed::ManagedError>>,
     pub store: ConfigStore,
     pub(crate) subscription_usage: Arc<super::subscription_usage::UsageService>,
@@ -1429,6 +1418,10 @@ pub const ROUTING_UNKNOWN: &str = "unknown";
 
 impl DaemonShared {
     pub fn load(store: ConfigStore) -> Result<Self> {
+        // Never stops a start: the file is unread, so a leftover is harmless.
+        if store.remove_retired_files().is_err() {
+            tracing::warn!("could not remove a retired daemon file");
+        }
         let mut queue = Queue::load(&store)?;
         // `Uploading` is a transient, in-pass claim. A daemon that died
         // mid-upload leaves entries in it, and nothing else would ever move
@@ -1588,7 +1581,6 @@ impl DaemonShared {
                 super::private_inference::PrivateInferenceState::Off,
             )),
             harness_plans: super::harness::PlanStore::default(),
-            native_identity: Mutex::new(Default::default()),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
             insights_counter,
             mission_catalogue: Mutex::new(None),
@@ -3679,19 +3671,9 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("set_private_ai", "private-ai-requires-async"),
     ("invite_lookup", "invite-lookup-requires-async"),
     ("first_run_estimate", "first-run-estimate-requires-async"),
-    ("account_bind", "identity-requires-async"),
-    ("account_binding", "identity-requires-async"),
     ("account_session_status", "identity-requires-async"),
     ("account_sign_in", "identity-requires-async"),
     ("account_sign_out", "identity-requires-async"),
-    ("passkey_add_begin", "identity-requires-async"),
-    ("passkey_add_complete", "identity-requires-async"),
-    ("passkey_cancel", "identity-requires-async"),
-    ("passkey_create_begin", "identity-requires-async"),
-    ("passkey_create_complete", "identity-requires-async"),
-    ("passkey_login_begin", "identity-requires-async"),
-    ("passkey_login_complete", "identity-requires-async"),
-    ("passkey_state", "identity-requires-async"),
     (
         "prepare_admission_session",
         "admission-setup-requires-async",
@@ -6862,19 +6844,9 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
         "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
         "first_run_estimate" => super::network_data::handle_first_run_estimate(shared, req).await,
-        "account_bind" => super::native_identity::handle(shared, req).await,
-        "account_binding" => super::native_identity::handle(shared, req).await,
         "account_session_status" => super::native_identity::handle(shared, req).await,
         "account_sign_in" => super::native_identity::handle(shared, req).await,
         "account_sign_out" => super::native_identity::handle(shared, req).await,
-        "passkey_add_begin" => super::native_identity::handle(shared, req).await,
-        "passkey_add_complete" => super::native_identity::handle(shared, req).await,
-        "passkey_cancel" => super::native_identity::handle(shared, req).await,
-        "passkey_create_begin" => super::native_identity::handle(shared, req).await,
-        "passkey_create_complete" => super::native_identity::handle(shared, req).await,
-        "passkey_login_begin" => super::native_identity::handle(shared, req).await,
-        "passkey_login_complete" => super::native_identity::handle(shared, req).await,
-        "passkey_state" => super::native_identity::handle(shared, req).await,
         "account_contribution_status" => crate::account_contribution::handle(shared, req).await,
         "account_invite_redeem" => crate::account_contribution::handle(shared, req).await,
         "account_devices_list" => super::device_codes::handle_list(shared, req).await,
@@ -10050,6 +10022,22 @@ mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
     use crate::daemon::policy::UNKNOWN_PROJECT_KEY;
+
+    /// Passkeys are gone, and so is the list of them a daemon before their
+    /// removal kept: a daemon starting on that state deletes the file. With
+    /// no such file, starting is unaffected.
+    #[test]
+    fn startup_deletes_the_retired_remembered_passkeys_file() {
+        let (_dir, store) = temp_store();
+        let retired = store.daemon_path("remembered-passkeys.json");
+        std::fs::write(&retired, b"{\"passkeys\":[]}").unwrap();
+
+        DaemonShared::load(store.clone()).unwrap();
+        assert!(!retired.exists());
+
+        DaemonShared::load(store).unwrap();
+        assert!(!retired.exists());
+    }
 
     fn shared() -> DaemonShared {
         let (_d, store) = temp_store();
@@ -18713,7 +18701,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 84);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 74);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -19197,7 +19185,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 106, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 91, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 81, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

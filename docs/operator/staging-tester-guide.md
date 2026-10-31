@@ -68,9 +68,7 @@ It should say `accepted` and name the Notarized Developer ID source.
 
 1. Sign in with your staging NEAR AI account. The browser opens a Google
    sign-in; use the Google account you made it with.
-2. Add a passkey if the app asks. A staging passkey works for the staging
-   site only (`staging.tracecommons.ai`).
-3. Choose which session folders the app may watch.
+2. Choose which session folders the app may watch.
 
 Do not add a folder with a session you would not want a test server to see.
 Staging is run with the same care as the real service, but it is a place for

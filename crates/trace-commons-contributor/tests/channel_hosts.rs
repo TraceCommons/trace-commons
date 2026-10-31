@@ -628,7 +628,7 @@ fn a_staging_build_refuses_a_production_ingest_origin() {
     channel::refuse_other_channel_origin("https://ingest.example").unwrap();
 }
 
-/// The keychain group, the associated domain and the application id each
+/// The keychain group and the application id each
 /// channel's binary asks for are the ones its entitlements file grants. The
 /// production file is checked in a default build, the staging file in a
 /// staging build. If either drifts, the signature is still valid and the
@@ -666,14 +666,6 @@ fn the_staging_entitlements_grant_the_staging_access_group() {
         "{file} must grant {}",
         channel::KEYCHAIN_ACCESS_GROUP
     );
-    assert!(
-        array_after("com.apple.developer.associated-domains").contains(&format!(
-            "<string>webcredentials:{}</string>",
-            channel::PASSKEY_RP_ID
-        )),
-        "{file} must name webcredentials:{}",
-        channel::PASSKEY_RP_ID
-    );
     let application_id = entitlements
         .split_once("<key>com.apple.application-identifier</key>")
         .unwrap()
@@ -687,13 +679,13 @@ fn the_staging_entitlements_grant_the_staging_access_group() {
     assert_eq!(application_id, channel::KEYCHAIN_ACCESS_GROUP);
 }
 
-/// The staging entitlements are production's with exactly three lines
-/// changed: the application id, the keychain access group and the
-/// `webcredentials:` domain, each the staging twin of production's. Anything
+/// The staging entitlements are production's with exactly two lines
+/// changed: the application id and the keychain access group, each the
+/// staging twin of production's. Anything
 /// else (a sandbox, a network or hardened-runtime entitlement) is the same
 /// in both, so a staging build is tested under production's entitlements.
 #[test]
-fn the_staging_entitlements_differ_from_production_in_three_lines() {
+fn the_staging_entitlements_differ_from_production_in_two_lines() {
     let read = |file: &str| {
         std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -724,10 +716,6 @@ fn the_staging_entitlements_differ_from_production_in_three_lines() {
             (
                 format!("{group}</string>").as_str(),
                 format!("{group}.staging</string>").as_str()
-            ),
-            (
-                "<string>webcredentials:tracecommons.ai</string>",
-                "<string>webcredentials:staging.tracecommons.ai</string>"
             ),
         ]
     );
@@ -923,7 +911,6 @@ fn the_production_identity_values_never_change() {
         channel::KEYCHAIN_ACCESS_GROUP,
         channel::KEYCHAIN.access_group
     );
-    assert_eq!(channel::PASSKEY_RP_ID, "tracecommons.ai");
     assert_eq!(channel::NEAR_AI_WALLET_RECIPIENT, "cloud.near.ai");
 }
 

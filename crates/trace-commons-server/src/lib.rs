@@ -3,13 +3,10 @@
 
 //! TraceCommons hosted server crate.
 
-pub mod account_binding;
+pub mod account_ceremony;
 pub mod account_native_auth;
-pub mod account_native_passkey;
 pub mod account_near;
 pub mod account_onboarding;
-pub mod account_passkey;
-pub mod account_reaper;
 pub mod account_session;
 pub mod account_trust;
 pub mod account_trust_growth;

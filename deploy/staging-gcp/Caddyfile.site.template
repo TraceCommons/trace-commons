@@ -6,10 +6,9 @@
 # block serves two static files from ${TC_SITE_ROOT}, written by the
 # operator, and nothing else:
 #
-#   /.well-known/apple-app-site-association  the passkey association for the
-#       staging app (RP ID ${TC_PUBLIC_HOST}); application/json, no redirect.
-#       Check it with scripts/check-aasa.sh https://${TC_PUBLIC_HOST}
-#       KXSWJN7WY8.ai.tracecommons.shell.staging
+#   /.well-known/apple-app-site-association  the app-site association for the
+#       staging app (webcredentials only). Nothing uses it since passkeys
+#       were removed; application/json, no redirect.
 #   /near-ai-pins/current.json  the signed NEAR AI pin set the staging app
 #       fetches (channel::STAGING_PIN_URL). Public: measurements are public
 #       image identifiers and the signature is the trust.

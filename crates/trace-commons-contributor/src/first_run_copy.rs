@@ -16,21 +16,18 @@
 //!   tools it used to name are not read (owner decision, 2026-10-04), and a
 //!   folder that matches nothing is refused with `tools.add_tool_refused`.
 //! - The invite placeholder carries no code: Ron's preview showed a mock one.
-//! - The passkey name warning is reworded: an account can hold more than one
-//!   passkey, so Ron's "Losing it means losing access" claimed more than is
-//!   true (Kristi's review of #1252).
-//! - Frame adds `undo`, which takes back a passkey or near.ai chosen on Join
+//! - Frame adds `undo`, which takes back a near.ai sign-in chosen on Join
 //!   and not yet acted on, and `back`, the first-run footer's Back on every
 //!   step after Join (owner, 2026-10-08, reversing Ron's review of #1235,
-//!   item 9) and the passkey popups' Back alike.
+//!   item 9).
 //! - Folders has no line for a tool missing from this Mac: its row asks
 //!   nothing and offers "Get {tool}" (owner, 2026-10-08).
 //! - Uses has no note asking for the first use to be ticked: the required
 //!   use is always included, its box ticked and locked (owner, 2026-10-08).
 //! - Join adds `invite_dead` for a real invite the daemon refused,
 //!   `pay_range_points` and `pay_range_points_one` to word the invite's
-//!   credit range in the one unit the daemon accepts, `passkey_chosen` and
-//!   `near_ai_chosen` for an account chosen before the daemon runs, and
+//!   credit range in the one unit the daemon accepts, `near_ai_chosen` for
+//!   an account chosen before the daemon runs, and
 //!   `unknown` for an invite host or pay range the shell does not know.
 //! - Tools adds three lines for a folder that matches more than one kind:
 //!   `which_kind` asks which, `trajectory_label` names the exported-traces
@@ -62,17 +59,10 @@
 //!   (`GET /v1/public/first-run-estimate`), `traces.estimate_usd` in
 //!   dollars of NEAR AI credit instead. [`traces_estimate_line`] does the
 //!   arithmetic and the formatting, so a shell only shows the string.
-//! - Join adds `passkey_unavailable` for a Create passkey whose daemon start
-//!   failed, so the sheets could not open over Join.
-//! - Join adds `invite_or_passkey`: a new passkey creates an account of its
-//!   own, so it is not combined with an invite. near.ai needs no invite
-//!   (owner, Ron's review of #1235), so there is no line asking for one.
+//! - near.ai needs no invite (owner, Ron's review of #1235), so there is no
+//!   line asking for one.
 //! - Uses adds Start's failures (`sharing_refused`, `scopes_failed`,
-//!   `rules_failed`, `private_ai_failed`, `complete_failed`), and the passkey
-//!   sheets add `refused`, so no daemon label is ever shown,
-//!   `bound_elsewhere` for an existing passkey whose (legacy) account this
-//!   Mac cannot join with a passkey, and `near_ai_mismatch` for a Mac whose
-//!   near.ai sign-in is not the one its passkey's account uses.
+//!   `rules_failed`, `private_ai_failed`, `complete_failed`).
 //! - One string has one key: the session count and Undo, shared by more than
 //!   one screen, live in `frame`.
 //! - Preview-only strings (the mock-data tag, the simulated system sheets
@@ -85,7 +75,7 @@
 //!   place (owner, 2026-10-08).
 //!
 //! Placeholders are `{tool}`, `{host}`, `{pay_range}`, `{count}`, `{folder}`,
-//! `{name}`, `{min}`, `{max}`, `{selected}`, `{total}`, `{tools}`, `{title}`, and the
+//! `{min}`, `{max}`, `{selected}`, `{total}`, `{tools}`, `{title}`, and the
 //! session date and duration's `{weekday}`, `{day}`, `{month}`, `{hours}` and
 //! `{minutes}`; the shell fills them and adds nothing else.
 
@@ -101,7 +91,6 @@ pub const PLACEHOLDERS: &[&str] = &[
     "pay_range",
     "count",
     "folder",
-    "name",
     "min",
     "max",
     "selected",
@@ -139,15 +128,19 @@ pub struct FrameCopy {
     pub answer_every_tool: &'static str,
     /// `{count}`: sessions found for a tool (Tools) or a repo (Rules).
     pub session_count: &'static str,
-    /// Takes back a choice not yet acted on (a passkey or near.ai on Join).
+    /// Takes back a choice not yet acted on (near.ai on Join).
     /// Approved 2026-10-06.
     pub undo: &'static str,
     /// What an unanswered picker reads: Ron's design-system `Picker`
     /// placeholder. The picker's question stays its accessible label.
     pub choose: &'static str,
-    /// The footer's Back on every step after Join, and the passkey popups'
-    /// Back. Approved 2026-10-08.
+    /// The footer's Back on every step after Join. Approved 2026-10-08.
     pub back: &'static str,
+    /// Cancel on the NEAR AI sign-in wait, the Folders footer and the sharing
+    /// confirmations. The words the passkey group carried before it went.
+    pub cancel: &'static str,
+    /// Close on the preview sheet's fallback. Unchanged words, as above.
+    pub close: &'static str,
 }
 
 /// Join: the invite, the account cards and skipping (`join-screen.tsx`).
@@ -180,28 +173,12 @@ pub struct JoinCopy {
     /// `{min}`: the same, when the range is a single figure. Approved
     /// 2026-10-23.
     pub pay_range_points_one: &'static str,
-    pub passkey_eyebrow: &'static str,
-    pub passkey_text: &'static str,
-    /// `{name}`: the passkey's name.
-    pub passkey_ready: &'static str,
-    pub passkey_create: &'static str,
-    pub passkey_done: &'static str,
-    /// Create passkey chosen but not yet created: the passkey sheets open
-    /// once the daemon starts, after Folders or Tools. Approved 2026-10-06.
-    pub passkey_chosen: &'static str,
-    /// Create passkey on Join starts the daemon so the sheets open there,
-    /// over Join (#1030), and it did not start: no account was made and
-    /// nothing is watched. Approved 2026-10-07 (owner rewrite).
-    pub passkey_unavailable: &'static str,
     pub near_ai_eyebrow: &'static str,
     pub near_ai_text: &'static str,
     pub near_ai_sign_in: &'static str,
     /// near.ai chosen but not yet signed in: the sign-in runs once the
     /// daemon starts, after Folders or Tools. Approved 2026-10-06.
     pub near_ai_chosen: &'static str,
-    /// A new passkey creates an account of its own, so it is not combined
-    /// with an invite. Approved 2026-10-06.
-    pub invite_or_passkey: &'static str,
     /// An invite host or pay range the shell does not know, in place of a
     /// dash (owner ruling, 2026-10-06).
     pub unknown: &'static str,
@@ -474,58 +451,6 @@ pub struct UsesCopy {
     pub credit_required: &'static str,
 }
 
-/// The passkey popups P-1, P-2, P-5 and P-7 (`passkey-flow.tsx`). P-3, P-4
-/// and P-6 are system sheets macOS draws, so they have no row.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PasskeyCopy {
-    pub close: &'static str,
-    pub cancel: &'static str,
-    pub choose_title: &'static str,
-    /// Approved 2026-10-08 (button rule).
-    pub use_existing: &'static str,
-    /// Approved 2026-10-08 (button rule).
-    pub create_new: &'static str,
-    pub choose_note: &'static str,
-    /// The Name popup's title.
-    pub name_title: &'static str,
-    /// The Name popup's submit button. Approved 2026-10-08 (button rule).
-    pub name_submit: &'static str,
-    pub name_field: &'static str,
-    pub clear_name: &'static str,
-    pub default_name: &'static str,
-    /// Ron's warning, reworded (Kristi b#11): an account can hold more than
-    /// one passkey (`passkey_add_*`), so losing one is not losing the
-    /// account. Approved 2026-10-07.
-    pub name_warning: &'static str,
-    pub name_empty: &'static str,
-    /// `{max}`: the longest name allowed, in characters.
-    pub name_too_long: &'static str,
-    pub verify_title: &'static str,
-    pub verify_body: &'static str,
-    pub verify: &'static str,
-    pub verify_note: &'static str,
-    pub welcome_title: &'static str,
-    pub welcome_body: &'static str,
-    /// Approved 2026-10-08 (button rule).
-    pub welcome_sign_in: &'static str,
-    /// Approved 2026-10-08 (button rule).
-    pub other_options: &'static str,
-    /// A passkey ceremony the daemon or the system refused; its label is
-    /// never shown.
-    pub refused: &'static str,
-    /// "Use existing passkey" signed in to a legacy account (created by a
-    /// path other than passkey creation, so it has no binding an enrollment
-    /// could check).
-    /// Adding a Mac to one with a passkey is not built, so the sheet signed
-    /// out and stays on Choose. (An account bound on another Mac goes through
-    /// Verify and joins.) Approved 2026-10-06.
-    pub bound_elsewhere: &'static str,
-    /// Verify, joining an account bound on another Mac, was refused: this
-    /// Mac's near.ai sign-in is not the one that account uses. Nothing was
-    /// added; the sheet signed out and stays on Choose. Approved 2026-10-06.
-    pub near_ai_mismatch: &'static str,
-}
-
 /// The Private AI card's fallbacks only; its words are
 /// `private_inference_copy`'s (`private-ai-card.tsx`).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -566,7 +491,6 @@ pub struct FirstRunCopy {
     pub rules: RulesCopy,
     pub uses: UsesCopy,
     pub traces: TracesCopy,
-    pub passkey: PasskeyCopy,
     pub private_ai: PrivateAiCopy,
 }
 
@@ -590,6 +514,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             undo: "Undo",
             choose: "Choose…",
             back: "Back",
+            cancel: "Cancel",
+            close: "Close",
         },
         welcome: WelcomeCopy {
             title: "Welcome to Near AI",
@@ -608,18 +534,10 @@ pub fn first_run_copy() -> FirstRunCopy {
             invite_dead: "This invite link is no longer valid. Ask whoever sent it for a new one.",
             pay_range_points: "an estimated {min}–{max} points per accepted trace",
             pay_range_points_one: "an estimated {min} points per accepted trace",
-            passkey_eyebrow: "Sign in with a passkey",
-            passkey_text: "Create a passkey that can be connected later.",
-            passkey_ready: "“{name}” is ready. Connect it to near.ai any time.",
-            passkey_create: "Create passkey",
-            passkey_done: "Done",
-            passkey_chosen: "You'll create your passkey once watching starts.",
-            passkey_unavailable: "Couldn't start passkey setup, so no account was made. Try again, or sign in with NEAR AI.",
             near_ai_eyebrow: "Sign in with near.ai",
             near_ai_text: "Use the login you already have. Credits land in that account.",
             near_ai_sign_in: "Sign in",
             near_ai_chosen: "You'll sign in once watching starts.",
-            invite_or_passkey: "An invite and a new passkey can't be combined. Use one or the other.",
             unknown: "Unknown",
             signed_in: "Signed in",
             no_sharing: "Connecting or creating an account doesn't authorize any data sharing.",
@@ -750,33 +668,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             estimate: EstimateRange { min: 3, max: 8 },
             no_credit: "Allow Train coding models to earn it.",
             back_to_uses: "Go back to Uses",
-        },
-        passkey: PasskeyCopy {
-            close: "Close",
-            cancel: "Cancel",
-            choose_title: "Continue with passkey",
-            use_existing: "Use existing",
-            create_new: "Create new",
-            choose_note: "A passkey is your sign-in for Trace Commons and near.ai. Nothing about your traces is sent by signing in.",
-            name_title: "Create new passkey",
-            name_submit: "Create",
-            name_field: "Passkey name",
-            clear_name: "Clear name",
-            default_name: "My trace passkey",
-            name_warning: "Store your passkey securely. If you lose every passkey on your account, you may lose access to it and any credit in it.",
-            name_empty: "Give the passkey a name you will recognise.",
-            name_too_long: "Keep the name under {max} characters.",
-            verify_title: "Verify your passkey",
-            verify_body: "Sign a message to prove the passkey is yours and unlock contributing and credit.",
-            verify: "Verify passkey",
-            verify_note: "Cancelling signs you out.",
-            welcome_title: "Welcome back",
-            welcome_body: "Sign in with your passkey.",
-            welcome_sign_in: "Sign in",
-            other_options: "Other options",
-            refused: "The passkey step didn't go through. Try again, or close this and choose another way to join.",
-            bound_elsewhere: "This passkey's account wasn't created with a passkey, and adding a Mac to it with a passkey isn't possible yet, so you were signed out here. Close this to choose another way to join.",
-            near_ai_mismatch: "This Mac is signed in to a different near.ai account from the one this passkey's account uses, so this Mac wasn't added to it, and you were signed out here. Sign in to near.ai with the account you use on your other Mac and try again, or close this to choose another way to join.",
         },
         private_ai: PrivateAiCopy {
             loading: "Loading disclosure…",
@@ -1233,15 +1124,14 @@ mod tests {
         assert!(first_run_copy().uses.more_about.contains("{title}"));
     }
 
-    /// Back is the frame's one word, read by the first-run footer and the
-    /// passkey popups alike (one string, one key). A tool missing from this
+    /// Back is the frame's one word, read by the first-run footer (one
+    /// string, one key). A tool missing from this
     /// Mac has no line of its own (owner, 2026-10-08).
     #[test]
     fn back_is_the_frames_and_a_missing_tool_has_no_line() {
         let copy = first_run_copy();
         assert_eq!(copy.frame.back, "Back");
         let json = serde_json::to_value(&copy).unwrap();
-        assert!(json["passkey"].get("back").is_none());
         assert!(json["folders"].get("not_installed").is_none());
         let text = json.to_string();
         assert!(!text.contains("this row asks again"), "{text}");
@@ -1345,76 +1235,12 @@ mod tests {
         assert!(copy.folders.settings_failed.contains("Continue"));
     }
 
-    /// Create passkey that could not start the daemon says so on Join, and
-    /// never reads as the watcher's line: no folder answer exists yet.
+    /// near.ai needs no invite, so nothing on Join asks for one.
     #[test]
-    fn a_passkey_that_could_not_start_has_its_own_line() {
-        let join = first_run_copy().join;
-        assert_ne!(
-            join.passkey_unavailable,
-            crate::onboarding_copy::WATCHER_START_FAILED
-        );
-        assert!(!join.passkey_unavailable.contains("folder"));
-        // Owner, 2026-10-12: sign-in required, so nothing offers watching only.
-        assert!(!join.passkey_unavailable.contains("watch"));
-        assert!(join.passkey_unavailable.contains("NEAR AI"));
-    }
-
-    /// A new passkey creates an account of its own, so Join says why it is
-    /// held back beside an invite. near.ai needs no invite, so nothing asks
-    /// for one.
-    #[test]
-    fn join_says_why_a_passkey_is_held_back_and_never_asks_for_an_invite() {
-        let join = first_run_copy().join;
-        assert_ne!(join.invite_or_passkey, join.passkey_text);
+    fn join_never_asks_for_an_invite() {
         let json = serde_json::to_string(&first_run_copy()).unwrap();
         assert!(!json.contains("near_ai_needs_invite"));
         assert!(!json.contains("Paste an invite above"));
-    }
-
-    /// An existing passkey whose account this Mac cannot join (a legacy
-    /// account, which has no binding an enrollment could check) signs out and says so,
-    /// in words of its own rather than the generic refusal. An account bound
-    /// on another Mac is joinable now, so the line no longer claims a Mac
-    /// can't be added to one.
-    #[test]
-    fn a_passkey_bound_elsewhere_has_its_own_line() {
-        let passkey = first_run_copy().passkey;
-        assert_ne!(passkey.bound_elsewhere, passkey.refused);
-        assert!(!passkey.bound_elsewhere.contains("another Mac"));
-        assert!(passkey.bound_elsewhere.contains("signed out"));
-    }
-
-    /// A second Mac signed in to a different near.ai account than the one
-    /// its passkey's account uses is refused and signed out. The line says
-    /// which sign-in to fix, names no account, and is not the generic
-    /// refusal or the legacy line.
-    #[test]
-    fn a_near_ai_mismatch_has_its_own_line() {
-        let passkey = first_run_copy().passkey;
-        assert_ne!(passkey.near_ai_mismatch, passkey.refused);
-        assert_ne!(passkey.near_ai_mismatch, passkey.bound_elsewhere);
-        assert!(passkey.near_ai_mismatch.contains("near.ai"));
-        assert!(passkey.near_ai_mismatch.contains("signed out"));
-        assert!(!passkey.near_ai_mismatch.contains('{'));
-    }
-
-    /// Kristi b#11: an account can hold more than one passkey
-    /// (`passkey_add_*`), so losing one passkey is not losing the account.
-    /// The warning says what is at stake without claiming more.
-    #[test]
-    fn the_passkey_warning_claims_no_more_than_is_true() {
-        let warning = first_run_copy().passkey.name_warning;
-        assert!(warning.contains("every passkey"), "{warning}");
-        assert!(!warning.contains("Losing it means"), "{warning}");
-    }
-
-    /// A refused passkey ceremony is worded here: the daemon's label never
-    /// reaches the sheet.
-    #[test]
-    fn a_refused_passkey_has_a_sentence() {
-        let passkey = first_run_copy().passkey;
-        assert!(!passkey.refused.contains('-'), "{}", passkey.refused);
     }
 
     /// The animated first run (Ron's 2026-10-21 canvas): Ron's own Welcome
@@ -1478,15 +1304,9 @@ mod tests {
     /// with its reason.
     #[test]
     fn no_two_keys_carry_the_same_string() {
-        // Join's near.ai sign-in and Welcome back's passkey sign-in both
-        // read "Sign in" under the button rule (2026-10-08); they start
-        // different ceremonies and may diverge.
         // The Private AI step's name and its title's bold half read the
         // same; one names a step, the other ends a sentence.
-        const MAY_DIVERGE: &[&[&str]] = &[
-            &[".join.near_ai_sign_in", ".passkey.welcome_sign_in"],
-            &[".frame.step_private_ai", ".private_ai.title_bold"],
-        ];
+        const MAY_DIVERGE: &[&[&str]] = &[&[".frame.step_private_ai", ".private_ai.title_bold"]];
         fn leaves(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
             match value {
                 serde_json::Value::String(text) => out.push((text.clone(), path.to_owned())),

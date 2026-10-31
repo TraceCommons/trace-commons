@@ -341,7 +341,7 @@ final class RulesScreenTests: XCTestCase {
         var state = FirstRunState(step: .tools)
         state.account = .watchOnly
         XCTAssertEqual(RulesScreenLayout.pastSessionsNote(state, copy: copy.rules), copy.rules.pastSessionsWatchOnly)
-        for account: AccountAnswer in [.nearAI, .passkeyChosen, .passkey(name: "p"), .enrolled, .none] {
+        for account: AccountAnswer in [.nearAI, .enrolled, .none] {
             state.account = account
             XCTAssertNil(RulesScreenLayout.pastSessionsNote(state, copy: copy.rules), "\(account)")
         }

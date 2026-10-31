@@ -49,7 +49,6 @@ trace-commons-server = { path = "../trace-commons-server" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
-webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
 zeroize = "1"
 
 [features]
@@ -71,8 +70,9 @@ name = "trace-commons-ingest"
 path = "src/bin/trace_commons_ingest_main.rs"
 
 [dev-dependencies]
+# Paused-clock tests (`tokio::time::pause`/`advance`). This used to arrive
+# through the removed WebAuthn test dependency.
+tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 trace-commons-contributor = { path = "../trace-commons-contributor" }
 wiremock = "0.6"
-# Software passkeys for end-to-end enrollment/login tests, never shipped.
-webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = ["softpasskey"] }

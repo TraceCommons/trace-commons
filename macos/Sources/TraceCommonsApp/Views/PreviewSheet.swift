@@ -144,7 +144,7 @@ struct PreviewSheet: View {
 
     /// The core's other Close, for a sheet whose Look-inside table did not
     /// decode: the footer's one control is never drawn without a name.
-    private static let fallbackClose = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.passkey.close
+    private static let fallbackClose = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.close
 
     /// Close in the core's words: the Look-inside table's, else the other.
     private var closeWord: String? { words?.close ?? Self.fallbackClose }

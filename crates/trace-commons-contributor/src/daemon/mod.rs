@@ -106,7 +106,6 @@ pub mod project_key;
 pub mod public_run;
 pub mod queue;
 pub mod referral;
-pub mod remembered_passkeys;
 pub mod second_look;
 pub mod settings;
 pub mod settlement_estimate;

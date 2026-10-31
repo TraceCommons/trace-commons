@@ -8,7 +8,7 @@ real daemon sent against a throwaway store, bundled into `TCShellCore` as a
 resource (`Package.swift`) and read through `Bundle.module`. `coreDown` and
 the network methods (C3, #1187: `inference_summary`, `inference_call_proof`,
 `model_spend`, `private_ai`, `mission_catalogue`, `invite_lookup`,
-`passkey_state`, `account_session_status`, `activity_missions_catalogue`,
+`account_session_status`, `activity_missions_catalogue`,
 marked `"_sample":"hand-written"` in the JSON) stay hand-written, the first
 because it answers `nil` for every method by construction and the second
 because they answer from the network and the recorder's temp store has none

@@ -87,10 +87,10 @@ pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
 /// the daemon stops offering it (`daemon::legacy_migration`). Hashes only;
 /// belongs to this enrollment and swept by `wipe()`.
 pub const LEGACY_INVITE_REFUSAL_FILE: &str = "legacy-invite-refusal.json";
-/// The passkeys used on this Mac, remembered for the first run's "Welcome
-/// back" (`daemon::remembered_passkeys`). Names and account hashes only.
-/// Survives sign-out; swept by `wipe()`.
-pub const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
+/// The list of passkeys a daemon from before their removal kept. Named only
+/// so it can be deleted: at daemon startup
+/// ([`ConfigStore::remove_retired_files`]) and by `wipe()`.
+const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
@@ -117,8 +117,7 @@ pub const DEVICE_KEY_REVOKED_FILE: &str = "device-key-revoked";
 /// Not here, deliberately: receipts, history and the audit log (the local
 /// record of what this device did, and the audit log records the unenroll
 /// itself), settings, folder rules and the queue (the person's choices about
-/// this Mac, not about an account), the NEAR AI notice marker, and the
-/// remembered passkeys (a passkey is not an enrollment).
+/// this Mac, not about an account), and the NEAR AI notice marker.
 pub(crate) const ENROLLMENT_FILES: [&str; 11] = [
     CONFIG_FILE,
     DAEMON_SETUP_COMPLETION_FILE,
@@ -1409,6 +1408,12 @@ impl ConfigStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
+    }
+
+    /// Delete files only an older daemon wrote and nothing reads any more.
+    /// A file that is already gone is not an error.
+    pub(crate) fn remove_retired_files(&self) -> Result<()> {
+        self.remove_daemon_file(REMEMBERED_PASSKEYS_FILE)
     }
 
     /// Remove a daemon runtime file (socket, lock). Missing is not an error.

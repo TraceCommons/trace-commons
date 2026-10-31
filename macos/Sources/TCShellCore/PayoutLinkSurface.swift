@@ -8,8 +8,7 @@ import Foundation
 /// Swift: a payload with a missing or empty field is refused whole, so a
 /// blank never stands where a consent sentence belongs. Templates carry the
 /// one placeholder `{org_name}`, filled by `render(_:orgName:)` with the name
-/// the daemon read from NEAR AI. There is no passkey line, because the owner
-/// superseded the passkey confirmation on 2026-10-23.
+/// the daemon read from NEAR AI.
 public struct PayoutLinkCopy: Decodable, Equatable, Sendable {
     public let title: String
     public let body: String

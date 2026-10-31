@@ -1412,9 +1412,6 @@ final class AppModel: ObservableObject {
         return result
     }
 
-    /// The client the first run's passkey sheets complete their ceremony
-    /// with (`LivePasskeyAccount`). Nil while no daemon is running.
-    var passkeyClient: DaemonClient? { client }
     /// The one subscription and what it declares (`ReengageDeclaration`):
     /// `reengage_due` only while a notification can be posted.
     private var reengage: ReengageDeclaration<TCSubscription>?
@@ -2494,42 +2491,42 @@ final class AppModel: ObservableObject {
     @Published private(set) var legacyMigrationInviteNeeded = false
     /// The move could not be started at all (no daemon answer).
     @Published private(set) var legacyMigrationStartFailed = false
-    /// The move is waiting on the passkey step in the browser.
-    @Published private(set) var legacyMigrationAwaitingPasskey = false
-    /// The passkey step ended without finishing; nothing was moved.
-    @Published private(set) var legacyMigrationPasskeyFailed = false
-    /// The passkey step: the first run's browser step (`nearAILogin`), where
-    /// the person creates or uses their passkey and the daemon keeps the
+    /// The move is waiting on the NEAR AI login step in the browser.
+    @Published private(set) var legacyMigrationAwaitingNearAILogin = false
+    /// The NEAR AI login step ended without finishing; nothing was moved.
+    @Published private(set) var legacyMigrationNearAILoginFailed = false
+    /// The NEAR AI login step: the first run's browser step (`nearAILogin`),
+    /// where the person signs in to NEAR AI and the daemon keeps the
     /// session the move provisions the account with. True once it finished.
     /// Replaced only by tests.
-    var legacyMigrationPasskeyStep: (() async -> Bool)?
-    /// Ends the browser step the passkey step began (`cancelNearAILogin`).
+    var legacyMigrationNearAILoginStep: (() async -> Bool)?
+    /// Ends the browser step the NEAR AI login step began (`cancelNearAILogin`).
     /// Replaced only by tests.
-    var legacyMigrationPasskeyCancel: (() async -> Void)?
-    /// The running passkey step, so Cancel can stop it.
-    private var legacyMigrationPasskeyTask: Task<Bool, Never>?
+    var legacyMigrationNearAILoginCancel: (() async -> Void)?
+    /// The running NEAR AI login step, so Cancel can stop it.
+    private var legacyMigrationNearAILoginTask: Task<Bool, Never>?
 
-    /// Cancel while waiting on the passkey: stop waiting and end the
+    /// Cancel while waiting on the NEAR AI login: stop waiting and end the
     /// browser step. Nothing is moved, and the offer stays.
-    func cancelLegacyMigrationPasskey() {
-        guard let task = legacyMigrationPasskeyTask else { return }
+    func cancelLegacyMigrationNearAILogin() {
+        guard let task = legacyMigrationNearAILoginTask else { return }
         task.cancel()
-        let cancel = legacyMigrationPasskeyCancel ?? { [weak self] in _ = await self?.cancelNearAILogin() }
+        let cancel = legacyMigrationNearAILoginCancel ?? { [weak self] in _ = await self?.cancelNearAILogin() }
         Task { await cancel() }
     }
 
-    /// Runs the passkey step once, as its own task so Cancel can stop it.
+    /// Runs the NEAR AI login step once, as its own task so Cancel can stop it.
     /// True when it finished; false when it failed, ran out of time or was
-    /// cancelled (then `legacyMigrationPasskeyFailed` stays false).
-    private func runLegacyMigrationPasskeyStep() async -> Bool {
-        let step = legacyMigrationPasskeyStep ?? { [weak self] in await self?.nearAILogin() ?? false }
-        legacyMigrationAwaitingPasskey = true
+    /// cancelled (then `legacyMigrationNearAILoginFailed` stays false).
+    private func runLegacyMigrationNearAILoginStep() async -> Bool {
+        let step = legacyMigrationNearAILoginStep ?? { [weak self] in await self?.nearAILogin() ?? false }
+        legacyMigrationAwaitingNearAILogin = true
         let task = Task { await step() }
-        legacyMigrationPasskeyTask = task
+        legacyMigrationNearAILoginTask = task
         let finished = await task.value
-        legacyMigrationPasskeyTask = nil
-        legacyMigrationAwaitingPasskey = false
-        if !finished && !task.isCancelled { legacyMigrationPasskeyFailed = true }
+        legacyMigrationNearAILoginTask = nil
+        legacyMigrationAwaitingNearAILogin = false
+        if !finished && !task.isCancelled { legacyMigrationNearAILoginFailed = true }
         return finished && !task.isCancelled
     }
 
@@ -2538,9 +2535,9 @@ final class AppModel: ObservableObject {
     /// re-read, the daemon stops offering the move and its notice takes
     /// over. `invite` is sent only once the daemon asked for it.
     ///
-    /// The move leads with the passkey step (owner, 2026-10-11): when the
+    /// The move leads with the NEAR AI login step (owner, 2026-10-11): when the
     /// daemon has no session to provision the account with
-    /// (`legacy_migration_no_near_ai_session`), this runs the passkey step
+    /// (`legacy_migration_no_near_ai_session`), this runs the NEAR AI login step
     /// and then the move again, once, without a second press. A step that
     /// does not finish moves nothing.
     func migrateLegacyInvite(invite: String? = nil) async {
@@ -2550,7 +2547,7 @@ final class AppModel: ObservableObject {
         legacyMigrationBusy = true
         legacyMigrationRefusal = nil
         legacyMigrationStartFailed = false
-        legacyMigrationPasskeyFailed = false
+        legacyMigrationNearAILoginFailed = false
         let move = {
             await Task.detached(priority: .userInitiated) {
                 Result { try client.migrateLegacyInvite(invite: sent) }
@@ -2558,9 +2555,9 @@ final class AppModel: ObservableObject {
         }
         var outcome = await move()
         if case .failure(let failure as DaemonClient.Failure) = outcome,
-            failure.message == LegacyMigrationOffer.passkeyNeededLabel, self.client === client
+            failure.message == LegacyMigrationOffer.nearAILoginNeededLabel, self.client === client
         {
-            guard await runLegacyMigrationPasskeyStep(), self.client === client else {
+            guard await runLegacyMigrationNearAILoginStep(), self.client === client else {
                 legacyMigrationBusy = false
                 refreshStatus()
                 return
@@ -3641,7 +3638,7 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var accountSession: AccountSessionRead = .unread
     /// The last status read's `sign_in`: `near_ai` when Sign in again is the
-    /// NEAR AI path (`near_ai_account_sign_in`), nil for a passkey account
+    /// NEAR AI path (`near_ai_account_sign_in`), nil for an `account_sign_in` account
     /// or before a read.
     @Published private(set) var accountSignInPath: String?
     @Published private(set) var accountSigningIn = false
@@ -3765,7 +3762,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var accountSessionGeneration = 0
 
     /// Sign in again by whichever path this account has: the NEAR AI one
-    /// for a NEAR AI account, the passkey one otherwise. The path comes
+    /// for a NEAR AI account, `account_sign_in` otherwise. The path comes
     /// from a status read, taken first when none has been.
     func signInToAccount() async {
         if accountSignInPath == nil,
@@ -3779,7 +3776,7 @@ final class AppModel: ObservableObject {
     /// opens the browser), then reads the session again and trusts only
     /// that read, as Ron's History does.
     func signInToWithdraw() async {
-        // A NEAR AI account has no passkey to sign in with.
+        // A NEAR AI account signs in through NEAR AI.
         if accountSignInPath == "near_ai" { return await signInAgain() }
         guard !accountSigningIn else { return }
         accountSigningIn = true

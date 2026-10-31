@@ -28,9 +28,13 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let undo: String
         /// What an unanswered picker reads (Ron's `Picker` placeholder).
         public let choose: String
-        /// The footer's Back on every step after Join, and the passkey
-        /// popups' Back.
+        /// The footer's Back on every step after Join.
         public let back: String
+        /// Cancel on a wait or a confirmation (the near.ai sign-in on Join,
+        /// the sharing disclosures).
+        public let cancel: String
+        /// Close on a sheet.
+        public let close: String
     }
 
     /// Welcome, the animated first run's splash.
@@ -56,30 +60,17 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let payRangePoints: String
         /// `{min}`.
         public let payRangePointsOne: String
-        public let passkeyEyebrow: String
-        public let passkeyText: String
-        /// `{name}`.
-        public let passkeyReady: String
-        public let passkeyCreate: String
-        public let passkeyDone: String
-        /// Create passkey chosen, created once the daemon starts.
-        public let passkeyChosen: String
-        /// Create passkey could not start the daemon, so no sheet opened.
-        public let passkeyUnavailable: String
         public let nearAiEyebrow: String
         public let nearAiText: String
         public let nearAiSignIn: String
         /// near.ai chosen, signed in once the daemon starts.
         public let nearAiChosen: String
-        /// An invite and a new passkey are not combined.
-        public let inviteOrPasskey: String
         /// An invite host or pay range not known, in place of a dash.
         public let unknown: String
         public let signedIn: String
         public let noSharing: String
         public let skipNote: String
         public let skip: String
-        public let signedOut: String
     }
 
     public struct Folders: Decodable, Equatable, Sendable {
@@ -250,39 +241,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         }
     }
 
-    public struct Passkey: Decodable, Equatable, Sendable {
-        public let close: String
-        public let cancel: String
-        public let chooseTitle: String
-        public let useExisting: String
-        public let createNew: String
-        public let chooseNote: String
-        public let nameTitle: String
-        /// P-2's submit button; the popup's title stays `nameTitle`.
-        public let nameSubmit: String
-        public let nameField: String
-        public let clearName: String
-        public let defaultName: String
-        public let nameWarning: String
-        public let nameEmpty: String
-        /// `{max}`.
-        public let nameTooLong: String
-        public let verifyTitle: String
-        public let verifyBody: String
-        public let verify: String
-        public let verifyNote: String
-        public let welcomeTitle: String
-        public let welcomeBody: String
-        public let welcomeSignIn: String
-        public let otherOptions: String
-        /// A refused ceremony; its label is never shown.
-        public let refused: String
-        /// An existing passkey's account is a legacy one; signed out.
-        public let boundElsewhere: String
-        /// This Mac's near.ai sign-in is not the passkey account's; signed out.
-        public let nearAiMismatch: String
-    }
-
     public struct PrivateAi: Decodable, Equatable, Sendable {
         public let loading: String
         public let unavailable: String
@@ -306,7 +264,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
     public let rules: Rules
     public let uses: Uses
     public let traces: Traces
-    public let passkey: Passkey
     public let privateAi: PrivateAi
 
     /// Fill a string's `{name}` placeholders, each with its value. The one

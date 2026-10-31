@@ -541,10 +541,6 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("invite_lookup", as: DaemonData.InviteLookup.self)
     }
 
-    public func passkeyState() async throws -> DaemonData.PasskeyState {
-        try serve("passkey_state", as: DaemonData.PasskeyState.self)
-    }
-
     public func accountState() async throws -> DaemonData.AccountState {
         try serve("account_session_status", as: DaemonData.AccountState.self)
     }

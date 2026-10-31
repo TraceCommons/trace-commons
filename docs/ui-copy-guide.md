@@ -59,7 +59,6 @@ string for both just because they initially have the same wording.
 
 | Title | Button |
 | --- | --- |
-| Create new passkey | Create |
 | Launch managed session | Launch |
 | Clear episode assessment | Clear |
 

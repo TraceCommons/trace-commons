@@ -38,7 +38,7 @@
 //!
 //! The network methods (C3, #1187: `inference_summary`,
 //! `inference_call_proof`, `model_spend`, `private_ai`, `mission_catalogue`,
-//! `invite_lookup`, `passkey_state`, `account_session_status`,
+//! `invite_lookup`, `account_session_status`,
 //! `activity_missions_catalogue`) are not recorded here: they answer from
 //! the network, and this recorder's temp store has none behind it. They stay
 //! hand-written in `SampleDaemonData.swift` in the shapes the daemon

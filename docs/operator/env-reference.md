@@ -663,6 +663,28 @@ The abuse thresholds fail startup with `referral_abuse_setting_invalid` when
 set but not a plain decimal in range. See the
 [referral rewards design](../superpowers/specs/2026-10-29-referral-rewards-design.md).
 
+## Removed variables (passkeys)
+
+Passkey sign-in was removed in migration V144. The ingest still accepts the
+variables below and ignores them; none of them is a startup failure. Each is
+safe to delete from env files once the deployment is past V144.
+
+| Var | Status | Notes |
+|---|---|---|
+| `TRACE_COMMONS_WEBAUTHN_RP_ID` | ignored since V144 | Passkey relying-party ID. |
+| `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` | ignored since V144 | Passkey relying-party origins. |
+| `TRACE_COMMONS_WEBAUTHN_RP_NAME` | ignored since V144 | Passkey relying-party display name. |
+| `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING` | ignored since V144 | Cap on unbound passkey accounts. |
+| `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` | ignored since V144 | Native passkey account creations per IP per day. |
+| `TRACE_COMMONS_UNBOUND_REAPER_ENABLED` | ignored since V144 | Unbound-account reaper switch. |
+| `TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL` | ignored since V144 | Reaper worker database URL. |
+| `TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS` | ignored since V144 | Reaper pass interval. |
+| `TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE` | ignored since V144 | Reaper batch size. |
+| `TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS` | ignored since V144 | Reaper age limit for unbound accounts. |
+| `TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS` | ignored since V144 | Reaper age limit for closed accounts. |
+| `TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS` | ignored since V144 | Earlier name of the reaper age limit. |
+| `TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS` | ignored since V144 | Earlier name of the reaper age limit. |
+
 ## Build-time features (Cargo)
 
 These aren't env vars but they gate which envs even matter at runtime.

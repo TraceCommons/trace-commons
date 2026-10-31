@@ -73,7 +73,7 @@ private final class SignInDaemon: DaemonCalling {
                 state.phase = .absent
                 return #"{"id":1,"result":{}}"#
             case "account_session_status":
-                return #"{"id":1,"result":{"state":"known","signed_in":false,"sign_in":"passkey"}}"#
+                return #"{"id":1,"result":{"state":"known","signed_in":false,"sign_in":null}}"#
             case "near_ai_balance":
                 return #"{"id":1,"result":{"state":"no_session","remaining_nanos":null,"spend_limit_nanos":null,"total_spent_nanos":null,"scale":9,"observed_at":null}}"#
             default:

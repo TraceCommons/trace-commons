@@ -39,7 +39,7 @@ final class ChannelAgreementTests: XCTestCase {
     }
 
     func testTheDylibJSONDecodes() throws {
-        let json = #"{"channel":"staging","state_dir_name":"trace-commons-staging","state_dir_env":"TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR","passkey_rp_id":"staging.tracecommons.ai","url_scheme":"tracecommons-staging","near_ai_dashboard_origin":"https://cloud-stg.near.ai","near_ai_sign_in_providers":["google"]}"#
+        let json = #"{"channel":"staging","state_dir_name":"trace-commons-staging","state_dir_env":"TRACE_COMMONS_STAGING_CONTRIBUTOR_DIR","url_scheme":"tracecommons-staging","near_ai_dashboard_origin":"https://cloud-stg.near.ai","near_ai_sign_in_providers":["google"]}"#
         XCTAssertEqual(BuildChannel.decode(fromJSON: json), BuildChannelFixture.staging)
         XCTAssertNil(BuildChannel.decode(fromJSON: nil))
         XCTAssertNil(BuildChannel.decode(fromJSON: "{}"))

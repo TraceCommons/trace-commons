@@ -35,7 +35,6 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/FirstRun/RulesScreen.swift",
         "Views/FirstRun/UsesScreen.swift",
         "Views/FirstRun/SharingDisclosures.swift",
-        "Views/FirstRun/PasskeySheets.swift",
         "Views/OnboardingCoordinatorView.swift",
         "Views/Monitor/FirstRunViews.swift",
         "Views/ComputeView.swift",

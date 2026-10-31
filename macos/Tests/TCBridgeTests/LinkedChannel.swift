@@ -27,8 +27,16 @@ enum LinkedChannel {
         return host
     }
 
-    /// The public site host, which is the passkey relying party.
-    static var siteHost: String { channel.passkeyRelyingParty }
+    /// The public site host (`channel::PUBLIC_SITE_HOST`). The dylib does
+    /// not report it, so it is named here per channel; an unknown channel
+    /// fails the test.
+    static var siteHost: String {
+        switch channel.channel {
+        case "production": return "tracecommons.ai"
+        case "staging": return "staging.tracecommons.ai"
+        default: fatalError("unknown linked channel \(channel.channel)")
+        }
+    }
 
     /// The host of an invite issued for this channel (`issuer.` + the site).
     static var inviteHost: String { "issuer.\(siteHost)" }

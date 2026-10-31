@@ -177,7 +177,7 @@ struct SharingChoiceCard: View {
             title: copy.uses.keepAsksTitle ?? copy.uses.sharing,
             message: copy.uses.keepAsksBody.map { FirstRunCopy.fill($0, ["count": String(count)]) } ?? "",
             actions: [
-                .cancel(copy.passkey.cancel) { keepAsksCount = nil },
+                .cancel(copy.frame.cancel) { keepAsksCount = nil },
                 GlassModalAction(copy.uses.keepAsksAll ?? "") { disclose(keepFolderAsks: false) },
                 GlassModalAction(copy.uses.keepAsksKeep ?? "", isDefault: true) { disclose(keepFolderAsks: true) },
             ],
