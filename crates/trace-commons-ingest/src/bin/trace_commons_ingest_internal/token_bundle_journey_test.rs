@@ -143,14 +143,24 @@ async fn token_bundle_http_journey_recovers_a_lost_finalize_response() {
     journal.approve_payload(id, payload).unwrap();
     journal.mark_approved(id).unwrap();
     let approval_ms = approval_started.elapsed().as_millis();
+    // Finalize is counted against the principal's submit rate once, before
+    // its body, and not again when it reaches the submit handler.
+    let _rate_lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let finalize_requests = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let finalize_seen = finalize_requests.clone();
     let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let lost_response = lost.clone();
     let router = app(state.clone()).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let lost = lost_response.clone();
+            let finalize_seen = finalize_seen.clone();
             async move {
                 let finalize = request.method() == axum::http::Method::POST
                     && request.uri().path().ends_with("/journey-r1");
+                if finalize {
+                    finalize_seen.fetch_add(1, Ordering::SeqCst);
+                }
                 let response = next.run(request).await;
                 if finalize && response.status().is_success() && !lost.swap(true, Ordering::SeqCst)
                 {
@@ -175,6 +185,15 @@ async fn token_bundle_http_journey_recovers_a_lost_finalize_response() {
     assert!(
         lost.load(Ordering::SeqCst),
         "the failure must occur after a successful real finalize"
+    );
+    assert_eq!(
+        submit_rate_limit_count_for_test(
+            tenant.tenant_id(),
+            tenant.safe_auth_method(),
+            tenant.principal_ref(),
+        ),
+        finalize_requests.load(Ordering::SeqCst),
+        "a finalize that reached submit work is counted once, not twice"
     );
     let committed_parent = db
         .get_trace_submission(tenant.tenant_id(), envelope.submission_id)

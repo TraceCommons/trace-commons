@@ -2825,8 +2825,10 @@ pub trait TraceCorpusStore: Send + Sync {
     /// `limit` in `(received_at DESC)` order, for an hourly submission
     /// ceiling. `principal_refs` narrows the scope to those principals; `None`
     /// counts the whole tenant. `submission_known` says whether
-    /// `submission_id` already has a row in the tenant, whatever its age, so
-    /// a retry of a recorded submission is never counted against itself.
+    /// `submission_id` already has a row in the same scope (the tenant, or
+    /// one of those principals), whatever its age, so a retry of a recorded
+    /// submission is never counted against itself and another principal's
+    /// id is not exempt.
     /// Tenant and principals MUST come from authentication.
     ///
     /// A store that cannot answer refuses, labelled: the caller decides what

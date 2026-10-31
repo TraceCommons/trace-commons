@@ -210,7 +210,7 @@ async fn round_trip(
     target_bytes: u64,
     read_back: bool,
 ) -> (SyntheticEnvelope, StdDuration, String) {
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let fixture = temp.path().join("envelope.json");
     let written = write_synthetic_envelope(&fixture, target_bytes).await;
@@ -563,7 +563,7 @@ async fn an_upload_whose_claim_expires_mid_body_is_still_accepted() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const TOKEN: &str = "expiring-upload-token";
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     let temp = tempfile::tempdir().expect("temp dir");
     let state = state_with_token(
         temp.path(),
@@ -714,7 +714,7 @@ async fn large_envelope_pilot_shaped_submit_probe() {
         .await
         .expect("this probe needs TRACE_COMMONS_PG_TEST_DATABASE_URL");
     cleanup_pg_trace_tenant(&backend, "tenant-a").await;
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     let target: u64 = std::env::var("TC_LARGE_ENVELOPE_BYTES")
         .ok()
         .and_then(|value| value.parse().ok())

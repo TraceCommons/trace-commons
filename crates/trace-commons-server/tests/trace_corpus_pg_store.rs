@@ -490,6 +490,22 @@ async fn pg_store_recent_submission_window_is_scoped_bounded_and_windowed() {
         known.submission_known,
         "an id with a row is known whatever its age"
     );
+    let others_id = backend
+        .recent_trace_submission_window(&tenant_id, Some(&a), ids[2], since, 10)
+        .await
+        .expect("another principal's id");
+    assert!(
+        !others_id.submission_known,
+        "another principal's id is not known to a principal-scoped window"
+    );
+    let others_id_whole = backend
+        .recent_trace_submission_window(&tenant_id, None, ids[2], since, 10)
+        .await
+        .expect("a whole-tenant window");
+    assert!(
+        others_id_whole.submission_known,
+        "a whole-tenant window knows every principal's id"
+    );
 
     let other = backend
         .recent_trace_submission_window(
