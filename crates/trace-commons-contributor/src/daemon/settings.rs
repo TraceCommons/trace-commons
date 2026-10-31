@@ -1927,6 +1927,14 @@ pub fn apply_settings_object(
     let obj = params.as_object().ok_or(ERR_SETTINGS_NOT_OBJECT)?;
     let mut changed = false;
     for (key, value) in obj {
+        // Retired with the daily upload limit. Accepted, whatever the value,
+        // and ignored, so a shell built while the limit existed can still
+        // save its other settings. Outside the marked region below: the
+        // agent schema and the IPC doc's key lists name settable keys only.
+        if matches!(key.as_str(), "max_uploads_per_day" | "max_bytes_per_day") {
+            changed = true;
+            continue;
+        }
         // SET-SETTINGS-KEYS-BEGIN
         //
         // `docs/contributor-daemon-ipc-v1_1.md` lists these keys twice, and
@@ -1963,10 +1971,6 @@ pub fn apply_settings_object(
             "local_notifications" => {
                 settings.local_notifications = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
-            // Retired with the daily upload limit. Accepted, whatever the
-            // value, and ignored, so a shell built while the limit existed
-            // can still save its other settings.
-            "max_uploads_per_day" | "max_bytes_per_day" => {}
             // The path spellings. A string declares "watch this"; null
             // clears the declaration back to never-asked, which is what the
             // application shells refuse to start on. Kept because the C ABI

@@ -250,8 +250,6 @@ pub const MONITOR_PLACEHOLDERS: &[&str] = &[
     "end",
     "shown",
     "hours",
-    "uploads",
-    "megabytes",
     "amount",
     "days",
     "section",
