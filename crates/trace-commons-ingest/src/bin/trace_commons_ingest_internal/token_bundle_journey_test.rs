@@ -147,6 +147,36 @@ async fn token_bundle_http_journey_recovers_a_lost_finalize_response() {
     // its body, and not again when it reaches the submit handler.
     let _rate_lock = submit_rate_limit_test_lock().lock().await;
     reset_account_rate_limiter_for_test();
+    // A finalize for a bundle this principal does not have is refused before
+    // it takes a submit slot or a unit of the rate (decision 3 on #1794).
+    {
+        use tower::ServiceExt;
+        let unknown = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/token-bundles/{}/journey-unknown",
+                        envelope.submission_id
+                    ))
+                    .header(AUTHORIZATION, "Bearer token-a")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(serde_json::to_vec(&envelope).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            submit_rate_limit_count_for_test(
+                tenant.tenant_id(),
+                tenant.safe_auth_method(),
+                tenant.principal_ref(),
+            ),
+            0,
+            "an unknown bundle's finalize spends no rate"
+        );
+    }
     let finalize_requests = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let finalize_seen = finalize_requests.clone();
     let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));

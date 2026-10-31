@@ -6745,6 +6745,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         // The whole budget: fixture principals are shared across parallel
         // tests, and the focused share tests set their own.
         large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(LARGE_BODY_GLOBAL_BYTES)),
+        upload_body_idle_timeout: UPLOAD_BODY_IDLE_TIMEOUT,
+        submission_attempts: Arc::new(HourlySubmissionAttempts::default()),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -10597,6 +10599,184 @@ async fn account_hourly_submission_ceiling_does_not_exempt_another_principals_id
         .expect_err("another principal's id is not a retry of this principal's");
     assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL);
+}
+
+/// The ceiling counts attempts, not only recorded submissions (decision 5 on
+/// #1794): an upload refused after the ceiling leaves no record, but it was
+/// let through, so it counts. Here the refusal is an ownership conflict on
+/// another principal's id; any later refusal (the tombstone, a witness or
+/// policy refusal) is counted the same way.
+#[tokio::test]
+async fn account_hourly_submission_ceiling_counts_attempts_refused_after_it() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let others = sample_envelope().await;
+    let _ = test_submit(state.clone(), "token-a-2", others.clone())
+        .await
+        .expect("another principal in the tenant records its submission");
+
+    let refused_downstream = test_submit(state.clone(), "token-a", others)
+        .await
+        .expect_err("another principal's id is refused after the ceiling");
+    assert_eq!(refused_downstream.0, StatusCode::CONFLICT);
+
+    let blocked = test_submit(state.clone(), "token-a", sample_envelope().await)
+        .await
+        .expect_err("the refused attempt counted, so the ceiling is reached");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL);
+    assert!(
+        blocked
+            .1
+            .0
+            .retry_after_seconds
+            .is_some_and(|seconds| (3590..=3600).contains(&seconds)),
+        "room returns when the attempt leaves the hour: {:?}",
+        blocked.1.0.retry_after_seconds
+    );
+}
+
+/// Only an identical retry (the same submission id with the same body) is
+/// exempt from the ceiling (decision 6 on #1794). A re-POST of a known id
+/// with a new body, which for a quarantined record is a remediation that
+/// re-runs the re-scrub, counts like a new upload.
+#[tokio::test]
+async fn account_hourly_submission_ceiling_counts_a_known_id_with_a_new_body() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let first = sample_envelope().await;
+    let _ = test_submit(state.clone(), "token-a", first.clone())
+        .await
+        .expect("the first upload of the hour is admitted");
+    let _ = test_submit(state.clone(), "token-a", first.clone())
+        .await
+        .expect("an identical retry is exempt");
+
+    let mut new_body = first;
+    new_body.events[0].redacted_content = Some("A different body for the same id".to_string());
+    let blocked = test_submit(state.clone(), "token-a", new_body)
+        .await
+        .expect_err("the same id with a new body counts against the ceiling");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL);
+}
+
+/// The in-process attempt table on its own: an identical retry needs a
+/// record and a body this process saw; attempts count by scope, never past
+/// the limit, and leave after an hour; the refusal names the later of the
+/// two counts' room; a sweep drops scopes with nothing left in the hour.
+#[test]
+fn hourly_submission_attempts_count_by_scope_and_leave_after_an_hour() {
+    use trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow;
+
+    let attempts = HourlySubmissionAttempts::default();
+    let now = Utc::now();
+    let empty = RecentTraceSubmissionWindow {
+        counted: 0,
+        oldest_counted_at: None,
+        submission_known: false,
+    };
+    let (id, body) = (Uuid::new_v4(), [1u8; 32]);
+    assert_eq!(
+        attempts.admit("scope-a", 2, now, &empty, id, body),
+        Some(HourlySubmissionAttemptDecision::Admitted)
+    );
+    // The same id and body, but no record yet (the first is still in flight,
+    // or was refused downstream): counted.
+    assert_eq!(
+        attempts.admit("scope-a", 2, now, &empty, id, body),
+        Some(HourlySubmissionAttemptDecision::Admitted)
+    );
+    assert_eq!(attempts.attempts_for_test("scope-a"), 2);
+    let known = RecentTraceSubmissionWindow {
+        counted: 1,
+        oldest_counted_at: Some(now),
+        submission_known: true,
+    };
+    assert_eq!(
+        attempts.admit("scope-a", 2, now, &known, id, body),
+        Some(HourlySubmissionAttemptDecision::IdenticalRetry),
+        "a recorded id with a body this process saw is an identical retry, even at the limit"
+    );
+    assert_eq!(
+        attempts.admit("scope-a", 2, now, &known, id, [2u8; 32]),
+        Some(HourlySubmissionAttemptDecision::Refused {
+            room_after: Some(now)
+        }),
+        "a new body for a recorded id counts"
+    );
+    assert_eq!(
+        attempts.attempts_for_test("scope-a"),
+        2,
+        "never past the limit"
+    );
+    assert_eq!(
+        attempts.admit("scope-b", 2, now, &empty, Uuid::new_v4(), body),
+        Some(HourlySubmissionAttemptDecision::Admitted),
+        "another scope has its own count"
+    );
+
+    // The recorded count can be the later one to free up.
+    let later = now + Duration::minutes(10);
+    let recorded_full = RecentTraceSubmissionWindow {
+        counted: 2,
+        oldest_counted_at: Some(later),
+        submission_known: false,
+    };
+    assert_eq!(
+        attempts.admit("scope-a", 2, later, &recorded_full, Uuid::new_v4(), body),
+        Some(HourlySubmissionAttemptDecision::Refused {
+            room_after: Some(later)
+        })
+    );
+
+    // An hour on, the attempts have left and the sweep drops both scopes.
+    let next_hour = now + Duration::hours(1) + Duration::seconds(1);
+    assert_eq!(
+        attempts.admit("scope-c", 2, next_hour, &empty, Uuid::new_v4(), body),
+        Some(HourlySubmissionAttemptDecision::Admitted)
+    );
+    assert_eq!(attempts.scopes_for_test(), 1, "only the live scope is kept");
+    assert_eq!(
+        attempts.admit("scope-a", 2, next_hour, &empty, Uuid::new_v4(), body),
+        Some(HourlySubmissionAttemptDecision::Admitted)
+    );
+    assert_eq!(attempts.attempts_for_test("scope-a"), 1);
+}
+
+/// A poisoned attempt table fails closed: the caller refuses the upload.
+#[test]
+fn hourly_submission_attempts_fail_closed_on_a_poisoned_lock() {
+    use trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow;
+
+    let attempts = Arc::new(HourlySubmissionAttempts::default());
+    let poisoner = attempts.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoner.table.lock().expect("lock");
+        panic!("poison the table");
+    })
+    .join();
+    let empty = RecentTraceSubmissionWindow {
+        counted: 0,
+        oldest_counted_at: None,
+        submission_known: false,
+    };
+    assert_eq!(
+        attempts.admit("scope", 1, Utc::now(), &empty, Uuid::new_v4(), [0u8; 32]),
+        None
+    );
 }
 
 /// The ceiling's `Retry-After` rounds up, so a client that waits exactly as
@@ -31093,6 +31273,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         // The whole budget: fixture principals are shared across parallel
         // tests, and the focused share tests set their own.
         large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(LARGE_BODY_GLOBAL_BYTES)),
+        upload_body_idle_timeout: UPLOAD_BODY_IDLE_TIMEOUT,
+        submission_attempts: Arc::new(HourlySubmissionAttempts::default()),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -81583,6 +81765,11 @@ async fn authenticated_upload_status(method: &str, path: &str, body_bytes: usize
 /// there for fixture-specific reasons) rather than being refused by the
 /// ordinary API ceiling -- or by the pre-body gate, which would make a
 /// non-413 status prove nothing.
+///
+/// Bundle finalize is the exception in this fixture: bundles are not enabled
+/// here, so its bundle pre-check answers 503 before the body is read, and
+/// its row proves only that the gate let it through. Its declared-length
+/// ceiling is pinned by `upload_routes_admit_their_ceiling_by_declared_length`.
 #[tokio::test]
 async fn large_upload_routes_retain_the_upload_body_ceiling() {
     for (method, path, _) in large_upload_route_ceilings() {
@@ -81869,10 +82056,14 @@ async fn submit_rate_limit_refuses_before_reading_the_body() {
     server.abort();
 }
 
-/// Bundle finalize runs the same submission work, so it takes the same
-/// per-principal rate before its body is read, and counts once.
+/// A finalize for a bundle that cannot be finalized (bundles disabled here,
+/// as in every non-PostgreSQL fixture, or an unknown or revoked bundle) is
+/// answered before its body is read and before it takes a submit slot or a
+/// unit of the submit rate (decision 3 on #1794): it costs the principal's
+/// submit window nothing. The rate a finalize that reaches submit work
+/// spends, and its counting once, are pinned by the PostgreSQL journey test.
 #[tokio::test]
-async fn token_bundle_finalize_refuses_past_the_submit_rate_before_reading_the_body() {
+async fn token_bundle_finalize_of_a_bundle_it_cannot_finalize_costs_no_submit_slot_or_rate() {
     use axum::body::Body;
     use tower::ServiceExt;
 
@@ -81884,45 +82075,80 @@ async fn token_bundle_finalize_refuses_past_the_submit_rate_before_reading_the_b
         rate_per_window: 1,
         concurrency: SUBMIT_PER_PRINCIPAL_CONCURRENCY,
     };
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    let count = || {
+        submit_rate_limit_count_for_test(
+            "tenant-a",
+            TraceAuthMethod::StaticToken,
+            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
+        )
+    };
     let path = format!("/v1/token-bundles/{}/r1", Uuid::nil());
+    let envelope = serde_json::to_vec(&sample_envelope().await).expect("envelope serialises");
+    for _ in 0..2 {
+        let response = app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(path.as_str())
+                    .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(envelope.clone()))
+                    .expect("finalize request builds"),
+            )
+            .await
+            .expect("finalize response");
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "bundles are not enabled in this fixture"
+        );
+    }
+    assert_eq!(
+        count(),
+        0,
+        "a finalize refused for its bundle spends no rate"
+    );
+
+    let (addr, server) = serve_ingest_for_test(state.clone()).await;
+    let mut headers_only =
+        send_upload_headers_without_body(addr, "POST", &path, Some(SUBMIT_RATE_LIMIT_TOKEN_A))
+            .await;
+    assert_eq!(
+        response_status_within(&mut headers_only, StdDuration::from_secs(2))
+            .await
+            .as_deref(),
+        Some("HTTP/1.1 503 Service Unavailable"),
+        "the bundle is checked before the body is read"
+    );
+    assert_eq!(count(), 0);
+    assert_eq!(
+        ACCOUNT_RATE_LIMITER.in_flight_for_test(&key),
+        0,
+        "and before a submit slot is taken"
+    );
+    server.abort();
+
+    // The window is untouched: the principal's one submission this minute
+    // is still there to spend.
     let mut invalid = sample_envelope().await;
     invalidate_envelope_schema(&mut invalid);
-    let first = app(state.clone())
+    let submit = app(state)
         .oneshot(
             axum::http::Request::builder()
                 .method("POST")
-                .uri(path.as_str())
+                .uri("/v1/traces")
                 .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
                 .header(axum::http::header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&invalid).expect("envelope serialises"),
                 ))
-                .expect("finalize request builds"),
+                .expect("submit request builds"),
         )
         .await
-        .expect("first response");
-    assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(
-        submit_rate_limit_count_for_test(
-            "tenant-a",
-            TraceAuthMethod::StaticToken,
-            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
-        ),
-        1
-    );
-
-    let (addr, server) = serve_ingest_for_test(state).await;
-    let mut refused =
-        send_upload_headers_without_body(addr, "POST", &path, Some(SUBMIT_RATE_LIMIT_TOKEN_A))
-            .await;
-    assert_eq!(
-        response_status_within(&mut refused, StdDuration::from_secs(2))
-            .await
-            .as_deref(),
-        Some("HTTP/1.1 429 Too Many Requests"),
-        "a principal past its rate is refused without its finalize body being read"
-    );
-    server.abort();
+        .expect("submit response");
+    assert_eq!(submit.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(count(), 1);
 }
 
 /// The submission in-flight cap is also taken before the body is read: with
@@ -82108,6 +82334,145 @@ async fn submit_handler_does_not_count_a_request_admitted_before_the_body() {
     let _ =
         submit_trace_handler_authenticated(State(state), headers, submit_body(invalid), None).await;
     assert_eq!(count(), 1, "a direct call is counted by the handler");
+}
+
+/// Read a response until `needle` shows up, the server closes, or `wait`
+/// runs out, and return what arrived, lowercased.
+async fn response_text_until(
+    stream: &mut tokio::net::TcpStream,
+    needle: &str,
+    wait: StdDuration,
+) -> String {
+    use tokio::io::AsyncReadExt;
+
+    let mut text = String::new();
+    let _ = tokio::time::timeout(wait, async {
+        let mut buffer = vec![0u8; 4096];
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    text.push_str(&String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase());
+                    if text.contains(needle) {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    text
+}
+
+/// An upload whose body stops arriving is refused once it has been idle for
+/// the timeout, with a fixed label, on `POST /v1/traces` and the token-bundle
+/// upload routes (decision 1 on #1794), and gives back the submit slot, the
+/// large-body slot and the byte share it held. Without the timeout it held
+/// them until the socket died, and two stalled uploads locked the principal
+/// out of submitting.
+#[tokio::test]
+async fn a_stalled_upload_is_refused_and_releases_its_slots_and_bytes() {
+    use tokio::io::AsyncWriteExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).upload_body_idle_timeout = StdDuration::from_millis(200);
+    let principal = static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let submit_key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    let large_key = large_body_principal_key("tenant-a", TraceAuthMethod::StaticToken, &principal);
+    let shares = state.large_body_principal_bytes.clone();
+    let (addr, server) = serve_ingest_for_test(state).await;
+
+    for (method, path) in [
+        ("POST", "/v1/traces"),
+        ("POST", "/v1/token-bundles"),
+        (
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+        ),
+    ] {
+        let mut stream =
+            send_upload_headers_without_body(addr, method, path, Some(SUBMIT_RATE_LIMIT_TOKEN_A))
+                .await;
+        // A first chunk arrives, then nothing more.
+        stream.write_all(b"{").await.expect("first chunk writes");
+        let text = response_text_until(
+            &mut stream,
+            UPLOAD_BODY_IDLE_TIMEOUT_LABEL,
+            StdDuration::from_secs(5),
+        )
+        .await;
+        assert!(
+            text.starts_with("http/1.1 408 request timeout"),
+            "{method} {path}: a stalled upload is refused: {text:?}"
+        );
+        assert!(
+            text.contains(UPLOAD_BODY_IDLE_TIMEOUT_LABEL),
+            "{method} {path}: with the fixed label: {text:?}"
+        );
+    }
+
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&submit_key) > 0
+            || ACCOUNT_RATE_LIMITER.in_flight_for_test(&large_key) > 0
+            || shares.held_for_test(&large_key) > 0
+        {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a refused stalled upload releases its submit slot, large-body slot and bytes");
+    server.abort();
+}
+
+/// The timeout is between chunks, not on the whole upload: a body that keeps
+/// arriving is read to the end however long it takes in all.
+#[tokio::test]
+async fn a_slow_upload_that_keeps_moving_is_not_timed_out() {
+    use tokio::io::AsyncWriteExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let idle = StdDuration::from_millis(300);
+    Arc::make_mut(&mut state).upload_body_idle_timeout = idle;
+    let (addr, server) = serve_ingest_for_test(state).await;
+    let body = serde_json::to_vec(&sample_envelope().await).expect("envelope serialises");
+
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connects to the test server");
+    stream
+        .write_all(
+            format!(
+                "POST /v1/traces HTTP/1.1\r\nHost: ingest.test\r\n\
+                 Authorization: Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("request headers write");
+    let started = std::time::Instant::now();
+    let chunks = 8;
+    for chunk in body.chunks(body.len().div_ceil(chunks)) {
+        tokio::time::sleep(idle / 3).await;
+        stream.write_all(chunk).await.expect("chunk writes");
+    }
+    assert!(
+        started.elapsed() > idle * 2,
+        "the upload took longer in all than the idle timeout"
+    );
+    let text = response_text_until(&mut stream, "\r\n", StdDuration::from_secs(10)).await;
+    assert!(
+        text.starts_with("http/1.1 200 ok"),
+        "an upload that keeps moving is read to the end: {text:?}"
+    );
+    server.abort();
 }
 
 /// A poisoned per-principal byte table refuses every upload, as the rate

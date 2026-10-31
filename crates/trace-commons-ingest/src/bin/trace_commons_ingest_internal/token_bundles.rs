@@ -105,7 +105,7 @@ fn stored_headers(bundle: &StoredTokenBundle) -> ApiResult<HeaderMap> {
 pub(super) async fn begin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Bytes,
+    UploadBytes(body): UploadBytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (_, server_id) = gate(&state)?;
     let tenant =
@@ -163,7 +163,7 @@ pub(super) async fn put(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath((submission, revision, artifact)): AxumPath<(Uuid, String, String)>,
-    body: Bytes,
+    UploadBytes(body): UploadBytes,
 ) -> ApiResult<Json<serde_json::Value>> {
     let (store, _) = gate(&state)?;
     let tenant =
@@ -229,6 +229,40 @@ pub(super) async fn put(
     .await
     .map_err(internal_error)?;
     Ok(Json(serde_json::json!({"ready":true})))
+}
+/// Bundle finalize, between `authenticate_large_body_request` and
+/// `admit_submit_before_body`: refuse a finalize whose bundle cannot be
+/// finalized before it takes a submit slot or a unit of the submit rate
+/// (decision 3 on #1794). Bundles disabled on this deployment (503), an
+/// unknown bundle (404) and a revoked one (410) are answered here with the
+/// labels `finalize` gives, before the body is read, and cost the
+/// principal's submit window nothing.
+///
+/// A replay of a finalized bundle passes and still counts: its receipt is
+/// answered only after the body's digest is checked, which needs the body.
+/// The large-body slot and byte share are taken before this runs, since this
+/// needs the authenticated context that gate establishes.
+pub(super) async fn finalize_precheck(
+    State(state): State<Arc<AppState>>,
+    AxumPath((submission, revision)): AxumPath<(Uuid, String)>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(PreBodyAuthenticated(tenant)) = request.extensions().get().cloned() else {
+        return next.run(request).await;
+    };
+    let finalizable = async {
+        gate(&state)?;
+        let bundle = owned(&state, &tenant, submission, &revision).await?;
+        if bundle.state == "revoked" {
+            return Err(api_error(StatusCode::GONE, "token_bundle_revoked"));
+        }
+        Ok(())
+    };
+    if let Err(refusal) = finalizable.await {
+        return refusal.into_response();
+    }
+    next.run(request).await
 }
 pub(super) async fn finalize(
     State(state): State<Arc<AppState>>,
