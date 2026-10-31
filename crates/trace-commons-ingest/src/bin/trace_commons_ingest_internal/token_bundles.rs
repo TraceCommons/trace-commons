@@ -238,7 +238,14 @@ pub(super) async fn finalize(
     body: SubmitBody,
 ) -> ApiResult<Json<DurableBundleReceipt>> {
     let (store, server_id) = gate(&state)?;
-    let tenant = authenticate_ctx(&state, &headers)?;
+    let admitted = admitted.map(|axum::Extension(admitted)| admitted);
+    // The context authenticated before the body was read, as for
+    // `POST /v1/traces`: a claim that expired while the body uploaded is
+    // still the claim this request began with.
+    let tenant = match &admitted {
+        Some(SubmitAdmittedBeforeBody(tenant)) => tenant.clone(),
+        None => authenticate_ctx(&state, &headers)?,
+    };
     let bundle = owned(&state, &tenant, submission, &revision).await?;
     if bundle.state == "revoked" {
         return Err(api_error(StatusCode::GONE, "token_bundle_revoked"));
@@ -313,14 +320,8 @@ pub(super) async fn finalize(
     // Existing admission, tenant scope, witness, PII and consent checks all run.
     // A normal upload status is not the bundle's durable receipt.
     // Counted by `admit_submit_before_body` when it ran on this route.
-    let _ = submit_trace_handler_authenticated(
-        State(state.clone()),
-        headers,
-        body,
-        None,
-        admitted.is_some(),
-    )
-    .await?;
+    let _ =
+        submit_trace_handler_authenticated(State(state.clone()), headers, body, admitted).await?;
     let record = tenant
         .read_submission_record(&state.root, submission)
         .map_err(internal_error)?

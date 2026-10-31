@@ -17317,7 +17317,7 @@ async fn large_envelope_pipeline_receipt_probe() {
         .await
         .expect("this probe needs TRACE_COMMONS_PG_TEST_DATABASE_URL");
     cleanup_pg_trace_tenant(&backend, "tenant-a").await;
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     let target: u64 = std::env::var("TC_LARGE_ENVELOPE_BYTES")
         .ok()
         .and_then(|value| value.parse().ok())

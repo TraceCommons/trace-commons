@@ -812,9 +812,9 @@ audit-event ID gaps, control-plane drift, object-ref integrity, and compact
 | `TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST` | Per-request item cap for replay/benchmark/ranker exports; requests above it are clamped. | 500 |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR` | Hourly contributor-upload quota per tenant. | disabled |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR` | Hourly contributor-upload quota per principal. | disabled |
-| `TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR` | Hourly contributor-upload ceiling per account (per principal outside the account namespaces), whatever its admission authority; answered `429` `submit_rate_limited` with `Retry-After`. `0` disables. See [`operator/env-reference.md`](operator/env-reference.md). | 600 |
-| `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` | `POST /v1/traces` requests per authenticated principal per 60 s window (1-600). | 30 |
-| `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY` | `POST /v1/traces` requests one principal may have in flight (1-4). | 2 |
+| `TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR` | Hourly ceiling on recorded contributor submissions per account (per principal outside the account namespaces), whatever its admission authority; answered `429` `submit_rate_limited` with `Retry-After`. `0` disables. See [`operator/env-reference.md`](operator/env-reference.md). | 600 |
+| `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` | `POST /v1/traces` and token-bundle finalize requests per authenticated principal per 60 s window, together (1-600). | 30 |
+| `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY` | `POST /v1/traces` and token-bundle finalize requests one principal may have in flight, together (1-4). | 2 |
 
 The two per-principal submit limits are in-process and checked before any
 other submit work; through the router (`POST /v1/traces` and token-bundle
