@@ -247,18 +247,43 @@ pub fn offered(tool: ToolId, models: Vec<ChatModel>) -> Vec<ChatModel> {
 
 /// The model a tool starts on when none was chosen.
 ///
-/// Claude Code and OpenCode start on a NEAR AI private (TEE-hosted) model
-/// when the catalogue lists one, the first in NEAR AI's order, and
-/// otherwise on the tool's family, then vendor, then first listed. Codex
-/// keeps to the models NEAR AI is known to run with its tools
-/// ([`CODEX_PREFERRED`]). A model the person chose is never replaced
-/// ([`select`]).
+/// Claude Code and OpenCode never start on an Incognito model while the
+/// catalogue lists a more private one (owner, 2026-10-31): the pool is the
+/// models of the most private tier the catalogue has, NEAR AI private
+/// first, then External, and every model only when it has neither. Within
+/// the pool the tool's own preference decides: its family, then vendor,
+/// then first listed. Codex keeps to the models NEAR AI is known to run
+/// with its tools ([`CODEX_PREFERRED`]). A model the person chose is never
+/// replaced ([`select`]).
 pub fn default_for(tool: ToolId, models: &[ChatModel]) -> Option<&ChatModel> {
-    if tool != ToolId::Codex {
-        if let Some(private) = models.iter().find(|m| m.tier == Some(ModelTier::NearAi)) {
-            return Some(private);
+    if tool == ToolId::Codex {
+        return preferred_in(tool, models, models);
+    }
+    for tier in [ModelTier::NearAi, ModelTier::External] {
+        let pool: Vec<ChatModel> = models
+            .iter()
+            .filter(|m| m.tier == Some(tier))
+            .cloned()
+            .collect();
+        if !pool.is_empty() {
+            return preferred_in(tool, &pool, models);
         }
     }
+    preferred_in(tool, models, models)
+}
+
+/// `tool`'s preferred model among `pool`, returned as the same model in
+/// `models`.
+fn preferred_in<'a>(
+    tool: ToolId,
+    pool: &[ChatModel],
+    models: &'a [ChatModel],
+) -> Option<&'a ChatModel> {
+    let chosen = preferred(tool, pool)?;
+    models.iter().find(|m| m.id == chosen.id)
+}
+
+fn preferred(tool: ToolId, models: &[ChatModel]) -> Option<&ChatModel> {
     let Some((family, vendor)) = preference(tool) else {
         return models.first();
     };
@@ -631,9 +656,33 @@ mod tests {
         );
     }
 
-    /// With no NEAR AI private model, the default is what it was: the
-    /// tool's family, then vendor, then first. A third party's TEE is not
-    /// NEAR AI's own, and a model with no tier is not private.
+    /// With no NEAR AI private model, a third party's TEE model is the
+    /// default over an Incognito one; with neither, the default is what it
+    /// was: the tool's family, then vendor, then first. A model with no
+    /// tier is not private.
+    #[test]
+    fn the_default_is_never_incognito_while_a_private_or_external_model_is_listed() {
+        let listed = tiered(&[
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+            ("x/incognito", ModelTier::Incognito),
+            ("z-ai/glm-5.3", ModelTier::External),
+        ]);
+        for tool in [ToolId::Claude, ToolId::Opencode] {
+            assert_eq!(default_for(tool, &listed).unwrap().id, "z-ai/glm-5.3");
+        }
+        // Within a tier the tool's own preference decides.
+        let two = tiered(&[
+            ("a/first", ModelTier::NearAi),
+            ("anthropic/claude-sonnet-5-5", ModelTier::NearAi),
+            ("anthropic/claude-sonnet-6", ModelTier::Incognito),
+        ]);
+        assert_eq!(
+            default_for(ToolId::Claude, &two).unwrap().id,
+            "anthropic/claude-sonnet-5-5"
+        );
+        assert_eq!(default_for(ToolId::Opencode, &two).unwrap().id, "a/first");
+    }
+
     #[test]
     fn the_default_falls_back_without_a_near_ai_private_model() {
         let listed = tiered(&[
@@ -642,11 +691,20 @@ mod tests {
         ]);
         assert_eq!(
             default_for(ToolId::Claude, &listed).unwrap().id,
-            "anthropic/claude-sonnet-5-5"
+            "z-ai/glm-5.3"
         );
         assert_eq!(
             default_for(ToolId::Opencode, &listed).unwrap().id,
             "z-ai/glm-5.3"
+        );
+        // Incognito only: the tool's own preference, as before.
+        let incognito = tiered(&[
+            ("x/first", ModelTier::Incognito),
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+        ]);
+        assert_eq!(
+            default_for(ToolId::Claude, &incognito).unwrap().id,
+            "anthropic/claude-sonnet-5-5"
         );
         let untiered = models(&["x/first", "anthropic/claude-sonnet-5-5"]);
         assert_eq!(
