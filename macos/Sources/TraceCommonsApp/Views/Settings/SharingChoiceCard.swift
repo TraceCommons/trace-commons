@@ -27,16 +27,6 @@ enum SharingChoice {
         projects.filter { $0.configured && !$0.isUnresolvedBucket && ($0.folderMode ?? $0.mode) == .ask }.count
     }
 
-    /// The Traces tab's line under its switch: how many of the folders it
-    /// lists send on their own, of those it lists that may send (Never
-    /// left out, shown or not).
-    static func automaticCount(_ folders: [TracesTree.FolderNode], words: String) -> String {
-        let listed = folders.filter { $0.mode != nil && $0.mode != .ignore }
-        let automatic = listed.filter { $0.mode == .autoUpload }.count
-        return words.replacingOccurrences(of: "{count}", with: String(automatic))
-            .replacingOccurrences(of: "{total}", with: String(listed.count))
-    }
-
     /// What pressing Automatic shows first.
     enum Step: Equatable {
         /// The question about the folders set to Ask.
@@ -67,6 +57,7 @@ struct SharingChoiceCard: View {
     /// The Traces tab's switch: its words, and the folders it lists.
     struct Switch {
         let accessibleName: String
+        let title: String
         let line: String
         /// Re-reads the tab once the choice is saved.
         let saved: () async -> Void
@@ -118,14 +109,13 @@ struct SharingChoiceCard: View {
         if let asSwitch { switchRow(copy, asSwitch) } else { card(copy) }
     }
 
-    /// The Traces tab's row: Automatic, the count under it, and the switch.
+    /// The Traces tab's row: its title, the line under it, and the switch.
     private func switchRow(_ copy: FirstRunCopy, _ words: Switch) -> some View {
-        let title = ProjectModeWords.table?.label(for: .autoUpload) ?? ""
-        return GlassCard {
+        GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                 HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        Text(title)
+                        Text(words.title)
                             .glassType(GlassTokens.TypeScale.bodyStrong)
                             .foregroundStyle(GlassColor.textPrimary)
                         Text(words.line)
