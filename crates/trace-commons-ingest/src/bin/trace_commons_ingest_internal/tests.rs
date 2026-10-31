@@ -6984,8 +6984,6 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         witness_capture_pin: None,
         admission: None,
         account_admission: None,
-        client_upload_allowance: None,
-        client_upload_trust_policy: None,
         client_upload_trust_database: None,
         account_trust_shadow_policy: None,
         near_ai_starter_mode: starter_advance::StarterMode::Disabled,
@@ -31143,8 +31141,6 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         witness_capture_pin: None,
         admission: None,
         account_admission: None,
-        client_upload_allowance: None,
-        client_upload_trust_policy: None,
         client_upload_trust_database: None,
         account_trust_shadow_policy: None,
         near_ai_starter_mode: starter_advance::StarterMode::Disabled,
@@ -32020,8 +32016,6 @@ fn the_applied_policy_is_read_only_from_a_tiered_admission_policy() {
 fn independent_upload_trust_policy(version: &str) -> upload_allowance::ClientUploadTrustPolicy {
     let json = tiered_admission_policy(version, 172800);
     upload_allowance::ClientUploadTrustPolicy {
-        bounded: trace_commons_server::account_trust::parse_bounded_policy(&json, &[version])
-            .unwrap(),
         growth: trace_commons_server::account_trust_rule::parse_growth_policy(&json, &[version])
             .unwrap(),
     }
@@ -32078,13 +32072,17 @@ fn independent_upload_trust_selects_the_same_applied_policy_without_admission_co
     )
     .unwrap()
     .unwrap();
-    assert_eq!(selected.version(), independent.bounded.version());
+    assert_eq!(selected.version(), independent.growth.version());
     assert_eq!(
         selected.effective_allowance(1),
         independent.growth.effective_allowance(1)
     );
     let admission = admission::AccountAdmissionConfig {
-        policy: independent.bounded.clone(),
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            &tiered_admission_policy("client-upload-v1", 172800),
+            &["client-upload-v1"],
+        )
+        .unwrap(),
         lease_seconds: 60,
         providers: None,
     };
@@ -32141,7 +32139,6 @@ async fn independent_upload_trust_scheduler_accepts_applied_policy_with_both_led
         .unwrap()
         .unwrap(),
     ));
-    state_mut.client_upload_trust_policy = Some(independent);
     assert!(state.admission.is_none());
     assert!(state.account_admission.is_none());
     let config = account_trust_growth_routes::AccountTrustSchedulerConfig::new(
