@@ -84,19 +84,24 @@ final class WindowResizeLoopTests: XCTestCase {
     /// closing it shrinks the window by the same; the leading and top edges
     /// stay. Computed from the old frame alone, never by measuring content.
     func test_aPaneChangeIsTheOldFramePlusOrMinusThePane() {
-        let visible = CGRect(x: 0, y: 0, width: 3000, height: 1000)
         let old = CGRect(x: 100, y: 200, width: GlassPaneLayout.windowWidth(showsMap: true, showsInspector: false),
                          height: 700)
         let pane = GlassPaneLayout.inspectorWidth + GlassTokens.Space.paneGap
         let mapOnly = GlassPaneLayout.Visibility(map: true, inspector: false)
         let both = GlassPaneLayout.Visibility(map: true, inspector: true)
         let opened = GlassPaneLayout.windowFrame(
-            old, width: GlassPaneLayout.windowWidth(current: old.width, from: mapOnly, to: both), visible: visible)
+            forPaneChange: old, width: GlassPaneLayout.windowWidth(current: old.width, from: mapOnly, to: both))
         XCTAssertEqual(opened, CGRect(x: old.minX, y: old.minY, width: old.width + pane, height: old.height))
         let closed = GlassPaneLayout.windowFrame(
-            opened, width: GlassPaneLayout.windowWidth(current: opened.width, from: both, to: mapOnly),
-            visible: visible)
+            forPaneChange: opened, width: GlassPaneLayout.windowWidth(current: opened.width, from: both, to: mapOnly))
         XCTAssertEqual(closed, old)
+        // Flush with a 1920pt screen's right edge, the window still keeps its
+        // leading edge: the inspector opens past the edge (owner, 2026-10-30).
+        let flush = CGRect(x: 1920 - old.width, y: 200, width: old.width, height: 700)
+        let openedAtEdge = GlassPaneLayout.windowFrame(
+            forPaneChange: flush, width: GlassPaneLayout.windowWidth(current: flush.width, from: mapOnly, to: both))
+        XCTAssertEqual(openedAtEdge.minX, flush.minX)
+        XCTAssertEqual(openedAtEdge.width, flush.width + pane)
     }
 
     // MARK: Source pins
@@ -110,6 +115,19 @@ final class WindowResizeLoopTests: XCTestCase {
         let monitor = try XCTUnwrap(Self.block(after: "struct MonitorScene: Scene {", in: app))
         XCTAssertFalse(monitor.contains(".windowResizability(.contentSize)"))
         XCTAssertTrue(monitor.contains(".windowResizability(.contentMinSize)"))
+    }
+
+    /// A pane change takes the rule that never moves the window, and only
+    /// the launch sizing takes the one that can; a pane change taking the
+    /// launch rule would bring back the sideways jump near the screen edge.
+    func test_aPaneChangeTakesTheRuleThatNeverMovesTheWindow() throws {
+        let pane = try Self.text(Self.threePaneSource)
+        let move = try XCTUnwrap(Self.block(after: "private func move(to new: GlassPaneLayout.Visibility)", in: pane))
+        XCTAssertTrue(move.contains("GlassPaneLayout.windowFrame(forPaneChange:"))
+        XCTAssertFalse(move.contains("windowFrame(atLaunch:"))
+        XCTAssertFalse(move.contains("windowFrame(onScreen:"))
+        let launch = try XCTUnwrap(Self.block(after: "private func openAtKeptWidth(_ window: NSWindow)", in: pane))
+        XCTAssertTrue(launch.contains("GlassPaneLayout.windowFrame(atLaunch:"))
     }
 
     /// The menu-bar panel's hosting view takes #1402's empty sizing options

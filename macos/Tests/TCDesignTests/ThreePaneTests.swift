@@ -189,35 +189,54 @@ final class ThreePaneTests: XCTestCase {
         XCTAssertEqual(GlassPaneLayout(windowWidth: 2000, showsMap: true, showsInspector: false).main, main)
     }
 
-    /// The window grows on its right with its top and leading edge fixed;
-    /// near the screen's edge it moves left only as far as it must; wider
-    /// than the screen it is held to the screen.
-    func test_theWindowGrowsRightAndStaysOnScreen() {
+    /// The on-screen rule: the window grows on its right with its top and
+    /// leading edge fixed; near the screen's edge it moves left only as far
+    /// as it must; wider than the screen it is held to the screen.
+    func test_theOnScreenRuleGrowsRightAndStaysOnScreen() {
         let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let frame = CGRect(x: 100, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(frame, width: 1280, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: frame, width: 1280, visible: screen),
                        CGRect(x: 100, y: 200, width: 1280, height: 760))
         let nearEdge = CGRect(x: 1000, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 1280, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: nearEdge, width: 1280, visible: screen),
                        CGRect(x: 640, y: 200, width: 1280, height: 760))
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 2400, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: nearEdge, width: 2400, visible: screen),
                        CGRect(x: 0, y: 200, width: 1920, height: 760))
         // Shrinking keeps the leading edge.
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 380, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: nearEdge, width: 380, visible: screen),
                        CGRect(x: 1000, y: 200, width: 380, height: 760))
     }
 
-    /// Opening or closing a pane never moves the window: near the screen's
-    /// right edge the window grows past it rather than shifting left, so
-    /// nothing the person was looking at moves (owner, 2026-10-30).
-    func test_aPaneChangeKeepsTheLeadingEdgeEvenPastTheScreen() {
-        let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+    /// Opening or closing a pane never moves the window and never caps its
+    /// width: near the screen's right edge it grows past the edge, even
+    /// when the new pane lands wholly off screen (owner, 2026-10-30).
+    func test_aPaneChangeNeverMovesTheWindow() {
         let nearEdge = CGRect(x: 1000, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 1280, visible: screen, keepsOnScreen: false),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(forPaneChange: nearEdge, width: 1280),
                        CGRect(x: 1000, y: 200, width: 1280, height: 760))
-        // Wider than the screen it is still held to the screen's width.
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 2400, visible: screen, keepsOnScreen: false),
-                       CGRect(x: 1000, y: 200, width: 1920, height: 760))
+        // Wider than a 1920pt screen: not held to it, so no pane is squeezed.
+        XCTAssertEqual(GlassPaneLayout.windowFrame(forPaneChange: nearEdge, width: 2400),
+                       CGRect(x: 1000, y: 200, width: 2400, height: 760))
+        XCTAssertEqual(GlassPaneLayout.windowFrame(forPaneChange: nearEdge, width: 380),
+                       CGRect(x: 1000, y: 200, width: 380, height: 760))
+    }
+
+    /// A window the person left running past the screen's edge opens where
+    /// it was, so closing the pane afterwards brings it back to where it
+    /// started. A window whose leading edge is not on this screen, or that
+    /// is wider than the screen, takes the on-screen rule.
+    func test_aLaunchKeepsTheWindowWhereThePersonLeftIt() {
+        let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let pastEdge = CGRect(x: 1000, y: 200, width: 1280, height: 760)
+        let opened = GlassPaneLayout.windowFrame(atLaunch: pastEdge, width: 1280, visible: screen)
+        XCTAssertEqual(opened, pastEdge)
+        XCTAssertEqual(GlassPaneLayout.windowFrame(forPaneChange: opened, width: 690),
+                       CGRect(x: 1000, y: 200, width: 690, height: 760))
+        let offThisScreen = CGRect(x: 2000, y: 200, width: 690, height: 760)
+        XCTAssertEqual(GlassPaneLayout.windowFrame(atLaunch: offThisScreen, width: 690, visible: screen),
+                       CGRect(x: 1230, y: 200, width: 690, height: 760))
+        XCTAssertEqual(GlassPaneLayout.windowFrame(atLaunch: pastEdge, width: 2400, visible: screen),
+                       CGRect(x: 0, y: 200, width: 1920, height: 760))
     }
 
     func test_theTrafficLightsHaveTheirClearance() {
