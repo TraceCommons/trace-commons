@@ -23,31 +23,56 @@
 //!
 //! Source paths are shortened to `<crate>/src/...`: a dependency's
 //! `file!()` is absolute and runs through the build machine's home
-//! directory, which carries a username.
+//! directory, which carries a username. A path whose kept part could still
+//! be a username is cut to its file name (see [`short_source_path`]).
 //!
-//! The file is `daemon-errors.log` in the state directory, mode 0600,
-//! opened append-only and capped at [`DIAGNOSTICS_LOG_CAP_BYTES`]; at the
-//! cap it is renamed to `daemon-errors.log.1` (replacing the previous one)
-//! and a fresh file starts. Nothing reads it back: it is for a person
-//! looking at the state directory.
+//! Two files in the state directory, both mode 0600, append-only and each
+//! capped at [`DIAGNOSTICS_LOG_CAP_BYTES`]: `daemon-panics.log` for panics
+//! and `daemon-errors.log` for warn/error events, so a storm of repeated
+//! warnings cannot rotate a panic record away. At the cap a file is renamed
+//! to `<name>.1` (replacing the previous one) and a fresh file starts; if
+//! that rename fails, the file starts over in place rather than stop
+//! recording. Nothing reads them back: they are for a person looking at the
+//! state directory. A file stays open between appends, so one deleted by
+//! hand receives nothing more until the next rotation or daemon start.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// File name of the log inside the daemon's state directory.
+use crate::config::ConfigStore;
+
+/// File name of the warn/error event log inside the daemon's state directory.
 pub const DIAGNOSTICS_LOG_FILE: &str = "daemon-errors.log";
 
-/// Size at which the current file is rotated to `.1`.
+/// File name of the panic log inside the daemon's state directory. Panics
+/// have their own file so a storm of repeated warn events cannot rotate the
+/// one panic record out of reach.
+pub const DIAGNOSTICS_PANIC_LOG_FILE: &str = "daemon-panics.log";
+
+/// Size at which a current file is rotated to `.1`.
 pub const DIAGNOSTICS_LOG_CAP_BYTES: u64 = 1024 * 1024;
+
+/// How many times the panic hook tries the lock, 1 ms apart, before it
+/// appends without it.
+const HOOK_LOCK_TRIES: usize = 5;
 
 /// One bounded, append-only log file plus its single rotated predecessor.
 pub struct DiagnosticsLog {
     path: PathBuf,
     cap: u64,
-    // Serializes writers: panics and events arrive from many threads, and
-    // the size check and the append must not interleave with a rotation.
-    write: Mutex<()>,
+    // Serializes writers, and holds the open file between appends so an
+    // event costs one `write`, not an open/stat/close per line.
+    state: Mutex<Option<OpenLog>>,
+}
+
+struct OpenLog {
+    file: std::fs::File,
+    /// Bytes in the file, tracked here rather than re-read per line. The
+    /// daemon's lock means one process writes a state directory's log. The
+    /// panic hook's lock-free fallback is not counted, so a file can pass
+    /// the cap by those few lines before it next rotates.
+    len: u64,
 }
 
 impl DiagnosticsLog {
@@ -55,7 +80,7 @@ impl DiagnosticsLog {
         Self {
             path,
             cap,
-            write: Mutex::new(()),
+            state: Mutex::new(None),
         }
     }
 
@@ -69,27 +94,27 @@ impl DiagnosticsLog {
     /// Append one line (a newline is added), rotating first if it would
     /// take the file past the cap.
     pub fn append_line(&self, line: &str) -> std::io::Result<()> {
-        let _guard = self
-            .write
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.append_locked(line)
+        self.append_locked(&mut state, line)
     }
 
     /// The same as [`Self::append_line`] for the panic hook, which must
-    /// never block on a writer that may be the panicking thread itself: it
-    /// tries the lock a bounded number of times and drops the line rather
-    /// than deadlock.
+    /// neither block on a writer (it may be the panicking thread itself) nor
+    /// stall a worker: after a few tries it appends without the lock, one
+    /// `write` under `O_APPEND`, skipping rotation for that one line.
     fn append_line_from_hook(&self, line: &str) {
-        for _ in 0..200 {
-            match self.write.try_lock() {
-                Ok(_guard) => {
-                    let _ = self.append_locked(line);
+        for _ in 0..HOOK_LOCK_TRIES {
+            match self.state.try_lock() {
+                Ok(mut state) => {
+                    let _ = self.append_locked(&mut state, line);
                     return;
                 }
                 Err(std::sync::TryLockError::Poisoned(poisoned)) => {
-                    let _guard = poisoned.into_inner();
-                    let _ = self.append_locked(line);
+                    let mut state = poisoned.into_inner();
+                    let _ = self.append_locked(&mut state, line);
                     return;
                 }
                 Err(std::sync::TryLockError::WouldBlock) => {
@@ -97,28 +122,80 @@ impl DiagnosticsLog {
                 }
             }
         }
+        if let Ok(mut file) = open_owner_only(&self.path, false) {
+            let _ = file.write_all(&line_bytes(line));
+        }
     }
 
-    fn append_locked(&self, line: &str) -> std::io::Result<()> {
-        let incoming = line.len() as u64 + 1;
-        let current = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
-        if current > 0 && current + incoming > self.cap {
-            // `rename` replaces the previous `.1`: one predecessor, never two.
-            std::fs::rename(&self.path, self.rotated_path())?;
+    fn append_locked(&self, state: &mut Option<OpenLog>, line: &str) -> std::io::Result<()> {
+        let bytes = line_bytes(line);
+        let incoming = bytes.len() as u64;
+        if state.is_none() {
+            let file = open_owner_only(&self.path, false)?;
+            let len = file.metadata()?.len();
+            *state = Some(OpenLog { file, len });
         }
-        let mut file = open_owner_only_append(&self.path)?;
-        let mut bytes = Vec::with_capacity(line.len() + 1);
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
-        // One write per line, so concurrent appenders from another process
-        // cannot split it under O_APPEND.
-        file.write_all(&bytes)
+        let current = state.as_ref().map_or(0, |open| open.len);
+        if current > 0 && current + incoming > self.cap {
+            // Close first: Windows refuses to rename an open file.
+            *state = None;
+            if self.rotate().is_err() {
+                // Without a rotation the cap can only hold by starting this
+                // file over. Losing the older lines beats losing every line
+                // from here on, which is what giving up here would do. The
+                // truncating handle is closed again at once: the kept handle
+                // must be `O_APPEND`, or its cursor could overwrite a line
+                // the hook's lock-free fallback appended.
+                drop(open_owner_only(&self.path, true)?);
+            }
+            let file = open_owner_only(&self.path, false)?;
+            *state = Some(OpenLog { file, len: 0 });
+        }
+        let open = state.as_mut().expect("opened above");
+        // One write per line, so a concurrent `O_APPEND` writer (the panic
+        // hook's lock-free fallback) cannot split it.
+        let written = open.file.write_all(&bytes);
+        if written.is_err() {
+            // Reopen next time rather than keep a handle that failed.
+            *state = None;
+        } else {
+            open.len += incoming;
+        }
+        written
+    }
+
+    /// Move the current file to `.1`, replacing the previous one: one
+    /// predecessor, never two. A `.1` that `rename` cannot replace (a
+    /// read-only file on some platforms) is removed and the rename retried.
+    fn rotate(&self) -> std::io::Result<()> {
+        let rotated = self.rotated_path();
+        match std::fs::rename(&self.path, &rotated) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                std::fs::remove_file(&rotated)?;
+                std::fs::rename(&self.path, &rotated)
+            }
+        }
     }
 }
 
-fn open_owner_only_append(path: &Path) -> std::io::Result<std::fs::File> {
+fn line_bytes(line: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(line.len() + 1);
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.push(b'\n');
+    bytes
+}
+
+/// Open the log for appending, or, with `truncate`, empty it first. Either
+/// way the file is owner-only.
+fn open_owner_only(path: &Path, truncate: bool) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
-    options.create(true).append(true);
+    options.create(true);
+    if truncate {
+        options.write(true).truncate(true);
+    } else {
+        options.append(true);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -139,17 +216,39 @@ fn open_owner_only_append(path: &Path) -> std::io::Result<std::fs::File> {
 
 /// Shorten a compile-time source path to `<crate>/src/...`, dropping any
 /// directory above the crate (a dependency's path is absolute and runs
-/// through the build machine's home directory). A path with no `src`
-/// component keeps only its file name.
+/// through the build machine's home directory).
+///
+/// Keeps only the file name when the path has no `src` component, and also
+/// when the directory kept above `src` could be a username rather than a
+/// crate: it sits within two components of an absolute root (`/Users/alice`,
+/// `/home/bob`, `C:\Users\carol`, `D:\carol`) or directly under a `Users` or
+/// `home` directory. Code generated under a `target/` directory keeps only
+/// its file name too.
 pub fn short_source_path(file: &str) -> String {
     let parts: Vec<&str> = file
         .split(['/', '\\'])
         .filter(|part| !part.is_empty())
         .collect();
-    match parts.iter().rposition(|part| *part == "src") {
-        Some(src) if src >= 1 => parts[src - 1..].join("/"),
-        _ => parts.last().copied().unwrap_or("?").to_string(),
+    let file_name = || parts.last().copied().unwrap_or("?").to_string();
+    let Some(src) = parts.iter().rposition(|part| *part == "src") else {
+        return file_name();
+    };
+    if src == 0 {
+        return file_name();
     }
+    let crate_dir = src - 1;
+    let drive = parts
+        .first()
+        .is_some_and(|first| first.len() == 2 && first.ends_with(':'));
+    let absolute = file.starts_with(['/', '\\']) || drive;
+    let depth_below_root = crate_dir.saturating_sub(usize::from(drive));
+    let under_home = crate_dir >= 1
+        && ["users", "home"].contains(&parts[crate_dir - 1].to_ascii_lowercase().as_str());
+    let kept = &parts[crate_dir..];
+    if (absolute && depth_below_root <= 1) || under_home || kept.contains(&"target") {
+        return file_name();
+    }
+    kept.join("/")
 }
 
 fn timestamp() -> String {
@@ -184,59 +283,110 @@ fn location_label(location: Option<&std::panic::Location<'_>>) -> String {
     }
 }
 
-/// Where the installed hook and subscriber write. `None` until `install`.
-fn global_sink() -> &'static Mutex<Option<Arc<DiagnosticsLog>>> {
-    static SINK: OnceLock<Mutex<Option<Arc<DiagnosticsLog>>>> = OnceLock::new();
+/// Where the installed hook and subscriber write.
+struct Sinks {
+    events: Arc<DiagnosticsLog>,
+    panics: Arc<DiagnosticsLog>,
+}
+
+/// `None` until `install`.
+fn global_sink() -> &'static Mutex<Option<Sinks>> {
+    static SINK: OnceLock<Mutex<Option<Sinks>>> = OnceLock::new();
     SINK.get_or_init(|| Mutex::new(None))
 }
 
-fn current_global_log() -> Option<Arc<DiagnosticsLog>> {
+fn current_global_log(pick: fn(&Sinks) -> &Arc<DiagnosticsLog>) -> Option<Arc<DiagnosticsLog>> {
     // `try_lock`: the hook may run on a thread that panicked while
     // `install` held this lock. Missing a record beats a deadlock.
+    let read = |sink: &Option<Sinks>| sink.as_ref().map(|s| Arc::clone(pick(s)));
     match global_sink().try_lock() {
-        Ok(sink) => sink.clone(),
-        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().clone(),
+        Ok(sink) => read(&sink),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => read(&poisoned.into_inner()),
         Err(std::sync::TryLockError::WouldBlock) => None,
     }
 }
 
-/// The panic hook. Never reads `info.payload()`, never calls `tracing`
-/// (that would re-enter the subscriber below), and never panics: a panic
-/// inside a panic hook aborts the process.
+/// The panic hook. Never reads `info.payload()` and never calls `tracing`
+/// (that would re-enter the subscriber below).
+///
+/// It must not panic either: a panic inside a panic hook aborts. The one
+/// call that can is `std::thread::current()`, and only once std has torn
+/// down the thread's handle, which it does after every Rust thread-local
+/// destructor has run (`rt::thread_cleanup`). A panic from a thread-local's
+/// or a runtime's `Drop` therefore still gets its name; only code a foreign
+/// TLS destructor runs after that point could reach the panicking branch,
+/// and no host here runs Rust from one.
+///
+/// The record is written before anything slow: the stderr line, then, only
+/// when `RUST_BACKTRACE` asks for one, a backtrace on stderr. Frames are
+/// code, not data, but they go to stderr alone, never to the file.
 fn panic_hook(info: &std::panic::PanicHookInfo<'_>) {
     let location = location_label(info.location());
     let thread = thread_label(std::thread::current().name());
     let line = format!("{} panic at {location} thread={thread}", timestamp());
+    if let Some(log) = current_global_log(|sinks| &sinks.panics) {
+        log.append_line_from_hook(&line);
+    }
     // Keep a payload-free line on stderr for a terminal-run daemon, which
     // would otherwise see nothing now that the default hook is replaced.
     let _ = writeln!(
         std::io::stderr(),
         "trace-commons daemon: panic at {location} on thread {thread} (message withheld)"
     );
-    if let Some(log) = current_global_log() {
-        log.append_line_from_hook(&line);
+    let backtrace = std::backtrace::Backtrace::capture();
+    if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+        let _ = writeln!(std::io::stderr(), "{backtrace}");
     }
 }
 
-/// Install the panic hook and the warn/error subscriber, and point both at
-/// `log_path`. Safe to call more than once: the hook and subscriber are
-/// installed on the first call only; a later call moves the destination.
+/// The two log paths for a store: warn/error events, then panics.
+pub fn paths_for(store: &ConfigStore) -> (PathBuf, PathBuf) {
+    (
+        store.daemon_path(DIAGNOSTICS_LOG_FILE),
+        store.daemon_path(DIAGNOSTICS_PANIC_LOG_FILE),
+    )
+}
+
+/// Install the log for a daemon about to run against `store`, and return
+/// the store it should run against. Every host (the CLI's `daemon run`, the
+/// FFI handle, the GTK shell) calls this, so none can skip it or point it at
+/// the wrong directory: the dev dry-run store is applied first (a no-op when
+/// already applied), so a dry run never writes the real state directory.
+pub fn install_for(store: ConfigStore) -> anyhow::Result<ConfigStore> {
+    let store = crate::daemon::dev_dry_run_store(store)?;
+    let (events, panics) = paths_for(&store);
+    install(&events, &panics);
+    Ok(store)
+}
+
+/// Install the panic hook and the warn/error subscriber, and point them at
+/// `events_path` and `panics_path`. Safe to call more than once: the hook
+/// and subscriber are installed on the first call only; a later call moves
+/// the destination.
 ///
 /// The hook **replaces** whatever was installed before rather than chaining
 /// to it. The previous hook is std's default (nothing in this process sets
 /// another), and that hook's whole output is the payload; chaining to it
 /// would print exactly what this module exists to keep off disk.
-pub fn install(log_path: &Path) {
+pub fn install(events_path: &Path, panics_path: &Path) {
     {
         let mut sink = global_sink()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let unchanged = sink.as_ref().is_some_and(|log| log.path == log_path);
+        let unchanged = sink
+            .as_ref()
+            .is_some_and(|s| s.events.path == events_path && s.panics.path == panics_path);
         if !unchanged {
-            *sink = Some(Arc::new(DiagnosticsLog::new(
-                log_path.to_path_buf(),
-                DIAGNOSTICS_LOG_CAP_BYTES,
-            )));
+            *sink = Some(Sinks {
+                events: Arc::new(DiagnosticsLog::new(
+                    events_path.to_path_buf(),
+                    DIAGNOSTICS_LOG_CAP_BYTES,
+                )),
+                panics: Arc::new(DiagnosticsLog::new(
+                    panics_path.to_path_buf(),
+                    DIAGNOSTICS_LOG_CAP_BYTES,
+                )),
+            });
         }
     }
     static INSTALLED: std::sync::Once = std::sync::Once::new();
@@ -305,7 +455,7 @@ impl tracing::Subscriber for MetadataOnlySubscriber {
         }
         let log = match &self.log {
             Some(log) => Some(Arc::clone(log)),
-            None => current_global_log(),
+            None => current_global_log(|sinks| &sinks.events),
         };
         let Some(log) = log else {
             return;
@@ -372,6 +522,71 @@ mod tests {
         );
         assert_eq!(short_source_path("/Users/alice/build.rs"), "build.rs");
         assert!(!short_source_path("/Users/alice/x/src/a.rs").contains("alice"));
+    }
+
+    #[test]
+    fn short_source_path_never_keeps_a_home_level_src_parent() {
+        // A `src` directly under a home directory (or a drive root) is not a
+        // crate's `src`: the directory above it is a username. Generated code
+        // under OUT_DIR is the usual way such a path reaches `file!()`.
+        for (path, want) in [
+            (
+                "/Users/alice/src/tc/target/release/build/foo-1a2b/out/gen.rs",
+                "gen.rs",
+            ),
+            (r"C:\Users\carol\src\x\build.rs", "build.rs"),
+            (r"D:\carol\src\x\build.rs", "build.rs"),
+            ("/home/bob/src/main.rs", "main.rs"),
+            (r"C:\src\main.rs", "main.rs"),
+            ("/src/main.rs", "main.rs"),
+            ("/Volumes/Data/Users/dave/src/lib.rs", "lib.rs"),
+            (
+                "/opt/ci/projects/src/tc/target/debug/build/foo-1a2b/out/gen.rs",
+                "gen.rs",
+            ),
+        ] {
+            assert_eq!(short_source_path(path), want, "{path}");
+        }
+    }
+
+    #[test]
+    fn every_host_installs_into_its_stores_state_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ConfigStore::open(dir.path().to_path_buf()).expect("store");
+        let (events, panics) = paths_for(&store);
+        assert_eq!(events, store.daemon_path(DIAGNOSTICS_LOG_FILE));
+        assert_eq!(panics, store.daemon_path(DIAGNOSTICS_PANIC_LOG_FILE));
+        assert_ne!(events, panics);
+    }
+
+    #[test]
+    fn the_hooks_fallback_append_lands_while_a_writer_holds_the_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = DiagnosticsLog::new(dir.path().join(DIAGNOSTICS_PANIC_LOG_FILE), 1024);
+        log.append_line("before").unwrap();
+        let held = log.state.lock().unwrap();
+        // Returns (no deadlock) and the line lands, with the lock held.
+        log.append_line_from_hook("from-hook");
+        drop(held);
+        log.append_line("after").unwrap();
+        assert_eq!(read(&log.path), "before\nfrom-hook\nafter\n");
+    }
+
+    #[test]
+    fn a_failed_rotation_still_records_the_line_and_keeps_the_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = DiagnosticsLog::new(dir.path().join(DIAGNOSTICS_LOG_FILE), 100);
+        // A non-empty directory where `.1` should go: `rename` over it fails
+        // on every platform, and so does removing it as a file.
+        std::fs::create_dir(log.rotated_path()).unwrap();
+        std::fs::write(log.rotated_path().join("keep"), "x").unwrap();
+        let line = "x".repeat(39);
+        for tag in ['a', 'b', 'c', 'd', 'e'] {
+            log.append_line(&format!("{tag}{line}")).unwrap();
+        }
+        let current = read(&log.path);
+        assert!(current.contains(&format!("e{line}")), "{current}");
+        assert!(std::fs::metadata(&log.path).unwrap().len() <= 100);
     }
 
     #[test]
@@ -497,23 +712,36 @@ mod tests {
         );
         assert!(stderr.contains("diagnostics_log.rs:"), "{stderr}");
 
-        let path = dir.path().join(DIAGNOSTICS_LOG_FILE);
-        let body = read(&path);
+        let events_path = dir.path().join(DIAGNOSTICS_LOG_FILE);
+        let panics_path = dir.path().join(DIAGNOSTICS_PANIC_LOG_FILE);
+        let events = read(&events_path);
+        let body = read(&panics_path);
         assert!(!body.contains(SECRET), "{body}");
+        assert!(!events.contains(SECRET), "{events}");
         let panics: Vec<&str> = body.lines().filter(|l| l.contains(" panic ")).collect();
         assert_eq!(panics.len(), 1, "one panic, one record:\n{body}");
+        assert_eq!(body.lines().count(), 1, "only panics here:\n{body}");
         assert!(
             panics[0].contains("trace-commons-contributor/src/daemon/diagnostics_log.rs:"),
             "{body}"
         );
         assert!(panics[0].contains("thread=diag-test-worker"), "{body}");
-        let warns = body.lines().filter(|l| l.contains(" WARN ")).count();
-        assert_eq!(warns, 1, "the global subscriber records the event:\n{body}");
+        assert!(
+            !events.contains(" panic "),
+            "panics have their own file:\n{events}"
+        );
+        let warns = events.lines().filter(|l| l.contains(" WARN ")).count();
+        assert_eq!(
+            warns, 1,
+            "the global subscriber records the event:\n{events}"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600);
+            for path in [&events_path, &panics_path] {
+                let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{}", path.display());
+            }
         }
     }
 
@@ -523,9 +751,10 @@ mod tests {
         let Some(dir) = std::env::var_os(CHILD_ENV) else {
             return;
         };
-        let path = Path::new(&dir).join(DIAGNOSTICS_LOG_FILE);
-        install(&path);
-        install(&path);
+        let events = Path::new(&dir).join(DIAGNOSTICS_LOG_FILE);
+        let panics = Path::new(&dir).join(DIAGNOSTICS_PANIC_LOG_FILE);
+        install(&events, &panics);
+        install(&events, &panics);
         let joined = std::thread::Builder::new()
             .name("diag-test-worker".into())
             .spawn(|| {
