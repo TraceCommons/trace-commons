@@ -38,14 +38,6 @@ pub struct Status {
     pub next_digest_at: Option<String>,
     #[serde(default)]
     pub health: Health,
-    /// The daily volume caps, and what they are holding back.
-    ///
-    /// Read independently of `health`: `daily-cap-reached` is last in the
-    /// daemon's precedence order, so any other condition takes the single
-    /// health slot and the cap disappears from view. That is exactly how a
-    /// spent budget came to be indistinguishable from a broken app.
-    #[serde(default)]
-    pub daily_budget: DailyBudget,
     /// What the daemon is seeing from the local proxy it was told about.
     ///
     /// Absent on a daemon older than the block, and `RoutingStatus`'s
@@ -60,8 +52,8 @@ pub struct Status {
     #[serde(default)]
     pub grant_voids: Vec<serde_json::Value>,
     /// Approved sessions held because the privacy witness is busy. Read
-    /// independently of `health` for the reason `daily_budget` is: a higher
-    /// label can hold the slot while these sessions are still waiting.
+    /// independently of `health` because a higher label can hold the slot
+    /// while these sessions are still waiting.
     /// Absent on a daemon older than the field, which holds nothing on it.
     #[serde(default)]
     pub witness_capacity: WitnessCapacity,
@@ -149,31 +141,23 @@ pub struct WitnessCapacity {
 
 impl Status {
     /// The health banner's lines, in order: the health label's own
-    /// sentence, the spent budget, and sessions waiting on the witness.
+    /// sentence, and sessions waiting on the witness.
     ///
     /// The label's sentence steps aside where a line below says the same
-    /// thing with real numbers: `daily-cap-reached` for the budget, and
-    /// `witness-saturated` for the witness. Both of those are drawn from
-    /// their own status objects rather than waiting for the label, because
-    /// the slot holds one label and either can be masked.
+    /// thing with real numbers: `witness-saturated` for the witness, drawn
+    /// from its own status object rather than waiting for the label,
+    /// because the slot holds one label and it can be masked.
     pub fn health_banner_lines(&self) -> Vec<String> {
         let witness = self.witness_capacity_line();
         let mut lines: Vec<String> = Vec::new();
         if let Some(label) = self.health.last_error_label.as_deref() {
             // And `automatic-contribution-held`, whose card names the folders
             // and says why, drawn beside the banner from its own object.
-            let shown_below = (label == "daily-cap-reached" && self.daily_budget.blocked)
-                || (label == crate::copy::WITNESS_SATURATED_LABEL && witness.is_some())
+            let shown_below = (label == crate::copy::WITNESS_SATURATED_LABEL && witness.is_some())
                 || (label == crate::copy::GATE_HELD_LABEL && self.gate_held_notice().is_some());
             if !shown_below {
                 lines.push(crate::copy::health_sentence(label).to_string());
             }
-        }
-        if self.daily_budget.blocked {
-            lines.push(crate::copy::daily_cap_sentence(
-                self.daily_budget.blocked_entries,
-                self.daily_budget.resets_at,
-            ));
         }
         lines.extend(witness);
         lines
@@ -260,34 +244,6 @@ pub struct RoutingStatus {
     /// checked" and never a date this install began.
     #[serde(default)]
     pub last_refresh_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// `status.daily_budget`. Counts and one timestamp; nothing identifying.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct DailyBudget {
-    #[serde(default)]
-    pub bytes_today: u64,
-    #[serde(default)]
-    pub max_bytes_per_day: u64,
-    #[serde(default)]
-    pub bytes_remaining: u64,
-    #[serde(default)]
-    pub uploads_today: u32,
-    #[serde(default)]
-    pub max_uploads_per_day: u32,
-    #[serde(default)]
-    pub uploads_remaining: u32,
-    /// When the counters zero. The daemon derives this from its own day
-    /// bucket, so it may be stated rather than paraphrased as "tomorrow".
-    #[serde(default)]
-    pub resets_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Whether at least one approved trace cannot go out before the reset.
-    #[serde(default)]
-    pub blocked: bool,
-    #[serde(default)]
-    pub blocked_entries: u32,
-    #[serde(default)]
-    pub blocked_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -902,10 +858,6 @@ pub struct Settings {
     pub digest_interval_secs: u64,
     #[serde(default)]
     pub approval_hold_secs: u64,
-    #[serde(default)]
-    pub max_uploads_per_day: u64,
-    #[serde(default)]
-    pub max_bytes_per_day: u64,
     #[serde(default)]
     pub local_notifications: bool,
     #[serde(default)]
