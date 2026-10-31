@@ -11,6 +11,20 @@ use std::{
     time::{Duration, Instant},
 };
 const MAX_HOMES: usize = 512;
+/// The columns read from a managed ledger, in the order the row reader
+/// expects them.
+macro_rules! exchange_columns {
+    () => {
+        "SELECT id, started_at, client_session_id, total_ms, facade, path, backend, requested_model, served_model, upstream_id, request_sha256, response_sha256, body_ref, rung, attempts, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, cost_usd, status, proof FROM exchanges"
+    };
+}
+/// A ledger with no `failure` column: every row is a call.
+const SELECT_ALL_EXCHANGES: &str = concat!(exchange_columns!(), " ORDER BY id LIMIT ?1");
+/// A ledger with a `failure` column: a row carrying a code is not a call.
+const SELECT_SERVED_EXCHANGES: &str = concat!(
+    exchange_columns!(),
+    " WHERE failure IS NULL ORDER BY id LIMIT ?1"
+);
 const MAX_ROWS: usize = 100_000;
 const MAX_DB_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Debug, Clone, Copy)]
@@ -118,19 +132,16 @@ impl ManagedHistory {
             conn.progress_handler(1000, Some(move || Instant::now() >= deadline));
             // Newer IronWire ledgers write a `failure` code for a request that
             // failed inside the proxy. Those are not calls. Older ledgers have
-            // no such column and every row is read as before.
-            let has_failure_column = conn
-                .prepare("PRAGMA table_info(exchanges)")?
-                .query_map([], |r| r.get::<_, String>(1))?
-                .collect::<Result<Vec<_>, _>>()?
-                .iter()
-                .any(|name| name == "failure");
-            let filter = if has_failure_column {
-                "WHERE failure IS NULL "
+            // no such column and every row is read as before. Asked per home:
+            // one machine can hold upgraded and older ledgers side by side.
+            // `column_exists` matches the name case-insensitively, as SQLite
+            // does.
+            let query = if conn.column_exists(Some("main"), "exchanges", "failure")? {
+                SELECT_SERVED_EXCHANGES
             } else {
-                ""
+                SELECT_ALL_EXCHANGES
             };
-            let mut stmt = conn.prepare(&format!("SELECT id, started_at, client_session_id, total_ms, facade, path, backend, requested_model, served_model, upstream_id, request_sha256, response_sha256, body_ref, rung, attempts, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, cost_usd, status, proof FROM exchanges {filter}ORDER BY id LIMIT ?1"))?;
+            let mut stmt = conn.prepare(query)?;
             let mut rows = stmt.query([
                 i64::try_from(MAX_ROWS - entries.len() + 1).map_err(|_| ManagedHistoryError)?
             ])?;
@@ -453,14 +464,71 @@ pub(crate) mod tests {
             rows
         );
     }
-    const FAILURE_CODES: [&str; 6] = [
-        "panic",
-        "body_rejected",
-        "invalid_json",
-        "unknown_login",
-        "client_disconnected",
-        "unrecorded",
+    /// Each failure code with a status IronWire writes for it, so the filter
+    /// is shown to key on `failure`, not on the status.
+    const FAILURE_ROWS: [(&str, i64); 7] = [
+        ("panic", 500),
+        ("body_rejected", 413),
+        ("body_rejected", 400),
+        ("invalid_json", 400),
+        ("unknown_login", 404),
+        ("client_disconnected", 499),
+        ("unrecorded", 500),
     ];
+    fn insert_failure_rows(conn: &Connection) {
+        for (i, (code, status)) in FAILURE_ROWS.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO exchanges (id, started_at, facade, backend, rung, attempts, status, failure) VALUES (?1, '2026-10-24T00:00:00Z', 'openai', 'none', 'none', 0, ?2, ?3)",
+                rusqlite::params![i as i64 + 2, status, code],
+            )
+            .unwrap();
+        }
+    }
+    #[test]
+    fn upgraded_and_older_ledgers_are_each_read_by_their_own_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        // The upgraded home sorts first, so a column check cached from the
+        // first home would make the older one fail with `no such column`.
+        let homes = [
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        ]
+        .map(|name| {
+            let home = fixture(temp.path(), "verified");
+            let named = temp.path().join(name);
+            fs::rename(&home, &named).unwrap();
+            named
+        });
+        let upgraded = Connection::open(homes[0].join("ledger.sqlite")).unwrap();
+        // Declared in another case: SQLite names are case-insensitive.
+        upgraded
+            .execute_batch("ALTER TABLE exchanges ADD COLUMN Failure TEXT;")
+            .unwrap();
+        insert_failure_rows(&upgraded);
+        drop(upgraded);
+        let older = Connection::open(homes[1].join("ledger.sqlite")).unwrap();
+        older
+            .execute("INSERT INTO exchanges (id, started_at, facade, backend, rung, attempts, status) VALUES (7, '2026-10-24T00:00:00Z', 'openai', 'nearai', 'native', 1, 499)", [])
+            .unwrap();
+        drop(older);
+        let start = DateTime::UNIX_EPOCH;
+        let history = ManagedHistory::load_root(temp.path(), start)
+            .unwrap()
+            .unwrap();
+        let by_home = history.rows_by_home();
+        let ids = |name: &str| -> Vec<Option<i64>> {
+            by_home
+                .get(name)
+                .map(|rows| rows.iter().map(|r| r.id).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(ids("00000000-0000-4000-8000-000000000001"), [Some(1)]);
+        // The older ledger has no failure column; its 499 row is a call.
+        assert_eq!(
+            ids("00000000-0000-4000-8000-000000000002"),
+            [Some(1), Some(7)]
+        );
+    }
     #[test]
     fn failed_request_rows_are_not_counted_as_calls() {
         let temp = tempfile::tempdir().unwrap();
@@ -468,13 +536,7 @@ pub(crate) mod tests {
         let conn = Connection::open(home.join("ledger.sqlite")).unwrap();
         conn.execute_batch("ALTER TABLE exchanges ADD COLUMN failure TEXT;")
             .unwrap();
-        for (i, code) in FAILURE_CODES.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO exchanges (id, started_at, facade, backend, rung, attempts, status, failure) VALUES (?1, '2026-10-24T00:00:00Z', 'openai', 'none', 'none', 0, 500, ?2)",
-                rusqlite::params![i as i64 + 2, code],
-            )
-            .unwrap();
-        }
+        insert_failure_rows(&conn);
         // A refusal carries no failure code and stays a counted call.
         conn.execute("INSERT INTO exchanges (id, started_at, facade, backend, rung, attempts, status) VALUES (100, '2026-10-24T00:00:00Z', 'openai', 'nearai', 'native', 1, 503)", [])
             .unwrap();
@@ -483,7 +545,8 @@ pub(crate) mod tests {
         let history = ManagedHistory::load_root(temp.path(), start)
             .unwrap()
             .unwrap();
-        assert_eq!(history.rows().len(), 2);
+        let ids: Vec<_> = history.rows().iter().map(|r| r.id).collect();
+        assert_eq!(ids, [Some(1), Some(100)]);
         let summary = history.summary(start).unwrap();
         let calls = summary.routed.calls + summary.outside.calls + summary.unknown.calls;
         assert_eq!(calls, 2);
