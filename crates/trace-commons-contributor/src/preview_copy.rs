@@ -237,23 +237,8 @@ pub struct MonitorTracesCopy {
 /// `section` is the part of the app an edge rail peek links into. `path` is
 /// the command-line tool's link path.
 pub const MONITOR_PLACEHOLDERS: &[&str] = &[
-    "count",
-    "total",
-    "min",
-    "max",
-    "tool",
-    "label",
-    "seconds",
-    "when",
-    "size",
-    "start",
-    "end",
-    "shown",
-    "hours",
-    "amount",
-    "days",
-    "section",
-    "path",
+    "count", "total", "min", "max", "tool", "label", "seconds", "when", "size", "start", "end",
+    "shown", "hours", "amount", "days", "section", "path",
 ];
 
 /// The Traces tree (`traces-tree.tsx`).
