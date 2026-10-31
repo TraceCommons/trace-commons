@@ -736,11 +736,13 @@ mod tests {
                 id: "deepseek-ai/DeepSeek-V3.1".into(),
                 name: None,
                 tier: None,
+                ..Default::default()
             },
             ChatModel {
                 id: "anthropic/claude-sonnet-5-5".into(),
                 name: Some("Claude Sonnet 5.5".into()),
                 tier: None,
+                ..Default::default()
             },
         ]
     }
@@ -1094,6 +1096,7 @@ mod tests {
             id: id.into(),
             name: None,
             tier: None,
+            ..Default::default()
         };
         let context = |tool: &str, model: &str| -> LaunchContext {
             serde_json::from_value(json!({

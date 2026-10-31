@@ -140,6 +140,23 @@ fn require_absent(paths: &[PathBuf]) -> Result<(), ManagedError> {
     Ok(())
 }
 
+/// OpenCode's output limit for a model it does not know, used when NEAR AI
+/// lists a window but no output limit.
+const OPENCODE_DEFAULT_OUTPUT: u64 = 32_000;
+
+/// A model's `limit` in OpenCode's config: NEAR AI's window and output
+/// limit, so OpenCode compacts before NEAR AI refuses a request as too
+/// long. Without it OpenCode assumes 200,000 and 32,000 for a model it
+/// does not know. None when NEAR AI lists no window.
+fn limit(model: &super::models::ChatModel) -> Option<serde_json::Value> {
+    let context = model.context_length?;
+    let output = model
+        .max_output_length
+        .unwrap_or(OPENCODE_DEFAULT_OUTPUT)
+        .min(context);
+    Some(json!({ "context": context, "output": output }))
+}
+
 pub struct OpenCodeSession {
     root: PathBuf,
     native: PathBuf,
@@ -236,6 +253,7 @@ impl OpenCodeSession {
             id: model.to_owned(),
             name: None,
             tier: None,
+            ..Default::default()
         }];
         self.command_with_models(model, &only, base_url, key)
     }
@@ -260,7 +278,11 @@ impl OpenCodeSession {
             .iter()
             .map(|m| {
                 let name = m.name.as_deref().unwrap_or(&m.id);
-                (m.id.clone(), json!({ "name": name }))
+                let mut entry = json!({ "name": name });
+                if let Some(limit) = limit(m) {
+                    entry["limit"] = limit;
+                }
+                (m.id.clone(), entry)
             })
             .collect();
         let mut options = json!({"baseURL":base_url,"apiKey":"{env:TRACE_COMMONS_OPENCODE_KEY}"});
@@ -468,6 +490,7 @@ mod tests {
                     id: "fixture-model".into(),
                     name: None,
                     tier: None,
+                    ..Default::default()
                 }],
                 "http://127.0.0.1:4321/openai/v1",
                 "fixture-key",
@@ -493,6 +516,7 @@ mod tests {
                     id: "fixture-model".into(),
                     name: None,
                     tier: None,
+                    ..Default::default()
                 }],
                 "https://api.openai.com/v1",
                 "fixture-key",
@@ -510,5 +534,61 @@ mod tests {
                 .get("headers")
                 .is_none()
         );
+    }
+
+    /// Each listed model carries NEAR AI's window and output limit in both
+    /// config versions; a model NEAR AI gives no window for carries none,
+    /// and a missing output limit is OpenCode's own, never above the window.
+    #[test]
+    fn models_carry_near_ai_context_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let model =
+            |id: &str, context: Option<u64>, output: Option<u64>| super::super::models::ChatModel {
+                id: id.into(),
+                context_length: context,
+                max_output_length: output,
+                ..Default::default()
+            };
+        let models = [
+            model("a/sized", Some(1_048_576), Some(128_000)),
+            model("b/no-output", Some(262_144), None),
+            model("c/tiny", Some(16_384), None),
+            model("d/unsized", None, Some(8_192)),
+        ];
+        for (version, key) in [(Version::V1, "provider"), (Version::V2, "providers")] {
+            let session = OpenCodeSession {
+                root: dir.path().join("profile"),
+                native: dir.path().join("opencode"),
+                cwd: dir.path().into(),
+                id: Uuid::new_v4(),
+                version,
+            };
+            if version == Version::V2 && ensure_v2_system_configuration_absent().is_err() {
+                continue;
+            }
+            let command = session
+                .command_with_models("a/sized", &models, "http://127.0.0.1:4321/openai/v1", "k")
+                .unwrap();
+            let config = command
+                .get_envs()
+                .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+                .and_then(|(_, value)| value)
+                .unwrap();
+            let config: serde_json::Value = serde_json::from_str(config.to_str().unwrap()).unwrap();
+            let listed = &config[key]["trace-managed"]["models"];
+            assert_eq!(
+                listed["a/sized"]["limit"],
+                json!({"context": 1_048_576, "output": 128_000})
+            );
+            assert_eq!(
+                listed["b/no-output"]["limit"],
+                json!({"context": 262_144, "output": 32_000})
+            );
+            assert_eq!(
+                listed["c/tiny"]["limit"],
+                json!({"context": 16_384, "output": 16_384})
+            );
+            assert!(listed["d/unsized"].get("limit").is_none());
+        }
     }
 }
