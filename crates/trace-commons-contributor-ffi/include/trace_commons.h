@@ -278,9 +278,9 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  *
  * settings_json accepts exactly the fields tc_call(handle, "set_settings",
  * ...) does: quiescence_secs, digest_interval_secs, approval_hold_secs,
- * local_notifications, claude_root, codex_root, max_uploads_per_day,
- * max_bytes_per_day -- one shared validation, so there is one
- * definition of "a valid settings object" for both entry points. An
+ * local_notifications, claude_root, codex_root -- one shared validation,
+ * so there is one definition of "a valid settings object" for both entry
+ * points. An
  * unrecognized top-level key, or a recognized key holding the wrong JSON
  * type, is rejected with a fixed error label rather than silently ignored
  * -- silently ignoring a misspelled claude_root would leave the daemon
@@ -321,9 +321,7 @@ tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* se
  *
  * {"quiescence_secs":{"min":0,"max":14400},
  *  "approval_hold_secs":{"min":0,"max":300},
- *  "digest_interval_secs":{"min":3600,"max":86400},
- *  "max_uploads_per_day":{"min":1,"max":1000},
- *  "max_bytes_per_day":{"min":1,"max":5368709120}}
+ *  "digest_interval_secs":{"min":3600,"max":86400}}
  *
  * Reads nothing and writes nothing; the same object for every caller on
  * this build. Returns an owned string; free it with tc_string_free. NULL
@@ -1295,19 +1293,6 @@ int64_t     tc_contribution_group_eligible_count(int64_t pending, int64_t contri
  * tc_contribution_group_eligible_count.
  */
 int64_t     tc_contribution_group_withheld_count(int64_t pending, int64_t contributable);
-
-/* K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
- * limit X of Y", the WYSIWYG design's Flow 2/3 example.
- *
- * uploads_today and max_uploads_per_day are status.daily_budget's fields of
- * the same names; decisions_owed is status.decisions_owed (K6, a separate
- * branch). All three are clamped to 0 on a negative value, which no honest
- * caller sends.
- *
- * Returns an owned string; free it with tc_string_free. NULL only on a
- * caught panic.
- */
-char*       tc_toast_sent_text(int64_t uploads_today, int64_t max_uploads_per_day, int64_t decisions_owed);
 
 /* The sentence for one near_ai_balance state.
  *

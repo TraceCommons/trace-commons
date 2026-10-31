@@ -6411,7 +6411,7 @@ mod tests {
             capture.lock().unwrap().bodies.is_empty(),
             "nothing reached the commons"
         );
-        assert_eq!(state.uploads_today, 0);
+        assert!(state.prior_uploads.is_empty());
     }
 
     /// A body that cannot be serialized for the unsure-span detector counts

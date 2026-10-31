@@ -11,12 +11,11 @@ final class MonitorNoticeDismissals {
 
     enum Kind: String, CaseIterable {
         case queueFull = "queue-full"
-        case dailyCap = "daily-cap-reached"
         case witness = "witness-saturated"
         case automaticHold = "automatic-contribution-held"
 
         var closeID: String { "health:" + rawValue }
-        var contextMayBeUnknown: Bool { self == .dailyCap || self == .automaticHold }
+        var contextMayBeUnknown: Bool { self == .automaticHold }
     }
 
     struct Scope: Equatable {
@@ -33,13 +32,11 @@ final class MonitorNoticeDismissals {
         let revision: String
         let unboundContext: Bool
 
-        init(kind: Kind, reasons: [String]? = [], window: Date? = nil) {
+        init(kind: Kind, reasons: [String]? = []) {
             self.kind = kind
             let materialReasons = Set((reasons ?? []).filter { !$0.isEmpty }).sorted()
-            unboundContext = (kind == .dailyCap && window == nil)
-                || (kind == .automaticHold && materialReasons.isEmpty)
-            let period = window.map { ["quota-window", String($0.timeIntervalSince1970)] } ?? []
-            revision = MonitorNoticeDismissals.digest([kind.rawValue] + period + materialReasons)
+            unboundContext = kind == .automaticHold && materialReasons.isEmpty
+            revision = MonitorNoticeDismissals.digest([kind.rawValue] + materialReasons)
         }
     }
 
@@ -86,8 +83,8 @@ final class MonitorNoticeDismissals {
             case .active(let incident):
                 guard !incident.unboundContext else { continue }
                 if kind.contextMayBeUnknown, values[kind.rawValue] == Incident(kind: kind).revision {
-                    // Bind a dismissal made before its quota window or hold
-                    // reasons were known; unread context never resets it.
+                    // Bind a dismissal made before its hold reasons were
+                    // known; unread context never resets it.
                     values[kind.rawValue] = incident.revision
                 } else if let old = values[kind.rawValue], old != incident.revision {
                     values[kind.rawValue] = nil
@@ -112,11 +109,6 @@ final class MonitorNoticeDismissals {
             result[.queueFull] = .clear
         } else if status.queueAtCapacity == nil, label == Kind.queueFull.rawValue {
             result[.queueFull] = .active(.init(kind: .queueFull))
-        }
-        if let blocked = status.dailyBudget?.blocked {
-            result[.dailyCap] = blocked ? .active(.init(kind: .dailyCap, window: status.dailyBudget?.resetsAt)) : .clear
-        } else if label == Kind.dailyCap.rawValue {
-            result[.dailyCap] = .active(.init(kind: .dailyCap))
         }
         if let waiting = status.witnessCapacity?.waitingSessions, waiting >= 0 {
             result[.witness] = waiting > 0 ? .active(.init(kind: .witness)) : .clear

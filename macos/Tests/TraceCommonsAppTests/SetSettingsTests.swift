@@ -180,7 +180,6 @@ final class SetSettingsTests: XCTestCase {
         daemon.response = settingsFrame
         let view = try client.setSettings(["quiescence_secs": 45])
         XCTAssertEqual(view.quiescenceSecs, 45)
-        XCTAssertEqual(view.maxUploadsPerDay, 100)
     }
 
     /// A refusal from the daemon surfaces as the same `Failure` every other

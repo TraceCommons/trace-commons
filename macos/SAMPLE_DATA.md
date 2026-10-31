@@ -39,8 +39,8 @@ hand-written `readable: true` page, shaped exactly like the real reply
 `calls_page` builds in `daemon/inference_map.rs`, because `readable` needs a
 live IronWire proxy answering and no temp store runs one. For the same
 reason, `normalDay` and `busyQueue` override `status.json`'s
-`private_inference_state` (running on 8463), `routing` (`rows_seen`) and
-`daily_budget` (4 uploads today), and `harness_list.json`'s Claude Code row
+`private_inference_state` (running on 8463) and `routing` (`rows_seen`),
+and `harness_list.json`'s Claude Code row
 (connected, `answering`), `activity`, `spend` (known) and
 `destination_port`; `empty/harness_list.json` overrides `spend` to a known
 zero.

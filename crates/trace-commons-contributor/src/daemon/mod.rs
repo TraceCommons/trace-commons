@@ -122,7 +122,6 @@ pub(crate) mod token_capture;
 mod token_cleanup;
 pub mod unenroll;
 pub mod unsure_spans;
-pub(crate) mod upload_allowance;
 pub mod uploader;
 pub mod watcher;
 #[cfg(windows)]
@@ -699,7 +698,6 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // full pass for the gate's R3. See `account_admission`.
                 // Skipped, and any earlier answer dropped, in a dry run and
                 // when nothing is armed.
-                upload_allowance::refresh(shared, now, dry_run).await;
                 account_admission::refresh(shared, now, dry_run).await;
                 // No usable session: renew an expired one off the pass, so
                 // R3 can lift at the next pass. Not awaited.
@@ -1229,7 +1227,7 @@ async fn drain_approved(
 
         let result = {
             let mut state = shared.state.lock().expect("state lock").clone();
-            let settings = upload_allowance::effective_settings(shared);
+            let settings = shared.settings.lock().expect("settings lock").clone();
             let mut health = shared.health.lock().expect("health lock").clone();
             let mut up = uploader::Uploader {
                 ctx: &mut ctx,
@@ -1552,10 +1550,6 @@ async fn drain_approved(
                 );
                 rate_limited = true;
             }
-            uploader::UploadDecision::CapReached => {
-                // Leave it approved: the cap lifts when the day rolls over.
-                break;
-            }
         }
         changed = true;
         if rate_limited || outage {
@@ -1568,7 +1562,7 @@ async fn drain_approved(
 
     // Nothing may be left claimed. Every entry that reached a decision above
     // already has a terminal state; anything still `Uploading` is one this
-    // pass broke out on (a daily cap, a fail-closed precondition), and
+    // pass broke out on (a rate limit, a fail-closed precondition), and
     // `Uploading` is a state nothing else would ever move it out of.
     {
         let mut q = shared.queue.lock().expect("queue lock");
@@ -1595,18 +1589,6 @@ async fn drain_approved(
     }
     if uploaded_this_pass {
         note_uploads(shared, now)?;
-    }
-
-    // An exhausted budget is the one outcome of this pass that changes
-    // nothing in the queue -- every affected entry stays `Approved` -- so
-    // `changed` is false and the loop above publishes nothing. Without
-    // this, a client that only redraws on an event sat on a stale status
-    // while the very condition it needed to show had just been decided.
-    // Published unconditionally rather than on a transition, because this
-    // pass holds no memory of the previous one; it is one event per poll
-    // interval at worst, and `status` is idempotent.
-    if shared.daily_budget(now).blocked() {
-        shared.publish(ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
     }
 
     // After the queue is final for this pass: a successful upload clears the

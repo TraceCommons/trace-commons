@@ -111,7 +111,7 @@ pub struct Verdict {
 /// evidence against it.
 ///
 /// `None` for every other refusal label, and that is the common case: a
-/// daily cap, an unreachable server, a stale approval and a filter outage all
+/// rate limit, an unreachable server, a stale approval and a filter outage all
 /// say nothing whatever about whether this session is admissible, and
 /// rewriting the row from one of them would be inventing an answer.
 ///

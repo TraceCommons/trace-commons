@@ -2103,9 +2103,6 @@ struct AppState {
     witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
     account_admission: Option<admission::AccountAdmissionConfig>,
-    client_upload_allowance: Option<trace_commons_protocol::upload_allowance::DailyUploadAllowance>,
-    /// Independent earned daily upload caps; neither admission ledger is enabled.
-    client_upload_trust_policy: Option<Arc<upload_allowance::ClientUploadTrustPolicy>>,
     /// Optional narrow nonowner trust pool; the ingest source pool is unchanged.
     client_upload_trust_database: Option<Arc<dyn Database>>,
     /// A candidate earned-trust growth policy for the shadow evaluator. Never
@@ -4742,7 +4739,6 @@ impl AppState {
             witness_bypass.as_ref(),
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
-        let client_upload_allowance = upload_allowance::config_from_env()?;
         let account_admission = admission::account_config_from_env(
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
@@ -5256,8 +5252,6 @@ impl AppState {
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
             admission,
             account_admission,
-            client_upload_allowance,
-            client_upload_trust_policy,
             client_upload_trust_database,
             account_trust_shadow_policy,
             near_ai_starter_mode,

@@ -484,7 +484,6 @@ extension DaemonData {
         public let settlementEstimate: SettlementEstimate?
         public let nextDigestAt: Date?
         public let health: Health?
-        public let dailyBudget: DailyBudget?
         public let routing: Routing?
         public let privateInferenceState: PrivateInferenceState?
         public let witnessCapacity: WitnessCapacity?
@@ -532,7 +531,6 @@ extension DaemonData {
             case settlementEstimate = "settlement_estimate"
             case nextDigestAt = "next_digest_at"
             case health
-            case dailyBudget = "daily_budget"
             case routing
             case privateInferenceState = "private_inference_state"
             case witnessCapacity = "witness_capacity"
@@ -697,32 +695,6 @@ extension DaemonData {
         public enum CodingKeys: String, CodingKey {
             case lastErrorLabel = "last_error_label"
             case since
-        }
-    }
-
-    public struct DailyBudget: Codable, Equatable, Sendable {
-        public let bytesToday: Int?
-        public let maxBytesPerDay: Int?
-        public let bytesRemaining: Int?
-        public let uploadsToday: Int?
-        public let maxUploadsPerDay: Int?
-        public let uploadsRemaining: Int?
-        public let resetsAt: Date?
-        public let blocked: Bool?
-        public let blockedEntries: Int?
-        public let blockedBytes: Int?
-
-        public enum CodingKeys: String, CodingKey {
-            case bytesToday = "bytes_today"
-            case maxBytesPerDay = "max_bytes_per_day"
-            case bytesRemaining = "bytes_remaining"
-            case uploadsToday = "uploads_today"
-            case maxUploadsPerDay = "max_uploads_per_day"
-            case uploadsRemaining = "uploads_remaining"
-            case resetsAt = "resets_at"
-            case blocked
-            case blockedEntries = "blocked_entries"
-            case blockedBytes = "blocked_bytes"
         }
     }
 
@@ -941,8 +913,6 @@ extension DaemonData {
         public let scrubCheckReturnedToWaiting: Int?
         /// Whether attested model-call bodies are sent with a session.
         public let ironwireAttestedBodies: Bool?
-        public let maxUploadsPerDay: Int?
-        public let maxBytesPerDay: Int?
         public let privateInference: Bool?
         /// Whether the first-run Private AI question has been answered.
         public let privateInferenceOfferSeen: Bool?
@@ -1019,8 +989,6 @@ extension DaemonData {
             case scrubCheckDefaultedOnUpgrade = "scrub_check_defaulted_on_upgrade"
             case scrubCheckReturnedToWaiting = "scrub_check_returned_to_waiting"
             case ironwireAttestedBodies = "ironwire_attested_bodies"
-            case maxUploadsPerDay = "max_uploads_per_day"
-            case maxBytesPerDay = "max_bytes_per_day"
             case privateInference = "private_inference"
             case privateInferenceOfferSeen = "private_inference_offer_seen"
             case suggestionsEnabled = "suggestions_enabled"

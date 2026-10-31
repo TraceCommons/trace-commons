@@ -14,7 +14,7 @@
 //!
 //! Paths appear in this file and never leave it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -155,10 +155,6 @@ pub struct DaemonState {
     pub prior_uploads: BTreeMap<String, PriorUpload>,
     pub last_observation: BTreeMap<String, u64>,
     pub last_digest_at: Option<DateTime<Utc>>,
-    /// UTC day the counters below belong to, as `YYYY-MM-DD`.
-    pub day_bucket: Option<String>,
-    pub uploads_today: u32,
-    pub bytes_today: u64,
     /// Whether the contributor has paused the daemon. Persisted, so a pause
     /// survives a restart and is visible to a one-shot CLI invocation rather
     /// than living only in a running process's memory.
@@ -281,6 +277,12 @@ pub struct DaemonState {
     /// process always writes once before it can skip anything.
     #[serde(skip)]
     last_written: LastWritten,
+    /// When each of the most recent upload attempts started, oldest first,
+    /// for the burst guard in `uploader::burst_wait`. Held in memory only:
+    /// it bounds how fast one running daemon sends, and a restart starting
+    /// from an empty window costs at most one window's worth of attempts.
+    #[serde(skip)]
+    pub recent_upload_attempts: VecDeque<DateTime<Utc>>,
 }
 
 impl Default for DaemonState {
@@ -297,9 +299,6 @@ impl DaemonState {
             prior_uploads: BTreeMap::new(),
             last_observation: BTreeMap::new(),
             last_digest_at: None,
-            day_bucket: None,
-            uploads_today: 0,
-            bytes_today: 0,
             paused: false,
             paused_until: None,
             last_history_poll_at: None,
@@ -316,6 +315,7 @@ impl DaemonState {
             notify_kinds_known: true,
             settlement_notified: None,
             last_written: LastWritten::default(),
+            recent_upload_attempts: VecDeque::new(),
         }
     }
 
@@ -406,22 +406,9 @@ impl DaemonState {
         self.attention_log.retain(|entry| entry.at >= floor);
     }
 
-    /// Reset the daily volume counters when the UTC day has rolled over.
-    /// Call before every cap check; without it a daemon running for a week
-    /// would still be measuring against its first day.
-    pub fn roll_day(&mut self, now: DateTime<Utc>) {
-        let today = now.format("%Y-%m-%d").to_string();
-        if self.day_bucket.as_deref() != Some(today.as_str()) {
-            self.day_bucket = Some(today);
-            self.uploads_today = 0;
-            self.bytes_today = 0;
-        }
-    }
-
-    /// Record a completed upload: both the per-path index that bounds growth
-    /// re-queue and the daily volume counters.
-    pub fn record_upload(&mut self, path: &Path, hash: &str, size_bytes: u64, now: DateTime<Utc>) {
-        self.roll_day(now);
+    /// Record a completed upload in the per-path index that bounds growth
+    /// re-queue.
+    pub fn record_upload(&mut self, path: &Path, hash: &str, size_bytes: u64) {
         let key = path.to_string_lossy().to_string();
         let count = self
             .prior_uploads
@@ -436,8 +423,6 @@ impl DaemonState {
                 upload_count: count + 1,
             },
         );
-        self.uploads_today = self.uploads_today.saturating_add(1);
-        self.bytes_today = self.bytes_today.saturating_add(size_bytes);
     }
 
     /// The size this path had at the previous poll, if it was seen then.
@@ -462,49 +447,22 @@ mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
 
-    use crate::daemon::test_support::at;
-
-    #[test]
-    fn roll_day_resets_counters_on_a_utc_day_change() {
-        let mut s = DaemonState::new();
-        s.day_bucket = Some("2026-08-07".to_string());
-        s.uploads_today = 9;
-        s.bytes_today = 1234;
-        s.roll_day(at("2026-08-08T00:00:01Z"));
-        assert_eq!(s.uploads_today, 0);
-        assert_eq!(s.bytes_today, 0);
-        assert_eq!(s.day_bucket.as_deref(), Some("2026-08-08"));
-    }
-
-    #[test]
-    fn roll_day_preserves_counters_within_the_same_day() {
-        let mut s = DaemonState::new();
-        s.roll_day(at("2026-08-08T01:00:00Z"));
-        s.uploads_today = 3;
-        s.roll_day(at("2026-08-08T23:59:00Z"));
-        assert_eq!(s.uploads_today, 3);
-    }
-
     #[test]
     fn record_upload_increments_the_count_for_the_same_path() {
         let mut s = DaemonState::new();
-        let now = at("2026-08-08T01:00:00Z");
-        s.record_upload(Path::new("/tmp/a.jsonl"), "sha256:aa", 10, now);
-        s.record_upload(Path::new("/tmp/a.jsonl"), "sha256:bb", 30, now);
+        s.record_upload(Path::new("/tmp/a.jsonl"), "sha256:aa", 10);
+        s.record_upload(Path::new("/tmp/a.jsonl"), "sha256:bb", 30);
         let prior = s.prior_upload(Path::new("/tmp/a.jsonl")).unwrap();
         assert_eq!(prior.upload_count, 2);
         assert_eq!(prior.hash, "sha256:bb");
         assert_eq!(prior.size_bytes, 30);
-        assert_eq!(s.uploads_today, 2);
-        assert_eq!(s.bytes_today, 40);
     }
 
     #[test]
     fn record_upload_tracks_paths_independently() {
         let mut s = DaemonState::new();
-        let now = at("2026-08-08T01:00:00Z");
-        s.record_upload(Path::new("/tmp/a.jsonl"), "sha256:aa", 10, now);
-        s.record_upload(Path::new("/tmp/b.jsonl"), "sha256:bb", 10, now);
+        s.record_upload(Path::new("/tmp/a.jsonl"), "sha256:aa", 10);
+        s.record_upload(Path::new("/tmp/b.jsonl"), "sha256:bb", 10);
         assert_eq!(
             s.prior_upload(Path::new("/tmp/a.jsonl"))
                 .unwrap()
@@ -531,12 +489,7 @@ mod tests {
     fn state_round_trips_through_the_store() {
         let (_d, store) = temp_store();
         let mut s = DaemonState::new();
-        s.record_upload(
-            Path::new("/tmp/a.jsonl"),
-            "sha256:aa",
-            10,
-            at("2026-08-08T01:00:00Z"),
-        );
+        s.record_upload(Path::new("/tmp/a.jsonl"), "sha256:aa", 10);
         s.save(&store).unwrap();
         let loaded = DaemonState::load(&store).unwrap();
         assert_eq!(loaded, s);
@@ -712,6 +665,30 @@ mod tests {
             Some("/Users/testuser/code/proj"),
             "the field that did exist must still decode"
         );
+    }
+
+    /// A state file from a build that counted uploads per UTC day still
+    /// loads, and the next save drops the counters: nothing reads them.
+    #[test]
+    fn a_state_file_with_the_daily_upload_counters_loads_and_drops_them() {
+        let (_d, store) = temp_store();
+        let mut body = serde_json::to_value(DaemonState::new()).unwrap();
+        body["day_bucket"] = serde_json::json!("2026-10-30");
+        body["uploads_today"] = serde_json::json!(50);
+        body["bytes_today"] = serde_json::json!(209_715_200u64);
+        std::fs::write(
+            store.daemon_path(DAEMON_STATE_FILE),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        let mut loaded = DaemonState::load(&store).unwrap();
+        loaded.save(&store).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.daemon_path(DAEMON_STATE_FILE)).unwrap())
+                .unwrap();
+        for key in ["day_bucket", "uploads_today", "bytes_today"] {
+            assert!(written.get(key).is_none(), "{key}: {written}");
+        }
     }
 
     /// A state file from a build that kept `verdicts_acked_through` still
