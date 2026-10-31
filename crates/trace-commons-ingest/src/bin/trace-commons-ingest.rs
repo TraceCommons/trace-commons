@@ -793,6 +793,15 @@ const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR";
+/// The per-account hourly submission ceiling. Unlike the two quotas above it
+/// is on by default ([`ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT`]); `0` turns it
+/// off.
+const TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR: &str =
+    "TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR";
+/// The per-account hourly ceiling when the variable is unset: a circuit
+/// breaker set far above any contributor's real pace (one upload every six
+/// seconds for an hour), not a pacing limit.
+const ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT: usize = 600;
 const TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS: &str =
@@ -2769,13 +2778,24 @@ impl TraceTenantRolloutGates {
     }
 }
 
+/// `Default` is every limit off, including the account ceiling: the default
+/// a deployment gets is set by the environment parser, not here, so a test
+/// state stays unbounded.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 struct TraceSubmissionQuotaConfig {
     max_per_tenant_per_hour: usize,
     max_per_principal_per_hour: usize,
+    /// Submissions per rolling hour for one account, whatever its admission
+    /// authority (bounded, invited or attested), or for one principal of a
+    /// tenant outside the account namespaces. Enforced by
+    /// `enforce_account_hourly_submission_ceiling`; it does not touch the
+    /// account admission budget.
+    max_per_account_per_hour: usize,
 }
 
 impl TraceSubmissionQuotaConfig {
+    /// Whether the tenant and principal quotas are both off. The account
+    /// ceiling is separate and is not consulted here.
     fn is_disabled(self) -> bool {
         self.max_per_tenant_per_hour == 0 && self.max_per_principal_per_hour == 0
     }
@@ -13115,7 +13135,31 @@ fn parse_submission_quota_config_from_env() -> anyhow::Result<TraceSubmissionQuo
         max_per_principal_per_hour: parse_submission_quota_limit_from_env(
             TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR,
         )?,
+        max_per_account_per_hour: match std::env::var(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR,
+        ) {
+            Ok(configured) => parse_account_hourly_submission_ceiling(Some(&configured))?,
+            Err(std::env::VarError::NotPresent) => parse_account_hourly_submission_ceiling(None)?,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to read {TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR}")
+                });
+            }
+        },
     })
+}
+
+/// `TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR`: unset is
+/// [`ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT`], `0` turns the ceiling off, and
+/// anything that is not a non-negative integer refuses startup.
+fn parse_account_hourly_submission_ceiling(configured: Option<&str>) -> anyhow::Result<usize> {
+    match configured {
+        None => Ok(ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT),
+        Some(configured) => parse_submission_quota_limit(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR,
+            configured,
+        ),
+    }
 }
 
 fn parse_submission_quota_limit_from_env(var_name: &'static str) -> anyhow::Result<usize> {
@@ -16230,6 +16274,14 @@ async fn submit_trace_handler_authenticated(
     if state.account_admission.is_some() {
         validate_envelope(&envelope)?;
     }
+    // The per-account hourly ceiling, before admission reserves anything: a
+    // refusal here holds no lease and charges nothing.
+    enforce_account_hourly_submission_ceiling(
+        state.as_ref(),
+        &authenticated_tenant,
+        envelope.submission_id,
+    )
+    .await?;
     let mut admission = admission::reserve(
         &state,
         &authenticated_tenant,
@@ -16432,6 +16484,15 @@ async fn submit_trace_handler_authenticated(
             tenant_policy.as_ref(),
             state.require_tenant_submission_policy,
         )?;
+        // The hourly quota runs before the witness check, the re-scrub and
+        // the per-tenant history reads below, so an upload it refuses costs
+        // none of them. The admission attempt is not yet `processing` here:
+        // a refusal leaves it reserved and the trailing `finish(false)`
+        // releases it. Same-id quarantine remediation does not consume a new
+        // quota slot -- the prior quarantined row already counted.
+        if remediating_prior.is_none() {
+            enforce_submission_quota(state.as_ref(), &tenant)?;
+        }
 
         // AT RECEIPT: against `raw_body`, the bytes the extractor captured before
         // any handler code ran. `rescrub_trace_envelope` on the next line rewrites
@@ -16519,11 +16580,6 @@ async fn submit_trace_handler_authenticated(
             &envelope.privacy.redaction_hash,
             &derived_precheck.canonical_summary_hash,
         )?;
-        // Same-id quarantine remediation does not consume a new quota slot — the
-        // prior quarantined row already counted.
-        if remediating_prior.is_none() {
-            enforce_submission_quota(state.as_ref(), &tenant)?;
-        }
         apply_embedding_precheck(&mut envelope, &derived_precheck);
         // Writes the scorecard and `submission_score` (the review queue and
         // the ranker exports read them) and holds `credit_points_pending` at
@@ -62994,6 +63050,101 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantCtx) -> ApiResult<(
     }
 
     Ok(())
+}
+
+/// The per-account hourly submission ceiling: a circuit breaker on intake,
+/// checked right after the per-principal rate limiter and before admission
+/// reserves anything, so a refused upload takes no lease, no ledger row, no
+/// re-scrub and no history read.
+///
+/// It bounds every contributor upload whatever its admission authority:
+/// bounded, invited and attested accounts alike. It counts uploads; it never
+/// reads or charges the account admission budget, so an attested upload
+/// still debits nothing there.
+///
+/// The scope is the account. A tenant in an account namespace (`near-`,
+/// `nearai-`) is allocated to one account at provisioning, so the scope is
+/// the tenant, every device of the account together. A tenant outside them
+/// (a legacy invite tenant or a pooled tenant) holds many contributors with
+/// no account, so the scope is the authenticated principal.
+///
+/// A retry of a submission that already has a record is not counted against
+/// itself; any other refusal for it comes from the checks after this one.
+/// The refusal is `429 submit_rate_limited` with the seconds until the
+/// window has room again, the label clients already keep an upload queued
+/// for.
+async fn enforce_account_hourly_submission_ceiling(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+) -> ApiResult<()> {
+    let limit = state.submission_quota.max_per_account_per_hour;
+    if limit == 0 || tenant.role() != TokenRole::Contributor {
+        return Ok(());
+    }
+    let now = Utc::now();
+    let window_start = now - Duration::hours(1);
+    let whole_tenant = trace_commons_protocol::admission::is_anchored_tenant(tenant.tenant_id());
+    let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+    let window = match state.db_mirror.as_ref() {
+        Some(db) => {
+            let principals: Vec<String> = tenant
+                .auth()
+                .principal_aliases()
+                .map(str::to_string)
+                .collect();
+            db.recent_trace_submission_window(
+                tenant.tenant_id(),
+                (!whole_tenant).then_some(principals.as_slice()),
+                submission_id,
+                window_start,
+                limit_i64,
+            )
+            .await
+            .map_err(internal_error)?
+        }
+        None => {
+            let records = read_all_submission_records(&state.root, tenant.tenant_id())
+                .map_err(internal_error)?;
+            let submission_known = records
+                .iter()
+                .any(|record| record.submission_id == submission_id);
+            let mut recent: Vec<DateTime<Utc>> = records
+                .iter()
+                .filter(|record| record.received_at > window_start)
+                .filter(|record| {
+                    whole_tenant
+                        || tenant
+                            .auth()
+                            .matches_stored_principal(&record.auth_principal_ref)
+                })
+                .map(|record| record.received_at)
+                .collect();
+            recent.sort_unstable_by(|a, b| b.cmp(a));
+            recent.truncate(limit);
+            trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow {
+                counted: i64::try_from(recent.len()).unwrap_or(i64::MAX),
+                oldest_counted_at: recent.last().copied(),
+                submission_known,
+            }
+        }
+    };
+    if window.submission_known || window.counted < limit_i64 {
+        return Ok(());
+    }
+    // Room returns when the oldest counted upload leaves the hour.
+    let retry_after_seconds = window
+        .oldest_counted_at
+        .map(|oldest| (oldest + Duration::hours(1) - now).num_seconds())
+        .unwrap_or(3600)
+        .clamp(1, 3600);
+    tracing::warn!(
+        tenant_id = %tenant.tenant_id(),
+        limit,
+        per_principal = !whole_tenant,
+        "Trace Commons account hourly submission ceiling reached"
+    );
+    Err(submit_rate_limited(retry_after_seconds))
 }
 
 fn submission_counts_toward_quota(record: &TraceCommonsSubmissionRecord) -> bool {
