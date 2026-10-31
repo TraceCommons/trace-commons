@@ -21,13 +21,22 @@
 //!    carries no modality fields at all. `supported_features` is not used:
 //!    it is incomplete (current GPT models list no `tools`).
 //! 2. A model the person chose must be one of those, or nothing starts.
-//! 3. Otherwise, per tool: Claude Code takes the newest Anthropic Sonnet,
-//!    Codex the first of [`CODEX_PREFERRED`] that is listed, else the
-//!    newest OpenAI GPT that is not in [`CODEX_REFUSED`]. "Newest" is the version after the family
-//!    prefix (`anthropic/claude-sonnet-5-5` is 5.5, `openai/gpt-6.1-sol` is
-//!    6.1); smaller variants (`mini`, `nano`, `lite`) are never the default.
+//! 3. Otherwise, Claude Code and OpenCode start in the most private tier
+//!    the catalogue lists short of Incognito: NEAR AI private, else
+//!    External, else every model (owner, 2026-10-31). In that pool, the
+//!    first of [`PRIVATE_PREFERRED`] that is listed; else Claude Code takes
+//!    the newest Anthropic Sonnet and OpenCode the first chat model. Codex
+//!    takes the first of [`CODEX_PREFERRED`] that is listed, from every
+//!    tier, else the newest OpenAI GPT that is not in [`CODEX_REFUSED`].
+//!    "Newest" is the version after the family prefix
+//!    (`anthropic/claude-sonnet-5-5` is 5.5, `openai/gpt-6.1-sol` is 6.1);
+//!    smaller variants (`mini`, `nano`, `lite`) are never the default.
 //!    Without one: the family's first model, then the vendor's, then the
-//!    first chat model. OpenCode takes the first chat model.
+//!    first chat model.
+//! 4. Every other model Claude Code is set to use (its family aliases and
+//!    small, fast model) is of the default's tier or a more private one,
+//!    else the default ([`claude_env`]). OpenCode's small model and its
+//!    title and compaction agents are the default.
 
 use super::{ManagedError, ToolId};
 use serde::{Deserialize, Serialize};
@@ -207,13 +216,14 @@ fn version(rest: &str) -> Option<Vec<u32>> {
 /// The newest model of the family `prefix` (`anthropic/claude-opus-`):
 /// the highest version, and among equals the first id in byte order.
 /// Without a readable version, the family's first model.
-fn newest_in<'a>(prefix: &str, models: &'a [ChatModel]) -> Option<&'a ChatModel> {
+fn newest_in<'a>(prefix: &str, models: &[&'a ChatModel]) -> Option<&'a ChatModel> {
     models
         .iter()
+        .copied()
         .filter_map(|m| Some((version(m.id.strip_prefix(prefix)?)?, m)))
         .max_by(|(a, x), (b, y)| a.cmp(b).then_with(|| y.id.cmp(&x.id)))
         .map(|(_, m)| m)
-        .or_else(|| models.iter().find(|m| m.id.starts_with(prefix)))
+        .or_else(|| models.iter().copied().find(|m| m.id.starts_with(prefix)))
 }
 
 /// Codex's default on NEAR AI, first listed first: models that answered a
@@ -232,6 +242,28 @@ pub const CODEX_PREFERRED: &[&str] = &["openai/gpt-6-sol", "openai/gpt-5.6-sol",
 ///   client-managed function tools only".
 pub const CODEX_REFUSED: &[&str] = &["openai/gpt-6.1-sol", "openai/gpt-6-astra"];
 
+/// Claude Code's and OpenCode's default inside a NEAR AI private or
+/// External pool, first listed first ([`default_for`]). NEAR AI lists
+/// alphabetically, so without this list the default is whichever private
+/// model sorts first, which may be a small, abliterated or vision model.
+/// Each entry is a general chat model NEAR AI lists with `tools` in its
+/// `supported_features` and a window of 128,000 tokens or more
+/// (`/v1/models`, read 2026-10-31); none is abliterated or vision-only.
+/// Not yet run with either tool's own tool schema: a product choice the
+/// owner approves, not a measured one like [`CODEX_PREFERRED`].
+pub const PRIVATE_PREFERRED: &[&str] = &[
+    // NEAR AI private.
+    "Qwen/Qwen3.8-27B",
+    "z-ai/glm-5.3",
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "z-ai/glm-5.3-flash",
+    "Qwen/Qwen3.6-27B-FP8",
+    // External.
+    "moonshotai/kimi-k3",
+    "z-ai/glm-5",
+    "deepseek/deepseek-v3.2",
+];
+
 /// The chat models `tool` is offered, in NEAR AI's order: every one, less
 /// [`CODEX_REFUSED`] for Codex. A session's picker lists these, and a
 /// model chosen by name must be one of them.
@@ -249,64 +281,55 @@ pub fn offered(tool: ToolId, models: Vec<ChatModel>) -> Vec<ChatModel> {
 ///
 /// Claude Code and OpenCode never start on an Incognito model while the
 /// catalogue lists a more private one (owner, 2026-10-31): the pool is the
-/// models of the most private tier the catalogue has, NEAR AI private
-/// first, then External, and every model only when it has neither. Within
-/// the pool the tool's own preference decides: its family, then vendor,
-/// then first listed. Codex keeps to the models NEAR AI is known to run
-/// with its tools ([`CODEX_PREFERRED`]). A model the person chose is never
-/// replaced ([`select`]).
+/// models of the most private tier the catalogue has short of Incognito
+/// ([`ModelTier`]'s order: NEAR AI private, then External), and every model
+/// only when it has neither. Within the pool the first of
+/// [`PRIVATE_PREFERRED`] that is listed, then the tool's own preference:
+/// its family, then vendor, then first listed. Codex keeps to the models
+/// NEAR AI is known to run with its tools ([`CODEX_PREFERRED`]), from every
+/// tier. A model the person chose is never replaced ([`select`]).
 pub fn default_for(tool: ToolId, models: &[ChatModel]) -> Option<&ChatModel> {
-    if tool == ToolId::Codex {
-        return preferred_in(tool, models, models);
-    }
-    for tier in [ModelTier::NearAi, ModelTier::External] {
-        let pool: Vec<ChatModel> = models
-            .iter()
-            .filter(|m| m.tier == Some(tier))
-            .cloned()
-            .collect();
-        if !pool.is_empty() {
-            return preferred_in(tool, &pool, models);
+    let best = models
+        .iter()
+        .filter_map(|m| m.tier)
+        .filter(|tier| *tier < ModelTier::Incognito)
+        .min();
+    match best {
+        Some(best) if tool != ToolId::Codex => {
+            let pool: Vec<&ChatModel> = models.iter().filter(|m| m.tier == Some(best)).collect();
+            listed(PRIVATE_PREFERRED, &pool).or_else(|| preferred(tool, &pool))
         }
+        _ => preferred(tool, &models.iter().collect::<Vec<_>>()),
     }
-    preferred_in(tool, models, models)
 }
 
-/// `tool`'s preferred model among `pool`, returned as the same model in
-/// `models`.
-fn preferred_in<'a>(
-    tool: ToolId,
-    pool: &[ChatModel],
-    models: &'a [ChatModel],
-) -> Option<&'a ChatModel> {
-    let chosen = preferred(tool, pool)?;
-    models.iter().find(|m| m.id == chosen.id)
+/// The first of `ids` that `models` holds.
+fn listed<'a>(ids: &[&str], models: &[&'a ChatModel]) -> Option<&'a ChatModel> {
+    ids.iter()
+        .find_map(|id| models.iter().copied().find(|m| m.id == *id))
 }
 
-fn preferred(tool: ToolId, models: &[ChatModel]) -> Option<&ChatModel> {
+/// `tool`'s own preference among `models`: Codex's list, then the family's
+/// newest, then the vendor's first, then the first listed.
+fn preferred<'a>(tool: ToolId, models: &[&'a ChatModel]) -> Option<&'a ChatModel> {
     let Some((family, vendor)) = preference(tool) else {
-        return models.first();
+        return models.first().copied();
     };
-    if tool == ToolId::Codex {
-        if let Some(model) = CODEX_PREFERRED
-            .iter()
-            .find_map(|id| models.iter().find(|m| m.id == *id))
-        {
+    let usable: Vec<&ChatModel> = if tool == ToolId::Codex {
+        if let Some(model) = listed(CODEX_PREFERRED, models) {
             return Some(model);
         }
-        let usable: Vec<ChatModel> = models
+        models
             .iter()
+            .copied()
             .filter(|m| !CODEX_REFUSED.contains(&m.id.as_str()))
-            .cloned()
-            .collect();
-        let chosen = newest_in(family, &usable)
-            .or_else(|| usable.iter().find(|m| m.id.starts_with(vendor)))
-            .or_else(|| usable.first())?;
-        return models.iter().find(|m| m.id == chosen.id);
-    }
-    newest_in(family, models)
-        .or_else(|| models.iter().find(|m| m.id.starts_with(vendor)))
-        .or_else(|| models.first())
+            .collect()
+    } else {
+        models.to_vec()
+    };
+    newest_in(family, &usable)
+        .or_else(|| usable.iter().copied().find(|m| m.id.starts_with(vendor)))
+        .or_else(|| usable.first().copied())
 }
 
 /// Claude Code's model aliases, each with the family whose newest listed
@@ -340,9 +363,12 @@ const CLAUDE_ALIASES: [(&str, &str, &str); 4] = [
 /// NEAR AI does not list or describe another model.
 ///
 /// `ANTHROPIC_MODEL` is the default. Each family alias (Opus, Sonnet,
-/// Haiku, Fable) names the family's newest listed model, with NEAR AI's
-/// display name when it gives one; a family NEAR AI does not list names
-/// the default, so the alias is never given a substitute by the proxy.
+/// Haiku, Fable) names the family's newest listed model of the default's
+/// tier or a more private one, with NEAR AI's display name when it gives
+/// one; a family with no such model names the default, so the alias is
+/// never given a substitute by the proxy and never sends Claude Code's
+/// background or subagent requests to a less private model than the
+/// session's own (owner, 2026-10-31).
 /// The small, fast model is the Haiku alias's. A default that no alias
 /// names (an older Sonnet, or another vendor's model while every family is
 /// listed) is offered as the picker's custom entry. The default's
@@ -350,10 +376,23 @@ const CLAUDE_ALIASES: [(&str, &str, &str); 4] = [
 pub fn claude_env(default: &str, models: &[ChatModel]) -> Vec<(&'static str, Option<String>)> {
     let default_model = models.iter().find(|m| m.id == default);
     let named = |model: Option<&ChatModel>| model.and_then(|m| m.name.clone());
+    // The models an alias may name: those at least as private as the
+    // default, so no alias sends a request somewhere less private than the
+    // session's own model. A default with no known tier claims nothing.
+    let ceiling = default_model
+        .and_then(|m| m.tier)
+        .filter(|tier| *tier != ModelTier::Unknown);
+    let pool: Vec<&ChatModel> = models
+        .iter()
+        .filter(|m| match ceiling {
+            Some(ceiling) => m.tier.is_some_and(|tier| tier <= ceiling),
+            None => true,
+        })
+        .collect();
     let mut env = vec![("ANTHROPIC_MODEL", Some(default.to_owned()))];
     let mut aliases = vec![];
     for (prefix, var, name_var) in CLAUDE_ALIASES {
-        let (id, name) = match newest_in(prefix, models) {
+        let (id, name) = match newest_in(prefix, &pool) {
             Some(model) => (model.id.clone(), named(Some(model))),
             None => (default.to_owned(), named(default_model)),
         };
@@ -636,7 +675,7 @@ mod tests {
     }
 
     /// With a NEAR AI private (TEE-hosted) model listed, Claude and
-    /// OpenCode start on it, the first one in NEAR AI's order; Codex keeps
+    /// OpenCode start on it, the first of [`PRIVATE_PREFERRED`]; Codex keeps
     /// to the models NEAR AI is known to run with its tools.
     #[test]
     fn the_default_prefers_a_near_ai_private_model() {
@@ -1021,6 +1060,138 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every model Claude Code is set to use comes from the default's tier
+    /// or a more private one (owner, 2026-10-31): with a NEAR AI private
+    /// default, no alias, small/fast model or custom entry names an
+    /// Incognito model, so no background or subagent request leaves the
+    /// TEE. A family the pool lacks names the default.
+    #[test]
+    fn claude_never_names_a_less_private_model_than_its_default() {
+        let listed = tiered(&[
+            ("anthropic/claude-haiku-4-5", ModelTier::Incognito),
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+            ("anthropic/claude-opus-5-5", ModelTier::Incognito),
+            ("anthropic/claude-fable-5", ModelTier::Incognito),
+            ("z-ai/glm-5", ModelTier::External),
+            ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+        ]);
+        let default = select(ToolId::Claude, None, &listed).unwrap();
+        assert_eq!(default, "Qwen/Qwen3.8-27B");
+        let tier_of = |id: &str| listed.iter().find(|m| m.id == id).and_then(|m| m.tier);
+        let vars = claude_env(&default, &listed);
+        for (name, value) in &vars {
+            if let Some(id) = value {
+                assert_ne!(tier_of(id), Some(ModelTier::Incognito), "{name}={id}");
+                assert_ne!(tier_of(id), Some(ModelTier::External), "{name}={id}");
+            }
+        }
+        let env = env_of(&vars);
+        for var in [
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        ] {
+            assert_eq!(env[var], Some("Qwen/Qwen3.8-27B"), "{var}");
+        }
+        assert_eq!(env["ANTHROPIC_CUSTOM_MODEL_OPTION"], None);
+
+        // An External default may use a NEAR AI private model, never an
+        // Incognito one.
+        let vars = claude_env("z-ai/glm-5", &listed);
+        for (name, value) in &vars {
+            if let Some(id) = value {
+                assert_ne!(tier_of(id), Some(ModelTier::Incognito), "{name}={id}");
+            }
+        }
+
+        // A family the pool does hold is still named by its newest model.
+        let pooled = tiered(&[
+            ("anthropic/claude-haiku-4-5", ModelTier::Incognito),
+            ("anthropic/claude-haiku-5-5", ModelTier::NearAi),
+            ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+        ]);
+        let env_vars = claude_env("Qwen/Qwen3.8-27B", &pooled);
+        let env = env_of(&env_vars);
+        assert_eq!(
+            env["ANTHROPIC_SMALL_FAST_MODEL"],
+            Some("anthropic/claude-haiku-5-5")
+        );
+
+        // A person who chose an Incognito model keeps every family alias.
+        let vars = claude_env("anthropic/claude-sonnet-5-5", &listed);
+        let env = env_of(&vars);
+        assert_eq!(
+            env["ANTHROPIC_SMALL_FAST_MODEL"],
+            Some("anthropic/claude-haiku-4-5")
+        );
+    }
+
+    /// Inside a private pool Claude Code and OpenCode start on a model in
+    /// [`PRIVATE_PREFERRED`], whatever NEAR AI's alphabetical order puts
+    /// first; a pool holding none of them falls back to the first listed.
+    #[test]
+    fn a_private_pool_prefers_a_listed_agent_model_over_the_first() {
+        let listed = tiered(&[
+            (
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated",
+                ModelTier::NearAi,
+            ),
+            ("meta-llama/llama-3.3-70b-instruct", ModelTier::NearAi),
+            ("Qwen/Qwen3.8-9B", ModelTier::NearAi),
+            ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+        ]);
+        for tool in [ToolId::Claude, ToolId::Opencode] {
+            assert_eq!(default_for(tool, &listed).unwrap().id, PRIVATE_PREFERRED[0]);
+        }
+        // The list is walked in order: the first one listed wins.
+        let later = tiered(&[
+            ("a/unlisted", ModelTier::NearAi),
+            (PRIVATE_PREFERRED[2], ModelTier::NearAi),
+            (PRIVATE_PREFERRED[1], ModelTier::NearAi),
+        ]);
+        assert_eq!(
+            default_for(ToolId::Opencode, &later).unwrap().id,
+            PRIVATE_PREFERRED[1]
+        );
+        // External pool: its own entries in the list.
+        let external = tiered(&[
+            ("a/unlisted", ModelTier::External),
+            ("moonshotai/kimi-k3", ModelTier::External),
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+        ]);
+        assert_eq!(
+            default_for(ToolId::Claude, &external).unwrap().id,
+            "moonshotai/kimi-k3"
+        );
+        // No entry listed: the first in NEAR AI's order, as before.
+        let none = tiered(&[
+            ("a/first", ModelTier::NearAi),
+            ("b/second", ModelTier::NearAi),
+        ]);
+        assert_eq!(default_for(ToolId::Claude, &none).unwrap().id, "a/first");
+        // Never an abliterated model, a vision-only or an untooled one.
+        for id in PRIVATE_PREFERRED {
+            let lower = id.to_ascii_lowercase();
+            assert!(
+                !lower.contains("abliterated") && !lower.contains("-vl-"),
+                "{id}"
+            );
+        }
+        // Codex is unchanged: its own list, across every tier.
+        let codex = tiered(&[
+            ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+            ("openai/gpt-6-sol", ModelTier::Incognito),
+        ]);
+        assert_eq!(
+            default_for(ToolId::Codex, &codex).unwrap().id,
+            "openai/gpt-6-sol"
+        );
     }
 
     /// A family NEAR AI does not list maps to the default model, so the
