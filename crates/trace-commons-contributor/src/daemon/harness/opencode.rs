@@ -672,19 +672,23 @@ fn private_create(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
     }
 }
 
+/// Replace `path` with `bytes` through the shared owner-only atomic write
+/// (UUID temporary name, sync, and the Windows rename retry), then sync the
+/// directory. The error keeps its OS code and kind but no path.
 fn atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = tempfile::NamedTempFile::new_in(
-        path.parent()
-            .ok_or_else(|| std::io::Error::other("no parent"))?,
-    )?;
-    file.write_all(bytes)?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|e| e.error)?;
-    sync_directory(
-        path.parent()
-            .ok_or_else(|| std::io::Error::other("no parent"))?,
-    )?;
-    Ok(())
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("no parent"))?;
+    crate::config::write_atomic_0600(dir, path, bytes).map_err(|error| {
+        match error.root_cause().downcast_ref::<std::io::Error>() {
+            Some(io) => io
+                .raw_os_error()
+                .map(std::io::Error::from_raw_os_error)
+                .unwrap_or_else(|| io.kind().into()),
+            None => std::io::Error::other("atomic write failed"),
+        }
+    })?;
+    sync_directory(dir)
 }
 
 fn sync_directory(directory: &Path) -> std::io::Result<()> {

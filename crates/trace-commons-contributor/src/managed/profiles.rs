@@ -259,14 +259,29 @@ pub(crate) fn bounded_output(command: Command) -> Result<std::process::Output, M
     bounded_output_limit(command, 65536)
 }
 
+/// A scratch file that holds a helper's output until it is read, gone once
+/// its last handle closes (see `local_files::create_capture_file`). A
+/// failure is logged by its error kind and OS code only, never a path.
+fn capture_file() -> Result<std::fs::File, ManagedError> {
+    trace_commons_contributor_platform::local_files::create_capture_file(&std::env::temp_dir())
+        .map_err(|error| {
+            tracing::warn!(
+                kind = ?error.kind(),
+                os_error = ?error.raw_os_error(),
+                "managed output capture file could not be created"
+            );
+            ManagedError::StorageUnavailable
+        })
+}
+
 pub(crate) fn bounded_output_limit(
     mut command: Command,
     limit: u64,
 ) -> Result<std::process::Output, ManagedError> {
     use std::io::{Read, Seek};
     use std::process::Stdio;
-    let mut stdout = tempfile::tempfile().map_err(|_| ManagedError::StorageUnavailable)?;
-    let mut stderr = tempfile::tempfile().map_err(|_| ManagedError::StorageUnavailable)?;
+    let mut stdout = capture_file()?;
+    let mut stderr = capture_file()?;
     command
         .stdin(Stdio::null())
         .stdout(
