@@ -82,14 +82,10 @@ PACKAGE_DIR="$PWD"
 # shellcheck source=channel.sh
 . ./scripts/channel.sh
 load_channel
-# Every native release requests webcredentials and must embed a matching
-# Apple-issued profile. An override is explicit local input, never a download.
-# Refuse invalid/expired grants before build or signing credential import.
+# Every native release must embed a matching Apple-issued profile. An
+# override is explicit local input, never a download.
 SIGNING_PROFILE="${!TC_PROFILE_VAR:-$PACKAGE_DIR/$TC_PROFILE}"
 SIGNING_ENTITLEMENTS="$PACKAGE_DIR/$TC_ENTITLEMENTS"
-python3 "$PACKAGE_DIR/../scripts/ci/native-passkey-entitlements.py" \
-  --entitlements "$SIGNING_ENTITLEMENTS" --profile-cms "$SIGNING_PROFILE" \
-  --bundle-id "$TC_BUNDLE_ID" --require-passkeys
 CONFIG=release
 APP="$PACKAGE_DIR/.build/$TC_BUNDLE_NAME.app"
 DMG="$PACKAGE_DIR/.build/$TC_BUNDLE_NAME.dmg"
@@ -242,7 +238,7 @@ codesign --force --timestamp --options runtime \
 codesign --verify --deep --strict --verbose=2 "$APP"
 # Inspect the actual signed metadata and embedded grant before packaging.
 # The release workflow separately runs the real launch/Keychain probe.
-TC_REQUIRE_NATIVE_PASSKEYS=1 TC_VERIFY_STATIC_ONLY=1 \
+TC_VERIFY_STATIC_ONLY=1 \
   "$PACKAGE_DIR/../scripts/ci/verify-macos-entitlements.sh" "$APP"
 
 echo "--- packaging the DMG"

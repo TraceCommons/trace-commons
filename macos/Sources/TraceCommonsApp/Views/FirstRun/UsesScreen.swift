@@ -251,7 +251,7 @@ enum UsesScreenLayout {
         // line, never the refused grant's "Setup finished".
         case .completeFailed: return uses.completeFailed
         // Tools' and sign-in's failures, which never stop Start.
-        case .startFailed, .passkeyUnavailable, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
+        case .startFailed, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
             .nearAIEnrollFailed:
             return nil
         }

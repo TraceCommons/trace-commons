@@ -66,7 +66,6 @@ final class OnboardingNavigationTests: XCTestCase {
         XCTAssertFalse(calls.contains { if case .enroll = $0 { return true } else { return false } })
         XCTAssertTrue(calls.contains(.signInNearAI))
         XCTAssertFalse(calls.contains(.enrollNearAI))
-        XCTAssertFalse(calls.contains(.openPasskeySheets))
 
         state.signedIn = true
         XCTAssertTrue(JoinScreenLayout.canForward(state))

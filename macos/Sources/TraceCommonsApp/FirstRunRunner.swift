@@ -83,9 +83,6 @@ extension FirstRunDaemon {
 enum FirstRunFailure: Equatable {
     /// The daemon did not start.
     case startFailed
-    /// Create passkey on Join could not start the daemon its sheets need,
-    /// so none opened and no account was made. Join says so.
-    case passkeyUnavailable
     /// The running daemon refused a changed declaration (`set_settings`) on
     /// a later commit. It keeps watching what it held before.
     case settingsFailed
@@ -141,37 +138,13 @@ final class FirstRunRunner: ObservableObject {
     /// a Continue pressed straight after cannot start a sign-in the cancel
     /// then ends.
     private var loginCancel: Task<Bool, Never>?
-    /// The passkey sheets are asked for: by Create passkey on Join, after
-    /// starting the daemon when it was not running (`openPasskeyOnJoin`),
-    /// or by the commit that started the daemon for a passkey an earlier
-    /// build recorded as chosen. `firstRunPasskeySheets`, mounted on the
-    /// first-run host, presents them on whichever step is on screen.
-    @Published private(set) var passkeyDue = false
-    /// How the passkey sheets last ended, for Join's notice
-    /// (`PasskeySheetOutcome.joinNotice`). Cleared when they are asked for
-    /// again.
-    @Published private(set) var passkeyOutcome: PasskeySheetOutcome?
-    /// The step the requested sheets open at: P-1 when Join asked, P-7 when
-    /// the first run opened for a returning person (`offerWelcomeBack`).
-    @Published private(set) var passkeyStart: PasskeySheetStep = .choose
-    /// The remembered passkey's name P-7 shows, when the daemon has one.
-    @Published private(set) var returningName: String?
-    /// Welcome back is offered once per first run: dismissed, it does not
-    /// come back when the daemon restarts or Join is shown again.
-    private var welcomeBackOffered = false
-
-    /// Start ran `markComplete`: the first run is finished, and a passkey
-    /// sheet that ends afterwards does not reopen Join.
+    /// Start ran `markComplete`: the first run is finished.
     @Published private(set) var completed = false
 
     /// The daemon refused the grant during the last commit. `failure` says
     /// so too, unless `completeFailed` outranked it; this keeps the refusal
     /// for the retry that finishes on Ask.
     @Published private(set) var refusedGrant: FirstRunFailure?
-
-    /// The `unenroll` a sign-out on Join started, while it runs. A commit
-    /// waits for it, so a new enrollment is never made and then dropped.
-    private(set) var pendingUnenroll: Task<Void, Never>?
 
     private let daemon: FirstRunDaemon
     /// The core's sentence for the refusal a finished first run carries
@@ -204,10 +177,7 @@ final class FirstRunRunner: ObservableObject {
         guard !isCommitting else { return }
         isCommitting = true
         defer { isCommitting = false }
-        if let pending = pendingUnenroll { await pending.value }
-        // Create passkey on Join takes back only its own failure: a refused
-        // invite's line stays on Join beside it.
-        if point != .passkeyOnJoin || failure == .passkeyUnavailable { failure = nil }
+        failure = nil
         refusedGrant = nil
         carriedRefusal = refusal
         defer { carriedRefusal = nil }
@@ -219,12 +189,7 @@ final class FirstRunRunner: ObservableObject {
             return
         }
         for call in FirstRunPlan.calls(for: state, at: point) {
-            guard await run(call) else {
-                // On Join a failed start is the passkey's, not the
-                // watcher's: no folder has been answered yet.
-                if point == .passkeyOnJoin, failure == .startFailed { failure = .passkeyUnavailable }
-                return
-            }
+            guard await run(call) else { return }
         }
         if point == .leaveTools {
             state = FirstRunNavigation.next(state)
@@ -244,7 +209,7 @@ final class FirstRunRunner: ObservableObject {
     static func declaresRoots(_ point: CommitPoint) -> Bool {
         switch point {
         case .declareRoots, .leaveTools, .signIn: return true
-        case .passkeyOnJoin, .start: return false
+        case .start: return false
         }
     }
 
@@ -318,10 +283,6 @@ final class FirstRunRunner: ObservableObject {
                 state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
                 return fail(.nearAIEnrollFailed(label: label))
             }
-        case .openPasskeySheets:
-            // The person's ceremony, not awaited: the commit moves on and
-            // the sheets record their outcome when they end.
-            requestPasskey()
         case .setAskEachTime:
             guard await daemon.setAskEachTime() else { return fail(.sharingFailed) }
         case .setConsentScopes(let scopes):
@@ -364,79 +325,6 @@ final class FirstRunRunner: ObservableObject {
         loginCancel = cancel
         login.cancel()
         _ = await cancel.value
-    }
-
-    /// Create passkey on Join: the sheets open over Join, as in #1030, with
-    /// the daemon started first (watching nothing) when it is not running
-    /// (`CommitPoint.passkeyOnJoin`). A start that fails opens nothing and
-    /// reads `passkeyUnavailable`; Join stays.
-    func openPasskeyOnJoin() async {
-        await commit(.passkeyOnJoin)
-    }
-
-    /// Ask for the passkey sheets, at P-1.
-    func requestPasskey() {
-        passkeyStart = .choose
-        returningName = nil
-        passkeyOutcome = nil
-        passkeyDue = true
-    }
-
-    /// Ron's P-7 for a returning person (`FirstRunNavigation.opensWelcomeBack`):
-    /// asks the daemon which passkeys this Mac remembers and, if the rule
-    /// holds, opens the sheets at Welcome back with the remembered name. The
-    /// rule is checked again once the daemon answers, since Join (or an
-    /// enrollment the first status reported) can change meanwhile. Offered at
-    /// most once; its Sign in is the ordinary sign-in, and "Other sign-in
-    /// options" closes it and leaves Join as it was.
-    func offerWelcomeBack(from account: any PasskeyAccount) async {
-        guard !welcomeBackOffered, !passkeyDue,
-            FirstRunNavigation.mayOfferWelcomeBack(state, completed: completed)
-        else { return }
-        welcomeBackOffered = true
-        let passkeys = await account.passkeyState()
-        guard !passkeyDue, FirstRunNavigation.opensWelcomeBack(state, passkeys: passkeys, completed: completed)
-        else { return }
-        passkeyStart = .welcomeBack
-        returningName = passkeys?.rememberedName
-        passkeyOutcome = nil
-        passkeyDue = true
-    }
-
-    /// The passkey sheets ended: record their outcome (`JoinScreenLayout.apply`)
-    /// and lower the request, whatever the outcome, so a closed sheet is
-    /// asked again only by the next commit or the button.
-    ///
-    /// A sign-out (Verify cancelled) clears every sign-in, the invite
-    /// included, and the person is on Join, which says why; every other
-    /// answer is kept.
-    /// After Start the first run is finished and stays where it is.
-    func finishPasskey(_ outcome: PasskeySheetOutcome, copy: FirstRunCopy) {
-        state = JoinScreenLayout.apply(outcome, to: state, copy: copy).state
-        // A sign-out clears the invite (`JoinScreenLayout.signOut`), so its
-        // lookup goes with it: no joined line outlives it.
-        if outcome == .signedOut { lookup = nil }
-        if outcome == .signedOut, !completed { state.step = .join }
-        passkeyOutcome = outcome
-        passkeyDue = false
-        if outcome == .signedOut, !completed, state.signedOutOfEnrolment {
-            pendingUnenroll = Task { await self.unenrollAfterSignOut() }
-        }
-    }
-
-    /// A sign-out on Join left the daemon holding an enrollment
-    /// (`signedOutOfEnrolment`): ask it to unenroll, so the person can
-    /// choose any account, or watch only, again. Only a confirmed unenroll
-    /// clears the mark; a refusal, or a daemon without the call, leaves it
-    /// held, which fails closed as before. A finished first run's
-    /// enrollment is never dropped here.
-    private func unenrollAfterSignOut() async {
-        defer { pendingUnenroll = nil }
-        guard state.signedOutOfEnrolment else { return }
-        guard await daemon.unenroll() else { return }
-        // Something may have enrolled meanwhile; only the mark this
-        // sign-out set is cleared.
-        if state.signedOutOfEnrolment { state.signedOutOfEnrolment = false }
     }
 
     /// The marker is written. No suspension point separates this from the

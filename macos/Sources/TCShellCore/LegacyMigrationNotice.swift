@@ -70,13 +70,13 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
     public let dismiss: String
     /// Beside the dismiss: the move stays in Settings.
     public let later: String
-    /// Shown in place of the button while the passkey step runs in the
-    /// browser.
-    public let passkeyWaiting: String
-    /// The passkey step ended without finishing: nothing was moved.
-    public let passkeyFailed: String
-    /// Stops waiting on the passkey step.
-    public let passkeyCancel: String
+    /// Shown in place of the button while the NEAR AI login step runs in
+    /// the browser.
+    public let nearAILoginWaiting: String
+    /// The NEAR AI login step ended without finishing: nothing was moved.
+    public let nearAILoginFailed: String
+    /// Stops waiting on the NEAR AI login step.
+    public let nearAILoginCancel: String
     /// The accessible name of `action` on the card in the notices.
     public let actionNameNotice: String
     /// The accessible name of `action` in Settings.
@@ -100,9 +100,10 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
         case title, body, action, working, dismiss, later
         case invitePrompt = "invite_prompt"
         case startFailed = "start_failed"
-        case passkeyWaiting = "passkey_waiting"
-        case passkeyFailed = "passkey_failed"
-        case passkeyCancel = "passkey_cancel"
+        // The NEAR AI login step's keys keep their old `passkey_` wire names.
+        case nearAILoginWaiting = "passkey_waiting"
+        case nearAILoginFailed = "passkey_failed"
+        case nearAILoginCancel = "passkey_cancel"
         case actionNameNotice = "action_name_notice"
         case actionNameSettings = "action_name_settings"
     }
@@ -119,10 +120,10 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
     /// shows the invite field and sends what is pasted with the next move.
     public static let inviteNeededLabel = "legacy_migration_invite_needed"
 
-    /// The daemon's refusal label for a move that needs the passkey step
-    /// first (no session to provision the account with). The shell runs the
+    /// The daemon's refusal label for a move that needs the NEAR AI login
+    /// step first (no session to provision the account with). The shell runs the
     /// step itself and then retries the move.
-    public static let passkeyNeededLabel = "legacy_migration_no_near_ai_session"
+    public static let nearAILoginNeededLabel = "legacy_migration_no_near_ai_session"
 
     /// Decode the payload, or nil if it will not parse or a field is empty:
     /// shown whole or not at all.
@@ -134,8 +135,8 @@ public struct LegacyMigrationOffer: Decodable, Equatable, Sendable {
         }
         let words = [
             offer.title, offer.body, offer.action, offer.working, offer.invitePrompt,
-            offer.startFailed, offer.dismiss, offer.later, offer.passkeyWaiting, offer.passkeyFailed,
-            offer.passkeyCancel, offer.actionNameNotice, offer.actionNameSettings,
+            offer.startFailed, offer.dismiss, offer.later, offer.nearAILoginWaiting,
+            offer.nearAILoginFailed, offer.nearAILoginCancel, offer.actionNameNotice, offer.actionNameSettings,
         ]
         return words.contains(where: \.isEmpty) ? nil : offer
     }

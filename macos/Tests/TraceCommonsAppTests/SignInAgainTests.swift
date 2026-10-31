@@ -19,8 +19,9 @@ final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
     /// How long `near_ai_account_sign_in` blocks its thread, as a ceremony
     /// waiting on the network does.
     var signInDelay: TimeInterval = 0
-    /// `sign_in` on the status read: `near_ai` or `passkey`.
-    var signInPath = "near_ai"
+    /// `sign_in` on the status read: `near_ai`, or nil (null) for an
+    /// account that signs in through `account_sign_in`.
+    var signInPath: String? = "near_ai"
     /// The browser sign-in ends without a login (closed, timed out).
     var attemptFails = false
     private var attempt = "absent"
@@ -48,7 +49,7 @@ final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
             return Self.ok(["state": "known", "signed_in": now, "expires_at": NSNull(),
                             "renewal": now ? NSNull() : "failed",
                             "renewal_failure": now ? NSNull() : "near_ai_sign_in_required",
-                            "sign_in": signInPath])
+                            "sign_in": signInPath ?? NSNull()])
         case "near_ai_account_sign_in":
             if signInDelay > 0 { Thread.sleep(forTimeInterval: signInDelay) }
             return lock.withLock {
@@ -90,7 +91,7 @@ final class NearAiAccountDaemon: DaemonCalling, @unchecked Sendable {
             return Self.ok(["state": "present", "session_state": "present",
                             "attempt_id": "synthetic-attempt-\(snapshot.1)", "attempt_status": snapshot.0])
         case "account_sign_in":
-            return #"{"error":{"code":"unavailable","message":"passkey-not-for-this-account"}}"#
+            return #"{"error":{"code":"unavailable","message":"account-sign-in-not-for-this-account"}}"#
         default:
             return #"{"error":{"code":"unknown_method","message":"unknown-method"}}"#
         }
@@ -122,9 +123,8 @@ final class SignInAgainTests: XCTestCase {
         return (model, { opened.withLock { urls } })
     }
 
-    /// Sign in again on a NEAR AI account runs the NEAR AI path, never the
-    /// passkey sign-in it has no passkey for, and trusts only the status
-    /// read after it.
+    /// Sign in again on a NEAR AI account runs the NEAR AI path, never
+    /// `account_sign_in`, and trusts only the status read after it.
     @MainActor
     func test_aNearAiAccountSignsInAgainWithItsNearAiLogin() async {
         let daemon = NearAiAccountDaemon()
@@ -138,7 +138,7 @@ final class SignInAgainTests: XCTestCase {
         XCTAssertEqual(model.accountSession, .signedIn)
         XCTAssertNil(model.accountSignInFailure)
         XCTAssertEqual(model.accountSignInPath, "near_ai")
-        XCTAssertEqual(daemon.count("account_sign_in"), 0, "a NEAR AI account has no passkey sign-in")
+        XCTAssertEqual(daemon.count("account_sign_in"), 0, "a NEAR AI account never uses account_sign_in")
         XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 1)
         XCTAssertEqual(daemon.calls.last, "account_session_status", "the session is read again after")
         XCTAssertEqual(daemon.count("near_ai_credential_start"), 0, "Trace-only sign-in reuses the healthy NEAR AI login")

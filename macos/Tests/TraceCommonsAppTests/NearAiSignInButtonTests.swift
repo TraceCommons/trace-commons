@@ -119,7 +119,7 @@ final class NearAiSignInButtonTests: XCTestCase {
         XCTAssertEqual(model.accountSession, .signedIn)
         XCTAssertEqual(daemon.count("near_ai_credential_start"), 1)
         XCTAssertEqual(daemon.count("near_ai_account_sign_in"), 1)
-        XCTAssertEqual(daemon.count("account_sign_in"), 0, "never the passkey path for a NEAR AI account")
+        XCTAssertEqual(daemon.count("account_sign_in"), 0, "never account_sign_in for a NEAR AI account")
         XCTAssertEqual(model.accountSessionGeneration, generation + 1, "billing and payout read again")
         try await waitFor("balance read again") { daemon.count("near_ai_balance") > 0 }
     }
@@ -148,12 +148,13 @@ final class NearAiSignInButtonTests: XCTestCase {
         XCTAssertEqual(model.accountSession, .signedIn)
     }
 
-    /// A passkey account whose NEAR AI login is refused has nothing to
-    /// renew at the commons: only the NEAR AI browser sign-in runs.
+    /// An account that is not a NEAR AI account (no `sign_in`) whose NEAR
+    /// AI login is refused has nothing to renew at the commons: only the
+    /// NEAR AI browser sign-in runs.
     @MainActor
-    func test_aPasskeyAccountSignsInToNearAiOnly() async throws {
+    func test_aNonNearAiAccountSignsInToNearAiOnly() async throws {
         let daemon = NearAiAccountDaemon()
-        daemon.signInPath = "passkey"
+        daemon.signInPath = nil
         let (model, opened) = model(daemon)
 
         let signIn = Task { await model.signInToNearAI() }
@@ -244,9 +245,9 @@ final class NearAiSignInButtonTests: XCTestCase {
     }
 
     @MainActor
-    func test_passkeyAccountsCanRestartTheNearAiBrowserWait() async throws {
+    func test_nonNearAiAccountsCanRestartTheNearAiBrowserWait() async throws {
         let daemon = NearAiAccountDaemon()
-        daemon.signInPath = "passkey"
+        daemon.signInPath = nil
         let (model, opened) = model(daemon)
         let signIn = Task { await model.signInToNearAI() }
         try await waitFor("first browser opened") { opened().count == 1 }

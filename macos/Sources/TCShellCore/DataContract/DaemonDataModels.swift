@@ -2026,29 +2026,6 @@ extension DaemonData {
         }
     }
 
-    public struct PasskeyState: Codable, Equatable, Sendable {
-        /// `none`, `unknown`, or binding labels `unbound|bound|closed|legacy`.
-        public let state: String
-        /// The passkeys this Mac remembers, not the account's on the server;
-        /// null when the daemon cannot read its list. Connection is never
-        /// inferred from a missing binding row.
-        public let passkeyCount: Int?
-        /// The most recently used remembered passkey's name, if it has one.
-        public let rememberedName: String?
-        /// The name remembered for the signed-in account's own record, never
-        /// the most recent record's; nil when signed out or unnamed.
-        public let signedInName: String?
-        public let nearAiConnected: Bool?
-
-        public enum CodingKeys: String, CodingKey {
-            case state
-            case passkeyCount = "passkey_count"
-            case rememberedName = "remembered_name"
-            case signedInName = "signed_in_name"
-            case nearAiConnected = "near_ai_connected"
-        }
-    }
-
     /// `account_session_status`: unreadable storage is unknown, never signed out.
     public struct AccountState: Codable, Equatable, Sendable {
         public let state: String
