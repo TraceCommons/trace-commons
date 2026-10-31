@@ -58,7 +58,7 @@ struct ManagedFolderOptions: View {
                 HStack(spacing: GlassTokens.Space.s2) {
                     GlassPicker(model.managedText("model_choice"), selection: Binding(
                         get: { draft.model ?? ManagedSurface.defaultModel },
-                        set: { draft.choose($0.flatMap { $0.isEmpty ? nil : $0 }); favoriteError = nil }),
+                        set: { draft.choose($0.flatMap { $0.isEmpty ? nil : $0 }, in: catalogue); favoriteError = nil }),
                         options: modelOptions, placeholder: model.managedText("model_default_unknown"))
                     if let chosen = draft.model, ManagedSurface.offersFavorite(chosen, in: catalogue) {
                         favoriteStar(chosen)
@@ -72,6 +72,9 @@ struct ManagedFolderOptions: View {
             // A new account or folder takes these fields away while its
             // settings load; a refused star's line was about the old one.
             .onDisappear { favoriteError = nil }
+            if offersBackground {
+                backgroundPicker
+            }
             ForEach(ManagedSurface.unavailableFavorites(catalogue), id: \.self) { stale in
                 unavailableFavoriteRow(stale)
             }
@@ -201,6 +204,41 @@ struct ManagedFolderOptions: View {
         Self.pickerOptions(catalogue, chosen: draft.model, copy: model.managedText)
     }
 
+    /// The background picker shows only to a daemon that reads the choice,
+    /// for Claude Code and OpenCode on NEAR AI's catalogue.
+    private var offersBackground: Bool {
+        ManagedSurface.offersBackgroundModel(tool: tool, connection: connection)
+            && model.managedSnapshot?.capabilities.backgroundModel == true
+    }
+
+    /// The model for background work, under the model picker: its title,
+    /// then a picker of the models no less private than the main model.
+    private var backgroundPicker: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            Text(model.managedText("background_model_title"))
+                .glassType(GlassTokens.TypeScale.eyebrow)
+                .foregroundStyle(GlassColor.textTertiary)
+            GlassPicker(model.managedText("background_model_choice"), selection: Binding(
+                get: { draft.backgroundModel ?? ManagedSurface.defaultModel },
+                set: { draft.chooseBackground($0.flatMap { $0.isEmpty ? nil : $0 }) }),
+                options: Self.backgroundPickerOptions(catalogue, main: draft.model, chosen: draft.backgroundModel,
+                                                      copy: model.managedText),
+                placeholder: model.managedText("model_default_unknown"))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // A saved choice the folder's main model no longer allows goes back
+        // to the default once the catalogue says so.
+        .onChange(of: catalogue, initial: true) { _, _ in draft.reconcileBackground(in: catalogue) }
+    }
+
+    /// The background picker's options, with tiers shown as the model
+    /// picker shows them (`pickerOptions`). A chosen model with no
+    /// catalogue to weigh it against is kept, with no tier.
+    static func backgroundPickerOptions(_ catalogue: ManagedModelCatalogue?, main: String?, chosen: String?,
+                                        copy: (String) -> String) -> [GlassPickerOption<String>] {
+        glassOptions(ManagedSurface.backgroundOptions(catalogue, main: main, copy: copy), chosen: chosen)
+    }
+
     /// The dot a model's privacy takes (owner, 2026-10-31): NEAR AI private
     /// is on, External is ask, Incognito is outside. The core reads the
     /// tier (`ManagedSurface.modelPrivacy`); this is only the palette.
@@ -217,7 +255,13 @@ struct ManagedFolderOptions: View {
     /// row's, shown by its dot and its tier's existing group heading. A
     /// chosen model the catalogue does not list is kept, with no tier.
     static func pickerOptions(_ catalogue: ManagedModelCatalogue?, chosen: String?, copy: (String) -> String) -> [GlassPickerOption<String>] {
-        var values = ManagedSurface.modelOptions(catalogue, copy: copy)
+        glassOptions(ManagedSurface.modelOptions(catalogue, copy: copy), chosen: chosen)
+    }
+
+    /// Core options as glass picker options, each tier shown by its dot
+    /// and heading, plus `chosen` when the options lack it.
+    private static func glassOptions(_ options: [ManagedModelOption], chosen: String?) -> [GlassPickerOption<String>] {
+        var values = options
             .map { GlassPickerOption($0.title, value: $0.value, dot: tierDot($0.privacy), section: $0.section, detail: $0.tierHeading) }
         if let chosen, !values.contains(where: { $0.value == chosen }) {
             values.append(GlassPickerOption(chosen, value: chosen))

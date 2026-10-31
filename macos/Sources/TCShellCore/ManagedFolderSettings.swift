@@ -4,6 +4,8 @@ import Foundation
 public struct ManagedFolderSettings: Codable, Equatable, Sendable {
     public let tool: String
     public let model: String?
+    /// The folder's background model; absent (none) from an older daemon.
+    public let backgroundModel: String?
     public let collectTraces: Bool
     public let cliOptions: String
     public let remembered: Bool
@@ -11,6 +13,7 @@ public struct ManagedFolderSettings: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case tool, model, remembered, revision
+        case backgroundModel = "background_model"
         case collectTraces = "collect_traces", cliOptions = "cli_options"
     }
 }
@@ -42,6 +45,8 @@ public struct ManagedFolderDraft: Equatable, Sendable {
     /// the folder's saved model. The launch runs the default and sends
     /// `keep_saved_model`, so the saved model is not replaced by it.
     public private(set) var keepsSavedModel = false
+    /// The model for the tool's background work; none for its default.
+    public private(set) var backgroundModel: String?
     public var collectTraces = false
     public var cliOptions = ""
 
@@ -64,6 +69,7 @@ public struct ManagedFolderDraft: Equatable, Sendable {
         guard self.token == token else { return false }
         guard settings.tool == tool else { phase = .failed; return false }
         model = settings.model
+        backgroundModel = settings.backgroundModel
         collectTraces = settings.collectTraces
         cliOptions = settings.cliOptions
         remembered = settings.remembered
@@ -92,6 +98,24 @@ public struct ManagedFolderDraft: Equatable, Sendable {
         keepsSavedModel = false
     }
 
+    /// `choose`, then clear a background choice the new main model does
+    /// not allow (`ManagedSurface.reconciledBackground`): the background
+    /// model is never less private than the main one.
+    public mutating func choose(_ model: String?, in catalogue: ManagedModelCatalogue?) {
+        choose(model)
+        reconcileBackground(in: catalogue)
+    }
+
+    /// A background model the person picked (nil for the default).
+    public mutating func chooseBackground(_ model: String?) {
+        backgroundModel = model
+    }
+
+    /// Clear a background choice the current main model does not allow.
+    public mutating func reconcileBackground(in catalogue: ManagedModelCatalogue?) {
+        backgroundModel = ManagedSurface.reconciledBackground(backgroundModel, main: model, in: catalogue)
+    }
+
     public mutating func useDefaults(tool: String, cwd: String?, cliOptions: String) {
         self = Self()
         self.tool = tool
@@ -114,13 +138,22 @@ public extension ManagedFolderDraft {
     /// Only launch choices change; the account remains the caller's selection.
     /// `keep_saved_model` goes only to a daemon that reads it
     /// (`capabilities.keep_saved_model`): an older one refuses the field.
-    func applying(to params: [String: Any], daemonKeepsSavedModel: Bool) -> [String: Any] {
+    /// `background_model` likewise goes only to a daemon that reads it
+    /// (`capabilities.background_model`), and only for a tool with a
+    /// background picker.
+    func applying(to params: [String: Any], daemonKeepsSavedModel: Bool,
+                  daemonReadsBackground: Bool = false) -> [String: Any] {
         var result = params
         result["cli_options"] = cliOptions
         result["collect_traces"] = collectTraces
-        let mode = ManagedSurface.folderModelMode(tool: params["tool"] as? String ?? "", connection: params["connection"] as? String ?? "")
+        let tool = params["tool"] as? String ?? "", connection = params["connection"] as? String ?? ""
+        let mode = ManagedSurface.folderModelMode(tool: tool, connection: connection)
         result["model"] = mode == .none ? nil : model
         if keepsSavedModel && mode != .none && daemonKeepsSavedModel { result["keep_saved_model"] = true }
+        if daemonReadsBackground, ManagedSurface.offersBackgroundModel(tool: tool, connection: connection),
+           let backgroundModel {
+            result["background_model"] = backgroundModel
+        }
         return result
     }
 }

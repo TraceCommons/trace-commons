@@ -67,6 +67,25 @@ final class ManagedModelPickerTierTests: XCTestCase {
         XCTAssertNil(ManagedFolderOptions.tierDot(nil))
     }
 
+    /// The background picker shows tiers as the model picker does: dots
+    /// and the tier heading on the default row and every allowed model.
+    func testTheBackgroundPickerShowsTiersLikeTheModelPicker() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
+        {"models":[{"id":"n/main","tier":"near_ai"},{"id":"n/small","tier":"near_ai"},{"id":"i/one","tier":"incognito"}],
+        "tier_order":["near_ai","external","incognito"],"default":"n/main","favorites":["n/small"],
+        "background_defaults":{"n/main":"n/small","i/one":"i/one"}}
+        """#.utf8))
+        let options = ManagedFolderOptions.backgroundPickerOptions(
+            catalogue, main: nil, chosen: nil, copy: { Self.copy[$0] ?? "" })
+        XCTAssertEqual(options.map(\.value), ["", "n/small", "n/main"])
+        XCTAssertEqual(options.map(\.title), ["Default: n/small", "n/small", "n/main"])
+        XCTAssertEqual(options.map(\.dot), [.on, .on, .on])
+        XCTAssertEqual(options.map(\.detail), Array(repeating: "NEAR AI private models", count: 3))
+        let incognito = ManagedFolderOptions.backgroundPickerOptions(
+            catalogue, main: "i/one", chosen: nil, copy: { Self.copy[$0] ?? "" })
+        XCTAssertEqual(incognito.map(\.dot), [.outside, .on, .on, .outside])
+    }
+
     func testAChosenModelTheCatalogueLacksIsKeptWithoutATier() throws {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(
             #"{"models":[{"id":"a/b"}],"default":null}"#.utf8))

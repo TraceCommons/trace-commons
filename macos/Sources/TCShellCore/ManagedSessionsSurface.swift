@@ -111,6 +111,9 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         /// older daemon refuses the unknown field, so it is sent only when
         /// this is true; absent reads as no.
         public let keepSavedModel: Bool?
+        /// Whether `managed_launch_prepare` reads `background_model`. Sent
+        /// only when this is true, as for `keepSavedModel`; absent is no.
+        public let backgroundModel: Bool?
         public let managedLaunch: Bool
         public let terminalLaunch: Bool
         /// Terminal installer support; absent from older daemons.
@@ -133,6 +136,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case toolSetup = "tool_setup"
             case folderSettings = "folder_settings"
             case keepSavedModel = "keep_saved_model"
+            case backgroundModel = "background_model"
             case nearAiSignin = "near_ai_signin"
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
             case terminalChosen = "terminal_chosen"
@@ -337,11 +341,15 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
     /// reads as `ManagedSurface.knownTierOrder`, so its tiered models are
     /// still grouped; an empty list sent by the core is followed.
     public let tierOrder: [String]
+    /// Each model's background model when it is the main model and none is
+    /// chosen (`background_defaults`). An older daemon sends none.
+    public let backgroundDefaults: [String: String]
 
     private enum CodingKeys: String, CodingKey {
         case models, `default`, favorites
         case unavailableFavorites = "unavailable_favorites"
         case tierOrder = "tier_order"
+        case backgroundDefaults = "background_defaults"
     }
 
     public init(from decoder: Decoder) throws {
@@ -351,14 +359,26 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         favorites = try container.decodeIfPresent([String].self, forKey: .favorites) ?? []
         unavailableFavorites = try container.decodeIfPresent([String].self, forKey: .unavailableFavorites) ?? []
         tierOrder = try container.decodeIfPresent([String].self, forKey: .tierOrder) ?? ManagedSurface.knownTierOrder
+        backgroundDefaults = try container.decodeIfPresent([String: String].self, forKey: .backgroundDefaults) ?? [:]
     }
 
-    private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String], tierOrder: [String]) {
+    private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String],
+                 tierOrder: [String], backgroundDefaults: [String: String]) {
         self.models = models
         self.default = `default`
         self.favorites = favorites
         self.unavailableFavorites = unavailableFavorites
         self.tierOrder = tierOrder
+        self.backgroundDefaults = backgroundDefaults
+    }
+
+    /// This catalogue cut to `allowed`, its default replaced: the shape the
+    /// background picker lists, through the model picker's own options.
+    func restricted(to allowed: Set<String>, default: String?) -> ManagedModelCatalogue {
+        ManagedModelCatalogue(
+            models: models.filter { allowed.contains($0.id) }, default: `default`,
+            favorites: favorites.filter(allowed.contains), unavailableFavorites: [],
+            tierOrder: tierOrder, backgroundDefaults: backgroundDefaults)
     }
 
     /// This catalogue with `managed_model_favorite_set`'s answer, the
@@ -372,7 +392,7 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
             models: models, default: `default`,
             favorites: models.map(\.id).filter(held.contains),
             unavailableFavorites: unavailableFavorites.filter(held.contains),
-            tierOrder: tierOrder)
+            tierOrder: tierOrder, backgroundDefaults: backgroundDefaults)
     }
 }
 
@@ -557,6 +577,56 @@ public extension ManagedSurface {
             }
         }
         return [head] + favored + byTier.flatMap { $0 } + rest
+    }
+
+    /// Whether the Launch sheet offers a background model picker: Claude
+    /// Code and OpenCode wherever their main model comes from NEAR AI's
+    /// catalogue. Codex has no background slot of its own.
+    static func offersBackgroundModel(tool: String, connection: String) -> Bool {
+        tool != "codex" && folderModelMode(tool: tool, connection: connection) == .catalogue
+    }
+
+    /// The main model a background choice is weighed against: the chosen
+    /// one, else the catalogue's default.
+    static func backgroundMain(_ main: String?, in catalogue: ManagedModelCatalogue) -> ManagedModel? {
+        let id = main ?? catalogue.default
+        return catalogue.models.first { $0.id == id }
+    }
+
+    /// The models that may do `main`'s background work: those whose tier
+    /// is `main`'s or more private, by the core's order (owner,
+    /// 2026-10-31). A main model whose tier the order lacks claims nothing,
+    /// so every model; beside one it has, a model with no known tier is not
+    /// offered. The core applies the same rule (`models::background_options`).
+    static func backgroundAllowed(_ main: ManagedModel?, in catalogue: ManagedModelCatalogue) -> [ManagedModel] {
+        let order = catalogue.tierOrder
+        guard let rank = main?.tier.flatMap({ order.firstIndex(of: $0) }) else { return catalogue.models }
+        return catalogue.models.filter { model in
+            model.tier.flatMap { order.firstIndex(of: $0) }.map { $0 <= rank } ?? false
+        }
+    }
+
+    /// The background picker's options: the default row, which names the
+    /// main model's background default, then the allowed models laid out
+    /// as the model picker lays them out, with their tiers. With no
+    /// catalogue, only the default.
+    static func backgroundOptions(_ catalogue: ManagedModelCatalogue?, main: String?,
+                                  copy: (String) -> String) -> [ManagedModelOption] {
+        guard let catalogue else { return modelOptions(nil, copy: copy) }
+        let mainModel = backgroundMain(main, in: catalogue)
+        let allowed = Set(backgroundAllowed(mainModel, in: catalogue).map(\.id))
+        let named = mainModel.flatMap { catalogue.backgroundDefaults[$0.id] }.flatMap { allowed.contains($0) ? $0 : nil }
+        return modelOptions(catalogue.restricted(to: allowed, default: named), copy: copy)
+    }
+
+    /// A background choice once the main model is known: kept when the
+    /// main model allows it, otherwise none, the default. Without a
+    /// catalogue it is kept: unknown is not removed.
+    static func reconciledBackground(_ background: String?, main: String?,
+                                     in catalogue: ManagedModelCatalogue?) -> String? {
+        guard let background, let catalogue else { return background }
+        let allowed = backgroundAllowed(backgroundMain(main, in: catalogue), in: catalogue)
+        return allowed.contains { $0.id == background } ? background : nil
     }
 
     /// The favorites NEAR AI no longer lists, each shown with a way to
