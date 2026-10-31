@@ -8,8 +8,8 @@
     {
         "type": "git",
         "url": "https://github.com/nearai/ironwire",
-        "commit": "c9201c93bbc6bb44aa29ad90820777875f4726e6",
-        "dest": "flatpak-cargo/git/ironwire-c9201c9"
+        "commit": "1b2f65f976a8720848fe49c4fab2836be008dd29",
+        "dest": "flatpak-cargo/git/ironwire-1b2f65f"
     },
     {
         "type": "archive",
@@ -2798,7 +2798,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_agents\" \"cargo/vendor/ironwire_agents\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_agents\" \"cargo/vendor/ironwire_agents\""
         ]
     },
     {
@@ -2816,7 +2816,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_catalog\" \"cargo/vendor/ironwire_catalog\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_catalog\" \"cargo/vendor/ironwire_catalog\""
         ]
     },
     {
@@ -2834,7 +2834,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_core\" \"cargo/vendor/ironwire_core\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_core\" \"cargo/vendor/ironwire_core\""
         ]
     },
     {
@@ -2852,7 +2852,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_creds\" \"cargo/vendor/ironwire_creds\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_creds\" \"cargo/vendor/ironwire_creds\""
         ]
     },
     {
@@ -2870,7 +2870,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_ledger\" \"cargo/vendor/ironwire_ledger\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_ledger\" \"cargo/vendor/ironwire_ledger\""
         ]
     },
     {
@@ -2888,7 +2888,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_privacy\" \"cargo/vendor/ironwire_privacy\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_privacy\" \"cargo/vendor/ironwire_privacy\""
         ]
     },
     {
@@ -2906,7 +2906,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_proxy\" \"cargo/vendor/ironwire_proxy\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_proxy\" \"cargo/vendor/ironwire_proxy\""
         ]
     },
     {
@@ -2924,7 +2924,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_translate\" \"cargo/vendor/ironwire_translate\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_translate\" \"cargo/vendor/ironwire_translate\""
         ]
     },
     {
@@ -2942,7 +2942,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_update\" \"cargo/vendor/ironwire_update\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_update\" \"cargo/vendor/ironwire_update\""
         ]
     },
     {
@@ -2960,7 +2960,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_upstream\" \"cargo/vendor/ironwire_upstream\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_upstream\" \"cargo/vendor/ironwire_upstream\""
         ]
     },
     {
@@ -2978,7 +2978,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-c9201c9/crates/ironwire_usage\" \"cargo/vendor/ironwire_usage\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/ironwire-1b2f65f/crates/ironwire_usage\" \"cargo/vendor/ironwire_usage\""
         ]
     },
     {
@@ -7051,7 +7051,7 @@
     },
     {
         "type": "inline",
-        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/nearai/ironclaw\"]\ngit = \"https://github.com/nearai/ironclaw\"\nreplace-with = \"vendored-sources\"\nbranch = \"main\"\n\n[source.\"https://github.com/nearai/ironwire\"]\ngit = \"https://github.com/nearai/ironwire\"\nreplace-with = \"vendored-sources\"\nrev = \"c9201c93bbc6bb44aa29ad90820777875f4726e6\"\n",
+        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/nearai/ironclaw\"]\ngit = \"https://github.com/nearai/ironclaw\"\nreplace-with = \"vendored-sources\"\nbranch = \"main\"\n\n[source.\"https://github.com/nearai/ironwire\"]\ngit = \"https://github.com/nearai/ironwire\"\nreplace-with = \"vendored-sources\"\nrev = \"1b2f65f976a8720848fe49c4fab2836be008dd29\"\n",
         "dest": "cargo",
         "dest-filename": "config"
     }
