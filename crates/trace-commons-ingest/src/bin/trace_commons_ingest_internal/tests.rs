@@ -10592,6 +10592,7 @@ async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry(
         TraceSubmissionQuotaConfig {
             max_per_tenant_per_hour: 1,
             max_per_principal_per_hour: 0,
+            max_per_account_per_hour: 0,
         },
     );
     let envelope = sample_envelope().await;
@@ -10627,6 +10628,7 @@ async fn submit_quota_limits_principal_without_blocking_other_contributors() {
         TraceSubmissionQuotaConfig {
             max_per_tenant_per_hour: 0,
             max_per_principal_per_hour: 1,
+            max_per_account_per_hour: 0,
         },
     );
 
@@ -10652,6 +10654,7 @@ async fn submit_quota_ignores_revoked_submissions() {
         TraceSubmissionQuotaConfig {
             max_per_tenant_per_hour: 1,
             max_per_principal_per_hour: 1,
+            max_per_account_per_hour: 0,
         },
     );
     let first = sample_envelope().await;
@@ -10675,6 +10678,136 @@ async fn submit_quota_ignores_revoked_submissions() {
     let _ = test_submit(state, "token-a", replacement)
         .await
         .expect("revoked submission no longer consumes quota");
+}
+
+#[test]
+fn account_hourly_submission_ceiling_is_on_by_default_and_zero_turns_it_off() {
+    assert_eq!(ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT, 600);
+    assert_eq!(
+        parse_account_hourly_submission_ceiling(None).expect("unset takes the default"),
+        ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT
+    );
+    assert_eq!(
+        parse_account_hourly_submission_ceiling(Some("0")).expect("zero parses"),
+        0,
+        "zero turns the ceiling off"
+    );
+    assert_eq!(
+        parse_account_hourly_submission_ceiling(Some(" 25 ")).expect("a count parses"),
+        25
+    );
+    let error = parse_account_hourly_submission_ceiling(Some("many"))
+        .expect_err("a non-numeric ceiling refuses startup");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR)
+    );
+}
+
+#[tokio::test]
+async fn account_hourly_submission_ceiling_refuses_the_next_upload_with_a_retry_hint() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let first = sample_envelope().await;
+    let Json(first_receipt) = test_submit(state.clone(), "token-a", first.clone())
+        .await
+        .expect("the first upload of the hour is admitted");
+    let Json(retry_receipt) = test_submit(state.clone(), "token-a", first)
+        .await
+        .expect("a retry of a recorded submission is not counted against itself");
+    assert_eq!(retry_receipt.status, first_receipt.status);
+
+    let blocked = test_submit(state.clone(), "token-a", sample_envelope().await)
+        .await
+        .expect_err("a new upload past the ceiling is refused");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL,
+        "the label clients already keep an upload queued for"
+    );
+    let retry_after = blocked
+        .1
+        .0
+        .retry_after_seconds
+        .expect("the refusal says when to come back");
+    assert!(
+        (1..=3600).contains(&retry_after),
+        "the wait is inside the hour window: {retry_after}"
+    );
+    let response = api_error_response_with_retry_after(blocked);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some(retry_after.to_string().as_str())
+    );
+
+    // A tenant outside the account namespaces (a legacy invite or pooled
+    // tenant) is bounded per principal: another contributor in it, and
+    // another tenant, are not refused.
+    let _ = test_submit(state.clone(), "token-a-2", sample_envelope().await)
+        .await
+        .expect("another principal in a legacy tenant has its own ceiling");
+    let _ = test_submit(state, "token-b", sample_envelope().await)
+        .await
+        .expect("another tenant has its own ceiling");
+}
+
+#[tokio::test]
+async fn account_hourly_submission_ceiling_of_zero_bounds_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 0,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    for _ in 0..3 {
+        let _ = test_submit(state.clone(), "token-a", sample_envelope().await)
+            .await
+            .expect("a ceiling of zero refuses nothing");
+    }
+}
+
+/// The ceiling runs before the admission reservation, and both hourly checks
+/// run before the server re-scrub and the per-tenant history reads, so an
+/// upload refused for its rate costs neither.
+#[test]
+fn hourly_submission_checks_run_before_the_rescrub_and_history_reads() {
+    let source = include_str!("../trace-commons-ingest.rs");
+    let handler = source
+        .find("async fn submit_trace_handler_authenticated(")
+        .expect("the submit handler");
+    let at = |needle: &str| {
+        handler
+            + source[handler..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("submit handler calls {needle}"))
+    };
+    let ceiling = at("enforce_account_hourly_submission_ceiling(");
+    let reserve = at("admission::reserve(");
+    let quota = at("enforce_submission_quota(state.as_ref(), &tenant)");
+    let rescrub = at("rescrub_trace_envelope(&mut envelope)");
+    let derived = at("read_all_derived_records(&state.root, tenant.tenant_id())");
+    assert!(
+        ceiling < reserve,
+        "the ceiling runs before admission reserves"
+    );
+    assert!(ceiling < rescrub, "the ceiling runs before the rescrub");
+    assert!(quota < rescrub, "the hourly quota runs before the rescrub");
+    assert!(
+        quota < derived,
+        "the hourly quota runs before the derived-record read"
+    );
 }
 
 #[test]
@@ -16236,7 +16369,8 @@ async fn admin_config_status_route_returns_safe_projection() {
                 "submission_quota",
                 serde_json::json!({
                     "max_per_tenant_per_hour": 0,
-                    "max_per_principal_per_hour": 0
+                    "max_per_principal_per_hour": 0,
+                    "max_per_account_per_hour": 0
                 }),
             ),
             (
