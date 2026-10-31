@@ -258,14 +258,14 @@ pub struct NearAiTransferClient {
     http: reqwest::Client,
     base: String,
     credentials: NearAiTransferCredentials,
-    credential_hash: String,
+    credential_label: String,
 }
 
 impl fmt::Debug for NearAiTransferClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NearAiTransferClient")
-            .field("credential", &self.credential_hash)
+            .field("credential", &self.credential_label)
             .finish_non_exhaustive()
     }
 }
@@ -346,12 +346,12 @@ impl NearAiTransferClient {
             .timeout(timeout)
             .build()
             .map_err(|_| NearAiTransferError::ClientConfig)?;
-        let credential_hash = Self::credential_label(credentials.credential_id);
+        let credential_label = Self::credential_label(credentials.credential_id);
         Ok(Self {
             http,
             base: base.to_string(),
             credentials,
-            credential_hash,
+            credential_label,
         })
     }
 
@@ -362,7 +362,7 @@ impl NearAiTransferClient {
     }
 
     /// The `sha256:` of a credential id, the only form of it that is logged.
-    pub fn credential_id_hash(credential_id: Uuid) -> String {
+    fn credential_id_hash(credential_id: Uuid) -> String {
         format!(
             "sha256:{}",
             hex::encode(Sha256::digest(
@@ -566,14 +566,14 @@ impl NearAiTransferClient {
             Ok(_) => tracing::info!(
                 rail = "near_ai",
                 call,
-                credential = %self.credential_hash,
+                credential = %self.credential_label,
                 outcome = "ok",
                 "near_ai payout call"
             ),
             Err(NearAiTransferError::Refused { status, code }) => tracing::warn!(
                 rail = "near_ai",
                 call,
-                credential = %self.credential_hash,
+                credential = %self.credential_label,
                 outcome = "refused",
                 status,
                 code = code.as_label(),
@@ -582,7 +582,7 @@ impl NearAiTransferClient {
             Err(error) => tracing::warn!(
                 rail = "near_ai",
                 call,
-                credential = %self.credential_hash,
+                credential = %self.credential_label,
                 outcome = error.label(),
                 "near_ai payout call"
             ),
@@ -667,6 +667,17 @@ struct ErrorReply {
 #[cfg(test)]
 mod tests {
 
+    use super::*;
+
+    fn credentials() -> NearAiTransferCredentials {
+        NearAiTransferCredentials {
+            token: SecretString::from(format!("oc_{}", "ab".repeat(32))),
+            credential_id: Some(Uuid::from_u128(2)),
+            sender_org: Uuid::from_u128(1),
+            source: NearAiCreditSource::Grant,
+        }
+    }
+
     /// An unset credential id is logged as a fixed label, never a hash of
     /// nothing; a set one keeps its `sha256:` form.
     #[test]
@@ -678,17 +689,6 @@ mod tests {
             set,
             NearAiTransferClient::credential_id_hash(Uuid::from_u128(2))
         );
-    }
-
-    use super::*;
-
-    fn credentials() -> NearAiTransferCredentials {
-        NearAiTransferCredentials {
-            token: SecretString::from(format!("oc_{}", "ab".repeat(32))),
-            credential_id: Some(Uuid::from_u128(2)),
-            sender_org: Uuid::from_u128(1),
-            source: NearAiCreditSource::Grant,
-        }
     }
 
     #[test]
