@@ -13,16 +13,17 @@ use anyhow::{Context, Result, anyhow};
 use uuid::Uuid;
 
 /// Write `body` to `path` atomically (temp file in the same dir, then
-/// rename), setting 0600 permissions on unix.
+/// rename), setting 0600 permissions on unix. A failure after the temp file
+/// exists removes it, so nothing is left beside `path`.
 pub fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
         .context("destination path has no file name")?
         .to_string_lossy();
     let tmp_path = dir.join(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
-    {
+    let tmp = {
         #[cfg(unix)]
-        let mut tmp = {
+        let tmp = {
             use std::os::unix::fs::OpenOptionsExt;
             std::fs::OpenOptions::new()
                 .write(true)
@@ -32,12 +33,20 @@ pub fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
                 .with_context(|| format!("creating temp file {}", tmp_path.display()))?
         };
         #[cfg(not(unix))]
-        let mut tmp = std::fs::File::create(&tmp_path)
+        let tmp = std::fs::File::create(&tmp_path)
             .with_context(|| format!("creating temp file {}", tmp_path.display()))?;
+        tmp
+    };
+    let written = (|| {
+        let mut tmp = tmp;
         tmp.write_all(body)
             .with_context(|| format!("writing temp file {}", tmp_path.display()))?;
         tmp.sync_all()
-            .with_context(|| format!("syncing temp file {}", tmp_path.display()))?;
+            .with_context(|| format!("syncing temp file {}", tmp_path.display()))
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
     }
     if let Err(e) = durable_rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -113,9 +122,13 @@ fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
 /// On Windows the file is named `.capture-<uuid>.tmp` and stays listed in
 /// `dir` until its last handle closes. It is opened shared with no other
 /// opener, marked temporary and deleted on close: the flags
-/// `tempfile::tempfile()` uses on Windows, with a different name. On unix it
-/// is created owner-only and its name removed at once, so it is anonymous
-/// while in use, as `tempfile::tempfile()` leaves it.
+/// `tempfile::tempfile()` uses on Windows, with a different name. On Linux
+/// it is opened with `O_TMPFILE` where the file system supports that, so it
+/// never has a name, as `tempfile::tempfile()` does. Elsewhere on unix (and
+/// where `O_TMPFILE` is refused) it is created owner-only and its name
+/// removed at once. In that fallback the name is visible briefly, and stays
+/// if the process dies between the create and the removal, or if the
+/// removal fails (which is then reported as an error).
 ///
 /// `tempfile` names come from `fastrand`, which is not seeded from the OS,
 /// and it retries only when the name already exists. On Windows a name
@@ -126,7 +139,35 @@ fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
 /// a pending-delete name this code did not make), so up to
 /// [`CAPTURE_ATTEMPTS`] tries are made, each under a fresh name.
 pub fn create_capture_file(dir: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(target_os = "linux")]
+    if let Some(file) = open_anonymous_capture_file(dir) {
+        return Ok(file);
+    }
     create_capture_file_with(|| capture_path(dir))
+}
+
+/// `O_TMPFILE` in `dir`, or `None` when the kernel, file system or target
+/// does not offer it. Spelled per-ABI, as `open_import_file` spells its
+/// flags, because `libc` is not a dependency of this crate; an ABI not
+/// listed uses the named fallback rather than a guessed constant.
+#[cfg(target_os = "linux")]
+fn open_anonymous_capture_file(dir: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // __O_TMPFILE | O_DIRECTORY.
+    let o_tmpfile = if cfg!(target_arch = "x86_64") {
+        0o20000000 | 0o200000
+    } else if cfg!(target_arch = "aarch64") {
+        0o20000000 | 0o40000
+    } else {
+        return None;
+    };
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(o_tmpfile)
+        .open(dir)
+        .ok()
 }
 
 /// How many names [`create_capture_file`] tries before it gives up.
@@ -183,8 +224,8 @@ fn open_capture_file(path: &Path) -> std::io::Result<std::fs::File> {
         .create_new(true)
         .mode(0o600)
         .open(path)?;
-    // A file whose name could not be removed would stay visible to anything
-    // that lists the directory, so that is an error rather than a capture.
+    // A failed removal leaves the file listed under its name; it is
+    // reported rather than handed back as an anonymous capture.
     std::fs::remove_file(path)?;
     Ok(file)
 }
@@ -361,6 +402,24 @@ mod tests {
         assert_eq!(tries, CAPTURE_ATTEMPTS);
     }
 
+    /// Which errors earn another attempt, independent of the volume's
+    /// delete semantics: a taken name everywhere, and raw OS error 5
+    /// (ERROR_ACCESS_DENIED) on Windows only, where it is what a
+    /// pending-delete name returns. On unix 5 is EIO and is not retried.
+    #[test]
+    fn capture_retryable_classifies_errors() {
+        assert!(capture_retryable(&std::io::Error::from(
+            std::io::ErrorKind::AlreadyExists
+        )));
+        assert_eq!(
+            capture_retryable(&std::io::Error::from_raw_os_error(5)),
+            cfg!(windows)
+        );
+        assert!(!capture_retryable(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+    }
+
     /// A failure that a new name cannot fix is returned at once.
     #[test]
     fn capture_file_does_not_retry_a_missing_directory() {
@@ -460,6 +519,11 @@ mod tests {
             // the refusal was error 5, the case tempfile does not retry.
             let refused = open_capture_file(&pending).unwrap_err();
             assert_eq!(refused.raw_os_error(), Some(5), "{refused:?}");
+        } else {
+            eprintln!(
+                "pending-delete name released at once; the error-5 retry was not exercised \
+                 here (capture_retryable_classifies_errors covers the classification)"
+            );
         }
         drop(file);
         drop(holder);
