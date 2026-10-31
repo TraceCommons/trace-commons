@@ -7605,9 +7605,10 @@ pub(super) async fn approve_as_a_person(
                 // re-check below would otherwise give it -- this one is
                 // permanent, and retrying the same session can never
                 // succeed, which `not-pinned`'s other causes do not imply.
-                if let Some(too_large_label) =
-                    super::preview::size_refusal(summary.would_send_bytes)
-                {
+                if let Some(too_large_label) = super::preview::size_refusal(
+                    summary.would_send_bytes,
+                    shared.store.envelope_limit_bytes(),
+                ) {
                     skipped.push((id, too_large_label));
                     // Reported *and* recorded. Reporting alone left the
                     // entry `Pending`, which is the state that means "still
@@ -8221,6 +8222,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     // its way (OWNER DECISION E13).
     let _building = shared.preview_build_started();
     match super::preview::build_preview_card(
+        &shared.store,
         cfg.as_ref(),
         near_ai,
         attested_bodies,
@@ -8473,6 +8475,7 @@ async fn build_and_pin_preview(
             &transcript,
             session_ref.size_bytes,
             attested_bodies,
+            shared.store.envelope_limit_bytes(),
         )
         .map_err(|_| (ERR_UNAVAILABLE, "witness-review-stale"))?;
         // The stored artifact this summary was rebuilt from is the one the
@@ -10559,6 +10562,7 @@ mod tests {
             &transcript,
             reference.size_bytes,
             false,
+            crate::envelope::MAX_ENVELOPE_BYTES,
         )
         .unwrap();
         (
@@ -11447,7 +11451,10 @@ mod tests {
             enrolled: true,
             subagent_count: 0,
             subagents_dropped: 0,
-            reason_label: super::super::preview::size_refusal(would_send_bytes),
+            reason_label: super::super::preview::size_refusal(
+                would_send_bytes,
+                crate::envelope::MAX_ENVELOPE_BYTES,
+            ),
             scrub_counts: super::super::second_look::ScrubCounts::default(),
         };
         let max = crate::envelope::MAX_ENVELOPE_BYTES;

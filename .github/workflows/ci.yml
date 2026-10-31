@@ -1611,16 +1611,9 @@ jobs:
         run: node scripts/ci/test-step-up-page.cjs
       - uses: dtolnay/rust-toolchain@stable
       - id: cargo-cache
-        uses: actions/cache/restore@v5
+        uses: ./.github/actions/restore-cargo-test-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-test-default-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-default-
+          key-prefix: cargo-test-default
       # Whole workspace, not a hand-maintained crate list. Naming crates
       # individually meant trace-commons-protocol (45 tests, including the
       # redaction and secret-detection suites) and trace-commons-operator-client
@@ -1629,19 +1622,58 @@ jobs:
       - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install a Secret Service provider for credential tests
         run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
-      - name: Install the pinned wallet browser test runtime
-        run: |
-          npm install --prefix "$RUNNER_TEMP/trace-commons-wallet-ci" \
-            --ignore-scripts --omit=optional --no-audit --no-fund --save-exact \
-            playwright@1.63.0 playwright-core@1.63.0
-          node "$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright/cli.js" \
-            install --with-deps chromium
       - name: Run workspace tests with Secret Service
         run: |
           dbus-run-session -- sh -eu -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
             cargo test --workspace
           '
+      - name: Verify real Secret Service storage
+        run: |
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test -p trace-commons-contributor-platform --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
+            cargo test -p trace-commons-contributor-platform --lib real_commons_os_round_trip -- --ignored
+          '
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # Split out of cargo-test-default, which had grown past its 30-minute
+  # timeout: each of these builds its own feature set or package selection,
+  # so in that job each one recompiled crates the workspace run had already
+  # built. Both are required status checks (owner decision, 2026-10-30), as
+  # the steps were while they ran inside cargo-test-default; keep their
+  # `name:` values stable, since branch protection matches on them.
+  cargo-test-staging-channel:
+    name: staging channel tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # Its own cache, saved on main below: this job's package and feature
+      # selection resolves some third-party crates (the tokio/hyper/zbus
+      # chain) with different features from the workspace run, and those
+      # are not in cargo-test-default's cache. Falls back to that cache,
+      # whose graph it otherwise shares, when its own is missing.
+      - id: cargo-cache
+        uses: ./.github/actions/restore-cargo-test-cache
+        with:
+          key-prefix: cargo-test-staging-channel
+          fallback-prefix: cargo-test-default
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install a Secret Service provider for credential tests
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
       # The staging channel's half of the channel checks: its host and
       # identity scan, the production deny-list digests, its refusals of
       # production hosts, its entitlements, its IronWire key gate and its
@@ -1656,8 +1688,8 @@ jobs:
       # pin label and its reconcile twin), the attestation crate's signed
       # pin-set verifier, whose unit tests no other crate's run reaches, and
       # the server's pin re-sign tool (`trace-commons-staging-pins`), which
-      # requires the feature. None of them is compiled into the default build
-      # above.
+      # requires the feature. None of them is compiled into the
+      # `cargo test (default features)` build.
       - name: Staging channel tests
         run: |
           dbus-run-session -- sh -eu -c '
@@ -1668,13 +1700,44 @@ jobs:
             cargo test --locked -p trace-commons-attestation --features near-ai-staging
             cargo test --locked -p trace-commons-server --features near-ai-staging --bin trace-commons-staging-pins --test staging_pins_tool
           '
-      - name: Verify real Secret Service storage
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  cargo-test-wallet-sdk-csp:
+    name: wallet SDK and production CSP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # Its own cache, saved on main below: this job's package and feature
+      # selection resolves some third-party crates (the tokio/hyper/zbus
+      # chain) with different features from the workspace run, and those
+      # are not in cargo-test-default's cache. Falls back to that cache,
+      # whose graph it otherwise shares, when its own is missing.
+      - id: cargo-cache
+        uses: ./.github/actions/restore-cargo-test-cache
+        with:
+          key-prefix: cargo-test-wallet-sdk-csp
+          fallback-prefix: cargo-test-default
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install the pinned wallet browser test runtime
         run: |
-          dbus-run-session -- sh -eu -c '
-            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            cargo test -p trace-commons-contributor-platform --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
-            cargo test -p trace-commons-contributor-platform --lib real_commons_os_round_trip -- --ignored
-          '
+          npm install --prefix "$RUNNER_TEMP/trace-commons-wallet-ci" \
+            --ignore-scripts --omit=optional --no-audit --no-fund --save-exact \
+            playwright@1.63.0 playwright-core@1.63.0
+          node "$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright/cli.js" \
+            install --with-deps chromium
       - name: Verify the real wallet SDK and production CSP
         run: |
           export TC_PLAYWRIGHT_MODULE="$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright"

@@ -13,8 +13,12 @@ repository.workspace = true
 # without `cfg(test)`, so without it every test that generated a device
 # identity wrote a real login-keychain item and left it there. It also
 # exposes `ManagedRoute::start_against`, which starts a managed route against
-# a local fixture instead of NEAR AI, for `tests/managed_statusline.rs`, and
-# the native-auth wire primitives for the separate client/server contract suite.
+# a local fixture instead of NEAR AI, for `tests/managed_statusline.rs`, the
+# native-auth wire primitives for the separate client/server contract suite,
+# and `ConfigStore::lower_envelope_limit_for_tests` with
+# `envelope::TEST_ENVELOPE_LIMIT_BYTES`, which lower one test state
+# directory's envelope limit so `tests/daemon_ipc_contract.rs` need not build
+# a 256 MiB session.
 #
 # Enabled ONLY by test dev-dependencies: the self dependency below and the
 # unpublished trace-commons-client-server-tests package. Never enable it for
