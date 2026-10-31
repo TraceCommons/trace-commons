@@ -373,6 +373,37 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.modelOptions(flat) { Self.modelCopy[$0] ?? "" }.map(\.section), [nil, nil])
     }
 
+    /// Every tier holds more than one unstarred model, listed in NEAR AI's
+    /// order within its group, and a starred Incognito model sits among the
+    /// favorites, ahead of every group, whatever the tier order.
+    func testEachTierKeepsNearAIsOrderBesideFavorites() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
+        {"models":[
+          {"id":"i/two","tier":"incognito"},
+          {"id":"e/two","tier":"external"},
+          {"id":"n/two","tier":"near_ai"},
+          {"id":"i/star","tier":"incognito"},
+          {"id":"e/one","tier":"external"},
+          {"id":"n/one","tier":"near_ai"},
+          {"id":"i/one","tier":"incognito"}
+        ],"default":null,"favorites":["i/star"]}
+        """#.utf8))
+        let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(options.map(\.value), [
+            ManagedSurface.defaultModel,
+            "i/star",
+            "n/two", "n/one",
+            "e/two", "e/one",
+            "i/two", "i/one",
+        ])
+        XCTAssertEqual(options.map(\.section), [
+            nil, nil,
+            "NEAR AI private models", "NEAR AI private models",
+            "External private models", "External private models",
+            "Incognito models", "Incognito models",
+        ])
+    }
+
     /// The picker's first option names no model and says which one the
     /// session will get; every NEAR AI chat model follows, in its order.
     func testTheModelPickerOffersTheDefaultThenTheCatalogue() throws {
