@@ -240,16 +240,6 @@ export function SettingsPage({
               <h2>Daily guardrails</h2>
             </div>
             <SettingRow
-              label="Uploads per day"
-              value={settingValue(snapshot, "max_uploads_per_day")}
-              detail="Hard daily count cap"
-            />
-            <SettingRow
-              label="Bytes per day"
-              value={settingValue(snapshot, "max_bytes_per_day")}
-              detail="Hard daily volume cap"
-            />
-            <SettingRow
               label="Queue capacity"
               value={settingValue(snapshot, "max_queue_entries")}
               detail="Maximum local entries"
