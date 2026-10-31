@@ -36,13 +36,12 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
 use uuid::Uuid;
 
 use super::health::{
     HealthState, LABEL_ADMISSION_LIMIT_REACHED, LABEL_ADMISSION_REFUSED, LABEL_CANARY_FAILED,
-    LABEL_CLAIM_MINT_FAILED, LABEL_DAILY_CAP_REACHED, LABEL_INGEST_UNREACHABLE,
-    LABEL_NEAR_AI_NOTICE_PENDING, LABEL_NOT_LOGGED_IN, LABEL_PII_FILTER_UNAVAILABLE,
+    LABEL_CLAIM_MINT_FAILED, LABEL_INGEST_UNREACHABLE, LABEL_NEAR_AI_NOTICE_PENDING,
+    LABEL_NOT_LOGGED_IN, LABEL_PII_FILTER_UNAVAILABLE,
 };
 use super::queue::QueueEntry;
 use super::settings::DaemonSettings;
@@ -134,128 +133,50 @@ pub enum UploadDecision {
     /// than `retry_after_secs`, the server's own bounded hint. The pass
     /// stops here, so the rest are not sent into the same limit.
     RateLimited { retry_after_secs: u32 },
-    /// A daily volume cap is in force.
-    CapReached,
 }
 
-/// Whether one more upload of `size_bytes` fits inside today's budget.
+/// How many uploads one daemon starts inside [`BURST_WINDOW`] at most.
 ///
-/// Call `DaemonState::roll_day` first; this deliberately does not mutate.
-pub fn cap_check(state: &DaemonState, size_bytes: u64, settings: &DaemonSettings) -> bool {
-    if state.uploads_today >= settings.max_uploads_per_day {
-        return false;
+/// Kept a little under ingest's default per-principal submission rate (30 a
+/// minute), so a daemon draining a long approved backlog paces itself
+/// rather than leaning on the server's `429` to slow it. Not a quota: the
+/// window slides, and nothing is counted beyond it.
+pub const BURST_MAX_UPLOADS: usize = 25;
+// Ingest's default per-principal submission rate, from the shared protocol
+// constant, so a change there fails this build rather than going unnoticed.
+const _: () = assert!(
+    BURST_MAX_UPLOADS < trace_commons_protocol::submit_rate::SUBMIT_PER_PRINCIPAL_LIMIT as usize
+);
+
+/// The span [`BURST_MAX_UPLOADS`] is measured over.
+pub const BURST_WINDOW: chrono::TimeDelta =
+    chrono::TimeDelta::seconds(trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS as i64);
+
+/// Whole seconds until another upload fits the burst window, or `None` when
+/// one may start now. Drops attempts that have left the window as it goes.
+///
+/// A full window answers with the time until its oldest attempt ages out,
+/// at least one second, which the caller reports as
+/// [`UploadDecision::RateLimited`]: the same pause, retry and silence as a
+/// server-side `429`, with the session keeping its approval.
+pub fn burst_wait(state: &mut DaemonState, now: DateTime<Utc>) -> Option<u32> {
+    let floor = now - BURST_WINDOW;
+    while state
+        .recent_upload_attempts
+        .front()
+        .is_some_and(|at| *at <= floor)
+    {
+        state.recent_upload_attempts.pop_front();
     }
-    state.bytes_today.saturating_add(size_bytes) <= settings.max_bytes_per_day
-}
-
-/// What today's volume budget looks like, and what it is currently holding
-/// back.
-///
-/// The daily cap was already enforced and already had a health label, but
-/// neither was legible from outside: `LABEL_DAILY_CAP_REACHED` sits at the
-/// bottom of the precedence order, so any other condition -- a full queue,
-/// in the case this was diagnosed from -- occupies the single
-/// `health.last_error_label` slot and the cap becomes invisible. From the
-/// contributor's side an exhausted budget was indistinguishable from a
-/// broken app: approvals simply stopped turning into uploads.
-///
-/// This is therefore reported on `status` as its own field rather than
-/// through the health slot, so it is visible no matter what else is wrong.
-/// Everything on it is a count or a timestamp; nothing here can carry a
-/// path, a hash, or a token.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DailyBudget {
-    pub bytes_today: u64,
-    pub max_bytes_per_day: u64,
-    pub bytes_remaining: u64,
-    pub uploads_today: u32,
-    pub max_uploads_per_day: u32,
-    pub uploads_remaining: u32,
-    /// The next UTC midnight, which is exactly when `DaemonState::roll_day`
-    /// zeroes the counters above. Derived, not guessed: `roll_day` buckets
-    /// by `%Y-%m-%d` in UTC, so this is the real reset instant and a client
-    /// may state it.
-    pub resets_at: DateTime<Utc>,
-    /// Approved entries that this budget will not let out before the reset.
-    pub blocked_entries: u32,
-    /// Their combined on-disk size.
-    pub blocked_bytes: u64,
-}
-
-impl DailyBudget {
-    /// Whether anything is actually being held back. A spent budget with
-    /// nothing approved behind it is not a condition worth telling anyone
-    /// about.
-    pub fn blocked(&self) -> bool {
-        self.blocked_entries > 0
+    // An attempt stamped after `now` means the wall clock stepped back; it
+    // would otherwise hold the window full until the clock caught up.
+    state.recent_upload_attempts.retain(|at| *at <= now);
+    if state.recent_upload_attempts.len() < BURST_MAX_UPLOADS {
+        return None;
     }
-}
-
-/// The next UTC midnight strictly after `now` -- when `roll_day` will next
-/// change the day bucket.
-fn next_utc_midnight(now: DateTime<Utc>) -> DateTime<Utc> {
-    (now.date_naive() + chrono::Duration::days(1))
-        .and_hms_opt(0, 0, 0)
-        .expect("midnight is a valid time")
-        .and_utc()
-}
-
-/// Measure today's budget against the entries waiting on it.
-///
-/// `approved` must be the approved entries in the order `drain_approved`
-/// walks them, because that order is what decides which of them go today.
-/// The walk here mirrors that loop exactly: each entry that fits is charged
-/// against a running copy of the counters, and the first one that does not
-/// fit stops the pass -- so it and every entry behind it are blocked, even
-/// the small ones. Counting only the entries that individually overflow
-/// would under-report, which is the same silence in a smaller font.
-///
-/// Does not mutate: the day roll is applied to a local copy, so calling
-/// this from a read-only `status` cannot move the daemon's own counters.
-pub fn budget_snapshot(
-    approved: &[QueueEntry],
-    state: &DaemonState,
-    settings: &DaemonSettings,
-    now: DateTime<Utc>,
-) -> DailyBudget {
-    let mut rolled = state.clone();
-    rolled.roll_day(now);
-
-    let mut simulated = rolled.clone();
-    let mut blocked_entries: u32 = 0;
-    let mut blocked_bytes: u64 = 0;
-    let mut stopped = false;
-    for entry in approved {
-        if stopped {
-            blocked_entries = blocked_entries.saturating_add(1);
-            blocked_bytes = blocked_bytes.saturating_add(entry.size_bytes);
-            continue;
-        }
-        if cap_check(&simulated, entry.size_bytes, settings) {
-            simulated.uploads_today = simulated.uploads_today.saturating_add(1);
-            simulated.bytes_today = simulated.bytes_today.saturating_add(entry.size_bytes);
-        } else {
-            stopped = true;
-            blocked_entries = blocked_entries.saturating_add(1);
-            blocked_bytes = blocked_bytes.saturating_add(entry.size_bytes);
-        }
-    }
-
-    DailyBudget {
-        bytes_today: rolled.bytes_today,
-        max_bytes_per_day: settings.max_bytes_per_day,
-        bytes_remaining: settings
-            .max_bytes_per_day
-            .saturating_sub(rolled.bytes_today),
-        uploads_today: rolled.uploads_today,
-        max_uploads_per_day: settings.max_uploads_per_day,
-        uploads_remaining: settings
-            .max_uploads_per_day
-            .saturating_sub(rolled.uploads_today),
-        resets_at: next_utc_midnight(now),
-        blocked_entries,
-        blocked_bytes,
-    }
+    let oldest = *state.recent_upload_attempts.front()?;
+    let wait = (oldest + BURST_WINDOW - now).num_seconds().max(1);
+    Some(u32::try_from(wait).unwrap_or(u32::MAX))
 }
 
 /// Save the certified review of a held session, so opening it shows the
@@ -391,7 +312,6 @@ fn decision_for(
 /// The health label a decision implies, if any.
 pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
     match decision {
-        UploadDecision::CapReached => Some(LABEL_DAILY_CAP_REACHED),
         UploadDecision::WitnessSaturated { .. } => Some(super::health::LABEL_WITNESS_SATURATED),
         // A pause the next pass clears on its own, with the session kept.
         // Like a lease another attempt holds, nothing to tell anyone about;
@@ -580,13 +500,13 @@ impl Uploader<'_, '_> {
         // so retract the notice-pending condition if it was set.
         self.health.resolve(LABEL_NEAR_AI_NOTICE_PENDING);
 
-        self.state.roll_day(now);
-        if !cap_check(self.state, entry.size_bytes, self.settings) {
-            self.health.fail(LABEL_DAILY_CAP_REACHED, now);
-            return Ok(UploadDecision::CapReached);
+        // Pace the send rate under ingest's per-principal limit before any
+        // work is spent on this entry. No health label: like the server's
+        // own `429`, it clears itself on the next pass.
+        if let Some(retry_after_secs) = burst_wait(self.state, now) {
+            return Ok(UploadDecision::RateLimited { retry_after_secs });
         }
-        // Cap check passed, so retract the daily-cap-reached condition if it was set.
-        self.health.resolve(LABEL_DAILY_CAP_REACHED);
+        self.state.recent_upload_attempts.push_back(now);
 
         // Re-read and re-hash. The approval was for the content described by
         // entry.session_hash; if the file has moved on, that approval does not
@@ -830,7 +750,7 @@ impl Uploader<'_, '_> {
         match &decision {
             UploadDecision::Uploaded { .. } => {
                 self.state
-                    .record_upload(&entry.path, &entry.session_hash, entry.size_bytes, now);
+                    .record_upload(&entry.path, &entry.session_hash, entry.size_bytes);
                 self.health.clear();
             }
             other => {
@@ -899,196 +819,70 @@ mod tests {
 
     use crate::daemon::test_support::at;
 
+    /// Completed uploads this state has recorded, across every path.
+    fn uploads_recorded(state: &DaemonState) -> u32 {
+        state.prior_uploads.values().map(|p| p.upload_count).sum()
+    }
+
     fn settings() -> DaemonSettings {
         DaemonSettings::default()
     }
 
     #[test]
-    fn cap_check_rejects_past_the_daily_upload_count() {
+    fn the_burst_guard_lets_uploads_through_below_its_ceiling() {
         let mut st = DaemonState::new();
-        st.uploads_today = 50;
-        assert!(!cap_check(&st, 10, &settings()));
-    }
-
-    #[test]
-    fn cap_check_rejects_past_the_daily_byte_budget() {
-        let mut st = DaemonState::new();
-        st.bytes_today = 209_715_200;
-        assert!(!cap_check(&st, 1, &settings()));
-    }
-
-    #[test]
-    fn cap_check_rejects_an_upload_that_would_cross_the_byte_budget() {
-        let mut st = DaemonState::new();
-        st.bytes_today = 209_715_100;
-        assert!(!cap_check(&st, 200, &settings()));
-    }
-
-    #[test]
-    fn cap_check_allows_a_normal_upload() {
-        assert!(cap_check(&DaemonState::new(), 1024, &settings()));
-    }
-
-    /// An approved entry of a given size, with nothing else that matters
-    /// to a budget calculation.
-    fn sized(size_bytes: u64) -> QueueEntry {
-        QueueEntry {
-            entry_id: Uuid::new_v4(),
-            session_hash: "sha256:00".into(),
-            source: "claude-code".into(),
-            project_key: "/Users/testuser/code/myproj".into(),
-            project_label: "myproj".into(),
-            path: PathBuf::from("/tmp/a.jsonl"),
-            size_bytes,
-            discovered_at: at("2026-08-08T12:00:00Z"),
-            state: QueueState::Approved,
-            ..Default::default()
+        let now = at("2026-08-08T20:00:00Z");
+        for _ in 0..BURST_MAX_UPLOADS - 1 {
+            st.recent_upload_attempts.push_back(now);
         }
+        assert_eq!(burst_wait(&mut st, now), None);
     }
 
-    /// The state observed on the machine this was diagnosed from: the byte
-    /// budget all but spent, 14 approved entries waiting behind it.
-    fn nearly_spent() -> DaemonState {
+    #[test]
+    fn the_burst_guard_holds_a_full_window_until_its_oldest_attempt_ages_out() {
         let mut st = DaemonState::new();
-        st.day_bucket = Some("2026-08-08".to_string());
-        st.uploads_today = 12;
-        st.bytes_today = 204_659_969;
-        st
+        let start = at("2026-08-08T20:00:00Z");
+        for _ in 0..BURST_MAX_UPLOADS {
+            st.recent_upload_attempts.push_back(start);
+        }
+        let now = start + chrono::TimeDelta::seconds(15);
+        assert_eq!(burst_wait(&mut st, now), Some(45));
+        // Once the window has slid past them, the next upload fits, and the
+        // aged-out attempts are forgotten rather than counted forever.
+        assert_eq!(burst_wait(&mut st, start + BURST_WINDOW), None);
+        assert!(st.recent_upload_attempts.is_empty());
     }
 
     #[test]
-    fn an_entry_that_fails_the_byte_check_is_reported_as_budget_blocked() {
-        // 14.9 MB against 5,055,231 bytes of remaining budget.
-        let approved = vec![sized(14_900_000)];
-        let b = budget_snapshot(
-            &approved,
-            &nearly_spent(),
-            &settings(),
-            at("2026-08-08T20:00:00Z"),
+    fn the_burst_guard_is_measured_over_ingests_one_minute_window() {
+        assert_eq!(
+            BURST_WINDOW.num_seconds() as u64,
+            trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS
         );
-        assert!(b.blocked());
-        assert_eq!(b.blocked_entries, 1);
-        assert_eq!(b.blocked_bytes, 14_900_000);
-        // The numbers, not just the flag.
-        assert_eq!(b.bytes_today, 204_659_969);
-        assert_eq!(b.max_bytes_per_day, 209_715_200);
-        assert_eq!(b.bytes_remaining, 5_055_231);
-        assert_eq!(b.uploads_today, 12);
-        assert_eq!(b.uploads_remaining, 38);
     }
 
     #[test]
-    fn an_entry_that_passes_the_byte_check_is_not_reported_as_blocked() {
-        let approved = vec![sized(1_000_000)];
-        let b = budget_snapshot(
-            &approved,
-            &nearly_spent(),
-            &settings(),
-            at("2026-08-08T20:00:00Z"),
-        );
-        assert!(!b.blocked());
-        assert_eq!(b.blocked_entries, 0);
-        assert_eq!(b.blocked_bytes, 0);
-    }
-
-    #[test]
-    fn a_small_entry_queued_behind_a_blocked_one_is_blocked_too() {
-        // `drain_approved` breaks on the first cap failure rather than
-        // skipping past it, so a 1 KB entry behind a 14.9 MB one does not
-        // go today either. Counting only the entries that individually
-        // overflow would under-report the wait.
-        let approved = vec![sized(14_900_000), sized(1_024)];
-        let b = budget_snapshot(
-            &approved,
-            &nearly_spent(),
-            &settings(),
-            at("2026-08-08T20:00:00Z"),
-        );
-        assert_eq!(b.blocked_entries, 2);
-        assert_eq!(b.blocked_bytes, 14_901_024);
-    }
-
-    #[test]
-    fn entries_ahead_of_the_first_blocked_one_are_charged_against_the_budget() {
-        // Two 3 MB entries fit in 5,055,231 bytes only one at a time; the
-        // first is charged, so the second is what stops the pass.
-        let approved = vec![sized(3_000_000), sized(3_000_000), sized(1_024)];
-        let b = budget_snapshot(
-            &approved,
-            &nearly_spent(),
-            &settings(),
-            at("2026-08-08T20:00:00Z"),
-        );
-        assert_eq!(b.blocked_entries, 2);
-        assert_eq!(b.blocked_bytes, 3_001_024);
-    }
-
-    #[test]
-    fn the_upload_count_cap_blocks_just_as_the_byte_cap_does() {
+    fn the_burst_guard_forgets_attempts_stamped_after_now() {
         let mut st = DaemonState::new();
-        st.day_bucket = Some("2026-08-08".to_string());
-        st.uploads_today = 50;
-        let b = budget_snapshot(&[sized(1)], &st, &settings(), at("2026-08-08T20:00:00Z"));
-        assert!(b.blocked());
-        assert_eq!(b.uploads_remaining, 0);
-        // The byte budget is untouched, and says so.
-        assert_eq!(b.bytes_remaining, 209_715_200);
+        let start = at("2026-08-08T20:00:00Z");
+        for _ in 0..BURST_MAX_UPLOADS {
+            st.recent_upload_attempts.push_back(start);
+        }
+        // The clock stepped back an hour after the burst.
+        let now = start - chrono::TimeDelta::hours(1);
+        assert_eq!(burst_wait(&mut st, now), None);
+        assert!(st.recent_upload_attempts.is_empty());
     }
 
     #[test]
-    fn the_condition_clears_when_the_day_rolls() {
-        // Same spent counters, but `now` is the next UTC day: `roll_day`
-        // zeroes them, so nothing is blocked any more.
-        let approved = vec![sized(14_900_000)];
-        let b = budget_snapshot(
-            &approved,
-            &nearly_spent(),
-            &settings(),
-            at("2026-08-09T00:00:01Z"),
-        );
-        assert!(!b.blocked());
-        assert_eq!(b.bytes_today, 0);
-        assert_eq!(b.uploads_today, 0);
-        assert_eq!(b.bytes_remaining, 209_715_200);
-    }
-
-    #[test]
-    fn measuring_the_budget_does_not_move_the_daemons_own_counters() {
-        // `status` polls this; a snapshot that rolled the real day would
-        // hand a contributor a fresh budget for free.
-        let state = nearly_spent();
-        let before = state.clone();
-        let _ = budget_snapshot(&[sized(1)], &state, &settings(), at("2026-08-09T00:00:01Z"));
-        assert_eq!(state, before);
-    }
-
-    #[test]
-    fn the_reset_time_is_the_next_utc_midnight() {
-        let b = budget_snapshot(
-            &[],
-            &nearly_spent(),
-            &settings(),
-            at("2026-08-08T23:59:59Z"),
-        );
-        assert_eq!(b.resets_at, at("2026-08-09T00:00:00Z"));
-        let b = budget_snapshot(
-            &[],
-            &nearly_spent(),
-            &settings(),
-            at("2026-08-08T00:00:00Z"),
-        );
-        assert_eq!(b.resets_at, at("2026-08-09T00:00:00Z"));
-    }
-
-    #[test]
-    fn a_spent_budget_with_nothing_waiting_is_not_a_condition() {
-        // Nothing to tell anyone about, so `blocked` stays false even
-        // though the budget really is gone.
-        let mut st = nearly_spent();
-        st.bytes_today = 209_715_200;
-        let b = budget_snapshot(&[], &st, &settings(), at("2026-08-08T20:00:00Z"));
-        assert!(!b.blocked());
-        assert_eq!(b.bytes_remaining, 0);
+    fn a_full_burst_window_waits_at_least_one_second() {
+        let mut st = DaemonState::new();
+        let now = at("2026-08-08T20:00:00Z");
+        for _ in 0..BURST_MAX_UPLOADS {
+            st.recent_upload_attempts
+                .push_back(now - BURST_WINDOW + chrono::TimeDelta::milliseconds(200));
+        }
+        assert_eq!(burst_wait(&mut st, now), Some(1));
     }
 
     #[test]
@@ -1340,7 +1134,8 @@ mod tests {
             other => panic!("expected Superseded, got {other:?}"),
         }
         assert_eq!(
-            state.uploads_today, 0,
+            uploads_recorded(&state),
+            0,
             "nothing may be uploaded once the conversation has grown a delegate"
         );
     }
@@ -1370,7 +1165,8 @@ mod tests {
             other => panic!("expected Superseded, got {other:?}"),
         }
         assert_eq!(
-            state.uploads_today, 0,
+            uploads_recorded(&state),
+            0,
             "nothing may be uploaded when the hash no longer matches"
         );
     }
@@ -1391,7 +1187,7 @@ mod tests {
             matches!(decision, UploadDecision::Uploaded { .. }),
             "got {decision:?}"
         );
-        assert_eq!(state.uploads_today, 1);
+        assert_eq!(uploads_recorded(&state), 1);
         assert!(health.ok());
     }
 
@@ -1502,7 +1298,7 @@ mod tests {
             &[REASON_NOTHING_MATCHED],
         );
         assert!(pin.is_some(), "the built envelope is pinned");
-        assert_eq!(state.uploads_today, 0, "nothing was sent");
+        assert_eq!(uploads_recorded(&state), 0, "nothing was sent");
     }
 
     /// A hold under `reason`, decided on `expected` second-look labels.
@@ -1547,7 +1343,7 @@ mod tests {
             crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL,
             &[],
         );
-        assert_eq!(state.uploads_today, 0, "nothing was sent");
+        assert_eq!(uploads_recorded(&state), 0, "nothing was sent");
     }
 
     /// Manual holds approvals made on anyone's behalf, never a person's own.
@@ -1564,7 +1360,7 @@ mod tests {
             matches!(decision, UploadDecision::Uploaded { .. }),
             "{decision:?}"
         );
-        assert_eq!(state.uploads_today, 1);
+        assert_eq!(uploads_recorded(&state), 1);
     }
 
     /// Automatic: nothing matched, so it waits.
@@ -1577,7 +1373,7 @@ mod tests {
             REASON_SECOND_LOOK_REVIEW_REQUIRED,
             &[REASON_NOTHING_MATCHED],
         );
-        assert_eq!(state.uploads_today, 0, "nothing was sent");
+        assert_eq!(uploads_recorded(&state), 0, "nothing was sent");
     }
 
     /// Automatic: something was removed, but the redacted body still holds a
@@ -1591,7 +1387,7 @@ mod tests {
             REASON_SECOND_LOOK_REVIEW_REQUIRED,
             &[REASON_LOOKS_UNSURE],
         );
-        assert_eq!(state.uploads_today, 0, "nothing was sent");
+        assert_eq!(uploads_recorded(&state), 0, "nothing was sent");
     }
 
     /// Reviewed on #1139: path removals alone are not a match. Nearly every
@@ -1611,7 +1407,7 @@ mod tests {
         let (_, counts) = pin.expect("the built envelope is pinned");
         assert!(counts.marks > 0, "the path was removed: {counts:?}");
         assert_eq!(counts.content_marks, 0, "and only the path: {counts:?}");
-        assert_eq!(state.uploads_today, 0, "nothing was sent");
+        assert_eq!(uploads_recorded(&state), 0, "nothing was sent");
     }
 
     /// Reviewed on #1139: a survivor the unsure-span detector flags holds,
@@ -1626,7 +1422,7 @@ mod tests {
             REASON_SECOND_LOOK_REVIEW_REQUIRED,
             &[REASON_NOTHING_MATCHED, REASON_LOOKS_UNSURE],
         );
-        assert_eq!(state.uploads_today, 0, "nothing was sent");
+        assert_eq!(uploads_recorded(&state), 0, "nothing was sent");
     }
 
     /// Automatic: trimmed to fit waits even with a clean scrub.
@@ -1647,7 +1443,7 @@ mod tests {
             REASON_SECOND_LOOK_REVIEW_REQUIRED,
             &[REASON_TRIMMED_TO_FIT],
         );
-        assert_eq!(state.uploads_today, 0, "nothing was sent");
+        assert_eq!(uploads_recorded(&state), 0, "nothing was sent");
     }
 
     /// Automatic: a scrubbed session with marks and nothing trimmed goes.
@@ -1659,7 +1455,7 @@ mod tests {
             matches!(decision, UploadDecision::Uploaded { .. }),
             "{decision:?}"
         );
-        assert_eq!(state.uploads_today, 1);
+        assert_eq!(uploads_recorded(&state), 1);
     }
 
     /// The hold is decided on the envelope actually built, never on the
@@ -1695,7 +1491,8 @@ mod tests {
                 &[REASON_NOTHING_MATCHED],
             );
             assert_eq!(
-                state.uploads_today, 0,
+                uploads_recorded(&state),
+                0,
                 "recorded {recorded:?}: nothing sent"
             );
         }
@@ -1773,7 +1570,7 @@ mod tests {
             matches!(decision, UploadDecision::Uploaded { .. }),
             "{decision:?}"
         );
-        assert_eq!(state.uploads_today, 1);
+        assert_eq!(uploads_recorded(&state), 1);
     }
 
     async fn spawn_stub(router: axum::Router) -> String {
@@ -2080,7 +1877,7 @@ mod tests {
             },
             "an approval must not transfer to an envelope built from different inputs"
         );
-        assert_eq!(state.uploads_today, 0, "nothing may be uploaded");
+        assert_eq!(uploads_recorded(&state), 0, "nothing may be uploaded");
     }
 
     /// Reviewed on #1024: an entry approved before a grant is voided is not
@@ -2186,7 +1983,7 @@ mod tests {
                 },
                 "{name}: an approval from before the void must not be sent"
             );
-            assert_eq!(state.uploads_today, 0, "{name}");
+            assert_eq!(uploads_recorded(&state), 0, "{name}");
         }
     }
 
@@ -2216,7 +2013,7 @@ mod tests {
                     .to_string(),
             }
         );
-        assert_eq!(state.uploads_today, 0);
+        assert_eq!(uploads_recorded(&state), 0);
     }
 
     #[tokio::test]
@@ -2313,7 +2110,7 @@ mod tests {
                     .to_string(),
             }
         );
-        assert_eq!(state.uploads_today, 0);
+        assert_eq!(uploads_recorded(&state), 0);
     }
 
     #[tokio::test]
@@ -2359,7 +2156,7 @@ mod tests {
             "a previewed entry must upload even though a rebuild would not \
              reproduce its envelope: got {decision:?}"
         );
-        assert_eq!(state.uploads_today, 1);
+        assert_eq!(uploads_recorded(&state), 1);
     }
 
     #[tokio::test]
@@ -2394,7 +2191,7 @@ mod tests {
             matches!(decision, UploadDecision::Uploaded { .. }),
             "got {decision:?}"
         );
-        assert_eq!(state.uploads_today, 1);
+        assert_eq!(uploads_recorded(&state), 1);
     }
 
     #[tokio::test]
@@ -2419,7 +2216,7 @@ mod tests {
                 reason_label: crate::daemon::preview::REASON_INPUTS_CHANGED.to_string(),
             }
         );
-        assert_eq!(state.uploads_today, 0);
+        assert_eq!(uploads_recorded(&state), 0);
     }
 
     #[tokio::test]
@@ -2448,11 +2245,11 @@ mod tests {
             health.last_error_label.as_deref(),
             Some(LABEL_NOT_LOGGED_IN)
         );
-        assert_eq!(state.uploads_today, 0);
+        assert_eq!(uploads_recorded(&state), 0);
     }
 
     #[tokio::test]
-    async fn upload_stops_at_the_daily_cap() {
+    async fn upload_pauses_while_the_burst_window_is_full() {
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
         let cfg = fixture_cfg(&store);
@@ -2462,8 +2259,10 @@ mod tests {
         let opts = dry_run_opts();
         let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
         let mut state = DaemonState::new();
-        state.roll_day(at("2026-08-08T16:00:00Z"));
-        state.uploads_today = 50;
+        let now = at("2026-08-08T16:00:00Z");
+        for _ in 0..BURST_MAX_UPLOADS {
+            state.recent_upload_attempts.push_back(now);
+        }
         let mut health = HealthState::default();
         let settings = settings();
         let mut up = Uploader {
@@ -2474,20 +2273,50 @@ mod tests {
             health: &mut health,
         };
         let decision = up
-            .upload_entry(
-                &session.source(),
-                &session.session_ref(),
-                &entry,
-                at("2026-08-08T16:00:00Z"),
-            )
+            .upload_entry(&session.source(), &session.session_ref(), &entry, now)
             .await
             .unwrap();
 
-        assert_eq!(decision, UploadDecision::CapReached);
         assert_eq!(
-            health.last_error_label.as_deref(),
-            Some(LABEL_DAILY_CAP_REACHED)
+            decision,
+            UploadDecision::RateLimited {
+                retry_after_secs: 60
+            }
         );
+        // The same quiet pause as the server's own limit: no health label,
+        // nothing sent, and the refused attempt not counted against the
+        // window.
+        assert_eq!(health.last_error_label, None);
+        assert_eq!(uploads_recorded(&state), 0);
+        assert_eq!(state.recent_upload_attempts.len(), BURST_MAX_UPLOADS);
+    }
+
+    #[tokio::test]
+    async fn every_upload_attempt_is_counted_in_the_burst_window() {
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+
+        let entry = session.entry_for(&session.current_hash(), &cfg);
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let now = at("2026-08-08T16:00:00Z");
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let _ = up
+            .upload_entry(&session.source(), &session.session_ref(), &entry, now)
+            .await
+            .unwrap();
+        assert_eq!(state.recent_upload_attempts, [now]);
     }
 
     /// The setup the stored-envelope tests above build inline: a previewed

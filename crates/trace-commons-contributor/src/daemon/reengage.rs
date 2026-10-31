@@ -313,8 +313,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
             .lock()
             .expect("health lock")
             .last_error_label
-            .is_none()
-            && !shared.daily_budget(now).blocked();
+            .is_none();
         let candidacy = settlement_candidacy(&shown, notified.as_ref());
         // Bookkeeping, not an announcement: adopted whatever the health
         // gate, so a pricing change seen while it is shut is not taken for

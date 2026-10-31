@@ -1,62 +1,46 @@
-# Client daily upload allowance
+# Client daily upload allowance (retired)
 
-The server advertises daily upload-count and byte limits for the authenticated account. Validated earned trust can raise both daily caps automatically through the existing admission policy or an independent client-upload policy. These client volume limits do not approve sessions or change consent or pause. Server admission still applies its separate processing-cost units and accounting period; a daily cap does not establish that an account is ready to submit or has admission capacity remaining.
+The contributor clients no longer have a daily upload limit, so the server
+no longer advertises one. Server admission is unchanged: the account's
+weekly processing-cost budget, its earned-trust growth (see
+[account trust](./account-trust.md)) and the per-principal submission rate
+still apply. An account that spends its weekly budget sees the existing
+`account_limit_reached` refusal.
 
-## Base caps and earned increases
+## Endpoint
 
-The optional ingest settings define the base daily caps before an earned increase:
-
-```sh
-TRACE_COMMONS_CLIENT_MAX_UPLOADS_PER_DAY=200
-TRACE_COMMONS_CLIENT_MAX_BYTES_PER_DAY=2147483648
-```
-
-Set both variables and restart ingest. Both must be positive integers. The count must not exceed 1,000, and bytes must not exceed 5,368,709,120 (5 GiB). Partial or invalid configuration refuses startup with a fixed configuration label.
-
-For a bounded account, the server reads the validated effective allowance under the configured admission policy or the independent client-upload policy described below. The independent policy performs an advisory trust read; it does not activate admission or reserve/debit processing budget. When `effective_allowance` exceeds the policy's `bounded_allowance`, it scales each base cap by their ratio:
-
-```text
-daily cap = min(hard ceiling, floor(base cap × effective_allowance / bounded_allowance))
-```
-
-Count and bytes scale independently, with integer division rounding down, and retain the hard ceilings of 1,000 uploads and 5 GiB. If both base settings are absent, earned growth uses the shared defaults of 50 uploads and 200 MiB (209,715,200 bytes) as its base. For example, a validated ratio of 2 advertises 100 uploads and 400 MiB without any operator base settings. With no configured base and no validated growth above 1, the response is `{"allowance":null}`.
-
-Both existing external-trust and tiered-trust admission modes supply the account's applied effective allowance. Their existing validation, freshness, and generation safeguards remain authoritative; this endpoint does not introduce scoring, promotion thresholds, or an independent trust decision. An account whose trust falls back to its ordinary admission allowance loses the earned uplift on a successful refresh: the response contains the configured base, or null when no base was configured. A transient status-read failure returns an error rather than pretending that trust fell back.
-
-Legacy and invited identities that use their independent compatibility admission path keep the configured base unchanged. They do not gain an earned multiplier from this endpoint; with no configured base, they receive null.
-
-## Endpoint and client behavior
-
-`GET /v1/account/upload-allowance` uses normal native bearer or account-cookie authentication and session rotation. Closed accounts are refused. Successful responses carry `Cache-Control: no-store` and either:
+`GET /v1/account/upload-allowance` stays, with normal native bearer or
+account-cookie authentication and session rotation. Unbound and closed
+accounts are refused. Every other account gets, with
+`Cache-Control: no-store`:
 
 ```json
-{"allowance":{"schema_version":1,"max_uploads_per_day":200,"max_bytes_per_day":2147483648}}
+{"allowance":null}
 ```
 
-or `{"allowance":null}` when neither a configured base nor an earned increase applies. No tenant/account identifiers, trust scores, or credentials appear in the response.
+The field is always present and always `null`. Older clients treat a
+missing field as malformed and an explicit `null` as "no server
+allowance", so this answer leaves them on their own local defaults. It is
+kept until no supported client reads it.
 
-Supporting clients refresh at startup and every five minutes even when their local daily cap is spent. A server allowance can raise default limits; explicitly chosen local limits remain in force separately for count and bytes. Today's usage counters are preserved, so a higher cap can immediately release an already-approved queue. Defaults remain 50 uploads and 200 MiB when no allowance applies. Existing clients keep their prior behavior.
+## Retired settings
 
-Clients retain the last valid allowance for the current signed-in identity after a transient refresh failure, until restart. A successful null response removes the previous uplift. Signing out or switching account, tenant, or server discards the old allowance. Allowances are runtime state, separate from saved local settings.
-
-On upgrading legacy local settings, nondefault count/byte values are preserved as explicit choices. A legacy value equal to the default cannot be distinguished from an untouched setting and follows the server; future explicit writes retain that choice even when it equals the default.
-
-Unsetting both operator variables and restarting removes the configured base, but accounts with validated earned growth still receive caps scaled from the shared defaults. Earned uplift follows the existing admission trust controls and falls back when admission no longer applies that growth. Supporting clients adopt the resulting base or null response at their next successful refresh; uploads already sent and daily usage counters are unchanged.
-
+`TRACE_COMMONS_CLIENT_MAX_UPLOADS_PER_DAY` and
+`TRACE_COMMONS_CLIENT_MAX_BYTES_PER_DAY` are no longer read. A deployment
+that still sets them starts normally and ignores them; remove them at the
+next configuration change. See
+[the environment reference](./env-reference.md#client-daily-upload-allowances-retired).
 
 ## Staging earned upload trust (opt-in)
 
-Staging uses the independent policy so provisioned users keep their current
-signup and upload path with both admission ledgers disabled. The checked-in
-[policy template](../../deploy/staging-gcp/client-upload-trust-policy.json.template)
-uses this progression when the optional base-cap settings above are unset:
-
-| Qualified distinct traces in the last 84 days | Uploads/day | MiB/day |
-| --- | --- | --- |
-| 0–4 | 50 | 200 |
-| 5–19 | 100 | 400 |
-| 20–49 | 150 | 600 |
-| 50 or more | 250 | 1000 |
+The independent policy pair
+(`TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY_JSON`/`_VERSION`) is still
+accepted and still validated at startup, so a staging render that sets it
+keeps starting, and its scoped scheduler still records trust facts and
+writes applied evaluations. Nothing reads those evaluations any more: they
+used to scale the advertised client caps, which are gone. The procedure
+below is kept so an existing staging deployment can be operated and rolled
+back; do not enable the applied mode anew. Its removal is a follow-up.
 
 There is no account-age or active-week waiting period. Each eligible
 submission counts once, including existing eligible history. A trace must
@@ -65,8 +49,7 @@ be accepted, novel, first in its dedup cluster, and pass an allowlisted gate:
 reuploads, withdrawn/revoked/quarantined outcomes do not add eligible units.
 Attestation has weight one and gives no bonus. The weekly cap is 10000;
 the qualification window is 84 days and evaluation freshness is two days.
-The scheduler records facts and evaluates every five minutes; clients
-independently refresh their advertised allowance every five minutes.
+The scheduler records facts and evaluates every five minutes.
 
 Before enabling either mode:
 
@@ -153,12 +136,9 @@ coexist with account-admission configuration. The renderer keeps
 settings. Enabling this feature does not require a witness or change
 signup, consent, review, credit, or payout.
 
-Check scheduler liveness and fresh applied evaluations, then request
-`GET /v1/account/upload-allowance` with each test account's own session.
-Confirm the table above, no change to admission/signup, and that a capped
-client resumes after refresh with its original daily counters. Retain
-hash-only qualification evidence; local tests and a successful render do
-not establish live behavior.
+Check scheduler liveness and fresh applied evaluations, and confirm no
+change to admission/signup. Retain hash-only qualification evidence; local
+tests and a successful render do not establish live behavior.
 
 Rotate the worker token before `exp`: add a new Secret Manager version,
 rerender with the same mode/labels, restart, and verify scheduler liveness
@@ -168,8 +148,8 @@ rotation procedure, then rerender/restart and recheck readiness; never
 replace the main app login or broaden its grants to bypass this check.
 Token validation is fail-closed at startup: an expired or revoked scheduler
 token prevents **all ingest startup**, including signup and uploads. While
-ingest stays running, expiry stops successful scheduler work; evaluations
-then become stale and clients lose the earned uplift on a successful refresh.
+ingest stays running, expiry stops successful scheduler work and
+evaluations become stale.
 For routine rotation, publish the new token version, rerender/restart, and
 verify scheduler work **before revoking the old jti**. Never revoke the only
 configured token and then restart. For a compromised token, revoke it
@@ -180,12 +160,6 @@ and restart to restore the existing staging upload/signup path. The scoped
 expiry and checks the restarted process; it does not relax authentication.
 
 To roll back this independent staging feature, unset
-`TC_CLIENT_UPLOAD_TRUST_MODE`, both `TC_UPLOAD_TRUST_*_VERSION` renderer
-labels, and any optional base-cap overrides; rerender and restart ingest.
-With admission still off and no independent policy, the endpoint must
-return `{"allowance":null}`. Verify that response with an account session
-and verify a supporting client successfully refreshes it before claiming
-its default limits are restored. Transient failures retain the last valid
-allowance. Already-sent uploads, counters, and explicit local limits remain
-unchanged. Keep the external invalidation controls enabled while any
-other instance still depends on them.
+`TC_CLIENT_UPLOAD_TRUST_MODE` and both `TC_UPLOAD_TRUST_*_VERSION` renderer
+labels; rerender and restart ingest. Keep the external invalidation
+controls enabled while any other instance still depends on them.

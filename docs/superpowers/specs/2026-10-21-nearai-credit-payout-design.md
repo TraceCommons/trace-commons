@@ -396,7 +396,8 @@ tokens and the rate never go in the repository, in a PR, or in a log.
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL` (held as `SecretString`,
      refused if empty or not `oc_` plus 64 hex);
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID` (the credential `id`; not
-     secret, used only for its log hash);
+     secret, used only for its log hash; optional since 2026-10-31: unset,
+     log lines carry `credential=unset`, while a set value must be a UUID);
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_SENDER_ORG` (the reseller org UUID);
    - `TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE` (`payment`, `grant` or
      `staking_farm`; required, **no default**). It names the credit the

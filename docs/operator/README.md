@@ -32,7 +32,7 @@ the link.
 | Running a versioned pipeline corpus locally | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate locally | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
 | Comparing the old gate path with the versioned pipeline | [`./pipeline-comparison.md`](./pipeline-comparison.md) |
-| Raising client daily upload limits automatically | [`./client-upload-allowance.md`](./client-upload-allowance.md) |
+| The retired client daily upload allowance, its endpoint, and the staging upload-trust evaluator | [`./client-upload-allowance.md`](./client-upload-allowance.md) |
 | Diagnosing upload credits missing from an account or payout | [`./upload-credit-ownership.md`](./upload-credit-ownership.md) |
 | Reading a failure label of `pipeline.py compare` | [`./pipeline-comparison-labels.md`](./pipeline-comparison-labels.md) |
 | Activating, rolling back, or containing the versioned pipeline for a tenant, suspending a policy, or reading the legacy drain report | [`./pipeline-activation.md`](./pipeline-activation.md) |

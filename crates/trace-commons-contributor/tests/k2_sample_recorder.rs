@@ -1157,12 +1157,9 @@ fn override_touched_keys(key: &str) -> Option<&'static [&'static str]> {
             "idle_sessions",
             "_sample",
         ]),
-        "normalDay/status" | "busyQueue/status" => Some(&[
-            "private_inference_state",
-            "routing",
-            "daily_budget",
-            "_sample",
-        ]),
+        "normalDay/status" | "busyQueue/status" => {
+            Some(&["private_inference_state", "routing", "_sample"])
+        }
         "normalDay/harness_list" | "busyQueue/harness_list" => Some(&[
             "harnesses",
             "activity",
@@ -1233,29 +1230,9 @@ fn apply_hand_written_overrides(all: &mut BTreeMap<String, Value>) {
                 json!({"state": "rows_seen", "derived": true,
                        "last_refresh_at": VOLATILE_TIMESTAMP_PLACEHOLDER, "unreadable_rows": 0}),
             );
-            if let Some(Value::Object(budget)) = status.get_mut("daily_budget") {
-                let max_bytes = budget
-                    .get("max_bytes_per_day")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                let max_uploads = budget
-                    .get("max_uploads_per_day")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                budget.insert("bytes_today".into(), json!(1_048_576));
-                budget.insert(
-                    "bytes_remaining".into(),
-                    json!(max_bytes.saturating_sub(1_048_576)),
-                );
-                budget.insert("uploads_today".into(), json!(4));
-                budget.insert(
-                    "uploads_remaining".into(),
-                    json!(max_uploads.saturating_sub(4)),
-                );
-            }
             status.insert(
                 "_sample".into(),
-                json!("private AI, routing and budget need a live IronWire"),
+                json!("private AI and routing need a live IronWire"),
             );
         }
         if let Some(Value::Object(list)) = all.get_mut(&format!("{set}/harness_list")) {

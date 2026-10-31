@@ -174,16 +174,17 @@ in the signing runbook).
 
 ## Earned client upload limits
 
-This feature is opt-in and changes daily client volume caps while keeping
-staging signup, both admission ledgers, witness requirements, and payouts
-as they are. Follow the [staging earned upload trust procedure](
+Retired: the contributor clients no longer have a daily upload limit, so
+the applied mode below no longer changes anything a client sees. It is
+still accepted so an existing staging render keeps starting; do not enable
+it anew. It keeps staging signup, both admission ledgers, witness
+requirements, and payouts as they are. Follow the [staging earned upload trust procedure](
 client-upload-allowance.md#staging-earned-upload-trust-opt-in) for database
 schema/role/readiness checks, scoped worker-token storage, qualification,
 rollout, rotation and rollback. Do not infer deployment from checked-in
 configuration or local verification.
 
-The approved distinct qualified-trace thresholds are 0/5/20/50, giving
-50/100/150/250 uploads and 200/400/600/1000 MiB per day. No age/week wait or
+The approved distinct qualified-trace thresholds are 0/5/20/50. No age/week wait or
 attestation bonus applies; gate pass, first-in-cluster novelty, count-once
 and outcome netting remain required over the existing 84-day window.
 
@@ -196,9 +197,7 @@ renderer reads only the enabled feature's
 `tc-staging-db-upload-trust-password`, schedules every five minutes, and
 keeps both admission switches explicitly false. Applied uses the
 independent `TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY_JSON`/`_VERSION`
-pair. To disable, unset mode and both labels, rerender/restart, and verify
-an authenticated successful null allowance followed by a client refresh;
-retain usage counters and contributor-chosen caps.
+pair. To disable, unset mode and both labels and rerender/restart.
 
 
 The trust runtime requires schema through V138. It uses a separate

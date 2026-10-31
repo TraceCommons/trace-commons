@@ -463,12 +463,13 @@ public extension ManagedSurface {
         ["claude", "codex"].contains(tool) && connection == "near_ai"
     }
 
-    /// NEAR AI's privacy tiers in the picker's order (owner, 2026-10-30),
-    /// each with the copy key of its heading.
+    /// NEAR AI's privacy tiers in the picker's order, most private first
+    /// (owner, 2026-10-31): NEAR AI's own TEEs, then a third party's, then
+    /// Incognito. Each with the copy key of its heading.
     static let modelTiers = [
-        ("incognito", "model_group_incognito"),
         ("near_ai", "model_group_near_ai"),
         ("external", "model_group_external"),
+        ("incognito", "model_group_incognito"),
     ]
 
     /// The picker's options: the default first, which names the model it

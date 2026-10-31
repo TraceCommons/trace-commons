@@ -122,21 +122,21 @@ final class MonitorNoticeDismissalTests: XCTestCase {
     func testCountsRetryTimesAndOtherHealthLabelsDoNotReopenIndependentSafeguards() throws {
         try withStore { defaults, scope in
             let store = MonitorNoticeDismissals(defaults: defaults)
-            let before = try status(#"{"health":{"last_error_label":"queue-full"},"daily_budget":{"blocked":true,"blocked_entries":2},"witness_capacity":{"waiting_sessions":3,"next_retry_at":"2026-10-25T12:00:00Z"},"automatic_contribution_held":{"held_sessions":4,"reasons":["one","two"]}}"#)
-            let after = try status(#"{"health":{"last_error_label":"privacy-filter-canary-failed"},"daily_budget":{"blocked":true,"blocked_entries":20},"witness_capacity":{"waiting_sessions":30,"next_retry_at":"2026-10-25T13:00:00Z"},"automatic_contribution_held":{"held_sessions":40,"reasons":["two","one","one"]}}"#)
+            let before = try status(#"{"health":{"last_error_label":"queue-full"},"witness_capacity":{"waiting_sessions":3,"next_retry_at":"2026-10-25T12:00:00Z"},"automatic_contribution_held":{"held_sessions":4,"reasons":["one","two"]}}"#)
+            let after = try status(#"{"health":{"last_error_label":"privacy-filter-canary-failed"},"witness_capacity":{"waiting_sessions":30,"next_retry_at":"2026-10-25T13:00:00Z"},"automatic_contribution_held":{"held_sessions":40,"reasons":["two","one","one"]}}"#)
             let first = MonitorNoticeDismissals.conditions(status: before, loaded: true)
             for condition in first.values {
                 if case .active(let incident) = condition { store.dismiss(incident, scope: scope) }
             }
             let latest = MonitorNoticeDismissals.conditions(status: after, loaded: true)
             store.reconcile(latest, scope: scope)
-            for kind in [MonitorNoticeDismissals.Kind.dailyCap, .witness, .automaticHold] {
+            for kind in [MonitorNoticeDismissals.Kind.witness, .automaticHold] {
                 guard case .active(let incident) = latest[kind] else { return XCTFail("The safeguard must still be active") }
                 XCTAssertTrue(store.isDismissed(incident, scope: scope))
             }
-            let resolved = try status(#"{"daily_budget":{"blocked":false},"witness_capacity":{"waiting_sessions":0},"automatic_contribution_held":{"held_sessions":0}}"#)
+            let resolved = try status(#"{"witness_capacity":{"waiting_sessions":0},"automatic_contribution_held":{"held_sessions":0}}"#)
             store.reconcile(MonitorNoticeDismissals.conditions(status: resolved, loaded: true), scope: scope)
-            for kind in [MonitorNoticeDismissals.Kind.dailyCap, .witness, .automaticHold] {
+            for kind in [MonitorNoticeDismissals.Kind.witness, .automaticHold] {
                 guard case .active(let incident) = latest[kind] else { return XCTFail("Missing incident") }
                 XCTAssertFalse(store.isDismissed(incident, scope: scope))
             }
@@ -144,41 +144,24 @@ final class MonitorNoticeDismissalTests: XCTestCase {
         }
     }
 
-    func testNewDailyQuotaWindowReappearsAcrossRestartWithoutAnObservedUnblockedRead() throws {
-        try withStore { defaults, scope in
-            let store = MonitorNoticeDismissals(defaults: defaults)
-            let first = try status(#"{"daily_budget":{"blocked":true,"resets_at":"2026-10-26T00:00:00Z","blocked_entries":2}}"#)
-            guard case .active(let incident) = MonitorNoticeDismissals.conditions(status: first, loaded: true)[.dailyCap] else {
-                return XCTFail("Expected a blocked daily quota window")
-            }
-            store.dismiss(incident, scope: scope)
-            let restarted = MonitorNoticeDismissals(defaults: defaults)
-            let same = try status(#"{"daily_budget":{"blocked":true,"resets_at":"2026-10-26T01:00:00+01:00","blocked_entries":20}}"#)
-            let sameConditions = MonitorNoticeDismissals.conditions(status: same, loaded: true)
-            restarted.reconcile(sameConditions, scope: scope)
-            guard case .active(let sameIncident) = sameConditions[.dailyCap] else { return XCTFail("Missing same-window incident") }
-            XCTAssertTrue(restarted.isDismissed(sameIncident, scope: scope), "Formatting and counts do not change the quota window")
-            let unreadWindow = try status(#"{"daily_budget":{"blocked":true}}"#)
-            let unknown = MonitorNoticeDismissals.conditions(status: unreadWindow, loaded: true)
-            restarted.reconcile(unknown, scope: scope)
-            guard case .active(let unknownIncident) = unknown[.dailyCap] else { return XCTFail("Missing unbound incident") }
-            XCTAssertTrue(restarted.isDismissed(unknownIncident, scope: scope), "A missing window cannot erase a known dismissal")
-            let next = try status(#"{"daily_budget":{"blocked":true,"resets_at":"2026-10-27T00:00:00Z"}}"#)
-            let nextConditions = MonitorNoticeDismissals.conditions(status: next, loaded: true)
-            restarted.reconcile(nextConditions, scope: scope)
-            guard case .active(let nextIncident) = nextConditions[.dailyCap] else { return XCTFail("Missing next-window incident") }
-            XCTAssertFalse(restarted.isDismissed(nextIncident, scope: scope), "A new quota window must show without observing the midnight clear")
-        }
+    /// The daily upload limit is retired: a blocked `daily_budget` from an
+    /// older daemon opens no safeguard and no dismissable notice.
+    func testTheRetiredDailyBudgetIsNotASafeguard() throws {
+        XCTAssertNil(MonitorNoticeDismissals.Kind(rawValue: "daily-cap-reached"))
+        let blocked = try status(#"{"daily_budget":{"blocked":true,"blocked_entries":2},"witness_capacity":{"waiting_sessions":0},"automatic_contribution_held":{"held_sessions":0}}"#)
+        let conditions = MonitorNoticeDismissals.conditions(status: blocked, loaded: true)
+        XCTAssertFalse(conditions.values.contains { if case .active = $0 { return true } else { return false } })
+        XCTAssertFalse(TracesStore.safeguards(blocked).contains { $0.condition == "daily-cap-reached" })
     }
 
     func testExplicitIndependentClearsOverrideStaleLabelsAndPreserveUnrelatedHealth() throws {
-        for kind in [MonitorNoticeDismissals.Kind.dailyCap, .witness, .automaticHold] {
-            let clear = try status(#"{"health":{"last_error_label":"LABEL"},"daily_budget":{"blocked":false},"witness_capacity":{"waiting_sessions":0},"automatic_contribution_held":{"held_sessions":0}}"#.replacingOccurrences(of: "LABEL", with: kind.rawValue))
+        for kind in [MonitorNoticeDismissals.Kind.witness, .automaticHold] {
+            let clear = try status(#"{"health":{"last_error_label":"LABEL"},"witness_capacity":{"waiting_sessions":0},"automatic_contribution_held":{"held_sessions":0}}"#.replacingOccurrences(of: "LABEL", with: kind.rawValue))
             XCTAssertFalse(TracesStore.safeguards(clear).contains { $0.condition == kind.rawValue }, "A stale label cannot redraw an explicitly resolved safeguard")
             let unknown = try status(#"{"health":{"last_error_label":"LABEL"}}"#.replacingOccurrences(of: "LABEL", with: kind.rawValue))
             XCTAssertTrue(TracesStore.safeguards(unknown).contains { $0.condition == kind.rawValue }, "An absent independent signal must retain its health fallback")
         }
-        let other = try status(#"{"health":{"last_error_label":"privacy-filter-canary-failed"},"daily_budget":{"blocked":false},"witness_capacity":{"waiting_sessions":0},"automatic_contribution_held":{"held_sessions":0}}"#)
+        let other = try status(#"{"health":{"last_error_label":"privacy-filter-canary-failed"},"witness_capacity":{"waiting_sessions":0},"automatic_contribution_held":{"held_sessions":0}}"#)
         XCTAssertTrue(TracesStore.safeguards(other).contains { $0.condition == "privacy-filter-canary-failed" })
     }
 

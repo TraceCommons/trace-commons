@@ -14,19 +14,6 @@ export const coreStatusSchema = z.object({
     // Older daemons do not report this aggregate. Keep an unavailable
     // count distinct from a confirmed zero and preserve the other status.
     decisions_owed: z.number().int().nonnegative().nullable().catch(null),
-    daily_budget: z
-      .object({
-        bytes_today: z.number(),
-        max_bytes_per_day: z.number(),
-        bytes_remaining: z.number(),
-        uploads_today: z.number(),
-        max_uploads_per_day: z.number(),
-        uploads_remaining: z.number(),
-        blocked: z.boolean(),
-        blocked_entries: z.number(),
-        blocked_bytes: z.number(),
-      })
-      .optional(),
     routing: z
       .object({
         state: z.string(),

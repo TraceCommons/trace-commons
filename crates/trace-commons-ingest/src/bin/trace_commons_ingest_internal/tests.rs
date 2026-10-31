@@ -6742,6 +6742,11 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         submit_principal_limits: SubmitPrincipalLimits::default(),
         large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
+        // The whole budget: fixture principals are shared across parallel
+        // tests, and the focused share tests set their own.
+        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(
+            LARGE_BODY_GLOBAL_BYTES,
+        )),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -6799,8 +6804,6 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         witness_capture_pin: None,
         admission: None,
         account_admission: None,
-        client_upload_allowance: None,
-        client_upload_trust_policy: None,
         client_upload_trust_database: None,
         account_trust_shadow_policy: None,
         near_ai_starter_mode: starter_advance::StarterMode::Disabled,
@@ -10393,6 +10396,7 @@ async fn submit_quota_limits_tenant_new_submissions_but_allows_idempotent_retry(
         TraceSubmissionQuotaConfig {
             max_per_tenant_per_hour: 1,
             max_per_principal_per_hour: 0,
+            max_per_account_per_hour: 0,
         },
     );
     let envelope = sample_envelope().await;
@@ -10428,6 +10432,7 @@ async fn submit_quota_limits_principal_without_blocking_other_contributors() {
         TraceSubmissionQuotaConfig {
             max_per_tenant_per_hour: 0,
             max_per_principal_per_hour: 1,
+            max_per_account_per_hour: 0,
         },
     );
 
@@ -10453,6 +10458,7 @@ async fn submit_quota_ignores_revoked_submissions() {
         TraceSubmissionQuotaConfig {
             max_per_tenant_per_hour: 1,
             max_per_principal_per_hour: 1,
+            max_per_account_per_hour: 0,
         },
     );
     let first = sample_envelope().await;
@@ -10476,6 +10482,136 @@ async fn submit_quota_ignores_revoked_submissions() {
     let _ = test_submit(state, "token-a", replacement)
         .await
         .expect("revoked submission no longer consumes quota");
+}
+
+#[test]
+fn account_hourly_submission_ceiling_is_on_by_default_and_zero_turns_it_off() {
+    assert_eq!(ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT, 600);
+    assert_eq!(
+        parse_account_hourly_submission_ceiling(None).expect("unset takes the default"),
+        ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT
+    );
+    assert_eq!(
+        parse_account_hourly_submission_ceiling(Some("0")).expect("zero parses"),
+        0,
+        "zero turns the ceiling off"
+    );
+    assert_eq!(
+        parse_account_hourly_submission_ceiling(Some(" 25 ")).expect("a count parses"),
+        25
+    );
+    let error = parse_account_hourly_submission_ceiling(Some("many"))
+        .expect_err("a non-numeric ceiling refuses startup");
+    assert!(
+        error
+            .to_string()
+            .contains(TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR)
+    );
+}
+
+#[tokio::test]
+async fn account_hourly_submission_ceiling_refuses_the_next_upload_with_a_retry_hint() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let first = sample_envelope().await;
+    let Json(first_receipt) = test_submit(state.clone(), "token-a", first.clone())
+        .await
+        .expect("the first upload of the hour is admitted");
+    let Json(retry_receipt) = test_submit(state.clone(), "token-a", first)
+        .await
+        .expect("a retry of a recorded submission is not counted against itself");
+    assert_eq!(retry_receipt.status, first_receipt.status);
+
+    let blocked = test_submit(state.clone(), "token-a", sample_envelope().await)
+        .await
+        .expect_err("a new upload past the ceiling is refused");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL,
+        "the label clients already keep an upload queued for"
+    );
+    let retry_after = blocked
+        .1
+        .0
+        .retry_after_seconds
+        .expect("the refusal says when to come back");
+    assert!(
+        (1..=3600).contains(&retry_after),
+        "the wait is inside the hour window: {retry_after}"
+    );
+    let response = api_error_response_with_retry_after(blocked);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some(retry_after.to_string().as_str())
+    );
+
+    // A tenant outside the account namespaces (a legacy invite or pooled
+    // tenant) is bounded per principal: another contributor in it, and
+    // another tenant, are not refused.
+    let _ = test_submit(state.clone(), "token-a-2", sample_envelope().await)
+        .await
+        .expect("another principal in a legacy tenant has its own ceiling");
+    let _ = test_submit(state, "token-b", sample_envelope().await)
+        .await
+        .expect("another tenant has its own ceiling");
+}
+
+#[tokio::test]
+async fn account_hourly_submission_ceiling_of_zero_bounds_nothing() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 0,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    for _ in 0..3 {
+        let _ = test_submit(state.clone(), "token-a", sample_envelope().await)
+            .await
+            .expect("a ceiling of zero refuses nothing");
+    }
+}
+
+/// The ceiling runs before the admission reservation, and both hourly checks
+/// run before the server re-scrub and the per-tenant history reads, so an
+/// upload refused for its rate costs neither.
+#[test]
+fn hourly_submission_checks_run_before_the_rescrub_and_history_reads() {
+    let source = include_str!("../trace-commons-ingest.rs");
+    let handler = source
+        .find("async fn submit_trace_handler_authenticated(")
+        .expect("the submit handler");
+    let at = |needle: &str| {
+        handler
+            + source[handler..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("submit handler calls {needle}"))
+    };
+    let ceiling = at("enforce_account_hourly_submission_ceiling(");
+    let reserve = at("admission::reserve(");
+    let quota = at("enforce_submission_quota(state.as_ref(), &tenant)");
+    let rescrub = at("rescrub_trace_envelope(&mut envelope)");
+    let derived = at("read_all_derived_records(&state.root, tenant.tenant_id())");
+    assert!(
+        ceiling < reserve,
+        "the ceiling runs before admission reserves"
+    );
+    assert!(ceiling < rescrub, "the ceiling runs before the rescrub");
+    assert!(quota < rescrub, "the hourly quota runs before the rescrub");
+    assert!(
+        quota < derived,
+        "the hourly quota runs before the derived-record read"
+    );
 }
 
 #[test]
@@ -16037,7 +16173,8 @@ async fn admin_config_status_route_returns_safe_projection() {
                 "submission_quota",
                 serde_json::json!({
                     "max_per_tenant_per_hour": 0,
-                    "max_per_principal_per_hour": 0
+                    "max_per_principal_per_hour": 0,
+                    "max_per_account_per_hour": 0
                 }),
             ),
             (
@@ -30889,6 +31026,11 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
         submit_principal_limits: SubmitPrincipalLimits::default(),
         large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
+        // The whole budget: fixture principals are shared across parallel
+        // tests, and the focused share tests set their own.
+        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(
+            LARGE_BODY_GLOBAL_BYTES,
+        )),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -30948,8 +31090,6 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         witness_capture_pin: None,
         admission: None,
         account_admission: None,
-        client_upload_allowance: None,
-        client_upload_trust_policy: None,
         client_upload_trust_database: None,
         account_trust_shadow_policy: None,
         near_ai_starter_mode: starter_advance::StarterMode::Disabled,
@@ -31816,8 +31956,6 @@ fn the_applied_policy_is_read_only_from_a_tiered_admission_policy() {
 fn independent_upload_trust_policy(version: &str) -> upload_allowance::ClientUploadTrustPolicy {
     let json = tiered_admission_policy(version, 172800);
     upload_allowance::ClientUploadTrustPolicy {
-        bounded: trace_commons_server::account_trust::parse_bounded_policy(&json, &[version])
-            .unwrap(),
         growth: trace_commons_server::account_trust_rule::parse_growth_policy(&json, &[version])
             .unwrap(),
     }
@@ -31874,13 +32012,17 @@ fn independent_upload_trust_selects_the_same_applied_policy_without_admission_co
     )
     .unwrap()
     .unwrap();
-    assert_eq!(selected.version(), independent.bounded.version());
+    assert_eq!(selected.version(), independent.growth.version());
     assert_eq!(
         selected.effective_allowance(1),
         independent.growth.effective_allowance(1)
     );
     let admission = admission::AccountAdmissionConfig {
-        policy: independent.bounded.clone(),
+        policy: trace_commons_server::account_trust::parse_bounded_policy(
+            &tiered_admission_policy("client-upload-v1", 172800),
+            &["client-upload-v1"],
+        )
+        .unwrap(),
         lease_seconds: 60,
         providers: None,
     };
@@ -31937,7 +32079,6 @@ async fn independent_upload_trust_scheduler_accepts_applied_policy_with_both_led
         .unwrap()
         .unwrap(),
     ));
-    state_mut.client_upload_trust_policy = Some(independent);
     assert!(state.admission.is_none());
     assert!(state.account_admission.is_none());
     let config = account_trust_growth_routes::AccountTrustSchedulerConfig::new(
@@ -81537,6 +81678,14 @@ async fn large_upload_gate_caps_in_flight_bodies_per_principal() {
         TraceAuthMethod::StaticToken,
         &static_token_principal_ref(TOKEN),
     );
+    // The submit route's own in-flight cap (2) is also taken before the body
+    // is read; lift it for this principal so the stalled submits reach the
+    // large-body cap under test.
+    configure_submit_rate_limits_for_test(
+        &static_submit_rate_limit_key("tenant-a", TOKEN),
+        u32::MAX,
+        u32::MAX,
+    );
     let (addr, server) = serve_ingest_for_test(state).await;
     let cap = LARGE_BODY_PER_PRINCIPAL_CONCURRENCY;
 
@@ -81591,6 +81740,236 @@ async fn large_upload_gate_caps_in_flight_bodies_per_principal() {
     .await
     .expect("abandoned uploads release their principal slots");
     server.abort();
+}
+
+/// Through the router, the per-principal submission rate is checked before
+/// the body is read: once the window is spent, an upload whose body is never
+/// sent is still answered, with the same 429, label and `Retry-After`.
+#[tokio::test]
+async fn submit_rate_limit_refuses_before_reading_the_body() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).submit_principal_limits = SubmitPrincipalLimits {
+        rate_per_window: 1,
+        concurrency: SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+    };
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+    let body = serde_json::to_vec(&invalid).expect("envelope serialises");
+    let first = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/traces")
+                .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .expect("submit request builds"),
+        )
+        .await
+        .expect("first response");
+    assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+
+    let (addr, server) = serve_ingest_for_test(state).await;
+    let mut refused = send_upload_headers_without_body(
+        addr,
+        "POST",
+        "/v1/traces",
+        Some(SUBMIT_RATE_LIMIT_TOKEN_A),
+    )
+    .await;
+    assert_eq!(
+        response_status_within(&mut refused, StdDuration::from_secs(2))
+            .await
+            .as_deref(),
+        Some("HTTP/1.1 429 Too Many Requests"),
+        "a principal past its rate is refused without its body being read"
+    );
+    // Another principal's window is its own: its upload is admitted and
+    // waits for the body.
+    let mut other = send_upload_headers_without_body(
+        addr,
+        "POST",
+        "/v1/traces",
+        Some(SUBMIT_RATE_LIMIT_TOKEN_B),
+    )
+    .await;
+    assert_eq!(
+        response_status_within(&mut other, StdDuration::from_millis(300)).await,
+        None,
+        "a principal under its rate is admitted and waits for its body"
+    );
+    server.abort();
+}
+
+/// Bundle finalize runs the same submission work, so it takes the same
+/// per-principal rate before its body is read, and counts once.
+#[tokio::test]
+async fn token_bundle_finalize_refuses_past_the_submit_rate_before_reading_the_body() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).submit_principal_limits = SubmitPrincipalLimits {
+        rate_per_window: 1,
+        concurrency: SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+    };
+    let path = format!("/v1/token-bundles/{}/r1", Uuid::nil());
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+    let first = app(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(path.as_str())
+                .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&invalid).expect("envelope serialises"),
+                ))
+                .expect("finalize request builds"),
+        )
+        .await
+        .expect("first response");
+    assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        submit_rate_limit_count_for_test(
+            "tenant-a",
+            TraceAuthMethod::StaticToken,
+            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
+        ),
+        1
+    );
+
+    let (addr, server) = serve_ingest_for_test(state).await;
+    let mut refused =
+        send_upload_headers_without_body(addr, "POST", &path, Some(SUBMIT_RATE_LIMIT_TOKEN_A))
+            .await;
+    assert_eq!(
+        response_status_within(&mut refused, StdDuration::from_secs(2))
+            .await
+            .as_deref(),
+        Some("HTTP/1.1 429 Too Many Requests"),
+        "a principal past its rate is refused without its finalize body being read"
+    );
+    server.abort();
+}
+
+/// The submission in-flight cap is also taken before the body is read: with
+/// the principal's slots held by stalled uploads, the next one is answered
+/// at once with the concurrency refusal.
+#[tokio::test]
+async fn submit_concurrency_limit_refuses_before_reading_the_body() {
+    use tokio::io::AsyncReadExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let key = static_submit_rate_limit_key("tenant-a", SUBMIT_RATE_LIMIT_TOKEN_A);
+    let (addr, server) = serve_ingest_for_test(state).await;
+
+    let mut stalled = Vec::new();
+    for _ in 0..SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+        stalled.push(
+            send_upload_headers_without_body(
+                addr,
+                "POST",
+                "/v1/traces",
+                Some(SUBMIT_RATE_LIMIT_TOKEN_A),
+            )
+            .await,
+        );
+    }
+    tokio::time::timeout(StdDuration::from_secs(2), async {
+        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) < SUBMIT_PER_PRINCIPAL_CONCURRENCY {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stalled uploads hold the principal's submission slots before their bodies arrive");
+
+    let mut next = send_upload_headers_without_body(
+        addr,
+        "POST",
+        "/v1/traces",
+        Some(SUBMIT_RATE_LIMIT_TOKEN_A),
+    )
+    .await;
+    let mut response = vec![0u8; 1024];
+    let read = tokio::time::timeout(StdDuration::from_secs(2), next.read(&mut response))
+        .await
+        .expect("the refusal does not wait for the body")
+        .expect("response reads");
+    let text = String::from_utf8_lossy(&response[..read]).to_ascii_lowercase();
+    assert!(
+        text.starts_with("http/1.1 429 too many requests"),
+        "refused: {text}"
+    );
+    assert!(
+        text.contains("retry-after: 2"),
+        "carries Retry-After: {text}"
+    );
+    assert!(
+        text.contains(SUBMIT_RATE_LIMITED_LABEL),
+        "names the label: {text}"
+    );
+
+    drop(stalled);
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) > 0 {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("abandoned uploads release their submission slots");
+    server.abort();
+}
+
+/// A routed submission is counted against the principal's window once, by
+/// the pre-body check; the handler does not count it again.
+#[tokio::test]
+async fn routed_submit_counts_against_the_rate_window_once() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+    let response = app(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/traces")
+                .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&invalid).expect("envelope serialises"),
+                ))
+                .expect("submit request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        submit_rate_limit_count_for_test(
+            "tenant-a",
+            TraceAuthMethod::StaticToken,
+            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
+        ),
+        1
+    );
 }
 
 /// The deployment-wide in-flight bound holds across principals, and each

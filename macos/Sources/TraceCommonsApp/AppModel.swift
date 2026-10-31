@@ -1543,11 +1543,8 @@ final class AppModel: ObservableObject {
 
     var health: HealthCopy? {
         guard let label = status.health.lastErrorLabel else { return nil }
-        // The budget banner says the same thing with real numbers, so the
+        // The witness banner says the same thing with the count, so the
         // bare label is suppressed when it is going to be drawn.
-        if label == "daily-cap-reached" && status.dailyBudget.blocked { return nil }
-        // Likewise the witness banner, with the count -- only when it is
-        // actually going to be drawn.
         if label == "witness-saturated" && witnessCapacityHealth != nil { return nil }
         // And the held-folder notice, which names the folders and says why --
         // again only when it is going to be drawn.
@@ -1567,23 +1564,11 @@ final class AppModel: ObservableObject {
     }
 
     /// The banner for approved sessions held on a busy privacy witness, when
-    /// there are any. Independent of `health` for the reason `budgetHealth`
-    /// is: another label can hold the daemon's one health slot while these
-    /// sessions are still waiting.
+    /// there are any. Independent of `health` because another label can
+    /// hold the daemon's one health slot while these sessions are still
+    /// waiting.
     var witnessCapacityHealth: HealthCopy? {
         HealthCopy.forWitnessCapacity(status.witnessCapacity)
-    }
-
-    /// The spent-budget banner, when there is one.
-    ///
-    /// Deliberately independent of `health`. The daemon's health slot holds
-    /// one label at a time and `daily-cap-reached` is last in its
-    /// precedence order, so a full queue -- or any other condition -- hid
-    /// the cap completely. Rendering both means the contributor sees the
-    /// reason their approvals are not moving even while something else is
-    /// also wrong.
-    var budgetHealth: HealthCopy? {
-        HealthCopy.forBudget(status.dailyBudget)
     }
 
     // MARK: - Lifecycle

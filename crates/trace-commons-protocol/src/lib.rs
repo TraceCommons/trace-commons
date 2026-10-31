@@ -27,6 +27,7 @@ pub mod public_run;
 mod redaction;
 pub mod referral;
 pub mod settlement_estimate;
+pub mod submit_rate;
 pub mod trace_contribution;
 pub mod upload_allowance;
 pub mod witness_pacing;

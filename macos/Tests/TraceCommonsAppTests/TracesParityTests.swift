@@ -70,8 +70,8 @@ final class TracesParityTests: XCTestCase {
         XCTAssertNotEqual(a.id, b.id)
     }
 
-    /// Severity per line: budget, witness and gate-held are waiting; the
-    /// label line carries the core's own severity.
+    /// The label line carries the core's own severity; a blocked
+    /// `daily_budget` from an older daemon adds no line of its own.
     func test_eachSafeguardCarriesItsSeverity() throws {
         let json = """
         {"health":{"last_error_label":"pii-filter-unavailable"},
@@ -82,8 +82,7 @@ final class TracesParityTests: XCTestCase {
         let label = HealthCopy.core(label: "pii-filter-unavailable", maxQueueEntries: nil)
         XCTAssertEqual(lines.first?.title, label.title)
         XCTAssertEqual(lines.first?.severity, label.severity)
-        XCTAssertEqual(lines.dropFirst().map(\.severity), [.waiting])
-        XCTAssertEqual(lines.dropFirst().first?.title, DailyBudgetCopy.title)
+        XCTAssertEqual(lines.count, 1)
     }
 
     /// The banners are popover notices over the Traces tab (owner,

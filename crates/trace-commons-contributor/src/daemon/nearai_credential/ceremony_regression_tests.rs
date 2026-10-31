@@ -70,7 +70,7 @@ impl Fixture {
         install_backend(&store, backend.clone());
         let mut settings =
             DaemonSettings::load_with_cloud_credentials(&store).expect("load synthetic settings");
-        settings.max_uploads_per_day = 7;
+        settings.max_reuploads = 7;
         settings
             .save_for_test(&store)
             .expect("save synthetic preference");
@@ -229,7 +229,7 @@ fn the_current_waiting_attempt_publishes_both_credentials_once() {
     assert_eq!(
         DaemonSettings::load_with_cloud_credentials(&fixture.store)
             .expect("reload persisted preference")
-            .max_uploads_per_day,
+            .max_reuploads,
         7
     );
 }

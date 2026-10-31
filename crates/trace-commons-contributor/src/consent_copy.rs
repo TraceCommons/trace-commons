@@ -68,14 +68,12 @@
 //! Approved 2026-10-06, every sentence in both. The spec's Open list left
 //! the switch-on notice wording open; that question is now closed.
 //!
-//! # The submit toast and the per-session notification (K9, #1118)
+//! # The per-session notification (K9, #1118)
 //!
-//! Two more WYSIWYG design sentences, matched here so no shell writes its
-//! own: [`toast_sent_text`] (`tc_toast_sent_text`), "Sent. N left to decide
-//! (middle dot) upload limit X of Y"; and [`session_notification_copy`]
-//! (`tc_session_notification_copy`), the per-session notification whose body
-//! is [`GATE_STATEMENT`] and whose one action is "Look, then decide". Both
-//! approved 2026-10-06.
+//! One more WYSIWYG design sentence, matched here so no shell writes its
+//! own: [`session_notification_copy`] (`tc_session_notification_copy`), the
+//! per-session notification whose body is [`GATE_STATEMENT`] and whose one
+//! action is "Look, then decide". Approved 2026-10-06.
 
 /// Approved 2026-10-06.
 /// Core-owned disclosure for configured activity missions with rewards disabled.
@@ -2405,39 +2403,6 @@ pub(crate) fn unlabelled_envelope_keys(
 }
 
 // ---------------------------------------------------------------------------
-// The submit toast (K9, #1118): "Sent. N left to decide - upload limit X of Y"
-// ---------------------------------------------------------------------------
-//
-// Not the same sentence as the GTK/macOS/Windows "one-click submit" toast
-// (`crate::daemon::queue`'s redaction-count toast, e.g. "Approved. 4
-// redactions applied. 1 flagged."). This is a second, later line from the
-// WYSIWYG design's Flow 2 and Flow 3: after a submit, how many decisions are
-// still owed and where today's upload cap stands. It lives here, not in a
-// shell, for the reason the module doc gives -- one Rust sentence rather
-// than three native copies of the same arithmetic.
-
-/// Approved 2026-10-06. The toast after a submit, matching the design's
-/// worked example exactly: "Sent. 1 left to decide - upload limit 7 of 20".
-///
-/// `uploads_today` and `max_uploads_per_day` are `status.daily_budget`'s
-/// fields of the same names. `decisions_owed` is `status.decisions_owed`
-/// (K6, a separate branch): this function only formats the count it is
-/// given and never reads the queue itself, so it has nothing to say about
-/// what counts as "owed" -- that is K6's decision, not this one's.
-#[must_use]
-pub fn toast_sent_text(
-    uploads_today: u64,
-    max_uploads_per_day: u64,
-    decisions_owed: u64,
-) -> String {
-    // `\u{b7}` is the design's middle dot (·), written as an escape so the
-    // source stays plain ASCII like the rest of this file's comments.
-    format!(
-        "Sent. {decisions_owed} left to decide \u{b7} upload limit {uploads_today} of {max_uploads_per_day}"
-    )
-}
-
-// ---------------------------------------------------------------------------
 // The per-session notification (K9, #1118)
 // ---------------------------------------------------------------------------
 
@@ -4215,23 +4180,6 @@ mod tests {
             SCRUB_CHECK_AUTOMATIC_HELP.contains("does not check that the scrubbing was right"),
             "Automatic says what it is not"
         );
-    }
-
-    /// The design's own worked example (Flow 2), verbatim.
-    #[test]
-    fn toast_sent_text_matches_the_design_example() {
-        assert_eq!(
-            toast_sent_text(7, 20, 1),
-            "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
-        );
-    }
-
-    #[test]
-    fn toast_sent_text_states_both_counts_whatever_they_are() {
-        let text = toast_sent_text(0, 50, 0);
-        assert!(text.starts_with("Sent."), "{text}");
-        assert!(text.contains("0 left to decide"), "{text}");
-        assert!(text.contains("upload limit 0 of 50"), "{text}");
     }
 
     /// The per-session notification's body is the consent sentence itself,

@@ -86,11 +86,6 @@ pub struct SettingsView {
     /// Shown only while the hold is zero. See `copy::KNOB_HOLD_ZERO`.
     approval_hold_note: gtk::Label,
     digest_hours: gtk::SpinButton,
-    /// The two daily-cap knobs. Same "built once, refilled" rule as the
-    /// three above, and the same `filling_knobs` guard covers them -- see
-    /// its doc.
-    max_uploads_per_day: gtk::SpinButton,
-    max_bytes_per_day_mb: gtk::SpinButton,
     /// Set while `render_knobs` is writing the daemon's own values into
     /// those three, so the `value-changed` they emit is not mistaken for a
     /// contributor turning a dial and echoed straight back as a write.
@@ -620,32 +615,6 @@ impl SettingsView {
         style::append_caveat(&knobs, copy::KNOBS_NOTE);
         content.append(&knobs);
 
-        // The daily upload budget: a separate card from the timing knobs
-        // above (see copy.rs's module doc for why). Ranges are `1` (a
-        // contributor throttling their own uploads is legitimate, so no
-        // higher floor than "not zero") to the same fixed ceiling
-        // `apply_settings_object` enforces server-side -- 1,000 uploads,
-        // 5,120 MB -- so a value this control can even produce is a value
-        // the daemon will actually accept.
-        content.append(&style::section(copy::BUDGET_HEADING));
-        let budget = style::card(gtk::Orientation::Vertical, space::M);
-        let max_uploads_per_day = knob_row(
-            &budget,
-            copy::KNOB_MAX_UPLOADS_TITLE,
-            copy::KNOB_MAX_UPLOADS_UNIT,
-            1.0,
-            1_000.0,
-        );
-        let max_bytes_per_day_mb = knob_row(
-            &budget,
-            copy::KNOB_MAX_BYTES_TITLE,
-            copy::KNOB_MAX_BYTES_UNIT,
-            1.0,
-            5_120.0,
-        );
-        style::append_caveat(&budget, copy::BUDGET_NOTE);
-        content.append(&budget);
-
         content.append(&style::section(copy::AUTOSTART_HEADING));
         let autostart_card = style::card(gtk::Orientation::Vertical, space::M);
         let autostart_body = gtk::Label::builder().xalign(0.0).wrap(true).build();
@@ -721,8 +690,6 @@ impl SettingsView {
             approval_hold_seconds,
             approval_hold_note,
             digest_hours,
-            max_uploads_per_day,
-            max_bytes_per_day_mb,
             filling_knobs: std::cell::Cell::new(false),
             autostart_body,
             autostart_row,
@@ -832,22 +799,6 @@ pub fn wire(app: &Rc<App>) {
         &app.settings.digest_hours,
         "digest_interval_secs",
         3600,
-    );
-    // The two budget knobs. `max_uploads_per_day` needs no scale (the
-    // control and the wire value are the same unit); `max_bytes_per_day`
-    // is shown in MB and scaled up to bytes, the same MB-to-bytes
-    // convention the rest of this shell already uses in `model::human_bytes`.
-    wire_knob(
-        app,
-        &app.settings.max_uploads_per_day,
-        "max_uploads_per_day",
-        1,
-    );
-    wire_knob(
-        app,
-        &app.settings.max_bytes_per_day_mb,
-        "max_bytes_per_day",
-        1_048_576,
     );
 
     // The declaration. The switch writes on its own -- turning it on IS
@@ -2261,10 +2212,6 @@ fn render_knobs(app: &Rc<App>, settings: &Settings) {
         .set_value(knob_shown(settings.approval_hold_secs, 1));
     view.digest_hours
         .set_value(knob_shown(settings.digest_interval_secs, 3600));
-    view.max_uploads_per_day
-        .set_value(knob_shown(settings.max_uploads_per_day, 1));
-    view.max_bytes_per_day_mb
-        .set_value(knob_shown(settings.max_bytes_per_day, 1_048_576));
     view.filling_knobs.set(false);
 
     view.approval_hold_note

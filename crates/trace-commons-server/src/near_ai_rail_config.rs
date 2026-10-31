@@ -26,6 +26,8 @@ use crate::payout_rate::{NEAR_AI_PAYOUT_MODE_ENV, PayoutMode};
 /// The payout credential: `oc_` plus 64 hex. Secret.
 pub const NEAR_AI_PAYOUT_CREDENTIAL_ENV: &str = "TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL";
 /// The credential's `id` (a UUID). Not secret; used only for its log hash.
+/// Optional: unset, log lines carry `credential=unset`. A set value must be a
+/// UUID.
 pub const NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV: &str = "TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID";
 /// The commons' reseller org (a UUID).
 pub const NEAR_AI_PAYOUT_SENDER_ORG_ENV: &str = "TRACE_COMMONS_NEAR_AI_PAYOUT_SENDER_ORG";
@@ -126,8 +128,15 @@ impl NearAiRailConfig {
         if !is_near_ai_org_credential(&token) {
             return Err(malformed(NEAR_AI_PAYOUT_CREDENTIAL_ENV));
         }
-        let credential_id = parse_uuid(&read(NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV)?)
-            .ok_or(malformed(NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV))?;
+        // Optional, but set means set: an empty or padded value is malformed.
+        let credential_id = match get(NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV) {
+            None => None,
+            Some(value) => Some(
+                parse_uuid(&value)
+                    .filter(|_| !value.is_empty() && value.trim() == value)
+                    .ok_or(malformed(NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV))?,
+            ),
+        };
         let sender_org = parse_uuid(&read(NEAR_AI_PAYOUT_SENDER_ORG_ENV)?)
             .ok_or(malformed(NEAR_AI_PAYOUT_SENDER_ORG_ENV))?;
         let source = NearAiCreditSource::parse(&read(NEAR_AI_PAYOUT_SOURCE_ENV)?)
@@ -322,15 +331,20 @@ impl NearAiReferralConfig {
                 let credential_id = parse_uuid(&credential_id)
                     .ok_or(missing(NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV))?;
                 let same_token = token == payout.token.expose_secret();
-                let same_id = credential_id == payout.credential_id;
+                // Without a payout credential id, the token alone decides.
+                let same_id = payout
+                    .credential_id
+                    .map(|payout_id| credential_id == payout_id);
                 match (same_token, same_id) {
-                    (true, true) => (Some(payout.clone()), true),
-                    (true, false) => return Err(missing(NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV)),
-                    (false, true) => return Err(missing(NEAR_AI_REFERRAL_CREDENTIAL_ENV)),
-                    (false, false) => (
+                    (true, Some(true) | None) => (Some(payout.clone()), true),
+                    (true, Some(false)) => {
+                        return Err(missing(NEAR_AI_REFERRAL_CREDENTIAL_ID_ENV));
+                    }
+                    (false, Some(true)) => return Err(missing(NEAR_AI_REFERRAL_CREDENTIAL_ENV)),
+                    (false, _) => (
                         Some(NearAiTransferCredentials {
                             token: SecretString::from(token),
-                            credential_id,
+                            credential_id: Some(credential_id),
                             sender_org: payout.sender_org,
                             source: payout.source,
                         }),
@@ -450,8 +464,12 @@ mod tests {
             assert_eq!(settings.credentials.source, NearAiCreditSource::Grant);
             assert_eq!(settings.account_ceiling, AtomicUnits::from_raw(1000));
 
-            // Each setting, missing, refuses with its own name.
+            // Each required setting, missing, refuses with its own name. The
+            // credential id is optional (it only labels log lines).
             for setting in &NEAR_AI_PAYOUT_ENV_NAMES[1..] {
+                if *setting == NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV {
+                    continue;
+                }
                 let mut vars = complete(mode);
                 vars.remove(setting);
                 let error = parse(&vars).unwrap_err();
@@ -502,6 +520,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The credential id only labels log lines, so it may be left unset; a
+    /// value that is set must still be a UUID.
+    #[test]
+    fn the_credential_id_is_optional_but_a_set_value_must_be_a_uuid() {
+        for mode in ["dry_run", "live"] {
+            let mut vars = complete(mode);
+            vars.remove(NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV);
+            let NearAiRailConfig::Enabled(settings) = parse(&vars).unwrap() else {
+                panic!("{mode} is enabled");
+            };
+            assert_eq!(settings.credentials.credential_id, None);
+            assert_eq!(settings.credentials.token.expose_secret(), TOKEN);
+
+            let NearAiRailConfig::Enabled(settings) = parse(&complete(mode)).unwrap() else {
+                panic!("{mode} is enabled");
+            };
+            assert_eq!(settings.credentials.credential_id, Some(Uuid::from_u128(2)));
+
+            for value in ["", " ", "trace-commons-reseller"] {
+                let mut vars = complete(mode);
+                vars.insert(NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV, value.to_string());
+                assert_eq!(
+                    parse(&vars).unwrap_err(),
+                    NearAiRailConfigError::Missing {
+                        setting: NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV
+                    },
+                    "{value:?}"
+                );
+            }
+        }
+    }
+
+    /// Without a payout credential id, sharing is decided by the token alone.
+    #[test]
+    fn referral_shares_by_token_when_the_payout_id_is_unset() {
+        let mut rail_vars = complete("live");
+        rail_vars.remove(NEAR_AI_PAYOUT_CREDENTIAL_ID_ENV);
+        let rail = parse(&rail_vars).unwrap();
+
+        let mut shared = referral("live");
+        shared.insert(NEAR_AI_REFERRAL_CREDENTIAL_ENV, TOKEN.to_string());
+        let NearAiReferralConfig::Enabled(settings) = parse_referral(&shared, &rail).unwrap()
+        else {
+            panic!("live is enabled");
+        };
+        assert!(settings.shares_payout_credential);
+
+        let NearAiReferralConfig::Enabled(settings) =
+            parse_referral(&referral("live"), &rail).unwrap()
+        else {
+            panic!("live is enabled");
+        };
+        assert!(!settings.shares_payout_credential);
+        let credentials = settings.credentials.expect("live has a credential");
+        assert_eq!(credentials.credential_id, Some(Uuid::from_u128(3)));
     }
 
     /// The source is the operator's choice among the three #1271 names; the
@@ -637,7 +712,7 @@ mod tests {
         assert!(!settings.shares_payout_credential);
         let credentials = settings.credentials.expect("live has a credential");
         assert_eq!(credentials.token.expose_secret(), REFERRAL_TOKEN);
-        assert_eq!(credentials.credential_id, Uuid::from_u128(3));
+        assert_eq!(credentials.credential_id, Some(Uuid::from_u128(3)));
         // The sender org and source are the rail's.
         assert_eq!(credentials.sender_org, Uuid::from_u128(1));
         assert_eq!(credentials.source, NearAiCreditSource::Grant);
@@ -695,7 +770,7 @@ mod tests {
             assert!(settings.shares_payout_credential);
             let credentials = settings.credentials.expect("live has a credential");
             assert_eq!(credentials.token.expose_secret(), TOKEN);
-            assert_eq!(credentials.credential_id, Uuid::from_u128(2));
+            assert_eq!(credentials.credential_id, Some(Uuid::from_u128(2)));
             assert_eq!(credentials.sender_org, Uuid::from_u128(1));
         }
 
