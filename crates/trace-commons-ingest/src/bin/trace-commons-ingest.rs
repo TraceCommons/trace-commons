@@ -62272,12 +62272,6 @@ async fn enforce_account_hourly_submission_ceiling(
     if limit == 0 || tenant.role() != TokenRole::Contributor {
         return Ok(());
     }
-    // Linear in the body, which at the cap is hundreds of MB: off the
-    // runtime workers, as the re-scrub is.
-    let body = raw_body.clone();
-    let body_digest: [u8; 32] = tokio::task::spawn_blocking(move || Sha256::digest(&body).into())
-        .await
-        .map_err(internal_error)?;
     let now = Utc::now();
     let window_start = now - Duration::hours(1);
     let whole_tenant = trace_commons_protocol::admission::is_anchored_tenant(tenant.tenant_id());
@@ -62324,6 +62318,20 @@ async fn enforce_account_hourly_submission_ceiling(
             .map_err(internal_error)?
             .map_err(internal_error)?
         }
+    };
+    // The digest decides an identical retry, which needs a record for the
+    // id, and is kept with an admitted attempt. An id with no record when
+    // the recorded count alone has reached the limit is refused with
+    // neither, so its body is not hashed.
+    let body_digest: [u8; 32] = if !window.submission_known && window.counted >= limit_i64 {
+        [0; 32]
+    } else {
+        // Linear in the body, which at the cap is hundreds of MB: off the
+        // runtime workers, as the re-scrub is.
+        let body = raw_body.clone();
+        tokio::task::spawn_blocking(move || Sha256::digest(&body).into())
+            .await
+            .map_err(internal_error)?
     };
     let decision = state
         .submission_attempts
