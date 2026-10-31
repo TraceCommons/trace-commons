@@ -63070,6 +63070,12 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantCtx) -> ApiResult<(
 ///
 /// A retry of a submission that already has a record is not counted against
 /// itself; any other refusal for it comes from the checks after this one.
+/// That includes a remediation re-POST of a quarantined id, which the ceiling
+/// lets through; remediation re-scrubs are bounded by the per-minute limiter,
+/// not by this ceiling.
+///
+/// Without a PostgreSQL mirror the window is counted from the tenant's file
+/// records, a full record read per contributor upload.
 /// The refusal is `429 submit_rate_limited` with the seconds until the
 /// window has room again, the label clients already keep an upload queued
 /// for.

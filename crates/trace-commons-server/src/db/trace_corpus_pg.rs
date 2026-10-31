@@ -2529,8 +2529,11 @@ impl TraceCorpusStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         // The `recent` scan walks idx_trace_submissions_account_keyset (V31,
         // `(tenant_id, received_at DESC, ...)`) from the newest row and stops
-        // at `limit`, so the read is bounded by the ceiling, not by the
-        // tenant's history. The known-id test is a primary-key probe.
+        // at `limit`, so for the whole tenant (an account tenant) the read is
+        // bounded by the ceiling, not by the tenant's history. With a
+        // principal filter (a pooled tenant) the filter applies during the
+        // walk, so the read is bounded by the tenant's last-hour volume.
+        // The known-id test is a primary-key probe.
         // `$4::text[] IS NULL` counts the whole tenant.
         let row = tx
             .query_one(
