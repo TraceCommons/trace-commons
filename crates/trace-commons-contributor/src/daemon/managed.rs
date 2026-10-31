@@ -964,7 +964,8 @@ fn too_low(report: &BalanceReport) -> bool {
 /// starred ids NEAR AI no longer lists for any tool. Neither prunes the
 /// stored list, so a model NEAR AI offers again is a favorite again. When
 /// NEAR AI cannot be read there is no answer, so nothing is marked.
-/// `tier` is NEAR AI's privacy tier (`models::ModelTier`).
+/// `tier` is NEAR AI's privacy tier (`models::ModelTier`); `tier_order` is
+/// the tiers a picker groups by, most private first (`ModelTier::ORDER`).
 async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -994,6 +995,7 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
             Ok(json!({
                 "models":models,"default":default,"favorites":favorites,
                 "unavailable_favorites":unavailable,
+                "tier_order":models::ModelTier::ORDER,
             }))
         }
         _ => Err(ManagedError::ModelUnavailable.into()),

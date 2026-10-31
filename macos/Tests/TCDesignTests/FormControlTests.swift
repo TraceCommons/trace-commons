@@ -73,6 +73,16 @@ final class FormControlTests: XCTestCase {
         XCTAssertNil(GlassSelect<Int>.current(3, in: options))
     }
 
+    /// A dot is never the only signal: an option's detail is spoken with its
+    /// title, as the picker's accessibility value.
+    func test_aPickerOptionsDetailIsSpokenWithItsTitle() {
+        let plain = GlassPickerOption("A", value: 1)
+        let detailed = GlassPickerOption("B", value: 2, dot: .on, detail: "Heading")
+        XCTAssertEqual(detailed.detail, "Heading")
+        XCTAssertEqual(GlassPicker<Int>.spoken(plain), "A")
+        XCTAssertEqual(GlassPicker<Int>.spoken(detailed), "B, Heading")
+    }
+
     /// The arrow keys move between the enabled options, wrapping, as a
     /// native radio group does.
     func test_theArrowKeysMoveBetweenEnabledRadios() {

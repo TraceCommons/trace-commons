@@ -39,21 +39,25 @@ pub const EXCLUDED: &[&str] = &["rerank", "privacy-filter", "embedding", "whispe
 
 /// NEAR AI's privacy tier for a model, which a picker groups by. NEAR AI
 /// labels each catalogue entry with one of three, through `owned_by`
-/// (docs.near.ai/cloud/models, read 2026-10-30):
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// (docs.near.ai/cloud/models, read 2026-10-30).
+///
+/// Declared most private first (owner, 2026-10-31), so the derived `Ord`
+/// is the picker's order and [`ModelTier::ORDER`] lists it for a shell to
+/// follow. Reordering the variants changes that order, not the wire form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelTier {
-    /// "Incognito": a vendor's model (OpenAI, Anthropic, Google, ...) on
-    /// the vendor's servers, sent through NEAR AI's gateway under NEAR AI's
-    /// account. `owned_by` is the vendor's name. The default for any named
-    /// owner not known to be a privacy provider, since it claims the least.
-    Incognito,
     /// "Confidential TEE": NEAR AI's own GPUs, in a TEE. `owned_by` is
     /// `nearai`.
     NearAi,
     /// "3P Confidential TEE": a third party's TEE. `owned_by` is
     /// `Attested 3P`.
     External,
+    /// "Incognito": a vendor's model (OpenAI, Anthropic, Google, ...) on
+    /// the vendor's servers, sent through NEAR AI's gateway under NEAR AI's
+    /// account. `owned_by` is the vendor's name. The default for any named
+    /// owner not known to be a privacy provider, since it claims the least.
+    Incognito,
     /// A tier a newer daemon sent that this build does not know. Treated as
     /// no tier: the picker lists the model last, under no heading.
     #[serde(other)]
@@ -61,6 +65,10 @@ pub enum ModelTier {
 }
 
 impl ModelTier {
+    /// The tiers a picker groups by, most private first. `Unknown` is
+    /// not one: it is listed last, under no heading.
+    pub const ORDER: [Self; 3] = [Self::NearAi, Self::External, Self::Incognito];
+
     /// The tier `owned_by` names: NEAR AI or `Attested 3P` only when the
     /// owner says so, otherwise Incognito, the least private, whether the
     /// owner is unlisted, generic, blank or absent.
@@ -238,7 +246,19 @@ pub fn offered(tool: ToolId, models: Vec<ChatModel>) -> Vec<ChatModel> {
 }
 
 /// The model a tool starts on when none was chosen.
+///
+/// Claude Code and OpenCode start on a NEAR AI private (TEE-hosted) model
+/// when the catalogue lists one, the first in NEAR AI's order, and
+/// otherwise on the tool's family, then vendor, then first listed. Codex
+/// keeps to the models NEAR AI is known to run with its tools
+/// ([`CODEX_PREFERRED`]). A model the person chose is never replaced
+/// ([`select`]).
 pub fn default_for(tool: ToolId, models: &[ChatModel]) -> Option<&ChatModel> {
+    if tool != ToolId::Codex {
+        if let Some(private) = models.iter().find(|m| m.tier == Some(ModelTier::NearAi)) {
+            return Some(private);
+        }
+    }
     let Some((family, vendor)) = preference(tool) else {
         return models.first();
     };
@@ -548,6 +568,110 @@ mod tests {
         ]}));
         assert_eq!(ids(&kept), vec!["deepseek-ai/DeepSeek-V3.1"]);
         assert!(chat_models(&json!({"error": "nope"})).is_empty());
+    }
+
+    fn tiered(list: &[(&str, ModelTier)]) -> Vec<ChatModel> {
+        list.iter()
+            .map(|(id, tier)| ChatModel {
+                id: (*id).into(),
+                tier: Some(*tier),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// The tiers sort most private first, whatever order they are named
+    /// in, and `ORDER` lists the same sequence for a shell to follow.
+    #[test]
+    fn tiers_order_most_private_first() {
+        let mut shuffled = [
+            ModelTier::Unknown,
+            ModelTier::Incognito,
+            ModelTier::NearAi,
+            ModelTier::External,
+        ];
+        shuffled.sort();
+        assert_eq!(
+            shuffled,
+            [
+                ModelTier::NearAi,
+                ModelTier::External,
+                ModelTier::Incognito,
+                ModelTier::Unknown,
+            ]
+        );
+        assert_eq!(
+            ModelTier::ORDER,
+            [ModelTier::NearAi, ModelTier::External, ModelTier::Incognito]
+        );
+        assert_eq!(
+            serde_json::to_value(ModelTier::ORDER).unwrap(),
+            json!(["near_ai", "external", "incognito"])
+        );
+    }
+
+    /// With a NEAR AI private (TEE-hosted) model listed, Claude and
+    /// OpenCode start on it, the first one in NEAR AI's order; Codex keeps
+    /// to the models NEAR AI is known to run with its tools.
+    #[test]
+    fn the_default_prefers_a_near_ai_private_model() {
+        let listed = tiered(&[
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+            ("z-ai/glm-5.3", ModelTier::External),
+            ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+            ("Qwen/Qwen3.8-9B", ModelTier::NearAi),
+            ("openai/gpt-6-sol", ModelTier::Incognito),
+        ]);
+        for tool in [ToolId::Claude, ToolId::Opencode] {
+            assert_eq!(default_for(tool, &listed).unwrap().id, "Qwen/Qwen3.8-27B");
+        }
+        assert_eq!(
+            default_for(ToolId::Codex, &listed).unwrap().id,
+            "openai/gpt-6-sol"
+        );
+    }
+
+    /// With no NEAR AI private model, the default is what it was: the
+    /// tool's family, then vendor, then first. A third party's TEE is not
+    /// NEAR AI's own, and a model with no tier is not private.
+    #[test]
+    fn the_default_falls_back_without_a_near_ai_private_model() {
+        let listed = tiered(&[
+            ("z-ai/glm-5.3", ModelTier::External),
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+        ]);
+        assert_eq!(
+            default_for(ToolId::Claude, &listed).unwrap().id,
+            "anthropic/claude-sonnet-5-5"
+        );
+        assert_eq!(
+            default_for(ToolId::Opencode, &listed).unwrap().id,
+            "z-ai/glm-5.3"
+        );
+        let untiered = models(&["x/first", "anthropic/claude-sonnet-5-5"]);
+        assert_eq!(
+            default_for(ToolId::Claude, &untiered).unwrap().id,
+            "anthropic/claude-sonnet-5-5"
+        );
+        assert_eq!(default_for(ToolId::Claude, &[]), None);
+    }
+
+    /// Only the default moves: a model the contributor chose is kept,
+    /// private model listed or not.
+    #[test]
+    fn a_chosen_model_is_kept_over_a_private_default() {
+        let listed = tiered(&[
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+            ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+        ]);
+        assert_eq!(
+            select(ToolId::Claude, Some("anthropic/claude-sonnet-5-5"), &listed),
+            Ok("anthropic/claude-sonnet-5-5".into())
+        );
+        assert_eq!(
+            select(ToolId::Claude, None, &listed),
+            Ok("Qwen/Qwen3.8-27B".into())
+        );
     }
 
     #[test]
