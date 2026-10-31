@@ -2134,7 +2134,7 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
 
     // Sessions that name no device key: a native one from before V139 (the
     // lost device's, as far as anyone can tell), the caller's own native one,
-    // and a browser passkey one.
+    // and a browser one.
     let unkeyed = |kind: &'static str, label: &'static str| {
         let admin = &admin;
         let tenant = tenant.clone();
@@ -2153,8 +2153,9 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
     };
     let legacy_session = unkeyed("native", "revoked-again-legacy").await;
     let caller_session = unkeyed("native", "revoked-again-caller").await;
-    let browser_session = unkeyed("passkey", "revoked-again-browser").await;
-    // A native session from a passkey sign-in names its passkey.
+    let browser_session = unkeyed("web", "revoked-again-browser").await;
+    // A native session that names a credential (only a passkey sign-in, before
+    // V144, minted one) is not the device's.
     let passkey_native_session = session_hash("revoked-again-passkey-native");
     admin
         .execute(
@@ -2216,7 +2217,7 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
         (
             &passkey_native_session,
             true,
-            "a native passkey session is its passkey's, not a device's",
+            "a native session that names a credential is not a device's",
         ),
     ] {
         assert_eq!(

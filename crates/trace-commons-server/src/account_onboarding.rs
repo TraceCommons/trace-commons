@@ -156,75 +156,10 @@ pub struct NearAiLoginPending {
     pub expires_at: i64,
 }
 
-/// What a stored bind ceremony is for. One value, and it must be present: a
-/// provisioning row has no `purpose` field, so it can never parse as a bind
-/// row, and a bind row's extra fields make it fail [`NearAiLoginPending`]'s
-/// `deny_unknown_fields`. The storage layer refuses to mix the two ceremonies
-/// before the preimage domains ever get the chance to.
-///
-/// `Enrol` is the same ceremony run by a session whose account is already
-/// `bound` (a further Mac signing in with a synced passkey): finish attaches
-/// the device only if the login's anchor is that account's own. The purpose is
-/// fixed at start from the binding state then, and finish refuses if the state
-/// no longer matches it, so a ceremony started as one never finishes as the
-/// other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NearAiBindPurpose {
-    Bind,
-    Enrol,
-}
-
-/// A NEAR AI bind ceremony between `bind/start` and `bind/finish` (Z2 native
-/// passkey identity, slice S3).
-///
-/// The provisioning ceremony's commitments plus the `(tenant_id, account_id)`
-/// of the authenticated session that started it. `bind/finish` refuses unless
-/// its own session names the same pair, so a ceremony started by account A can
-/// never be finished by account B. Both come from the session, never from a
-/// request body.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NearAiBindPending {
-    pub purpose: NearAiBindPurpose,
-    pub tenant_id: String,
-    pub account_id: uuid::Uuid,
-    pub nonce_hex: String,
-    pub code_challenge: String,
-    pub device_public_key: String,
-    pub expires_at: i64,
-}
-
-/// What `bind/finish` did with a verified NEAR AI login.
-#[derive(Debug, Clone)]
-pub enum NearAiBindOutcome {
-    /// The anchor was unclaimed. It, the device and the principal now belong
-    /// to the passkey account, which is `bound`; `provisioned` is that account
-    /// and its fresh native session's context.
-    Bound(ProvisionedNearAccount),
-    /// The anchor already belonged to account X in another tenant. X was
-    /// provisioned exactly as the unauthenticated NEAR AI provisioning would
-    /// have done it, and the passkey account was closed in its own tenant.
-    /// Nothing crossed between the two tenants.
-    ExistingAccount {
-        provisioned: ProvisionedNearAccount,
-        /// X's binding state label (`legacy` or `bound`), for the response.
-        binding_state: crate::account_binding::AccountBindingState,
-    },
-}
-
-/// The label-only reason recorded when bind takes the existing-account branch.
-/// `anchor_claimed_strong`: X holds at least one strong authenticator, so the
-/// passkey could never be moved to it. `anchor_claimed`: X holds none, the case
-/// the deferred S6 fold would serve; until then it is refused too.
-pub const BIND_REFUSED_ANCHOR_CLAIMED_STRONG: &str = "anchor_claimed_strong";
-pub const BIND_REFUSED_ANCHOR_CLAIMED: &str = "anchor_claimed";
-
 /// The device key is already registered under a different tenant.
 ///
-/// `device_keys.device_key_id` is a global primary key, so provisioning (and
-/// bind, which enrolls the same daemon key) cannot place the key under this
-/// tenant, and the key would go on authenticating into the tenant that holds
+/// `device_keys.device_key_id` is a global primary key, so provisioning
+/// cannot place the key under this tenant, and the key would go on authenticating into the tenant that holds
 /// it. Named, so it is not one more `near_provisioning_refused`; label-only,
 /// because which tenant holds the key is exactly what must not be disclosed.
 /// Carried as `DatabaseError::Pool(DEVICE_KEY_REGISTERED_ELSEWHERE)`; test it
@@ -232,7 +167,7 @@ pub const BIND_REFUSED_ANCHOR_CLAIMED: &str = "anchor_claimed";
 pub const DEVICE_KEY_REGISTERED_ELSEWHERE: &str =
     "near_provisioning_device_key_registered_elsewhere";
 
-/// Whether a provisioning or bind error is the named
+/// Whether a provisioning error is the named
 /// [`DEVICE_KEY_REGISTERED_ELSEWHERE`] refusal.
 pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REGISTERED_ELSEWHERE)
@@ -250,23 +185,6 @@ pub const DEVICE_KEY_REVOKED: &str = "near_provisioning_device_key_revoked";
 /// Whether `error` is the [`DEVICE_KEY_REVOKED`] refusal.
 pub fn is_device_key_revoked(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REVOKED)
-}
-
-/// An enrollment's login does not resolve to the session's own account.
-///
-/// Decided inside the account's own tenant, under RLS, so the check never
-/// reads another tenant: an anchor held by some other account and no anchor
-/// at all are the same refusal. Label-only, and the same value whatever the
-/// login resolves to elsewhere, because which account (if any) holds the
-/// login is exactly what must not be disclosed. Carried as
-/// `DatabaseError::Pool(NEAR_AI_ENROL_ACCOUNT_MISMATCH)`; test it with
-/// [`is_near_ai_enrol_account_mismatch`].
-pub const NEAR_AI_ENROL_ACCOUNT_MISMATCH: &str = "near_ai_enrol_account_mismatch";
-
-/// Whether an enrollment error is the named [`NEAR_AI_ENROL_ACCOUNT_MISMATCH`]
-/// refusal.
-pub fn is_near_ai_enrol_account_mismatch(error: &crate::error::DatabaseError) -> bool {
-    matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_ENROL_ACCOUNT_MISMATCH)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -781,39 +699,21 @@ mod tests {
         }
     }
 
-    /// A stored bind ceremony never parses as a provisioning one, nor the
-    /// reverse, so a ceremony id from one surface finishes nothing on the other
-    /// even before the preimage domains are compared.
+    /// A ceremony row left by the removed passkey bind routes (it carries a
+    /// `purpose`, a tenant and an account) never parses as a NEAR AI login or
+    /// provisioning ceremony, so a leftover row finishes nothing.
     #[test]
-    fn bind_and_provisioning_ceremony_rows_do_not_parse_as_each_other() {
-        let login = serde_json::to_value(NearAiLoginPending {
-            nonce_hex: "00".repeat(32),
-            code_challenge: "c".into(),
-            device_public_key: "d".into(),
-            expires_at: 1,
-        })
-        .unwrap();
-        let bind = serde_json::to_value(NearAiBindPending {
-            purpose: NearAiBindPurpose::Bind,
-            tenant_id: "nearai-t".into(),
-            account_id: uuid::Uuid::nil(),
-            nonce_hex: "00".repeat(32),
-            code_challenge: "c".into(),
-            device_public_key: "d".into(),
-            expires_at: 1,
-        })
-        .unwrap();
-        assert_eq!(bind["purpose"], "bind");
+    fn a_leftover_bind_ceremony_row_does_not_parse_as_a_login_ceremony() {
+        let bind = serde_json::json!({
+            "purpose": "bind",
+            "tenant_id": "nearai-t",
+            "account_id": uuid::Uuid::nil(),
+            "nonce_hex": "00".repeat(32),
+            "code_challenge": "c",
+            "device_public_key": "d",
+            "expires_at": 1,
+        });
         assert!(serde_json::from_value::<NearAiLoginPending>(bind.clone()).is_err());
-        assert!(serde_json::from_value::<NearAiBindPending>(login.clone()).is_err());
-        assert!(serde_json::from_value::<NativeProvisioningPending>(bind.clone()).is_err());
-        // A provisioning row with a purpose smuggled in is still not a bind
-        // row: it has no account to bind.
-        let mut smuggled = login;
-        smuggled["purpose"] = serde_json::json!("bind");
-        assert!(serde_json::from_value::<NearAiBindPending>(smuggled).is_err());
-        let mut wrong_purpose = bind;
-        wrong_purpose["purpose"] = serde_json::json!("provision");
-        assert!(serde_json::from_value::<NearAiBindPending>(wrong_purpose).is_err());
+        assert!(serde_json::from_value::<NativeProvisioningPending>(bind).is_err());
     }
 }

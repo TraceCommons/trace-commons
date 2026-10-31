@@ -135,11 +135,8 @@ use trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
-use trace_commons_server::account_passkey::{
-    CeremonyState, CeremonyStore, build_webauthn, credential_id_from_string,
-    credential_id_to_string,
-};
-use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
+use trace_commons_server::account_ceremony::{CeremonyState, CeremonyStore};
+use trace_commons_server::config::{DatabaseConfig, NearConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
@@ -990,27 +987,6 @@ const TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS: &str =
 /// 210 others were never touched, because the driver takes them oldest-first
 /// and nothing bounded the first one.
 const TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS: i64 = 900;
-/// The unbound-account reaper (Z2 S5). Off unless `_ENABLED`; when on it needs
-/// its own least-privilege login, never the runtime URL.
-const TRACE_COMMONS_UNBOUND_REAPER_ENABLED: &str = "TRACE_COMMONS_UNBOUND_REAPER_ENABLED";
-const TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL: &str = "TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL";
-const TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS: &str =
-    "TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS";
-const TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS: &str =
-    "TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS";
-/// Names an earlier, never-released draft of the reaper read. Neither is an
-/// alias: the idle window they configured no longer exists, so boot refuses
-/// either one rather than silently ignoring it.
-const TRACE_COMMONS_UNBOUND_REAPER_REMOVED_VARS: &[&str] = &[
-    "TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS",
-    "TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS",
-];
-const TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS: &str =
-    "TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS";
-const TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE: &str = "TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE";
-const TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS: u64 = 3600;
-/// Batches one tick may run back to back while each one comes back full.
-const TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK: usize = 10;
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -1506,7 +1482,6 @@ pub async fn run_ingest(
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
     spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
     spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
-    spawn_unbound_account_reaper_task(&state, state.unbound_account_reaper.clone());
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
@@ -2088,10 +2063,6 @@ struct AppState {
     /// the config + reader-pool plumbing lands first.
     #[allow(dead_code)]
     pii_backstop_driver: Option<PiiBackstopDriverConfig>,
-    /// Unbound passkey-account reaper. `None` (the default) means it is off;
-    /// `TRACE_COMMONS_UNBOUND_REAPER_ENABLED` turns it on. Its own pool, built
-    /// at boot from its own login, so the runtime pool never runs the sweep.
-    unbound_account_reaper: Option<UnboundAccountReaperConfig>,
     /// Redaction-witness PII-backstop bypass. `None` -- the default, and the
     /// posture every deployment ships in -- means an arriving certificate is
     /// ignored entirely and every content-bearing trace holds exactly as it
@@ -2176,25 +2147,9 @@ struct AppState {
     /// pipeline credits as. `None` falls back to a label no central-issuer
     /// allowlist can hold.
     scoring_driver_credit_issuer_principal_ref: Option<String>,
-    /// Slice 2 passkeys: the WebAuthn relying party, present only when
-    /// `WebauthnConfig` is fully configured. `None` makes the passkey surface
-    /// fail closed (its accessor 503s). Wired into ceremony handlers in later
-    /// Slice 2 tasks.
-    account_webauthn: Option<Arc<webauthn_rs::Webauthn>>,
-    /// Slice 2 passkeys: in-process, single-use, TTL-bounded ceremony store.
-    /// Single-instance only (see `account_passkey` module docs). Consumed by
-    /// the register/login ceremony handlers in later Slice 2 tasks.
+    /// The NEAR wallet sign-in's in-process, single-use, TTL-bounded ceremony
+    /// store. Single-instance only (see the `account_ceremony` module docs).
     account_ceremony_store: Arc<CeremonyStore>,
-    /// Z2 S2: the cap on unbound passkey-origin accounts, from
-    /// `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`. Unset disables native
-    /// passkey creation.
-    account_unbound_ceiling:
-        Arc<trace_commons_server::account_native_passkey::UnboundAccountCeiling>,
-    /// Z2 S2: successful native passkey creations per client IP in a rolling
-    /// 24 hours, from `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY`
-    /// (default 10). In process, like the other account limiters.
-    account_native_creation_cap:
-        Arc<trace_commons_server::account_native_passkey::PerSourceCreationCap>,
     /// Loopback native-app sign-in: pending authorization requests, keyed by
     /// `request_id`, holding only the PKCE challenge and the validated loopback
     /// redirect. Single-use and TTL-bounded, same in-process store and same
@@ -2442,19 +2397,6 @@ struct PiiBackstopDriverConfig {
     max_attempts: i32,
     backoff_base_seconds: i64,
     per_submission_timeout: StdDuration,
-}
-
-/// In-process unbound-account reaper config (Z2 S5). Like the PII-backstop
-/// driver it has no bearer-token worker route; unlike it, the cross-tenant
-/// pool is the reaper's own, held here rather than in `PgBackend`, and the
-/// only thing it can run is the V101 definer function.
-#[derive(Clone)]
-struct UnboundAccountReaperConfig {
-    interval: StdDuration,
-    unbound_ttl_days: i64,
-    closed_ttl_days: i64,
-    batch_size: i32,
-    reaper: trace_commons_server::account_reaper::UnboundAccountReaper,
 }
 
 /// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
@@ -4706,29 +4648,6 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
-        let unbound_account_reaper = parse_unbound_account_reaper_config_from_env()?;
-        if let Some(reaper) = &unbound_account_reaper {
-            // The pool connects lazily; take one connection now and check the
-            // login may execute the reaper function, so a login that cannot
-            // connect, or lacks trace_unbound_account_reaper, fails boot, not
-            // the first tick. The error names the variable, never the URL.
-            reaper.reaper.verify_login().await.map_err(|error| {
-                let denied = matches!(
-                    &error,
-                    trace_commons_server::error::DatabaseError::Pool(label)
-                        if label == "unbound_reaper_execute_denied"
-                );
-                if denied {
-                    anyhow::anyhow!(
-                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} connects but cannot execute trace_reap_unbound_accounts (unbound_reaper_execute_denied)"
-                    )
-                } else {
-                    anyhow::anyhow!(
-                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} did not accept a connection"
-                    )
-                }
-            })?;
-        }
         // Fail closed on configuration. An enabled bypass missing its signing
         // address, its measurement set, or its policy allowlist refuses to
         // boot naming the control, rather than running with a control an
@@ -5006,29 +4925,11 @@ impl AppState {
             "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS requires TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS",
         )?;
 
-        // Slice 2 passkeys: build the relying party only when fully configured.
-        // A partial WebauthnConfig is dropped to None by the loader, so the
-        // passkey surface stays fail-closed. An invalid origin fails startup.
-        let account_webauthn = match WebauthnConfig::from_env() {
-            Some(cfg) => Some(Arc::new(build_webauthn(&cfg)?)),
-            None => None,
-        };
-
         // Slice 3a login-with-NEAR: capture the NEAR sign-in config only when
         // fully configured. A partial NearConfig is dropped to None by the loader,
         // so the NEAR sign-in surface stays fail-closed (its accessor 503s).
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
-        // Z2 S2: unset disables native passkey creation; a malformed value
-        // fails startup rather than guessing either way.
-        let account_unbound_ceiling = Arc::new(
-            trace_commons_server::account_native_passkey::UnboundAccountCeiling::from_env()
-                .map_err(|error| anyhow::anyhow!(error))?,
-        );
-        let account_native_creation_cap = Arc::new(
-            trace_commons_server::account_native_passkey::PerSourceCreationCap::from_env()
-                .map_err(|error| anyhow::anyhow!(error))?,
-        );
         let account_native_requests = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL));
         let account_native_codes = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL));
 
@@ -5250,7 +5151,6 @@ impl AppState {
             vector_index_scheduler,
             perplexity_score_driver,
             pii_backstop_driver,
-            unbound_account_reaper,
             witness_bypass,
             witness_capture_pin,
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
@@ -5292,10 +5192,7 @@ impl AppState {
             novelty_utility_require_production_gate,
             novelty_utility_settle_from,
             scoring_driver_credit_issuer_principal_ref: credit_issuer_principal_ref,
-            account_webauthn,
             account_ceremony_store,
-            account_unbound_ceiling,
-            account_native_creation_cap,
             near_provisioning_public_origin: std::env::var(
                 "TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN",
             )
@@ -7836,72 +7733,6 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
     }))
 }
 
-/// The unbound passkey-account reaper. Off by default (`Ok(None)`), so
-/// existing deployments and CI are unaffected until an operator opts in.
-///
-/// Fail-closed at boot: `_ENABLED` without a reaper login URL refuses with a
-/// missing-control label rather than silently leaving the reaper off, and a
-/// login that cannot connect refuses in `AppState::from_env`. The error text
-/// never includes the URL. The unbound TTL defaults to 7 days from binding
-/// creation and the closed TTL to 30 days from `closed_at`; neither can be set
-/// under one day, and the V101 function refuses that too. A variable from the
-/// earlier draft's idle window refuses boot.
-fn parse_unbound_account_reaper_config_from_env()
--> anyhow::Result<Option<UnboundAccountReaperConfig>> {
-    use trace_commons_server::account_reaper::{
-        DEFAULT_BATCH, DEFAULT_CLOSED_TTL_DAYS, DEFAULT_UNBOUND_TTL_DAYS, MAX_BATCH, MAX_TTL_DAYS,
-        MIN_TTL_DAYS, UnboundAccountReaper,
-    };
-    for removed in TRACE_COMMONS_UNBOUND_REAPER_REMOVED_VARS {
-        if optional_trimmed_env(removed)?.is_some() {
-            anyhow::bail!(
-                "{removed} is no longer read; use {TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS} and {TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS}"
-            );
-        }
-    }
-    if !env_truthy(TRACE_COMMONS_UNBOUND_REAPER_ENABLED) {
-        return Ok(None);
-    }
-    let Some(url) = optional_trimmed_env(TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL)? else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_UNBOUND_REAPER_ENABLED}=true but {TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is not set"
-        );
-    };
-    let unbound_ttl_days = parse_optional_scheduler_i64_env(
-        TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS,
-        DEFAULT_UNBOUND_TTL_DAYS,
-        MIN_TTL_DAYS,
-        MAX_TTL_DAYS,
-    )?;
-    let closed_ttl_days = parse_optional_scheduler_i64_env(
-        TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS,
-        DEFAULT_CLOSED_TTL_DAYS,
-        MIN_TTL_DAYS,
-        MAX_TTL_DAYS,
-    )?;
-    let interval_seconds = parse_optional_scheduler_u64_env(
-        TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS,
-        TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS,
-        60,
-        86_400,
-    )?;
-    let batch_size = parse_optional_scheduler_i64_env(
-        TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE,
-        i64::from(DEFAULT_BATCH),
-        1,
-        i64::from(MAX_BATCH),
-    )?;
-    let reaper = UnboundAccountReaper::connect(&url)
-        .map_err(|_| anyhow::anyhow!("{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is invalid"))?;
-    Ok(Some(UnboundAccountReaperConfig {
-        interval: StdDuration::from_secs(interval_seconds),
-        unbound_ttl_days,
-        closed_ttl_days,
-        batch_size: batch_size as i32,
-        reaper,
-    }))
-}
-
 fn parse_trace_credit_cycle_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditCycleSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED);
@@ -8705,11 +8536,7 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// Every authenticated account route, with the record of what was registered.
 ///
 /// Routes join ONLY through [`account_routes::AccountRoutes`], which records
-/// each `(method, path)`. Each one must also be classified in
-/// [`account_routes::UNBOUND_ACCOUNT_ROUTE_POLICY`] -- the unbound gate in
-/// `account_auth_middleware` refuses any route that is not -- and the test
-/// `every_authenticated_account_route_is_classified_for_unbound_accounts`
-/// fails until it is.
+/// each `(method, path)`.
 fn authenticated_account_surface(
     state: Arc<AppState>,
 ) -> account_routes::AuthenticatedAccountRoutes {
@@ -8721,7 +8548,7 @@ fn authenticated_account_surface(
 
 /// The account routes before authentication, as two groups because the reward
 /// routes take an extra response layer outside the auth middleware. The
-/// production surface above and the gate tests both build from this, so they
+/// production surface above and the tests both build from this, so they
 /// cannot disagree about which routes exist.
 fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::AccountRoutes) {
     let general = account_routes::AccountRoutes::new()
@@ -8730,8 +8557,6 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
             "/v1/account/contribution-status",
             admission::account_status_handler,
         )
-        // Z2 S1: the caller's binding state, for the native app's state machine.
-        .get("/v1/account/binding", account_binding_handler)
         .post("/v1/account/invites/redeem", account_invite_redeem_handler)
         .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
@@ -8796,35 +8621,6 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
             "/v1/account/sessions/revoke-all",
             account_revoke_all_handler,
         )
-        .post(
-            "/v1/account/passkeys/register/start",
-            account_passkey_register_start_handler,
-        )
-        .post(
-            "/v1/account/passkeys/register/finish",
-            account_passkey_register_finish_handler,
-        )
-        // The native sibling (Z2 S2): the same registration with the ceremony
-        // id in the body instead of a cookie, native session only.
-        .post(
-            "/v1/account/passkeys/native/register/start",
-            account_passkey_native_register_start_handler,
-        )
-        .post(
-            "/v1/account/passkeys/native/register/finish",
-            account_passkey_native_register_finish_handler,
-        )
-        // Passkey credential management (Slice 2 Task 7). list / rename / remove the
-        // caller's OWN credentials. `{credential_id}` is the public base64url id.
-        .get("/v1/account/passkeys", account_passkeys_list_handler)
-        .patch(
-            "/v1/account/passkeys/{credential_id}",
-            account_passkey_rename_handler,
-        )
-        .delete(
-            "/v1/account/passkeys/{credential_id}",
-            account_passkey_remove_handler,
-        )
         // Login-with-NEAR enroll ceremony (Slice 3a Task 6). Links a NEAR access
         // key to the caller's account behind the same account-auth middleware.
         .post(
@@ -8861,19 +8657,7 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         // consuming device B's login-link as proof-of-control (a weak session may
         // stage); `confirm` performs the irreversible fold and is strong-auth-gated.
         .post("/v1/account/merge/start", account_merge_start_handler)
-        .post("/v1/account/merge/confirm", account_merge_confirm_handler)
-        // Connect near.ai (Z2 S3): bind this unbound passkey account to a NEAR
-        // AI login through the provisioning ceremony. Behind the account
-        // middleware, unlike the unauthenticated provisioning pair: the account
-        // comes from the session, and the ceremony is bound to it.
-        .post(
-            "/v1/account/near-ai/provision/bind/start",
-            near_ai_bind_start_handler,
-        )
-        .post(
-            "/v1/account/near-ai/provision/bind/finish",
-            near_ai_bind_finish_handler,
-        );
+        .post("/v1/account/merge/confirm", account_merge_confirm_handler);
     (general, rewards::account_routes())
 }
 
@@ -9105,8 +8889,8 @@ fn app(state: Arc<AppState>) -> Router {
         // and MUST NOT sit behind the account-auth middleware:
         //  - `login-links` mint authenticates the DEVICE bearer via
         //    `authenticate_ctx_with_tenant_access_grant` (NOT a cookie/account ctx).
-        //  - The redeem + passkey-login flows are the credential themselves (the
-        //    single-use code / the WebAuthn assertion).
+        //  - The redeem and NEAR wallet login flows are the credential
+        //    themselves (the single-use code / the wallet assertion).
         .route("/v1/account/login-links", post(mint_login_link_handler))
         // Loopback native-app sign-in. BOTH endpoints are unauthenticated by
         // necessity, and neither confers anything on its own:
@@ -9120,28 +8904,6 @@ fn app(state: Arc<AppState>) -> Router {
             post(native_authorize_start_handler),
         )
         .route("/v1/account/native/token", post(native_token_handler))
-        // Native passkey identity (Z2 S2). Unauthenticated for the same reason
-        // as the pair above: create/finish and login/finish CREATE the
-        // session, so they cannot require one. The credential is the verified
-        // WebAuthn ceremony itself; every refusal is `native_generic_deny`.
-        // Outside `AccountRoutes` on purpose, so the unbound gate and its
-        // classification table do not apply to them.
-        .route(
-            "/v1/account/native/passkey/create/start",
-            post(native_passkey_create_start_handler),
-        )
-        .route(
-            "/v1/account/native/passkey/create/finish",
-            post(native_passkey_create_finish_handler),
-        )
-        .route(
-            "/v1/account/native/passkey/login/start",
-            post(native_passkey_login_start_handler),
-        )
-        .route(
-            "/v1/account/native/passkey/login/finish",
-            post(native_passkey_login_finish_handler),
-        )
         .route(
             "/v1/account/near/provision/capabilities",
             get(near_provisioning::capabilities),
@@ -9206,26 +8968,8 @@ fn app(state: Arc<AppState>) -> Router {
         // (`/account/login?code=...`) points here.
         .route("/account/login", get(login_interstitial_handler))
         .route("/account/login/confirm", post(confirm_login_handler))
-        // Discoverable passkey login (Slice 2 Task 6). Un-versioned and un-authed,
-        // beside the redeem flow: the assertion IS the credential.
-        .route(
-            "/account/passkey/login/start",
-            post(account_passkey_login_start_handler),
-        )
-        .route(
-            "/account/passkey/login/finish",
-            post(account_passkey_login_finish_handler),
-        )
-        // The browser passkey step-up page (Z2 S7). Un-versioned and un-authed
-        // beside the login it drives: a plain page whose one script calls the
-        // routes above and the authenticated passkey and payout routes, so a
-        // weak native session's owner can get a strong cookie session.
-        .route(
-            step_up_page::STEP_UP_PATH,
-            get(step_up_page::step_up_page_handler),
-        )
         // Discoverable NEAR wallet login (Slice 3a Task 7). Un-versioned and
-        // un-authed, beside the passkey login flow: the NEP-413 wallet assertion
+        // un-authed, beside the redeem flow: the NEP-413 wallet assertion
         // IS the credential. No RPC at login — the signature is verified offline.
         .route(
             "/account/near/login/start",
@@ -9235,7 +8979,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/account/near/login/finish",
             post(account_near_login_finish_handler),
         )
-        // AUTHENTICATED account surface (read-back, session, passkey enrollment +
+        // AUTHENTICATED account surface (read-back, session, NEAR identity
         // management). Grouped behind `account_auth_middleware` so the resolved
         // `AccountCtx` is injected AND any rotated session cookie is attached on
         // EVERY response (the single guaranteed rotation attach point).
@@ -11485,7 +11229,6 @@ const CREDIT_CYCLE_SCHEDULER_DRIVER_NAME: &str = "credit_cycle_scheduler";
 const CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME: &str = "credit_settlement_scheduler";
 const PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME: &str = "process_evaluation_scheduler";
 const REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME: &str = "revocation_propagation_scheduler";
-const UNBOUND_ACCOUNT_REAPER_DRIVER_NAME: &str = "unbound_account_reaper";
 const ACCOUNT_TRUST_SCHEDULER_DRIVER_NAME: &str = "account_trust_scheduler";
 
 /// Every driver the liveness registry knows about. The distinctness test
@@ -11503,7 +11246,6 @@ const ALL_DRIVER_NAMES: &[&str] = &[
     CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
     PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
     REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
-    UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
     ACCOUNT_TRUST_SCHEDULER_DRIVER_NAME,
 ];
 
@@ -11668,67 +11410,6 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
                     "Trace Commons PII backstop driver tick completed"
                 );
                 pii_backstop_tick_outcome(&summary)
-            }
-        },
-    );
-}
-
-/// Spawn the in-process unbound-account reaper (Z2 S5). Copies
-/// `spawn_pii_backstop_driver_task`: `spawn_driver_loop`, a cross-tenant pool
-/// that is not the runtime pool, no bearer-token worker route, hash-free
-/// count-only logging. A tick runs bounded batches back to back while each
-/// comes back full of deletions, up to `TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK`.
-fn spawn_unbound_account_reaper_task(
-    state: &Arc<AppState>,
-    config: Option<UnboundAccountReaperConfig>,
-) {
-    let Some(config) = config else {
-        return;
-    };
-    tracing::info!(
-        interval_seconds = config.interval.as_secs(),
-        unbound_ttl_days = config.unbound_ttl_days,
-        closed_ttl_days = config.closed_ttl_days,
-        batch_size = config.batch_size,
-        "Trace Commons unbound account reaper enabled"
-    );
-    let tick_config = config.clone();
-    spawn_driver_loop(
-        state,
-        UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
-        config.interval,
-        move |_state| {
-            let config = tick_config.clone();
-            async move {
-                let mut reaped_unbound = 0u64;
-                let mut reaped_closed = 0u64;
-                let mut skipped = 0u64;
-                for _ in 0..TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK {
-                    let summary = config
-                        .reaper
-                        .reap(
-                            config.unbound_ttl_days,
-                            config.closed_ttl_days,
-                            config.batch_size,
-                        )
-                        .await
-                        .context("unbound account reaper batch failed")?;
-                    reaped_unbound += summary.reaped_unbound;
-                    reaped_closed += summary.reaped_closed;
-                    skipped += summary.skipped;
-                    if summary.reaped() < u64::try_from(config.batch_size).unwrap_or(0) {
-                        break;
-                    }
-                }
-                tracing::info!(
-                    reaped_unbound,
-                    reaped_closed,
-                    skipped,
-                    unbound_ttl_days = config.unbound_ttl_days,
-                    closed_ttl_days = config.closed_ttl_days,
-                    "Trace Commons unbound account reaper tick completed"
-                );
-                Ok(())
             }
         },
     );
@@ -19559,24 +19240,9 @@ async fn account_invite_redeem_handler(
     ))
 }
 
-/// Resolve the configured WebAuthn relying party for the passkey ceremonies.
-///
-/// Fails closed exactly like `account_db`: when the relying party is not
-/// configured (partial or absent `WebauthnConfig`), it returns a 503 with a safe
-/// missing-control label rather than letting a ceremony proceed without a
-/// relying party. Wired into the register/login handlers in later Slice 2 tasks.
-fn account_webauthn(state: &AppState) -> ApiResult<Arc<webauthn_rs::Webauthn>> {
-    state.account_webauthn.as_ref().cloned().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "passkey relying party is not configured",
-        )
-    })
-}
-
 /// Resolve the configured NEAR sign-in config for the login-with-NEAR ceremonies.
 ///
-/// Fails closed exactly like `account_webauthn`: when NEAR sign-in is not
+/// Fails closed exactly like `account_db`: when NEAR sign-in is not
 /// configured (partial or absent `NearConfig`), it returns a 503 with a safe
 /// missing-control label rather than letting a ceremony proceed without a
 /// verifier. Wired into the begin/finish handlers in later Slice 3a tasks.
@@ -19590,8 +19256,7 @@ fn account_near_config(state: &AppState) -> ApiResult<Arc<NearConfig>> {
 }
 
 /// Borrow the in-process ceremony store. Infallible: the store is always present
-/// on `AppState`. Consumed by the register/login ceremony handlers in later
-/// Slice 2 tasks.
+/// on `AppState`.
 fn account_ceremony_store(state: &AppState) -> Arc<CeremonyStore> {
     state.account_ceremony_store.clone()
 }
@@ -19676,7 +19341,7 @@ async fn account_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> axum::response::Response {
-    let (ctx, rotated_secret_value, binding) =
+    let (ctx, rotated_secret_value) =
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
@@ -19690,23 +19355,6 @@ async fn account_auth_middleware(
             }
         };
 
-    // The unbound gate (Z2 S1). An account whose binding state is gated
-    // reaches only the routes `UNBOUND_ACCOUNT_ROUTE_POLICY` marks `Allowed`,
-    // looked up by method and matched path template; anything else, including
-    // a route missing from the policy, is refused here, before any handler.
-    // Legacy (no binding row) and bound accounts skip this entirely. The
-    // binding state was read in the same query that validated the session, and
-    // a failed read already refused above.
-    //
-    // A refusal still flows through the rotation attach below: the session may
-    // have rotated in this very request, and withholding the new secret would
-    // sign the client out once the grace window lapses.
-    let gate_refused = binding.is_gated()
-        && account_routes::unbound_access(
-            request.method(),
-            request.extensions().get::<axum::extract::MatchedPath>(),
-        ) != account_routes::UnboundAccess::Allowed;
-
     // A native token rotates exactly like a cookie session, but a native client
     // has no cookie jar. Hand the new token back in a response header — the
     // bearer analogue of `Set-Cookie`, on the same channel, to the same
@@ -19714,13 +19362,8 @@ async fn account_auth_middleware(
     // ever emitted for a native client.
     let native_rotation = matches!(ctx.auth_method, AccountAuthMethod::NativeToken);
     if native_rotation {
-        let mut response = if gate_refused {
-            unbound_gate_refusal(state.as_ref(), &ctx).await
-        } else {
-            request.extensions_mut().insert(ctx);
-            request.extensions_mut().insert(binding);
-            next.run(request).await
-        };
+        request.extensions_mut().insert(ctx);
+        let mut response = next.run(request).await;
         if let Some((token, expires_at)) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
@@ -19748,13 +19391,8 @@ async fn account_auth_middleware(
         return response;
     }
 
-    let mut response = if gate_refused {
-        unbound_gate_refusal(state.as_ref(), &ctx).await
-    } else {
-        request.extensions_mut().insert(ctx);
-        request.extensions_mut().insert(binding);
-        next.run(request).await
-    };
+    request.extensions_mut().insert(ctx);
+    let mut response = next.run(request).await;
 
     if let Some((cookie_value, expires_at)) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
@@ -19793,9 +19431,7 @@ async fn account_auth_middleware(
 
 /// Max-Age for a rotated session cookie: the usual lifetime, capped at what
 /// is left of the session's absolute `expires_at`, so rotation can never make
-/// the cookie outlive its row. That matters for a step-up session
-/// (`STEP_UP_SESSION_TTL_MINUTES`), whose row expires long before a fresh
-/// seven-day cookie would.
+/// the cookie outlive its row.
 fn rotated_cookie_max_age(
     expires_at: chrono::DateTime<Utc>,
     now: chrono::DateTime<Utc>,
@@ -19810,63 +19446,8 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
     // call sites (which assert resolver semantics, not cookie attach) keep working.
     // The PRODUCTION attach point is `account_auth_middleware`, which calls
     // `resolve_account_ctx_with_rotation` and emits the `Set-Cookie` itself.
-    let (ctx, _rotated, _binding) = resolve_account_ctx_with_rotation(state, headers).await?;
+    let (ctx, _rotated) = resolve_account_ctx_with_rotation(state, headers).await?;
     Ok(ctx)
-}
-
-/// The unbound gate's refusal: `403 account_unbound`, one label-only audit row
-/// (`account_unbound_gate_denied`, empty metadata), and a label-only log line.
-/// The refusal does not depend on the audit write: if that fails, the request
-/// is refused all the same.
-async fn unbound_gate_refusal(state: &AppState, ctx: &AccountCtx) -> axum::response::Response {
-    if let Some(db) = state.db_mirror.as_ref() {
-        if db
-            .append_account_audit(
-                &ctx.tenant_id,
-                "account_unbound_gate_denied",
-                &ctx.actor_ref,
-                "denied",
-                serde_json::json!({}),
-            )
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                label = "account_unbound_gate_audit_failed",
-                "unbound gate refusal could not be audited"
-            );
-        }
-    }
-    tracing::info!(
-        label = account_routes::ACCOUNT_UNBOUND,
-        "unbound gate refusal"
-    );
-    let mut response =
-        api_error(StatusCode::FORBIDDEN, account_routes::ACCOUNT_UNBOUND).into_response();
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    response
-}
-
-/// `GET /v1/account/binding` (Z2 S1): the caller's binding state, as a label.
-///
-/// `unbound` and `bound` for a passkey-origin account, `closed` for one closed
-/// by the existing-account branch of bind, and `legacy` for an account with no
-/// binding row. The state comes from `account_auth_middleware`, which read it
-/// in the session validation query; a request that did not pass through the
-/// middleware has no such extension and is refused by the extractor.
-async fn account_binding_handler(
-    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
-) -> axum::response::Response {
-    let mut response =
-        Json(serde_json::json!({ "binding_state": binding.label() })).into_response();
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    response
 }
 
 /// A session that rotated on this request: the new credential value (cookie
@@ -19880,11 +19461,7 @@ type RotatedSession = (String, chrono::DateTime<Utc>);
 async fn resolve_account_ctx_with_rotation(
     state: &AppState,
     headers: &HeaderMap,
-) -> ApiResult<(
-    AccountCtx,
-    Option<RotatedSession>,
-    trace_commons_server::account_binding::AccountBindingState,
-)> {
+) -> ApiResult<(AccountCtx, Option<RotatedSession>)> {
     let bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -19944,11 +19521,7 @@ async fn resolve_account_ctx_with_rotation(
 async fn resolve_account_ctx_native(
     state: &AppState,
     bearer: &str,
-) -> ApiResult<(
-    AccountCtx,
-    Option<RotatedSession>,
-    trace_commons_server::account_binding::AccountBindingState,
-)> {
+) -> ApiResult<(AccountCtx, Option<RotatedSession>)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -19994,15 +19567,13 @@ async fn resolve_account_ctx_native(
             auth_method: AccountAuthMethod::NativeToken,
             tenant_id,
             actor_ref: account_actor_ref(&account),
-            // The passkey that minted a native session (Z2 S2), so the passkey
-            // list can mark `this_device`. NULL for loopback and NEAR AI
-            // sessions. A public id; it confers no strength (see below).
+            // NULL for loopback and NEAR AI sessions. A public id; it confers
+            // no strength (see below).
             auth_credential_id: session.auth_credential_id,
             client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
             session_token_hash: Some(token_hash),
         },
         rotated,
-        session.binding,
     ))
 }
 
@@ -20014,11 +19585,7 @@ async fn resolve_account_ctx_native(
 async fn resolve_account_ctx_cookie(
     state: &AppState,
     cookie: &str,
-) -> ApiResult<(
-    AccountCtx,
-    Option<RotatedSession>,
-    trace_commons_server::account_binding::AccountBindingState,
-)> {
+) -> ApiResult<(AccountCtx, Option<RotatedSession>)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -20064,16 +19631,15 @@ async fn resolve_account_ctx_cookie(
             principal_set,
             auth_method: AccountAuthMethod::SessionCookie,
             tenant_id,
-            // Carried through from the validated session row so the passkey list can
-            // flag the currently-authenticating credential as `this_device`.
+            // Carried through from the validated session row so the NEAR identity
+            // list can flag the currently-authenticating key as `this_session`.
             auth_credential_id: session.auth_credential_id,
-            // Session strength for the authenticator-change gate: `'web'` is weak,
-            // `'passkey'`/`'near'` are strong.
+            // Session strength for the authenticator-change gate: only `'near'`
+            // is strong.
             client_kind: session.client_kind,
             session_token_hash: Some(token_hash),
         },
         rotated_cookie_value,
-        session.binding,
     ))
 }
 
@@ -21833,26 +21399,14 @@ async fn native_authorize_start_handler(
     response
 }
 
-#[path = "trace_commons_ingest_internal/native_passkey.rs"]
-mod native_passkey;
-#[cfg(test)]
-use native_passkey::NATIVE_PASSKEY_PER_IP_LIMIT;
-use native_passkey::{
-    account_passkey_native_register_finish_handler, account_passkey_native_register_start_handler,
-    native_passkey_create_finish_handler, native_passkey_create_start_handler,
-    native_passkey_login_finish_handler, native_passkey_login_start_handler,
-};
-
 #[path = "trace_commons_ingest_internal/starter_advance.rs"]
 mod starter_advance;
-#[path = "trace_commons_ingest_internal/step_up_page.rs"]
-mod step_up_page;
 
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
 use near_provisioning::{
-    near_ai_bind_finish_handler, near_ai_bind_start_handler, near_ai_provision_finish_handler,
-    near_ai_provision_start_handler, near_provision_finish_handler, near_provision_start_handler,
+    near_ai_provision_finish_handler, near_ai_provision_start_handler,
+    near_provision_finish_handler, near_provision_start_handler,
 };
 
 #[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
@@ -22069,12 +21623,6 @@ where
 /// Issued session lifetime. Matches the spec's ~7d browser session.
 const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
 
-/// Lifetime of a browser passkey session minted for the step-up page (Z2 S7):
-/// a sign-in whose `login/start` asked for `purpose=step_up`. Absolute, like
-/// every session's `expires_at`: activity and rotation-on-use never move it.
-/// A constant, as the other session lifetimes are.
-const STEP_UP_SESSION_TTL_MINUTES: i64 = 15;
-
 /// The session cookie name. Value is `{b64url(tenant_id)}.{secret}`; only the
 /// sha256 hash of the SECRET part is persisted server-side. The tenant prefix
 /// lets the (tenant-less) browser request bootstrap an RLS tenant tx without the
@@ -22202,25 +21750,13 @@ const CONFIRM_GLOBAL_LIMIT: u32 = 600;
 /// before the single-use consume would. A login link is meant to be redeemed
 /// once; a handful of attempts covers a legitimate retry.
 const CONFIRM_PER_CODE_LIMIT: u32 = 5;
-/// Per-IP cap on `POST /account/passkey/login/start` + `/finish` attempts per
-/// window. A discoverable login is a couple of round-trips; this comfortably
-/// covers a legitimate retry while bounding a guessing/replay flood from one IP.
-const PASSKEY_LOGIN_PER_IP_LIMIT: u32 = 30;
-/// Coarse global cap on passkey-login attempts per window across ALL callers — a
-/// blast-radius ceiling mirroring `CONFIRM_GLOBAL_LIMIT`.
-const PASSKEY_LOGIN_GLOBAL_LIMIT: u32 = 600;
-/// Hard per-`credential_id` ceiling on `login/finish` attempts per window. A
-/// given passkey should assert a handful of times at most in a minute; beyond
-/// that the credential collapses to the uniform deny (replay/brute ceiling). The
-/// credential id is a PUBLIC, globally-unique label (not a secret).
-const PASSKEY_LOGIN_PER_CRED_LIMIT: u32 = 5;
 /// Per-IP cap on `POST /account/near/login/start` + `/finish` attempts per
-/// window. Mirrors `PASSKEY_LOGIN_PER_IP_LIMIT`: a discoverable NEAR login is a
+/// window. A discoverable NEAR login is a
 /// couple of round-trips, comfortably covering a legitimate retry while bounding
 /// a guessing/replay flood from one IP.
 const NEAR_LOGIN_PER_IP_LIMIT: u32 = 30;
 /// Coarse global cap on NEAR-login attempts per window across ALL callers — a
-/// blast-radius ceiling mirroring `PASSKEY_LOGIN_GLOBAL_LIMIT`.
+/// blast-radius ceiling mirroring `CONFIRM_GLOBAL_LIMIT`.
 const NEAR_LOGIN_GLOBAL_LIMIT: u32 = 600;
 /// Hard per-`publicKey` ceiling on `login/finish` attempts per window. A given
 /// NEAR access key should assert a handful of times at most in a minute; beyond
@@ -22692,7 +22228,7 @@ impl AccountRateLimiter {
     }
 
     /// TEST-ONLY: clear all fixed-window and concurrency state so a test starts
-    /// from a pristine limiter. The DB-backed account/passkey/session/rotation
+    /// from a pristine limiter. The DB-backed account/session/rotation
     /// tests share the process-global `ACCOUNT_RATE_LIMITER`; without this reset a
     /// test inherits hit counts from whatever ran before it, causing spurious
     /// rate-limit denials when the suite runs with default parallelism. Each such
@@ -22764,7 +22300,7 @@ impl AccountRateLimiter {
 }
 
 /// TEST-ONLY: reset the process-global account-surface rate limiter. The
-/// DB-backed account/passkey/session/rotation tests call this at the start of
+/// DB-backed account/session/rotation tests call this at the start of
 /// each test so they don't inherit hit counts from prior tests sharing the
 /// `ACCOUNT_RATE_LIMITER` singleton. See `AccountRateLimiter::reset_for_test`.
 #[cfg(test)]
@@ -23411,48 +22947,24 @@ async fn account_revoke_all_handler(
     Ok(Json(serde_json::json!({ "revoked": revoked })))
 }
 
-// ============================================================================
-// Slice 2 Task 5: passkey enrollment ceremony (authenticated).
-//
-// Two dual-auth handlers guarded by `resolve_account_ctx`. `register/start`
-// issues a WebAuthn registration challenge, stashes the server-side
-// `PasskeyRegistration` state in the in-process ceremony store, and binds the
-// ceremony to the browser via a short-lived `__Host-tc_passkey_ceremony` cookie.
-// `register/finish` consumes that cookie (single-use), verifies the attestation,
-// and persists the resulting passkey. Discoverable login (Task 6) and credential
-// management (Task 7+) are intentionally out of scope here.
-// ============================================================================
-
-/// Short-lived cookie that binds a passkey registration ceremony to the browser
-/// that started it. Carries only the opaque ceremony id (an unguessable CSPRNG
-/// token), never any key or challenge material; the server-side challenge state
-/// lives in the ceremony store keyed by this id.
-const ACCOUNT_PASSKEY_CEREMONY_COOKIE: &str = "__Host-tc_passkey_ceremony";
-
-/// Ceremony cookie lifetime. Matches the ceremony-store TTL window (a few
-/// minutes): long enough for an interactive authenticator tap, short enough to
-/// bound stale challenge state.
-const ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
-
-/// Generic, non-PII WebAuthn user name / display name presented to the
-/// authenticator. There is no contributor handle wired into the account model at
-/// this slice, and the spec calls for a generic label when no handle is set, so
-/// we deliberately use a fixed string rather than leak any account identifier
-/// (which would otherwise be stored by the authenticator / surfaced in its UI).
-const ACCOUNT_PASSKEY_USER_LABEL: &str = "TraceCommons contributor";
+/// Ceremony cookie lifetime (the NEAR wallet ceremonies). Matches the
+/// ceremony-store TTL window (a few minutes): long enough for an interactive
+/// wallet approval, short enough to bound stale challenge state.
+const ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
 
 /// Slice 3a Task 8: the strong-authenticator-change gate.
 ///
-/// Adding or removing an authenticator (passkey or NEAR key) is only freely
-/// allowed from a STRONG session — one minted by a passkey or NEAR assertion.
-/// From a WEAK session (a device-link `'web'` cookie or a `'device'` bearer) the
-/// change is REFUSED *once the account already holds at least one strong
-/// authenticator*, so a leaked device bearer or a phished device-link link cannot
-/// silently swap the account's real second factor.
+/// Adding or removing an authenticator (a NEAR key) is only freely allowed
+/// from a STRONG session — one minted by a NEAR wallet assertion. From a WEAK
+/// session (a device-link `'web'` cookie, a native token, or a `'passkey'`
+/// session minted before passkeys were removed) the change is REFUSED *once the
+/// account already holds at least one strong authenticator*, so a leaked
+/// session or a phished device-link link cannot silently swap the account's
+/// real second factor.
 ///
 /// The single exception is the BOOTSTRAPPING carve-out: when the account has zero
 /// strong authenticators a weak session MAY add the FIRST one (otherwise a
-/// contributor who only ever held a device link could never enroll a passkey).
+/// contributor who only ever held a device link could never enroll a NEAR key).
 /// The carve-out is symmetric for removal — when zero strong authenticators
 /// remain the account is already back at bootstrap, so a weak-session remove is
 /// permitted.
@@ -23487,196 +22999,8 @@ async fn require_authenticator_change_allowed(state: &AppState, ctx: &AccountCtx
     .map_err(internal_error)?;
     Err(api_error(
         StatusCode::FORBIDDEN,
-        "a passkey or NEAR sign-in is required to change authenticators",
+        "a NEAR sign-in is required to change authenticators",
     ))
-}
-
-/// Request body for `POST /v1/account/passkeys/register/finish`. The browser's
-/// `RegisterPublicKeyCredential` (the attestation response) is flattened in;
-/// `label` is an optional, user-supplied display name for the new credential.
-#[derive(serde::Deserialize)]
-struct AccountPasskeyRegisterFinishBody {
-    #[serde(flatten)]
-    credential: webauthn_rs::prelude::RegisterPublicKeyCredential,
-    #[serde(default)]
-    label: Option<String>,
-}
-
-/// `POST /v1/account/passkeys/register/start` — begin enrolling a passkey for the
-/// authenticated account (Slice 2 Task 5). Dual-auth via `resolve_account_ctx`;
-/// fails closed with 503 if the relying party is unconfigured. Builds
-/// `exclude_credentials` from the account's existing active credentials so the
-/// same authenticator cannot enroll twice, stashes the server-side
-/// `PasskeyRegistration` state in the ceremony store, and returns the
-/// `CreationChallengeResponse` plus a short-lived `__Host-tc_passkey_ceremony` cookie
-/// binding the ceremony to this browser.
-async fn account_passkey_register_start_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-) -> ApiResult<axum::response::Response> {
-    use axum::response::IntoResponse;
-
-    // Strong-authenticator gate (Slice 3a Task 8): a weak session may add the
-    // FIRST authenticator (bootstrapping) but not a second.
-    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
-
-    let webauthn = account_webauthn(state.as_ref())?;
-    let db = account_db(state.as_ref())?;
-
-    // Exclude the account's already-enrolled credentials so an authenticator the
-    // user already registered cannot be double-enrolled. A stored id that fails to
-    // decode is a corrupt row, not a client error: fail closed with a 500 rather
-    // than silently dropping it from the exclusion list.
-    let existing = db
-        .list_account_credentials(&ctx.tenant_id, ctx.account_id.as_uuid())
-        .await
-        .map_err(internal_error)?;
-    let mut exclude = Vec::with_capacity(existing.len());
-    for cred in &existing {
-        exclude.push(credential_id_from_string(&cred.credential_id).map_err(internal_error)?);
-    }
-    let exclude = if exclude.is_empty() {
-        None
-    } else {
-        Some(exclude)
-    };
-
-    // The user id is the account's own UUID (stable, non-PII). user_name /
-    // user_display_name are a fixed generic label (no handle is wired here).
-    let (challenge, reg_state) = webauthn
-        .start_passkey_registration(
-            ctx.account_id.as_uuid(),
-            ACCOUNT_PASSKEY_USER_LABEL,
-            ACCOUNT_PASSKEY_USER_LABEL,
-            exclude,
-        )
-        .map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not start passkey registration",
-            )
-        })?;
-
-    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
-    account_ceremony_store(state.as_ref())
-        .put(ceremony_id.clone(), CeremonyState::Registration(reg_state));
-
-    // Bind the ceremony to this browser. Secure + HttpOnly + SameSite=Strict +
-    // Path=/, short Max-Age. Carries only the opaque ceremony id.
-    let cookie = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ceremony_id))
-        .secure(true)
-        .http_only(true)
-        .same_site(cookie::SameSite::Strict)
-        .path("/")
-        .max_age(cookie::time::Duration::seconds(
-            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
-        ))
-        .build();
-
-    // Coarse, hash-only audit. Records only the count of excluded (existing)
-    // credentials — never any credential id, challenge, or key material.
-    db.append_account_audit(
-        &ctx.tenant_id,
-        "account_passkey_register_started",
-        &ctx.actor_ref,
-        "success",
-        serde_json::json!({ "existing_credentials": existing.len() }),
-    )
-    .await
-    .map_err(internal_error)?;
-
-    let mut response = Json(challenge).into_response();
-    match HeaderValue::from_str(&cookie.to_string()) {
-        Ok(value) => {
-            response
-                .headers_mut()
-                .insert(axum::http::header::SET_COOKIE, value);
-        }
-        Err(_) => {
-            return Err(api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not set ceremony cookie",
-            ));
-        }
-    }
-    Ok(response)
-}
-
-/// `POST /v1/account/passkeys/register/finish` — complete passkey enrollment
-/// (Slice 2 Task 5). Dual-auth via `resolve_account_ctx`; fails closed with 503
-/// if the relying party is unconfigured. Recovers the pending
-/// `PasskeyRegistration` via the single-use `__Host-tc_passkey_ceremony` cookie
-/// (missing / expired / already-consumed / wrong-variant -> 400), verifies the
-/// browser's attestation, and persists the resulting passkey under the canonical
-/// credential-id encoding. A failed/invalid attestation is rejected with a 400
-/// and NO row is written.
-async fn account_passkey_register_finish_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-    headers: HeaderMap,
-    Json(body): Json<AccountPasskeyRegisterFinishBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    // Strong-authenticator gate (Slice 3a Task 8). Enforced again on finish so a
-    // weak session cannot complete a registration it could not start.
-    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
-
-    let webauthn = account_webauthn(state.as_ref())?;
-    let db = account_db(state.as_ref())?;
-
-    // Recover and CONSUME (single-use `take`) the pending registration state.
-    let ceremony_id = cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE)
-        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "no passkey ceremony in progress"))?;
-    let reg_state = match account_ceremony_store(state.as_ref()).take(ceremony_id) {
-        Some(CeremonyState::Registration(reg_state)) => reg_state,
-        // Missing / expired / already-consumed, or a non-registration ceremony id.
-        Some(_) | None => {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "no passkey ceremony in progress",
-            ));
-        }
-    };
-
-    // Verify the attestation. An invalid/forged attestation is a client error:
-    // reject with 400 and write no row.
-    let passkey = webauthn
-        .finish_passkey_registration(&body.credential, &reg_state)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "passkey registration failed"))?;
-
-    let credential_id = credential_id_to_string(passkey.cred_id());
-    let passkey_json = serde_json::to_value(&passkey).map_err(internal_error)?;
-    // Treat a blank/whitespace label as absent.
-    let label = body
-        .label
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    db.insert_webauthn_credential(
-        &ctx.tenant_id,
-        ctx.account_id.as_uuid(),
-        &credential_id,
-        &passkey_json,
-        label,
-    )
-    .await
-    .map_err(internal_error)?;
-
-    // Hash-only / label-only audit. Records only whether a label was supplied —
-    // never the credential id, public key, or attestation material.
-    db.append_account_audit(
-        &ctx.tenant_id,
-        "account_passkey_enrolled",
-        &ctx.actor_ref,
-        "success",
-        serde_json::json!({ "labeled": label.is_some() }),
-    )
-    .await
-    .map_err(internal_error)?;
-
-    // The credential id is a PUBLIC identifier (not a secret); returning it lets
-    // the client correlate the new credential for management (Task 7+).
-    Ok(Json(serde_json::json!({ "credential_id": credential_id })))
 }
 
 // ============================================================================
@@ -23690,7 +23014,7 @@ async fn account_passkey_register_finish_handler(
 //     the key is a FullAccess key of the named account, then persist the link.
 //
 // NOTE: this is the ENROLL surface only. The strong-auth GATE (requiring a
-// passkey-backed session before linking a NEAR key) is Task 8; here the
+// strong session before linking a further NEAR key) is Task 8; here the
 // middleware-injected `AccountCtx` is the only guard. The unauthenticated NEAR
 // LOGIN flow is Task 7.
 //
@@ -23716,7 +23040,7 @@ const NEAR_LOGIN_MESSAGE: &str = "Trace Commons sign-in";
 
 /// Ceremony cookie binding a NEAR enroll ceremony to this browser. Shares the
 /// shape (Secure + HttpOnly + SameSite=Strict + Path=/ + short Max-Age) of the
-/// passkey ceremony cookie but a distinct name so the two ceremonies never alias.
+/// other ceremony cookies but a distinct name so ceremonies never alias.
 const ACCOUNT_NEAR_CEREMONY_COOKIE: &str = "__Host-tc_near_ceremony";
 
 /// Encode the 32-byte challenge nonce for the wire as lowercase hex (64 chars).
@@ -23753,7 +23077,7 @@ async fn account_near_enroll_start_handler(
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let recipient = cfg.recipient.clone();
 
-    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
+    let ceremony_id = trace_commons_server::account_ceremony::new_ceremony_id();
     account_ceremony_store(state.as_ref()).put(
         ceremony_id.clone(),
         CeremonyState::NearChallenge {
@@ -23768,7 +23092,7 @@ async fn account_near_enroll_start_handler(
         .same_site(cookie::SameSite::Strict)
         .path("/")
         .max_age(cookie::time::Duration::seconds(
-            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
+            ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS,
         ))
         .build();
 
@@ -23848,8 +23172,8 @@ async fn account_near_enroll_finish_handler(
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "no near ceremony in progress"))?;
     let (nonce, recipient) = match account_ceremony_store(state.as_ref()).take(ceremony_id) {
         Some(CeremonyState::NearChallenge { nonce, recipient }) => (nonce, recipient),
-        // Missing / expired / already-consumed, or a non-NEAR ceremony id.
-        Some(_) | None => {
+        // Missing / expired / already-consumed.
+        None => {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
                 "no near ceremony in progress",
@@ -23955,189 +23279,6 @@ async fn account_near_enroll_finish_handler(
 }
 
 // ============================================================================
-// Slice 2 Task 7: passkey credential management (authenticated).
-//
-// Three dual-auth handlers guarded by `resolve_account_ctx`, scoped to the
-// caller's OWN account by the DB ops (forced RLS + account_id predicate):
-//
-//   * GET    /v1/account/passkeys                 — list active credentials.
-//   * PATCH  /v1/account/passkeys/{credential_id} — rename one credential.
-//   * DELETE /v1/account/passkeys/{credential_id} — soft-revoke one credential.
-//
-// A credential not owned by the caller (or unknown / already-revoked) is a
-// UNIFORM 404 on rename/remove — no oracle distinguishing not-found from
-// not-owned. `credential_id` is the PUBLIC base64url WebAuthn id; it is safe to
-// return in list responses but is NEVER recorded in hash-only audit metadata.
-// ============================================================================
-
-/// One credential as surfaced by `GET /v1/account/passkeys`. `this_device` is
-/// `true` only when THIS exact credential authenticated the current (passkey)
-/// session — always `false` for bearer and device-link cookie sessions.
-#[derive(Debug, Serialize)]
-struct AccountPasskeyListItem {
-    credential_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-    created_at: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_used_at: Option<DateTime<Utc>>,
-    this_device: bool,
-}
-
-/// `GET /v1/account/passkeys` — list the caller's ACTIVE credentials.
-///
-/// Dual-auth via `resolve_account_ctx`. The owning account is auth-derived; the
-/// DB op is tenant- + account-scoped under forced RLS, so another account's
-/// credentials are never listed. `this_device` flags the credential that
-/// authenticated the current session (passkey-cookie path only). No audit row is
-/// written: this is a read of the caller's own label/timestamp metadata (no key
-/// material, no other account's data), consistent with the other account read
-/// surfaces that do not audit plain list reads.
-async fn account_passkeys_list_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let db = account_db(state.as_ref())?;
-
-    let creds = db
-        .list_account_credentials(&ctx.tenant_id, ctx.account_id.as_uuid())
-        .await
-        .map_err(internal_error)?;
-
-    let passkeys: Vec<AccountPasskeyListItem> = creds
-        .into_iter()
-        .map(|c| {
-            let this_device = ctx
-                .auth_credential_id
-                .as_deref()
-                .is_some_and(|active| active == c.credential_id);
-            AccountPasskeyListItem {
-                credential_id: c.credential_id,
-                label: c.label,
-                created_at: c.created_at,
-                last_used_at: c.last_used_at,
-                this_device,
-            }
-        })
-        .collect();
-
-    Ok(Json(serde_json::json!({ "passkeys": passkeys })))
-}
-
-/// Request body for `PATCH /v1/account/passkeys/{credential_id}`. A blank /
-/// whitespace-only `label` clears the credential's label (stored as NULL).
-#[derive(Debug, Deserialize)]
-struct AccountPasskeyRenameBody {
-    #[serde(default)]
-    label: Option<String>,
-}
-
-/// `PATCH /v1/account/passkeys/{credential_id}` — rename one of the caller's
-/// credentials.
-///
-/// Dual-auth via `resolve_account_ctx`. The DB op is tenant- + account-scoped, so
-/// a credential the caller does not own (or one that is unknown / already
-/// revoked) affects zero rows and yields a UNIFORM 404 — no existence oracle
-/// distinguishing not-found from not-owned. Audited hash-only as
-/// `account_passkey_renamed`, recording ONLY whether a label was set (never the
-/// credential id or label text).
-async fn account_passkey_rename_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-    AxumPath(credential_id): AxumPath<String>,
-    Json(body): Json<AccountPasskeyRenameBody>,
-) -> ApiResult<StatusCode> {
-    let db = account_db(state.as_ref())?;
-
-    // Treat a blank/whitespace label as absent (clears the label).
-    let label = body
-        .label
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    let renamed = db
-        .rename_account_credential(
-            &ctx.tenant_id,
-            ctx.account_id.as_uuid(),
-            &credential_id,
-            label,
-        )
-        .await
-        .map_err(internal_error)?;
-
-    if !renamed {
-        // Uniform 404: unknown / revoked / not-owned are indistinguishable.
-        return Err(api_error(StatusCode::NOT_FOUND, "passkey not found"));
-    }
-
-    db.append_account_audit(
-        &ctx.tenant_id,
-        "account_passkey_renamed",
-        &ctx.actor_ref,
-        "success",
-        serde_json::json!({ "labeled": label.is_some() }),
-    )
-    .await
-    .map_err(internal_error)?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// `DELETE /v1/account/passkeys/{credential_id}` — soft-revoke one of the
-/// caller's credentials.
-///
-/// Dual-auth via `resolve_account_ctx`. The DB op is tenant- + account-scoped, so
-/// a credential the caller does not own (or one that is unknown / already
-/// revoked) yields a UNIFORM 404. On success returns the count of the account's
-/// remaining active credentials. Audited hash-only as `account_passkey_removed`,
-/// recording ONLY the remaining count (never the credential id).
-async fn account_passkey_remove_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-    AxumPath(credential_id): AxumPath<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    // Strong-authenticator gate (Slice 3a Task 8): a weak session may remove only
-    // while zero strong authenticators remain (bootstrapping); otherwise refused.
-    // NOTE: NEAR-identity removal (Task 9) will call this SAME gate.
-    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
-
-    let db = account_db(state.as_ref())?;
-
-    // Z2 S2: every live session this passkey minted is revoked with it, browser
-    // and native, except the session making this request.
-    let result = db
-        .revoke_account_credential_sparing_session(
-            &ctx.tenant_id,
-            ctx.account_id.as_uuid(),
-            &credential_id,
-            ctx.session_token_hash.as_deref(),
-        )
-        .await
-        .map_err(internal_error)?;
-
-    if !result.removed {
-        // Uniform 404: unknown / revoked / not-owned are indistinguishable.
-        return Err(api_error(StatusCode::NOT_FOUND, "passkey not found"));
-    }
-
-    db.append_account_audit(
-        &ctx.tenant_id,
-        "account_passkey_removed",
-        &ctx.actor_ref,
-        "success",
-        serde_json::json!({ "remaining": result.remaining }),
-    )
-    .await
-    .map_err(internal_error)?;
-
-    Ok(Json(serde_json::json!({
-        "removed": true,
-        "remaining_credentials": result.remaining,
-    })))
-}
-
-// ============================================================================
 // Slice 3a Task 9: NEAR identity management (authenticated).
 //
 // Three dual-auth handlers behind `account_auth_middleware`, scoped to the
@@ -24152,14 +23293,13 @@ async fn account_passkey_remove_handler(
 // not-owned. `public_key` and `near_account_id` are PUBLIC identifiers (not
 // secrets); they are safe to return in list responses but are NEVER recorded in
 // hash-only audit metadata. Removal is an authenticator change, so it shares the
-// Task 8 strong-authenticator gate with passkey removal; rename and list are
-// not gated.
+// Task 8 strong-authenticator gate; rename and list are not gated.
 // ============================================================================
 
 /// One NEAR identity as surfaced by `GET /v1/account/near-identities`.
 /// `this_session` is `true` only when THIS exact identity (its public key)
-/// authenticated the current (NEAR-login) session — always `false` for passkey
-/// and device-link cookie sessions and for the bearer path, whose
+/// authenticated the current (NEAR-login) session — always `false` for
+/// device-link cookie sessions and for the bearer path, whose
 /// `auth_credential_id` is a credential id or `None` and never equals a NEAR
 /// public key.
 #[derive(Debug, Serialize)]
@@ -24184,7 +23324,7 @@ struct AccountNearIdentityListItem {
 /// `this_session` flags the identity that authenticated the current session
 /// (NEAR-login cookie path only). No audit row is written: this is a read of the
 /// caller's own label/timestamp metadata (no key material, no other account's
-/// data), consistent with the passkey list read which also does not audit.
+/// data), consistent with the other account list reads, which do not audit.
 async fn account_near_identities_list_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -24200,9 +23340,10 @@ async fn account_near_identities_list_handler(
         .into_iter()
         .map(|i| {
             // True only when THIS NEAR identity authenticated the current session.
-            // NEAR login set `auth_credential_id` to the public key; passkey login
-            // set it to a credential id; device-link is None — none of which can
-            // false-positive against a NEAR public key.
+            // NEAR login set `auth_credential_id` to the public key; a session
+            // minted by a pre-removal passkey login carries a credential id;
+            // device-link is None — none of which can false-positive against a
+            // NEAR public key.
             let this_session = ctx
                 .auth_credential_id
                 .as_deref()
@@ -24283,7 +23424,7 @@ async fn account_near_identity_rename_handler(
 /// caller's NEAR identities.
 ///
 /// Dual-auth via `resolve_account_ctx`. Removal is an authenticator change, so it
-/// runs behind the SAME Task 8 strong-authenticator gate as passkey removal: a
+/// runs behind the Task 8 strong-authenticator gate: a
 /// weak session may remove only while zero strong authenticators remain
 /// (bootstrapping); otherwise refused with 403. The DB op is tenant- +
 /// account-scoped, so an identity the caller does not own (or unknown / already
@@ -24690,460 +23831,10 @@ async fn account_merge_confirm_handler(
 }
 
 // ============================================================================
-// Slice 2 Task 6: discoverable passkey login (UNAUTHENTICATED surface).
-//
-// Two handlers, both un-versioned and un-authed, sitting beside the Slice 1
-// `/account/login/*` redeem flow:
-//
-//   * `/account/passkey/login/start` issues a discoverable-credential WebAuthn
-//     challenge (no allow-list), stashes the server-side
-//     `DiscoverableAuthentication` state in the in-process ceremony store, and
-//     binds it to the browser via the same short-lived `__Host-tc_passkey_ceremony`
-//     cookie used by enrollment.
-//   * `/account/passkey/login/finish` verifies the browser's assertion and, on
-//     success, mints the IDENTICAL Slice 1 session cookie. It bootstraps the
-//     tenant from the asserted credential id via the NARROW resolver pool (NO
-//     ensure_trace_tenant before the credential is verified), loads the stored
-//     passkey under that tenant's RLS, runs webauthn-rs `finish_discoverable_
-//     authentication` (which enforces the sign-counter / clone-detection check
-//     INSIDE finish), and issues the session under the resolved tenant tx.
-//
-// SECURITY: EVERY failure mode — unknown credential, missing/expired ceremony,
-// malformed body, sign-counter regression, handle/account mismatch, rate-limit
-// — collapses to ONE byte-identical uniform deny (`passkey_login_generic_deny`)
-// behind a fixed timing floor (`sleep_to_redeem_floor`), so nothing about the
-// attempt is enumerable by status, body, or latency. No credential key or raw
-// session secret is ever logged or audited.
-// ============================================================================
-
-/// The ONE uniform, non-enumerating deny for EVERY passkey-login failure mode.
-/// Byte-identical status + body across unknown-credential / missing-ceremony /
-/// malformed-body / counter-regression / handle-mismatch / rate-limited, with
-/// no-store + no-referrer. Shape mirrors `redeem_generic_deny`; kept distinct so
-/// the login surface has a single, self-contained deny site.
-fn passkey_login_generic_deny() -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let mut response =
-        (StatusCode::BAD_REQUEST, "passkey login invalid or expired").into_response();
-    let headers = response.headers_mut();
-    headers.insert(
-        axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    headers.insert(
-        axum::http::header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
-    response
-}
-
-/// Body extractor for `login/finish`: the browser's `PublicKeyCredential`
-/// assertion. On ANY extraction failure (malformed JSON, wrong shape, missing
-/// body) it rejects with the SAME uniform passkey-login deny so a malformed body
-/// is indistinguishable from a bad/unknown credential. Mirrors `ConfirmLoginForm`.
-struct PasskeyAssertionBody(webauthn_rs::prelude::PublicKeyCredential);
-
-impl<S> axum::extract::FromRequest<S> for PasskeyAssertionBody
-where
-    S: Send + Sync,
-{
-    type Rejection = axum::response::Response;
-
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        match axum::Json::<webauthn_rs::prelude::PublicKeyCredential>::from_request(req, state)
-            .await
-        {
-            Ok(axum::Json(assertion)) => Ok(PasskeyAssertionBody(assertion)),
-            Err(_) => Err(passkey_login_generic_deny()),
-        }
-    }
-}
-
-/// What a browser passkey sign-in is for, fixed at `login/start` and carried
-/// in the ceremony to `finish`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PasskeyLoginPurpose {
-    /// An ordinary sign-in: a session of `ACCOUNT_SESSION_TTL_DAYS`.
-    Session,
-    /// The step-up page's sign-in (Z2 S7): a session of
-    /// `STEP_UP_SESSION_TTL_MINUTES`.
-    StepUp,
-}
-
-/// The `purpose` of a `login/start`, from its raw query. No `purpose` is an
-/// ordinary sign-in and other parameters are ignored, as before. A `purpose`
-/// must be exactly `step_up`, once; any other value (or a repeat) is `None`,
-/// which the handler answers with the uniform deny. The value is compared, not
-/// decoded, and never logged.
-fn passkey_login_purpose(query: Option<&str>) -> Option<PasskeyLoginPurpose> {
-    let mut purposes = query.unwrap_or_default().split('&').filter_map(|pair| {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        (key == "purpose").then_some(value)
-    });
-    match (purposes.next(), purposes.next()) {
-        (None, _) => Some(PasskeyLoginPurpose::Session),
-        (Some("step_up"), None) => Some(PasskeyLoginPurpose::StepUp),
-        _ => None,
-    }
-}
-
-/// `POST /account/passkey/login/start` — begin a discoverable passkey login
-/// (Slice 2 Task 6). UNAUTHENTICATED. Fails closed (uniform deny) when the
-/// relying party is unconfigured. Rate-limited per-IP + global. Issues a
-/// discoverable-credential challenge (no allow-list — the authenticator
-/// "discovers" the credential and user handle), stashes the server-side
-/// `DiscoverableAuthentication` state under a fresh ceremony id, and binds it to
-/// this browser with the short-lived `__Host-tc_passkey_ceremony` cookie. Returns the
-/// `RequestChallengeResponse`. ANY failure collapses to the uniform deny.
-async fn account_passkey_login_start_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    axum::extract::RawQuery(query): axum::extract::RawQuery,
-) -> axum::response::Response {
-    // The one optional input: `purpose=step_up` from the step-up page. Checked
-    // before anything else so a refused purpose costs nothing.
-    let Some(purpose) = passkey_login_purpose(query.as_deref()) else {
-        return passkey_login_generic_deny();
-    };
-    // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
-    // in the `REDEEM_MIN_LATENCY` timing floor. It performs NO credential or tenant
-    // lookup — it only mints a fresh discoverable-auth challenge — so there is no
-    // found-vs-not-found oracle to erase. Do not "fix" this by adding a floor here;
-    // the floor belongs only on paths whose latency could leak credential existence.
-    // Per-IP + coarse global rate limit; both collapse to the uniform deny.
-    let client_ip = client_ip_for_rate_limit(&headers);
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("passkey-login-ip:{client_ip}"),
-        PASSKEY_LOGIN_PER_IP_LIMIT,
-    ) {
-        return passkey_login_generic_deny();
-    }
-    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
-        return passkey_login_generic_deny();
-    }
-
-    // Fail-closed: an unconfigured relying party yields the uniform deny (NOT a
-    // 503), so the login surface does not enumerate configuration state.
-    let webauthn = match account_webauthn(state.as_ref()) {
-        Ok(webauthn) => webauthn,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-
-    let (challenge, auth_state) = match webauthn.start_discoverable_authentication() {
-        Ok(pair) => pair,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-
-    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
-    account_ceremony_store(state.as_ref()).put(
-        ceremony_id.clone(),
-        match purpose {
-            PasskeyLoginPurpose::Session => CeremonyState::DiscoverableAuthentication(auth_state),
-            PasskeyLoginPurpose::StepUp => CeremonyState::StepUpDiscoverable(auth_state),
-        },
-    );
-
-    // Same short-lived ceremony cookie shape as enrollment (Task 5): opaque id
-    // only, Secure + HttpOnly + SameSite=Strict + Path=/, short Max-Age.
-    let cookie = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ceremony_id))
-        .secure(true)
-        .http_only(true)
-        .same_site(cookie::SameSite::Strict)
-        .path("/")
-        .max_age(cookie::time::Duration::seconds(
-            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
-        ))
-        .build();
-
-    use axum::response::IntoResponse;
-    let mut response = Json(challenge).into_response();
-    match HeaderValue::from_str(&cookie.to_string()) {
-        Ok(value) => {
-            response
-                .headers_mut()
-                .insert(axum::http::header::SET_COOKIE, value);
-        }
-        // A cookie that cannot be serialized would leave the ceremony unbindable;
-        // collapse to the uniform deny rather than returning an unusable challenge.
-        Err(_) => return passkey_login_generic_deny(),
-    }
-    response
-}
-
-/// A discoverable passkey assertion that verified: the tenant the credential
-/// lives in, the account it belongs to, and its canonical credential id.
-struct VerifiedPasskeyAssertion {
-    tenant: String,
-    account_id: uuid::Uuid,
-    credential_id: String,
-}
-
-/// The ONE passkey login verifier, shared by the browser
-/// (`/account/passkey/login/finish`) and native
-/// (`/v1/account/native/passkey/login/finish`) sign-ins. The two differ only in
-/// how the ceremony state was recovered (a cookie or a body-borne id) and what
-/// they issue; every check on the assertion itself lives here, so the surfaces
-/// cannot drift apart. `None` on any failure; the caller answers with its own
-/// uniform deny.
-///
-/// Steps, in order: identify the asserted handle and credential id (no tenant
-/// context yet); the per-credential ceiling; resolve the tenant through the
-/// NARROW resolver pool with NO tenant write; load the active credential under
-/// that tenant's RLS; require the asserted user handle to equal the
-/// credential's account (before verification runs); verify, which enforces the
-/// signature and the sign-counter clone check; persist the advanced counter.
-async fn verify_discoverable_passkey_assertion(
-    webauthn: &webauthn_rs::Webauthn,
-    db: &dyn Database,
-    assertion: &webauthn_rs::prelude::PublicKeyCredential,
-    auth_state: webauthn_rs::prelude::DiscoverableAuthentication,
-) -> Option<VerifiedPasskeyAssertion> {
-    // Extract the asserted user handle + credential id from the assertion (no
-    // tenant context yet). Encode the credential id with the SAME canonical
-    // base64url encoding enrollment used so the lookup agrees byte-for-byte.
-    let (account_handle_uuid, cred_id_bytes) = webauthn
-        .identify_discoverable_authentication(assertion)
-        .ok()?;
-    let credential_id =
-        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
-
-    // Per-credential hard ceiling (replay/brute bound on one specific credential,
-    // IP-independent, and shared by both surfaces).
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("passkey-login-cred:{credential_id}"),
-        PASSKEY_LOGIN_PER_CRED_LIMIT,
-    ) {
-        return None;
-    }
-
-    // Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
-    // ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
-    // -> deny, and critically NO tenant row is written for a forged id.
-    let tenant = db.resolve_credential_tenant(&credential_id).await.ok()??;
-
-    // Under the resolved tenant's RLS, load the active credential. Deserialize
-    // the stored passkey JSON into a webauthn-rs `Passkey`; a corrupt row also
-    // denies.
-    let credential = db
-        .load_webauthn_credential_for_login(&tenant, &credential_id)
-        .await
-        .ok()??;
-    let credential_account_id = credential.account_id;
-    let mut passkey: webauthn_rs::prelude::Passkey =
-        serde_json::from_value(credential.passkey).ok()?;
-
-    // Cross-account / handle binding (checked BEFORE finish so a mismatch never
-    // reaches verification): the user handle the authenticator asserted MUST
-    // equal the account the stored credential belongs to. Defense-in-depth on
-    // top of the credential_id -> account binding.
-    if account_handle_uuid != credential_account_id {
-        return None;
-    }
-
-    // Verify the assertion. The SIGN-COUNTER regression / clone-detection check
-    // is enforced INSIDE finish_discoverable_authentication (a regressed counter
-    // -> Err), as is the allowed-credential / signature check.
-    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
-    let auth_result = webauthn
-        .finish_discoverable_authentication(assertion, auth_state, &[discoverable_key])
-        .ok()?;
-
-    // Persist the advanced sign counter (clone-detection state) when it moved.
-    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
-    // property (counter / backup flags) actually changed. A persistence failure is
-    // NOT fatal to this login (the assertion already verified), but we fail closed
-    // so a stuck counter can't silently accumulate.
-    if matches!(passkey.update_credential(&auth_result), Some(true)) {
-        let updated = serde_json::to_value(&passkey).ok()?;
-        db.update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
-            .await
-            .ok()?;
-    }
-
-    Some(VerifiedPasskeyAssertion {
-        tenant,
-        account_id: credential_account_id,
-        credential_id,
-    })
-}
-
-/// `POST /account/passkey/login/finish` — complete a discoverable passkey login
-/// and issue a session (Slice 2 Task 6). UNAUTHENTICATED, with full redeem-style
-/// hardening: a fixed timing floor wraps the WHOLE handler so success and every
-/// uniform deny take at least `REDEEM_MIN_LATENCY`, erasing the
-/// found-vs-not-found (and rate-limited-vs-not) timing oracle.
-async fn account_passkey_login_finish_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: PasskeyAssertionBody,
-) -> axum::response::Response {
-    let start = std::time::Instant::now();
-    let response = account_passkey_login_finish_inner(state, headers, body).await;
-    sleep_to_redeem_floor(start).await;
-    response
-}
-
-/// Inner body of the passkey `login/finish` handler. Returns on every branch with
-/// the final response; the outer wrapper pads each path to `REDEEM_MIN_LATENCY`.
-async fn account_passkey_login_finish_inner(
-    state: Arc<AppState>,
-    headers: HeaderMap,
-    body: PasskeyAssertionBody,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let PasskeyAssertionBody(assertion) = body;
-
-    // 1. Per-IP + coarse global rate limit. Same uniform deny; floor still applies.
-    let client_ip = client_ip_for_rate_limit(&headers);
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("passkey-login-ip:{client_ip}"),
-        PASSKEY_LOGIN_PER_IP_LIMIT,
-    ) {
-        return passkey_login_generic_deny();
-    }
-    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
-        return passkey_login_generic_deny();
-    }
-
-    let webauthn = match account_webauthn(state.as_ref()) {
-        Ok(webauthn) => webauthn,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-    let db = match account_db(state.as_ref()) {
-        Ok(db) => db,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-
-    // 3. Recover and CONSUME (single-use `take`) the pending discoverable-auth
-    //    state via the ceremony cookie. Missing / expired / already-consumed /
-    //    wrong-variant all collapse to the uniform deny. The purpose was bound
-    //    into the ceremony at `start`; nothing here can change it.
-    let (auth_state, purpose) =
-        match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
-            Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
-                Some(CeremonyState::DiscoverableAuthentication(auth_state)) => {
-                    (auth_state, PasskeyLoginPurpose::Session)
-                }
-                Some(CeremonyState::StepUpDiscoverable(auth_state)) => {
-                    (auth_state, PasskeyLoginPurpose::StepUp)
-                }
-                Some(_) | None => return passkey_login_generic_deny(),
-            },
-            None => return passkey_login_generic_deny(),
-        };
-
-    // 4-8. Identify, resolve, load, bind and verify the assertion, and persist
-    //    the advanced sign counter: the verification core shared with native
-    //    passkey sign-in. Any failure -> uniform deny.
-    let Some(VerifiedPasskeyAssertion {
-        tenant,
-        account_id: credential_account_id,
-        credential_id,
-    }) =
-        verify_discoverable_passkey_assertion(&webauthn, db.as_ref(), &assertion, auth_state).await
-    else {
-        return passkey_login_generic_deny();
-    };
-
-    // 9. Mint the session secret (>=128-bit CSPRNG); store ONLY its hash. Insert
-    //    the session (client_kind='passkey', auth_credential_id=credential_id) +
-    //    hash-only audit in one RLS-scoped tx under the resolved tenant. NO
-    //    ensure_trace_tenant: the credential is verified, so the tenant provably
-    //    exists via its FK.
-    //    A step-up sign-in's session lasts `STEP_UP_SESSION_TTL_MINUTES`, in
-    //    the row's absolute `expires_at` and in the cookie's Max-Age alike.
-    let secret = generate_session_secret();
-    let token_hash = hash_secret(&secret);
-    let (lifetime, metadata) = match purpose {
-        PasskeyLoginPurpose::Session => (
-            Duration::days(ACCOUNT_SESSION_TTL_DAYS),
-            // Hash-only / label-only: never the credential id or key material.
-            serde_json::json!({ "client_kind": "passkey" }),
-        ),
-        PasskeyLoginPurpose::StepUp => (
-            Duration::minutes(STEP_UP_SESSION_TTL_MINUTES),
-            serde_json::json!({ "client_kind": "passkey", "purpose": "step_up" }),
-        ),
-    };
-    let expires_at = Utc::now() + lifetime;
-    if db
-        .issue_passkey_session(
-            &tenant,
-            credential_account_id,
-            trace_commons_server::db::NewSession {
-                token_hash: &token_hash,
-                client_kind: "passkey",
-                expires_at,
-            },
-            &credential_id,
-            trace_commons_server::db::RedeemAudit {
-                action: "account_passkey_login".to_string(),
-                outcome: "success".to_string(),
-                metadata,
-            },
-        )
-        .await
-        .is_err()
-    {
-        return passkey_login_generic_deny();
-    }
-
-    // 10. Build the IDENTICAL Slice 1 session cookie (`{b64url(tenant)}.{secret}`),
-    //     303 to the account view, no-store + no-referrer, and clear the ceremony
-    //     cookie. See `confirm_login_inner` for the cookie-value rationale.
-    let cookie_value = format!(
-        "{}.{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant.as_bytes()),
-        secret,
-    );
-    let session_cookie = cookie::Cookie::build((ACCOUNT_SESSION_COOKIE, cookie_value))
-        .secure(true)
-        .http_only(true)
-        .same_site(cookie::SameSite::Strict)
-        .path("/")
-        .max_age(cookie::time::Duration::seconds(lifetime.num_seconds()))
-        .build();
-    // Expire the ceremony cookie (Max-Age=0) now that it has been consumed.
-    let clear_ceremony = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ""))
-        .secure(true)
-        .http_only(true)
-        .same_site(cookie::SameSite::Strict)
-        .path("/")
-        .max_age(cookie::time::Duration::seconds(0))
-        .build();
-
-    let mut response = StatusCode::SEE_OTHER.into_response();
-    let resp_headers = response.headers_mut();
-    resp_headers.insert(
-        axum::http::header::LOCATION,
-        HeaderValue::from_static(ACCOUNT_VIEW_PATH),
-    );
-    match HeaderValue::from_str(&session_cookie.to_string()) {
-        Ok(value) => {
-            resp_headers.append(axum::http::header::SET_COOKIE, value);
-        }
-        Err(_) => return passkey_login_generic_deny(),
-    }
-    if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
-        resp_headers.append(axum::http::header::SET_COOKIE, value);
-    }
-    append_legacy_account_session_clear(resp_headers);
-    resp_headers.insert(
-        axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    resp_headers.insert(
-        axum::http::header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
-    response
-}
-
-// ============================================================================
 // Slice 3a Task 7: discoverable NEAR wallet login (UNAUTHENTICATED surface).
 //
-// Two handlers, both un-versioned and un-authed, sitting beside the Slice 2
-// passkey login flow:
+// Two handlers, both un-versioned and un-authed, sitting beside the Slice 1
+// redeem flow:
 //
 //   * `/account/near/login/start` mints a fresh 32-byte challenge nonce, stashes
 //     a `NearChallenge` ceremony in the in-process store, binds it to the browser
@@ -25168,9 +23859,8 @@ async fn account_passkey_login_finish_inner(
 /// The ONE uniform, non-enumerating deny for EVERY NEAR-login failure mode.
 /// Byte-identical status + body across unknown-key / missing-ceremony /
 /// replayed-nonce / malformed-body / bad-signature / wrong-message /
-/// rate-limited, with no-store + no-referrer. Shape mirrors
-/// `passkey_login_generic_deny`; kept distinct so the NEAR login surface has a
-/// single, self-contained deny site (intra-surface byte-identical).
+/// rate-limited, with no-store + no-referrer. A single, self-contained deny site
+/// for the NEAR login surface (intra-surface byte-identical).
 fn near_login_generic_deny() -> axum::response::Response {
     use axum::response::IntoResponse;
     let mut response = (StatusCode::BAD_REQUEST, "near login invalid or expired").into_response();
@@ -25203,7 +23893,7 @@ struct NearLoginFinishBody {
 /// Body extractor for `near/login/finish`: the wallet's NEP-413 assertion. On ANY
 /// extraction failure (malformed JSON, wrong shape, missing body) it rejects with
 /// the SAME uniform NEAR-login deny so a malformed body is indistinguishable from
-/// a bad/unknown key. Mirrors `PasskeyAssertionBody`.
+/// a bad/unknown key.
 struct NearAssertionBody(NearLoginFinishBody);
 
 impl<S> axum::extract::FromRequest<S> for NearAssertionBody
@@ -25234,8 +23924,7 @@ async fn account_near_login_start_handler(
     use rand::RngCore as _;
     // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
     // in the timing floor. It performs NO key or tenant lookup — it only mints a
-    // fresh challenge — so there is no found-vs-not-found oracle to erase. Mirrors
-    // the passkey login/start rationale.
+    // fresh challenge — so there is no found-vs-not-found oracle to erase.
     let client_ip = client_ip_for_rate_limit(&headers);
     if !ACCOUNT_RATE_LIMITER.check(
         &format!("near-login-ip:{client_ip}"),
@@ -25259,7 +23948,7 @@ async fn account_near_login_start_handler(
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let recipient = cfg.recipient.clone();
 
-    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
+    let ceremony_id = trace_commons_server::account_ceremony::new_ceremony_id();
     account_ceremony_store(state.as_ref()).put(
         ceremony_id.clone(),
         CeremonyState::NearChallenge {
@@ -25276,7 +23965,7 @@ async fn account_near_login_start_handler(
         .same_site(cookie::SameSite::Strict)
         .path("/")
         .max_age(cookie::time::Duration::seconds(
-            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
+            ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS,
         ))
         .build();
 
@@ -25357,8 +24046,7 @@ async fn account_near_login_finish_inner(
     //     longer than NEAR_LOGIN_PUBKEY_MAX_LEN cannot be a valid credential, so we
     //     reject it with the uniform deny here. This stops an attacker from
     //     spraying over-long/garbage `publicKey` values to bloat the limiter map
-    //     keys, and short-circuits malformed keys before any further work. (The
-    //     passkey path needs no analogue: webauthn-rs parses the assertion first.)
+    //     keys, and short-circuits malformed keys before any further work.
     if !body.public_key.starts_with("ed25519:") || body.public_key.len() > NEAR_LOGIN_PUBKEY_MAX_LEN
     {
         return near_login_generic_deny();
@@ -25381,7 +24069,7 @@ async fn account_near_login_finish_inner(
     {
         Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
             Some(CeremonyState::NearChallenge { nonce, recipient }) => (nonce, recipient),
-            Some(_) | None => return near_login_generic_deny(),
+            None => return near_login_generic_deny(),
         },
         None => return near_login_generic_deny(),
     };

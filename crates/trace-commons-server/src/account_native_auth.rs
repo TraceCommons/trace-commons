@@ -40,7 +40,7 @@
 //! # Single-instance limitation
 //!
 //! The pending-request and issued-code stores are the in-process
-//! [`crate::account_passkey::CeremonyStore`], with the same caveat: a flow
+//! [`crate::account_ceremony::CeremonyStore`], with the same caveat: a flow
 //! started on one process cannot be finished on another, and state is lost on
 //! restart. Both TTLs are minutes, and the pilot runs a single ingest process.
 //! A horizontally-scaled deployment MUST move these to a shared short-TTL

@@ -473,24 +473,10 @@ async fn a_link_request_with_an_owned_active_org_is_pending_confirmation_and_cha
 }
 
 #[tokio::test]
-async fn an_account_with_no_passkey_links_from_its_signed_in_session() {
+async fn an_account_links_from_its_weak_signed_in_session() {
     let Some(h) = harness().await else { return };
     let account = h.account().await;
-    // The account has no passkey and the session is the weak native kind.
-    let passkeys: i64 = h
-        .backend
-        .raw_pool_for_tests_and_diagnostics()
-        .get()
-        .await
-        .unwrap()
-        .query_one(
-            "SELECT count(*) FROM trace_webauthn_credentials WHERE tenant_id = $1",
-            &[&account.tenant],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    assert_eq!(passkeys, 0);
+    // The session is the weak native kind.
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,

@@ -1940,3 +1940,343 @@ async fn v114_role_setup_accepts_restricted_roles_and_rejects_elevated_roles() {
         }
     }
 }
+
+/// V144 removes passkeys. Run as the non-superuser owner it runs as in
+/// production, on a database migrated to V143 that holds every kind of
+/// passkey-origin account, because forced row security applies to the owner:
+/// a superuser run cannot tell a migration that works from one that silently
+/// touches zero rows.
+///
+/// Seeded before V144: an `unbound` and a `closed` passkey account (deleted),
+/// a `bound` one with its NEAR AI anchor (untouched), a legacy account with no
+/// binding row that holds a browser passkey (untouched, except that the
+/// credential table is gone), and an `unbound` one that a non-cascading
+/// `trace_account_trust` row keeps from being deleted (closed, sessions
+/// revoked). Every account also holds a session a passkey authenticated,
+/// which V144 revokes whatever the account. Plus a hash-only audit row about a
+/// past passkey sign-in.
+#[tokio::test]
+async fn v144_removes_unbound_and_closed_passkey_accounts_as_a_non_superuser_owner() {
+    let Some(url) = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+    else {
+        eprintln!("skipping: TRACE_COMMONS_PG_TEST_DATABASE_URL or DATABASE_URL not configured");
+        return;
+    };
+    let _turn = VIRGIN_DATABASE.lock().await;
+
+    const OWNER: &str = "tc_v144_owner_probe";
+    const DB: &str = "trace_v144_owner_probe_db";
+    let probe = ProbeRole::claim(&url, OWNER, &[DB]).await;
+    let admin = owned_database(&url, OWNER, DB, Standing::Creator).await;
+    let mut owner = connect(&with_user(&with_database(&url, DB), OWNER, "probe")).await;
+    owner
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS _trace_commons_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .await
+        .expect("create the recording table");
+    for (version, name, sql) in registered_migrations()
+        .iter()
+        .filter(|(version, ..)| *version < 144)
+    {
+        apply_and_record_migration(&mut owner, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("V{version} before V144: {error:?}"));
+    }
+
+    // Seeded as the superuser, which row security does not apply to.
+    let seed = connect(&with_database(&url, DB)).await;
+    let unbound = uuid::Uuid::new_v4();
+    let closed = uuid::Uuid::new_v4();
+    let bound = uuid::Uuid::new_v4();
+    let legacy = uuid::Uuid::new_v4();
+    let held = uuid::Uuid::new_v4();
+    let anchor_hex = "ab".repeat(32);
+    let bound_tenant = format!("near-{anchor_hex}");
+    let accounts: [(&str, uuid::Uuid, Option<&str>); 5] = [
+        ("v144-unbound", unbound, Some("unbound")),
+        ("v144-closed", closed, Some("closed")),
+        (bound_tenant.as_str(), bound, Some("bound")),
+        ("v144-legacy", legacy, None),
+        ("v144-held", held, Some("unbound")),
+    ];
+    for (n, (tenant, account, state)) in accounts.iter().enumerate() {
+        seed.execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1)",
+            &[tenant],
+        )
+        .await
+        .expect("seed tenant");
+        seed.execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id, closed_at)
+             VALUES ($1, $2, CASE WHEN $3::text = 'closed' THEN now() END)",
+            &[tenant, account, state],
+        )
+        .await
+        .expect("seed account");
+        if let Some(state) = state {
+            seed.execute(
+                "INSERT INTO trace_account_bindings (tenant_id, account_id, origin, state, bound_at)
+                 VALUES ($1, $2, 'passkey', $3, CASE WHEN $3 = 'bound' THEN now() END)",
+                &[tenant, account, state],
+            )
+            .await
+            .expect("seed binding");
+        }
+        seed.execute(
+            "INSERT INTO trace_webauthn_credentials (tenant_id, credential_id, account_id, passkey)
+             VALUES ($1, $2, $3, '{}'::jsonb)",
+            &[tenant, &format!("v144-credential-{n}"), account],
+        )
+        .await
+        .expect("seed credential");
+        seed.execute(
+            "INSERT INTO trace_sessions
+                 (tenant_id, session_id, account_id, token_hash, client_kind, expires_at, revoked_at)
+             VALUES ($1, $2, $3, $4, 'native', now() + interval '1 day',
+                     CASE WHEN $5::text = 'closed' THEN now() END)",
+            &[
+                tenant,
+                &uuid::Uuid::new_v4(),
+                account,
+                &format!("sha256:{:064x}", n + 1),
+                state,
+            ],
+        )
+        .await
+        .expect("seed session");
+        // A session a passkey authenticated: a browser passkey sign-in on the
+        // legacy account, a native passkey sign-in on the others.
+        let kind = if state.is_none() { "passkey" } else { "native" };
+        seed.execute(
+            "INSERT INTO trace_sessions
+                 (tenant_id, session_id, account_id, token_hash, client_kind, expires_at,
+                  auth_credential_id)
+             VALUES ($1, $2, $3, $4, $5, now() + interval '1 day', $6)",
+            &[
+                tenant,
+                &uuid::Uuid::new_v4(),
+                account,
+                &format!("sha256:{:064x}", n + 100),
+                &kind,
+                &format!("v144-credential-{n}"),
+            ],
+        )
+        .await
+        .expect("seed passkey session");
+    }
+    seed.execute(
+        "INSERT INTO trace_near_account_anchors
+             (tenant_id, anchor_hash, account_id, sealed_account_name,
+              index_pepper_ref, account_name_key_ref)
+         VALUES ($1, $2, $3, $4, 'fixture-pepper', 'fixture-key')",
+        &[
+            &bound_tenant,
+            &format!("sha256:{anchor_hex}"),
+            &bound,
+            &serde_json::json!({"fixture": true}),
+        ],
+    )
+    .await
+    .expect("seed the bound account's anchor");
+    seed.execute(
+        "INSERT INTO trace_account_trust (tenant_id, account_id, authority, trust_version)
+         VALUES ('v144-held', $1, 'invited', 1)",
+        &[&held],
+    )
+    .await
+    .expect("seed a non-cascading row on the held account");
+    seed.execute(
+        "INSERT INTO trace_account_audit (tenant_id, action, actor_ref, outcome)
+         VALUES ('v144-unbound', 'account_passkey_login', 'account-actor:v144', 'ok')",
+        &[],
+    )
+    .await
+    .expect("seed a past passkey audit row");
+
+    let (version, name, sql) = registered_migrations()
+        .iter()
+        .find(|(version, ..)| *version == 144)
+        .expect("V144 is wired into the runner");
+    let applied = apply_and_record_migration(&mut owner, *version, name, sql)
+        .await
+        .map_err(|error| format!("{error:?}"));
+
+    let mut problems: Vec<String> = Vec::new();
+    if let Err(error) = &applied {
+        problems.push(format!("V144 failed for the non-superuser owner: {error}"));
+    } else {
+        let account = |id: uuid::Uuid| {
+            let seed = &seed;
+            async move {
+                seed.query_opt(
+                    "SELECT closed_at IS NOT NULL FROM trace_accounts WHERE account_id = $1",
+                    &[&id],
+                )
+                .await
+                .expect("read account")
+                .map(|row| row.get::<_, bool>(0))
+            }
+        };
+        let live_sessions = |id: uuid::Uuid| {
+            let seed = &seed;
+            async move {
+                seed.query_one(
+                    "SELECT count(*) FROM trace_sessions WHERE account_id = $1 AND revoked_at IS NULL",
+                    &[&id],
+                )
+                .await
+                .expect("count sessions")
+                .get::<_, i64>(0)
+            }
+        };
+        let sessions = |id: uuid::Uuid| {
+            let seed = &seed;
+            async move {
+                seed.query_one(
+                    "SELECT count(*) FROM trace_sessions WHERE account_id = $1",
+                    &[&id],
+                )
+                .await
+                .expect("count sessions")
+                .get::<_, i64>(0)
+            }
+        };
+        for (label, id) in [("unbound", unbound), ("closed", closed)] {
+            if account(id).await.is_some() {
+                problems.push(format!("the {label} passkey account was not deleted"));
+            }
+            if sessions(id).await != 0 {
+                problems.push(format!("the {label} account's sessions were not deleted"));
+            }
+        }
+        for (label, id) in [("bound", bound), ("legacy", legacy)] {
+            if account(id).await != Some(false) {
+                problems.push(format!("the {label} account was deleted or closed"));
+            }
+            if live_sessions(id).await != 1 {
+                problems.push(format!("the {label} account's session was revoked"));
+            }
+        }
+        let passkey_sessions: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM trace_sessions
+                  WHERE auth_credential_id LIKE 'v144-credential-%' AND revoked_at IS NULL",
+                &[],
+            )
+            .await
+            .expect("count passkey sessions")
+            .get(0);
+        if passkey_sessions != 0 {
+            problems.push(format!(
+                "{passkey_sessions} sessions a passkey authenticated are still live"
+            ));
+        }
+        let anchors: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM trace_near_account_anchors WHERE account_id = $1",
+                &[&bound],
+            )
+            .await
+            .expect("count anchors")
+            .get(0);
+        if anchors != 1 {
+            problems.push(format!("the bound account holds {anchors} anchors, not 1"));
+        }
+        if account(held).await != Some(true) {
+            problems.push("the held unbound account was not left closed".into());
+        }
+        if live_sessions(held).await != 0 {
+            problems.push("the held unbound account kept a live session".into());
+        }
+        let audit: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM trace_account_audit
+                  WHERE tenant_id = 'v144-unbound' AND action = 'account_passkey_login'",
+                &[],
+            )
+            .await
+            .expect("read the audit row")
+            .get(0);
+        if audit != 1 {
+            problems.push(format!("{audit} past passkey audit rows remain, not 1"));
+        }
+        let gone: (bool, bool, bool, bool) = seed
+            .query_one(
+                "SELECT to_regclass('public.trace_account_bindings') IS NULL,
+                        to_regclass('public.trace_webauthn_credentials') IS NULL,
+                        to_regprocedure('public.trace_unbound_passkey_account_count()') IS NULL,
+                        to_regprocedure('public.trace_reap_unbound_accounts(bigint,bigint,integer)') IS NULL",
+                &[],
+            )
+            .await
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+            .expect("read the catalog");
+        if gone != (true, true, true, true) {
+            problems.push(format!(
+                "(bindings, credentials, count function, reaper function) dropped = {gone:?}"
+            ));
+        }
+        let forced: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM pg_class
+                  WHERE relname IN ('trace_accounts', 'trace_sessions')
+                    AND relforcerowsecurity",
+                &[],
+            )
+            .await
+            .expect("read FORCE")
+            .get(0);
+        if forced != 2 {
+            problems.push("row security is no longer forced on accounts and sessions".into());
+        }
+        let leftover: i64 = seed
+            .query_one(
+                "SELECT (SELECT count(*) FROM pg_policy p
+                          WHERE p.polrelid = 'trace_accounts'::regclass
+                            AND p.polname LIKE 'trace_unbound_reaper_%')
+                      + (SELECT count(*) FROM information_schema.table_privileges
+                          WHERE grantee LIKE 'trace_unbound_account_%')
+                      + (SELECT count(*) FROM information_schema.column_privileges
+                          WHERE grantee LIKE 'trace_unbound_account_%')
+                      -- Grants of its own on the schema; PUBLIC's USAGE is not one.
+                      + (SELECT count(*) FROM pg_namespace n, aclexplode(n.nspacl) a
+                          JOIN pg_roles r ON r.oid = a.grantee
+                          WHERE n.nspname = 'public'
+                            AND r.rolname LIKE 'trace_unbound_account_%')",
+                &[],
+            )
+            .await
+            .expect("read leftover privileges")
+            .get(0);
+        if leftover != 0 {
+            problems.push(format!(
+                "{leftover} policies or privileges remain for the passkey guard roles"
+            ));
+        }
+    }
+
+    drop(seed);
+    drop(owner);
+    admin
+        .execute(&format!("DROP DATABASE IF EXISTS {DB} WITH (FORCE)"), &[])
+        .await
+        .expect("drop the probe database");
+    assert!(
+        problems.is_empty(),
+        "V144 must delete unbound and closed passkey accounts, close the ones it cannot \
+         delete, and leave bound and legacy accounts and audit rows alone:\n  {}",
+        problems.join("\n  ")
+    );
+    probe.release().await;
+    assert!(
+        !role_exists(&url, OWNER).await,
+        "{OWNER} is per server and must not outlive the test (#1335)"
+    );
+}

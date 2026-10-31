@@ -6,7 +6,7 @@ use crate::account_onboarding::{
     NativeProvisioningPending, ProvisionedNearAccount, VerifiedNearProvisioning,
 };
 // The device key is already registered under a different tenant. Public, in
-// `account_onboarding`, because bind shows this refusal to its caller.
+// `account_onboarding`, because provisioning shows this refusal to its caller.
 use crate::account_onboarding::DEVICE_KEY_REGISTERED_ELSEWHERE;
 // The device key was revoked by its account. Public for the same reason.
 use crate::account_onboarding::DEVICE_KEY_REVOKED;
@@ -26,10 +26,6 @@ const WALLET_KEY_REGISTERED_ELSEWHERE: &str = "near_provisioning_wallet_key_regi
 /// tenant.
 const DEVICE_PRINCIPAL_BOUND_TO_OTHER_ACCOUNT: &str =
     "near_provisioning_device_bound_to_other_account";
-
-/// Bind (Z2 S3) reached an account that is not an open, `unbound`
-/// passkey-origin account: legacy, already bound, or closed.
-const BIND_ACCOUNT_NOT_UNBOUND: &str = "near_ai_bind_account_not_unbound";
 
 fn named_refusal(label: &str) -> DatabaseError {
     DatabaseError::Pool(label.into())
@@ -158,7 +154,7 @@ async fn link_provisioned_principal(
 }
 
 /// The anchor inputs a verified NEAR AI login produces, computed once for
-/// provisioning and bind alike.
+/// provisioning.
 ///
 /// The anchor is HMAC(pepper, subject_id) under the *login* domain, and the
 /// sealed subject is the only copy of that id we keep -- the same shape the
@@ -202,12 +198,9 @@ impl NearAiAnchorMaterial {
 /// the floor, `model_training` never among them, whatever the contributor
 /// consented to in the app. It is insert-only
 /// (`insert_near_ai_signup_device_tenant_access_grant`): a returning sign-in,
-/// a bind or an enrollment of the same device never duplicates, widens or
-/// revives it. With no template, no grant is written and the floor stays.
+/// of the same device never duplicates, widens or revives it. With no template, no grant is written and the floor stays.
 ///
-/// Shared by provisioning (#836), where the account was just found or minted,
-/// and by bind (Z2 S3), where it is the passkey account that started the
-/// ceremony. One copy, so the two cannot drift in what a linked device is.
+/// Used by provisioning (#836), where the account was just found or minted.
 /// No `trace_near_identities` row: that table binds a wallet public key to a
 /// NEAR account name, and this path has neither. A login proves an account,
 /// not a key. Returns the device key id and the principal.
@@ -418,9 +411,6 @@ impl PgBackend {
     /// write different rows, but they race identically, and this is the subtle
     /// half -- a second copy would be the one to drift, and it would drift
     /// silently because a race is not what a test reaches for first.
-    ///
-    /// Bind (Z2 S3) goes through it too, with "mint" meaning "the passkey
-    /// account's own tenant": the race is the same race.
     async fn provision_against_anchor<T, M, F, Fut>(
         &self,
         anchor_hash: &str,
@@ -668,251 +658,6 @@ impl PgBackend {
         }))
     }
 
-    /// Store a NEAR AI bind ceremony (Z2 S3) in the same ceremony table.
-    pub(super) async fn near_ai_bind_store_ceremony(
-        &self,
-        hash: &str,
-        pending: &crate::account_onboarding::NearAiBindPending,
-        expires_at: i64,
-    ) -> Result<(), DatabaseError> {
-        self.store_ceremony_payload(hash, pending, expires_at).await
-    }
-
-    /// Consume a NEAR AI bind ceremony. The row is deleted before it is
-    /// parsed, so a provisioning or wallet row presented here is consumed and
-    /// refused (`NearAiBindPending` is `deny_unknown_fields` and needs a
-    /// `purpose`), never read as a bind.
-    pub(super) async fn near_ai_bind_take_ceremony(
-        &self,
-        hash: &str,
-    ) -> Result<Option<crate::account_onboarding::NearAiBindPending>, DatabaseError> {
-        self.take_ceremony_payload(hash).await
-    }
-
-    /// Bind a verified NEAR AI login to the unbound passkey account
-    /// `(tenant, account)` (Z2 native passkey identity, slice S3).
-    ///
-    /// The anchor decides, through the same [`Self::provision_against_anchor`]
-    /// race handling provisioning uses, with the passkey account's own tenant in
-    /// the place of a freshly minted one:
-    ///
-    /// - **The anchor resolves to no tenant, or to this one: bind in place.**
-    ///   One transaction in this tenant flips the binding row `unbound` ->
-    ///   `bound`, claims the anchor for this account, and writes the device,
-    ///   principal, provisioned-device row, session and audit row. If the
-    ///   globally UNIQUE anchor was claimed meanwhile, the transaction rolls
-    ///   back whole and the retry resolves the winner's tenant.
-    /// - **The anchor resolves to another tenant (account X): refuse.** X is
-    ///   provisioned by the very function the unauthenticated provisioning
-    ///   uses, in X's tenant only, and then this account is closed in its own
-    ///   tenant only. No transaction touches both tenants, and nothing of this
-    ///   account moves to X. (The cross-tenant fold is the deferred S6.)
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn near_ai_login_bind(
-        &self,
-        tenant: &str,
-        account: Uuid,
-        login: &crate::near_ai_login::VerifiedNearAiLogin,
-        device_public_key: &[u8; 32],
-        session: NewSession<'_>,
-        identity: &NearAccountIdentity,
-        grant_template: Option<&NearAiSignupPolicyTemplate>,
-    ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
-        if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
-            return Err(refused());
-        }
-        let material = NearAiAnchorMaterial::for_login(login, identity)?;
-        let own = tenant.to_string();
-        let (own_ref, material_ref, session_ref) = (&own, &material, &session);
-        self.provision_against_anchor(
-            &material.anchor_hash,
-            || own.clone(),
-            |resolved| async move {
-                if resolved == *own_ref {
-                    self.near_ai_bind_in_place(
-                        own_ref,
-                        &account,
-                        login,
-                        device_public_key,
-                        session_ref,
-                        material_ref,
-                        grant_template,
-                    )
-                    .await
-                } else {
-                    self.near_ai_bind_refuse_existing(
-                        own_ref,
-                        &account,
-                        resolved,
-                        login,
-                        device_public_key,
-                        session_ref,
-                        material_ref,
-                        grant_template,
-                    )
-                    .await
-                }
-            },
-        )
-        .await
-    }
-
-    /// The in-place bind: one transaction in the passkey account's tenant.
-    ///
-    /// `Ok(None)` means the anchor was claimed by another tenant while this
-    /// transaction waited on the advisory lock; dropping the transaction rolls
-    /// back the state flip and everything else, so the account is exactly as
-    /// unbound as before.
-    #[allow(clippy::too_many_arguments)]
-    async fn near_ai_bind_in_place(
-        &self,
-        tenant: &str,
-        account: &Uuid,
-        login: &crate::near_ai_login::VerifiedNearAiLogin,
-        device_public_key: &[u8; 32],
-        session: &NewSession<'_>,
-        material: &NearAiAnchorMaterial,
-        grant_template: Option<&NearAiSignupPolicyTemplate>,
-    ) -> Result<Option<crate::account_onboarding::NearAiBindOutcome>, DatabaseError> {
-        let provider = login.auth_provider().to_string();
-        let mut client = self.trace_pool().get().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
-            &[&material.anchor_hash],
-        )
-        .await?;
-        // The state flip is also the guard: it matches only an open account
-        // whose row is still `unbound`, and its row lock serializes two binds
-        // of the same account. A legacy account (no row), a bound one, or a
-        // closed one flips nothing and is refused before anything is written.
-        let flipped = tx
-            .execute(
-                "UPDATE trace_account_bindings b SET state = 'bound', bound_at = now()
-                  WHERE b.tenant_id = trace_current_tenant_id() AND b.account_id = $1
-                    AND b.state = 'unbound'
-                    AND EXISTS (SELECT 1 FROM trace_accounts a
-                                 WHERE a.tenant_id = b.tenant_id AND a.account_id = b.account_id
-                                   AND a.closed_at IS NULL)",
-                &[account],
-            )
-            .await?;
-        if flipped != 1 {
-            return Err(named_refusal(BIND_ACCOUNT_NOT_UNBOUND));
-        }
-        let claimed = tx.execute("INSERT INTO trace_near_account_anchors(tenant_id,anchor_hash,account_id,sealed_account_name,index_pepper_ref,account_name_key_ref,identity_source,auth_provider) VALUES(trace_current_tenant_id(),$1,$2,$3,$4,$5,'near_ai_login',$6) ON CONFLICT (anchor_hash) DO NOTHING", &[&material.anchor_hash,account,&material.sealed_json,&material.pepper_ref,&material.key_ref,&provider]).await?;
-        if claimed == 0 {
-            return Ok(None);
-        }
-        let (device, _principal) = attach_near_ai_login_device(
-            &tx,
-            tenant,
-            account,
-            device_public_key,
-            &material.anchor_hash,
-            session,
-            grant_template,
-        )
-        .await?;
-        let actor = crate::account_session::account_actor_ref(
-            &crate::account_session::AccountId::from_uuid(*account),
-        );
-        tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES(trace_current_tenant_id(),'account_bound',$1,'success',$2)", &[&actor,&serde_json::json!({"identity":"near_ai_login"})]).await?;
-        tx.commit().await?;
-        Ok(Some(crate::account_onboarding::NearAiBindOutcome::Bound(
-            ProvisionedNearAccount {
-                tenant_id: tenant.to_string(),
-                account_id: *account,
-                device_key_id: device,
-                anchor_hash: material.anchor_hash.clone(),
-            },
-        )))
-    }
-
-    /// Enroll a further device into the `bound` account `(tenant, account)`: a
-    /// second Mac signed in with that account's passkey, proving the near.ai
-    /// login the account is already bound to.
-    ///
-    /// **One transaction, in the session's own tenant, and the comparison is
-    /// inside it.** Under the anchor's advisory lock (the one provisioning and
-    /// bind take, so no concurrent claim of this anchor interleaves), it reads
-    /// the anchor row for this login under forced RLS and requires it to name
-    /// this account, open and `bound`, with the binding row share-locked so a
-    /// concurrent state change waits for this transaction. Only then does it
-    /// write the device, principal, provisioned-device row, session and audit
-    /// row, and commit. A mismatch returns before the first write; dropping
-    /// the transaction leaves nothing behind.
-    ///
-    /// **It never resolves the anchor across tenants.** No login-resolver
-    /// lookup, no mint, no claim: an anchor held by another account in another
-    /// tenant is invisible here, exactly as an anchor nobody holds is, so the
-    /// two are one refusal
-    /// ([`crate::account_onboarding::NEAR_AI_ENROL_ACCOUNT_MISMATCH`]) and
-    /// this path can never disclose, or create, another account.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn near_ai_login_enrol(
-        &self,
-        tenant: &str,
-        account: Uuid,
-        login: &crate::near_ai_login::VerifiedNearAiLogin,
-        device_public_key: &[u8; 32],
-        session: NewSession<'_>,
-        identity: &NearAccountIdentity,
-        grant_template: Option<&NearAiSignupPolicyTemplate>,
-    ) -> Result<ProvisionedNearAccount, DatabaseError> {
-        if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
-            return Err(refused());
-        }
-        let material = NearAiAnchorMaterial::for_login(login, identity)?;
-        let mut client = self.trace_pool().get().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
-            &[&material.anchor_hash],
-        )
-        .await?;
-        let own = tx
-            .query_opt(
-                "SELECT 1 FROM trace_account_bindings b
-                   JOIN trace_accounts a
-                     ON a.tenant_id = b.tenant_id AND a.account_id = b.account_id
-                   JOIN trace_near_account_anchors n
-                     ON n.tenant_id = b.tenant_id AND n.account_id = b.account_id
-                  WHERE b.tenant_id = trace_current_tenant_id() AND b.account_id = $1
-                    AND b.state = 'bound' AND a.closed_at IS NULL
-                    AND n.anchor_hash = $2 AND n.identity_source = 'near_ai_login'
-                  FOR SHARE OF b",
-                &[&account, &material.anchor_hash],
-            )
-            .await?;
-        if own.is_none() {
-            return Err(named_refusal(
-                crate::account_onboarding::NEAR_AI_ENROL_ACCOUNT_MISMATCH,
-            ));
-        }
-        let (device, _principal) = attach_near_ai_login_device(
-            &tx,
-            tenant,
-            &account,
-            device_public_key,
-            &material.anchor_hash,
-            &session,
-            grant_template,
-        )
-        .await?;
-        let actor = crate::account_session::account_actor_ref(
-            &crate::account_session::AccountId::from_uuid(account),
-        );
-        tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES(trace_current_tenant_id(),'account_device_enrolled',$1,'success',$2)", &[&actor,&serde_json::json!({"identity":"near_ai_login"})]).await?;
-        tx.commit().await?;
-        Ok(ProvisionedNearAccount {
-            tenant_id: tenant.to_string(),
-            account_id: account,
-            device_key_id: device,
-            anchor_hash: material.anchor_hash,
-        })
-    }
-
     /// The issuer's backfill of the sign-up grant for a NEAR AI device
     /// provisioned before sign-up wrote one. See
     /// [`crate::db::Database::backfill_near_ai_signup_device_grant`].
@@ -955,176 +700,6 @@ impl PgBackend {
         .await?;
         tx.commit().await?;
         Ok(true)
-    }
-
-    /// The existing-account branch: re-check the passkey account, provision X
-    /// as provisioning would, then close the passkey account. Separate
-    /// transactions, one per tenant, in that order: if the re-check fails,
-    /// nothing is written anywhere; if X's fails, the passkey account is
-    /// untouched; if the closure fails, the request fails and the passkey
-    /// account stays `unbound` (the session minted for X is never returned, so
-    /// its secret is gone).
-    ///
-    /// The re-check (#1135 review) is what stops a bind that lost a race --
-    /// the passkey account closed or bound after the anchor resolved -- from
-    /// provisioning X a device and a session nobody is handed. It narrows the
-    /// window rather than closing it: holding the passkey account's row lock
-    /// across X's transaction would close it, but would hold one pooled
-    /// connection while waiting on a second, and the runtime pool has no wait
-    /// timeout, so enough concurrent binds would starve it. What is left is a
-    /// close landing between the re-check and the closure, which the closure's
-    /// own `unbound` guard still refuses.
-    #[allow(clippy::too_many_arguments)]
-    async fn near_ai_bind_refuse_existing(
-        &self,
-        own_tenant: &str,
-        account: &Uuid,
-        existing_tenant: String,
-        login: &crate::near_ai_login::VerifiedNearAiLogin,
-        device_public_key: &[u8; 32],
-        session: &NewSession<'_>,
-        material: &NearAiAnchorMaterial,
-        grant_template: Option<&NearAiSignupPolicyTemplate>,
-    ) -> Result<Option<crate::account_onboarding::NearAiBindOutcome>, DatabaseError> {
-        if !self
-            .near_ai_bind_account_still_unbound(own_tenant, account)
-            .await?
-        {
-            return Err(named_refusal(BIND_ACCOUNT_NOT_UNBOUND));
-        }
-        let Some(provisioned) = self
-            .near_ai_login_provision_in_tenant(
-                login,
-                device_public_key,
-                session,
-                existing_tenant,
-                &material.anchor_hash,
-                &material.sealed_json,
-                &material.pepper_ref,
-                &material.key_ref,
-                grant_template,
-            )
-            .await?
-        else {
-            return Ok(None);
-        };
-        let (strong, binding_state) = self
-            .near_ai_bind_existing_account_facts(&provisioned.tenant_id, &provisioned.account_id)
-            .await?;
-        let reason = if strong > 0 {
-            crate::account_onboarding::BIND_REFUSED_ANCHOR_CLAIMED_STRONG
-        } else {
-            crate::account_onboarding::BIND_REFUSED_ANCHOR_CLAIMED
-        };
-        self.near_ai_bind_close_refused(own_tenant, account, reason)
-            .await?;
-        Ok(Some(
-            crate::account_onboarding::NearAiBindOutcome::ExistingAccount {
-                provisioned,
-                binding_state,
-            },
-        ))
-    }
-
-    /// Whether the passkey account is still an open, `unbound` one: the same
-    /// predicate the in-place state flip matches, read in its own tenant.
-    async fn near_ai_bind_account_still_unbound(
-        &self,
-        tenant: &str,
-        account: &Uuid,
-    ) -> Result<bool, DatabaseError> {
-        let mut client = self.trace_pool().get().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        let row = tx
-            .query_opt(
-                "SELECT 1 FROM trace_account_bindings b
-                  WHERE b.tenant_id = trace_current_tenant_id() AND b.account_id = $1
-                    AND b.state = 'unbound'
-                    AND EXISTS (SELECT 1 FROM trace_accounts a
-                                 WHERE a.tenant_id = b.tenant_id AND a.account_id = b.account_id
-                                   AND a.closed_at IS NULL)",
-                &[account],
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(row.is_some())
-    }
-
-    /// X's active strong-authenticator count and binding state, read under X's
-    /// own tenant. Read-only. The count is the shared
-    /// [`super::active_strong_authenticator_count`] that
-    /// `count_active_strong_authenticators` also reads, not a copy of its SQL.
-    /// That method itself is not called: it first upserts the tenant row, a
-    /// write this path neither needs nor holds a grant for.
-    async fn near_ai_bind_existing_account_facts(
-        &self,
-        tenant: &str,
-        account: &Uuid,
-    ) -> Result<(i64, crate::account_binding::AccountBindingState), DatabaseError> {
-        let strong = {
-            let mut client = self.trace_pool().get().await?;
-            let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-            let strong = super::active_strong_authenticator_count(&tx, account).await?;
-            tx.commit().await?;
-            strong
-        };
-        let binding = self
-            .binding_state_for_account(tenant, *account)
-            .await
-            .map_err(|_| refused())?;
-        Ok((strong, binding))
-    }
-
-    /// Close a passkey account that lost its bind to an existing account, in
-    /// its own tenant: binding `closed`, every session and credential revoked,
-    /// the account closed, and a label-only audit row. Refuses unless the row
-    /// is still `unbound`, so it can never close a bound or legacy account.
-    async fn near_ai_bind_close_refused(
-        &self,
-        tenant: &str,
-        account: &Uuid,
-        reason: &'static str,
-    ) -> Result<(), DatabaseError> {
-        let mut client = self.trace_pool().get().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        let closed = tx
-            .execute(
-                "UPDATE trace_account_bindings SET state = 'closed'
-                  WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
-                    AND state = 'unbound'",
-                &[account],
-            )
-            .await?;
-        if closed != 1 {
-            return Err(named_refusal(BIND_ACCOUNT_NOT_UNBOUND));
-        }
-        tx.execute(
-            "UPDATE trace_sessions SET revoked_at = now()
-              WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
-                AND revoked_at IS NULL",
-            &[account],
-        )
-        .await?;
-        tx.execute(
-            "UPDATE trace_webauthn_credentials SET revoked_at = now()
-              WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
-                AND revoked_at IS NULL",
-            &[account],
-        )
-        .await?;
-        tx.execute(
-            "UPDATE trace_accounts SET closed_at = now()
-              WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
-                AND closed_at IS NULL",
-            &[account],
-        )
-        .await?;
-        let actor = crate::account_session::account_actor_ref(
-            &crate::account_session::AccountId::from_uuid(*account),
-        );
-        tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES(trace_current_tenant_id(),'account_binding_refused',$1,'denied',$2)", &[&actor,&serde_json::json!({"reason":reason})]).await?;
-        tx.commit().await?;
-        Ok(())
     }
 
     /// The provisioned admission anchor for one authenticated principal.

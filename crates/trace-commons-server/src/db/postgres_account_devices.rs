@@ -189,15 +189,15 @@ impl PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
-        // Native sessions that name neither a device key nor a passkey
+        // Native sessions that name neither a device key nor a credential
         // (issued before V139, or by the login-link native sign-in) cannot be
         // told apart from the revoked device's own, so they end too: a lost
         // laptop that signed in before V139 is not left live. A NEAR AI
         // device among them renews on its own with a keyed session; any
-        // other signs in again. A native passkey session names its passkey
-        // (`auth_credential_id`), and removing that passkey is what ends it,
-        // so it is left alone, as are browser, passkey and NEAR sessions and
-        // the caller's own. Only live rows: past the idle cap
+        // other signs in again. A native session that names a credential
+        // (`auth_credential_id`) was minted by a passkey sign-in, and V144
+        // revoked every one of those; browser and NEAR sessions and the
+        // caller's own are left alone. Only live rows: past the idle cap
         // `validate_session` already refuses them.
         let unattributed_sessions_revoked = tx
             .execute(

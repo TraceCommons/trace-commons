@@ -44,7 +44,7 @@ fn sliding_state(db: Arc<NativeAuthTestDb>) -> (tempfile::TempDir, Arc<AppState>
 fn native_request(tenant: &str, secret: &str) -> axum::http::Request<Body> {
     axum::http::Request::builder()
         .method("GET")
-        .uri("/v1/account/binding")
+        .uri("/v1/account/inference-connection/offers")
         .header(
             AUTHORIZATION,
             format!("Bearer {}", native_token_value(tenant, secret)),
@@ -128,7 +128,7 @@ struct SlidingFixture {
     tenant: String,
 }
 
-/// A fresh tenant with one legacy account (no binding row, so never gated).
+/// A fresh tenant with one account.
 async fn sliding_fixture() -> Option<(SlidingFixture, Uuid)> {
     let backend = postgres_backend_for_ingest_test().await?;
     let admin = backend
