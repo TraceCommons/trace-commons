@@ -962,10 +962,10 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 /// `status.legacy_invite_migration.offered` is true.
 pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
 
-/// Reworded 2026-10-11 around the passkey step (owner direction); the new
-/// wording is not yet approved. The offer. Says it is optional and that
+/// Reworded 2026-10-11 (owner direction), and its passkey clause deleted
+/// 2026-10-31 when passkeys were removed; not yet approved. The offer. Says it is optional and that
 /// declining changes nothing, because coexistence is the default.
-pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead, by creating or using your passkey in your browser. Nothing changes unless you choose to, and your invite keeps working if you don't.";
+pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
 
 /// Approved 2026-10-06. The button that starts the move. Approved 2026-10-08 (button rule).
 pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move";
@@ -979,10 +979,11 @@ pub const LEGACY_MIGRATION_OFFER_DISMISS: &str = "Dismiss";
 /// card away is not taken for declining the move for good.
 pub const LEGACY_MIGRATION_OFFER_LATER: &str = "You can move later from Settings.";
 
-/// Not yet approved. Shown while the shell waits on the passkey step in the
-/// browser, which it starts itself when the move needs it
-/// (`legacy_migration_no_near_ai_session`), before it retries the move.
-pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your passkey in your browser...";
+/// Not yet approved. Shown while the shell waits on the NEAR AI sign-in in
+/// the browser, which it starts itself when the move needs it
+/// (`legacy_migration_no_near_ai_session`), before it retries the move. The
+/// key keeps its old `passkey_` name.
+pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your browser...";
 
 /// Not yet approved. The passkey step ended without finishing (it failed,
 /// or ran out of time). Nothing ran.
@@ -4026,20 +4027,20 @@ mod tests {
         }
     }
 
-    /// The move leads with the passkey step (owner, 2026-10-11): with no
-    /// session the shell runs the browser step itself, and the offer, the
-    /// wait and the refusal speak of the passkey, never of signing in to
-    /// NEAR AI. The step's own words are separate keys, and its button is
-    /// short.
+    /// The move leads with the browser step (owner, 2026-10-11): with no
+    /// session the shell runs the browser step itself. The offer and the
+    /// wait offer no passkey (removed 2026-10-31), and none of the step's
+    /// lines speaks of signing in. The step's own words are separate keys,
+    /// and its button is short.
     #[test]
-    fn the_migration_leads_with_the_passkey_step() {
+    fn the_migration_leads_with_the_browser_step() {
         let offer = legacy_migration_offer();
         assert_eq!(offer.passkey_waiting, LEGACY_MIGRATION_PASSKEY_WAITING);
         assert_eq!(offer.passkey_failed, LEGACY_MIGRATION_PASSKEY_FAILED);
         assert_eq!(offer.passkey_cancel, LEGACY_MIGRATION_PASSKEY_CANCEL);
         let no_session = legacy_migration_refusal_line("legacy_migration_no_near_ai_session");
-        for line in [offer.body, offer.passkey_waiting, no_session] {
-            assert!(line.contains("passkey"), "{line}");
+        for line in [offer.body, offer.passkey_waiting] {
+            assert!(!line.to_lowercase().contains("passkey"), "{line}");
         }
         for line in [
             offer.body,

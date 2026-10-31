@@ -801,7 +801,7 @@ pub extern "C" fn tc_settings_ranges_json() -> *mut c_char {
 /// ```json
 /// {"channel":"production","state_dir_name":"trace-commons",
 ///  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
-///  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
+///  "url_scheme":"tracecommons",
 ///  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>",
 ///  "near_ai_sign_in_providers":["near","github","google"]}
 /// ```
@@ -823,7 +823,6 @@ pub extern "C" fn tc_build_channel_json() -> *mut c_char {
             "channel": channel::CHANNEL,
             "state_dir_name": channel::STATE_DIR_NAME,
             "state_dir_env": channel::STATE_DIR_ENV,
-            "passkey_rp_id": channel::PASSKEY_RP_ID,
             "url_scheme": channel::URL_SCHEME,
             "near_ai_dashboard_origin": channel::NEAR_AI_DASHBOARD_ORIGIN,
             "near_ai_sign_in_providers": channel::NEAR_AI_SIGN_IN_PROVIDERS,
@@ -5750,8 +5749,8 @@ pub extern "C" fn tc_onboarding_copy() -> *mut c_char {
 
 /// The first-run wording of #1030 (`first_run_copy::first_run_copy`): a JSON
 /// object of per-screen groups, `{frame, join, folders, tools, rules, uses,
-/// passkey, private_ai}`, each a map of strings. `{tool}`, `{host}`,
-/// `{pay_range}`, `{count}`, `{folder}`, `{name}`, `{max}`, `{selected}`,
+/// private_ai}`, each a map of strings. `{tool}`, `{host}`,
+/// `{pay_range}`, `{count}`, `{folder}`, `{max}`, `{selected}`,
 /// `{total}` and `{tools}` are placeholders the shell fills.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only

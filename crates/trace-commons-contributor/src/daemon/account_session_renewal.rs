@@ -2,9 +2,8 @@
 //! account.
 //!
 //! A native account session lives 12 hours and is never extended (see
-//! [`super::nearai_onboarding::renew_account_session`]). A passkey account
-//! signs in again through the browser. A NEAR AI-provisioned account has no
-//! such sign-in: its only one is the provisioning ceremony, which `enroll`
+//! [`super::nearai_onboarding::renew_account_session`]). A NEAR
+//! AI-provisioned account has no other sign-in: its only one is the provisioning ceremony, which `enroll`
 //! refuses once the device is enrolled. So after 12 hours every
 //! account-session route answered `account-session-required` for good, and
 //! the macOS app's payout section, which needs one, never appeared.
@@ -95,8 +94,7 @@
 //! - **An absent record**, automatically. Sign-out removes it; the person
 //!   left, and is not signed back in behind their back. Only [`sign_in`]
 //!   signs them in.
-//! - **Any other tenant**, including a passkey account: it signs in again
-//!   with its passkey.
+//! - **Any other tenant.**
 
 use std::collections::HashMap;
 use std::path::PathBuf;

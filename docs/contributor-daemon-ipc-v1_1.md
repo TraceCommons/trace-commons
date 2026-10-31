@@ -7614,8 +7614,7 @@ What is removed:
   remembered invite subject hash, and every stored approved envelope.
 
 What stays: receipts, history and the audit log, settings, folder rules,
-the queue, the NEAR AI notice marker, and the remembered passkeys (a passkey
-is not an enrollment).
+the queue, and the NEAR AI notice marker.
 
 Order: the credential references go first, with the credential generation
 advanced so an enrollment, sign-in or identity switch in flight cannot
@@ -7632,8 +7631,7 @@ Queued entries: every `approved`, unsent entry returns to `pending` with
 The sessions stay queued; no approval given under the old enrollment can be
 sent under a later one. A preview that finishes after `unenroll` pins
 nothing, because a pin now requires the envelope to name the enrollment in
-force. In-memory account-admission answers and passkey ceremonies are
-dropped.
+force. In-memory account-admission answers are dropped.
 
 Audit: appended first, label only: action `unenrolled`, `detail`
 `approvals_returned=<n>`. No tenant, account, key id or path. When nothing
@@ -8655,7 +8653,7 @@ error string into `error.message`.
 | `mission_catalogue` | `limit?`: 1–50, default 20; `before?`: UUID | `kind`, `catalogue`, `disclosure` | Public skill-evaluation catalogue/client exist; IPC new |
 | `invite_lookup` | `code`: full invite URL | protocol `InviteLookupResponse` | Issuer lookup/client exist; IPC new |
 | `first_run_estimate` | none | protocol `FirstRunEstimate`: `usd_micros_per_accepted_trace?` (`{min, max}`), `{}` when the commons publishes none or cannot be reached | Anonymous `GET /v1/public/first-run-estimate` on the configured commons, or the channel's account origin before enrollment; the shell passes the range to `tc_first_run_estimate_line` and shows its answer |
-| Native passkey/account methods | see below | token-free replies below | Server routes exist; daemon and native adapter new |
+| Native account methods | see below | token-free replies below | Server routes exist; daemon and native adapter new |
 | `history_rollup` | none | existing optional `community` | Already implemented; authoritative standing surface |
 
 ### `inference_summary`
@@ -8856,28 +8854,15 @@ settled**, never a payment promise. C1's provisional `CreditRange.unit` comment
 not daily mission credit. Perform lookup for an explicit action, not on every
 keystroke. Display-name/range bounds must be validated before presentation.
 
-### Native passkey and account identity
+### Native account identity
 
-The C1 names in the approved [native passkey design](superpowers/specs/2026-09-28-native-passkey-identity-design.md)
-are authoritative. That design remains on the #1120 branch at this contract
-baseline; its proposed screen copy is **not approved** by this contract.
-The native app uses only Apple's platform passkey provider, while one Rust
-encoder creates the WebAuthn JSON. All raw byte fields below use canonical,
-unpadded base64url. The app receives no native bearer, NEAR AI token, device
-key, tenant identity or secret-store reference.
+Passkeys were removed on 2026-10-31: an account signs in through NEAR AI.
+The former `passkey_*`, `account_bind` and `account_binding` methods are gone
+and get the ordinary unknown-method answer. The app receives no native
+bearer, NEAR AI token, device key, tenant identity or secret-store reference.
 
 | Method | Parameters | Token-free result |
 |---|---|---|
-| `passkey_create_begin` | `label?`, `ingest_url?` | registration options below |
-| `passkey_create_complete` | `ceremony`, `credential_id`, `raw_client_data_json`, `raw_attestation_object` | `{binding_state}` |
-| `passkey_login_begin` | `ingest_url?` | assertion options below |
-| `passkey_login_complete` | `ceremony`, `credential_id`, `raw_client_data_json`, `raw_authenticator_data`, `signature`, `user_handle` | `{binding_state}` |
-| `passkey_add_begin` | `label?` | registration options below |
-| `passkey_add_complete` | same fields as create complete | `{binding_state}` |
-| `passkey_cancel` | `ceremony` | `{cancelled:true}` |
-| `account_bind` | none | `{outcome,binding_state}` |
-| `account_binding` | none | `{binding_state}` |
-| `passkey_state` | none | `{state,passkey_count,remembered_name,signed_in_name,near_ai_connected}` |
 | `account_sign_in` | `ingest_url?` | `{signed_in:true,expires_at}` |
 | `account_session_status` | none | `{state,signed_in,expires_at,renewal,renewal_failure,sign_in}` |
 | `account_sign_out` | none | `{signed_out:true}` |
@@ -8900,128 +8885,15 @@ never signs that key in again, so no ceremony runs; sign-out keeps the key,
 and only `unenroll` and a new enrollment, with a new key, recover),
 `near_ai_sign_in_not_near_ai_account`, `near_ai_sign_in_not_enrolled`,
 `commons_credential_storage_unavailable`, or
-`near_ai_sign_in_unavailable`. `near_ai_account_enroll` and `account_bind` can
-refuse the same case as `near_ai_enroll_device_key_revoked`.
+`near_ai_sign_in_unavailable`. `near_ai_account_enroll` can refuse the same
+case as `near_ai_enroll_device_key_revoked`.
 
-`label` is optional, at most 64 characters. A no-config create/login may name
-an `ingest_url` only when its canonical origin equals the compiled production
-API origin `https://ingest.tracecommons.ai`; omitting it selects that origin.
-A retained unconfigured session must satisfy the same trust root. Explicit
-operator configuration retains its host policy. Once a config or pre-enrollment
-session pins an origin, a caller cannot substitute another one. The native
-Swift adapter exposes no caller-supplied ingest URL. Begin stores the server ceremony privately and returns
-an opaque local `ceremony` handle pinned to action, origin, expiry and current
-credential/config lifecycle. Adding a passkey reloads the current token and
-permits ordinary rotation only within the same lifecycle and account. Complete
-consumes the ceremony once; cancel invalidates it.
-Sign-out, wipe or identity/config replacement invalidates stale finishes.
-Complete accepts no origin, account or tenant parameters.
-
-SAMPLE create/add begin result:
-
-```json
-{
-  "ceremony": "SAMPLE-local-handle", "rp_id": "tracecommons.ai",
-  "challenge": "AQID", "user_id": "BAUG", "user_name": "SAMPLE passkey",
-  "user_display_name": "SAMPLE passkey", "attestation": "none",
-  "expires_in_secs": 180, "exclude_credentials": [],
-  "user_verification": "preferred", "authenticator_attachment": "platform",
-  "resident_key": "preferred", "algorithms": [-7]
-}
-```
-
-SAMPLE login begin result:
-
-```json
-{"ceremony":"SAMPLE-local-handle","rp_id":"tracecommons.ai","challenge":"AQID","expires_in_secs":180,"user_verification":"preferred","allowed_credentials":[]}
-```
-
-Verification/resident-key options are the validated server values
-`required|preferred|discouraged`, not permission for the app to downgrade them.
-`exclude_credentials` and login's `allowed_credentials` contain canonical
-credential IDs, with at most 128 entries per list. An empty login list selects
-a discoverable credential. `user_display_name` is the validated server display
-name, falling back to `user_name`; `attestation` preserves the validated server
-preference `none|direct|indirect`, defaulting to `none`. These three fields are
-additive to the original C3 begin options. Creation uses the platform provider
-and algorithms the adapter actually supports (ES256 `-7`).
-Refuse unsupported server options rather than silently weakening them.
-
-SAMPLE create/add complete request:
-
-```json
-{"ceremony":"SAMPLE-local-handle","credential_id":"AQID","raw_client_data_json":"BAUG","raw_attestation_object":"BwgJ"}
-```
-
-SAMPLE login complete request:
-
-```json
-{"ceremony":"SAMPLE-local-handle","credential_id":"AQID","raw_client_data_json":"BAUG","raw_authenticator_data":"BwgJ","signature":"CgsM","user_handle":"DQ4P"}
-```
-
-These bytes illustrate encoding only and are not valid credentials. SAMPLE
-complete result: `{"binding_state":"unbound"}`. Binding read values are
-`unbound|bound|closed|legacy`; `legacy` means no passkey-origin binding row,
-not proof of a NEAR AI connection. A signed-out binding read is unavailable,
-not `unbound`. `passkey_state.state` projects those labels, or `none` when
-signed out and `unknown` when unreadable. `near_ai_connected` is nullable
-unless an authenticated identity fact establishes it. Never infer connected
-status from a missing binding row.
-
-`passkey_count` and `remembered_name` are local facts, answered in every
-`state` including `none` and `unknown`: the passkeys **this Mac remembers**,
-not the account's passkeys on the server. The server cannot list an account's
-passkeys before authentication without telling anyone who asks whether the
-account exists, so the daemon keeps its own list (`remembered-passkeys.json`
-in the state directory, 0600): a record is written when a passkey is created,
-added, or used to sign in here, and holds the passkey's display name when this
-Mac learned one (the name it was given when created or added here, or the
-label the server returned for it at sign-in; see below), the SHA-256 of the account id (for matching a later sign-in;
-never sent over IPC), and when it was last used. No credential material, no
-token, no credential id. At most four records are kept, most recent first.
-`passkey_count` is how many; `0` means none remembered here, not that the
-account has none. `remembered_name` is the most recent record's name, or null
-when it has none (a passkey first used here by signing in whose login answer
-carried no label: it has none on the server, or the server predates
-`passkey_label`).
-
-A sign-in learns the passkey's name from the server. The commons'
-`POST /v1/account/native/passkey/login/finish` answer carries, beside the
-session, an optional `passkey_label`: the label the signed-in account gave the
-passkey that just authenticated, looked up by the tenant, account and
-credential id of the verified assertion (never from anything in the request),
-so it is only ever the authenticating account's own credential's label. It is
-absent, not null, when that passkey has no label or the label could not be
-read; an older server never sends it, and an older daemon ignores it. On a
-login the daemon records that label as the record's name, replacing any name
-it held; with no label (or one that fails the daemon's own name rules: blank,
-over 64 characters, or holding a control character) it keeps the name it
-already had. The label is not logged and is not forwarded over IPC except as
-`remembered_name`/`signed_in_name`. A login the daemon refuses (for example
-`account-enrollment-mismatch`, a session for another tenant or account than
-the one this Mac is enrolled under) records nothing, label included. Both are null when the list cannot be read. Signing out
-keeps the list, since a returning person after sign-out is who the first
-run's "Welcome back" greets; removing this Mac's contributor state (`wipe`,
-the CLI's `logout`) clears it. Added in v1.1 additively; older shells ignore
-`remembered_name`.
-
-`signed_in_name` is the name this Mac remembers for the **signed-in
-account's own record**, matched by the session's account id (hashed, as the
-record is), never the most recent record's: after a sign-in, the most recent
-record may belong to another account, and its name is not this one's. It is
-null when no account session is held or the session cannot be read, when
-this Mac has no record for that account, when that record has no name (a
-passkey first used here by signing in whose login answer carried no label), or when the list cannot be read. A
-local fact like the other two, it is answered in every `state`, including
-`unknown`. The first run reads it once a passkey sign-in has finished, to
-name the passkey on Join's card; it never reads `remembered_name` for that,
-since the person may have picked another account's passkey in the system
-sheet. Added in v1.1 additively; older shells ignore it, and a shell
-reading an older daemon finds it absent and shows no name.
-
-Native login is discoverable authentication: `user_handle` must contain the
-nonempty raw Apple user ID encoded as canonical base64url. A missing or empty
-handle is an incomplete credential and must not reach login completion.
+With no config, an `ingest_url` is accepted only when its canonical origin
+equals the compiled production API origin `https://ingest.tracecommons.ai`;
+omitting it selects that origin. A retained unconfigured session must satisfy
+the same trust root. Explicit operator configuration retains its host policy.
+Once a config or pre-enrollment session pins an origin, a caller cannot
+substitute another one.
 
 SAMPLE account status:
 
@@ -9035,62 +8907,13 @@ expiry. Raw account identifiers do not cross this status surface. It must not be
 a read. Status and sign-out support a pre-enrollment account without creating a
 fake config. `account_sign_in` reuses existing browser/PKCE machinery where
 its enrollment prerequisites hold; without real enrollment configuration it
-refuses with `unavailable` / `account-enrollment-required`. An unenrolled
-account uses the native passkey create/login path. Browser URL exposure is bounded to the live sign-in attempt and
-uses the existing URL validation/opening controls.
+refuses with `unavailable` / `account-enrollment-required`. Browser URL exposure is bounded to the live sign-in attempt and
+uses the existing URL validation/opening controls. Tokens, rotations and
+atomic device/config persistence stay in Rust/Keychain.
 
-`account_bind` reuses retained NEAR AI provisioning against the authenticated
-bind start/finish routes and the **bind-specific** proof preimage. SAMPLE
-result: `{"outcome":"bound","binding_state":"bound"}`. An
-`existing_account` outcome switches to the existing account and closes the
-unbound account; its passkey is not transferred (S6 fold is deferred).
-
-For a signed-in account whose `binding_state` is `bound` (another Mac bound
-it, and this Mac signed in with the same passkey), `account_bind` **enrolls
-this Mac into that account** through the same routes: SAMPLE result
-`{"outcome":"enrolled","binding_state":"bound"}`. The commons compares the
-near.ai login this Mac proves with the account the passkey session is signed
-in to -- the session's own account, never a request field -- inside the one
-transaction that would write the device key, and refuses before writing
-anything when they differ. That refusal is `unavailable` /
-`account-enrol-mismatch` (server: `409 {"error":"near_ai_account_mismatch"}`),
-one fixed label whether the login owns another account or none; the passkey
-session is left as it was, and the shell signs it out. A `bound` or
-`enrolled` result is persisted only if its tenant and account are the passkey
-session's (`account-enrollment-mismatch` otherwise). `legacy` (or any other
-state) is refused with `account-bind-refused` before the refresh token is
-spent.
-
-On a Mac that is **already enrolled**, `account_bind` sends no request and
-writes nothing. It answers `{"outcome":"already_enrolled","binding_state":"bound"}`
-when the enrollment it holds is the signed-in account's own: the session's
-tenant (decoded from its `tcn1_` token, as the sign-in's tenant check reads
-it) equals the enrollment config's `tenant_id`, **and** the session was signed
-in to a `bound` account (the `binding_state` stored with it at sign-in). This
-is the first run's Welcome back case: the enrollment is reported after P-7
-opened, and the person signs in with that account's passkey. Anything else
--- no session, another tenant, an `unbound` or `legacy` account, or a stored
-session without a `binding_state` -- is refused as before with
-`account-already-enrolled`. The config records a tenant and no account, so
-the check is a tenant match; it identifies one account because a binding row
-(and so a `bound` state) is only ever written for a passkey-origin account,
-each created alone in a freshly minted tenant, and it accepts nothing the
-sign-in's own tenant check had not already accepted when it kept the
-session. Recording the enrolled account at enrollment would make it
-account-precise; that is not done yet. Added in v1.1 additively: the macOS
-shell treats it exactly as `enrolled` (Verify for a `bound` account accepts
-either); a shell that does not know it reads an unknown outcome and fails
-closed (`account-bind-invalid`). Tokens,
-rotations and atomic device/config persistence stay in Rust/Keychain. Binding
-creates no folder/trace/body consent. Native login remains weak and native add
-keeps the existing first-strong-authenticator gate; adding another requires
-browser passkey step-up.
-
-The Associated Domains entitlement, approved profile bytes, deployed AASA and
-signed create/login origin check are **release gates**. Local/mock tests do
-not establish Apple origin behavior or satisfy the spec's S3 deployment gate.
-This contract approves no new screen copy, deployment, profile fabrication or
-relaxation of origin/CORS/CSP controls.
+A daemon from before the removal kept a list of the passkeys used on the Mac
+(`remembered-passkeys.json` in the state directory). A daemon after it
+deletes that file when it starts.
 
 ## Events
 

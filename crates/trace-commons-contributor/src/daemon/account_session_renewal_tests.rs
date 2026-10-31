@@ -481,8 +481,7 @@ async fn a_signed_out_account_is_not_signed_back_in() {
 
 #[tokio::test]
 async fn an_account_in_another_tenant_is_not_renewed_this_way() {
-    // A passkey account signs in again with its passkey.
-    let fx = Fixture::with_tenant(Session::Expired, "tenant-passkey").await;
+    let fx = Fixture::with_tenant(Session::Expired, "tenant-other").await;
 
     let response = fx.payout_status().await;
 
@@ -709,10 +708,10 @@ async fn the_session_status_reports_signed_in_once_it_is_renewed() {
 }
 
 #[tokio::test]
-async fn the_session_status_of_a_signed_out_or_passkey_account_renews_nothing() {
+async fn the_session_status_of_a_signed_out_or_other_tenant_account_renews_nothing() {
     for fx in [
         Fixture::new(Session::Absent).await,
-        Fixture::with_tenant(Session::Expired, "tenant-passkey").await,
+        Fixture::with_tenant(Session::Expired, "tenant-other").await,
     ] {
         let status = fx.call("account_session_status", json!({})).await;
 
@@ -1111,8 +1110,8 @@ async fn sign_in_again_without_a_near_ai_login_asks_for_one_and_spends_nothing()
 }
 
 #[tokio::test]
-async fn sign_in_again_is_not_offered_to_a_passkey_account() {
-    let fx = Fixture::with_tenant(Session::Expired, "tenant-passkey").await;
+async fn sign_in_again_is_not_offered_to_an_account_in_another_tenant() {
+    let fx = Fixture::with_tenant(Session::Expired, "tenant-other").await;
 
     assert!(fx.status().await["sign_in"].is_null());
     let response = sign_in_again(&fx).await;

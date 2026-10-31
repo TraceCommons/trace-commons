@@ -12,9 +12,7 @@
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm`
 //!   -- confirm it from the same account.
 //!
-//! The owner superseded the passkey confirmation on 2026-10-23 ("We aren't
-//! using passkeys at all in the app right now"): the signed-in session is the
-//! authority, so the daemon calls confirm itself once the person confirms in
+//! The signed-in session is the authority, so the daemon calls confirm itself once the person confirms in
 //! the app. There is no step-up page.
 //!
 //! Every success is validated before it is believed. A started link must

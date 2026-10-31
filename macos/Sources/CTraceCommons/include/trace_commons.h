@@ -335,7 +335,7 @@ char*       tc_settings_ranges_json(void);
  *
  * {"channel":"production","state_dir_name":"trace-commons",
  *  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
- *  "passkey_rp_id":"<relying party>","url_scheme":"tracecommons",
+ *  "url_scheme":"tracecommons",
  *  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>",
  *  "near_ai_sign_in_providers":["near","github","google"]}
  *
@@ -2140,8 +2140,8 @@ char*       tc_witness_copy(void);
 char*       tc_onboarding_copy(void);
 
 /* The first-run wording of #1030 (first_run_copy::first_run_copy): {frame,
- * join, folders, tools, rules, uses, passkey, private_ai}, each a map of
- * strings with {tool}, {host}, {pay_range}, {count}, {folder}, {name},
+ * join, folders, tools, rules, uses, private_ai}, each a map of
+ * strings with {tool}, {host}, {pay_range}, {count}, {folder},
  * {max}, {selected}, {total} and {tools} placeholders the shell fills. NULL
  * only on a caught panic.
  */

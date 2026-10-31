@@ -5,9 +5,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::*;
-use crate::config::{
-    ACCOUNT_SESSION_FILE, DAEMON_SETTINGS_FILE, INVITE_SUBJECT_FILE, REMEMBERED_PASSKEYS_FILE,
-};
+use crate::config::{ACCOUNT_SESSION_FILE, DAEMON_SETTINGS_FILE, INVITE_SUBJECT_FILE};
 use crate::daemon::ipc::{ERR_BUSY, ERR_UNAVAILABLE, handle_request, handle_request_async};
 use crate::daemon::queue::{QueueEntry, QueueState};
 
@@ -123,9 +121,6 @@ async fn unenroll_removes_config_credentials_and_session_and_reads_not_logged_in
 async fn unenroll_keeps_what_is_not_the_enrollment() {
     let s = shared();
     enroll_fixture(&s);
-    s.store
-        .write_daemon_file(REMEMBERED_PASSKEYS_FILE, b"{\"passkeys\":[]}")
-        .unwrap();
     // A real preferences document: unenroll must now persist permission
     // revocation, so an unreadable placeholder is a separate failure case.
     {
@@ -138,9 +133,7 @@ async fn unenroll_keeps_what_is_not_the_enrollment() {
 
     assert!(call(&s).await.error.is_none());
 
-    // A passkey is not an enrollment, and the person's choices about this
-    // Mac are not an account's.
-    assert!(s.store.daemon_path(REMEMBERED_PASSKEYS_FILE).exists());
+    // The person's choices about this Mac are not an account's.
     assert!(s.store.daemon_path(DAEMON_SETTINGS_FILE).exists());
     assert!(
         !crate::daemon::settings::DaemonSettings::load(&s.store)
@@ -431,7 +424,7 @@ async fn the_credentials_are_gone_even_when_a_later_file_cannot_be_removed() {
 }
 
 #[tokio::test]
-async fn admission_answers_and_passkey_ceremonies_do_not_outlive_the_enrollment() {
+async fn admission_answers_do_not_outlive_the_enrollment() {
     let s = shared();
     let cfg = enroll_fixture(&s);
     s.account_admission.record_for_test(&cfg, "bounded", true);
@@ -447,7 +440,6 @@ async fn admission_answers_and_passkey_ceremonies_do_not_outlive_the_enrollment(
         s.account_admission.current(Some(&cfg)),
         crate::daemon::automatic_gate::AccountAdmission::NotAdvertised
     );
-    assert!(s.native_identity.lock().unwrap().is_empty());
 }
 
 /// Start a real `/v1/onboard` responder on an ephemeral `127.0.0.1` port.

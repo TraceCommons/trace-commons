@@ -17,8 +17,8 @@
 //!
 //! What stays: receipts, history and the audit log (the local record of what
 //! this device did -- the audit log also records this call), settings, folder
-//! rules, the queue, the NEAR AI notice marker, and the remembered passkeys,
-//! which are not an enrollment.
+//! rules, the queue, and the NEAR AI notice marker, which are not an
+//! enrollment.
 //!
 //! What also goes: the in-app suggestion ledger, the verdict news with its
 //! high-water marks, the idle-session batching set, and the attention log
@@ -207,9 +207,6 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
     // account's `mission_fit` starts unknown. A leaf lock, taken alone.
     super::mission_matching::clear_catalogue(&shared.mission_catalogue);
     shared.account_admission.forget_enrollment();
-    if let Ok(mut ceremonies) = shared.native_identity.lock() {
-        ceremonies.clear();
-    }
     if insights_cleanup.is_err() {
         shared.publish(EVENT_QUEUE_CHANGED, json!({}));
     }
