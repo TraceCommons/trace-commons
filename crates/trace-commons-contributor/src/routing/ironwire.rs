@@ -762,7 +762,9 @@ impl RoutingLedger for IronWireLedger {
         };
         let mut rows: Vec<RoutedExchange> = snapshot
             .iter()
-            .filter(|row| row.started_at >= from)
+            // Failed requests are not calls. Dropped here, after paging has
+            // used them, never while a page is being read.
+            .filter(|row| row.started_at >= from && row.failure.is_none())
             .cloned()
             .collect();
         rows.sort_by_key(|row| row.started_at);
@@ -1147,6 +1149,102 @@ mod tests {
         let page =
             IronWireLedger::parse_page(br#"{"enabled":false}"#).expect("valid JSON is readable");
         assert!(page.rows.is_empty());
+    }
+
+    const SERVED: &str = r#"{"id":1,"started_at":"2026-09-01T00:00:00Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1,"status":200}"#;
+    const FAILED: &str = r#"{"id":2,"started_at":"2026-09-01T00:00:01Z","facade":"anthropic","backend":"none","rung":"none","attempts":0,"status":500,"failure":"panic"}"#;
+
+    fn ledger_with_page(body: &str) -> IronWireLedger {
+        let page = IronWireLedger::parse_page(body.as_bytes()).expect("readable");
+        let ledger = IronWireLedger::new(0, "t".to_string());
+        *ledger.snapshot.write().unwrap() = page.rows;
+        ledger
+    }
+
+    #[test]
+    fn failed_request_rows_never_leave_exchanges_since() {
+        let ledger = ledger_with_page(&format!(r#"{{"exchanges":[{SERVED},{FAILED}]}}"#));
+        let rows = ledger.exchanges_since(chrono::DateTime::UNIX_EPOCH);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, Some(1));
+    }
+
+    #[test]
+    fn a_null_failure_and_a_payload_without_the_field_are_served_rows() {
+        let with_null = SERVED.replace("\"status\":200", "\"status\":200,\"failure\":null");
+        let ledger = ledger_with_page(&format!(r#"{{"exchanges":[{SERVED},{with_null}]}}"#));
+        assert_eq!(
+            ledger.exchanges_since(chrono::DateTime::UNIX_EPOCH).len(),
+            2
+        );
+    }
+
+    /// A full page made only of failure rows must still advance the cursor and
+    /// fetch the next page: the filter runs after paging, never before.
+    #[tokio::test]
+    async fn a_full_page_of_failure_rows_still_advances_the_cursor() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cursors = Arc::new(RwLock::new(Vec::<Option<String>>::new()));
+        let calls_r = Arc::clone(&calls);
+        let cursors_r = Arc::clone(&cursors);
+        let router = axum::Router::new().route(
+            "/_ironwire/log",
+            axum::routing::get(move |req: axum::extract::Request| {
+                let calls = Arc::clone(&calls_r);
+                let cursors = Arc::clone(&cursors_r);
+                async move {
+                    let after = req
+                        .uri()
+                        .query()
+                        .unwrap_or("")
+                        .split('&')
+                        .find_map(|p| p.strip_prefix("after_id=").map(str::to_string));
+                    cursors.write().unwrap().push(after);
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    let rows: Vec<String> = if n == 0 {
+                        (1..=PAGE_LIMIT)
+                            .map(|i| {
+                                format!(
+                                    r#"{{"id":{i},"started_at":"2026-09-01T00:00:00Z","facade":"anthropic","backend":"none","rung":"none","attempts":0,"status":500,"failure":"panic"}}"#
+                                )
+                            })
+                            .collect()
+                    } else {
+                        let id = PAGE_LIMIT + 1;
+                        vec![format!(
+                            r#"{{"id":{id},"started_at":"2026-09-01T00:00:00Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1,"status":200}}"#
+                        )]
+                    };
+                    axum::response::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(format!(
+                            r#"{{"enabled":true,"exchanges":[{}]}}"#,
+                            rows.join(",")
+                        )))
+                        .expect("response builds")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let ledger = IronWireLedger::new(port, "t".to_string());
+        ledger.refresh().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the second page was fetched"
+        );
+        assert_eq!(
+            cursors.read().unwrap()[1].as_deref(),
+            Some(PAGE_LIMIT.to_string().as_str())
+        );
+        let rows = ledger.exchanges_since(chrono::DateTime::UNIX_EPOCH);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, Some(PAGE_LIMIT as i64 + 1));
     }
 
     #[test]

@@ -192,6 +192,8 @@ impl ManagedHistory {
                     cost_usd: cost,
                     status: row.get(20)?,
                     proof: text(21)?.as_deref().and_then(ProofStatus::parse),
+                    // Failure rows are filtered out in SQL above.
+                    failure: None,
                 };
                 entries.push((home.clone(), exchange));
             }

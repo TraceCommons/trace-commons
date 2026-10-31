@@ -1185,6 +1185,7 @@ mod tests {
             cost_usd: Some(0.0123),
             status: 200,
             proof,
+            failure: None,
         }
     }
 

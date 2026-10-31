@@ -146,6 +146,12 @@ pub struct RoutedExchange {
     /// `Verified`.
     #[serde(default, deserialize_with = "lenient_proof_status")]
     pub proof: Option<ProofStatus>,
+    /// IronWire's short fixed code for a request that failed inside the proxy
+    /// (`panic`, `body_rejected`, ...). A row carrying one is not a call and
+    /// is dropped by `exchanges_since`. `None` on a served row and on a proxy
+    /// that predates the field.
+    #[serde(default)]
+    pub failure: Option<String>,
 }
 
 /// IronWire's proof label for one exchange, mirroring
