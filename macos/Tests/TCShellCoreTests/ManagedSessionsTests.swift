@@ -312,9 +312,9 @@ final class ManagedSessionsTests: XCTestCase {
         "model_group_external": "External private models",
     ]
 
-    /// Owner, 2026-10-30: the picker groups models by NEAR AI's privacy
-    /// tier, Incognito first, then NEAR AI's TEEs, then a third party's,
-    /// each in NEAR AI's order. The default heads no group; a model with
+    /// Owner, 2026-10-31: the picker groups models by NEAR AI's privacy
+    /// tier, NEAR AI's own TEEs first, then a third party's, then
+    /// Incognito, each in NEAR AI's order. The default heads no group; a model with
     /// no tier (an older daemon) comes last, under no heading.
     func testTheModelPickerGroupsModelsByPrivacyTier() throws {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
@@ -330,16 +330,16 @@ final class ManagedSessionsTests: XCTestCase {
         let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
         XCTAssertEqual(options.map(\.value), [
             ManagedSurface.defaultModel,
-            "anthropic/claude-sonnet-5-5", "openai/gpt-6-sol",
             "Qwen/Qwen3.8-27B",
             "z-ai/glm-5.3",
+            "anthropic/claude-sonnet-5-5", "openai/gpt-6-sol",
             "x/untiered", "x/future",
         ])
         XCTAssertEqual(options.map(\.section), [
             nil,
-            "Incognito models", "Incognito models",
             "NEAR AI private models",
             "External private models",
+            "Incognito models", "Incognito models",
             nil, nil,
         ])
         // Favorites come first, in NEAR AI's order (as the daemon answers
@@ -358,14 +358,14 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(favored.map(\.value), [
             ManagedSurface.defaultModel,
             "z-ai/glm-5.3", "openai/gpt-6-sol",
-            "anthropic/claude-sonnet-5-5",
             "Qwen/Qwen3.8-27B",
+            "anthropic/claude-sonnet-5-5",
             "x/untiered", "x/future",
         ])
         XCTAssertEqual(favored.map(\.section), [
             nil, nil, nil,
-            "Incognito models",
             "NEAR AI private models",
+            "Incognito models",
             nil, nil,
         ])
         // No tiers at all: no headings.
