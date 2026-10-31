@@ -259,17 +259,19 @@ pub(crate) fn bounded_output(command: Command) -> Result<std::process::Output, M
     bounded_output_limit(command, 65536)
 }
 
-/// An unnamed file that holds a helper's output until it is read. On
-/// Windows `tempfile::tempfile()` intermittently fails with "access
-/// denied" when its random name lands on a file still being deleted, so
-/// the platform crate names the file with a UUID instead.
-fn capture_file() -> std::io::Result<std::fs::File> {
-    #[cfg(windows)]
-    return trace_commons_contributor_platform::local_files::create_capture_file(
-        &std::env::temp_dir(),
-    );
-    #[cfg(not(windows))]
-    tempfile::tempfile()
+/// A scratch file that holds a helper's output until it is read, gone once
+/// its last handle closes (see `local_files::create_capture_file`). A
+/// failure is logged by its error kind and OS code only, never a path.
+fn capture_file() -> Result<std::fs::File, ManagedError> {
+    trace_commons_contributor_platform::local_files::create_capture_file(&std::env::temp_dir())
+        .map_err(|error| {
+            tracing::warn!(
+                kind = ?error.kind(),
+                os_error = ?error.raw_os_error(),
+                "managed output capture file could not be created"
+            );
+            ManagedError::StorageUnavailable
+        })
 }
 
 pub(crate) fn bounded_output_limit(
@@ -278,8 +280,8 @@ pub(crate) fn bounded_output_limit(
 ) -> Result<std::process::Output, ManagedError> {
     use std::io::{Read, Seek};
     use std::process::Stdio;
-    let mut stdout = capture_file().map_err(|_| ManagedError::StorageUnavailable)?;
-    let mut stderr = capture_file().map_err(|_| ManagedError::StorageUnavailable)?;
+    let mut stdout = capture_file()?;
+    let mut stderr = capture_file()?;
     command
         .stdin(Stdio::null())
         .stdout(
