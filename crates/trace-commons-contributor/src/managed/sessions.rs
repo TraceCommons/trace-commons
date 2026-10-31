@@ -84,6 +84,16 @@ pub struct LaunchRequest {
     /// the snapshot says `capabilities.keep_saved_model`.
     #[serde(default, skip_serializing)]
     pub keep_saved_model: bool,
+    /// The model for the tool's background work (Claude Code's small, fast
+    /// model; OpenCode's title agent), or none for the tool's background
+    /// default. Only a NEAR AI session of Claude Code or OpenCode takes
+    /// one; the launcher replaces one less private than the main model
+    /// (`models::background_for`). Read from a request, never written: the
+    /// registry keeps it on the view, where a daemon that predates it skips
+    /// it, and a shell sends it only when the snapshot says
+    /// `capabilities.background_model`.
+    #[serde(default, skip_serializing)]
+    pub background_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +104,10 @@ pub struct SessionView {
     /// None for a session that names no model and has no proxy.
     #[serde(default)]
     pub model: Option<String>,
+    /// The background model the request named, for the launcher; none for
+    /// the tool's background default. Additive: absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_model: Option<String>,
     #[serde(default)]
     pub collect_traces: bool,
     #[serde(default)]
@@ -306,6 +320,7 @@ impl SessionRegistry {
             }
             entry.ticket_hash = None;
             entry.request.keep_saved_model = entry.keep_saved_model;
+            entry.request.background_model = entry.view.background_model.clone();
         }
         let launched = store
             .read_daemon_file(FIRST_LAUNCH_FILE)
@@ -572,6 +587,7 @@ impl SessionRegistry {
         let id = Uuid::new_v4();
         let view = SessionView {
             model: request.model.clone(),
+            background_model: request.background_model.clone(),
             collect_traces: request.collect_traces,
             collection: if request.collect_traces {
                 CollectionState::Pending
@@ -660,6 +676,21 @@ impl SessionRegistry {
                 return Err(ManagedError::InvalidRequest);
             }
         }
+        // A background model is named only where a NEAR AI proxy serves it,
+        // and only for a tool with a background slot; its tier is checked
+        // when the tool's configuration is built.
+        if let Some(background) = request.background_model.as_deref() {
+            let ok = super::opencode::valid_model(background)
+                && request.purpose == LaunchPurpose::Coding
+                && request.tool != ToolId::Codex
+                && matches!(
+                    request.connection,
+                    ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
+                );
+            if !ok {
+                return Err(ManagedError::InvalidRequest);
+            }
+        }
         if request.account_id != account.id
             || request.tool != account.tool
             || request.connection != account.connection
@@ -737,6 +768,7 @@ impl SessionRegistry {
             tool: entry.request.tool,
             cwd: entry.request.cwd.clone(),
             model: entry.request.model.clone(),
+            background_model: entry.request.background_model.clone(),
             collect_traces: entry.request.collect_traces,
             cli_options: entry.cli_options_text.clone()?,
         })
@@ -1059,6 +1091,7 @@ mod tests {
             expected_generation: Generation(0),
             save_default: false,
             keep_saved_model: true,
+            background_model: None,
         };
         let id = registry
             .prepare(request.clone(), &sign_in)
@@ -1091,6 +1124,7 @@ mod tests {
             .prepare(
                 LaunchRequest {
                     keep_saved_model: false,
+                    background_model: None,
                     ..again
                 },
                 &sign_in,
@@ -1101,6 +1135,105 @@ mod tests {
         let raw: serde_json::Value =
             serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
         assert!(raw["entries"][1].get("keep_saved_model").is_none());
+    }
+
+    /// A launch's background model is kept on the session's view, which
+    /// its launcher reads and an older daemon skips, never on the stored
+    /// request; it survives a restart, a retry is still one session, Start
+    /// again keeps it, and the folder settings remember it. Codex and a
+    /// connection with no NEAR AI proxy take none.
+    #[test]
+    fn a_background_model_is_kept_on_the_view_and_remembered() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let sign_in = crate::managed::signin::entry(ToolId::Claude).unwrap();
+        let request = LaunchRequest {
+            cli_options: Some(String::new()),
+            model: Some("Qwen/Qwen3.8-27B".into()),
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Claude,
+            connection: ConnectionKind::NearAiSignIn,
+            account_id: sign_in.id,
+            cwd: home.path().to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+            keep_saved_model: false,
+            background_model: Some("z-ai/glm-5.3-flash".into()),
+        };
+        let id = registry
+            .prepare(request.clone(), &sign_in)
+            .unwrap()
+            .session_id;
+        let raw: serde_json::Value =
+            serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
+        let entry = &raw["entries"][0];
+        assert!(
+            entry["request"].get("background_model").is_none(),
+            "{entry}"
+        );
+        assert_eq!(entry["view"]["background_model"], "z-ai/glm-5.3-flash");
+        assert_eq!(
+            registry
+                .folder_settings(id)
+                .unwrap()
+                .background_model
+                .as_deref(),
+            Some("z-ai/glm-5.3-flash")
+        );
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        assert_eq!(
+            registry
+                .prepare(request.clone(), &sign_in)
+                .unwrap()
+                .session_id,
+            id
+        );
+        let again = registry.start_again_request(id, Uuid::new_v4()).unwrap();
+        assert_eq!(
+            again.background_model.as_deref(),
+            Some("z-ai/glm-5.3-flash")
+        );
+        // A launch without one stores none.
+        let plain = registry
+            .prepare(
+                LaunchRequest {
+                    background_model: None,
+                    ..again.clone()
+                },
+                &sign_in,
+            )
+            .unwrap()
+            .session_id;
+        let raw: serde_json::Value =
+            serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
+        let plain = raw["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["view"]["id"] == serde_json::json!(plain))
+            .unwrap();
+        assert!(plain["view"].get("background_model").is_none());
+        // Codex, and Claude on a subscription, take none.
+        for (tool, connection) in [
+            (ToolId::Codex, ConnectionKind::NearAiSignIn),
+            (ToolId::Claude, ConnectionKind::Subscription),
+        ] {
+            let refused = LaunchRequest {
+                request_id: Uuid::new_v4(),
+                tool,
+                connection,
+                model: None,
+                ..request.clone()
+            };
+            assert_eq!(
+                registry.check(&refused, &sign_in).err(),
+                Some(ManagedError::InvalidRequest),
+                "{tool:?} {connection:?}"
+            );
+        }
     }
 
     /// OpenCode can use the sign-in proxy's default or select a valid model.
@@ -1123,6 +1256,7 @@ mod tests {
             expected_generation: Generation(0),
             save_default: false,
             keep_saved_model: false,
+            background_model: None,
         };
         let sign_in = crate::managed::signin::entry(ToolId::Opencode).unwrap();
         assert_eq!(
@@ -1199,6 +1333,7 @@ mod tests {
             expected_generation: Generation(0),
             save_default: false,
             keep_saved_model: false,
+            background_model: None,
         }
     }
 
@@ -1393,6 +1528,7 @@ mod tests {
             expected_generation: Generation(0),
             save_default: false,
             keep_saved_model: false,
+            background_model: None,
         };
         let launch = registry.prepare(request, &account).unwrap();
         let mut value = serde_json::to_value(&registry.data).unwrap();
@@ -1430,6 +1566,7 @@ mod tests {
             expected_generation: Generation(0),
             save_default: false,
             keep_saved_model: false,
+            background_model: None,
         };
         let launch = registry.prepare(request.clone(), &account).unwrap();
         registry.data.entries[0].ticket_expires = Utc::now() - Duration::seconds(1);
@@ -1472,6 +1609,7 @@ mod tests {
             expected_generation: Generation(0),
             save_default: false,
             keep_saved_model: false,
+            background_model: None,
         }
     }
 

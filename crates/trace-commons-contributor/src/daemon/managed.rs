@@ -229,6 +229,7 @@ impl ManagedService {
                         expected_generation: Generation(0),
                         save_default: false,
                         keep_saved_model: false,
+                        background_model: None,
                     },
                     sign_in,
                 )
@@ -326,7 +327,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
                 )
             }
             "managed_tool_setup" => {
@@ -502,6 +503,7 @@ impl ManagedService {
                     expected_generation: self.accounts.generation(account.tool),
                     save_default: false,
                     keep_saved_model: false,
+                    background_model: None,
                 };
                 Ok(json!(self.sessions.prepare(request, &account)?))
             }
@@ -966,6 +968,10 @@ fn too_low(report: &BalanceReport) -> bool {
 /// NEAR AI cannot be read there is no answer, so nothing is marked.
 /// `tier` is NEAR AI's privacy tier (`models::ModelTier`); `tier_order` is
 /// the tiers a picker groups by, most private first (`ModelTier::ORDER`).
+/// `background_defaults` maps each model's id to the background model it
+/// gets as the main model when none is chosen (`models::background_default`;
+/// empty for Codex). A background picker offers the models of the main
+/// model's tier or a more private one (`models::background_options`).
 async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -992,10 +998,24 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
                 .map(String::as_str)
                 .filter(|id| !listed.iter().any(|m| m.id == *id))
                 .collect();
+            // Each model's background default when it is the main model,
+            // for the background picker's default row. Codex has none.
+            let backgrounds: serde_json::Map<String, Value> = if p.tool == ToolId::Codex {
+                serde_json::Map::new()
+            } else {
+                models
+                    .iter()
+                    .map(|main| {
+                        let background = models::background_default(p.tool, main, &models);
+                        (main.id.clone(), json!(background.id))
+                    })
+                    .collect()
+            };
             Ok(json!({
                 "models":models,"default":default,"favorites":favorites,
                 "unavailable_favorites":unavailable,
                 "tier_order":models::ModelTier::ORDER,
+                "background_defaults":backgrounds,
             }))
         }
         _ => Err(ManagedError::ModelUnavailable.into()),
@@ -1346,6 +1366,8 @@ mod tests {
         let (_dir, _store, mut service) = service();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
         assert_eq!(snapshot["capabilities"]["keep_saved_model"], true);
+        // And `background_model`, which an older daemon refuses.
+        assert_eq!(snapshot["capabilities"]["background_model"], true);
     }
 
     /// #1754 review: "no saved model" and "could not tell" are different
@@ -1361,6 +1383,7 @@ mod tests {
             tool: ToolId::Codex,
             cwd: cwd.to_path_buf(),
             model: None,
+            background_model: None,
             collect_traces: false,
             cli_options: String::new(),
         };
@@ -1441,6 +1464,7 @@ mod tests {
             expected_generation: Generation(0),
             save_default: false,
             keep_saved_model: false,
+            background_model: None,
             model: None,
             collect_traces: false,
         })
@@ -1520,6 +1544,7 @@ mod tests {
                     expected_generation: Generation(0),
                     save_default: false,
                     keep_saved_model: false,
+                    background_model: None,
                     model: None,
                     collect_traces: false,
                 }),

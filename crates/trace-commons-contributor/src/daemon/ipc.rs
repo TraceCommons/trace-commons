@@ -15687,8 +15687,48 @@ mod tests {
                 "favorites":[],
                 "unavailable_favorites":[],
                 "tier_order":["near_ai","external","incognito"],
+                "background_defaults":{},
             })
         );
+        // Claude's answer also says each model's background default: here
+        // each model itself, as the fixture lists no small model.
+        let r = handle_request_async(
+            &s,
+            &req(
+                "managed_model_catalogue",
+                serde_json::json!({"tool":"claude"}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            r.result.expect("catalogue")["background_defaults"],
+            serde_json::json!({"fixture-model":"fixture-model","fixture-other":"fixture-other","openai/gpt-6.1-sol":"openai/gpt-6.1-sol"})
+        );
+        // A launch's background model is kept on the session, which its
+        // launcher reads; the launcher replaces one less private than the
+        // main model (`models::background_for`).
+        let mut background = launch("claude");
+        background["background_model"] = "fixture-model".into();
+        let prepared = handle_request_async(&s, &req("managed_launch_prepare", background))
+            .await
+            .result
+            .expect("prepared");
+        let snapshot = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({})))
+            .await
+            .result
+            .expect("snapshot");
+        let row = snapshot["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == prepared["session_id"])
+            .unwrap();
+        assert_eq!(row["background_model"], "fixture-model");
+        // Codex takes none.
+        let mut codex = launch("codex");
+        codex["background_model"] = "fixture-other".into();
+        let r = handle_request_async(&s, &req("managed_launch_prepare", codex)).await;
+        assert_eq!(r.error.unwrap().message, "managed-invalid-request");
         for params in [
             serde_json::json!({}),
             serde_json::json!({"tool":"claude","key":"sk-route-fixture-key"}),

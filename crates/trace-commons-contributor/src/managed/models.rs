@@ -332,8 +332,93 @@ fn preferred<'a>(tool: ToolId, models: &[&'a ChatModel]) -> Option<&'a ChatModel
         .or_else(|| usable.first().copied())
 }
 
+/// Claude Code's and OpenCode's background model by default in a NEAR AI
+/// private pool, first listed first ([`background_default`]): the small,
+/// fast chat models NEAR AI lists with `tools` (`/v1/models`, read
+/// 2026-10-31). A product choice the owner approves, like
+/// [`PRIVATE_PREFERRED`].
+pub const BACKGROUND_PREFERRED: &[&str] = &[
+    "z-ai/glm-5.3-flash",
+    "Qwen/Qwen3.6-35B-A3B-FP8",
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+];
+
+/// The models that may serve `main`'s background work: those of `main`'s
+/// tier or a more private one, in NEAR AI's order (owner, 2026-10-31). A
+/// model with no tier claims nothing, so it is offered only beside a main
+/// model that claims nothing either.
+pub fn background_options<'a>(main: &ChatModel, models: &'a [ChatModel]) -> Vec<&'a ChatModel> {
+    let ceiling = main.tier.filter(|tier| *tier != ModelTier::Unknown);
+    models
+        .iter()
+        .filter(|m| match ceiling {
+            Some(ceiling) => m.tier.is_some_and(|tier| tier <= ceiling),
+            None => true,
+        })
+        .collect()
+}
+
+/// `tool`'s background model for `main` when none was chosen: from
+/// `main`'s own tier, Claude Code's newest Haiku, else the first listed
+/// of [`BACKGROUND_PREFERRED`], else `main` itself.
+pub fn background_default<'a>(
+    tool: ToolId,
+    main: &'a ChatModel,
+    models: &'a [ChatModel],
+) -> &'a ChatModel {
+    let same: Vec<&ChatModel> = models.iter().filter(|m| m.tier == main.tier).collect();
+    let haiku = match tool {
+        ToolId::Claude => newest_in("anthropic/claude-haiku-", &same),
+        ToolId::Codex | ToolId::Opencode => None,
+    };
+    haiku
+        .or_else(|| listed(BACKGROUND_PREFERRED, &same))
+        .unwrap_or(main)
+}
+
+/// The background model a session of `tool` on `main` runs: `requested`
+/// when it is one of [`background_options`], otherwise
+/// [`background_default`], so a stale or hand-edited choice can never send
+/// background work somewhere less private than the main model. None only
+/// when `main` is not listed.
+pub fn background_for<'a>(
+    tool: ToolId,
+    main: &str,
+    requested: Option<&str>,
+    models: &'a [ChatModel],
+) -> Option<&'a ChatModel> {
+    let main = models.iter().find(|m| m.id == main)?;
+    let allowed = background_options(main, models);
+    Some(
+        requested
+            .and_then(|id| allowed.iter().copied().find(|m| m.id == id))
+            .unwrap_or_else(|| background_default(tool, main, models)),
+    )
+}
+
+/// The model `tool`'s own flag names in `args`, the person's CLI options,
+/// which overrides the session's default: Claude Code's `--model`, Codex's
+/// `-m` or `--model`. The last one wins, as each tool reads them.
+pub fn flag_model(tool: ToolId, args: &[String]) -> Option<&str> {
+    let mut found = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let short = tool == ToolId::Codex;
+        if arg == "--model" || (short && arg == "-m") {
+            if let Some(value) = iter.next() {
+                found = Some(value.as_str());
+            }
+        } else if let Some(value) = arg.strip_prefix("--model=") {
+            found = Some(value);
+        } else if let Some(value) = arg.strip_prefix("-m").filter(|v| short && !v.is_empty()) {
+            found = Some(value);
+        }
+    }
+    found.filter(|_| tool != ToolId::Opencode)
+}
+
 /// Claude Code's model aliases, each with the family whose newest listed
-/// model it names.
+/// model it names. The Haiku alias names the background model instead.
 const CLAUDE_ALIASES: [(&str, &str, &str); 4] = [
     (
         "anthropic/claude-opus-",
@@ -369,11 +454,17 @@ const CLAUDE_ALIASES: [(&str, &str, &str); 4] = [
 /// never given a substitute by the proxy and never sends Claude Code's
 /// background or subagent requests to a less private model than the
 /// session's own (owner, 2026-10-31).
-/// The small, fast model is the Haiku alias's. A default that no alias
+/// The small, fast model and the Haiku alias are the background model
+/// ([`background_for`]): `background` when it is no less private than the
+/// default, else the tool's background default. A default that no alias
 /// names (an older Sonnet, or another vendor's model while every family is
 /// listed) is offered as the picker's custom entry. The default's
 /// context window is `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
-pub fn claude_env(default: &str, models: &[ChatModel]) -> Vec<(&'static str, Option<String>)> {
+pub fn claude_env(
+    default: &str,
+    background: Option<&str>,
+    models: &[ChatModel],
+) -> Vec<(&'static str, Option<String>)> {
     let default_model = models.iter().find(|m| m.id == default);
     let named = |model: Option<&ChatModel>| model.and_then(|m| m.name.clone());
     // The models an alias may name: those at least as private as the
@@ -389,10 +480,16 @@ pub fn claude_env(default: &str, models: &[ChatModel]) -> Vec<(&'static str, Opt
             None => true,
         })
         .collect();
+    let background = background_for(ToolId::Claude, default, background, models);
     let mut env = vec![("ANTHROPIC_MODEL", Some(default.to_owned()))];
     let mut aliases = vec![];
     for (prefix, var, name_var) in CLAUDE_ALIASES {
-        let (id, name) = match newest_in(prefix, &pool) {
+        let pick = if prefix == "anthropic/claude-haiku-" {
+            background
+        } else {
+            newest_in(prefix, &pool)
+        };
+        let (id, name) = match pick {
             Some(model) => (model.id.clone(), named(Some(model))),
             None => (default.to_owned(), named(default_model)),
         };
@@ -400,7 +497,9 @@ pub fn claude_env(default: &str, models: &[ChatModel]) -> Vec<(&'static str, Opt
         env.push((name_var, name));
         aliases.push(id);
     }
-    // The Haiku alias, third in the table.
+    // The background model, which the Haiku alias names: Claude Code reads
+    // ANTHROPIC_SMALL_FAST_MODEL first and the Haiku alias after it for its
+    // background work, and its Explore subagent asks for the Haiku alias.
     env.push(("ANTHROPIC_SMALL_FAST_MODEL", Some(aliases[2].clone())));
     let custom = !aliases.iter().any(|id| id == default);
     env.push((
@@ -437,6 +536,9 @@ pub fn claude_env(default: &str, models: &[ChatModel]) -> Vec<(&'static str, Opt
         "ANTHROPIC_DEFAULT_FABLE_MODEL_SUPPORTED_CAPABILITIES",
         "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
         "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL",
+        "CLAUDE_CODE_AUTO_MODE_MODEL",
+        "CLAUDE_CODE_BG_CLASSIFIER_MODEL",
     ] {
         env.push((var, None));
     }
@@ -983,17 +1085,17 @@ mod tests {
             sized("z-ai/glm-5.3", Some(1_048_576)),
             sized("x/unsized", None),
         ];
-        let vars = claude_env("z-ai/glm-5.3", &kept);
+        let vars = claude_env("z-ai/glm-5.3", None, &kept);
         assert_eq!(
             env_of(&vars)["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
             Some("1048576")
         );
-        let vars = claude_env("anthropic/claude-sonnet-5-5", &kept);
+        let vars = claude_env("anthropic/claude-sonnet-5-5", None, &kept);
         assert_eq!(
             env_of(&vars)["CLAUDE_CODE_MAX_CONTEXT_TOKENS"],
             Some("1000000")
         );
-        let vars = claude_env("x/unsized", &kept);
+        let vars = claude_env("x/unsized", None, &kept);
         let env = env_of(&vars);
         assert!(env.contains_key("CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
         assert_eq!(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], None);
@@ -1017,7 +1119,7 @@ mod tests {
             ..Default::default()
         });
         kept[2].name = Some("Claude Opus 5.5".into());
-        let vars = claude_env("anthropic/claude-sonnet-5-5", &kept);
+        let vars = claude_env("anthropic/claude-sonnet-5-5", None, &kept);
         let env = env_of(&vars);
         assert_eq!(env["ANTHROPIC_MODEL"], Some("anthropic/claude-sonnet-5-5"));
         assert_eq!(
@@ -1080,7 +1182,7 @@ mod tests {
         let default = select(ToolId::Claude, None, &listed).unwrap();
         assert_eq!(default, "Qwen/Qwen3.8-27B");
         let tier_of = |id: &str| listed.iter().find(|m| m.id == id).and_then(|m| m.tier);
-        let vars = claude_env(&default, &listed);
+        let vars = claude_env(&default, None, &listed);
         for (name, value) in &vars {
             if let Some(id) = value {
                 assert_ne!(tier_of(id), Some(ModelTier::Incognito), "{name}={id}");
@@ -1102,7 +1204,7 @@ mod tests {
 
         // An External default may use a NEAR AI private model, never an
         // Incognito one.
-        let vars = claude_env("z-ai/glm-5", &listed);
+        let vars = claude_env("z-ai/glm-5", None, &listed);
         for (name, value) in &vars {
             if let Some(id) = value {
                 assert_ne!(tier_of(id), Some(ModelTier::Incognito), "{name}={id}");
@@ -1115,7 +1217,7 @@ mod tests {
             ("anthropic/claude-haiku-5-5", ModelTier::NearAi),
             ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
         ]);
-        let env_vars = claude_env("Qwen/Qwen3.8-27B", &pooled);
+        let env_vars = claude_env("Qwen/Qwen3.8-27B", None, &pooled);
         let env = env_of(&env_vars);
         assert_eq!(
             env["ANTHROPIC_SMALL_FAST_MODEL"],
@@ -1123,11 +1225,213 @@ mod tests {
         );
 
         // A person who chose an Incognito model keeps every family alias.
-        let vars = claude_env("anthropic/claude-sonnet-5-5", &listed);
+        let vars = claude_env("anthropic/claude-sonnet-5-5", None, &listed);
         let env = env_of(&vars);
         assert_eq!(
             env["ANTHROPIC_SMALL_FAST_MODEL"],
             Some("anthropic/claude-haiku-4-5")
+        );
+    }
+
+    /// A model the person chose holds Claude Code to its tier just as the
+    /// default does: an explicit NEAR AI private pick, with Incognito
+    /// Anthropic models listed, leaves no variable naming an Incognito
+    /// model, and a stale Incognito background choice is replaced.
+    #[test]
+    fn an_explicit_private_pick_keeps_every_claude_variable_private() {
+        let listed = tiered(&[
+            ("anthropic/claude-haiku-4-5", ModelTier::Incognito),
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+            ("anthropic/claude-opus-5-5", ModelTier::Incognito),
+            ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+            ("z-ai/glm-5.3", ModelTier::NearAi),
+            ("z-ai/glm-5.3-flash", ModelTier::NearAi),
+        ]);
+        let tier_of = |id: &str| listed.iter().find(|m| m.id == id).and_then(|m| m.tier);
+        let chosen = select(ToolId::Claude, Some("z-ai/glm-5.3"), &listed).unwrap();
+        for background in [None, Some("anthropic/claude-haiku-4-5"), Some("gone/model")] {
+            let vars = claude_env(&chosen, background, &listed);
+            for (name, value) in &vars {
+                if let Some(id) = value {
+                    assert_eq!(
+                        tier_of(id),
+                        Some(ModelTier::NearAi),
+                        "{name}={id} {background:?}"
+                    );
+                }
+            }
+            let env = env_of(&vars);
+            assert_eq!(env["ANTHROPIC_MODEL"], Some("z-ai/glm-5.3"));
+            // The background default in the NEAR AI private tier.
+            assert_eq!(
+                env["ANTHROPIC_SMALL_FAST_MODEL"],
+                Some("z-ai/glm-5.3-flash")
+            );
+            assert_eq!(
+                env["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+                Some("z-ai/glm-5.3-flash")
+            );
+        }
+        // A background choice in the tier is kept, for both variables.
+        let vars = claude_env(&chosen, Some("Qwen/Qwen3.8-27B"), &listed);
+        let env = env_of(&vars);
+        assert_eq!(env["ANTHROPIC_SMALL_FAST_MODEL"], Some("Qwen/Qwen3.8-27B"));
+        assert_eq!(
+            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+            Some("Qwen/Qwen3.8-27B")
+        );
+        // Only an Incognito main model lets the others be Incognito.
+        let vars = claude_env("anthropic/claude-sonnet-5-5", None, &listed);
+        let env = env_of(&vars);
+        assert_eq!(
+            env["ANTHROPIC_SMALL_FAST_MODEL"],
+            Some("anthropic/claude-haiku-4-5")
+        );
+        // Model variables an inherited shell could set are removed.
+        for var in [
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+            "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL",
+            "CLAUDE_CODE_AUTO_MODE_MODEL",
+            "CLAUDE_CODE_BG_CLASSIFIER_MODEL",
+        ] {
+            assert!(env.contains_key(var), "{var}");
+            assert_eq!(env[var], None, "{var}");
+        }
+    }
+
+    /// The background model may be the main model's tier or a more private
+    /// one, never less private (owner, 2026-10-31). Its default is the
+    /// tool's small model in the main model's own tier, else the main
+    /// model; a choice outside the allowed set is replaced by that default.
+    #[test]
+    fn the_background_model_is_never_less_private_than_the_main_model() {
+        let listed = tiered(&[
+            ("anthropic/claude-haiku-4-5", ModelTier::Incognito),
+            ("anthropic/claude-haiku-5", ModelTier::Incognito),
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+            ("z-ai/glm-5", ModelTier::External),
+            ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+            ("z-ai/glm-5.3-flash", ModelTier::NearAi),
+        ]);
+        let ids = |models: Vec<&ChatModel>| models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        let main = |id: &str| listed.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(
+            ids(background_options(main("Qwen/Qwen3.8-27B"), &listed)),
+            vec!["Qwen/Qwen3.8-27B", "z-ai/glm-5.3-flash"]
+        );
+        assert_eq!(
+            ids(background_options(main("z-ai/glm-5"), &listed)),
+            vec!["z-ai/glm-5", "Qwen/Qwen3.8-27B", "z-ai/glm-5.3-flash"]
+        );
+        assert_eq!(
+            background_options(main("anthropic/claude-sonnet-5-5"), &listed).len(),
+            6
+        );
+        // Defaults: newest Haiku of the main's tier for Claude, the small
+        // private model in a private tier, else the main model.
+        let default = |tool, id: &str| background_default(tool, main(id), &listed).id.as_str();
+        assert_eq!(
+            default(ToolId::Claude, "anthropic/claude-sonnet-5-5"),
+            "anthropic/claude-haiku-5"
+        );
+        assert_eq!(
+            default(ToolId::Claude, "Qwen/Qwen3.8-27B"),
+            "z-ai/glm-5.3-flash"
+        );
+        assert_eq!(
+            default(ToolId::Opencode, "Qwen/Qwen3.8-27B"),
+            "z-ai/glm-5.3-flash"
+        );
+        assert_eq!(default(ToolId::Claude, "z-ai/glm-5"), "z-ai/glm-5");
+        assert_eq!(
+            default(ToolId::Opencode, "anthropic/claude-sonnet-5-5"),
+            "anthropic/claude-sonnet-5-5"
+        );
+        // A choice is kept only inside the allowed set.
+        let pick = |tool, id: &str, requested| {
+            background_for(tool, id, requested, &listed).map(|m| m.id.as_str())
+        };
+        assert_eq!(
+            pick(ToolId::Claude, "z-ai/glm-5", Some("Qwen/Qwen3.8-27B")),
+            Some("Qwen/Qwen3.8-27B")
+        );
+        assert_eq!(
+            pick(ToolId::Claude, "Qwen/Qwen3.8-27B", Some("z-ai/glm-5")),
+            Some("z-ai/glm-5.3-flash")
+        );
+        assert_eq!(
+            pick(
+                ToolId::Claude,
+                "Qwen/Qwen3.8-27B",
+                Some("anthropic/claude-haiku-5")
+            ),
+            Some("z-ai/glm-5.3-flash")
+        );
+        assert_eq!(
+            pick(ToolId::Opencode, "Qwen/Qwen3.8-27B", Some("gone/model")),
+            Some("z-ai/glm-5.3-flash")
+        );
+        assert_eq!(pick(ToolId::Claude, "gone/main", None), None);
+        // A model with no tier is not private: never offered beside a
+        // private main model; an untiered main admits every model.
+        let mixed = vec![
+            ChatModel {
+                id: "n/main".into(),
+                tier: Some(ModelTier::NearAi),
+                ..Default::default()
+            },
+            ChatModel {
+                id: "x/untiered".into(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(ids(background_options(&mixed[0], &mixed)), vec!["n/main"]);
+        assert_eq!(
+            ids(background_options(&mixed[1], &mixed)),
+            vec!["n/main", "x/untiered"]
+        );
+    }
+
+    /// The model a tool's own flag names in the person's CLI options: it
+    /// overrides the default, so the other models follow it instead.
+    #[test]
+    fn the_model_flag_in_cli_options_is_the_model_in_use() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            flag_model(ToolId::Codex, &args(&["-m", "a/b"])),
+            Some("a/b")
+        );
+        assert_eq!(
+            flag_model(ToolId::Codex, &args(&["--model", "a/b"])),
+            Some("a/b")
+        );
+        assert_eq!(
+            flag_model(ToolId::Codex, &args(&["--model=a/b"])),
+            Some("a/b")
+        );
+        assert_eq!(flag_model(ToolId::Codex, &args(&["-ma/b"])), Some("a/b"));
+        assert_eq!(
+            flag_model(ToolId::Codex, &args(&["-m", "a/b", "-m", "c/d"])),
+            Some("c/d")
+        );
+        assert_eq!(
+            flag_model(ToolId::Claude, &args(&["--model", "a/b"])),
+            Some("a/b")
+        );
+        assert_eq!(
+            flag_model(ToolId::Claude, &args(&["--model=a/b"])),
+            Some("a/b")
+        );
+        // Claude's -m is not a model flag; a missing value names nothing.
+        assert_eq!(flag_model(ToolId::Claude, &args(&["-m", "a/b"])), None);
+        assert_eq!(flag_model(ToolId::Codex, &args(&["--model"])), None);
+        assert_eq!(
+            flag_model(ToolId::Codex, &args(&["--sandbox", "workspace-write"])),
+            None
+        );
+        assert_eq!(
+            flag_model(ToolId::Opencode, &args(&["--model", "a/b"])),
+            None
         );
     }
 
@@ -1213,7 +1517,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let vars = claude_env("openai/gpt-6.1-sol", &kept);
+        let vars = claude_env("openai/gpt-6.1-sol", None, &kept);
         let env = env_of(&vars);
         assert_eq!(env["ANTHROPIC_MODEL"], Some("openai/gpt-6.1-sol"));
         assert_eq!(
@@ -1244,7 +1548,7 @@ mod tests {
         let mut kept = chat_models(&catalogue());
         kept[13].name = Some("GPT-6.1 Sol".into());
         assert_eq!(kept[13].id, "openai/gpt-6.1-sol");
-        let vars = claude_env("openai/gpt-6.1-sol", &kept);
+        let vars = claude_env("openai/gpt-6.1-sol", None, &kept);
         let env = env_of(&vars);
         assert_eq!(env["ANTHROPIC_MODEL"], Some("openai/gpt-6.1-sol"));
         assert_eq!(
@@ -1260,7 +1564,7 @@ mod tests {
             Some("GPT-6.1 Sol")
         );
         // An older Sonnet chosen as the default is not an alias either.
-        let vars = claude_env("anthropic/claude-sonnet-4-6", &kept);
+        let vars = claude_env("anthropic/claude-sonnet-4-6", None, &kept);
         let env = env_of(&vars);
         assert_eq!(
             env["ANTHROPIC_DEFAULT_SONNET_MODEL"],
