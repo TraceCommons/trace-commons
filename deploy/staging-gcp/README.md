@@ -520,10 +520,12 @@ What this changes, and what it does not:
   carries the payout rate, from the operator, not committed) at an absolute
   path the `tracecommons` user can read; run the payout rail grant in step 6;
   then rerun step 4 with `TC_NEAR_AI_PAYOUT_MODE=dry_run`,
-  `TC_NEAR_AI_PAYOUT_CREDENTIAL_ID`, `_SENDER_ORG`, `_SOURCE` (`payment` for
+  `TC_NEAR_AI_PAYOUT_SENDER_ORG`, `_SOURCE` (`payment` for
   an org funded with paid credit; no default), `_ACCOUNT_CEILING_NANO` and
   `TC_CREDIT_SETTLEMENT_TABLE_PATH`, which also reads
   `tc-staging-nearai-reseller-key` (an `oc_` credential, `oc_` and 64 hex).
+  `TC_NEAR_AI_PAYOUT_CREDENTIAL_ID` (a UUID that only labels log lines) is
+  optional: unset, nothing is written and they carry `credential=unset`.
   The ingest then refuses to boot unless sign-up provisioning is on with the
   account-index pepper and account-name KEK set (the link routes seal each
   recipient under them); the staging template already sets all three. Values

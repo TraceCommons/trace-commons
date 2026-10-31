@@ -1127,7 +1127,7 @@ async fn logs_carry_no_org_id_token_or_rate() {
     let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
     assert!(!logs.is_empty(), "the subscriber captured nothing");
     // Captured, and carrying the credential id's hash.
-    let credential_hash = NearAiTransferClient::credential_id_hash(credential_id());
+    let credential_hash = NearAiTransferClient::credential_label(Some(credential_id()));
     assert!(logs.contains(&credential_hash), "{logs}");
     assert!(logs.contains("near_ai"), "{logs}");
     let transfer_id = mock.transfers()[0].id.to_string();
