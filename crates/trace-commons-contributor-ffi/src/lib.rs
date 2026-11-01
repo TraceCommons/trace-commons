@@ -527,15 +527,16 @@ pub struct tc_preview {
 fn start_daemon_handle(store: ConfigStore) -> anyhow::Result<tc_handle> {
     // The app's stdout and stderr go nowhere, so a panic here (IronWire's
     // proxy runs on this runtime) would leave no trace. This records its
-    // location, never its message; see `daemon::diagnostics_log`. Callers
-    // have already applied the dev dry-run store. This crate's own test
-    // builds skip it (see the `test-keep-panic-messages` feature) so their
-    // assertion messages survive; every other build installs it.
-    #[cfg(not(any(test, feature = "test-keep-panic-messages")))]
-    {
-        use trace_commons_contributor::daemon::diagnostics_log;
-        diagnostics_log::install(&store.daemon_path(diagnostics_log::DIAGNOSTICS_LOG_FILE));
-    }
+    // location, never its message; see `daemon::diagnostics_log`. This
+    // crate's own test builds skip it (see the `test-keep-panic-messages`
+    // feature) so their assertion messages survive; every other build
+    // installs it. `cfg!` rather than `#[cfg]`, so the call is compiled, and
+    // linted by `clippy --all-targets`, in every build, test builds included.
+    let store = if cfg!(any(test, feature = "test-keep-panic-messages")) {
+        store
+    } else {
+        trace_commons_contributor::daemon::diagnostics_log::install_for(store)?
+    };
     // A floor of two workers, not tokio's default of "available
     // parallelism, or whatever TOKIO_WORKER_THREADS says". With exactly one
     // worker, `stop_embedded`'s join-on-the-supervisor and an in-flight

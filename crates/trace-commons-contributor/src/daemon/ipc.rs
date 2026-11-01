@@ -15639,8 +15639,9 @@ mod tests {
         let port = context["route_port"].as_u64().expect("a loopback port");
         assert!(port > 0);
         // The model the proxy pinned, so a launcher that must name one
-        // (OpenCode) names the same model Claude Code and Codex get.
-        assert_eq!(context["route_model"], "fixture-model");
+        // (OpenCode) names the same model Claude Code and Codex get. Claude
+        // starts on the NEAR AI private model the fixture lists.
+        assert_eq!(context["route_model"], "fixture-other");
         // Every chat model the proxy serves as named, so the launcher can
         // offer them in the tool's own picker.
         assert_eq!(
@@ -15674,8 +15675,8 @@ mod tests {
             .iter()
             .find(|row| row["id"] == context["session"]["id"])
             .unwrap();
-        assert_eq!(row["model"], "fixture-model");
-        assert_eq!(context["session"]["model"], "fixture-model");
+        assert_eq!(row["model"], "fixture-other");
+        assert_eq!(context["session"]["model"], "fixture-other");
 
         // The models a launch picker offers, with the tool's default.
         let r = handle_request_async(
@@ -15693,6 +15694,7 @@ mod tests {
                 "default":"fixture-model",
                 "favorites":[],
                 "unavailable_favorites":[],
+                "tier_order":["near_ai","external","incognito"],
             })
         );
         for params in [
@@ -15799,7 +15801,7 @@ mod tests {
         // OpenCode's, which is told the pinned model with the port.
         let running = redeem("opencode").await;
         assert!(running["route_port"].as_u64().is_some_and(|port| port > 0));
-        assert_eq!(running["route_model"], "fixture-model");
+        assert_eq!(running["route_model"], "fixture-other");
         assert_eq!(running["route_models"][1]["id"], "fixture-other");
         assert!(
             !running.to_string().contains("sk-route-fixture-key"),

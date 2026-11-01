@@ -979,7 +979,9 @@ because of it, and no other rail notices.
 
 - A rail in `dry_run` or `live` with any of its settings missing or
   malformed refuses ingest's start, with a per-rail label (for `near_ai`,
-  `near_ai_payout_config_missing`). A rail in `disabled` needs no settings.
+  `near_ai_payout_config_missing`). The one optional setting is the
+  `near_ai` credential id (2026-10-31): unset is accepted, while a set value
+  that is not a UUID is malformed. A rail in `disabled` needs no settings.
 - An unknown rail id anywhere (a mode setting, a route segment, a stored
   row) is refused, never defaulted.
 - The `near_ai` host is compiled in. A `near-ai-staging` build switches it

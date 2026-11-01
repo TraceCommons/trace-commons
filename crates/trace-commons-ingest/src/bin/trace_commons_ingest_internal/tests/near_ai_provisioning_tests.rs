@@ -583,7 +583,7 @@ async fn pg_a_near_ai_device_upload_claim_resolves_its_provisioned_account() {
     let Some(h) = harness().await else {
         return;
     };
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     let admin = h.admin().await;
     let device = Device::new();
     let provisioned = provision(&h, &device).await;
@@ -672,7 +672,7 @@ async fn pg_a_near_ai_device_upload_claim_resolves_its_provisioned_account() {
             .await
             .unwrap_or_else(|error| panic!("cleanup {table}: {error}"));
     }
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     drop_tenants(&admin, &[&tenant]).await;
 }
 
@@ -690,7 +690,7 @@ async fn pg_one_devices_upload_claim_cannot_resolve_another_devices_account() {
     let Some(other) = harness().await else {
         return;
     };
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     let admin = h.admin().await;
     let device_a = Device::new();
     let a = provision(&h, &device_a).await;
@@ -760,7 +760,7 @@ async fn pg_one_devices_upload_claim_cannot_resolve_another_devices_account() {
         "revoking one device leaves the other resolving"
     );
 
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     drop_tenants(&admin, &[&tenant_a, &tenant_b]).await;
 }
 
@@ -1350,7 +1350,7 @@ async fn pg_a_revoked_device_key_is_refused_by_name_at_provisioning() {
     let Some(h) = harness().await else {
         return;
     };
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     let admin = h.admin().await;
     let device = Device::new();
     let first = provision(&h, &device).await;
@@ -1388,6 +1388,6 @@ async fn pg_a_revoked_device_key_is_refused_by_name_at_provisioning() {
         tenant.as_str(),
         "a new key joins the same account"
     );
-    reset_account_rate_limiter_for_test();
+    reset_account_rate_limiter_for_db_test().await;
     drop_tenants(&admin, &[&tenant]).await;
 }

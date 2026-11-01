@@ -9593,16 +9593,19 @@ fn app(state: Arc<AppState>) -> Router {
 
 /// Reject a missing or invalid bearer before a large upload extractor is
 /// allowed to poll the body, then bound how many upload bodies that principal,
-/// and the deployment, may be buffering at once. Both slots are held until the
-/// handler returns, which is after the body has been read and dropped.
-/// Handlers authenticate again on purpose: their existing rate-limit,
-/// tenant-access-grant, and admission ordering remains the authoritative
-/// authorization path, while this middleware is only the cheap pre-body gate.
+/// and the deployment, may be buffering at once, and how many of the
+/// deployment's upload bytes the principal may hold
+/// ([`LargeBodyPrincipalBytes`]) and the deployment holds in all. Every slot
+/// and byte is held until the handler returns, which is after the body has
+/// been read and dropped. The tenant-access-grant and admission checks stay
+/// in the handlers, after the body.
 ///
-/// Concurrency only, no per-minute rate: a token bundle may carry up to
+/// This middleware takes no per-minute rate: a token bundle may carry up to
 /// `MAX_ATTACHMENTS` attachments, uploaded one `put` at a time, so any rate a
 /// legitimate bundle fits under bounds nothing. Memory is what an in-flight
-/// cap bounds.
+/// cap bounds. The two routes that run submit work, `POST /v1/traces` and
+/// bundle finalize, also take the submit rate and slot before the body, in
+/// [`admit_submit_before_body`], which runs inside this middleware.
 ///
 /// `LIMIT` is the route's body ceiling (its `DefaultBodyLimit`). A declared
 /// `Content-Length` over it is refused here with 413, before any budget is
@@ -9635,17 +9638,15 @@ async fn authenticate_large_body_request<const LIMIT: usize>(
     // at its share never takes bytes from the shared budget.
     let Some(_share) = state
         .large_body_principal_bytes
-        .try_take(&principal_key, weight)
+        .try_take(principal_key, weight)
     else {
         return large_body_concurrency_refusal();
     };
     let Some(_bytes) = large_body_byte_permit(&state.large_body_bytes, weight) else {
         return large_body_concurrency_refusal();
     };
-    // The handler authenticates again, after the body is buffered. A large
-    // upload can outlive a five-minute upload claim, and the claim was valid
-    // when this request began, so the handler is handed the context
-    // established here rather than refusing the same request it admitted.
+    // Handed to `admit_submit_before_body`, which passes it on to the submit
+    // handlers, so they use the context established here.
     let mut request = request;
     request
         .extensions_mut()
@@ -9654,17 +9655,23 @@ async fn authenticate_large_body_request<const LIMIT: usize>(
 }
 
 /// The context [`authenticate_large_body_request`] authenticated before the
-/// body was read. Only that middleware inserts it.
+/// body was read. Only that middleware inserts it; [`admit_submit_before_body`]
+/// reads it.
 #[derive(Clone)]
 struct PreBodyAuthenticated(TenantCtx);
 
 /// `POST /v1/traces` and bundle finalize, inside [`authenticate_large_body_request`]: take
-/// the per-principal submission rate and in-flight slot before the body is
+/// the per-principal in-flight slot and submission rate before the body is
 /// read, with the same refusals the handler gives (429,
 /// `submit_rate_limited`, `Retry-After`). The slot is held until the handler
-/// returns. The handler is told through [`SubmitAdmittedBeforeBody`] and
-/// does not count the request again; a request without it (a direct call,
-/// or a route this did not run on) is admitted by the handler as before.
+/// returns. The handler is handed [`SubmitAdmittedBeforeBody`], which
+/// carries the pre-body context, and does not count the request again; a
+/// request without it (a direct call, or a route this did not run on) is
+/// authenticated and admitted by the handler as before.
+///
+/// Every request admitted here counts, whether or not its body arrives,
+/// parses, or reaches submit work: the count is taken before the body is
+/// read, which is the point.
 ///
 /// It runs after the large-body gate's own slots and byte budget, so an
 /// upload refused there is not counted against the principal's window.
@@ -9680,17 +9687,24 @@ async fn admit_submit_before_body(
         Ok(slot) => slot,
         Err(refusal) => return api_error_response_with_retry_after(refusal),
     };
-    request.extensions_mut().insert(SubmitAdmittedBeforeBody);
+    request
+        .extensions_mut()
+        .insert(SubmitAdmittedBeforeBody(tenant));
     next.run(request).await
 }
 
-/// Set by [`admit_submit_before_body`] once the request holds its
-/// submission rate count and in-flight slot.
-#[derive(Clone, Copy)]
-struct SubmitAdmittedBeforeBody;
+/// Set by [`admit_submit_before_body`] once the request holds its in-flight
+/// slot and submission rate count. It carries the context
+/// [`authenticate_large_body_request`] authenticated before the body was
+/// read: a large upload can outlive a five-minute upload claim, and the
+/// claim was valid when the request began, so the handler uses this context
+/// rather than refusing the request it admitted.
+#[derive(Clone)]
+struct SubmitAdmittedBeforeBody(TenantCtx);
 
-/// Count one submission against the principal's window and take one of its
-/// in-flight slots, or the refusal to answer with. Both refusals name
+/// Take one of the principal's in-flight slots, then count one submission
+/// against its window, or the refusal to answer with. A request refused for
+/// concurrency is not counted. Both refusals name
 /// themselves (`submit_rate_limited`) and say when to come back, so a client
 /// keeps the upload queued instead of giving it up.
 ///
@@ -9709,14 +9723,18 @@ fn admit_submit_principal(
         tenant.principal_ref(),
     );
     let (rate, concurrency) = submit_rate_limits(&submit_key, configured);
+    // The slot before the rate: a slot is held for a whole body upload, so a
+    // principal retrying while its slots are busy must not spend its window
+    // on requests that were refused anyway. A rate refusal drops the slot.
+    let slot = ACCOUNT_RATE_LIMITER
+        .acquire(&submit_key, concurrency)
+        .ok_or_else(|| submit_rate_limited(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS))?;
     if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, rate) {
         return Err(submit_rate_limited(
             ACCOUNT_RATE_LIMITER.principal_retry_after_seconds(&submit_key),
         ));
     }
-    ACCOUNT_RATE_LIMITER
-        .acquire(&submit_key, concurrency)
-        .ok_or_else(|| submit_rate_limited(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS))
+    Ok(slot)
 }
 
 /// What one upload weighs against [`AppState::large_body_bytes`]: its
@@ -9766,20 +9784,31 @@ impl LargeBodyPrincipalBytes {
 
     /// Add `weight` bytes to `key`'s holding, or `None` when that would take
     /// it past `cap`. Never waits: the caller is refused with `Retry-After`.
-    fn try_take(self: &Arc<Self>, key: &str, weight: u32) -> Option<LargeBodyPrincipalBytesGuard> {
+    /// A poisoned lock fails CLOSED (`None`), as [`AccountRateLimiter`] does.
+    fn try_take(
+        self: &Arc<Self>,
+        key: String,
+        weight: u32,
+    ) -> Option<LargeBodyPrincipalBytesGuard> {
         let weight = u64::from(weight);
-        let mut held = self
-            .held
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let current = held.get(key).copied().unwrap_or(0);
-        let next = current
-            .checked_add(weight)
-            .filter(|next| *next <= self.cap)?;
-        held.insert(key.to_string(), next);
+        let mut held = self.held.lock().ok()?;
+        match held.get_mut(&key) {
+            Some(current) => {
+                *current = current
+                    .checked_add(weight)
+                    .filter(|next| *next <= self.cap)?;
+            }
+            None => {
+                if weight > self.cap {
+                    return None;
+                }
+                held.insert(key.clone(), weight);
+            }
+        }
+        drop(held);
         Some(LargeBodyPrincipalBytesGuard {
             table: self.clone(),
-            key: key.to_string(),
+            key,
             weight,
         })
     }
@@ -9804,11 +9833,11 @@ struct LargeBodyPrincipalBytesGuard {
 
 impl Drop for LargeBodyPrincipalBytesGuard {
     fn drop(&mut self) {
-        let mut held = self
-            .table
-            .held
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A poisoned table already refuses every take, so there is nothing
+        // left to release into.
+        let Ok(mut held) = self.table.held.lock() else {
+            return;
+        };
         if let Some(current) = held.get_mut(&self.key) {
             *current = current.saturating_sub(self.weight);
             if *current == 0 {
@@ -9819,8 +9848,12 @@ impl Drop for LargeBodyPrincipalBytesGuard {
 }
 
 /// Most upload bodies one principal may have in flight at once, across every
-/// large-body route. Above the submit handler's own concurrency of 2, so a
-/// contributor submitting while a bundle uploads is never refused here first.
+/// large-body route. Above the submit concurrency (default 2), so a
+/// contributor submitting while a bundle's attachments upload is never
+/// refused here first. The submit slots are held for the whole body upload
+/// and are shared by `POST /v1/traces` and bundle finalize, so with two
+/// slow uploads in flight a finalize is refused (429, `Retry-After: 2`) until
+/// one finishes; that refusal does not spend the principal's rate.
 const LARGE_BODY_PER_PRINCIPAL_CONCURRENCY: u32 = 4;
 /// Most upload bodies in flight across the deployment, whatever their size.
 /// Memory is bounded by [`LARGE_BODY_GLOBAL_BYTES`], not by this count.
@@ -12974,46 +13007,44 @@ fn parse_submission_quota_config_from_env() -> anyhow::Result<TraceSubmissionQuo
     Ok(TraceSubmissionQuotaConfig {
         max_per_tenant_per_hour: parse_submission_quota_limit_from_env(
             TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR,
+            0,
         )?,
         max_per_principal_per_hour: parse_submission_quota_limit_from_env(
             TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR,
+            0,
         )?,
-        max_per_account_per_hour: match std::env::var(
+        max_per_account_per_hour: parse_submission_quota_limit_from_env(
             TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR,
-        ) {
-            Ok(configured) => parse_account_hourly_submission_ceiling(Some(&configured))?,
-            Err(std::env::VarError::NotPresent) => parse_account_hourly_submission_ceiling(None)?,
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("failed to read {TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR}")
-                });
-            }
-        },
+            ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT,
+        )?,
     })
 }
 
-/// `TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR`: unset is
-/// [`ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT`], `0` turns the ceiling off, and
-/// anything that is not a non-negative integer refuses startup.
-fn parse_account_hourly_submission_ceiling(configured: Option<&str>) -> anyhow::Result<usize> {
-    match configured {
-        None => Ok(ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT),
-        Some(configured) => parse_submission_quota_limit(
-            TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR,
-            configured,
-        ),
-    }
-}
-
-fn parse_submission_quota_limit_from_env(var_name: &'static str) -> anyhow::Result<usize> {
+/// An hourly submission quota from `var_name`; see
+/// [`parse_submission_quota_limit`].
+fn parse_submission_quota_limit_from_env(
+    var_name: &'static str,
+    default: usize,
+) -> anyhow::Result<usize> {
     match std::env::var(var_name) {
-        Ok(configured) => parse_submission_quota_limit(var_name, &configured),
-        Err(std::env::VarError::NotPresent) => Ok(0),
+        Ok(configured) => parse_submission_quota_limit(var_name, Some(&configured), default),
+        Err(std::env::VarError::NotPresent) => {
+            parse_submission_quota_limit(var_name, None, default)
+        }
         Err(error) => Err(error).with_context(|| format!("failed to read {var_name}")),
     }
 }
 
-fn parse_submission_quota_limit(var_name: &'static str, configured: &str) -> anyhow::Result<usize> {
+/// An hourly submission quota: unset (`None`) is `default`, `0` turns it
+/// off, and anything that is not a non-negative integer refuses startup.
+fn parse_submission_quota_limit(
+    var_name: &'static str,
+    configured: Option<&str>,
+    default: usize,
+) -> anyhow::Result<usize> {
+    let Some(configured) = configured else {
+        return Ok(default);
+    };
     configured
         .trim()
         .parse::<usize>()
@@ -16044,16 +16075,12 @@ async fn claim_legacy_receipt(
 /// The handler keeps `ApiResult` so its tests can call it directly.
 async fn submit_trace_route(
     state: State<Arc<AppState>>,
-    pre_body: Option<axum::Extension<PreBodyAuthenticated>>,
     admitted: Option<axum::Extension<SubmitAdmittedBeforeBody>>,
     headers: HeaderMap,
     body: SubmitBody,
 ) -> axum::response::Response {
-    let pre_body = pre_body.map(|axum::Extension(PreBodyAuthenticated(tenant))| tenant);
-    let admitted_before_body = admitted.is_some();
-    match submit_trace_handler_authenticated(state, headers, body, pre_body, admitted_before_body)
-        .await
-    {
+    let admitted = admitted.map(|axum::Extension(admitted)| admitted);
+    match submit_trace_handler_authenticated(state, headers, body, admitted).await {
         Ok(receipt) => receipt.into_response(),
         Err(error) => api_error_response_with_retry_after(error),
     }
@@ -16067,45 +16094,36 @@ async fn submit_trace_handler(
     headers: HeaderMap,
     body: SubmitBody,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
-    submit_trace_handler_authenticated(state, headers, body, None, false).await
+    submit_trace_handler_authenticated(state, headers, body, None).await
 }
 
-/// `pre_body` is the context the large-body middleware authenticated before
-/// the body was read, when it ran. A credential that expired while the body
-/// was uploading is still the credential this request began with, so the
-/// handler uses that context instead of re-checking expiry after the fact;
-/// without one (a direct call) it authenticates here.
-///
-/// `admitted_before_body` is true when [`admit_submit_before_body`] already
-/// counted this request and holds its in-flight slot; otherwise the handler
-/// takes both itself, as the first submit work.
+/// `admitted` is set when [`admit_submit_before_body`] already took this
+/// request's in-flight slot and rate count, before the body was read; the
+/// handler then uses the context authenticated there (a credential that
+/// expired while the body was uploading is still the credential this request
+/// began with). Without it (a direct call) the handler authenticates and
+/// admits the request itself, as the first submit work.
 async fn submit_trace_handler_authenticated(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: SubmitBody,
-    pre_body: Option<TenantCtx>,
-    admitted_before_body: bool,
+    admitted: Option<SubmitAdmittedBeforeBody>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
     let SubmitBody {
         mut envelope,
         raw: raw_body,
     } = body;
-    let authenticated_tenant = match pre_body {
-        Some(tenant) => tenant,
-        None => authenticate_ctx(state.as_ref(), &headers)?,
-    };
-
     // Submission work includes the server re-scrub and gate preparation, so
     // bound it before the tenant-access-grant query, envelope validation, or any
     // submission-record read. Through the router this was done before the
     // body was read; see `admit_submit_before_body`.
-    let _submit_slot = if admitted_before_body {
-        None
-    } else {
-        Some(admit_submit_principal(
-            &authenticated_tenant,
-            state.submit_principal_limits,
-        )?)
+    let (authenticated_tenant, _submit_slot) = match admitted {
+        Some(SubmitAdmittedBeforeBody(tenant)) => (tenant, None),
+        None => {
+            let tenant = authenticate_ctx(state.as_ref(), &headers)?;
+            let slot = admit_submit_principal(&tenant, state.submit_principal_limits)?;
+            (tenant, Some(slot))
+        }
     };
     #[cfg(test)]
     pause_submit_after_rate_limit_for_test(&submit_principal_rate_limit_key(
@@ -61954,14 +61972,23 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantCtx) -> ApiResult<(
 /// (a legacy invite tenant or a pooled tenant) holds many contributors with
 /// no account, so the scope is the authenticated principal.
 ///
-/// A retry of a submission that already has a record is not counted against
-/// itself; any other refusal for it comes from the checks after this one.
-/// That includes a remediation re-POST of a quarantined id, which the ceiling
-/// lets through; remediation re-scrubs are bounded by the per-minute limiter,
-/// not by this ceiling.
+/// It counts recorded submissions, not attempts: an upload refused after
+/// this check (by admission, the re-scrub, or a gate) leaves no record and
+/// is never counted. Nothing is reserved between the read and the record,
+/// so uploads in flight at once can each pass at `limit - 1` and overshoot
+/// the ceiling by up to the number in flight.
+///
+/// A retry of a submission that already has a record of the same scope (the
+/// tenant for an account tenant, the uploading principal otherwise) is not
+/// counted against itself; any other refusal for it comes from the checks
+/// after this one. That includes a remediation re-POST of a quarantined id,
+/// which the ceiling lets through; remediation re-scrubs are bounded by the
+/// per-minute limiter, not by this ceiling. An id another principal of a
+/// pooled tenant recorded is not exempt.
 ///
 /// Without a PostgreSQL mirror the window is counted from the tenant's file
-/// records, a full record read per contributor upload.
+/// records, a full record read per contributor upload, on a blocking thread.
+///
 /// The refusal is `429 submit_rate_limited` with the seconds until the
 /// window has room again, the label clients already keep an upload queued
 /// for.
@@ -61996,40 +62023,35 @@ async fn enforce_account_hourly_submission_ceiling(
             .map_err(internal_error)?
         }
         None => {
-            let records = read_all_submission_records(&state.root, tenant.tenant_id())
-                .map_err(internal_error)?;
-            let submission_known = records
-                .iter()
-                .any(|record| record.submission_id == submission_id);
-            let mut recent: Vec<DateTime<Utc>> = records
-                .iter()
-                .filter(|record| record.received_at > window_start)
-                .filter(|record| {
-                    whole_tenant
-                        || tenant
-                            .auth()
-                            .matches_stored_principal(&record.auth_principal_ref)
-                })
-                .map(|record| record.received_at)
-                .collect();
-            recent.sort_unstable_by(|a, b| b.cmp(a));
-            recent.truncate(limit);
-            trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow {
-                counted: i64::try_from(recent.len()).unwrap_or(i64::MAX),
-                oldest_counted_at: recent.last().copied(),
-                submission_known,
-            }
+            let root = state.root.clone();
+            let tenant_id = tenant.tenant_id().to_string();
+            // `None` counts the whole tenant, as for the mirror.
+            let principals: Option<Vec<String>> = (!whole_tenant).then(|| {
+                tenant
+                    .auth()
+                    .principal_aliases()
+                    .map(str::to_string)
+                    .collect()
+            });
+            tokio::task::spawn_blocking(move || {
+                file_recent_submission_window(
+                    &root,
+                    &tenant_id,
+                    principals.as_deref(),
+                    submission_id,
+                    window_start,
+                    limit,
+                )
+            })
+            .await
+            .map_err(internal_error)?
+            .map_err(internal_error)?
         }
     };
     if window.submission_known || window.counted < limit_i64 {
         return Ok(());
     }
-    // Room returns when the oldest counted upload leaves the hour.
-    let retry_after_seconds = window
-        .oldest_counted_at
-        .map(|oldest| (oldest + Duration::hours(1) - now).num_seconds())
-        .unwrap_or(3600)
-        .clamp(1, 3600);
+    let retry_after_seconds = hourly_ceiling_retry_after_seconds(window.oldest_counted_at, now);
     tracing::warn!(
         tenant_id = %tenant.tenant_id(),
         limit,
@@ -62037,6 +62059,59 @@ async fn enforce_account_hourly_submission_ceiling(
         "Trace Commons account hourly submission ceiling reached"
     );
     Err(submit_rate_limited(retry_after_seconds))
+}
+
+/// [`enforce_account_hourly_submission_ceiling`]'s window from the tenant's
+/// file records, for a deployment without a PostgreSQL mirror. `principals`
+/// narrows both the count and the known-id test to those principals; `None`
+/// is the whole tenant.
+fn file_recent_submission_window(
+    root: &Path,
+    tenant_id: &str,
+    principals: Option<&[String]>,
+    submission_id: Uuid,
+    window_start: DateTime<Utc>,
+    limit: usize,
+) -> anyhow::Result<trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow> {
+    let records = read_all_submission_records(root, tenant_id)?;
+    let in_scope = |record: &&TraceCommonsSubmissionRecord| {
+        principals.is_none_or(|principals| principals.contains(&record.auth_principal_ref))
+    };
+    let submission_known = records
+        .iter()
+        .filter(in_scope)
+        .any(|record| record.submission_id == submission_id);
+    let mut recent: Vec<DateTime<Utc>> = records
+        .iter()
+        .filter(in_scope)
+        .filter(|record| record.received_at > window_start)
+        .map(|record| record.received_at)
+        .collect();
+    recent.sort_unstable_by(|a, b| b.cmp(a));
+    recent.truncate(limit);
+    Ok(
+        trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow {
+            counted: i64::try_from(recent.len()).unwrap_or(i64::MAX),
+            oldest_counted_at: recent.last().copied(),
+            submission_known,
+        },
+    )
+}
+
+/// Whole seconds until the oldest counted upload leaves the hour and the
+/// ceiling has room again, rounded up so a client that waits exactly this
+/// long is not refused again, and kept within 1 to 3600.
+fn hourly_ceiling_retry_after_seconds(
+    oldest_counted_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> i64 {
+    oldest_counted_at
+        .map(|oldest| {
+            let millis = (oldest + Duration::hours(1) - now).num_milliseconds();
+            millis.saturating_add(999).div_euclid(1000)
+        })
+        .unwrap_or(3600)
+        .clamp(1, 3600)
 }
 
 fn submission_counts_toward_quota(record: &TraceCommonsSubmissionRecord) -> bool {

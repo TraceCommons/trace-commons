@@ -150,6 +150,11 @@ impl Backend {
         if !daemon::settings::roots_declared(&settings) {
             bail!(ERR_ROOTS_NOT_DECLARED);
         }
+        // This process is about to host the daemon, and a GTK app's stderr
+        // is usually unwatched: record panic locations and warn/error
+        // callsites (never messages) in the state directory, as the CLI and
+        // the FFI handle do. Returns the dev dry-run store when one applies.
+        let store = daemon::diagnostics_log::install_for(store)?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;

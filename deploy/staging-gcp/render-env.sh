@@ -53,9 +53,12 @@ set +x
 #                       read back from there by every later render.
 #   TC_NEAR_AI_PAYOUT_MODE
 #                       default disabled. dry_run or live also require
-#                       TC_NEAR_AI_PAYOUT_CREDENTIAL_ID, _SENDER_ORG, _SOURCE
+#                       TC_NEAR_AI_PAYOUT_SENDER_ORG, _SOURCE
 #                       (payment, grant or staking_farm; no default) and
-#                       _ACCOUNT_CEILING_NANO, and read the secret
+#                       _ACCOUNT_CEILING_NANO, accept an optional
+#                       TC_NEAR_AI_PAYOUT_CREDENTIAL_ID (a UUID that only
+#                       labels log lines; unset, they carry credential=unset),
+#                       and read the secret
 #                       tc-staging-nearai-reseller-key, which must be an org
 #                       credential: oc_ and 64 hex characters. They also
 #                       require TC_CREDIT_SETTLEMENT_TABLE_PATH, the absolute
@@ -473,10 +476,19 @@ esac
 case "$TC_NEAR_AI_PAYOUT_MODE" in
   disabled) ;;
   dry_run | live)
-    for setting in CREDENTIAL_ID SENDER_ORG SOURCE ACCOUNT_CEILING_NANO; do
+    for setting in SENDER_ORG SOURCE ACCOUNT_CEILING_NANO; do
       var="TC_NEAR_AI_PAYOUT_$setting"
       [[ "${!var:-}" =~ ^[A-Za-z0-9_-]+$ ]] || refuse "$var is not set (payout $TC_NEAR_AI_PAYOUT_MODE)"
     done
+    # The credential id is optional: it only labels the ingest's log lines.
+    # Unset, nothing is written and they carry `credential=unset`. A set
+    # value must be a UUID, as the ingest requires (a set but malformed id
+    # refuses its boot).
+    payout_credential_id="${TC_NEAR_AI_PAYOUT_CREDENTIAL_ID:-}"
+    if [ -n "$payout_credential_id" ]; then
+      [[ "$payout_credential_id" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] \
+        || refuse "TC_NEAR_AI_PAYOUT_CREDENTIAL_ID is not a UUID (payout $TC_NEAR_AI_PAYOUT_MODE)"
+    fi
     # The credit type the sender org sends from. No default: staging's org
     # holds paid credit (`payment`), and the right one is the operator's call.
     case "$TC_NEAR_AI_PAYOUT_SOURCE" in
@@ -503,7 +515,9 @@ case "$TC_NEAR_AI_PAYOUT_MODE" in
     shaped tc-staging-nearai-reseller-key "$reseller_key" \
       '^oc_[0-9A-Fa-f]{64}$' "an org credential (oc_ and 64 hex characters)"
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL=$reseller_key"$'\n'
-    extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID=$TC_NEAR_AI_PAYOUT_CREDENTIAL_ID"$'\n'
+    if [ -n "$payout_credential_id" ]; then
+      extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID=$payout_credential_id"$'\n'
+    fi
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_SENDER_ORG=$TC_NEAR_AI_PAYOUT_SENDER_ORG"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_SOURCE=$TC_NEAR_AI_PAYOUT_SOURCE"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO=$TC_NEAR_AI_PAYOUT_ACCOUNT_CEILING_NANO"$'\n'
@@ -587,10 +601,18 @@ if [ "$TC_NEAR_AI_REFERRAL_MODE" != disabled ]; then
     same_key=0
     same_id=0
     [ "$referral_key" != "$reseller_key" ] || same_key=1
-    [ "$(printf '%s' "$TC_NEAR_AI_REFERRAL_CREDENTIAL_ID" | tr 'A-F' 'a-f')" \
-      != "$(printf '%s' "$TC_NEAR_AI_PAYOUT_CREDENTIAL_ID" | tr 'A-F' 'a-f')" ] || same_id=1
-    [ "$same_key" = "$same_id" ] \
-      || refuse "the referral credential and its id must both be the payout pair or both differ"
+    if [ -z "$payout_credential_id" ]; then
+      # No payout id to match: the payout key beside any referral id would
+      # quietly share the payout budget and drop the id, as the ingest
+      # refuses. The shared case is both referral settings unset.
+      [ "$same_key" = 0 ] \
+        || refuse "the referral credential is the payout credential, which has no id set: leave the referral credential and its id unset to share it"
+    else
+      [ "$(printf '%s' "$TC_NEAR_AI_REFERRAL_CREDENTIAL_ID" | tr 'A-F' 'a-f')" \
+        != "$(printf '%s' "$payout_credential_id" | tr 'A-F' 'a-f')" ] || same_id=1
+      [ "$same_key" = "$same_id" ] \
+        || refuse "the referral credential and its id must both be the payout pair or both differ"
+    fi
     extra+="TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL=$referral_key"$'\n'
     extra+="TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL_ID=$TC_NEAR_AI_REFERRAL_CREDENTIAL_ID"$'\n'
   fi

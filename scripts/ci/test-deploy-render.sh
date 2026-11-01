@@ -818,6 +818,25 @@ payout_refused source "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" 
   TC_NEAR_AI_PAYOUT_SOURCE=transfer
 payout_refused no-source "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
   TC_NEAR_AI_PAYOUT_SOURCE=
+# The credential id is optional: it only labels the ingest's log lines. Unset
+# or empty, the render writes no line (an empty line would be set but
+# malformed and refuse the ingest's boot); a set value must be a UUID.
+for unset_id in TC_NEAR_AI_PAYOUT_CREDENTIAL_ID=; do
+  if run_render payout-no-credential-id "${payout_settings[@]}" \
+    "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" "$unset_id"; then
+    expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_PAYOUT_MODE dry_run
+    if grep -q '^TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID' "$out/ingest.env"; then
+      fail "render-env.sh wrote a payout credential id line with none set ($unset_id)"
+    else
+      pass "render-env.sh renders payout without a credential id and writes no line"
+    fi
+  else
+    fail "render-env.sh refused payout without a credential id ($unset_id)"
+    cat "$scratch/payout-no-credential-id.err" >&2
+  fi
+done
+payout_refused credential-id-not-uuid "TC_SECRET_tc_staging_nearai_reseller_key=$payout_key_ok" \
+  TC_NEAR_AI_PAYOUT_CREDENTIAL_ID=trace-commons-reseller
 # An enabled rail without a settlement table has no rate in force: each pass
 # stops with payout_rate_unavailable, even over a rate epoch an earlier boot
 # stored. The render refuses it: unset, relative, or a file that is not
@@ -1082,6 +1101,28 @@ referral_refused live-reseller-key "${referral_live[@]}" \
 referral_refused live-same-credential-id "${referral_live[@]}" \
   "TC_SECRET_tc_staging_nearai_referral_key=$referral_key_ok" \
   TC_NEAR_AI_REFERRAL_CREDENTIAL_ID=00000000-0000-4000-8000-0000000000c1
+
+# With the payout id unset, the ingest refuses the payout key beside any
+# referral id (it would share the payout budget and drop the id), accepts a
+# dedicated pair, and accepts both referral settings unset.
+referral_refused live-payout-id-unset-payout-key "${referral_live[@]}" \
+  TC_NEAR_AI_PAYOUT_CREDENTIAL_ID= \
+  "TC_SECRET_tc_staging_nearai_referral_key=$payout_key_ok"
+if run_render referral-live-payout-id-unset-dedicated "${referral_live[@]}" \
+  TC_NEAR_AI_PAYOUT_CREDENTIAL_ID= \
+  "TC_SECRET_tc_staging_nearai_referral_key=$referral_key_ok"; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL "$referral_key_ok"
+else
+  fail "render-env.sh refused a dedicated referral pair with the payout id unset"
+  cat "$scratch/referral-live-payout-id-unset-dedicated.err" >&2
+fi
+if run_render referral-live-payout-id-unset-shared "${referral_live[@]}" \
+  TC_NEAR_AI_PAYOUT_CREDENTIAL_ID= TC_NEAR_AI_REFERRAL_CREDENTIAL_ID=; then
+  expect "$out/ingest.env" TRACE_COMMONS_NEAR_AI_REFERRAL_MODE live
+else
+  fail "render-env.sh refused a shared referral stream with the payout id unset"
+  cat "$scratch/referral-live-payout-id-unset-shared.err" >&2
+fi
 
 # Every referral setting the ingest reads is one the render and the staging
 # template name, so a setting added later cannot reach a configured program

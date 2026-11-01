@@ -6744,9 +6744,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
         // The whole budget: fixture principals are shared across parallel
         // tests, and the focused share tests set their own.
-        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(
-            LARGE_BODY_GLOBAL_BYTES,
-        )),
+        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(LARGE_BODY_GLOBAL_BYTES)),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -10486,22 +10484,30 @@ async fn submit_quota_ignores_revoked_submissions() {
 
 #[test]
 fn account_hourly_submission_ceiling_is_on_by_default_and_zero_turns_it_off() {
+    // The arguments `parse_submission_quota_config_from_env` passes.
+    let parse_account_ceiling = |configured: Option<&str>| {
+        parse_submission_quota_limit(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR,
+            configured,
+            ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT,
+        )
+    };
     assert_eq!(ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT, 600);
     assert_eq!(
-        parse_account_hourly_submission_ceiling(None).expect("unset takes the default"),
+        parse_account_ceiling(None).expect("unset takes the default"),
         ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT
     );
     assert_eq!(
-        parse_account_hourly_submission_ceiling(Some("0")).expect("zero parses"),
+        parse_account_ceiling(Some("0")).expect("zero parses"),
         0,
         "zero turns the ceiling off"
     );
     assert_eq!(
-        parse_account_hourly_submission_ceiling(Some(" 25 ")).expect("a count parses"),
+        parse_account_ceiling(Some(" 25 ")).expect("a count parses"),
         25
     );
-    let error = parse_account_hourly_submission_ceiling(Some("many"))
-        .expect_err("a non-numeric ceiling refuses startup");
+    let error =
+        parse_account_ceiling(Some("many")).expect_err("a non-numeric ceiling refuses startup");
     assert!(
         error
             .to_string()
@@ -10563,6 +10569,53 @@ async fn account_hourly_submission_ceiling_refuses_the_next_upload_with_a_retry_
     let _ = test_submit(state, "token-b", sample_envelope().await)
         .await
         .expect("another tenant has its own ceiling");
+}
+
+/// In a tenant counted per principal (a legacy invite or pooled tenant), a
+/// principal at its ceiling cannot pass it by sending another principal's
+/// submission id: only an id of its own is exempt as a retry.
+#[tokio::test]
+async fn account_hourly_submission_ceiling_does_not_exempt_another_principals_id() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let others = sample_envelope().await;
+    let _ = test_submit(state.clone(), "token-a-2", others.clone())
+        .await
+        .expect("another principal in the tenant records its submission");
+    let _ = test_submit(state.clone(), "token-a", sample_envelope().await)
+        .await
+        .expect("the principal's first upload of the hour is admitted");
+
+    let blocked = test_submit(state, "token-a", others)
+        .await
+        .expect_err("another principal's id is not a retry of this principal's");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL);
+}
+
+/// The ceiling's `Retry-After` rounds up, so a client that waits exactly as
+/// long as it was told is not refused again.
+#[test]
+fn hourly_ceiling_retry_after_rounds_up() {
+    let now = Utc::now();
+    let oldest_leaving_in = |millis: i64| {
+        hourly_ceiling_retry_after_seconds(
+            Some(now - Duration::hours(1) + Duration::milliseconds(millis)),
+            now,
+        )
+    };
+    assert_eq!(oldest_leaving_in(59_900), 60, "59.9 s is 60, not 59");
+    assert_eq!(oldest_leaving_in(60_000), 60);
+    assert_eq!(oldest_leaving_in(60_001), 61);
+    assert_eq!(oldest_leaving_in(1), 1);
+    assert_eq!(oldest_leaving_in(-5_000), 1, "never below 1");
+    assert_eq!(hourly_ceiling_retry_after_seconds(None, now), 3600);
 }
 
 #[tokio::test]
@@ -11147,19 +11200,30 @@ fn validates_configured_credit_settlement_near_contract_id() {
 #[test]
 fn parses_submission_quota_limits() {
     assert_eq!(
-        parse_submission_quota_limit(TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR, "25")
-            .expect("tenant quota parses"),
+        parse_submission_quota_limit(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR,
+            Some("25"),
+            0
+        )
+        .expect("tenant quota parses"),
         25
     );
     assert_eq!(
-        parse_submission_quota_limit(TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR, "0")
-            .expect("zero disables principal quota"),
+        parse_submission_quota_limit(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR,
+            Some("0"),
+            0
+        )
+        .expect("zero disables principal quota"),
         0
     );
 
-    let parse_error =
-        parse_submission_quota_limit(TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR, "many")
-            .expect_err("non-numeric quota is invalid");
+    let parse_error = parse_submission_quota_limit(
+        TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR,
+        Some("many"),
+        0,
+    )
+    .expect_err("non-numeric quota is invalid");
     assert!(
         parse_error
             .to_string()
@@ -31028,9 +31092,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         large_body_bytes: Arc::new(tokio::sync::Semaphore::new(LARGE_BODY_GLOBAL_BYTES)),
         // The whole budget: fixture principals are shared across parallel
         // tests, and the focused share tests set their own.
-        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(
-            LARGE_BODY_GLOBAL_BYTES,
-        )),
+        large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(LARGE_BODY_GLOBAL_BYTES)),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -81970,6 +82032,104 @@ async fn routed_submit_counts_against_the_rate_window_once() {
         ),
         1
     );
+}
+
+/// A request refused because the principal's in-flight slots are all held
+/// does not spend its rate window: the slot is taken before the rate is
+/// counted, so retrying while slow uploads hold the slots costs nothing.
+#[tokio::test]
+async fn submit_concurrency_refusal_does_not_spend_the_rate_window() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let tenant = authenticate_ctx(state.as_ref(), &auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A))
+        .expect("the rate-limit fixture token authenticates");
+    let limits = SubmitPrincipalLimits {
+        rate_per_window: 30,
+        concurrency: 1,
+    };
+    let count = || {
+        submit_rate_limit_count_for_test(
+            "tenant-a",
+            TraceAuthMethod::StaticToken,
+            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
+        )
+    };
+    let held = admit_submit_principal(&tenant, limits).expect("the first request is admitted");
+    assert_eq!(count(), 1);
+    for _ in 0..5 {
+        let Err(refused) = admit_submit_principal(&tenant, limits) else {
+            panic!("the principal's only slot is held");
+        };
+        assert_eq!(refused.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            refused.1.0.retry_after_seconds,
+            Some(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS)
+        );
+    }
+    assert_eq!(count(), 1, "concurrency refusals are not counted");
+    drop(held);
+    let _next = admit_submit_principal(&tenant, limits).expect("a freed slot admits again");
+    assert_eq!(count(), 2);
+}
+
+/// The submit handler counts a request only when the router has not already
+/// admitted it before the body: handed the pre-body admission (as
+/// `POST /v1/traces` and bundle finalize hand it on), it does not count again.
+#[tokio::test]
+async fn submit_handler_does_not_count_a_request_admitted_before_the_body() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    let headers = auth_headers(SUBMIT_RATE_LIMIT_TOKEN_A);
+    let tenant = authenticate_ctx(state.as_ref(), &headers)
+        .expect("the rate-limit fixture token authenticates");
+    let count = || {
+        submit_rate_limit_count_for_test(
+            "tenant-a",
+            TraceAuthMethod::StaticToken,
+            &static_token_principal_ref(SUBMIT_RATE_LIMIT_TOKEN_A),
+        )
+    };
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    let _ = submit_trace_handler_authenticated(
+        State(state.clone()),
+        headers.clone(),
+        submit_body(invalid.clone()),
+        Some(SubmitAdmittedBeforeBody(tenant)),
+    )
+    .await;
+    assert_eq!(count(), 0, "an admitted request is not counted again");
+
+    let _ =
+        submit_trace_handler_authenticated(State(state), headers, submit_body(invalid), None).await;
+    assert_eq!(count(), 1, "a direct call is counted by the handler");
+}
+
+/// A poisoned per-principal byte table refuses every upload, as the rate
+/// limiter does, rather than carrying on with whatever it held.
+#[test]
+fn large_body_principal_bytes_fail_closed_on_a_poisoned_lock() {
+    let table = Arc::new(LargeBodyPrincipalBytes::new(MAX_INGEST_BODY_BYTES));
+    let held = table
+        .try_take("large-body:poison".to_string(), 10)
+        .expect("within the share");
+    let poisoner = table.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = poisoner.held.lock().expect("lock");
+        panic!("poison the table");
+    })
+    .join();
+    assert!(table.held.is_poisoned());
+    assert!(
+        table.try_take("large-body:poison".to_string(), 1).is_none(),
+        "a poisoned table refuses"
+    );
+    drop(held);
 }
 
 /// The deployment-wide in-flight bound holds across principals, and each

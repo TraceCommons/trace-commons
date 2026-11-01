@@ -2533,7 +2533,8 @@ impl TraceCorpusStore for PgBackend {
         // bounded by the ceiling, not by the tenant's history. With a
         // principal filter (a pooled tenant) the filter applies during the
         // walk, so the read is bounded by the tenant's last-hour volume.
-        // The known-id test is a primary-key probe.
+        // The known-id test is a primary-key probe, scoped like the count:
+        // in a pooled tenant another principal's id is not exempt.
         // `$4::text[] IS NULL` counts the whole tenant.
         let row = tx
             .query_one(
@@ -2549,7 +2550,9 @@ impl TraceCorpusStore for PgBackend {
                  SELECT (SELECT COUNT(*) FROM recent) AS counted,
                         (SELECT MIN(received_at) FROM recent) AS oldest_counted_at,
                         EXISTS(SELECT 1 FROM trace_submissions
-                                WHERE tenant_id = $1 AND submission_id = $2) AS submission_known",
+                                WHERE tenant_id = $1 AND submission_id = $2
+                                  AND ($4::text[] IS NULL
+                                       OR auth_principal_ref = ANY($4))) AS submission_known",
                 &[&tenant_id, &submission_id, &since, &principal_refs, &limit],
             )
             .await

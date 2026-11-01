@@ -868,12 +868,10 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         },
         Command::Daemon { action } => match action {
             DaemonAction::Run { dry_run } => {
-                // The dry-run store first (a no-op when already applied), so
-                // a dev dry run never writes the real state directory.
-                let store = crate::daemon::dev_dry_run_store(store)?;
-                crate::daemon::diagnostics_log::install(
-                    &store.daemon_path(crate::daemon::diagnostics_log::DIAGNOSTICS_LOG_FILE),
-                );
+                // `install_for` applies the dry-run store first (a no-op when
+                // already applied), so a dev dry run never writes the real
+                // state directory, and the daemon runs against that store.
+                let store = crate::daemon::diagnostics_log::install_for(store)?;
                 crate::daemon::run(store, dry_run).await
             }
             DaemonAction::TokenStorage {
