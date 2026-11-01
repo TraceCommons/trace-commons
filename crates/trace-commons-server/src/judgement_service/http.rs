@@ -511,8 +511,8 @@ mod tests {
     use trace_commons_attestation::receipt::recover_eip191_signer;
     use trace_commons_attestation::report_data::{ReportDataLayout, check_report_data};
     use trace_commons_protocol::insights_judgement::{
-        JudgementKind, JudgementRequest, JudgementRequestNonce, parse_judgement_attestation,
-        parse_judgement_refusal, parse_judgement_response,
+        JudgementKind, JudgementRequest, JudgementRequestNonce, JudgementRoute,
+        parse_judgement_attestation, parse_judgement_refusal, parse_judgement_response,
     };
 
     const NONCE_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -735,9 +735,19 @@ mod tests {
         (status, headers, body)
     }
 
-    fn refusal_of(status: StatusCode, body: &[u8]) -> JudgementRefusalBody {
-        parse_judgement_refusal(status.as_u16(), body)
+    fn refusal_on(route: JudgementRoute, status: StatusCode, body: &[u8]) -> JudgementRefusalBody {
+        parse_judgement_refusal(route, status.as_u16(), body)
             .unwrap_or_else(|| panic!("not a closed-set refusal: {status} {body:?}"))
+    }
+
+    /// A refusal from `POST /v1/judgement`.
+    fn refusal_of(status: StatusCode, body: &[u8]) -> JudgementRefusalBody {
+        refusal_on(JudgementRoute::Judgement, status, body)
+    }
+
+    /// A refusal from `GET /v1/attestation`.
+    fn attestation_refusal_of(status: StatusCode, body: &[u8]) -> JudgementRefusalBody {
+        refusal_on(JudgementRoute::Attestation, status, body)
     }
 
     /// Send a valid request for `h`'s issuer, return the refusal label.
@@ -1205,7 +1215,7 @@ mod tests {
         for nonce in [None, Some("00"), Some("zz")] {
             let (status, _, body) = send(&h.router, get_attestation(nonce)).await;
             assert_eq!(
-                refusal_of(status, &body).refusal(),
+                attestation_refusal_of(status, &body).refusal(),
                 JudgementRefusal::RequestMalformed
             );
         }
@@ -1217,7 +1227,7 @@ mod tests {
         });
         let (status, headers, body) = send(&h.router, get_attestation(Some(NONCE_HEX))).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        let refusal = refusal_of(status, &body).refusal();
+        let refusal = attestation_refusal_of(status, &body).refusal();
         assert_eq!(refusal, JudgementRefusal::QuoteUnavailable);
         assert!(!refusal.is_capacity());
         assert_eq!(
@@ -1240,7 +1250,7 @@ mod tests {
         let started = std::time::Instant::now();
         let (status, _, body) = send(&h.router, get_attestation(Some(NONCE_HEX))).await;
         assert_eq!(
-            refusal_of(status, &body).refusal(),
+            attestation_refusal_of(status, &body).refusal(),
             JudgementRefusal::QuoteUnavailable
         );
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -1257,7 +1267,7 @@ mod tests {
             .expect("the only slot");
         let (status, _, body) = send(&h.router, get_attestation(Some(NONCE_HEX))).await;
         assert_eq!(
-            refusal_of(status, &body).refusal(),
+            attestation_refusal_of(status, &body).refusal(),
             JudgementRefusal::QuoteUnavailable
         );
         assert_eq!(
