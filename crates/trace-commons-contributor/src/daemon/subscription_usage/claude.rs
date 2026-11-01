@@ -1241,7 +1241,7 @@ mod tests {
             deps.cache
                 .lookup(
                     &key,
-                    &cache_binding("Claude Code-credentials", &Identity::default(), &key),
+                    &cache_binding(&service(&spec).unwrap(), &Identity::default(), &key),
                     Utc::now()
                 )
                 .is_none()

@@ -172,11 +172,15 @@ impl NoUiContext {
     }
     #[cfg(test)]
     fn interaction_not_allowed(&self) -> bool {
-        // SAFETY: the getter takes no arguments and returns a BOOL.
-        let get: unsafe extern "C" fn(Ref, Ref) -> bool =
-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
-        unsafe { get(self.0, sel_registerName(c"interactionNotAllowed".as_ptr())) }
+        interaction_not_allowed(self.0)
     }
+}
+#[cfg(test)]
+fn interaction_not_allowed(context: Ref) -> bool {
+    // SAFETY: the getter takes no arguments and returns a BOOL.
+    let get: unsafe extern "C" fn(Ref, Ref) -> bool =
+        unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+    unsafe { get(context, sel_registerName(c"interactionNotAllowed".as_ptr())) }
 }
 impl Drop for NoUiContext {
     fn drop(&mut self) {
@@ -689,6 +693,22 @@ mod tests {
     fn the_no_ui_context_forbids_interaction() {
         let context = NoUiContext::new().unwrap();
         assert!(context.interaction_not_allowed());
+    }
+
+    /// The built query keeps its own reference to the context after ours is
+    /// released, and an explicit read has none. Builds dictionaries only;
+    /// never runs a query.
+    #[test]
+    fn built_no_ui_queries_retain_their_context() {
+        let service = string("Claude Code-credentials-fixture").unwrap();
+        for kind in [Query::Metadata, Query::ItemRef, Query::SilentSecret] {
+            let built = query(kind, service.0, None).unwrap();
+            let context = unsafe { CFDictionaryGetValue(built.0, kSecUseAuthenticationContext) };
+            assert!(!context.is_null());
+            assert!(interaction_not_allowed(context));
+        }
+        let built = query(Query::ExplicitSecret, service.0, None).unwrap();
+        assert!(unsafe { CFDictionaryGetValue(built.0, kSecUseAuthenticationContext) }.is_null());
     }
 
     #[test]
