@@ -631,6 +631,77 @@ fn resumed_claude_row_stages_the_continued_root_transcript_under_its_own_id() {
     assert!(foreign.exists() && transcript.exists());
 }
 
+/// A resumed Claude row stages the subagent transcripts its root's earlier
+/// turns wrote, with the root transcript that points to them: they belong
+/// to the same conversation and were covered by the same consent.
+#[test]
+fn resumed_claude_row_stages_the_roots_earlier_subagent_transcripts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let account = AccountId(Uuid::new_v4());
+    let root = NativeProfiles::new(&store).profile_root(account).unwrap();
+    let root_id = Uuid::new_v4();
+    let transcript = claude(&root, root_id);
+    let subagent = transcript
+        .parent()
+        .unwrap()
+        .join(root_id.to_string())
+        .join("subagents/agent-a1.jsonl");
+    std::fs::create_dir_all(subagent.parent().unwrap()).unwrap();
+    std::fs::write(&subagent, format!(r#"{{"type":"user","isSidechain":true,"message":{{"role":"user","content":"Find the test"}},"cwd":"/Users/test/project","timestamp":"2026-08-08T10:00:01Z","version":"2.0.1","sessionId":"{root_id}","uuid":"s1"}}
+"#)).unwrap();
+
+    let resumed = Uuid::new_v4();
+    let capture = NativeCollection::snapshot(&store, ToolId::Claude, account, resumed, None)
+        .unwrap()
+        .continuing(root_id);
+    claude_turn(&transcript, root_id);
+    capture.collect(&store).unwrap();
+
+    let staged = store
+        .dir()
+        .join(trace_commons_contributor::managed::native_collection::STAGING)
+        .join("claude")
+        .join(resumed.to_string())
+        .join("-Users-test-project")
+        .join(root_id.to_string())
+        .join("subagents/agent-a1.jsonl");
+    assert_eq!(
+        std::fs::read(&staged).expect("the earlier subagent transcript is staged"),
+        std::fs::read(&subagent).unwrap()
+    );
+}
+
+/// A fresh Claude row stages the subagent transcripts it wrote, which sit
+/// one directory below its own transcript.
+#[test]
+fn fresh_claude_row_stages_its_subagent_transcripts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let account = AccountId(Uuid::new_v4());
+    let root = NativeProfiles::new(&store).profile_root(account).unwrap();
+    let id = Uuid::new_v4();
+    let capture = NativeCollection::snapshot(&store, ToolId::Claude, account, id, None).unwrap();
+    let transcript = claude(&root, id);
+    let subagent = transcript
+        .parent()
+        .unwrap()
+        .join(id.to_string())
+        .join("subagents/agent-a1.jsonl");
+    std::fs::create_dir_all(subagent.parent().unwrap()).unwrap();
+    std::fs::write(&subagent, format!(r#"{{"type":"user","isSidechain":true,"message":{{"role":"user","content":"Find the test"}},"cwd":"/Users/test/project","timestamp":"2026-08-08T10:00:01Z","version":"2.0.1","sessionId":"{id}","uuid":"s1"}}
+"#)).unwrap();
+    capture.collect(&store).unwrap();
+
+    let staged = staged_claude(&store, id, id)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(id.to_string())
+        .join("subagents/agent-a1.jsonl");
+    assert_eq!(std::fs::read(&staged).unwrap(), std::fs::read(&subagent).unwrap());
+}
+
 /// A resumed Claude row whose root transcript is gone at exit fails
 /// collection and stages nothing; the local profile is left as it is.
 #[test]

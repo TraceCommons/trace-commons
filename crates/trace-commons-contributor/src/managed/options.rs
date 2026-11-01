@@ -97,6 +97,9 @@ fn validate(tool: ToolId, args: &[String]) -> Result<(), ManagedError> {
                         | "--session-id"
                         | "--resume"
                         | "--continue"
+                        // Forking writes the resumed turns to a new
+                        // conversation the launcher would not collect.
+                        | "--fork-session"
                         | "-r"
                         | "-c"
                 ) || arg

@@ -107,6 +107,8 @@ fn routing_and_session_overrides_are_rejected_in_every_spelling() {
         "--session-id other",
         "--resume previous",
         "--continue",
+        "--fork-session",
+        "--fork-session=true",
         "-rSESSION",
         "-cSESSION",
         "-pc",

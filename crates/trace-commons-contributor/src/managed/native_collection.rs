@@ -238,11 +238,14 @@ impl NativeCollection {
                 }
                 parents.insert(relative.to_path_buf(), native);
                 selected.insert(relative.to_path_buf());
+                // A resumed launch takes the whole conversation: the
+                // subagent transcripts its earlier turns wrote are part of
+                // it. A fresh one takes only what it wrote itself.
                 for path in owned {
                     let relative = path
                         .strip_prefix(&self.root)
                         .map_err(|_| ManagedError::InvalidRequest)?;
-                    if !before.contains(relative) {
+                    if self.continues.is_some() || !before.contains(relative) {
                         selected.insert(relative.to_path_buf());
                     }
                 }
@@ -320,7 +323,17 @@ impl NativeCollection {
         let result = (|| {
             for relative in selected {
                 let destination = pending.join(&relative);
-                private_directory(destination.parent().ok_or(ManagedError::InvalidRequest)?)?;
+                // Subagent transcripts sit below their conversation's own
+                // directory: create every level, each owner-only.
+                let mut level = pending.clone();
+                for part in relative
+                    .parent()
+                    .ok_or(ManagedError::InvalidRequest)?
+                    .components()
+                {
+                    level.push(part);
+                    private_directory(&level)?;
+                }
                 std::fs::copy(self.root.join(relative), &destination)
                     .map_err(|_| ManagedError::StorageUnavailable)?;
                 #[cfg(unix)]
