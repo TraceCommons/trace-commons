@@ -63,7 +63,7 @@ final class InsightsEconomizerTests: XCTestCase {
 
         await model.restore(Self.folder)
         XCTAssertEqual(box.restored, ["claude", "repo-1"])
-        XCTAssertEqual(model.answer?.folders.first?.leftOut, [])
+        XCTAssertEqual(model.answer?.folders.first?.leftOut.isEmpty, true)
         XCTAssertNil(model.refusal)
         XCTAssertTrue(model.restoring.isEmpty)
     }

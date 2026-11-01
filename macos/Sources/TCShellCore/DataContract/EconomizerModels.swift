@@ -66,10 +66,14 @@ extension DaemonData {
     /// `economizer_set_enabled`'s reply: the switch as it now stands.
     public struct EconomizerSwitch: Codable, Equatable, Sendable {
         public let enabled: Bool
+
+        public init(enabled: Bool) { self.enabled = enabled }
     }
 
     /// `economizer_restore`'s reply: the tools given back.
     public struct EconomizerRestored: Codable, Equatable, Sendable {
         public let restored: [String]
+
+        public init(restored: [String]) { self.restored = restored }
     }
 }
