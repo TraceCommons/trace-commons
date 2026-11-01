@@ -131,7 +131,7 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("copy.rs", 209),
     ("main.rs", 2),
     ("model.rs", 4),
-    ("notify.rs", 4),
+    ("notify.rs", 3),
     ("tray.rs", 1),
     ("ui/history.rs", 3),
     ("ui/onboarding.rs", 2),
