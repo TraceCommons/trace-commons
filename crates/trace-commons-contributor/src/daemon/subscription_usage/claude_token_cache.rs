@@ -29,7 +29,7 @@
 //! only. `unentitled()` lets the caller skip background reads of Claude
 //! Code's item in such a build.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -102,12 +102,25 @@ pub(super) struct Cached {
     pub revision: ItemRevision,
 }
 
+/// What the cache did while `store` was refusing this build, so the store's
+/// own document can be brought up to date before it is used again.
+#[derive(Default)]
+struct Fallback {
+    /// When `store` last answered `UNENTITLED`; `None` while it is usable.
+    since: Option<Instant>,
+    /// Everything was cleared (unenroll, the Claude switch turned off).
+    cleared: bool,
+    /// Logins forgotten (rejected, or their item gone or recreated).
+    forgotten: BTreeSet<String>,
+}
+
 pub(super) struct TokenCache {
     store: Box<dyn TokenStore>,
     /// Where the cache lives once `store` has answered `UNENTITLED`.
     memory: MemoryStore,
-    /// When `store` last answered `UNENTITLED`; `None` while it is usable.
-    unentitled_since: Mutex<Option<Instant>>,
+    /// The in-memory mode, if `store` has refused this build. Never held
+    /// across a store call.
+    fallback: Mutex<Fallback>,
     reprobe_after: Duration,
     /// Per login, the item revision whose silent check last ended without
     /// an answer. Memory only: it only spares repeating that check.
@@ -124,7 +137,7 @@ impl TokenCache {
         Self {
             store,
             memory: MemoryStore::default(),
-            unentitled_since: Mutex::new(None),
+            fallback: Mutex::new(Fallback::default()),
             reprobe_after: REPROBE_AFTER,
             unanswered: Mutex::new(BTreeMap::new()),
             lock: Mutex::new(()),
@@ -138,39 +151,111 @@ impl TokenCache {
         self
     }
 
+    /// Test only: make the next store operation re-probe the OS store.
+    #[cfg(test)]
+    fn expire_window(&self) {
+        let mut fallback = self.fallback.lock().unwrap();
+        if fallback.since.is_some() {
+            fallback.since =
+                Instant::now().checked_sub(self.reprobe_after + Duration::from_secs(1));
+            assert!(fallback.since.is_some());
+        }
+    }
+
     /// True while the OS store's last answer was that this build is not
     /// entitled to it. Known only after the first store operation, which
-    /// `lookup` makes.
+    /// `lookup` makes. Never waits on a store call.
     pub(super) fn unentitled(&self) -> bool {
-        self.unentitled_since
+        self.fallback
             .lock()
-            .map_or(true, |since| since.is_some())
+            .map_or(true, |fallback| fallback.since.is_some())
+    }
+
+    fn refused_now(&self) {
+        if let Ok(mut fallback) = self.fallback.lock() {
+            fallback.since = Some(Instant::now());
+        }
     }
 
     /// The OS store, or memory once that store has refused this build. A
-    /// refusal is trusted for `reprobe_after`; the next operation after that
-    /// asks the OS store again, and any other answer ends the in-memory mode
-    /// and wipes the memory copy.
+    /// refusal is trusted for `reprobe_after`. The next operation after that
+    /// first brings the OS store up to date (`reconcile`); only once that
+    /// succeeds is the store used again. Callers hold `self.lock`, so store
+    /// operations and the fallback's bookkeeping never interleave.
     fn with_store<T>(
         &self,
         operation: impl Fn(&dyn TokenStore) -> Result<T, &'static str>,
     ) -> Result<T, &'static str> {
-        let Ok(mut since) = self.unentitled_since.lock() else {
-            return operation(&self.memory);
-        };
-        if since.is_some_and(|at| at.elapsed() < self.reprobe_after) {
-            return operation(&self.memory);
+        let since = self
+            .fallback
+            .lock()
+            .map_or(Some(Instant::now()), |fallback| fallback.since);
+        if let Some(at) = since {
+            if at.elapsed() < self.reprobe_after {
+                return operation(&self.memory);
+            }
+            // Never read the store's document before the clears and forgets
+            // made in memory are applied to it.
+            if self.reconcile().is_err() {
+                self.refused_now();
+                return operation(&self.memory);
+            }
+            if let Ok(mut fallback) = self.fallback.lock() {
+                *fallback = Fallback::default();
+            }
+            let _ = self.memory.clear();
         }
         match operation(self.store.as_ref()) {
             Err(UNENTITLED) => {
-                *since = Some(Instant::now());
+                self.refused_now();
                 operation(&self.memory)
             }
-            other => {
-                if since.take().is_some() {
-                    let _ = self.memory.clear();
-                }
-                other
+            other => other,
+        }
+    }
+
+    /// Apply what happened in memory to the OS store's document: a clear
+    /// empties it, a forgotten login is removed, and a token remembered in
+    /// memory replaces the store's entry for that login.
+    fn reconcile(&self) -> Result<(), &'static str> {
+        let (cleared, forgotten) = {
+            let fallback = self.fallback.lock().map_err(|_| "unavailable")?;
+            (fallback.cleared, fallback.forgotten.clone())
+        };
+        let mut document = if cleared {
+            empty_document()
+        } else {
+            parse(self.store.read()?)
+        };
+        document.entries.retain(|e| !forgotten.contains(&e.login));
+        let carried = parse(self.memory.read()?);
+        for entry in carried.entries {
+            document.entries.retain(|e| e.login != entry.login);
+            document.entries.push(entry);
+        }
+        bound(&mut document);
+        if document.entries.is_empty() {
+            return self.store.clear();
+        }
+        let bytes = SecretBytes::new(serde_json::to_vec(&document).map_err(|_| "unavailable")?);
+        self.store.write(&bytes)
+    }
+
+    /// Record a forget or clear made while in memory, for `reconcile`.
+    fn tombstone(&self, login: Option<&str>) {
+        let Ok(mut fallback) = self.fallback.lock() else {
+            return;
+        };
+        if fallback.since.is_none() {
+            return;
+        }
+        match login {
+            Some(login) => {
+                fallback.forgotten.insert(login.into());
+            }
+            None => {
+                fallback.cleared = true;
+                fallback.forgotten.clear();
             }
         }
     }
@@ -214,17 +299,9 @@ impl TokenCache {
     }
 
     fn document(&self) -> Document {
-        let empty = || Document {
-            v: VERSION,
-            entries: Vec::new(),
-        };
-        match self.with_store(|store| store.read()) {
-            Ok(Some(bytes)) => serde_json::from_slice::<Document>(&bytes)
-                .ok()
-                .filter(|doc| doc.v == VERSION)
-                .unwrap_or_else(empty),
-            _ => empty(),
-        }
+        self.with_store(|store| store.read())
+            .map(parse)
+            .unwrap_or_else(|_| empty_document())
     }
 
     fn save(&self, document: &Document) {
@@ -295,17 +372,9 @@ impl TokenCache {
             expires_at,
             token: token.into(),
         });
-        while document.entries.len() > MAX_ENTRIES {
-            document.entries.remove(0);
-        }
-        // Drop the oldest logins until the document fits; never the new one.
-        while serde_json::to_vec(&document).map_or(usize::MAX, |b| SecretBytes::new(b).len())
-            > MAX_SECRET_BYTES
-        {
-            if document.entries.len() <= 1 {
-                return;
-            }
-            document.entries.remove(0);
+        bound(&mut document);
+        if document.entries.last().is_none_or(|e| e.login != login) {
+            return;
         }
         self.save(&document);
     }
@@ -345,6 +414,8 @@ impl TokenCache {
             return;
         };
         let mut document = self.document();
+        // In memory mode the store may still hold this login's entry.
+        self.tombstone(Some(login));
         let before = document.entries.len();
         document.entries.retain(|e| e.login != login);
         if document.entries.len() != before {
@@ -366,6 +437,38 @@ impl TokenCache {
         self.epoch.fetch_add(1, Ordering::SeqCst);
         self.answered(None);
         let _ = self.with_store(|store| store.clear());
+        // In memory mode the store still holds what it had.
+        self.tombstone(None);
+    }
+}
+
+fn empty_document() -> Document {
+    Document {
+        v: VERSION,
+        entries: Vec::new(),
+    }
+}
+
+/// A stored document, or an empty one when absent or unreadable.
+fn parse(bytes: Option<SecretBytes>) -> Document {
+    bytes
+        .and_then(|bytes| serde_json::from_slice::<Document>(&bytes).ok())
+        .filter(|doc| doc.v == VERSION)
+        .unwrap_or_else(empty_document)
+}
+
+/// Keep at most `MAX_ENTRIES` logins, and drop the oldest until the document
+/// fits the store's bound. The newest entry is last; it is dropped only when
+/// it cannot fit on its own.
+fn bound(document: &mut Document) {
+    while document.entries.len() > MAX_ENTRIES {
+        document.entries.remove(0);
+    }
+    while !document.entries.is_empty()
+        && serde_json::to_vec(&*document).map_or(usize::MAX, |b| SecretBytes::new(b).len())
+            > MAX_SECRET_BYTES
+    {
+        document.entries.remove(0);
     }
 }
 
@@ -749,8 +852,8 @@ mod tests {
     /// Refuses the first `refusals` operations as unentitled, then behaves
     /// as a working store.
     struct RecoveringStore {
-        refusals: Mutex<usize>,
-        inner: MemoryStore,
+        refusals: std::sync::Arc<Mutex<usize>>,
+        inner: std::sync::Arc<MemoryStore>,
     }
     impl RecoveringStore {
         fn refused(&self) -> bool {
@@ -784,8 +887,8 @@ mod tests {
     #[test]
     fn an_unentitled_answer_is_asked_again_after_the_window() {
         let recovering = |refusals| RecoveringStore {
-            refusals: Mutex::new(refusals),
-            inner: MemoryStore::default(),
+            refusals: std::sync::Arc::new(Mutex::new(refusals)),
+            inner: std::sync::Arc::new(MemoryStore::default()),
         };
         // A transient refusal: once the window has passed, the OS store is
         // asked again, and its answer ends the in-memory mode.
@@ -818,6 +921,194 @@ mod tests {
         );
         assert!(cache.unentitled());
         assert!(cache.lookup("login-a", "bind", now()).is_some());
+    }
+
+    /// A cache over a working store that can be made to refuse later, with
+    /// handles to the refusal count and the store's own contents.
+    fn interruptible() -> (
+        TokenCache,
+        std::sync::Arc<Mutex<usize>>,
+        std::sync::Arc<MemoryStore>,
+    ) {
+        let refusals = std::sync::Arc::new(Mutex::new(0));
+        let inner = std::sync::Arc::new(MemoryStore::default());
+        let cache = TokenCache::new(Box::new(RecoveringStore {
+            refusals: std::sync::Arc::clone(&refusals),
+            inner: std::sync::Arc::clone(&inner),
+        }))
+        .with_reprobe_after(Duration::from_secs(600));
+        (cache, refusals, inner)
+    }
+    fn stored_logins(inner: &MemoryStore) -> Vec<String> {
+        inner
+            .read()
+            .unwrap()
+            .map(|bytes| serde_json::from_slice::<Document>(&bytes).unwrap())
+            .map(|doc| doc.entries.iter().map(|e| e.login.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_token_forgotten_during_the_memory_window_stays_forgotten_after_the_store_returns() {
+        let (cache, refusals, inner) = interruptible();
+        cache.remember(
+            cache.epoch(),
+            "login-a",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-a",
+        );
+        cache.remember(
+            cache.epoch(),
+            "login-b",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-b",
+        );
+        // The store refuses once: the cache moves to memory, where neither
+        // token is.
+        *refusals.lock().unwrap() = 1;
+        assert!(cache.lookup("login-a", "bind", now()).is_none());
+        assert!(cache.unentitled());
+        // Anthropic rejected login-a's token: forgotten while in memory.
+        cache.forget("login-a");
+        // The store answers again: login-a must not come back from it.
+        cache.expire_window();
+        assert!(cache.lookup("login-a", "bind", now()).is_none());
+        assert!(!cache.unentitled());
+        assert_eq!(stored_logins(&inner), ["login-b"]);
+        assert!(cache.lookup("login-b", "bind", now()).is_some());
+    }
+
+    #[test]
+    fn a_clear_during_the_memory_window_reaches_the_store_when_it_returns() {
+        let (cache, refusals, inner) = interruptible();
+        cache.remember(
+            cache.epoch(),
+            "login-a",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-a",
+        );
+        *refusals.lock().unwrap() = 1;
+        assert!(cache.lookup("login-a", "bind", now()).is_none());
+        // Unenroll, or the Claude switch turned off, while in memory.
+        cache.clear();
+        cache.expire_window();
+        assert!(cache.lookup("login-a", "bind", now()).is_none());
+        assert!(!cache.unentitled());
+        assert!(inner.read().unwrap().is_none());
+
+        // A token remembered after that clear is kept, and the cleared
+        // ones still do not return.
+        let (cache, refusals, inner) = interruptible();
+        cache.remember(
+            cache.epoch(),
+            "login-a",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-a",
+        );
+        *refusals.lock().unwrap() = 1;
+        assert!(cache.lookup("login-a", "bind", now()).is_none());
+        cache.clear();
+        cache.remember(
+            cache.epoch(),
+            "login-b",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-b",
+        );
+        cache.expire_window();
+        assert!(cache.lookup("login-a", "bind", now()).is_none());
+        assert!(cache.lookup("login-b", "bind", now()).is_some());
+        assert_eq!(stored_logins(&inner), ["login-b"]);
+    }
+
+    #[test]
+    fn a_token_read_during_the_memory_window_is_carried_into_the_store() {
+        let (cache, refusals, inner) = interruptible();
+        cache.remember(
+            cache.epoch(),
+            "login-a",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-a",
+        );
+        *refusals.lock().unwrap() = 1;
+        assert!(cache.lookup("login-b", "bind", now()).is_none());
+        // A pressed Refresh read login-b's token while in memory.
+        cache.remember(
+            cache.epoch(),
+            "login-b",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-b",
+        );
+        cache.expire_window();
+        assert_eq!(
+            cache
+                .lookup("login-b", "bind", now())
+                .unwrap()
+                .token
+                .as_ref(),
+            b"token-b"
+        );
+        assert!(cache.lookup("login-a", "bind", now()).is_some());
+        let mut logins = stored_logins(&inner);
+        logins.sort();
+        assert_eq!(logins, ["login-a", "login-b"]);
+        assert!(cache.memory.read().unwrap().is_none());
+    }
+
+    /// Blocks in `read` until released, to stand in for a stalled Keychain.
+    struct StalledStore {
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl TokenStore for StalledStore {
+        fn read(&self) -> Result<Option<SecretBytes>, &'static str> {
+            let _ = self.entered.send(());
+            let _ = self.release.lock().unwrap().recv();
+            Ok(None)
+        }
+        fn write(&self, _bytes: &[u8]) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn clear(&self) -> Result<(), &'static str> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn asking_whether_the_build_is_unentitled_never_waits_on_the_store() {
+        let (entered_tx, entered) = std::sync::mpsc::sync_channel(1);
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let cache = std::sync::Arc::new(TokenCache::new(Box::new(StalledStore {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        })));
+        let reader = std::sync::Arc::clone(&cache);
+        let stalled = std::thread::spawn(move || {
+            reader.lookup("login-a", "bind", now());
+        });
+        entered.recv().unwrap();
+        let asker = std::sync::Arc::clone(&cache);
+        let (answer_tx, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answer_tx.send(asker.unentitled());
+        });
+        let answered = answer.recv_timeout(Duration::from_secs(5));
+        release.send(()).unwrap();
+        stalled.join().unwrap();
+        assert_eq!(answered, Ok(false));
     }
 
     #[test]
