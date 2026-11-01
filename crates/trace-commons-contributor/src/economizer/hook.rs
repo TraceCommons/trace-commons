@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use super::Harness;
 use super::loop_guard::{self, Thresholds};
-use super::signals::{ToolCall, short_digest};
+use super::signals::{CallKind, ToolCall, short_digest};
 use super::store::{SessionState, Store};
 
 /// How long the hook waits for its input.
@@ -75,7 +75,13 @@ pub fn handle(
             None
         }
         "PostToolUse" | "PostToolUseFailure" => {
-            let call = ToolCall::from_hook(input, event == "PostToolUseFailure")?;
+            let mut call = ToolCall::from_hook(input, event == "PostToolUseFailure")?;
+            // Claude Code reports a command that exited non-zero through
+            // `PostToolUseFailure`, so one it reports through `PostToolUse`
+            // exited 0.
+            if harness == Harness::Claude && !call.failed && call.exit_code.is_none() {
+                call.exit_code = matches!(call.kind, CallKind::Command { .. }).then_some(0);
+            }
             let mut session = load();
             if session.used_tools.len() < 512 {
                 session.used_tools.insert(call.tool.clone());
