@@ -843,7 +843,21 @@ keyring-core = "=1.0.0"
 # moves only the eleven `ironwire_*` source strings, no package added;
 # `cargo-sources.json` was regenerated the same way as above (14 lines, all
 # the revision; `grep -c c9201c9` is 0).
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "1b2f65f976a8720848fe49c4fab2836be008dd29" }
+# ADVANCE TO be236673 (2026-11-01). Four commits in the range, all additive:
+#   * nearai/ironwire#73 records a mid-upload client disconnect in the ledger
+#     as `client_disconnected`.
+#   * nearai/ironwire#74 keeps panic text out of logs.
+#   * nearai/ironwire#75 redacts emails whose local part has non-ASCII
+#     characters.
+#   * nearai/ironwire#76 reserves the answer's room on provider-stated
+#     context windows.
+# New public items: `ironwire_proxy::panic_hook`, `RequestRequirements.
+# output_tokens: Option<u32>` (has Default) and `Capabilities.
+# context_from_provider: bool` (serde-skipped). This crate does not call
+# `panic_hook::install_location_only`; its own diagnostics_log hook stays in
+# charge. Each lock (root, GTK, Tauri) moves only the eleven `ironwire_*`
+# source strings; `cargo-sources.json` was regenerated the same way as above.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "be236673dcd71d6f3237b965aa3aeedf13be004a" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -857,8 +871,8 @@ ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "1b2f65f976
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "1b2f65f976a8720848fe49c4fab2836be008dd29" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "1b2f65f976a8720848fe49c4fab2836be008dd29" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "be236673dcd71d6f3237b965aa3aeedf13be004a" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "be236673dcd71d6f3237b965aa3aeedf13be004a" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
