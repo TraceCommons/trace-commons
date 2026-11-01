@@ -834,6 +834,21 @@ fn with_service<T>(
     Ok(result?)
 }
 
+/// Every (tool, folder) a managed session row names, for the economizer's
+/// status. A registry that cannot be read names none.
+pub(crate) fn session_folders(shared: &DaemonShared) -> Vec<(ToolId, std::path::PathBuf)> {
+    with_service(shared, |service| {
+        Ok(service
+            .sessions
+            .views()?
+            .into_iter()
+            .filter(|view| view.purpose == LaunchPurpose::Coding)
+            .map(|view| (view.tool, view.cwd))
+            .collect())
+    })
+    .unwrap_or_default()
+}
+
 fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
     match result {
         Ok(value) => Response::ok(request.id, value),

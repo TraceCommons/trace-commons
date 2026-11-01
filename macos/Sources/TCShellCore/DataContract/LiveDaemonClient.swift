@@ -319,6 +319,19 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("insights_submitted", params: params, as: DaemonData.InsightsSubmitted.self)
     }
 
+    public func economizerStatus() async throws -> DaemonData.EconomizerStatus {
+        try await call("economizer_status", as: DaemonData.EconomizerStatus.self)
+    }
+
+    public func setEconomizer(on: Bool) async throws -> DaemonData.EconomizerSwitch {
+        try await call("economizer_set_enabled", params: ["on": on], as: DaemonData.EconomizerSwitch.self)
+    }
+
+    public func economizerRestore(harness: String, key: String) async throws -> DaemonData.EconomizerRestored {
+        try await call("economizer_restore", params: ["tool": harness, "key": key],
+                       as: DaemonData.EconomizerRestored.self)
+    }
+
     public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
         return try await subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider, login: nil)
     }

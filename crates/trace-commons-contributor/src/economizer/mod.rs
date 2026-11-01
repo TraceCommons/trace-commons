@@ -35,6 +35,7 @@ pub mod launch;
 pub mod loop_guard;
 pub mod signals;
 pub mod store;
+pub mod summary;
 pub mod tools;
 
 /// The coding tool a session runs in. Each learns on its own: tool

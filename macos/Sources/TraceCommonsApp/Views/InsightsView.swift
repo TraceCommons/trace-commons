@@ -9,6 +9,7 @@ struct InsightsView: View {
     @State private var patternsModel: InsightsPatternsModel
     @State private var comparisonsModel: InsightsComparisonsModel
     @State private var benchmarksModel: InsightsBenchmarksModel
+    @State private var economizerModel: InsightsEconomizerModel
     /// Home's figures, for Overview's credit tile; `nil` hides the tile.
     private let home: HomeStore?
     @State private var fallbackSubscriptionModel: SubscriptionUsageModel
@@ -78,6 +79,12 @@ struct InsightsView: View {
         #if DEBUG
         if InsightsSampleWeek.enabled { benchmarks = nil }
         #endif
+        let economizer: InsightsEconomizerModel.Calls? = daemon.map { client in
+            InsightsEconomizerModel.Calls(
+                status: { try await client.economizerStatus() },
+                setEnabled: { on in try await client.setEconomizer(on: on) },
+                restore: { harness, key in try await client.economizerRestore(harness: harness, key: key) })
+        }
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
             { @Sendable in _ = try await client.setInsightsRecapCard(false) }
         }
@@ -87,6 +94,7 @@ struct InsightsView: View {
                   subscriptionModel: subscriptions,
                   subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
                   benchmarks: InsightsBenchmarksModel(reader: benchmarks),
+                  economizer: InsightsEconomizerModel(calls: economizer),
                   inspector: inspector,
                   home: home,
                   payoutStreams: payoutStreams, openTraces: openTraces)
@@ -104,6 +112,7 @@ struct InsightsView: View {
                     subscriptionModel: SubscriptionUsageModel? = nil,
                     subscriptionFallback: SubscriptionUsageModel? = nil,
                     benchmarks: InsightsBenchmarksModel? = nil,
+                    economizer: InsightsEconomizerModel? = nil,
                     inspector: InsightsBreakdownInspector? = nil,
                     home: HomeStore? = nil,
                     payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
@@ -117,6 +126,7 @@ struct InsightsView: View {
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
         _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
         _benchmarksModel = State(initialValue: benchmarks ?? InsightsBenchmarksModel(reader: nil))
+        _economizerModel = State(initialValue: economizer ?? InsightsEconomizerModel(calls: nil))
         self.home = home
         self.sharedSubscriptionModel = subscriptionModel
         _fallbackSubscriptionModel = State(initialValue: subscriptionFallback ?? SubscriptionUsageModel())
@@ -137,8 +147,14 @@ struct InsightsView: View {
     }
 
     /// The tabs on the bar, in order: Overview, Breakdown, Benchmarks
-    /// (product owner, 2026-10-29).
-    nonisolated static let shownTabs: [InsightsTab] = [.overview, .patterns, .benchmarks]
+    /// (product owner, 2026-10-29), then Economizer (2026-11-01).
+    nonisolated static let shownTabs: [InsightsTab] = [.overview, .patterns, .benchmarks, .economizer]
+
+    /// The tabs this window can use: Economizer only with a daemon to ask,
+    /// since a tab that cannot be used is hidden, not drawn greyed.
+    private var usableTabs: [InsightsTab] {
+        Self.shownTabs.filter { $0 != .economizer || economizerModel.available }
+    }
 
     /// Home's credit tile, the same figure and word as Home's.
     private var creditTile: (value: String, detail: String)? {
@@ -170,6 +186,8 @@ struct InsightsView: View {
         switch tab {
         case .overview, .patterns: weekEmpty
         case .benchmarks: benchmarksEmpty
+        // The economizer's own empty state says what to do; no sample.
+        case .economizer: false
         }
     }
 
@@ -202,7 +220,7 @@ struct InsightsView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Overview, Breakdown and Benchmarks (product owner,
             // 2026-10-29). Breakdown's details are the inspector's.
-            GlassSegmentedTabs(model.text("title"), selection: $tab, segments: Self.shownTabs.map {
+            GlassSegmentedTabs(model.text("title"), selection: $tab, segments: usableTabs.map {
                 GlassSegment(model.text($0.copyKey), value: $0)
             })
             // A failed copy or snapshot read, on every tab.
@@ -257,6 +275,8 @@ struct InsightsView: View {
                                     overview: overviewModel, inspector: inspector)
             case .benchmarks:
                 InsightsBenchmarksTab(model: benchmarksModel, copy: model.copy)
+            case .economizer:
+                InsightsEconomizerTab(model: economizerModel, copy: model.copy)
             }
         }
         .onAppear { model.open() }
@@ -358,10 +378,10 @@ struct InsightsView: View {
     }
 }
 
-/// The Insights window's tabs: Overview, Breakdown (`patterns`) and
-/// Benchmarks.
+/// The Insights window's tabs: Overview, Breakdown (`patterns`),
+/// Benchmarks and Economizer.
 enum InsightsTab: Hashable {
-    case overview, patterns, benchmarks
+    case overview, patterns, benchmarks, economizer
 
     /// The copy key of the tab's name.
     var copyKey: String {
@@ -369,6 +389,7 @@ enum InsightsTab: Hashable {
         case .overview: "analytics_tab_overview"
         case .patterns: "analytics_tab_patterns"
         case .benchmarks: "analytics_tab_benchmarks"
+        case .economizer: "analytics_tab_economizer"
         }
     }
 }

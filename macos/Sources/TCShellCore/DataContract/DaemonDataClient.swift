@@ -262,6 +262,17 @@ public protocol DaemonDataClient: Sendable {
     /// session, over the last `weeks` local weeks (4 or 13) or all time
     /// (`nil`). An older daemon refuses it as `unknown_method`.
     func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted
+    /// `economizer_status`: whether the economizer is on, and what it
+    /// learned in each folder a managed session ran in. An older daemon
+    /// refuses it as `unknown_method`, and the Economizer tab says it is
+    /// unavailable.
+    func economizerStatus() async throws -> DaemonData.EconomizerStatus
+    /// `economizer_set_enabled`: the same switch as `near-ai economizer
+    /// on|off`. Draw only the value the reply confirms.
+    func setEconomizer(on: Bool) async throws -> DaemonData.EconomizerSwitch
+    /// `economizer_restore`: give back every tool left out in one folder,
+    /// for good. `key` is that folder's `EconomizerFolder.key`.
+    func economizerRestore(harness: String, key: String) async throws -> DaemonData.EconomizerRestored
 
     /// Current native subscription usage, independent of the selected analytics week.
     /// A refresh schedules provider reads and returns the held snapshot at once.
@@ -344,6 +355,19 @@ extension DaemonDataClient {
     /// Clients that predate `insights_submitted` have none to read.
     public func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted {
         throw DaemonDataError.notAvailableYet(method: "insights_submitted")
+    }
+
+    /// Clients that predate the economizer have none to read or set.
+    public func economizerStatus() async throws -> DaemonData.EconomizerStatus {
+        throw DaemonDataError.notAvailableYet(method: "economizer_status")
+    }
+
+    public func setEconomizer(on: Bool) async throws -> DaemonData.EconomizerSwitch {
+        throw DaemonDataError.notAvailableYet(method: "economizer_set_enabled")
+    }
+
+    public func economizerRestore(harness: String, key: String) async throws -> DaemonData.EconomizerRestored {
+        throw DaemonDataError.notAvailableYet(method: "economizer_restore")
     }
 
     public func subscriptionUsage(refresh: Bool, interactive: Bool) async throws -> DaemonData.SubscriptionUsage {

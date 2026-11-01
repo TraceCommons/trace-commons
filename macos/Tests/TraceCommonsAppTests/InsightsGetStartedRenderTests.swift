@@ -357,6 +357,7 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         case .overview: "overview"
         case .patterns: "breakdown"
         case .benchmarks: "benchmarks"
+        case .economizer: "economizer"
         }
     }
 
@@ -373,13 +374,19 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         let benchmarks = InsightsBenchmarksModel(reader: { _, _ in bench })
         let usage = subscriptions(state)
         let subscriptions = SubscriptionUsageModel(reader: { _, _, _, _ in usage })
+        let learned = DaemonData.EconomizerStatus(
+            enabled: state != .empty, folders: state == .empty ? [] : [InsightsEconomizerTests.folder])
+        let economizer = InsightsEconomizerModel(calls: .init(
+            status: { learned }, setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
+            restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
         let view = InsightsView(storeSelection: .standard, storeCopy: copy, model: model, overviewModel: overview,
                                 initialTab: tab, subscriptionModel: subscriptions, benchmarks: benchmarks,
-                                openTraces: {})
+                                economizer: economizer, openTraces: {})
         let height: CGFloat = width < 900 ? 4_000 : 2_800
         return try await render(AnyView(view), width: width, height: height) {
             model.weekSettled && !overview.busy && overview.shown != nil
                 && (tab != .benchmarks || benchmarks.settled)
+                && (tab != .economizer || economizer.answer != nil)
         }
     }
 

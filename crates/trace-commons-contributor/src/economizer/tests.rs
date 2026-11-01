@@ -1003,3 +1003,100 @@ fn codex_patches_count_as_edits() {
     turn.record(&native);
     assert_eq!(turn.edits.len(), 2);
 }
+
+// ---- summary ----
+
+#[test]
+fn the_summary_lists_each_known_folder_once_with_what_it_learned() {
+    use super::summary::{ToldCommand, restore, summarize};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    let busy = dir.path().join("work").join("busy-project");
+    let quiet = dir.path().join("work").join("quiet");
+    let unknown = dir.path().join("work").join("never-ran");
+    for folder in [&busy, &quiet, &unknown] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+
+    // Busy: six sessions, so unused tools are left out, and a command
+    // confirmed in three of them is told.
+    let busy_key = repo_key(&busy, Harness::Claude);
+    let mut state = RepoState::default();
+    for n in 0..6 {
+        state
+            .tools
+            .fold_session(Harness::Claude, 5, &used(&["Bash", "Agent"]));
+        if n < 3 {
+            state
+                .facts
+                .fold_session(&format!("s{n}"), &repair_session());
+        }
+        state.sessions += 1;
+    }
+    store.save_repo(&busy_key, &state).unwrap();
+    // Quiet: one Codex session, nothing decided yet.
+    let mut quiet_state = RepoState::default();
+    quiet_state
+        .tools
+        .fold_session(Harness::Codex, 2, &used(&["shell"]));
+    quiet_state.sessions = 1;
+    store
+        .save_repo(&repo_key(&quiet, Harness::Codex), &quiet_state)
+        .unwrap();
+
+    let summary = summarize(
+        &store,
+        [
+            (Harness::Codex, quiet.clone()),
+            (Harness::Claude, busy.clone()),
+            (Harness::Claude, busy.clone()),
+            (Harness::Claude, unknown.clone()),
+        ],
+    );
+    assert!(!summary.enabled);
+    assert_eq!(summary.folders_truncated, 0);
+    assert_eq!(summary.folders.len(), 2, "{summary:?}");
+    let first = &summary.folders[0];
+    assert_eq!(first.folder, "busy-project");
+    assert_eq!(first.harness, Harness::Claude);
+    assert_eq!(first.key, busy_key);
+    assert_eq!(first.sessions, 6);
+    assert!(first.left_out.contains(&"TodoWrite".to_owned()));
+    assert!(!first.left_out.contains(&"Agent".to_owned()), "used here");
+    assert_eq!(
+        first.told,
+        [ToldCommand {
+            program: "pytest".into(),
+            prefix: "python -m".into()
+        }]
+    );
+    assert_eq!(first.forming, 0);
+    assert!(first.given_back.is_empty());
+    let second = &summary.folders[1];
+    assert_eq!(
+        (second.folder.as_str(), second.harness),
+        ("quiet", Harness::Codex)
+    );
+    assert!(second.left_out.is_empty());
+
+    // Nothing crosses but the label and the digest.
+    let wire = serde_json::to_string(&summary).unwrap();
+    assert!(!wire.contains(&dir.path().to_string_lossy().into_owned()));
+
+    // Giving back clears the left-out list and keeps the tools out of it.
+    let given = restore(&store, Harness::Claude, &busy_key).unwrap();
+    assert_eq!(given, first.left_out);
+    let after = summarize(&store, [(Harness::Claude, busy.clone())]);
+    assert!(after.folders[0].left_out.is_empty());
+    assert_eq!(after.folders[0].given_back, given);
+    assert!(
+        restore(&store, Harness::Claude, &busy_key)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        restore(&store, Harness::Claude, "../escape")
+            .unwrap()
+            .is_empty()
+    );
+}

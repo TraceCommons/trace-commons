@@ -442,6 +442,16 @@ near-ai economizer restore --cwd /path/to/project   # give back every left-out t
 near-ai economizer off
 ```
 
+On macOS, Insights' Economizer tab shows the same switch and, for each
+folder and coding tool a managed session ran in (from the session rows and
+the remembered folder settings), how many sessions it learned from, the tools
+it leaves out with a Give back button, and the commands it tells the agent.
+It reads the daemon's `economizer_status`, and writes through
+`economizer_set_enabled` and `economizer_restore`
+([IPC contract](contributor-daemon-ipc-v1_1.md)). No path crosses the
+socket: a row carries the folder's last path component and the store's
+digest key.
+
 ## Native shell visibility and map
 
 New setup and launch choices hide unavailable coding tools when at least one
