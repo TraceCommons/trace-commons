@@ -1568,7 +1568,9 @@ mod tests {
         let printed = std::fs::canonicalize(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
         assert_eq!(printed, std::fs::canonicalize(dir.path()).unwrap());
     }
+
     /// A row as the launcher receives it, for `tool` in `cwd`.
+    #[cfg(unix)]
     fn row(
         tool: &str,
         cwd: &std::path::Path,

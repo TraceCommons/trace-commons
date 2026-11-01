@@ -673,6 +673,7 @@ fn a_fresh_row_still_refuses_a_preexisting_transcript() {
 }
 
 /// Append one more line to a Codex rollout, so it is modified.
+#[cfg(unix)]
 fn codex_turn(path: &std::path::Path) {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
