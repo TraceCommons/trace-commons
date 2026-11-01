@@ -396,10 +396,12 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(options.map(\.section), [nil, "External private models", nil, nil])
     }
 
-    /// A favorite heads no group, so its tier is carried by its own dot and
-    /// an accessibility value of the tier's existing heading (the dot alone
-    /// would say nothing to VoiceOver). A model with no known tier has none.
-    func testAFavoriteCarriesItsTiersHeadingForTheDot() throws {
+    /// Every model with a known tier carries it and its existing heading,
+    /// favorite or grouped, and so does the default row for the model it
+    /// names (#1797 review): the closed picker then shows the tier of
+    /// whatever is chosen, not only of a favorite. A model with no known
+    /// tier has none.
+    func testEveryTieredOptionAndTheDefaultCarryTheirTiersHeading() throws {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
         {"models":[
           {"id":"n/star","tier":"near_ai"},
@@ -407,18 +409,76 @@ final class ManagedSessionsTests: XCTestCase {
           {"id":"i/star","tier":"incognito"},
           {"id":"x/star"},
           {"id":"i/plain","tier":"incognito"}
-        ],"tier_order":["near_ai","external","incognito"],"default":null,
+        ],"tier_order":["near_ai","external","incognito"],"default":"n/star",
         "favorites":["n/star","e/star","i/star","x/star"]}
         """#.utf8))
         let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
         XCTAssertEqual(options.map(\.value), [
             ManagedSurface.defaultModel, "n/star", "e/star", "i/star", "x/star", "i/plain",
         ])
-        XCTAssertEqual(options.map(\.tier), [nil, "near_ai", "external", "incognito", nil, nil])
+        XCTAssertEqual(options.map(\.tier), ["near_ai", "near_ai", "external", "incognito", nil, "incognito"])
         XCTAssertEqual(options.map(\.tierHeading), [
-            nil, "NEAR AI private models", "External private models", "Incognito models", nil, nil,
+            "NEAR AI private models", "NEAR AI private models", "External private models",
+            "Incognito models", nil, "Incognito models",
+        ])
+        XCTAssertEqual(options.map(\.privacy), [
+            .nearAIPrivate, .nearAIPrivate, .externalPrivate, .incognito, nil, .incognito,
         ])
         XCTAssertEqual(options.map(\.section), [nil, nil, nil, nil, nil, "Incognito models"])
+        // A default the catalogue does not describe, or none, has no tier.
+        let unnamed = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(
+            #"{"models":[{"id":"a/b","tier":"near_ai"}],"tier_order":["near_ai"],"default":null}"#.utf8))
+        XCTAssertNil(ManagedSurface.modelOptions(unnamed) { Self.modelCopy[$0] ?? "" }.first?.tier)
+    }
+
+    /// The shell takes the tier order from the core only (owner,
+    /// 2026-11-01): the app always ships with its own daemon, so it keeps
+    /// no copy of the order. Without one the picker lists the catalogue in
+    /// its own order, favorites first, under no heading; an order the core
+    /// sends, even an empty one, is followed.
+    func testWithoutATierOrderThePickerKeepsTheCataloguesOrder() throws {
+        let models = #"""
+        "models":[
+          {"id":"i/one","tier":"incognito"},
+          {"id":"e/one","tier":"external"},
+          {"id":"n/one","tier":"near_ai"},
+          {"id":"n/star","tier":"near_ai"}
+        ],"default":null,"favorites":["n/star"]
+        """#
+        let unordered = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(("{" + models + "}").utf8))
+        XCTAssertEqual(unordered.tierOrder, [])
+        let options = ManagedSurface.modelOptions(unordered) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(options.map(\.value), [ManagedSurface.defaultModel, "n/star", "i/one", "e/one", "n/one"])
+        XCTAssertEqual(options.map(\.section), [nil, nil, nil, nil, nil])
+        let none = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(
+            ("{" + models + #","tier_order":[]}"#).utf8))
+        XCTAssertEqual(none.tierOrder, [])
+        XCTAssertEqual(ManagedSurface.modelOptions(none) { Self.modelCopy[$0] ?? "" }.compactMap(\.section), [])
+    }
+
+    /// The tier ids onto what they mean, in the core so every shell reads
+    /// them alike (#1797 review); a tier this build does not know means
+    /// nothing, and a newer core's tier still keeps the heading it sends.
+    func testATiersPrivacyIsReadInTheCore() throws {
+        XCTAssertEqual(ManagedSurface.modelPrivacy("near_ai"), .nearAIPrivate)
+        XCTAssertEqual(ManagedSurface.modelPrivacy("external"), .externalPrivate)
+        XCTAssertEqual(ManagedSurface.modelPrivacy("incognito"), .incognito)
+        XCTAssertNil(ManagedSurface.modelPrivacy("some_future_tier"))
+        XCTAssertNil(ManagedSurface.modelPrivacy(nil))
+        let newer = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
+        {"models":[{"id":"f/one","tier":"future"},{"id":"f/star","tier":"future"}],
+        "tier_order":["future"],"default":null,"favorites":["f/star"]}
+        """#.utf8))
+        var copy = Self.modelCopy
+        copy["model_group_future"] = "Future models"
+        let options = ManagedSurface.modelOptions(newer) { copy[$0] ?? "" }
+        XCTAssertEqual(options.map(\.tierHeading), [nil, "Future models", "Future models"])
+        XCTAssertEqual(options.map(\.section), [nil, nil, "Future models"])
+        XCTAssertEqual(options.map(\.privacy), [nil, nil, nil])
+        // Without its copy, a tier's heading is none, never an empty one.
+        let bare = ManagedSurface.modelOptions(newer) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(bare.map(\.tierHeading), [nil, nil, nil])
+        XCTAssertEqual(bare.map(\.section), [nil, nil, nil])
     }
 
     /// Every tier holds more than one unstarred model, listed in NEAR AI's
