@@ -555,17 +555,22 @@ pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
 pub struct ContributedSince {
     pub count: usize,
     pub project_labels: BTreeSet<String>,
-    /// Credit the server has decided (a final figure, 0 included), summed
-    /// from each figure as written ([`super::nudge::decimal_credit`]).
-    pub credit_final: f64,
     /// Credit still being scored, summed the same way.
     pub credit_pending: f64,
-    /// Each decided trace's credit by submission id (opaque, never on the
-    /// wire), so a digest can leave out the traces its verdicts fold states.
+    /// Each decided trace's credit (a final figure, 0 included) by submission
+    /// id, as written ([`super::nudge::decimal_credit`]). The one store of
+    /// decided credit: [`Self::credit_final`] sums it, so a repeated id is
+    /// counted once. Opaque ids, never on the wire; a digest uses them to
+    /// leave out the traces its verdicts fold states.
     pub credit_final_by_submission: BTreeMap<String, f64>,
 }
 
 impl ContributedSince {
+    /// All decided credit, summed from [`Self::credit_final_by_submission`].
+    pub fn credit_final(&self) -> f64 {
+        self.credit_final_by_submission.values().sum()
+    }
+
     /// Decided credit of the traces NOT in `folded`: what is left to state
     /// when a verdicts fold already states those traces' credit.
     pub fn credit_final_not_in(&self, folded: &BTreeSet<String>) -> f64 {
@@ -578,7 +583,7 @@ impl ContributedSince {
 
     /// Decided credit in tenths, rounded once; `None` when it rounds to zero.
     pub fn credit_final_tenths(&self) -> Option<u64> {
-        super::nudge::tenths_of(self.credit_final)
+        super::nudge::tenths_of(self.credit_final())
     }
 
     /// Pending credit in tenths, rounded once; `None` when it rounds to zero.
@@ -611,7 +616,6 @@ pub fn contributed_since(
         match rec.credit_points_final {
             Some(f) => {
                 let f = super::nudge::decimal_credit(f);
-                out.credit_final += f;
                 out.credit_final_by_submission
                     .insert(rec.submission_id.to_string(), f);
             }
@@ -748,6 +752,21 @@ mod tests {
             approved_verdict: None,
             uploaded_bytes: None,
         }
+    }
+
+    /// One figure per submission: a submission id that appears twice in the
+    /// cache is counted once, and the total is derived from the same map.
+    #[test]
+    fn a_duplicate_submission_id_is_counted_once() {
+        let mut a = record("accepted", "2026-08-08T13:00:00Z");
+        a.credit_points_final = Some(2.0);
+        let b = a.clone();
+        let out = contributed_since(&[a, b], None);
+        assert_eq!(out.credit_final(), 2.0);
+        assert_eq!(
+            out.credit_final_not_in(&BTreeSet::new()),
+            out.credit_final()
+        );
     }
 
     #[test]
