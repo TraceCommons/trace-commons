@@ -258,10 +258,9 @@ impl ManagedService {
     /// binding, which also requires its transcript.
     fn knows_conversation(&self, tool: ToolId, account: AccountId, root: Uuid) -> bool {
         match tool {
-            ToolId::Codex => ConfigStore::open(self.config_dir.clone())
-                .ok()
-                .and_then(|store| crate::managed::session_binding::read(&store, root))
-                .is_some(),
+            ToolId::Codex => {
+                crate::managed::session_binding::read(self.sessions.store(), root).is_some()
+            }
             ToolId::Claude => self
                 .profiles
                 .existing_profile_root(account)
@@ -278,14 +277,23 @@ impl ManagedService {
     }
 
     /// Whether an ended row's conversation can be continued in a new
-    /// session: it can be started again, its conversation's root started,
-    /// and the tool's id for that conversation is known.
-    fn can_resume(&self, view: &SessionView) -> bool {
+    /// session: it can be started again, its conversation's root started
+    /// and is not in use (`roots`, from `SessionRegistry::resume_roots`),
+    /// and the tool's id for that conversation is known. `known` keeps
+    /// that last answer for the snapshot, since every row of a chain asks
+    /// it of the same conversation.
+    fn can_resume(
+        &self,
+        view: &SessionView,
+        roots: &std::collections::BTreeMap<Uuid, Uuid>,
+        known: &mut std::collections::BTreeMap<(ToolId, Uuid, Uuid), bool>,
+    ) -> bool {
         view.can_start_again
-            && self
-                .sessions
-                .resume_root(view.id)
-                .is_some_and(|root| self.knows_conversation(view.tool, view.account_id, root))
+            && roots.get(&view.id).is_some_and(|root| {
+                *known
+                    .entry((view.tool, view.account_id.0, *root))
+                    .or_insert_with(|| self.knows_conversation(view.tool, view.account_id, *root))
+            })
     }
 
     /// Redeem a ticket. A session on the NEAR AI sign-in is refused without
@@ -352,9 +360,11 @@ impl ManagedService {
         match request.method.as_str() {
             "managed_snapshot" => {
                 let mut sessions = self.sessions.views()?;
+                let roots = self.sessions.resume_roots();
+                let mut known = std::collections::BTreeMap::new();
                 for view in &mut sessions {
                     view.can_start_again = self.can_start_again(view, sign_in);
-                    view.can_resume = self.can_resume(view);
+                    view.can_resume = self.can_resume(view, &roots, &mut known);
                 }
                 let saved = [
                     self.accounts.selection(ToolId::Claude),

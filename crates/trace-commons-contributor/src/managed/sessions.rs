@@ -572,6 +572,38 @@ impl SessionRegistry {
         .then_some(root)
     }
 
+    /// [`Self::resume_root`] for every row at once, in one pass, for a
+    /// snapshot: each row whose conversation can be continued now, with
+    /// that conversation's root.
+    pub fn resume_roots(&self) -> std::collections::BTreeMap<Uuid, Uuid> {
+        let root_of = |e: &Entry| e.request.resume_of.unwrap_or(e.view.id);
+        let in_use: std::collections::BTreeSet<Uuid> = self
+            .data
+            .entries
+            .iter()
+            .filter(|e| e.view.state.holds_profile())
+            .map(root_of)
+            .collect();
+        let started: std::collections::BTreeSet<Uuid> = self
+            .data
+            .entries
+            .iter()
+            .filter(|e| e.proof_hash.is_some())
+            .map(|e| e.view.id)
+            .collect();
+        self.data
+            .entries
+            .iter()
+            .map(|e| (e.view.id, root_of(e)))
+            .filter(|(_, root)| started.contains(root) && !in_use.contains(root))
+            .collect()
+    }
+
+    /// The store this registry was opened on.
+    pub fn store(&self) -> &ConfigStore {
+        &self.store
+    }
+
     /// Whether a row on the conversation `root` started (the root itself,
     /// or a resume of it) still holds its profile.
     fn conversation_in_use(&self, root: Uuid) -> bool {
@@ -1953,6 +1985,14 @@ mod tests {
                 Err(ManagedError::Conflict)
             );
         }
+        // A snapshot's one pass agrees with the row-by-row answer.
+        let agrees = |registry: &SessionRegistry| {
+            let roots = registry.resume_roots();
+            for id in [root, chained, prepared.session_id] {
+                assert_eq!(roots.get(&id).copied(), registry.resume_root(id), "{id}");
+            }
+        };
+        agrees(&registry);
         assert_eq!(
             registry.resume_request(root, first.request_id),
             Ok(first.clone()),
@@ -1992,6 +2032,7 @@ mod tests {
             assert_eq!(registry.resume_root(id), Some(root));
             assert!(registry.resume_request(id, Uuid::new_v4()).is_ok());
         }
+        agrees(&registry);
     }
 
     /// A resumed row says when its conversation's root row started; a
