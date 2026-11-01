@@ -3,10 +3,14 @@
 
 use serde::{Deserialize, Serialize};
 
+#[deprecated(note = "the client daily upload limit is retired; nothing reads it")]
 pub const DEFAULT_MAX_UPLOADS_PER_DAY: u32 = 50;
+#[deprecated(note = "the client daily upload limit is retired; nothing reads it")]
 pub const DEFAULT_MAX_BYTES_PER_DAY: u64 = 209_715_200;
 
+#[deprecated(note = "the client daily upload limit is retired; nothing reads it")]
 pub const MAX_UPLOADS_PER_DAY: u32 = 1_000;
+#[deprecated(note = "the client daily upload limit is retired; nothing reads it")]
 pub const MAX_BYTES_PER_DAY: u64 = 5 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +23,8 @@ pub struct DailyUploadAllowance {
 impl DailyUploadAllowance {
     /// Reject unsupported versions and the whole allowance if either limit
     /// exceeds the client's runaway-upload safeguards.
+    #[deprecated(note = "the client daily upload limit is retired; nothing reads it")]
+    #[allow(deprecated)]
     pub fn validate(&self) -> bool {
         self.schema_version == 1
             && (1..=MAX_UPLOADS_PER_DAY).contains(&self.max_uploads_per_day)

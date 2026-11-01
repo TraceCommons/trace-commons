@@ -189,16 +189,17 @@ impl PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
-        // Native sessions that name neither a device key nor a credential
-        // (issued before V139, or by the login-link native sign-in) cannot be
-        // told apart from the revoked device's own, so they end too: a lost
-        // laptop that signed in before V139 is not left live. A NEAR AI
-        // device among them renews on its own with a keyed session; any
-        // other signs in again. A native session that names a credential
-        // (`auth_credential_id`) was minted by a passkey sign-in, and V144
-        // revoked every one of those; browser and NEAR sessions and the
-        // caller's own are left alone. Only live rows: past the idle cap
-        // `validate_session` already refuses them.
+        // Native sessions that name no device key (issued before V139, by
+        // the login-link native sign-in, or by a passkey sign-in before
+        // V144) cannot be told apart from the revoked device's own, so they
+        // end too: a lost laptop that signed in before V139 is not left
+        // live. A NEAR AI device among them renews on its own with a keyed
+        // session; any other signs in again. Nothing sets
+        // `auth_credential_id` on a native session any more, so it is not
+        // part of the test: a passkey-era session V144 missed ends here
+        // too. Browser and NEAR sessions and the caller's own are left
+        // alone. Only live rows: past the idle cap `validate_session`
+        // already refuses them.
         let unattributed_sessions_revoked = tx
             .execute(
                 "UPDATE trace_sessions
@@ -206,7 +207,6 @@ impl PgBackend {
                   WHERE tenant_id = trace_current_tenant_id()
                     AND account_id = $1
                     AND device_key_id IS NULL
-                    AND auth_credential_id IS NULL
                     AND client_kind = $2
                     AND revoked_at IS NULL
                     AND expires_at > now()

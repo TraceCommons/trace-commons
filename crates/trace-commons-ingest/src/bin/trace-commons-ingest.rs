@@ -1967,6 +1967,14 @@ struct AppState {
     /// Upload body bytes each principal holds of [`Self::large_body_bytes`],
     /// and the most it may hold. Shared by every clone of the state.
     large_body_principal_bytes: Arc<LargeBodyPrincipalBytes>,
+    /// How long an upload body may go without a new chunk before
+    /// [`authenticate_large_body_request`] refuses it
+    /// ([`UPLOAD_BODY_IDLE_TIMEOUT`]; tests shorten it).
+    upload_body_idle_timeout: StdDuration,
+    /// Submit attempts this process admitted past the hourly ceiling, per
+    /// ceiling scope, for [`enforce_account_hourly_submission_ceiling`].
+    /// Shared by every clone of the state.
+    submission_attempts: Arc<HourlySubmissionAttempts>,
     analytics_min_cell_count: usize,
     analytics_broad_release_noise: Option<TraceAnalyticsNoiseConfig>,
     analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
@@ -5126,6 +5134,8 @@ impl AppState {
             large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(
                 large_body_principal_byte_share,
             )),
+            upload_body_idle_timeout: UPLOAD_BODY_IDLE_TIMEOUT,
+            submission_attempts: Arc::new(HourlySubmissionAttempts::default()),
             analytics_min_cell_count,
             analytics_broad_release_noise,
             analytics_broad_release_privacy_accounting,
@@ -8766,6 +8776,12 @@ fn app(state: Arc<AppState>) -> Router {
                         state.clone(),
                         admit_submit_before_body,
                     ))
+                    // Outer to the admission: a disabled, unknown or revoked
+                    // bundle is refused before it takes a submit slot or rate.
+                    .layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        token_bundles::finalize_precheck,
+                    ))
                     .layer(large_body_auth.clone()),
             ),
         )
@@ -9610,6 +9626,12 @@ fn app(state: Arc<AppState>) -> Router {
 /// `LIMIT` is the route's body ceiling (its `DefaultBodyLimit`). A declared
 /// `Content-Length` over it is refused here with 413, before any budget is
 /// taken: axum's own limit only trips once that many bytes have been read.
+///
+/// The body is handed on under an idle timeout
+/// ([`AppState::upload_body_idle_timeout`], [`UPLOAD_BODY_IDLE_TIMEOUT`]):
+/// a body with no new chunk for that long fails its extraction, the route
+/// answers [`upload_body_idle_timeout_refusal`], and everything taken here
+/// is released as the request returns.
 async fn authenticate_large_body_request<const LIMIT: usize>(
     State(state): State<Arc<AppState>>,
     request: Request,
@@ -9651,6 +9673,13 @@ async fn authenticate_large_body_request<const LIMIT: usize>(
     request
         .extensions_mut()
         .insert(PreBodyAuthenticated(tenant));
+    // An idle timeout between body chunks, so a stalled upload is refused
+    // and drops every slot and byte held above when this returns. Wrapping
+    // does not poll the body: the timer starts when the extractor first
+    // reads it, after the pre-body admission.
+    let idle = state.upload_body_idle_timeout;
+    let request = request
+        .map(|body| axum::body::Body::new(tower_http::timeout::TimeoutBody::new(idle, body)));
     next.run(request).await
 }
 
@@ -9659,6 +9688,61 @@ async fn authenticate_large_body_request<const LIMIT: usize>(
 /// reads it.
 #[derive(Clone)]
 struct PreBodyAuthenticated(TenantCtx);
+
+/// How long an upload body may go without a new chunk before it is refused
+/// (decision 1 on #1794). An idle timeout, not a total one: an upload that
+/// keeps moving finishes however long it takes. A stalled one (laptop sleep,
+/// a NAT drop with no FIN) is refused with [`UPLOAD_BODY_IDLE_TIMEOUT_LABEL`]
+/// and gives back every slot and byte it held, which would otherwise stay
+/// held until the socket died.
+const UPLOAD_BODY_IDLE_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+
+/// The fixed refusal for an upload body that stopped arriving.
+const UPLOAD_BODY_IDLE_TIMEOUT_LABEL: &str = "upload_body_idle_timeout";
+
+fn upload_body_idle_timeout_refusal() -> axum::response::Response {
+    api_error(StatusCode::REQUEST_TIMEOUT, UPLOAD_BODY_IDLE_TIMEOUT_LABEL).into_response()
+}
+
+/// Whether a body-read failure is the idle timeout
+/// [`authenticate_large_body_request`] put on the body, anywhere in its
+/// source chain.
+fn upload_body_idle_timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(error) = next {
+        if error.is::<tower_http::timeout::TimeoutError>() {
+            return true;
+        }
+        next = error.source();
+    }
+    false
+}
+
+/// `Bytes` for the large-body routes: the same extraction and rejections,
+/// except that a body that went idle past [`UPLOAD_BODY_IDLE_TIMEOUT`] is
+/// refused with the fixed [`upload_body_idle_timeout_refusal`] rather than
+/// axum's generic "Failed to buffer the request body".
+struct UploadBytes(Bytes);
+
+impl<S> FromRequest<S> for UploadBytes
+where
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Bytes::from_request(request, state)
+            .await
+            .map(UploadBytes)
+            .map_err(|rejection| {
+                if upload_body_idle_timed_out(&rejection) {
+                    upload_body_idle_timeout_refusal()
+                } else {
+                    rejection.into_response()
+                }
+            })
+    }
+}
 
 /// `POST /v1/traces` and bundle finalize, inside [`authenticate_large_body_request`]: take
 /// the per-principal in-flight slot and submission rate before the body is
@@ -15081,8 +15165,10 @@ async fn append_tenant_access_grant_update_audit(
 /// hand-rolling axum's rejection shape too -- status, body text and
 /// content-type -- and any drift there is a regression for every client,
 /// including the ones that never send a certificate. Instead this reproduces
-/// `Json`'s own `FromRequest` and returns `JsonRejection` **verbatim**, so a
-/// malformed body fails exactly as it did before.
+/// `Json`'s own `FromRequest` and answers with `JsonRejection`'s response
+/// **verbatim**, so a malformed body fails exactly as it did before. The one
+/// addition is a body that went idle on a large-body route, which gets the
+/// fixed [`upload_body_idle_timeout_refusal`] (see [`UploadBytes`]).
 struct SubmitBody {
     envelope: TraceContributionEnvelope,
     /// The body exactly as received, for the witness digest and nothing else.
@@ -15113,14 +15199,15 @@ impl<S> FromRequest<S> for SubmitBody
 where
     S: Send + Sync,
 {
-    type Rejection = JsonRejection;
+    type Rejection = axum::response::Response;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         if !json_content_type(request.headers()) {
-            return Err(MissingJsonContentType::default().into());
+            return Err(JsonRejection::from(MissingJsonContentType::default()).into_response());
         }
-        let raw = Bytes::from_request(request, state).await?;
-        let Json(envelope) = Json::<TraceContributionEnvelope>::from_bytes(&raw)?;
+        let UploadBytes(raw) = UploadBytes::from_request(request, state).await?;
+        let Json(envelope) = Json::<TraceContributionEnvelope>::from_bytes(&raw)
+            .map_err(IntoResponse::into_response)?;
         Ok(SubmitBody { envelope, raw })
     }
 }
@@ -16141,6 +16228,7 @@ async fn submit_trace_handler_authenticated(
         state.as_ref(),
         &authenticated_tenant,
         envelope.submission_id,
+        HourlyCeilingCharge::Upload,
     )
     .await?;
     let mut admission = admission::reserve(
@@ -16353,6 +16441,16 @@ async fn submit_trace_handler_authenticated(
         // quota slot -- the prior quarantined row already counted.
         if remediating_prior.is_none() {
             enforce_submission_quota(state.as_ref(), &tenant)?;
+        } else {
+            // A remediation re-runs the re-scrub, so it is charged to the
+            // hourly ceiling, which let the known id through uncharged.
+            enforce_account_hourly_submission_ceiling(
+                state.as_ref(),
+                &tenant,
+                envelope.submission_id,
+                HourlyCeilingCharge::Remediation,
+            )
+            .await?;
         }
 
         // AT RECEIPT: against `raw_body`, the bytes the extractor captured before
@@ -21957,9 +22055,15 @@ struct ConfirmLoginBody {
 /// not sleep. See `confirm_login_handler`.
 const REDEEM_MIN_LATENCY: StdDuration = StdDuration::from_millis(250);
 
-/// Fixed-window length for all account-surface rate limiters.
-const ACCOUNT_RATE_WINDOW: StdDuration =
-    StdDuration::from_secs(trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS);
+/// Fixed-window length for all account-surface rate limiters. A literal: the
+/// login and content limits below are sized per 60 s, so retuning the submit
+/// pacing must not move them.
+const ACCOUNT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
+// The submit limiter shares this window, and the daemon paces itself against
+// the protocol's value, so the two must still agree.
+const _: () = assert!(
+    ACCOUNT_RATE_WINDOW.as_secs() == trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS
+);
 
 /// Per-IP cap on `GET /account/login` interstitial renders per window.
 const INTERSTITIAL_PER_IP_LIMIT: u32 = 120;
@@ -61957,6 +62061,225 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantCtx) -> ApiResult<(
     Ok(())
 }
 
+/// Submit attempts [`enforce_account_hourly_submission_ceiling`] let through
+/// in the last hour, per ceiling scope, held in this process's memory
+/// (decision 5 on #1794).
+///
+/// The recorded-submission window only sees uploads that got as far as a
+/// record, so an upload refused after the ceiling (by admission, the
+/// re-scrub, a tombstone, a witness or policy refusal) was never counted, and
+/// a client looping on one paid a full re-scrub every time. This table counts
+/// every attempt the ceiling let through. The ceiling refuses when either
+/// count has reached the limit: the larger of the two, never their sum, since
+/// a recorded submission was also an attempt.
+///
+/// It is per process, like the per-minute limiter: a restart empties it, and
+/// two ingest instances each keep their own, so with N instances a scope can
+/// make up to N times the limit in attempts. The recorded count still holds
+/// across restarts and instances.
+///
+/// An attempt is recorded only while its scope is under the limit, and only
+/// attempts inside the hour are kept, so a scope holds at most `limit`
+/// timestamps. The time is read under the lock, so each scope's timestamps
+/// are in order and the oldest is at the front. A sweep, at most once a
+/// minute, drops scopes with nothing left in the hour, and the table holds
+/// at most `max_scopes` scopes: a new scope that finds it full, even after a
+/// sweep, is refused ([`HourlySubmissionAttemptDecision::Full`]). A poisoned
+/// lock fails closed, as [`AccountRateLimiter`] does.
+struct HourlySubmissionAttempts {
+    table: std::sync::Mutex<HourlySubmissionAttemptTable>,
+    max_scopes: usize,
+}
+
+impl Default for HourlySubmissionAttempts {
+    fn default() -> Self {
+        Self {
+            table: std::sync::Mutex::default(),
+            max_scopes: MAX_HOURLY_SUBMISSION_ATTEMPT_SCOPES,
+        }
+    }
+}
+
+#[derive(Default)]
+struct HourlySubmissionAttemptTable {
+    scopes: HashMap<String, VecDeque<DateTime<Utc>>>,
+    last_sweep: Option<DateTime<Utc>>,
+}
+
+/// Most scopes [`HourlySubmissionAttempts`] holds at once, the same bound
+/// the per-minute limiter puts on its keys.
+const MAX_HOURLY_SUBMISSION_ATTEMPT_SCOPES: usize = MAX_ACCOUNT_RATE_WINDOWS;
+
+/// What [`HourlySubmissionAttempts::admit`] decided.
+#[derive(Debug, PartialEq, Eq)]
+enum HourlySubmissionAttemptDecision {
+    /// Under the limit; the attempt was recorded.
+    Admitted,
+    /// At the limit. The scope has room again an hour after this instant
+    /// (`None`: no instant known, a full hour).
+    Refused { room_after: Option<DateTime<Utc>> },
+    /// A new scope, and the table already holds `max_scopes` scopes with
+    /// attempts in the hour. Refused for the sweep interval.
+    Full,
+}
+
+/// How often [`HourlySubmissionAttempts`] drops scopes with nothing left in
+/// the hour, and the `Retry-After` of a [`HourlySubmissionAttemptDecision::Full`]
+/// refusal.
+const HOURLY_SUBMISSION_ATTEMPT_SWEEP_INTERVAL_SECONDS: i64 = 60;
+
+impl HourlySubmissionAttempts {
+    #[cfg(test)]
+    fn with_max_scopes_for_test(max_scopes: usize) -> Self {
+        Self {
+            table: std::sync::Mutex::default(),
+            max_scopes,
+        }
+    }
+
+    /// Decide one upload against the ceiling `limit` for `scope`, given the
+    /// scope's recorded window `recorded`, and record it, at the current
+    /// time read under the lock, when it is let through. `None` when the
+    /// table's lock is poisoned: the caller refuses.
+    fn admit(
+        &self,
+        scope: &str,
+        limit: usize,
+        recorded: &trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow,
+    ) -> Option<HourlySubmissionAttemptDecision> {
+        let mut table = self.table.lock().ok()?;
+        Some(table.admit_at(scope, limit, recorded, Utc::now(), self.max_scopes))
+    }
+
+    /// [`Self::admit`] at a given instant, for tests.
+    #[cfg(test)]
+    fn admit_at_for_test(
+        &self,
+        scope: &str,
+        limit: usize,
+        recorded: &trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow,
+        now: DateTime<Utc>,
+    ) -> Option<HourlySubmissionAttemptDecision> {
+        let mut table = self.table.lock().ok()?;
+        Some(table.admit_at(scope, limit, recorded, now, self.max_scopes))
+    }
+
+    #[cfg(test)]
+    fn attempts_for_test(&self, scope: &str) -> usize {
+        self.table
+            .lock()
+            .map(|table| table.scopes.get(scope).map_or(0, VecDeque::len))
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn scopes_for_test(&self) -> usize {
+        self.table
+            .lock()
+            .map(|table| table.scopes.len())
+            .unwrap_or(0)
+    }
+}
+
+impl HourlySubmissionAttemptTable {
+    fn admit_at(
+        &mut self,
+        scope: &str,
+        limit: usize,
+        recorded: &trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow,
+        now: DateTime<Utc>,
+        max_scopes: usize,
+    ) -> HourlySubmissionAttemptDecision {
+        let window_start = now - Duration::hours(1);
+        let new_scope = !self.scopes.contains_key(scope);
+        self.sweep(
+            now,
+            window_start,
+            new_scope && self.scopes.len() >= max_scopes,
+        );
+        if new_scope && self.scopes.len() >= max_scopes {
+            return HourlySubmissionAttemptDecision::Full;
+        }
+        let attempts = self.scopes.entry(scope.to_string()).or_default();
+        while attempts.front().is_some_and(|at| *at <= window_start) {
+            attempts.pop_front();
+        }
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let recorded_full = recorded.counted >= limit_i64;
+        let attempts_full = attempts.len() >= limit;
+        if recorded_full || attempts_full {
+            // Room returns once every full count has dropped below the
+            // limit, so the later of the two instants decides.
+            let recorded_room = recorded_full.then_some(recorded.oldest_counted_at);
+            let attempts_room = attempts_full.then(|| attempts.front().copied());
+            let room_after = match (recorded_room, attempts_room) {
+                (Some(None), _) | (_, Some(None)) => None,
+                (Some(Some(a)), Some(Some(b))) => Some(a.max(b)),
+                (Some(Some(a)), None) | (None, Some(Some(a))) => Some(a),
+                (None, None) => None,
+            };
+            if attempts.is_empty() {
+                self.scopes.remove(scope);
+            }
+            return HourlySubmissionAttemptDecision::Refused { room_after };
+        }
+        attempts.push_back(now);
+        HourlySubmissionAttemptDecision::Admitted
+    }
+
+    /// Drop the scopes with nothing left in the hour, at most once a sweep
+    /// interval unless `force`d (a full table meeting a new scope).
+    fn sweep(&mut self, now: DateTime<Utc>, window_start: DateTime<Utc>, force: bool) {
+        if !force
+            && self.last_sweep.is_some_and(|last| {
+                now - last < Duration::seconds(HOURLY_SUBMISSION_ATTEMPT_SWEEP_INTERVAL_SECONDS)
+            })
+        {
+            return;
+        }
+        self.last_sweep = Some(now);
+        self.scopes.retain(|_, attempts| {
+            while attempts.front().is_some_and(|at| *at <= window_start) {
+                attempts.pop_front();
+            }
+            !attempts.is_empty()
+        });
+    }
+}
+
+/// The key [`HourlySubmissionAttempts`] counts an upload under: the same
+/// scope the recorded window counts, length-prefixed so no two scopes share
+/// a key. For an account tenant that is the tenant. Otherwise it is the
+/// principal: its canonical `principal_ref`, from which its legacy alias is
+/// derived, and not the authentication method, so the attempts of one
+/// principal share one budget as its recorded submissions share one count.
+fn hourly_submission_attempt_scope(tenant: &TenantCtx, whole_tenant: bool) -> String {
+    let tenant_id = tenant.tenant_id();
+    if whole_tenant {
+        format!("hourly-tenant:{}:{tenant_id}", tenant_id.len())
+    } else {
+        let principal_ref = tenant.principal_ref();
+        format!(
+            "hourly-principal:{}:{tenant_id}:{}:{principal_ref}",
+            tenant_id.len(),
+            principal_ref.len()
+        )
+    }
+}
+
+/// What an upload is charged for at [`enforce_account_hourly_submission_ceiling`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HourlyCeilingCharge {
+    /// The ceiling's own check, before admission. A submission id that
+    /// already has a record in scope is not charged here: the handler either
+    /// replays its receipt (no work), or remediates it, and a remediation is
+    /// charged when the handler decides on it.
+    Upload,
+    /// A re-POST of an owned quarantined id, which the handler re-scrubs:
+    /// always charged, whatever its body.
+    Remediation,
+}
+
 /// The per-account hourly submission ceiling: a circuit breaker on intake,
 /// checked right after the per-principal rate limiter and before admission
 /// reserves anything, so a refused upload takes no lease, no ledger row, no
@@ -61973,19 +62296,30 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantCtx) -> ApiResult<(
 /// (a legacy invite tenant or a pooled tenant) holds many contributors with
 /// no account, so the scope is the authenticated principal.
 ///
-/// It counts recorded submissions, not attempts: an upload refused after
-/// this check (by admission, the re-scrub, or a gate) leaves no record and
-/// is never counted. Nothing is reserved between the read and the record,
-/// so uploads in flight at once can each pass at `limit - 1` and overshoot
-/// the ceiling by up to the number in flight.
+/// It counts two things and refuses when either has reached the limit:
+/// recorded submissions (the store window below), and the attempts this
+/// process let through in the hour ([`HourlySubmissionAttempts`], decision
+/// 5 on #1794). The attempt count covers uploads refused after this check
+/// (by admission, the re-scrub, a tombstone or a gate), which leave no
+/// record. It is in-process memory, per process like the per-minute
+/// limiter: a restart empties it and each instance keeps its own, while the
+/// recorded count holds across both. Nothing is reserved in the store
+/// between the read and the record, so across processes (or after a
+/// restart) uploads in flight at once can each pass at `limit - 1` and
+/// overshoot the ceiling by up to the number in flight; within one process
+/// the attempt count is taken under a lock, so they cannot.
 ///
-/// A retry of a submission that already has a record of the same scope (the
-/// tenant for an account tenant, the uploading principal otherwise) is not
-/// counted against itself; any other refusal for it comes from the checks
-/// after this one. That includes a remediation re-POST of a quarantined id,
-/// which the ceiling lets through; remediation re-scrubs are bounded by the
-/// per-minute limiter, not by this ceiling. An id another principal of a
-/// pooled tenant recorded is not exempt.
+/// What is charged follows what the handler will do (decision 6 on #1794,
+/// as revised in the #1800 review). A submission id that already has a
+/// record in scope (the tenant for an account tenant, the uploading
+/// principal otherwise) is not charged at this check: a retry of a recorded
+/// submission only replays its receipt, so it is never refused here,
+/// whatever this process remembers and whatever bytes it carries. When the
+/// handler instead remediates a quarantined record (the legacy path, which
+/// re-runs the re-scrub), it charges the ceiling again with
+/// [`HourlyCeilingCharge::Remediation`], which counts every remediation,
+/// an identical body included. An id another principal of a pooled tenant
+/// recorded is not exempt.
 ///
 /// Without a PostgreSQL mirror the window is counted from the tenant's file
 /// records, a full record read per contributor upload, on a blocking thread.
@@ -61997,13 +62331,13 @@ async fn enforce_account_hourly_submission_ceiling(
     state: &AppState,
     tenant: &TenantCtx,
     submission_id: Uuid,
+    charge: HourlyCeilingCharge,
 ) -> ApiResult<()> {
     let limit = state.submission_quota.max_per_account_per_hour;
     if limit == 0 || tenant.role() != TokenRole::Contributor {
         return Ok(());
     }
-    let now = Utc::now();
-    let window_start = now - Duration::hours(1);
+    let window_start = Utc::now() - Duration::hours(1);
     let whole_tenant = trace_commons_protocol::admission::is_anchored_tenant(tenant.tenant_id());
     let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
     let window = match state.db_mirror.as_ref() {
@@ -62049,14 +62383,30 @@ async fn enforce_account_hourly_submission_ceiling(
             .map_err(internal_error)?
         }
     };
-    if window.submission_known || window.counted < limit_i64 {
+    if charge == HourlyCeilingCharge::Upload && window.submission_known {
         return Ok(());
     }
-    let retry_after_seconds = hourly_ceiling_retry_after_seconds(window.oldest_counted_at, now);
+    let decision = state
+        .submission_attempts
+        .admit(
+            &hourly_submission_attempt_scope(tenant, whole_tenant),
+            limit,
+            &window,
+        )
+        .ok_or_else(|| internal_error("hourly submission attempt table unavailable"))?;
+    let retry_after_seconds = match decision {
+        HourlySubmissionAttemptDecision::Admitted => return Ok(()),
+        HourlySubmissionAttemptDecision::Refused { room_after } => {
+            hourly_ceiling_retry_after_seconds(room_after, Utc::now())
+        }
+        HourlySubmissionAttemptDecision::Full => HOURLY_SUBMISSION_ATTEMPT_SWEEP_INTERVAL_SECONDS,
+    };
     tracing::warn!(
         tenant_id = %tenant.tenant_id(),
         limit,
         per_principal = !whole_tenant,
+        remediation = charge == HourlyCeilingCharge::Remediation,
+        attempt_table_full = matches!(decision, HourlySubmissionAttemptDecision::Full),
         "Trace Commons account hourly submission ceiling reached"
     );
     Err(submit_rate_limited(retry_after_seconds))

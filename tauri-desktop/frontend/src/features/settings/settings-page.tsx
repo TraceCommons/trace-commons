@@ -237,7 +237,7 @@ export function SettingsPage({
               <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
                 LIMITS
               </span>
-              <h2>Daily guardrails</h2>
+              <h2>Local limits</h2>
             </div>
             <SettingRow
               label="Queue capacity"

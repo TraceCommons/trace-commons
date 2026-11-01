@@ -682,6 +682,18 @@ V144 removes passkeys. It is forward-only and runs in one transaction:
   and `trace_webauthn_credentials` are dropped.
 - Hash-only audit rows (`trace_account_audit`, `trace_audit_events`) are kept.
 
+Stop every ingest and issuer instance on an older build before a binary
+carrying V144 starts; do not roll it out instance by instance. Each binary
+runs migrations at boot, and two things go wrong while an older instance is
+live:
+
+- its session writes hold `trace_sessions` row locks, and a deadlock or lock
+  wait against V144's session updates or cascaded deletes rolls back all of
+  V144, so the new binary fails to boot;
+- once V144 commits, the older instance's session check still joins
+  `trace_account_bindings`, which no longer exists, so every authenticated
+  account request it serves fails until it is restarted.
+
 The NOLOGIN roles `trace_unbound_account_count_guard`,
 `trace_unbound_account_reaper_guard` and `trace_unbound_account_reaper` are
 left in place with no privileges, because roles are cluster-global and

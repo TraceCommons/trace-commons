@@ -7,18 +7,15 @@ use super::settings::{self, DaemonSettings};
 
 pub(crate) fn schema() -> Value {
     let mut properties = Map::new();
-    let ranges =
-        serde_json::to_value(settings::settings_ranges()).expect("settings ranges serialize");
-    for (key, bounds) in ranges.as_object().expect("settings ranges object") {
-        properties.insert(key.clone(), json!({
-            "type":"integer", "minimum":bounds["min"], "maximum":bounds["max"],
-            "description": match key.as_str() {
-                "quiescence_secs" => "Seconds without writes before a trace is considered finished.",
-                "approval_hold_secs" => "Seconds before an approved upload can start; zero removes the undo hold.",
-                _ => "Seconds between interval notifications.",
-            },
-            "examples":[bounds["min"]]
-        }));
+    for (key, bounds, description) in settings::settings_ranges().described() {
+        properties.insert(
+            key.to_string(),
+            json!({
+                "type":"integer", "minimum":bounds.min, "maximum":bounds.max,
+                "description": description,
+                "examples":[bounds.min]
+            }),
+        );
     }
     for (key, description) in [
         (
@@ -236,7 +233,12 @@ pub(crate) fn schema() -> Value {
 
 pub(crate) fn preview(settings: &DaemonSettings, patch: &Value) -> Result<Value, &'static str> {
     let mut candidate = settings.clone();
-    if !settings::apply_settings_object(&mut candidate, patch)? {
+    // `Ok(false)` on a non-empty patch is one of only retired keys: accepted
+    // with nothing to change, as `set_settings` answers it, so it previews
+    // as an empty change list below.
+    if !settings::apply_settings_object(&mut candidate, patch)?
+        && !patch.as_object().is_some_and(|obj| !obj.is_empty())
+    {
         return Err("no-known-setting-supplied");
     }
     // Compare internally before redaction: two different source paths both
@@ -485,6 +487,40 @@ mod tests {
             "sk-sensitive-sentinel"
         );
         assert!(preview(&settings, &json!({"near_ai_inference":null})).is_err());
+    }
+
+    /// The described ranges name the same keys `settings_ranges` serializes
+    /// under, so the agent schema and the IPC ranges agree. Each has its
+    /// text by construction (`SettingsRanges::described`).
+    #[test]
+    fn the_described_ranges_use_the_serialized_keys() {
+        let ranges = serde_json::to_value(settings::settings_ranges()).unwrap();
+        let serialized: std::collections::BTreeSet<&str> = ranges
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let described: std::collections::BTreeSet<&str> = settings::settings_ranges()
+            .described()
+            .iter()
+            .map(|(key, _, _)| *key)
+            .collect();
+        assert_eq!(described, serialized);
+    }
+
+    /// A patch of only the retired daily-limit keys previews the way
+    /// `set_settings` applies it: accepted, with nothing to change.
+    #[test]
+    fn a_retired_keys_only_patch_previews_as_a_no_op() {
+        let settings = DaemonSettings::default();
+        let result = preview(&settings, &json!({"max_uploads_per_day": 50})).unwrap();
+        assert_eq!(result["applied"], false);
+        assert_eq!(result["changes"], json!([]));
+        assert_eq!(
+            preview(&settings, &json!({})),
+            Err("no-known-setting-supplied")
+        );
     }
 
     /// The daily upload limit is retired: nothing advertises it to an

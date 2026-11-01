@@ -133,6 +133,12 @@ pub enum UploadDecision {
     /// than `retry_after_secs`, the server's own bounded hint. The pass
     /// stops here, so the rest are not sent into the same limit.
     RateLimited { retry_after_secs: u32 },
+    /// This daemon's own burst guard ([`burst_wait`]) held the upload back
+    /// before anything was read or sent. Handled like
+    /// [`UploadDecision::RateLimited`] -- the session keeps its approval and
+    /// the pass stops -- except that it is not counted as an attempt, since
+    /// nothing was tried.
+    Paced { retry_after_secs: u32 },
 }
 
 /// How many uploads one daemon starts inside [`BURST_WINDOW`] at most.
@@ -142,8 +148,11 @@ pub enum UploadDecision {
 /// rather than leaning on the server's `429` to slow it. Not a quota: the
 /// window slides, and nothing is counted beyond it.
 pub const BURST_MAX_UPLOADS: usize = 25;
-// Ingest's default per-principal submission rate, from the shared protocol
-// constant, so a change there fails this build rather than going unnoticed.
+// Ingest's compiled default per-principal submission rate, from the shared
+// protocol constant, so a change to that default fails this build. It cannot
+// see an operator's `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN`: under a
+// lower limit the server's own `429` paces the daemon instead, ending the pass
+// ([`UploadDecision::RateLimited`]).
 const _: () = assert!(
     BURST_MAX_UPLOADS < trace_commons_protocol::submit_rate::SUBMIT_PER_PRINCIPAL_LIMIT as usize
 );
@@ -156,9 +165,9 @@ pub const BURST_WINDOW: chrono::TimeDelta =
 /// one may start now. Drops attempts that have left the window as it goes.
 ///
 /// A full window answers with the time until its oldest attempt ages out,
-/// at least one second, which the caller reports as
-/// [`UploadDecision::RateLimited`]: the same pause, retry and silence as a
-/// server-side `429`, with the session keeping its approval.
+/// rounded up and at least one second, which the caller reports as
+/// [`UploadDecision::Paced`]: the same pause and silence as a server-side
+/// `429`, with the session keeping its approval.
 pub fn burst_wait(state: &mut DaemonState, now: DateTime<Utc>) -> Option<u32> {
     let floor = now - BURST_WINDOW;
     while state
@@ -168,14 +177,21 @@ pub fn burst_wait(state: &mut DaemonState, now: DateTime<Utc>) -> Option<u32> {
     {
         state.recent_upload_attempts.pop_front();
     }
-    // An attempt stamped after `now` means the wall clock stepped back; it
-    // would otherwise hold the window full until the clock caught up.
-    state.recent_upload_attempts.retain(|at| *at <= now);
+    // An attempt stamped after `now` means the wall clock stepped back. It is
+    // moved to `now` rather than dropped: ingest counts on a monotonic clock
+    // and still holds the burst, so an emptied window would send another one
+    // straight into its `429`. Held this way, the window stays full for at
+    // most one more window, instead of until the clock catches up.
+    for at in &mut state.recent_upload_attempts {
+        *at = (*at).min(now);
+    }
     if state.recent_upload_attempts.len() < BURST_MAX_UPLOADS {
         return None;
     }
     let oldest = *state.recent_upload_attempts.front()?;
-    let wait = (oldest + BURST_WINDOW - now).num_seconds().max(1);
+    // Rounded up, so the retry lands after the slot frees, not just before.
+    let wait_ms = (oldest + BURST_WINDOW - now).num_milliseconds();
+    let wait = (wait_ms + 999).div_euclid(1000).max(1);
     Some(u32::try_from(wait).unwrap_or(u32::MAX))
 }
 
@@ -316,7 +332,7 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
         // A pause the next pass clears on its own, with the session kept.
         // Like a lease another attempt holds, nothing to tell anyone about;
         // above all not `ingest-unreachable`, which reads as an outage.
-        UploadDecision::RateLimited { .. } => None,
+        UploadDecision::RateLimited { .. } | UploadDecision::Paced { .. } => None,
         UploadDecision::Refused { reason_label } => match reason_label.as_str() {
             "pii-filter-unavailable" => Some(LABEL_PII_FILTER_UNAVAILABLE),
             LABEL_NEAR_AI_NOTICE_PENDING => Some(LABEL_NEAR_AI_NOTICE_PENDING),
@@ -502,11 +518,11 @@ impl Uploader<'_, '_> {
 
         // Pace the send rate under ingest's per-principal limit before any
         // work is spent on this entry. No health label: like the server's
-        // own `429`, it clears itself on the next pass.
+        // own `429`, it clears itself on the next pass. The attempt itself is
+        // counted only if it reaches ingest, after `submit_loaded` below.
         if let Some(retry_after_secs) = burst_wait(self.state, now) {
-            return Ok(UploadDecision::RateLimited { retry_after_secs });
+            return Ok(UploadDecision::Paced { retry_after_secs });
         }
-        self.state.recent_upload_attempts.push_back(now);
 
         // Re-read and re-hash. The approval was for the content described by
         // entry.session_hash; if the file has moved on, that approval does not
@@ -684,7 +700,18 @@ impl Uploader<'_, '_> {
         self.ctx
             .set_upload_provenance(entry.approved_unattended, entry.approved_verdict.clone());
         self.ctx.hold_large_session_permit(large_session);
-        let outcome = match self.ctx.submit_loaded(transcript).await {
+        let outcome = self.ctx.submit_loaded(transcript).await;
+        // Counted in the burst window only if it reached ingest, which limits
+        // the submissions it receives, and stamped when the send started.
+        // Every hold, local refusal or failure, and dry run returns before
+        // that and is left out. Never earlier than `now`: a test hands the
+        // pass a clock of its own.
+        if let Some(sent_at) = self.ctx.last_ingest_send_at() {
+            self.state
+                .recent_upload_attempts
+                .push_back(sent_at.max(now));
+        }
+        let outcome = match outcome {
             Ok(o) => o,
             Err(e) => {
                 self.health.fail(precondition_health_label(&e), now);
@@ -861,17 +888,36 @@ mod tests {
         );
     }
 
+    /// A wall clock stepped back after a burst does not empty the window:
+    /// ingest counts on a monotonic clock and still holds the burst, so
+    /// attempts stamped after `now` are moved to `now` rather than dropped.
+    /// The window stays full for at most one more window.
     #[test]
-    fn the_burst_guard_forgets_attempts_stamped_after_now() {
+    fn a_clock_step_back_keeps_the_burst_window_full() {
         let mut st = DaemonState::new();
         let start = at("2026-08-08T20:00:00Z");
         for _ in 0..BURST_MAX_UPLOADS {
             st.recent_upload_attempts.push_back(start);
         }
-        // The clock stepped back an hour after the burst.
-        let now = start - chrono::TimeDelta::hours(1);
-        assert_eq!(burst_wait(&mut st, now), None);
-        assert!(st.recent_upload_attempts.is_empty());
+        // The clock stepped back one second after the burst.
+        let now = start - chrono::TimeDelta::seconds(1);
+        assert_eq!(burst_wait(&mut st, now), Some(60));
+        assert_eq!(st.recent_upload_attempts.len(), BURST_MAX_UPLOADS);
+        assert!(st.recent_upload_attempts.iter().all(|at| *at <= now));
+        assert_eq!(burst_wait(&mut st, now + BURST_WINDOW), None);
+    }
+
+    /// The wait is rounded up, so a retry never lands just before the
+    /// oldest attempt ages out and takes a second one-second pause.
+    #[test]
+    fn a_full_burst_window_rounds_its_wait_up() {
+        let mut st = DaemonState::new();
+        let start = at("2026-08-08T20:00:00Z");
+        for _ in 0..BURST_MAX_UPLOADS {
+            st.recent_upload_attempts.push_back(start);
+        }
+        let now = start + chrono::TimeDelta::milliseconds(15_100);
+        assert_eq!(burst_wait(&mut st, now), Some(45));
     }
 
     #[test]
@@ -2279,7 +2325,7 @@ mod tests {
 
         assert_eq!(
             decision,
-            UploadDecision::RateLimited {
+            UploadDecision::Paced {
                 retry_after_secs: 60
             }
         );
@@ -2291,8 +2337,11 @@ mod tests {
         assert_eq!(state.recent_upload_attempts.len(), BURST_MAX_UPLOADS);
     }
 
+    /// A dry run sends nothing to ingest, so it takes no slot in the burst
+    /// window. A real send is counted in
+    /// `daemon::tests::only_a_send_to_ingest_is_counted_in_the_burst_window`.
     #[tokio::test]
-    async fn every_upload_attempt_is_counted_in_the_burst_window() {
+    async fn a_dry_run_is_not_counted_in_the_burst_window() {
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
         let cfg = fixture_cfg(&store);
@@ -2316,7 +2365,42 @@ mod tests {
             .upload_entry(&session.source(), &session.session_ref(), &entry, now)
             .await
             .unwrap();
-        assert_eq!(state.recent_upload_attempts, [now]);
+        assert!(state.recent_upload_attempts.is_empty());
+    }
+
+    /// Only an attempt that goes on to ingest is counted: one stopped
+    /// before the send, here because the session grew since it was
+    /// approved, leaves the window as it was.
+    #[tokio::test]
+    async fn an_entry_stopped_before_the_send_is_not_counted_in_the_burst_window() {
+        let session = GrowingSession::new();
+        let (_d, store) = temp_store();
+        let cfg = fixture_cfg(&store);
+        store.save_config(&cfg).unwrap();
+
+        let entry = session.entry_for("sha256:an-earlier-version", &cfg);
+        let opts = dry_run_opts();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut state = DaemonState::new();
+        let now = at("2026-08-08T16:00:00Z");
+        let mut health = HealthState::default();
+        let settings = settings();
+        let mut up = Uploader {
+            ctx: &mut ctx,
+            store: &store,
+            settings: &settings,
+            state: &mut state,
+            health: &mut health,
+        };
+        let decision = up
+            .upload_entry(&session.source(), &session.session_ref(), &entry, now)
+            .await
+            .unwrap();
+        assert!(
+            matches!(decision, UploadDecision::Superseded { .. }),
+            "{decision:?}"
+        );
+        assert!(state.recent_upload_attempts.is_empty());
     }
 
     /// The setup the stored-envelope tests above build inline: a previewed

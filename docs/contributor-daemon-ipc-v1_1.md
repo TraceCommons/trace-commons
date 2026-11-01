@@ -7138,7 +7138,8 @@ connect-and-forget design's R1).
 upload limit. Either is accepted, whatever its value, and changes nothing,
 so a shell built while the limit existed can still save its other
 settings in the same call; an unknown key beside them is still refused.
-`get_settings` no longer returns them, and a settings file that still
+A request holding only these keys saves nothing and answers with the
+settings as they stand. `get_settings` no longer returns them, and a settings file that still
 holds them loads and drops them on the next save.
 
 ### History provenance (K7)
@@ -9077,7 +9078,8 @@ the next poll, and a flag a blip pins on a healthy daemon is one nobody will
 trust.
 
 `daily-cap-reached` is retired with the daily upload limit: no daemon in
-this revision sets it. A client may still map it, for an older daemon.
+this revision sets it, and the shells no longer map it. A shell attached to
+an older daemon that still sets it shows no message about the cap.
 
 Rationale: states the contributor can act on outrank states they can only
 wait out. An application should not attempt to infer or reconstruct this
