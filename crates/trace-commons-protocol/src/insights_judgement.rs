@@ -342,8 +342,11 @@ impl JudgementRefusalBody {
     /// The `reset_at` a client may act on at `now_unix`: the one sent when
     /// it is the next month start as seen within
     /// [`JUDGEMENT_RESET_AT_SKEW_SECS`] of `now_unix`, and otherwise the
-    /// next month start by the client's own clock. `None` for a refusal
-    /// without `reset_at`.
+    /// next month start by the client's own clock. A believed month start
+    /// the client's clock has already passed (a service clock behind, just
+    /// before the turn of the month) is `now_unix`: the reset has happened,
+    /// so the client may retry now. `None` for a refusal without
+    /// `reset_at`.
     ///
     /// Refusal bodies are not signed. Without this a forged or broken month
     /// start such as 2099-01-01 would turn an account's judgements off for
@@ -358,8 +361,8 @@ impl JudgementRefusalBody {
         let latest = now_unix
             .checked_add(JUDGEMENT_RESET_AT_SKEW_SECS)
             .and_then(next);
-        if sent > now_unix && (earliest == Some(sent) || latest == Some(sent)) {
-            return Some(sent);
+        if earliest == Some(sent) || latest == Some(sent) {
+            return Some(sent.max(now_unix));
         }
         next(now_unix)
     }
@@ -1236,8 +1239,10 @@ impl JudgementRequest {
         if stuck {
             // The digest must be a valid turn digest in its canonical
             // encoding, so no padding or reordering rides along with the
-            // counts. A newer turn digest is a version the service does not
-            // speak yet, so the client can step down rather than drop it.
+            // counts. A later turn digest version is reported as
+            // unsupported rather than malformed, so it reads as a service
+            // that has not caught up; the client retries it like any other
+            // `Soon` refusal, a bounded number of times.
             let turn = TurnDigest::parse(&digest).map_err(|error| match error {
                 JudgementWireError::WireVersionUnsupported => {
                     JudgementRefusal::WireVersionUnsupported
@@ -1832,11 +1837,15 @@ impl TurnDigest {
 
     /// When the last `Check` among the recent calls has no `Edit` after it,
     /// it is the latest check since the last edit, so its `failed` must be
-    /// `last_check_failed`.
+    /// `last_check_failed`. When an `Edit` comes after every recent check,
+    /// no check has run since the last edit, so `last_check_failed` must be
+    /// false.
     fn latest_recent_check_agrees(&self) -> bool {
         for call in self.recent.iter().rev() {
             match call.kind {
-                TurnCallKind::Edit => return true,
+                // An edit after every recent check: no check since the
+                // last edit, so none can have failed.
+                TurnCallKind::Edit => return !self.last_check_failed,
                 TurnCallKind::Check => return call.failed == self.last_check_failed,
                 _ => {}
             }
@@ -1851,16 +1860,22 @@ impl TurnDigest {
     }
 
     /// Parse a turn digest, closed. The version is read leniently first, so
-    /// a later version is reported as unsupported, not malformed.
+    /// a later version is reported as unsupported, not malformed. Only a
+    /// JSON object naming a later version is unsupported: an array, a
+    /// missing or non-integer version, or an earlier one is malformed.
     pub fn parse(bytes: &[u8]) -> Result<Self, JudgementWireError> {
-        #[derive(Deserialize)]
-        struct Version {
-            digest_version: u32,
-        }
-        let version: Version = serde_json::from_slice(bytes)
-            .map_err(|_| JudgementWireError::Malformed("turn_digest"))?;
-        if version.digest_version != TURN_DIGEST_VERSION {
+        let malformed = JudgementWireError::Malformed("turn_digest");
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| malformed)?;
+        let version = value
+            .as_object()
+            .and_then(|object| object.get("digest_version"))
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(malformed)?;
+        if version > u64::from(TURN_DIGEST_VERSION) {
             return Err(JudgementWireError::WireVersionUnsupported);
+        }
+        if version != u64::from(TURN_DIGEST_VERSION) {
+            return Err(malformed);
         }
         let digest: Self = parse_closed(bytes, &["recent"])
             .map_err(|_| JudgementWireError::Malformed("turn_digest"))?;
@@ -1933,6 +1948,26 @@ mod turn_digest_tests {
             TurnDigest::parse(&serde_json::to_vec(&later).unwrap()),
             Err(JudgementWireError::WireVersionUnsupported)
         );
+        // Only an object naming a later version is unsupported: an array
+        // that names one, an earlier version, or a version that is not a
+        // whole number is malformed.
+        let mut earlier = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+        earlier["digest_version"] = serde_json::json!(0);
+        let mut text = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+        text["digest_version"] = serde_json::json!("2");
+        for broken in [
+            b"[2]".to_vec(),
+            b"[1]".to_vec(),
+            serde_json::to_vec(&earlier).unwrap(),
+            serde_json::to_vec(&text).unwrap(),
+        ] {
+            assert_eq!(
+                TurnDigest::parse(&broken),
+                Err(JudgementWireError::Malformed("turn_digest")),
+                "{}",
+                String::from_utf8_lossy(&broken)
+            );
+        }
         for broken in [
             TurnDigest {
                 failures: 30,
@@ -2048,6 +2083,12 @@ mod turn_digest_tests {
                     failed: false,
                     repeated: false,
                 }],
+                ..digest()
+            },
+            // An edit after the last recent check: no check has run since,
+            // so the latest check since the last edit cannot have failed.
+            TurnDigest {
+                recent: vec![digest().recent[1], digest().recent[0]],
                 ..digest()
             },
         ] {
@@ -2499,10 +2540,16 @@ mod tests {
         assert_eq!(at(1_798_761_600, dec_31), Some(1_798_761_600));
         assert_eq!(at(1_801_440_000, dec_31), Some(1_801_440_000));
         assert_eq!(at(1_803_859_200, dec_31), Some(1_798_761_600));
-        // A month start already past is never believed, even within the
-        // skew: 06:00 on Nov 1 with a sent Nov 1 00:00 waits for Dec 1.
+        // A service clock just behind the turn of the month sends the month
+        // start the client has already passed: the reset has happened, so
+        // the client retries now, not a month later.
+        assert_eq!(at(next, next + 1), Some(next + 1));
         let nov_1_morning = next + 6 * 3600;
-        assert_eq!(at(next, nov_1_morning), Some(1_796_083_200));
+        assert_eq!(at(next, nov_1_morning), Some(nov_1_morning));
+        // A past month start outside the skew is still not believed.
+        let oct_1 = 1_790_812_800; // 2026-10-01T00:00:00Z
+        assert_eq!(at(oct_1, now), Some(next));
+        assert_eq!(at(oct_1, oct_1 + 2 * 86_400), Some(next));
         assert_eq!(
             JudgementRefusalBody::new(JudgementRefusal::Timeout, None)
                 .unwrap()
