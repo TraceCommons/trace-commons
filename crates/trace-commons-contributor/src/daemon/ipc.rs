@@ -6620,14 +6620,6 @@ fn handle_set_notify_kind(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 pub(super) fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
-    // An older shell's daily-limit control sends only the retired keys.
-    // Nothing would change, so nothing is saved or rebuilt; the reply is the
-    // settings as they stand, as a successful save would return them.
-    if super::settings::carries_only_retired_keys(&req.params) {
-        let mut value = redacted_settings(&shared.settings.lock().expect("settings lock"));
-        add_admission_setting(shared, &mut value);
-        return Response::ok(req.id, value);
-    }
     // Read before the commit lock, and policy and the queue are taken again
     // below only after it is released. `unenroll` holds policy and the queue
     // while it takes the commit lock, so holding commit while waiting for
@@ -6681,6 +6673,16 @@ pub(super) fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Respo
     };
     candidate.cloud_credentials = persisted.cloud_credentials;
     match super::settings::apply_settings_object(&mut candidate, &req.params) {
+        // Only retired keys, such as an older shell's daily-limit control
+        // sends: accepted with nothing to change, so nothing is saved or
+        // rebuilt, and the reply is the settings as they stand.
+        Ok(false) if req.params.as_object().is_some_and(|obj| !obj.is_empty()) => {
+            let mut value = redacted_settings(&settings);
+            drop(settings);
+            drop(commit);
+            add_admission_setting(shared, &mut value);
+            Response::ok(req.id, value)
+        }
         Ok(false) => Response::err(req.id, ERR_BAD_PARAMS, "no-known-setting-supplied"),
         Ok(true) => {
             if let Err(_e) = candidate.save_locked(&shared.store) {

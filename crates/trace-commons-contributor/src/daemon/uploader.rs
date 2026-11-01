@@ -519,13 +519,10 @@ impl Uploader<'_, '_> {
         // Pace the send rate under ingest's per-principal limit before any
         // work is spent on this entry. No health label: like the server's
         // own `429`, it clears itself on the next pass. The attempt itself is
-        // counted only once it is about to go to ingest, below.
+        // counted only if it reaches ingest, after `submit_loaded` below.
         if let Some(retry_after_secs) = burst_wait(self.state, now) {
             return Ok(UploadDecision::Paced { retry_after_secs });
         }
-        // `now` is when this entry's turn came; the send starts later, after
-        // the read and hash below.
-        let entry_started = std::time::Instant::now();
 
         // Re-read and re-hash. The approval was for the content described by
         // entry.session_hash; if the file has moved on, that approval does not
@@ -703,18 +700,20 @@ impl Uploader<'_, '_> {
         self.ctx
             .set_upload_provenance(entry.approved_unattended, entry.approved_verdict.clone());
         self.ctx.hold_large_session_permit(large_session);
-        // Counted in the burst window from here: ingest limits the
-        // submissions it receives, and every return above sent nothing.
-        // Stamped with the time the send starts, not when the pass did.
-        let sent_at = now
-            + chrono::TimeDelta::from_std(entry_started.elapsed())
-                .unwrap_or(chrono::TimeDelta::zero());
-        self.state.recent_upload_attempts.push_back(sent_at);
-        let outcome = match self.ctx.submit_loaded(transcript).await {
+        let outcome = self.ctx.submit_loaded(transcript).await;
+        // Counted in the burst window only if it reached ingest, which limits
+        // the submissions it receives, and stamped when the send started.
+        // Every hold, local refusal or failure, and dry run returns before
+        // that and is left out. Never earlier than `now`: a test hands the
+        // pass a clock of its own.
+        if let Some(sent_at) = self.ctx.last_ingest_send_at() {
+            self.state
+                .recent_upload_attempts
+                .push_back(sent_at.max(now));
+        }
+        let outcome = match outcome {
             Ok(o) => o,
             Err(e) => {
-                // A fail-closed precondition stops before the upload.
-                self.state.recent_upload_attempts.pop_back();
                 self.health.fail(precondition_health_label(&e), now);
                 return Err(e);
             }
@@ -755,16 +754,6 @@ impl Uploader<'_, '_> {
                 self.ctx.last_rate_limit_retry_after(),
             ),
         };
-        // A hold, or a busy witness, stops before the upload: nothing
-        // reached ingest, so it does not count against the window.
-        if matches!(
-            decision,
-            UploadDecision::HeldForReview { .. }
-                | UploadDecision::HeldForSecondLook { .. }
-                | UploadDecision::WitnessSaturated { .. }
-        ) {
-            self.state.recent_upload_attempts.pop_back();
-        }
         // K6: checked on this session's own certificate, the one it was
         // sent with, and only for a session nobody looked at.
         let decision = match decision {
@@ -2348,8 +2337,11 @@ mod tests {
         assert_eq!(state.recent_upload_attempts.len(), BURST_MAX_UPLOADS);
     }
 
+    /// A dry run sends nothing to ingest, so it takes no slot in the burst
+    /// window. A real send is counted in
+    /// `daemon::tests::only_a_send_to_ingest_is_counted_in_the_burst_window`.
     #[tokio::test]
-    async fn every_upload_attempt_is_counted_in_the_burst_window() {
+    async fn a_dry_run_is_not_counted_in_the_burst_window() {
         let session = GrowingSession::new();
         let (_d, store) = temp_store();
         let cfg = fixture_cfg(&store);
@@ -2373,10 +2365,7 @@ mod tests {
             .upload_entry(&session.source(), &session.session_ref(), &entry, now)
             .await
             .unwrap();
-        assert_eq!(state.recent_upload_attempts.len(), 1);
-        // Stamped when the send started, which is no earlier than the turn.
-        assert!(state.recent_upload_attempts[0] >= now);
-        assert!(state.recent_upload_attempts[0] < now + chrono::TimeDelta::seconds(30));
+        assert!(state.recent_upload_attempts.is_empty());
     }
 
     /// Only an attempt that goes on to ingest is counted: one stopped

@@ -867,6 +867,15 @@ async fn drain_approved(
     now: chrono::DateTime<Utc>,
     tick_started: std::time::Instant,
 ) -> Result<()> {
+    // The time now, as this pass reckons it: its start plus the monotonic
+    // time since, but never behind the wall clock. `Instant` does not advance
+    // while the machine sleeps, so a pass that slept mid-call would otherwise
+    // date a burst stamp or a retry deadline in the past.
+    let observed_at = || {
+        (now + chrono::Duration::from_std(tick_started.elapsed())
+            .expect("daemon pass elapsed time fits chrono duration"))
+        .max(Utc::now())
+    };
     // Read off the queue before anything can return early: every pass sees
     // the whole queue, so every pass can say whether sessions are still
     // waiting on the witness, including one that sends nothing because all
@@ -1237,11 +1246,9 @@ async fn drain_approved(
                 health: &mut health,
             };
             // When this entry's turn came, not when the pass started: the
-            // burst window is stamped and checked with it, and a pass that
-            // sends many sessions runs for a while.
-            let entry_now = now
-                + chrono::Duration::from_std(tick_started.elapsed())
-                    .expect("daemon pass elapsed time fits chrono duration");
+            // burst window is checked against it, and a pass that sends many
+            // sessions runs for a while.
+            let entry_now = observed_at();
             let result = up
                 .upload_entry(source, &session_ref, &entry, entry_now)
                 .await;
@@ -1459,9 +1466,7 @@ async fn drain_approved(
                     // `now` was sampled at tick start. Classifier retries may
                     // take longer than our backoff, so include monotonic time
                     // spent in this pass before scheduling the next attempt.
-                    let observed_at = now
-                        + chrono::Duration::from_std(tick_started.elapsed())
-                            .expect("daemon pass elapsed time fits chrono duration");
+                    let observed_at = observed_at();
                     q.record_attempt(
                         entry.entry_id,
                         Some(observed_at + transient_redaction_retry_delay(attempt)),
@@ -1487,9 +1492,7 @@ async fn drain_approved(
                             Some(reason_label),
                         );
                     } else {
-                        let observed_at = now
-                            + chrono::Duration::from_std(tick_started.elapsed())
-                                .expect("daemon pass elapsed time fits chrono duration");
+                        let observed_at = observed_at();
                         q.record_attempt(
                             entry.entry_id,
                             Some(observed_at + transient_upload_retry_delay(failures)),
@@ -1522,9 +1525,7 @@ async fn drain_approved(
                     .get(entry.entry_id)
                     .map(|e| e.attempts.saturating_add(1))
                     .unwrap_or(1);
-                let observed_at = now
-                    + chrono::Duration::from_std(tick_started.elapsed())
-                        .expect("daemon pass elapsed time fits chrono duration");
+                let observed_at = observed_at();
                 let until = observed_at + witness_capacity_retry_delay(retry_after_secs, attempt);
                 q.record_attempt(
                     entry.entry_id,
@@ -1537,40 +1538,22 @@ async fn drain_approved(
                 );
                 witness_busy_until = Some((until, retry_after_secs));
             }
-            uploader::UploadDecision::RateLimited { retry_after_secs } => {
+            decision @ (uploader::UploadDecision::RateLimited { retry_after_secs }
+            | uploader::UploadDecision::Paced { retry_after_secs }) => {
                 // Sending too fast is not a verdict on the session: it keeps
-                // its approval, with the attempt recorded, and is not
-                // claimable again until the server's wait has passed. No
-                // per-session attempt limit, for the reason the witness
-                // capacity retry has none.
-                let observed_at = now
-                    + chrono::Duration::from_std(tick_started.elapsed())
-                        .expect("daemon pass elapsed time fits chrono duration");
+                // its approval and is not claimable again until the wait has
+                // passed. No per-session attempt limit, for the reason the
+                // witness capacity retry has none. A server `429` records an
+                // attempt; this daemon's own burst guard (`Paced`) does not,
+                // since it sent nothing, and the witness and classifier
+                // backoffs grow with `attempts`.
                 let wait = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
-                q.record_attempt(
-                    entry.entry_id,
-                    Some(observed_at + chrono::Duration::seconds(i64::from(wait))),
-                );
-                q.set_state(
-                    entry.entry_id,
-                    queue::QueueState::Approved,
-                    Some(crate::submit::REASON_RATE_LIMITED.to_string()),
-                );
-                rate_limited = true;
-            }
-            uploader::UploadDecision::Paced { retry_after_secs } => {
-                // This daemon's own burst guard, before anything was sent.
-                // Kept and stopped like a server `429`, but not counted as
-                // an attempt: the witness and classifier backoffs grow with
-                // `attempts`, and nothing was tried.
-                let observed_at = now
-                    + chrono::Duration::from_std(tick_started.elapsed())
-                        .expect("daemon pass elapsed time fits chrono duration");
-                let wait = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
-                q.defer_without_attempt(
-                    entry.entry_id,
-                    observed_at + chrono::Duration::seconds(i64::from(wait)),
-                );
+                let retry_at = observed_at() + chrono::Duration::seconds(i64::from(wait));
+                if matches!(decision, uploader::UploadDecision::Paced { .. }) {
+                    q.defer_without_attempt(entry.entry_id, retry_at);
+                } else {
+                    q.record_attempt(entry.entry_id, Some(retry_at));
+                }
                 q.set_state(
                     entry.entry_id,
                     queue::QueueState::Approved,
@@ -4291,6 +4274,65 @@ mod tests {
             due >= now + chrono::Duration::seconds(window)
                 && due <= now + pass_took + chrono::Duration::seconds(window),
             "{due}"
+        );
+    }
+
+    /// Only a send that reached ingest takes a slot in the burst window: a
+    /// local classifier failure stops before the send and leaves it empty,
+    /// and the upload that follows takes exactly one.
+    #[tokio::test]
+    async fn only_a_send_to_ingest_is_counted_in_the_burst_window() {
+        let h = TransientRetryHarness::new().await;
+        h.classifier_status.store(500, Ordering::SeqCst);
+        h.pass(TransientRetryHarness::now()).await;
+        assert_eq!(
+            h.entry().reason_label.as_deref(),
+            Some("privacy-filter-transient")
+        );
+        assert!(
+            h.shared
+                .state
+                .lock()
+                .unwrap()
+                .recent_upload_attempts
+                .is_empty()
+        );
+
+        h.classifier_status.store(0, Ordering::SeqCst);
+        let retry = h.entry().retry_after.unwrap();
+        h.pass(retry).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.shared.state.lock().unwrap().recent_upload_attempts.len(),
+            1
+        );
+    }
+
+    /// The burst window and the pause's deadline follow the wall clock, not
+    /// the pass's start plus monotonic time, which stops while the machine
+    /// sleeps. Here the pass is handed a start long past: the window, full
+    /// in real time, still pauses the upload, and the entry is held until a
+    /// real-time deadline.
+    #[tokio::test]
+    async fn the_burst_pause_follows_the_wall_clock() {
+        let h = TransientRetryHarness::new().await;
+        {
+            let mut state = h.shared.state.lock().unwrap();
+            for _ in 0..uploader::BURST_MAX_UPLOADS {
+                state.recent_upload_attempts.push_back(Utc::now());
+            }
+        }
+        let long_ago = at("2020-01-01T00:00:00Z");
+        h.pass(long_ago).await;
+        let held = h.entry();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(crate::submit::REASON_RATE_LIMITED)
+        );
+        assert!(
+            held.retry_after.expect("a retry time") > Utc::now(),
+            "{held:?}"
         );
     }
 

@@ -2357,9 +2357,9 @@ pub struct RevokeAccountDeviceResult {
     pub removed: bool,
     pub sessions_revoked: u64,
     pub grants_revoked: u64,
-    /// The account's live native sessions that named neither a device key nor
-    /// a credential (issued before V139, or by the login-link native sign-in),
-    /// revoked with the
+    /// The account's live native sessions that named no device key (issued
+    /// before V139, by the login-link native sign-in, or by a passkey sign-in
+    /// before V144, whatever credential id it carries), revoked with the
     /// device because they cannot be told apart from its own. The caller's
     /// session is never among them.
     pub unattributed_sessions_revoked: u64,
