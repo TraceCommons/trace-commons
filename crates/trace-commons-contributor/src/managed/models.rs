@@ -216,14 +216,16 @@ fn version(rest: &str) -> Option<Vec<u32>> {
 /// The newest model of the family `prefix` (`anthropic/claude-opus-`):
 /// the highest version, and among equals the first id in byte order.
 /// Without a readable version, the family's first model.
-fn newest_in<'a>(prefix: &str, models: &[&'a ChatModel]) -> Option<&'a ChatModel> {
+fn newest_in<'a>(
+    prefix: &str,
+    mut models: impl Iterator<Item = &'a ChatModel> + Clone,
+) -> Option<&'a ChatModel> {
     models
-        .iter()
-        .copied()
+        .clone()
         .filter_map(|m| Some((version(m.id.strip_prefix(prefix)?)?, m)))
         .max_by(|(a, x), (b, y)| a.cmp(b).then_with(|| y.id.cmp(&x.id)))
         .map(|(_, m)| m)
-        .or_else(|| models.iter().copied().find(|m| m.id.starts_with(prefix)))
+        .or_else(|| models.find(|m| m.id.starts_with(prefix)))
 }
 
 /// Codex's default on NEAR AI, first listed first: models that answered a
@@ -297,40 +299,50 @@ pub fn default_for(tool: ToolId, models: &[ChatModel]) -> Option<&ChatModel> {
         .min();
     match best {
         Some(best) if tool != ToolId::Codex => {
-            let pool: Vec<&ChatModel> = models.iter().filter(|m| m.tier == Some(best)).collect();
-            listed(PRIVATE_PREFERRED, &pool).or_else(|| preferred(tool, &pool))
+            let pool = models.iter().filter(move |m| m.tier == Some(best));
+            listed(PRIVATE_PREFERRED, pool.clone()).or_else(|| preferred(tool, pool))
         }
-        _ => preferred(tool, &models.iter().collect::<Vec<_>>()),
+        _ => preferred(tool, models.iter()),
     }
 }
 
 /// The first of `ids` that `models` holds.
-fn listed<'a>(ids: &[&str], models: &[&'a ChatModel]) -> Option<&'a ChatModel> {
+fn listed<'a>(
+    ids: &[&str],
+    models: impl Iterator<Item = &'a ChatModel> + Clone,
+) -> Option<&'a ChatModel> {
     ids.iter()
-        .find_map(|id| models.iter().copied().find(|m| m.id == *id))
+        .find_map(|id| models.clone().find(|m| m.id == *id))
 }
 
 /// `tool`'s own preference among `models`: Codex's list, then the family's
 /// newest, then the vendor's first, then the first listed.
-fn preferred<'a>(tool: ToolId, models: &[&'a ChatModel]) -> Option<&'a ChatModel> {
+fn preferred<'a>(
+    tool: ToolId,
+    mut models: impl Iterator<Item = &'a ChatModel> + Clone,
+) -> Option<&'a ChatModel> {
     let Some((family, vendor)) = preference(tool) else {
-        return models.first().copied();
+        return models.next();
     };
-    let usable: Vec<&ChatModel> = if tool == ToolId::Codex {
-        if let Some(model) = listed(CODEX_PREFERRED, models) {
+    if tool == ToolId::Codex {
+        if let Some(model) = listed(CODEX_PREFERRED, models.clone()) {
             return Some(model);
         }
-        models
-            .iter()
-            .copied()
-            .filter(|m| !CODEX_REFUSED.contains(&m.id.as_str()))
-            .collect()
-    } else {
-        models.to_vec()
-    };
-    newest_in(family, &usable)
-        .or_else(|| usable.iter().copied().find(|m| m.id.starts_with(vendor)))
-        .or_else(|| usable.first().copied())
+        let usable = models.filter(|m| !CODEX_REFUSED.contains(&m.id.as_str()));
+        return pick_in(family, vendor, usable);
+    }
+    pick_in(family, vendor, models)
+}
+
+/// The family's newest, then the vendor's first, then the first listed.
+fn pick_in<'a>(
+    family: &str,
+    vendor: &str,
+    mut models: impl Iterator<Item = &'a ChatModel> + Clone,
+) -> Option<&'a ChatModel> {
+    newest_in(family, models.clone())
+        .or_else(|| models.clone().find(|m| m.id.starts_with(vendor)))
+        .or_else(|| models.next())
 }
 
 /// Claude Code's and OpenCode's background model by default in a NEAR AI
@@ -344,37 +356,102 @@ pub const BACKGROUND_PREFERRED: &[&str] = &[
     "deepseek-ai/DeepSeek-V4.1-Flash-1017",
 ];
 
+/// The tier `main` claims, when this build can read it: none for a tier
+/// a newer daemon sent ([`ModelTier::Unknown`]) or a model with no tier.
+fn known_tier(main: &ChatModel) -> Option<ModelTier> {
+    main.tier.filter(|tier| *tier != ModelTier::Unknown)
+}
+
+/// Whether `model` may serve a session whose main model claims `ceiling`
+/// ([`known_tier`]): a model of a known tier no less private than it. A
+/// main model whose tier is unreadable claims nothing, so only `main_id`
+/// itself passes (#1798 review: fail closed, never every model).
+fn within(model: &ChatModel, ceiling: Option<ModelTier>, main_id: &str) -> bool {
+    match ceiling {
+        Some(ceiling) => known_tier(model).is_some_and(|tier| tier <= ceiling),
+        None => model.id == main_id,
+    }
+}
+
 /// The models that may serve `main`'s background work: those of `main`'s
 /// tier or a more private one, in NEAR AI's order (owner, 2026-10-31). A
-/// model with no tier claims nothing, so it is offered only beside a main
-/// model that claims nothing either.
+/// model with no known tier is never offered beside one that has one, and
+/// a main model with no known tier is offered only itself.
 pub fn background_options<'a>(main: &ChatModel, models: &'a [ChatModel]) -> Vec<&'a ChatModel> {
-    let ceiling = main.tier.filter(|tier| *tier != ModelTier::Unknown);
+    let ceiling = known_tier(main);
     models
         .iter()
-        .filter(|m| match ceiling {
-            Some(ceiling) => m.tier.is_some_and(|tier| tier <= ceiling),
-            None => true,
-        })
+        .filter(|m| within(m, ceiling, &main.id))
         .collect()
 }
 
 /// `tool`'s background model for `main` when none was chosen: from
-/// `main`'s own tier, Claude Code's newest Haiku, else the first listed
-/// of [`BACKGROUND_PREFERRED`], else `main` itself.
+/// `main`'s own known tier, Claude Code's newest Haiku, else the first
+/// listed of [`BACKGROUND_PREFERRED`], else `main` itself. A main model
+/// with no known tier is its own background model.
 pub fn background_default<'a>(
     tool: ToolId,
     main: &'a ChatModel,
     models: &'a [ChatModel],
 ) -> &'a ChatModel {
-    let same: Vec<&ChatModel> = models.iter().filter(|m| m.tier == main.tier).collect();
+    known_tier(main)
+        .and_then(|tier| tier_background(tool, tier, models))
+        .unwrap_or(main)
+}
+
+/// The background default every main model of `tier` shares, when the
+/// tier holds one: Claude Code's newest Haiku, else the first listed of
+/// [`BACKGROUND_PREFERRED`]. None leaves each main model its own.
+fn tier_background(tool: ToolId, tier: ModelTier, models: &[ChatModel]) -> Option<&ChatModel> {
+    let same = models.iter().filter(move |m| m.tier == Some(tier));
     let haiku = match tool {
-        ToolId::Claude => newest_in("anthropic/claude-haiku-", &same),
+        ToolId::Claude => newest_in("anthropic/claude-haiku-", same.clone()),
         ToolId::Codex | ToolId::Opencode => None,
     };
-    haiku
-        .or_else(|| listed(BACKGROUND_PREFERRED, &same))
-        .unwrap_or(main)
+    haiku.or_else(|| listed(BACKGROUND_PREFERRED, same))
+}
+
+/// What a background picker needs for every main model in `models`, from
+/// the core so a shell keeps no privacy rule of its own (#1798 review):
+/// `sets` holds each distinct list of allowed background ids
+/// ([`background_options`]), and `models` maps each main model's id to its
+/// background default ([`background_default`]) and the index of its set.
+/// Worked out once per tier, not once per model. Empty for Codex, which
+/// has no background slot.
+pub fn background_table(tool: ToolId, models: &[ChatModel]) -> serde_json::Value {
+    let mut sets: Vec<Vec<&str>> = vec![];
+    let mut table = serde_json::Map::new();
+    if tool != ToolId::Codex {
+        let mut tiers: Vec<(ModelTier, usize, Option<&str>)> = vec![];
+        for main in models {
+            let (set, shared) = match known_tier(main) {
+                Some(tier) => match tiers.iter().find(|(t, _, _)| *t == tier) {
+                    Some((_, set, shared)) => (*set, *shared),
+                    None => {
+                        sets.push(
+                            background_options(main, models)
+                                .iter()
+                                .map(|m| m.id.as_str())
+                                .collect(),
+                        );
+                        let shared = tier_background(tool, tier, models).map(|m| m.id.as_str());
+                        tiers.push((tier, sets.len() - 1, shared));
+                        (sets.len() - 1, shared)
+                    }
+                },
+                // No known tier: only itself, its own set.
+                None => {
+                    sets.push(vec![main.id.as_str()]);
+                    (sets.len() - 1, None)
+                }
+            };
+            table.insert(
+                main.id.clone(),
+                serde_json::json!({"default": shared.unwrap_or(&main.id), "set": set}),
+            );
+        }
+    }
+    serde_json::json!({"sets": sets, "models": table})
 }
 
 /// The background model a session of `tool` on `main` runs: `requested`
@@ -470,17 +547,12 @@ pub fn claude_env(
     let named = |model: Option<&ChatModel>| model.and_then(|m| m.name.clone());
     // The models an alias may name: those at least as private as the
     // default, so no alias sends a request somewhere less private than the
-    // session's own model. A default with no known tier claims nothing.
-    let ceiling = default_model
-        .and_then(|m| m.tier)
-        .filter(|tier| *tier != ModelTier::Unknown);
-    let pool: Vec<&ChatModel> = models
+    // session's own model. A default with no known tier claims nothing, so
+    // every alias names the default; one the catalogue does not list, too.
+    let ceiling = default_model.and_then(known_tier);
+    let pool = models
         .iter()
-        .filter(|m| match ceiling {
-            Some(ceiling) => m.tier.is_some_and(|tier| tier <= ceiling),
-            None => true,
-        })
-        .collect();
+        .filter(move |m| default_model.is_some() && within(m, ceiling, default));
     let background = background_for(ToolId::Claude, default, background, models);
     let mut env = vec![("ANTHROPIC_MODEL", Some(default.to_owned()))];
     let mut aliases = vec![];
@@ -488,7 +560,7 @@ pub fn claude_env(
         let pick = if prefix == "anthropic/claude-haiku-" {
             background
         } else {
-            newest_in(prefix, &pool)
+            newest_in(prefix, pool.clone())
         };
         let (id, name) = match pick {
             Some(model) => (model.id.clone(), named(Some(model))),
@@ -774,6 +846,25 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ModelTier::ORDER).unwrap(),
             json!(["near_ai", "external", "incognito"])
+        );
+    }
+
+    /// #1798 review: the macOS shell keeps one copy of the tier order, a
+    /// fallback for a daemon from before `tier_order`. It must name the
+    /// same tiers in the same order as [`ModelTier::ORDER`].
+    #[test]
+    fn the_shells_fallback_tier_order_is_the_cores() {
+        let swift =
+            include_str!("../../../../macos/Sources/TCShellCore/ManagedSessionsSurface.swift");
+        let line = swift
+            .lines()
+            .find(|line| line.contains("static let knownTierOrder"))
+            .expect("the shell's fallback order");
+        let literal = &line[line.find('[').unwrap()..=line.rfind(']').unwrap()];
+        let shell: Vec<String> = serde_json::from_str(literal).unwrap();
+        assert_eq!(
+            serde_json::to_value(shell).unwrap(),
+            serde_json::to_value(ModelTier::ORDER).unwrap()
         );
     }
 
@@ -1374,7 +1465,7 @@ mod tests {
         );
         assert_eq!(pick(ToolId::Claude, "gone/main", None), None);
         // A model with no tier is not private: never offered beside a
-        // private main model; an untiered main admits every model.
+        // private main model.
         let mixed = vec![
             ChatModel {
                 id: "n/main".into(),
@@ -1387,10 +1478,68 @@ mod tests {
             },
         ];
         assert_eq!(ids(background_options(&mixed[0], &mixed)), vec!["n/main"]);
+        // An untiered main model claims nothing: only itself (#1798
+        // review), never every model.
         assert_eq!(
             ids(background_options(&mixed[1], &mixed)),
-            vec!["n/main", "x/untiered"]
+            vec!["x/untiered"]
         );
+    }
+
+    /// #1798 review: a main model whose tier this build cannot read (a
+    /// newer tier, or a payload without one) claims nothing, so every
+    /// secondary model is the main model itself, never an Incognito one,
+    /// and a main model the catalogue does not list names only itself.
+    #[test]
+    fn secondary_models_fail_closed_when_the_main_tier_is_unknown_or_missing() {
+        let mut listed = tiered(&[
+            ("anthropic/claude-haiku-4-5", ModelTier::Incognito),
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+            ("anthropic/claude-opus-5-5", ModelTier::Incognito),
+            ("anthropic/claude-fable-5", ModelTier::Incognito),
+            ("z-ai/glm-5.3-flash", ModelTier::NearAi),
+        ]);
+        let future: ChatModel =
+            serde_json::from_value(json!({"id": "x/future", "tier": "some_future_tier"})).unwrap();
+        assert_eq!(future.tier, Some(ModelTier::Unknown));
+        listed.push(future);
+        listed.push(ChatModel {
+            id: "x/untiered".into(),
+            ..Default::default()
+        });
+        for main in ["x/future", "x/untiered", "x/not-listed"] {
+            for background in [
+                None,
+                Some("anthropic/claude-haiku-4-5"),
+                Some("z-ai/glm-5.3-flash"),
+            ] {
+                let vars = claude_env(main, background, &listed);
+                for (name, value) in &vars {
+                    if let Some(id) = value {
+                        assert_eq!(id, main, "{name} {background:?}");
+                    }
+                }
+            }
+            if main != "x/not-listed" {
+                let model = listed.iter().find(|m| m.id == main).unwrap();
+                let ids: Vec<&str> = background_options(model, &listed)
+                    .into_iter()
+                    .map(|m| m.id.as_str())
+                    .collect();
+                assert_eq!(ids, vec![main]);
+                assert_eq!(background_default(ToolId::Claude, model, &listed).id, main);
+                assert_eq!(
+                    background_for(
+                        ToolId::Opencode,
+                        main,
+                        Some("anthropic/claude-haiku-4-5"),
+                        &listed
+                    )
+                    .map(|m| m.id.as_str()),
+                    Some(main)
+                );
+            }
+        }
     }
 
     /// The model a tool's own flag names in the person's CLI options: it
@@ -1480,7 +1629,9 @@ mod tests {
             ("b/second", ModelTier::NearAi),
         ]);
         assert_eq!(default_for(ToolId::Claude, &none).unwrap().id, "a/first");
-        // Never an abliterated model, a vision-only or an untooled one.
+        // No entry names an abliterated or a `-vl-` (vision) variant. Tool
+        // support and the window come from NEAR AI's catalogue, as the
+        // list's doc says; an id cannot show them, so this checks ids only.
         for id in PRIVATE_PREFERRED {
             let lower = id.to_ascii_lowercase();
             assert!(
@@ -1508,13 +1659,13 @@ mod tests {
             ChatModel {
                 id: "openai/gpt-6.1-sol".into(),
                 name: Some("GPT-6.1 Sol".into()),
-                tier: None,
+                tier: Some(ModelTier::Incognito),
                 ..Default::default()
             },
             ChatModel {
                 id: "anthropic/claude-sonnet-5".into(),
                 name: None,
-                tier: None,
+                tier: Some(ModelTier::Incognito),
                 ..Default::default()
             },
         ];

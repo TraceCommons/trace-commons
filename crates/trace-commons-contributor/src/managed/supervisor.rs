@@ -781,13 +781,13 @@ mod tests {
             ChatModel {
                 id: "deepseek-ai/DeepSeek-V3.1".into(),
                 name: None,
-                tier: None,
+                tier: Some(crate::managed::models::ModelTier::Incognito),
                 ..Default::default()
             },
             ChatModel {
                 id: "anthropic/claude-sonnet-5-5".into(),
                 name: Some("Claude Sonnet 5.5".into()),
-                tier: None,
+                tier: Some(crate::managed::models::ModelTier::Incognito),
                 ..Default::default()
             },
         ]

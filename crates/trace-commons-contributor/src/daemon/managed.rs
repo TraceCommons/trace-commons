@@ -636,12 +636,17 @@ fn remember_prepared(
         if let Some(mut prefs) = prefs {
             // A launch that fell back to the default because NEAR AI no
             // longer lists the saved model remembers its other choices but
-            // not the fallback: the folder keeps the model it had.
+            // not the fallback: the folder keeps the model it had, and the
+            // background model saved with it, which this launch weighed
+            // against the default instead (#1798 review).
             // When the saved model cannot be read, nothing is written: a
             // default must never replace it (#1754 review).
             if keep {
                 match saved_folder_model(shared, &prefs) {
-                    Ok(model) => prefs.model = model,
+                    Ok((model, background)) => {
+                        prefs.model = model;
+                        prefs.background_model = background;
+                    }
                     Err(()) => {
                         with_service(shared, |service| service.sessions.rollback_prepared(id))?;
                         return Err(Refusal::Unavailable("managed-folder-settings-save-failed"));
@@ -677,14 +682,15 @@ enum Resolved {
 fn saved_folder_model(
     shared: &DaemonShared,
     prefs: &crate::managed::folder::FolderSettings,
-) -> Result<Option<String>, ()> {
+) -> Result<(Option<String>, Option<String>), ()> {
     let cwd = crate::managed::folder::canonical(&prefs.cwd).map_err(|_| ())?;
     let settings = shared.settings.lock().map_err(|_| ())?;
     Ok(settings
         .managed_folder_settings
         .iter()
         .find(|entry| entry.tool == prefs.tool && entry.cwd == cwd)
-        .and_then(|entry| entry.model.clone()))
+        .map(|entry| (entry.model.clone(), entry.background_model.clone()))
+        .unwrap_or_default())
 }
 
 fn refusal_label(refusal: Refusal) -> &'static str {
@@ -771,6 +777,9 @@ fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
 /// Synchronous entry. A proxy whose session ended is dropped, which
 /// requests its shutdown; the asynchronous entry also awaits it.
 pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
+    if request.method == "managed_cli_model" {
+        return cli_model(request);
+    }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
     let mut ended = vec![];
@@ -809,6 +818,9 @@ where
     }
     if request.method == "managed_model_favorite_set" {
         return favorite_set(shared, request).await;
+    }
+    if request.method == "managed_cli_model" {
+        return cli_model(request);
     }
     // A launch that would prepare a new session on the sign-in waits for
     // the balance before anything is committed: a refusal, a cancelled
@@ -968,10 +980,10 @@ fn too_low(report: &BalanceReport) -> bool {
 /// NEAR AI cannot be read there is no answer, so nothing is marked.
 /// `tier` is NEAR AI's privacy tier (`models::ModelTier`); `tier_order` is
 /// the tiers a picker groups by, most private first (`ModelTier::ORDER`).
-/// `background_defaults` maps each model's id to the background model it
-/// gets as the main model when none is chosen (`models::background_default`;
-/// empty for Codex). A background picker offers the models of the main
-/// model's tier or a more private one (`models::background_options`).
+/// `background` maps each model's id, as the main model, to its background
+/// default and the index in `background_sets` of the background ids it
+/// allows (`models::background_table`; both empty for Codex). A background
+/// picker lists those and keeps no rule of its own.
 async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -998,29 +1010,38 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
                 .map(String::as_str)
                 .filter(|id| !listed.iter().any(|m| m.id == *id))
                 .collect();
-            // Each model's background default when it is the main model,
-            // for the background picker's default row. Codex has none.
-            let backgrounds: serde_json::Map<String, Value> = if p.tool == ToolId::Codex {
-                serde_json::Map::new()
-            } else {
-                models
-                    .iter()
-                    .map(|main| {
-                        let background = models::background_default(p.tool, main, &models);
-                        (main.id.clone(), json!(background.id))
-                    })
-                    .collect()
-            };
+            let background = models::background_table(p.tool, &models);
             Ok(json!({
                 "models":models,"default":default,"favorites":favorites,
                 "unavailable_favorites":unavailable,
                 "tier_order":models::ModelTier::ORDER,
-                "background_defaults":backgrounds,
+                "background_sets":background["sets"],
+                "background":background["models"],
             }))
         }
         _ => Err(ManagedError::ModelUnavailable.into()),
     };
     respond(request, result)
+}
+
+/// `managed_cli_model {tool, cli_options}`: the model the tool's own flag
+/// names in `cli_options` (`models::flag_model`), which the launcher runs
+/// instead of the picker's (#1798 review). Local only: nothing is read from
+/// NEAR AI. Options that do not parse name none, as a launch refuses them.
+fn cli_model(request: &Request) -> Response {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        tool: ToolId,
+        cli_options: String,
+    }
+    let p: Params = match parse(request) {
+        Ok(p) => p,
+        Err(error) => return respond(request, Err(error.into())),
+    };
+    let args = crate::managed::options::parse(p.tool, &p.cli_options).unwrap_or_default();
+    let model = models::flag_model(p.tool, &args);
+    respond(request, Ok(json!({ "model": model })))
 }
 
 /// `managed_model_favorite_set {model, favorite}`: star or unstar one model
@@ -1387,7 +1408,10 @@ mod tests {
             collect_traces: false,
             cli_options: String::new(),
         };
-        assert_eq!(saved_folder_model(&shared, &prefs(&folder)), Ok(None));
+        assert_eq!(
+            saved_folder_model(&shared, &prefs(&folder)),
+            Ok((None, None))
+        );
         shared
             .settings
             .lock()
@@ -1395,11 +1419,14 @@ mod tests {
             .managed_folder_settings
             .push(crate::managed::folder::FolderSettings {
                 model: Some("provider/saved".into()),
+                background_model: Some("provider/small".into()),
                 ..prefs(&crate::managed::folder::canonical(&folder).unwrap())
             });
+        // #1798 review: a fallback launch keeps the folder's saved
+        // background model with its saved model, never this launch's.
         assert_eq!(
             saved_folder_model(&shared, &prefs(&folder)),
-            Ok(Some("provider/saved".into()))
+            Ok((Some("provider/saved".into()), Some("provider/small".into())))
         );
         // The folder went away between prepare and this write.
         assert!(saved_folder_model(&shared, &prefs(&home.path().join("gone"))).is_err());

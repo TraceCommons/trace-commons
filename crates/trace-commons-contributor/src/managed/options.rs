@@ -78,8 +78,6 @@ pub fn parse(tool: ToolId, options: &str) -> Result<Vec<String>, ManagedError> {
     Ok(args)
 }
 
-/// Managed account isolation, routing and session identity belong to the launcher.
-/// Model, reasoning, sandbox and permission choices remain configurable.
 /// Whether a `-c` override, as a TOML table, reaches one of Codex's
 /// secondary model keys ([`super::codex::SECONDARY_MODEL_KEYS`]): by its
 /// dotted key, or by setting a table that holds it (`agents={...}`).
@@ -98,6 +96,12 @@ fn names_secondary_model(table: &toml::Table) -> bool {
     walk("", table)
 }
 
+/// Managed account isolation, routing and session identity belong to the launcher.
+/// Model, reasoning, sandbox and permission choices remain configurable,
+/// except a model other than the session's own (#1798 review): Claude
+/// Code's `--fallback-model` and `--agents`, and Codex's secondary model
+/// keys, are refused, so no secondary model can be less private than the
+/// model in use.
 fn validate(tool: ToolId, args: &[String]) -> Result<(), ManagedError> {
     let invalid = || ManagedError::InvalidCliOptions;
     let mut iter = args.iter();
@@ -111,6 +115,8 @@ fn validate(tool: ToolId, args: &[String]) -> Result<(), ManagedError> {
                 if matches!(
                     flag,
                     "--settings"
+                        | "--fallback-model"
+                        | "--agents"
                         | "--setting-sources"
                         | "--session-id"
                         | "--resume"
@@ -241,5 +247,31 @@ mod tests {
         ] {
             assert!(parse(ToolId::Codex, allowed).is_ok(), "{allowed}");
         }
+    }
+}
+
+#[cfg(test)]
+mod claude_tests {
+    use super::*;
+
+    /// #1798 review: Claude Code's own secondary-model flags could send
+    /// work to a model less private than the session's, so they are
+    /// refused, as Codex's secondary keys are. `--model` stays: the
+    /// launcher follows it (`models::flag_model`).
+    #[test]
+    fn claude_options_cannot_name_a_secondary_model() {
+        for refused in [
+            "--fallback-model anthropic/claude-opus-5-5",
+            "--fallback-model=anthropic/claude-opus-5-5",
+            r#"--agents '{"x":{"description":"d","prompt":"p","model":"anthropic/claude-opus-5-5"}}'"#,
+            "--agents=agents.json",
+        ] {
+            assert_eq!(
+                parse(ToolId::Claude, refused),
+                Err(ManagedError::InvalidCliOptions),
+                "{refused}"
+            );
+        }
+        assert!(parse(ToolId::Claude, "--model Qwen/Qwen3.8-27B").is_ok());
     }
 }
