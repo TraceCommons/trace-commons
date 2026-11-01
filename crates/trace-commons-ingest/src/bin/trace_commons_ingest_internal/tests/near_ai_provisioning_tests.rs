@@ -1458,12 +1458,20 @@ async fn insert_plain_session(
     secret
 }
 
-/// Every route behind the strong-authenticator gate, with a request that
-/// passes the gate and then fails on its own terms (an unknown key, a bogus
-/// proposal) so the status alone says whether the gate let it through.
+/// Every route behind the strong-authenticator gate, each with a well-formed
+/// body, so a `403` can only have come from the gate.
 fn gated_requests() -> Vec<(&'static str, &'static str, Option<serde_json::Value>)> {
     vec![
         ("POST", "/v1/account/near/enroll/start", None),
+        (
+            "POST",
+            "/v1/account/near/enroll/finish",
+            Some(serde_json::json!({
+                "accountId": "alice.near",
+                "publicKey": "ed25519:unknown-key",
+                "signature": "AAAA",
+            })),
+        ),
         (
             "PATCH",
             "/v1/account/near-identities/ed25519:unknown-key/payout",
@@ -1538,11 +1546,12 @@ async fn pg_a_weak_session_cannot_change_authenticators_on_a_near_ai_login_accou
     drop_tenants(&admin, &[&tenant]).await;
 }
 
-/// A session a NEAR AI sign-in just minted may make those changes. Once the
-/// sign-in is older than `NEAR_AI_LOGIN_FRESH_SECS`, the same session is
-/// refused until the contributor signs in with NEAR AI again.
+/// No NEAR AI session passes the gate, however recent: a NEAR AI sign-in
+/// and the daemon's unattended renewal mint the same session, so neither is
+/// proof that a person just signed in. On an account with a strong
+/// authenticator, only a NEAR wallet session may make these changes.
 #[tokio::test]
-async fn pg_a_fresh_near_ai_login_session_may_change_authenticators_and_a_stale_one_may_not() {
+async fn pg_a_near_ai_sign_in_session_cannot_change_authenticators() {
     let Some(h) = harness().await else {
         return;
     };
@@ -1563,34 +1572,94 @@ async fn pg_a_fresh_near_ai_login_session_may_change_authenticators_and_a_stale_
     for (method, uri, body) in gated_requests() {
         reset_account_rate_limiter_for_db_test().await;
         let reply = send_account(&h.state, method, uri, body.as_ref(), &auth).await;
-        assert_ne!(
-            reply.status,
-            StatusCode::FORBIDDEN,
-            "a fresh NEAR AI sign-in passes the gate: {method} {uri}: {:?}",
-            reply.json()
-        );
-    }
-
-    let window = trace_commons_server::account_session::NEAR_AI_LOGIN_FRESH_SECS + 1;
-    admin
-        .execute(
-            "UPDATE trace_sessions
-                SET near_ai_login_at = now() - make_interval(secs => $2::float8)
-              WHERE tenant_id = $1",
-            &[&tenant, &(window as f64)],
-        )
-        .await
-        .expect("age the sign-in");
-    for (method, uri, body) in gated_requests() {
-        reset_account_rate_limiter_for_db_test().await;
-        let reply = send_account(&h.state, method, uri, body.as_ref(), &auth).await;
         assert_eq!(
             reply.status,
             StatusCode::FORBIDDEN,
-            "a stale NEAR AI sign-in is refused: {method} {uri}: {:?}",
+            "{method} {uri}: {:?}",
             reply.json()
         );
     }
 
+    drop_tenants(&admin, &[&tenant]).await;
+}
+
+/// The gate counts a NEAR AI login as a strong authenticator, once however
+/// many anchors a merge left on the account. Removing a NEAR key still
+/// reports how many NEAR keys remain, so a NEAR AI account that removes its
+/// last one reads `0`, as it did before.
+#[tokio::test]
+async fn pg_a_near_ai_account_counts_its_login_once_and_reports_remaining_near_keys() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let admin = h.admin().await;
+    let device = Device::new();
+    let provisioned = provision(&h, &device).await;
+    let tenant = provisioned["tenant_id"]
+        .as_str()
+        .expect("tenant")
+        .to_string();
+    let account: Uuid = provisioned["account_id"]
+        .as_str()
+        .expect("account")
+        .parse()
+        .expect("uuid");
+    let anchor = provisioned["anchor_hash"]
+        .as_str()
+        .expect("anchor")
+        .to_string();
+    // A second login anchor, as a merge that re-keys the absorbed account's
+    // anchors onto the survivor leaves.
+    admin
+        .execute(
+            "INSERT INTO trace_near_account_anchors
+                    (tenant_id, anchor_hash, account_id, sealed_account_name,
+                     index_pepper_ref, account_name_key_ref, identity_source, auth_provider)
+             SELECT tenant_id, 'sha256:' || repeat('e', 64), account_id, sealed_account_name,
+                    index_pepper_ref, account_name_key_ref, identity_source, auth_provider
+               FROM trace_near_account_anchors WHERE anchor_hash = $1",
+            &[&anchor],
+        )
+        .await
+        .expect("second anchor");
+    let backend = h.backend.clone();
+    assert_eq!(
+        backend
+            .count_active_strong_authenticators(&tenant, account)
+            .await
+            .expect("count"),
+        1
+    );
+
+    admin
+        .execute(
+            "INSERT INTO trace_near_identities(tenant_id, public_key, near_account_id, account_id)
+             VALUES ($1, 'ed25519:near-ai-account-key', 'alice.near', $2)",
+            &[&tenant, &account],
+        )
+        .await
+        .expect("near key");
+    assert_eq!(
+        backend
+            .count_active_strong_authenticators(&tenant, account)
+            .await
+            .expect("count"),
+        2
+    );
+    let revoked = backend
+        .revoke_account_near_identity(&tenant, account, "ed25519:near-ai-account-key")
+        .await
+        .expect("revoke");
+    assert!(revoked.removed);
+    assert_eq!(revoked.remaining_strong, 0, "no NEAR key remains");
+
+    admin
+        .execute(
+            "DELETE FROM trace_near_account_anchors WHERE anchor_hash = $1",
+            &[&format!("sha256:{}", "e".repeat(64))],
+        )
+        .await
+        .expect("cleanup");
     drop_tenants(&admin, &[&tenant]).await;
 }

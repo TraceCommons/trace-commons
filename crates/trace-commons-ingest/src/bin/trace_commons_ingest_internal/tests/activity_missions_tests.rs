@@ -77,7 +77,6 @@ async fn activity_missions_status_never_substitutes_zero_for_missing_policy_or_d
         actor_ref: "test".into(),
         auth_credential_id: None,
         client_kind: "native".into(),
-        fresh_near_ai_login: false,
         session_token_hash: None,
     };
     let response = activity_missions::status(

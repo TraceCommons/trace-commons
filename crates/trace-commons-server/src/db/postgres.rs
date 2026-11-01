@@ -1934,13 +1934,6 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "remove_passkeys",
         include_str!("../../../../migrations/V144__remove_passkeys.sql"),
     ),
-    // V145: a session records when a NEAR AI sign-in minted it, so the
-    // strong-authenticator gate can tell that sign-in from a device renewal.
-    (
-        145,
-        "session_near_ai_login_at",
-        include_str!("../../../../migrations/V145__session_near_ai_login_at.sql"),
-    ),
 ];
 
 /// Shared by verified claim issuance and the explicit historical repair.
@@ -1993,12 +1986,32 @@ async fn bind_device_upload_principal_tx(
     Ok(())
 }
 
+/// One account's active NEAR identities (unrevoked NEAR keys), inside a
+/// transaction already scoped to its tenant. What a NEAR key revoke reports as
+/// remaining: `0` means no NEAR key is left.
+pub(super) async fn active_near_identity_count(
+    tx: &deadpool_postgres::Transaction<'_>,
+    account_id: &Uuid,
+) -> Result<i64, DatabaseError> {
+    let row = tx
+        .query_one(
+            "SELECT count(*) AS key_count FROM trace_near_identities
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND revoked_at IS NULL",
+            &[account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    Ok(row.get("key_count"))
+}
+
 /// One account's active strong authenticators, inside a transaction already
-/// scoped to its tenant: its unrevoked NEAR identities plus its NEAR AI login
-/// anchor, if it has one. A NEAR AI login is strong, so an account that signs
-/// in with NEAR AI is never at zero and never takes the bootstrapping
-/// carve-out. The single definition of the count
-/// `count_active_strong_authenticators` reads.
+/// scoped to its tenant: its unrevoked NEAR identities, plus one if it signs in
+/// with NEAR AI (a `near_ai_login` anchor; one however many a merge left). The
+/// strong-authenticator gate reads it, so an account that signs in with NEAR AI
+/// is never at zero and never takes the bootstrapping carve-out. The single
+/// definition of the count `count_active_strong_authenticators` reads.
 pub(super) async fn active_strong_authenticator_count(
     tx: &deadpool_postgres::Transaction<'_>,
     account_id: &Uuid,
@@ -2009,10 +2022,12 @@ pub(super) async fn active_strong_authenticator_count(
                       WHERE tenant_id = trace_current_tenant_id()
                         AND account_id = $1
                         AND revoked_at IS NULL)
-                  + (SELECT count(*) FROM trace_near_account_anchors
-                      WHERE tenant_id = trace_current_tenant_id()
-                        AND account_id = $1
-                        AND identity_source = 'near_ai_login')
+                  + (SELECT CASE WHEN EXISTS (
+                        SELECT 1 FROM trace_near_account_anchors
+                         WHERE tenant_id = trace_current_tenant_id()
+                           AND account_id = $1
+                           AND identity_source = 'near_ai_login')
+                     THEN 1 ELSE 0 END)
                     AS strong_count",
             &[account_id],
         )
@@ -4230,9 +4245,6 @@ impl Database for PgBackend {
             .query_opt(
                 "SELECT s.account_id, s.auth_credential_id, s.token_hash, s.client_kind,
                         s.expires_at,
-                        (s.near_ai_login_at IS NOT NULL
-                         AND s.near_ai_login_at > now() - make_interval(secs => $5::float8))
-                            AS fresh_near_ai_login,
                         (s.token_hash = $1) AS matched_current,
                         (s.token_issued_at < now() - make_interval(secs =>
                             CASE WHEN s.client_kind = $4 THEN $3::float8 ELSE $2::float8 END))
@@ -4253,7 +4265,6 @@ impl Database for PgBackend {
                     &(interval_secs as f64),
                     &(native_interval_secs as f64),
                     &crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND,
-                    &(crate::account_session::NEAR_AI_LOGIN_FRESH_SECS as f64),
                 ],
             )
             .await
@@ -4284,7 +4295,6 @@ impl Database for PgBackend {
         let account_id: Uuid = row.get("account_id");
         let auth_credential_id: Option<String> = row.get("auth_credential_id");
         let client_kind: String = row.get("client_kind");
-        let fresh_near_ai_login: bool = row.get("fresh_near_ai_login");
         let mut expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
         let current_token_hash: String = row.get("token_hash");
         let matched_current: bool = row.get("matched_current");
@@ -4358,7 +4368,6 @@ impl Database for PgBackend {
                         account_id,
                         auth_credential_id,
                         client_kind,
-                        fresh_near_ai_login,
                         rotated_secret: None,
                         expires_at,
                     }));
@@ -4403,7 +4412,6 @@ impl Database for PgBackend {
             account_id,
             auth_credential_id,
             client_kind,
-            fresh_near_ai_login,
             rotated_secret,
             expires_at,
         }))
@@ -4846,9 +4854,9 @@ impl Database for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
-        // remaining strong authenticators (NEAR identities), computed in the
-        // SAME tx after the revoke.
-        let remaining_strong = active_strong_authenticator_count(&tx, &account_id).await?;
+        // Remaining NEAR identities (NEAR keys), computed in the SAME tx after
+        // the revoke. Not the gate's count: a NEAR AI login is not a key.
+        let remaining_strong = active_near_identity_count(&tx, &account_id).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(crate::db::RevokeNearResult {
             removed: removed > 0,

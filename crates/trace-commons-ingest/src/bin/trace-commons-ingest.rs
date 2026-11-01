@@ -19807,9 +19807,6 @@ async fn resolve_account_ctx_native(
             // no strength (see below).
             auth_credential_id: session.auth_credential_id,
             client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
-            // The one way a native token passes the gate: a NEAR AI sign-in
-            // minted it within `NEAR_AI_LOGIN_FRESH_SECS`.
-            fresh_near_ai_login: session.fresh_near_ai_login,
             session_token_hash: Some(token_hash),
         },
         rotated,
@@ -19876,8 +19873,6 @@ async fn resolve_account_ctx_cookie(
             // Session strength for the authenticator-change gate: only `'near'`
             // is strong.
             client_kind: session.client_kind,
-            // Only a native session is ever stamped by a NEAR AI sign-in.
-            fresh_near_ai_login: false,
             session_token_hash: Some(token_hash),
         },
         rotated_cookie_value,
@@ -23233,6 +23228,13 @@ const ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
 /// session or a phished device-link link cannot silently swap the account's
 /// real second factor.
 ///
+/// The strong authenticators are the account's NEAR keys and, if it signs in
+/// with NEAR AI, that login (`count_active_strong_authenticators`). A NEAR AI
+/// session is still weak: the daemon's unattended renewal mints the same
+/// session a person's sign-in does, so no NEAR AI session proves that someone
+/// just signed in. An account that signs in with NEAR AI therefore needs a NEAR
+/// wallet session for these changes.
+///
 /// The single exception is the BOOTSTRAPPING carve-out: when the account has zero
 /// strong authenticators a weak session MAY add the FIRST one (otherwise a
 /// contributor who only ever held a device link could never enroll a NEAR key).
@@ -23244,7 +23246,7 @@ const ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
 /// read under RLS and a non-zero count denies with a 403 plus a hash-only
 /// `account_authenticator_gate_denied` audit row (actor-only, no identifiers).
 async fn require_authenticator_change_allowed(state: &AppState, ctx: &AccountCtx) -> ApiResult<()> {
-    if ctx.may_change_authenticators() {
+    if ctx.is_strong_session() {
         return Ok(());
     }
     let db = account_db(state)?;
@@ -23270,7 +23272,7 @@ async fn require_authenticator_change_allowed(state: &AppState, ctx: &AccountCtx
     .map_err(internal_error)?;
     Err(api_error(
         StatusCode::FORBIDDEN,
-        "a NEAR wallet sign-in or a recent NEAR AI sign-in is required to change authenticators",
+        "a NEAR wallet sign-in is required to change authenticators",
     ))
 }
 

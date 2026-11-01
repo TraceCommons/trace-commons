@@ -1511,7 +1511,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     }
 
     /// Soft-revoke one of `account_id`'s ACTIVE NEAR identities and report how many
-    /// strong authenticators (NEAR identities) remain active
+    /// NEAR identities (NEAR keys) remain active
     /// for the account afterwards, computed in the SAME tx as the revoke. `removed`
     /// is `false` for an unknown / already-revoked / other-account key. Tenant- +
     /// account-scoped under forced RLS so a caller can never revoke an identity they
@@ -1684,10 +1684,10 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Count `account_id`'s ACTIVE strong authenticators, which are its NEAR
-    /// identities, in ONE RLS-scoped tx. Lets a caller enforce "keep at least
-    /// one strong authenticator" before revoking the last NEAR key. Tenant- +
-    /// account-scoped under forced RLS.
+    /// Count `account_id`'s ACTIVE strong authenticators in ONE RLS-scoped tx:
+    /// its NEAR identities, plus one if it signs in with NEAR AI. The
+    /// strong-authenticator gate reads it. Tenant- + account-scoped under
+    /// forced RLS.
     async fn count_active_strong_authenticators(
         &self,
         _tenant_id: &str,
@@ -2100,10 +2100,6 @@ pub struct ValidatedSession {
     /// strong-authenticator gate to classify session strength: only a `'near'`
     /// session is STRONG. A public label, never key material.
     pub client_kind: String,
-    /// Whether a NEAR AI sign-in minted this session within the last
-    /// `NEAR_AI_LOGIN_FRESH_SECS` (`trace_sessions.near_ai_login_at`). Such a
-    /// session passes the strong-authenticator gate while it holds.
-    pub fresh_near_ai_login: bool,
     /// Set to the NEW raw session secret when rotation-on-use fired for this
     /// request (the matched row's `token_issued_at` aged past the rotation
     /// interval and the request matched the CURRENT `token_hash`), and `None`
@@ -2216,9 +2212,10 @@ pub enum PayoutResolution {
 
 /// Outcome of revoking one of an account's NEAR identities. `removed` is whether
 /// the soft-delete affected a row (false for an unknown / already-revoked / other
-/// account's key); `remaining_strong` is the count of the account's strong
-/// authenticators (NEAR identities) still active after the
-/// revoke, so the caller can refuse to remove the last strong authenticator.
+/// account's key); `remaining_strong` is the count of the account's NEAR
+/// identities (NEAR keys) still active after the revoke. It does not count a
+/// NEAR AI login, so `0` means no NEAR key is left, not that the account has
+/// no strong authenticator.
 #[derive(Debug, Clone, Copy)]
 pub struct RevokeNearResult {
     pub removed: bool,

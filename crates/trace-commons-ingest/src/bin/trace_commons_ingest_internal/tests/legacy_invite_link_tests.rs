@@ -29,7 +29,6 @@ fn session_ctx(tenant: &str, account: Uuid, method: AccountAuthMethod) -> Accoun
         actor_ref: format!("account-actor:{account}"),
         auth_credential_id: None,
         client_kind: "near".into(),
-        fresh_near_ai_login: false,
         session_token_hash: None,
     }
 }

@@ -92303,7 +92303,6 @@ impl Database for NativeAuthTestDb {
                 account_id: s.account_id,
                 auth_credential_id: None,
                 client_kind: s.client_kind.clone(),
-                fresh_near_ai_login: false,
                 rotated_secret: rotated_secret.clone(),
                 expires_at: s.expires_at,
             });

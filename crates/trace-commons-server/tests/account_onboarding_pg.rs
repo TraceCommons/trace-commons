@@ -1901,14 +1901,11 @@ async fn a_code_minted_on_a_laptop_links_a_server_that_alone_renews_by_key() {
     };
     assert_eq!(linked.account_id, account);
     assert_eq!(linked.anchor_hash, first.anchor_hash);
-    // A code is not a NEAR AI sign-in, so the server's session may not
-    // change authenticators on the strength of one.
     assert!(
-        !db.validate_session(&tenant, &server_session)
+        db.validate_session(&tenant, &server_session)
             .await
             .unwrap()
-            .expect("the server's session is live")
-            .fresh_near_ai_login
+            .is_some()
     );
     assert_eq!(
         signup_grants(&admin, &tenant, &linked.device_key_id).await,
