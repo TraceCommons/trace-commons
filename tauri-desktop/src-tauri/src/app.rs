@@ -84,31 +84,18 @@ fn digest_body(
         lines.push("Nothing is sent until you review them.".to_owned());
     }
     if contributed_count > 0 {
-        let noun = if contributed_count == 1 {
-            "trace"
-        } else {
-            "traces"
-        };
-        // A project is named only when exactly one contributed -- the same
-        // rule as the daemon's `notify::contribution_text` and the three
-        // native shells (K9, #1118), matching the design's evening-digest
-        // examples. Unlike the waiting half, never a list.
+        // The daemon's own sentence, so the wording, the one-project rule and
+        // the rounding are the core's alone. Labels are sanitised first.
         let named: BTreeSet<String> = contributed_projects
             .iter()
             .map(String::as_str)
             .filter_map(sanitize_digest_label)
             .collect();
-        let from = match named.iter().collect::<Vec<_>>().as_slice() {
-            [only] => format!(" from {only}"),
-            _ => String::new(),
-        };
-        let mut line = format!("{contributed_count} {noun} contributed{from}.");
-        // Earned, then pending, in the daemon's one wording.
-        line.push_str(
-            &trace_commons_contributor::daemon::notify::credit_sentences(
-                credit_final as f32,
-                credit_pending as f32,
-            ),
+        let line = trace_commons_contributor::daemon::notify::contribution_text(
+            contributed_count,
+            &named,
+            credit_final,
+            credit_pending,
         );
         lines.push(line);
     }
@@ -521,6 +508,14 @@ mod tests {
             )
             .as_deref(),
             Some("2 traces contributed. 10.5 credit pending.")
+        );
+    }
+
+    #[test]
+    fn credit_is_rounded_once_by_the_core() {
+        assert_eq!(
+            digest_body(0, &[], 1, &["a".to_owned()], f64::from(0.35_f32), 0.04).as_deref(),
+            Some("1 trace contributed from a. 0.4 credit earned.")
         );
     }
 

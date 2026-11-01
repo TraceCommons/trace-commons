@@ -1169,7 +1169,6 @@ enum DaemonEventParser {
                 pending: payload["pending"] as? Int ?? 0,
                 contributed: payload["contributed"] as? Int ?? 0,
                 contributedProjects: payload["contributed_projects"] as? [String] ?? [],
-                creditFinal: payload["credit_final"] as? Double ?? 0,
                 creditPending: payload["credit_pending"] as? Double ?? 0,
                 text: payload["text"] as? String ?? ""
             )

@@ -42,7 +42,9 @@
 //!
 //! The words a nudge must never use are pinned by this module's tests:
 //! nothing that calls pending credit money ("earned", "paid", "settled",
-//! "worth", "$"), no "private inference", no pressure ("unlock", "reward",
+//! "worth", "$"; the digest's contribution line, in `daemon::notify`, says
+//! "earned" of credit the server has decided, owner 2026-11-01, and never
+//! of pending credit), no "private inference", no pressure ("unlock", "reward",
 //! "missing out", "last chance", "streak", "in a row", "don't miss",
 //! "hurry"), nothing about expiry ("expire", "dropped", "days left"), and no
 //! exclamation marks. A folder mode is named only by its
@@ -172,8 +174,10 @@ pub const TOOL_LIST_MANY: &str = "{k} tools";
 /// The History card's title. A zero clause is dropped. DRAFT, NEEDS
 /// APPROVAL.
 pub const NUDGE_VERDICTS_TITLE: &str = "Since {date}: {a} accepted, {h} held for privacy review";
-/// Omitted when the credit is zero. "final", never "earned", "paid" or
-/// "settled"; owner decision 12 asks whether "final" itself reads as
+/// Omitted when the credit is zero. "final", never "paid" or "settled"
+/// (the digest's contribution line says "earned" of decided credit, owner
+/// 2026-11-01; a digest that folds this clause in leaves that sentence out,
+/// so the two never share a body); owner decision 12 asks whether "final" itself reads as
 /// settled. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_VERDICTS_FINAL_CLAUSE: &str = "{x} credit is now final.";
 /// The History card's title when the only news is credit becoming final:

@@ -338,7 +338,7 @@ public sealed class DaemonHost : IAsyncDisposable
                         evt.ContributedCount,
                         evt.ContributedProjects,
                         evt.CreditPending,
-                        evt.CreditFinal));
+                        evt.Contribution));
                     break;
 
                 case DaemonProtocol.Events.Lagged:

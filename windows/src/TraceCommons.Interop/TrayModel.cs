@@ -356,8 +356,7 @@ public static class DigestText
     public static string? ContributionLine(
         int contributedCount,
         IReadOnlyList<string> projectLabels,
-        double creditPending,
-        double creditFinal = 0)
+        double creditPending)
     {
         ArgumentNullException.ThrowIfNull(projectLabels);
 
@@ -381,32 +380,28 @@ public static class DigestText
         string from = named.Count == 1 ? JoinProjects(named) : string.Empty;
         string line = $"{contributedCount} {noun} contributed{from}.";
 
-        // Earned (credit the server has decided), then pending (still being
-        // scored, never called earned). Each only when there is some: "0
-        // credit pending" reads as a failure rather than as a fresh start.
-        line += CreditSentence(creditFinal, EarnedWord);
-        line += CreditSentence(creditPending, PendingWord);
+        // Only when there is some: "0 credit pending" reads as a failure
+        // rather than as a fresh start, and the first digest after arming a
+        // project is exactly when that would show. This is the fallback for
+        // a daemon that sends no `contribution` sentence; the core's own
+        // sentence (which also says decided credit as "earned") is posted
+        // instead whenever it is present. Pending is never called earned.
+        if (creditPending > 0)
+        {
+            // Rounded half away from zero explicitly, matching the daemon and
+            // the other two shells. "0.0" already rounds that way here while
+            // Rust's {:.1} and Swift's %.1f round half to even, so 4.25 read
+            // as 4.3 here and 4.2 there -- the same contribution, a different
+            // figure depending which machine the contributor read it on.
+            // Stated rather than relied on, so the agreement is visible.
+            line += string.Format(
+                CultureInfo.InvariantCulture,
+                " {0:0.0} credit pending.",
+                Math.Round(creditPending, 1, MidpointRounding.AwayFromZero));
+        }
 
         return line;
     }
-
-    // The digest's credit wording in one place: "{amount} credit earned."
-    // (approved by the owner, 2026-11-01) and "{amount} credit pending.".
-    // The daemon's notify::credit_sentences is the Rust original.
-    private const string EarnedWord = "earned";
-    private const string PendingWord = "pending";
-
-    // Rounded half away from zero explicitly, matching the daemon and the
-    // other shells: Rust's {:.1} and Swift's %.1f round half to even, so 4.25
-    // would read as 4.2 there and 4.3 here.
-    private static string CreditSentence(double amount, string word) =>
-        double.IsFinite(amount) && amount > 0
-            ? string.Format(
-                CultureInfo.InvariantCulture,
-                " {0:0.0} credit {1}.",
-                Math.Round(amount, 1, MidpointRounding.AwayFromZero),
-                word)
-            : string.Empty;
 
     /// <summary>
     /// The most names a notification will list before summarising the rest

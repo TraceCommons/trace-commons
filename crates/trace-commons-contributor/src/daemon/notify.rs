@@ -331,18 +331,18 @@ pub fn digest_text(pending: &[&QueueEntry]) -> String {
 /// the one-project rule is not expected to make this line silent about
 /// where things came from as often as it looks.
 ///
-/// The same sentence is built by the macOS shell
-/// (`DigestCopy.contributionLine`), the Windows shell
-/// (`DigestText.ContributionLine`) and the Linux shell
-/// (`notify::contribution_body`). All four use one rule -- a project is
+/// The daemon composes this sentence once. GTK and Tauri call it; macOS posts
+/// the daemon's `text` and Windows the `contribution` field, and their older
+/// pending-only fallbacks (`DigestCopy.contributionLine`,
+/// `DigestText.ContributionLine`) follow the same rule -- a project is
 /// named only when exactly one distinct, non-blank label is present, the
 /// clause always ends with a period, and credit follows as its own
 /// sentence -- and each pins the design's two examples verbatim.
 pub fn contribution_text(
     count: usize,
     projects: &BTreeSet<String>,
-    credit_final: f32,
-    credit_pending: f32,
+    credit_final: f64,
+    credit_pending: f64,
 ) -> String {
     let noun = if count == 1 { "trace" } else { "traces" };
     let mut line = format!("{count} {noun} contributed");
@@ -355,30 +355,55 @@ pub fn contribution_text(
     line
 }
 
+/// The digest's credit sentence for credit the server has decided. Owned by
+/// this module (the digest's copy table); the shells that link this crate
+/// call [`contribution_text`], and macOS and Windows post the sentence the
+/// daemon composes (`digest_due.contribution`). Approved by the owner
+/// 2026-11-01 ("we have finalized credits in the app"); the Home tile's
+/// "Credit earned" was approved 2026-10-29.
+pub const DIGEST_CREDIT_EARNED: &str = "{x} credit earned.";
+/// The digest's credit sentence for credit still being scored.
+pub const DIGEST_CREDIT_PENDING: &str = "{x} credit pending.";
+
 /// The digest's credit sentences, each with a leading space so they append to
-/// the contribution sentence, or an empty string when there is no credit.
-///
-/// The one place the wording lives for the daemon, the GTK shell and the
-/// Tauri shell (macOS and Windows keep a mirror each, pinned by their tests):
-/// `{amount} credit earned.` for credit the server has decided, then
-/// `{amount} credit pending.` for credit still being scored. Each appears
-/// only when its figure is above zero. "Earned" is only ever said of decided
+/// the contribution sentence, or an empty string when there is no credit:
+/// [`DIGEST_CREDIT_EARNED`] first, then [`DIGEST_CREDIT_PENDING`]. Each
+/// appears only when its figure is at least 0.1 *after* rounding, so
+/// "0.0 credit earned." is never said. "Earned" is only ever said of decided
 /// credit; a pending figure is never called earned.
 ///
-/// One decimal place: credit is a score, not an amount, and trailing
-/// precision invites the reader to treat it as a balance. Rounded explicitly,
-/// half away from zero, rather than left to each language's default: Rust's
-/// `{:.1}` rounds half to even and .NET's "0.0" rounds half away from zero,
-/// so 4.25 would read 4.2 here and 4.3 on Windows.
-pub fn credit_sentences(credit_final: f32, credit_pending: f32) -> String {
+/// One decimal place, rounded once (half away from zero, from the decimal
+/// the server wrote -- see [`wire_credit`]), so every shell shows the same
+/// figure: credit is a score, not an amount, and trailing precision invites
+/// the reader to treat it as a balance.
+pub fn credit_sentences(credit_final: f64, credit_pending: f64) -> String {
     let mut out = String::new();
-    for (figure, word) in [(credit_final, "earned"), (credit_pending, "pending")] {
-        if figure.is_finite() && figure > 0.0 {
-            let rounded = (figure * 10.0).round() / 10.0;
-            out.push_str(&format!(" {rounded:.1} credit {word}."));
+    for (figure, template) in [
+        (credit_final, DIGEST_CREDIT_EARNED),
+        (credit_pending, DIGEST_CREDIT_PENDING),
+    ] {
+        if let Some(tenths) = super::nudge::tenths_of(figure) {
+            out.push(' ');
+            out.push_str(&template.replace("{x}", &crate::nudge_render::credit_text(tenths)));
         }
     }
     out
+}
+
+/// A credit figure for the wire: rounded once to tenths and decimal-clean
+/// (0.4, never 0.3999999940395355), or 0 when it rounds to nothing. A shell
+/// that formats it to one decimal cannot disagree with another.
+pub fn wire_credit(credit: f64) -> f64 {
+    super::nudge::tenths_of(credit).map_or(0.0, |t| t as f64 / 10.0)
+}
+
+/// The final credit the contribution line may state. When verdict news is
+/// folded into the same digest it already says decided credit ("is now
+/// final", approved nudge copy), so that sentence owns it and the
+/// contribution line leaves it out rather than say one figure twice in two
+/// words.
+pub fn earned_credit_for_digest(credit_final: f64, fold_is_verdicts: bool) -> f64 {
+    if fold_is_verdicts { 0.0 } else { credit_final }
 }
 
 /// Best-effort local OS notification.
@@ -633,6 +658,37 @@ mod tests {
         assert_eq!(credit_sentences(0.0, 0.0), "");
         assert_eq!(credit_sentences(2.0, 0.0), " 2.0 credit earned.");
         assert_eq!(credit_sentences(0.0, 2.0), " 2.0 credit pending.");
+    }
+
+    /// Rounded once, from the decimal the server wrote. 0.35 crosses the
+    /// wire as the f32 widened to f64, 0.3499999940395355, and every shell
+    /// must still read it as 0.4 (nudge's `decimal_credit` case).
+    #[test]
+    fn credit_is_rounded_once_from_the_decimal_not_the_binary_figure() {
+        let wire = f64::from(0.35_f32);
+        assert_eq!(credit_sentences(wire, 0.0), " 0.4 credit earned.");
+        assert_eq!(credit_sentences(0.0, wire), " 0.4 credit pending.");
+        assert_eq!(wire_credit(wire), 0.4);
+    }
+
+    /// A figure that rounds to zero is not a credit sentence: "0.0 credit
+    /// earned." is the "0 credit" line this copy never says.
+    #[test]
+    fn a_figure_that_rounds_to_zero_is_not_stated() {
+        assert_eq!(credit_sentences(0.04, 0.0), "");
+        assert_eq!(credit_sentences(0.0, 0.04), "");
+        assert_eq!(wire_credit(0.04), 0.0);
+        let text = contribution_text(1, &labels(&["api"]), 0.04, 0.049);
+        assert_eq!(text, "1 trace contributed from api.");
+    }
+
+    /// Verdict news already says decided credit ("is now final") in the
+    /// digest it is folded into, so that sentence owns it and the
+    /// contribution line does not repeat it as "earned".
+    #[test]
+    fn a_verdicts_fold_owns_the_final_credit() {
+        assert_eq!(earned_credit_for_digest(4.3, true), 0.0);
+        assert_eq!(earned_credit_for_digest(4.3, false), 4.3);
     }
 
     #[test]

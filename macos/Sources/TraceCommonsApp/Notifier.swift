@@ -313,13 +313,12 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         projects: [String],
         contributedCount: Int = 0,
         contributedProjects: [String] = [],
-        creditFinal: Double = 0,
         creditPending: Double = 0
     ) {
         guard available,
               let body = Self.digestBody(
                 text: text, pendingCount: pendingCount, projects: projects, contributedCount: contributedCount,
-                contributedProjects: contributedProjects, creditFinal: creditFinal, creditPending: creditPending)
+                contributedProjects: contributedProjects, creditPending: creditPending)
         else { return }
         let content = UNMutableNotificationContent()
         content.title = Self.nudgeCopy?[.digestTitle] ?? "Near.ai"
@@ -342,7 +341,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// nothing to say.
     nonisolated static func digestBody(
         text: String, pendingCount: Int, projects: [String], contributedCount: Int = 0,
-        contributedProjects: [String] = [], creditFinal: Double = 0, creditPending: Double = 0
+        contributedProjects: [String] = [], creditPending: Double = 0
     ) -> String? {
         if !text.isEmpty { return text }
         guard pendingCount > 0 || contributedCount > 0 else { return nil }
@@ -360,7 +359,6 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         if let contributed = DigestCopy.contributionLine(
             count: contributedCount,
             projects: contributedProjects,
-            creditFinal: creditFinal,
             creditPending: creditPending
         ) {
             lines.append(contributed)

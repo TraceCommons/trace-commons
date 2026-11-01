@@ -2499,6 +2499,10 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
         },
     );
     if attention.digest_posts {
+        let earned_credit = notify::earned_credit_for_digest(
+            contributed.credit_final,
+            matches!(&attention.fold, Some((attention::Kind::VerdictsLanded, _))),
+        );
         // Two sentences, either of which may be absent: what is waiting for
         // you, and what went without you. Joined rather than merged because
         // they are about different things and a contributor acts on only one
@@ -2507,7 +2511,7 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
             notify::contribution_text(
                 contributed.count,
                 &contributed.project_labels,
-                contributed.credit_final,
+                earned_credit,
                 contributed.credit_pending,
             )
         });
@@ -2530,8 +2534,13 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
             // these (each platform's notification centre words things
             // differently), so it needs the names and not just the count.
             "contributed_projects": contributed.project_labels,
-            "credit_final": contributed.credit_final,
-            "credit_pending": contributed.credit_pending,
+            // The sentence the shells post as the contribution half, so only
+            // the core words credit (copy-guide rule 8).
+            "contribution": contribution,
+            // Rounded once to tenths and decimal-clean, so no shell rounds a
+            // raw f32 widened to f64 (0.35 would read 0.3 or 0.4 by shell).
+            "credit_final": notify::wire_credit(earned_credit),
+            "credit_pending": notify::wire_credit(contributed.credit_pending),
             "text": body,
         });
         if let Some((kind, sentence)) = &attention.fold {

@@ -377,9 +377,7 @@ impl VerdictDelta {
     /// reads 0.34999999999999998 still gives 4 tenths, not 3.
     #[must_use]
     pub fn credit_final_tenths(&self) -> Option<u64> {
-        let millionths = (self.credit_final_delta * 1e6).round() as i64;
-        let tenths = millionths.saturating_add(50_000).div_euclid(100_000);
-        u64::try_from(tenths).ok().filter(|t| *t >= 1)
+        tenths_of(self.credit_final_delta)
     }
 
     /// The summary of `submissions`, or `None` when no submission carries
@@ -408,8 +406,18 @@ impl VerdictDelta {
 /// A final credit figure as the decimal the server wrote: the f32's
 /// shortest round-trip form, read back as an f64. Widening the f32 itself
 /// turns 0.35 into 0.3499999940..., which rounds to 3 tenths.
-fn decimal_credit(credit: f32) -> f64 {
+pub(crate) fn decimal_credit(credit: f32) -> f64 {
     credit.to_string().parse().unwrap_or(f64::from(credit))
+}
+
+/// A credit figure in tenths, rounded half away from zero, or `None` when
+/// it rounds to zero. Rounded in whole millionths first, so a sum that
+/// should be 0.35 but reads 0.34999999999999998 still gives 4 tenths.
+/// The one rounding every credit sentence goes through.
+pub(crate) fn tenths_of(credit: f64) -> Option<u64> {
+    let millionths = (credit * 1e6).round() as i64;
+    let tenths = millionths.saturating_add(50_000).div_euclid(100_000);
+    u64::try_from(tenths).ok().filter(|t| *t >= 1)
 }
 
 /// Whether a final credit figure is above zero in whole millionths, the

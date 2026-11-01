@@ -859,7 +859,7 @@ enum DaemonEvent: Equatable {
     case snapshot(pending: [QueueEntry], status: DaemonStatus)
     case queueChanged
     case statusChanged
-    /// `contributed`, `creditFinal` and `creditPending` describe what went out unasked
+    /// `contributed` and `creditPending` describe what went out unasked
     /// since the last digest. They are zero on a daemon that predates them,
     /// which degrades this to the waiting-only digest that shipped before
     /// rather than to a wrong number.
@@ -867,7 +867,6 @@ enum DaemonEvent: Equatable {
         pending: Int,
         contributed: Int,
         contributedProjects: [String],
-        creditFinal: Double,
         creditPending: Double,
         text: String
     )

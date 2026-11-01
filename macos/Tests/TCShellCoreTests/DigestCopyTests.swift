@@ -81,31 +81,13 @@ final class DigestCopyTests: XCTestCase {
         XCTAssertFalse(without?.contains("credit") ?? true, without ?? "")
     }
 
-    /// Pending credit is a record being scored, not a decision, so it is
-    /// never called earned.
+    /// The fallback sentence for a daemon that sent no text says only
+    /// "pending": it is never given credit the server has decided.
     func testPendingCreditIsNeverCalledEarned() {
-        let line = DigestCopy.contributionLine(count: 2, projects: ["api"], creditFinal: 0, creditPending: 4.25)
+        let line = DigestCopy.contributionLine(count: 2, projects: ["api"], creditPending: 4.25)
         XCTAssertTrue(line?.contains("pending") ?? false, line ?? "")
         for word in ["earned", "paid", "settled", "worth"] {
             XCTAssertFalse(line?.contains(word) ?? true, "must not say \(word): \(line ?? "")")
         }
-    }
-
-    /// Credit the server has decided is reported as earned (owner,
-    /// 2026-11-01), and never called pending.
-    func testFinalCreditIsReportedAsEarned() {
-        let line = DigestCopy.contributionLine(count: 2, projects: ["api"], creditFinal: 4.25, creditPending: 0)
-        XCTAssertEqual(line, "2 traces contributed from api. 4.3 credit earned.")
-        XCTAssertFalse(line?.contains("pending") ?? true, line ?? "")
-    }
-
-    /// Both kinds: earned first, each only when above zero.
-    func testEarnedComesBeforePendingAndEachIsOptional() {
-        XCTAssertEqual(
-            DigestCopy.contributionLine(count: 3, projects: ["api"], creditFinal: 6.0, creditPending: 1.5),
-            "3 traces contributed from api. 6.0 credit earned. 1.5 credit pending.")
-        XCTAssertEqual(
-            DigestCopy.contributionLine(count: 1, projects: [], creditFinal: 0, creditPending: 0),
-            "1 trace contributed.")
     }
 }

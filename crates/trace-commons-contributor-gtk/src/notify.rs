@@ -110,30 +110,17 @@ pub fn digest_body(pending: usize, project_labels: &[String]) -> String {
 pub fn contribution_body(
     contributed: usize,
     project_labels: &[String],
-    credit_final: f32,
-    credit_pending: f32,
+    credit_final: f64,
+    credit_pending: f64,
 ) -> Option<String> {
-    if contributed == 0 {
-        return None;
-    }
-    let sessions = if contributed == 1 { "trace" } else { "traces" };
-    let named: std::collections::BTreeSet<&str> = project_labels
-        .iter()
-        .map(String::as_str)
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    let projects = match named.iter().collect::<Vec<_>>().as_slice() {
-        [one] => format!(" from {one}"),
-        _ => String::new(),
-    };
-    let mut line = format!("{contributed} {sessions} contributed{projects}.");
-    // Earned and pending, each only when there is some: "0 credit pending"
-    // reads as a failure rather than as a fresh start. The wording and the
-    // rounding live in one place, the daemon's `credit_sentences`.
-    line.push_str(
-        &trace_commons_contributor::daemon::notify::credit_sentences(credit_final, credit_pending),
-    );
-    Some(line)
+    (contributed > 0).then(|| {
+        trace_commons_contributor::daemon::notify::contribution_text(
+            contributed,
+            &project_labels.iter().cloned().collect(),
+            credit_final,
+            credit_pending,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -209,6 +196,15 @@ mod tests {
             both,
             "3 traces contributed from a. 6.0 credit earned. 1.5 credit pending."
         );
+    }
+
+    #[test]
+    fn credit_is_the_daemons_rounding_of_the_decimal() {
+        let wire = f64::from(0.35_f32);
+        let line = contribution_body(1, &["a".to_string()], wire, 0.0).unwrap();
+        assert_eq!(line, "1 trace contributed from a. 0.4 credit earned.");
+        let tiny = contribution_body(1, &["a".to_string()], 0.04, 0.04).unwrap();
+        assert_eq!(tiny, "1 trace contributed from a.");
     }
 
     #[test]

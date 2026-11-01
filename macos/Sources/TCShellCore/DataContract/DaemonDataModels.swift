@@ -1200,6 +1200,9 @@ extension DaemonData {
         public let creditFinal: Double?
         /// Credit for them still being scored: pending, never earned.
         public let creditPending: Double?
+        /// The contribution sentence as the core worded it, credit included;
+        /// the same sentence `text` carries. Nil from an older daemon.
+        public let contribution: String?
         /// The core's notification body, posted unchanged. When the
         /// attention arbiter folded a re-engagement sentence in, it already
         /// ends with `fold.text`.
@@ -1210,19 +1213,21 @@ extension DaemonData {
 
         public init(
             pending: Int?, contributed: Int? = nil, contributedProjects: [String]? = nil,
-            creditFinal: Double? = nil, creditPending: Double? = nil, text: String?, fold: DigestFold? = nil
+            creditFinal: Double? = nil, creditPending: Double? = nil, contribution: String? = nil, text: String?,
+            fold: DigestFold? = nil
         ) {
             self.pending = pending
             self.contributed = contributed
             self.contributedProjects = contributedProjects
             self.creditFinal = creditFinal
             self.creditPending = creditPending
+            self.contribution = contribution
             self.text = text
             self.fold = fold
         }
 
         public enum CodingKeys: String, CodingKey {
-            case pending, contributed, text, fold
+            case pending, contributed, contribution, text, fold
             case contributedProjects = "contributed_projects"
             case creditFinal = "credit_final"
             case creditPending = "credit_pending"
