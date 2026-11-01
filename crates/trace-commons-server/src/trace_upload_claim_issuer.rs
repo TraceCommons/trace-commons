@@ -1905,7 +1905,11 @@ impl TraceUploadClaimIssuerState {
             return Err(JudgementClaimRefusal::DeviceKeyMismatch);
         }
         let now = Utc::now();
-        if (now.timestamp() - request.issued_at).abs() > JUDGEMENT_CLAIM_MAX_SKEW_SECONDS {
+        // `abs_diff`, because `issued_at` is the caller's: a subtraction
+        // overflows for one near `i64::MIN`.
+        if now.timestamp().abs_diff(request.issued_at)
+            > JUDGEMENT_CLAIM_MAX_SKEW_SECONDS.unsigned_abs()
+        {
             return Err(JudgementClaimRefusal::Stale);
         }
         let tenant_id = normalized_required(Some(request.tenant_id.as_str()), "")
@@ -1997,10 +2001,23 @@ impl TraceUploadClaimIssuerState {
             return Ok(());
         }
         let actor = crate::account_trust::device_claim_actor(tenant_id, device_key_id, None);
-        let grants =
+        let mut grants =
             active_tenant_access_grants(db.as_ref(), tenant_id, &principal_ref, &actor, now)
                 .await
                 .map_err(|_| JudgementClaimRefusal::IssueFailed)?;
+        // The upload route backfills a NEAR AI sign-up grant for a device
+        // with none before it checks grants; so does this one.
+        if grants.is_empty()
+            && self
+                .backfill_near_ai_signup_grant(db.as_ref(), tenant_id, device_key_id, now)
+                .await
+                .map_err(|_| JudgementClaimRefusal::IssueFailed)?
+        {
+            grants =
+                active_tenant_access_grants(db.as_ref(), tenant_id, &principal_ref, &actor, now)
+                    .await
+                    .map_err(|_| JudgementClaimRefusal::IssueFailed)?;
+        }
         let admitted = grants.iter().any(|grant| {
             grant.status == TraceTenantAccessGrantStatus::Active
                 && grant.role == TraceTenantAccessGrantRole::Contributor
@@ -2016,6 +2033,36 @@ impl TraceUploadClaimIssuerState {
         } else {
             Err(JudgementClaimRefusal::GrantRequired)
         }
+    }
+
+    /// Write the NEAR AI sign-up contributor grant for a device that has
+    /// none, when this issuer has the sign-up template. Both the upload-claim
+    /// and the judgement-claim routes call this before reading grants, so a
+    /// device NEAR AI provisioned before sign-up wrote grants is admitted by
+    /// both or by neither. True when a grant was written. Never replaces a
+    /// grant row, so a revoked grant stays revoked.
+    async fn backfill_near_ai_signup_grant(
+        &self,
+        db: &dyn Database,
+        tenant_id: &str,
+        device_key_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, ()> {
+        let Some(template) = self.near_ai_signup_policy_template.as_ref() else {
+            return Ok(false);
+        };
+        let eligible = db
+            .backfill_near_ai_signup_device_grant(tenant_id, device_key_id, template, now)
+            .await
+            .map_err(|_| ())?;
+        if eligible {
+            tracing::info!(
+                device_key_id = %device_key_id,
+                policy_version = %template.policy_version(),
+                "NEAR AI sign-up contributor grant backfilled at claim time"
+            );
+        }
+        Ok(eligible)
     }
 }
 
@@ -2260,22 +2307,13 @@ impl TraceUploadClaimIssuerState {
         let mut matching_grants =
             active_contributor_grants(db.as_ref(), tenant_id, grant_principal_ref, now).await?;
         if matching_grants.is_empty()
-            && let Some(template) = self.near_ai_signup_policy_template.as_ref()
-        {
-            let eligible = db
-                .backfill_near_ai_signup_device_grant(tenant_id, device_key_id, template, now)
+            && self
+                .backfill_near_ai_signup_grant(db.as_ref(), tenant_id, device_key_id, now)
                 .await
-                .map_err(|_| IssuerError::internal())?;
-            if eligible {
-                tracing::info!(
-                    device_key_id = %device_key_id,
-                    policy_version = %template.policy_version(),
-                    "NEAR AI sign-up contributor grant backfilled at claim time"
-                );
-                matching_grants =
-                    active_contributor_grants(db.as_ref(), tenant_id, grant_principal_ref, now)
-                        .await?;
-            }
+                .map_err(|_| IssuerError::internal())?
+        {
+            matching_grants =
+                active_contributor_grants(db.as_ref(), tenant_id, grant_principal_ref, now).await?;
         }
         if matching_grants.is_empty() {
             return Ok(hardcoded_floor());
@@ -7875,7 +7913,13 @@ mod tests {
         async fn a_stale_or_future_request_is_refused() {
             let tenant = near_tenant();
             let d = device();
-            for issued_at in [Utc::now().timestamp() - 301, Utc::now().timestamp() + 301] {
+            // i64::MIN and i64::MAX would overflow a subtraction.
+            for issued_at in [
+                Utc::now().timestamp() - 301,
+                Utc::now().timestamp() + 301,
+                i64::MIN,
+                i64::MAX,
+            ] {
                 let (status, response) = signed(
                     config_with(vec![record(&d, &tenant, false)]),
                     &d,
