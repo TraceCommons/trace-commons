@@ -396,6 +396,31 @@ final class ManagedSessionsTests: XCTestCase {
     /// tier, NEAR AI's own TEEs first, then a third party's, then
     /// Incognito, each in NEAR AI's order. The default heads no group; a model with
     /// no tier (an older daemon) comes last, under no heading.
+    func testThePickersTitleModelsByDisplayNameAndKeepTheIdAsValueAndTooltip() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
+        {"models":[
+          {"id":"z-ai/glm-5.3","name":"GLM 5.3 Flash","tier":"external"},
+          {"id":"x/no-name","tier":"external"},
+          {"id":"x/blank","name":"  ","tier":"external"},
+          {"id":"a/fav","name":"Fav Model","tier":"external"}
+        ],"tier_order":["external"],"default":"z-ai/glm-5.3","favorites":["a/fav"]}
+        """#.utf8))
+        let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
+        // The default row names the model by its display name too.
+        XCTAssertTrue(options[0].title.contains("GLM 5.3 Flash"), options[0].title)
+        XCTAssertFalse(options[0].title.contains("z-ai/glm-5.3"))
+        let byValue = Dictionary(uniqueKeysWithValues: options.map { ($0.value, $0) })
+        XCTAssertEqual(byValue["z-ai/glm-5.3"]?.title, "GLM 5.3 Flash")
+        XCTAssertEqual(byValue["z-ai/glm-5.3"]?.help, "z-ai/glm-5.3")
+        XCTAssertEqual(byValue["a/fav"]?.title, "Fav Model")
+        XCTAssertEqual(byValue["a/fav"]?.help, "a/fav")
+        // No name, or a blank one: the id is the title and there is no tooltip.
+        XCTAssertEqual(byValue["x/no-name"]?.title, "x/no-name")
+        XCTAssertNil(byValue["x/no-name"]?.help)
+        XCTAssertEqual(byValue["x/blank"]?.title, "x/blank")
+        XCTAssertNil(byValue["x/blank"]?.help)
+    }
+
     func testTheModelPickerGroupsModelsByPrivacyTier() throws {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
         {"models":[
@@ -593,13 +618,14 @@ final class ManagedSessionsTests: XCTestCase {
     }
 
     /// The picker's first option names no model and says which one the
-    /// session will get; every NEAR AI chat model follows, in its order.
+    /// session will get; every NEAR AI chat model follows, in its order,
+    /// each by its display name when NEAR AI gives one, else its id.
     func testTheModelPickerOffersTheDefaultThenTheCatalogue() throws {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"anthropic/claude-sonnet-5-5","name":"Claude Sonnet 5.5"},{"id":"openai/gpt-6.1-sol"}],"default":"anthropic/claude-sonnet-5-5"}"#.utf8))
         XCTAssertEqual(catalogue.models.map(\.id), ["anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"])
         XCTAssertEqual(catalogue.models.first?.name, "Claude Sonnet 5.5")
         let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
-        XCTAssertEqual(options.map(\.title), ["Default: anthropic/claude-sonnet-5-5", "anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"])
+        XCTAssertEqual(options.map(\.title), ["Default: Claude Sonnet 5.5", "Claude Sonnet 5.5", "openai/gpt-6.1-sol"])
         XCTAssertEqual(options.map(\.value), [ManagedSurface.defaultModel, "anthropic/claude-sonnet-5-5", "openai/gpt-6.1-sol"])
 
         // Before the catalogue arrives, or when NEAR AI could not be read:

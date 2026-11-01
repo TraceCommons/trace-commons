@@ -287,7 +287,7 @@ struct ManagedFolderOptions: View {
     /// and heading, plus `chosen` when the options lack it.
     private static func glassOptions(_ options: [ManagedModelOption], chosen: String?) -> [GlassPickerOption<String>] {
         var values = options
-            .map { GlassPickerOption($0.title, value: $0.value, dot: tierDot($0.privacy), section: $0.section, detail: $0.tierHeading) }
+            .map { GlassPickerOption($0.title, value: $0.value, dot: tierDot($0.privacy), section: $0.section, detail: $0.tierHeading, help: $0.help) }
         if let chosen, !values.contains(where: { $0.value == chosen }) {
             values.append(GlassPickerOption(chosen, value: chosen))
         }
