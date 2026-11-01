@@ -27,6 +27,17 @@
 //! [`ResponseSealer::seal`] consumes it. Neither is `Clone`. Do not add a
 //! reusable variant.
 //!
+//! **The types do not stop a replay.** [`open_request`] is a pure function:
+//! a captured sealed request opened twice gives two sealers with the same
+//! `k_resp`, and two responses sealed with them reuse the keystream and the
+//! one-time Poly1305 key, enough to forge a response to the honest client.
+//! So the service must record the request nonce (inside the opened
+//! plaintext) before it calls [`ResponseSealer::seal`], must refuse a
+//! nonce it has already recorded, and must never seal anything, an error
+//! included, for a request it has not recorded. Per-response randomness in
+//! the key schedule would remove this duty from the service; that is open
+//! on the design spec.
+//!
 //! It is **not** RFC 9180 HPKE, which defines no secp256k1 KEM; it keeps
 //! HPKE's base-mode shape (ephemeral-static DH, a key schedule bound to both
 //! public keys, one AEAD message per key) using only `k256` and `ring`, which
@@ -218,6 +229,10 @@ fn seal_request_with_ephemeral(
 
 /// Open a sealed request with the service's sealing secret. Returns the
 /// plaintext and the one sealer for the response.
+///
+/// Opening the same bytes again returns a sealer with the same key. Record
+/// the plaintext's request nonce, and refuse a repeat, before sealing
+/// anything with it; see the module doc.
 pub fn open_request(
     seal_secret_key: &SealSecretKey,
     sealed: &[u8],
