@@ -27,6 +27,19 @@ use uuid::Uuid;
 /// The prompt every entry carries when Codex's own list could not be read.
 pub const BASIC_INSTRUCTIONS: &str = "You are a coding agent.";
 
+/// The config keys naming a model Codex uses besides the session's own,
+/// each set to the model in use at launch and refused in the person's CLI
+/// options: the reviewer of `/review`, the default subagent model, and the
+/// memory jobs' models. Each is a string key of Codex 0.166.0's config,
+/// which refuses a non-string value at that path (`codex debug models -c
+/// <key>=1`, read 2026-10-31).
+pub const SECONDARY_MODEL_KEYS: &[&str] = &[
+    "review_model",
+    "agents.default_subagent_model",
+    "memories.extract_model",
+    "memories.consolidation_model",
+];
+
 /// Where the launcher keeps each session's catalog. The launcher owns it:
 /// a sign-in session's proxy home belongs to the daemon.
 pub const CATALOGS: &str = "managed-codex-catalogs";
@@ -90,6 +103,10 @@ pub fn catalog(default: &str, models: &[ChatModel], bundled: Option<&Value>) -> 
                 entry["context_window"] = json!(window);
             }
             entry["slug"] = json!(model.id);
+            // Auto mode's reviewer would otherwise ask for Codex's hidden
+            // `codex-auto-review`, which NEAR AI does not serve: it reviews
+            // with the model it reviews for, in the same tier.
+            entry["auto_review_model_override"] = json!(model.id);
             entry["display_name"] = json!(display);
             entry["visibility"] = json!("list");
             entry["supported_in_api"] = json!(true);
@@ -406,6 +423,19 @@ mod tests {
     /// (`apply_patch_tool_type`, `tool_mode`). Codex's own list turns them
     /// on for every OpenAI model it ships, so a NEAR AI id it matches would
     /// otherwise inherit them.
+    /// Auto mode's reviewer reviews with each entry's own model, never
+    /// Codex's hidden `codex-auto-review`, which NEAR AI does not serve.
+    #[test]
+    fn every_entry_reviews_with_its_own_model() {
+        let models = [chat("a/one", None), chat("b/two", Some("Two"))];
+        let catalog = catalog("b/two", &models, Some(&bundled()));
+        let entries = catalog["models"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        for entry in entries {
+            assert_eq!(entry["auto_review_model_override"], entry["slug"]);
+        }
+    }
+
     #[test]
     fn no_entry_carries_codex_tool_settings() {
         let models = [
@@ -438,6 +468,7 @@ mod tests {
             "experimental_supported_tools",
             "upgrade",
             "use_responses_lite",
+            "auto_review_model_override",
         ]
         .iter()
         .chain(KEPT)

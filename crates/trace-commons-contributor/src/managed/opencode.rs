@@ -267,16 +267,20 @@ impl OpenCodeSession {
             tier: None,
             ..Default::default()
         }];
-        self.command_with_models(model, &only, base_url, key)
+        self.command_with_models(model, None, &only, base_url, key)
     }
 
     /// Run on `default`, offering every model in `models` (which must hold
     /// it) in OpenCode's own picker, each under its display name or id.
     /// The profile is isolated, so the list never reaches the person's own
-    /// OpenCode settings.
+    /// OpenCode settings. The background model (v1's `small_model`, which
+    /// v2 reads as its title agent's model) is `background` when it is no
+    /// less private than `default`, else OpenCode's background default
+    /// ([`super::models::background_for`]); compaction stays on `default`.
     pub fn command_with_models(
         &self,
         default: &str,
+        background: Option<&str>,
         models: &[super::models::ChatModel],
         base_url: &str,
         key: &str,
@@ -286,6 +290,10 @@ impl OpenCodeSession {
         }
         let mut command = self.base_command()?;
         let selected = format!("trace-managed/{default}");
+        let small =
+            super::models::background_for(super::ToolId::Opencode, default, background, models)
+                .map_or(default, |m| m.id.as_str());
+        let small = format!("trace-managed/{small}");
         let listed: serde_json::Map<String, serde_json::Value> = models
             .iter()
             .map(|m| {
@@ -307,7 +315,7 @@ impl OpenCodeSession {
         }
         let config = match self.version {
             Version::V1 => json!({
-                "model":selected,"small_model":selected,"share":"disabled",
+                "model":selected,"small_model":small,"share":"disabled",
                 "enabled_providers":["trace-managed"],
                 "provider":{"trace-managed":{"npm":"@ai-sdk/openai-compatible","name":"Managed connection",
                     "options":options,"models":listed
@@ -323,7 +331,7 @@ impl OpenCodeSession {
                         {"action":"provider.use","resource":"trace-managed","effect":"allow"},
                         {"action":"integration.use","resource":"plugin:*","effect":"deny"}
                     ],
-                    "agents":{"title":{"model":selected},"compaction":{"model":selected}},
+                    "agents":{"title":{"model":small},"compaction":{"model":selected}},
                     "providers":{"trace-managed":{"package":"@ai-sdk/openai-compatible","name":"Managed connection",
                         "settings":settings,"models":listed
                     }}
@@ -614,6 +622,73 @@ mod tests {
         );
     }
 
+    /// OpenCode's background slots (v1's `small_model`, v2's title agent)
+    /// take the background model only when it is no less private than the
+    /// main model; a stale Incognito choice beside a NEAR AI private main
+    /// model is replaced, and compaction stays on the main model.
+    #[test]
+    fn opencode_background_slots_are_never_less_private_than_the_model() {
+        use super::super::models::{ChatModel, ModelTier};
+        let models: Vec<ChatModel> = [
+            ("anthropic/claude-haiku-4-5", ModelTier::Incognito),
+            ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+            ("z-ai/glm-5.3-flash", ModelTier::NearAi),
+        ]
+        .into_iter()
+        .map(|(id, tier)| ChatModel {
+            id: id.into(),
+            tier: Some(tier),
+            ..Default::default()
+        })
+        .collect();
+        let dir = tempfile::tempdir().unwrap();
+        for version in [Version::V1, Version::V2] {
+            let session = OpenCodeSession {
+                root: dir.path().join("profile"),
+                title: "Managed session",
+                native: dir.path().join("opencode"),
+                cwd: dir.path().into(),
+                id: Uuid::new_v4(),
+                version,
+            };
+            for (background, expected) in [
+                (None, "z-ai/glm-5.3-flash"),
+                (Some("anthropic/claude-haiku-4-5"), "z-ai/glm-5.3-flash"),
+                (Some("Qwen/Qwen3.8-27B"), "Qwen/Qwen3.8-27B"),
+            ] {
+                let command = session
+                    .command_with_models(
+                        "Qwen/Qwen3.8-27B",
+                        background,
+                        &models,
+                        "http://127.0.0.1:4321/openai/v1",
+                        "k",
+                    )
+                    .unwrap();
+                let config = command
+                    .get_envs()
+                    .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")
+                    .and_then(|(_, v)| v)
+                    .unwrap();
+                let config: serde_json::Value =
+                    serde_json::from_str(config.to_str().unwrap()).unwrap();
+                let expected = format!("trace-managed/{expected}");
+                assert_eq!(config["model"], "trace-managed/Qwen/Qwen3.8-27B");
+                match version {
+                    Version::V1 => assert_eq!(config["small_model"], expected),
+                    Version::V2 => {
+                        assert_eq!(config["agents"]["title"]["model"], expected);
+                        assert_eq!(config["agents"]["compaction"]["model"], config["model"]);
+                    }
+                }
+                assert!(
+                    !config.to_string().contains("\"trace-managed/anthropic/"),
+                    "{config}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn provider_header_binds_the_exact_seeded_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -628,6 +703,7 @@ mod tests {
         let command = session
             .command_with_models(
                 "fixture-model",
+                None,
                 &[super::super::models::ChatModel {
                     id: "fixture-model".into(),
                     name: None,
@@ -654,6 +730,7 @@ mod tests {
         let direct = session
             .command_with_models(
                 "fixture-model",
+                None,
                 &[super::super::models::ChatModel {
                     id: "fixture-model".into(),
                     name: None,
@@ -710,7 +787,13 @@ mod tests {
                 continue;
             }
             let command = session
-                .command_with_models("a/sized", &models, "http://127.0.0.1:4321/openai/v1", "k")
+                .command_with_models(
+                    "a/sized",
+                    None,
+                    &models,
+                    "http://127.0.0.1:4321/openai/v1",
+                    "k",
+                )
                 .unwrap();
             let config = command
                 .get_envs()

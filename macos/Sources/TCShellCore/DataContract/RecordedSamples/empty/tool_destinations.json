@@ -167,6 +167,8 @@
     "opencode": "OpenCode",
     "model": "Model ID",
     "model_choice": "Model",
+    "background_model_title": "Background model",
+    "background_model_choice": "Model for background tasks",
     "model_default": "Default: {model}",
     "model_default_unknown": "Default",
     "model_group_incognito": "Incognito models",

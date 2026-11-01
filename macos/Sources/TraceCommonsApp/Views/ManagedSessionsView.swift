@@ -176,7 +176,9 @@ struct ManagedSessionsSection: View {
               var params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
         else { return }
         if let settings {
-            params = settings.applying(to: params, daemonKeepsSavedModel: model.managedSnapshot?.capabilities.keepSavedModel == true)
+            let capabilities = model.managedSnapshot?.capabilities
+            params = settings.applying(to: params, daemonKeepsSavedModel: capabilities?.keepSavedModel == true,
+                                       daemonReadsBackground: capabilities?.backgroundModel == true)
         }
         // A dialog that asked for a terminal saves it first, so this launch
         // opens there and later ones do not ask again.
@@ -574,7 +576,8 @@ struct ManagedLaunchSheet: View {
             generation: snapshot.generations[account.tool] ?? 0,
             model: folderDraft.model, collectTraces: folderDraft.collectTraces)
         if supportsFolderSettings {
-            params = folderDraft.applying(to: params, daemonKeepsSavedModel: snapshot.capabilities.keepSavedModel == true)
+            params = folderDraft.applying(to: params, daemonKeepsSavedModel: snapshot.capabilities.keepSavedModel == true,
+                                          daemonReadsBackground: snapshot.capabilities.backgroundModel == true)
         }
         let terminal = snapshot.asksForTerminal ? launchTerminal : nil
         model.managedAction("managed_launch_prepare", params: params, openTerminal: true, terminal: terminal)

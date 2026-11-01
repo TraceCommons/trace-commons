@@ -364,6 +364,7 @@ pub const METHODS: &[&str] = &[
     "managed_account_verify",
     "managed_model_catalogue",
     "managed_model_favorite_set",
+    "managed_cli_model",
     "account_session_status",
     "account_sign_in",
     "account_sign_out",
@@ -3847,6 +3848,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "managed_account_reconnect" => super::managed::handle(shared, req),
         "managed_model_catalogue" => super::managed::handle(shared, req),
         "managed_model_favorite_set" => super::managed::handle(shared, req),
+        "managed_cli_model" => super::managed::handle(shared, req),
         "hello" => Response::ok(
             req.id,
             serde_json::json!({
@@ -15714,8 +15716,86 @@ mod tests {
                 "favorites":[],
                 "unavailable_favorites":[],
                 "tier_order":["near_ai","external","incognito"],
+                "background_sets":[],
+                "background":{},
             })
         );
+        // Claude's answer also says, for each model as the main model, its
+        // background default and the background models it allows, once per
+        // tier (#1798 review): the shell keeps no privacy rule of its own.
+        // The NEAR AI private main allows only itself here; an Incognito
+        // main allows every model of a known tier.
+        let r = handle_request_async(
+            &s,
+            &req(
+                "managed_model_catalogue",
+                serde_json::json!({"tool":"claude"}),
+            ),
+        )
+        .await;
+        let catalogue = r.result.expect("catalogue");
+        assert_eq!(
+            catalogue["background_sets"],
+            serde_json::json!([
+                ["fixture-model", "fixture-other", "openai/gpt-6.1-sol"],
+                ["fixture-other"],
+            ])
+        );
+        assert_eq!(
+            catalogue["background"],
+            serde_json::json!({
+                "fixture-model":{"default":"fixture-model","set":0},
+                "fixture-other":{"default":"fixture-other","set":1},
+                "openai/gpt-6.1-sol":{"default":"openai/gpt-6.1-sol","set":0},
+            })
+        );
+        // The model the session's own CLI options name, read by the core so
+        // the shell weighs the background picker against the same model the
+        // launcher will run; options that do not parse name none.
+        for (options, model) in [
+            ("--model fixture-other", serde_json::json!("fixture-other")),
+            ("--verbose", serde_json::Value::Null),
+            ("--model 'unterminated", serde_json::Value::Null),
+        ] {
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "managed_cli_model",
+                    serde_json::json!({"tool":"claude","cli_options":options}),
+                ),
+            )
+            .await;
+            assert_eq!(
+                r.result.expect("cli model"),
+                serde_json::json!({"model":model}),
+                "{options}"
+            );
+        }
+        // A launch's background model is kept on the session, which its
+        // launcher reads; the launcher replaces one less private than the
+        // main model (`models::background_for`).
+        let mut background = launch("claude");
+        background["background_model"] = "fixture-model".into();
+        let prepared = handle_request_async(&s, &req("managed_launch_prepare", background))
+            .await
+            .result
+            .expect("prepared");
+        let snapshot = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({})))
+            .await
+            .result
+            .expect("snapshot");
+        let row = snapshot["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == prepared["session_id"])
+            .unwrap();
+        assert_eq!(row["background_model"], "fixture-model");
+        // Codex takes none.
+        let mut codex = launch("codex");
+        codex["background_model"] = "fixture-other".into();
+        let r = handle_request_async(&s, &req("managed_launch_prepare", codex)).await;
+        assert_eq!(r.error.unwrap().message, "managed-invalid-request");
         for params in [
             serde_json::json!({}),
             serde_json::json!({"tool":"claude","key":"sk-route-fixture-key"}),

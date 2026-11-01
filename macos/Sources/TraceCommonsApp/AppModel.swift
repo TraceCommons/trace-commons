@@ -105,6 +105,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The model `options`, a session's CLI options for `tool`, name with
+    /// the tool's own model flag, as the core reads them
+    /// (`managed_cli_model`); none when they name none or the read fails.
+    func cliModel(tool: String, options: String, done: @escaping @MainActor (_ model: String?) -> Void) {
+        guard let client else { return done(nil) }
+        let params: [String: Any] = ["tool": tool, "cli_options": options]
+        Task.detached(priority: .userInitiated) {
+            let model = (try? client.managedAction("managed_cli_model", params: params))?["model"] as? String
+            await MainActor.run { done(model) }
+        }
+    }
+
     /// The terminal app managed sessions open in, by the id the daemon
     /// offered in `capabilities.terminal_choices`. The daemon refuses any
     /// other value; the snapshot is re-read after the write.
