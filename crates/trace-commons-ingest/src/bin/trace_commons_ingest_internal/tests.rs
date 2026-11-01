@@ -10673,6 +10673,72 @@ async fn account_hourly_submission_ceiling_counts_a_known_id_with_a_new_body() {
     assert_eq!(blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL);
 }
 
+/// A re-POST of an owned quarantined id re-runs the re-scrub (remediation),
+/// so every one counts against the ceiling, an identical body included
+/// (#1800 review). Before, an identical re-POST was exempt, and a client
+/// looping on the same bytes re-scrubbed under the per-minute limiter only.
+#[tokio::test]
+async fn account_hourly_submission_ceiling_counts_every_remediation_of_a_quarantined_id() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 2,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let quarantined = sample_envelope().await;
+    let Json(first) = test_submit(state.clone(), "token-a", quarantined.clone())
+        .await
+        .expect("the first upload is admitted");
+    assert_eq!(first.status, "quarantined", "the fixture is remediable");
+    let _ = test_submit(state.clone(), "token-a", quarantined.clone())
+        .await
+        .expect("the first remediation is under the ceiling");
+    let blocked = test_submit(state, "token-a", quarantined)
+        .await
+        .expect_err("an identical remediation still counts");
+    assert_eq!(blocked.0, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(blocked.1.0.error, SUBMIT_RATE_LIMITED_LABEL);
+}
+
+/// A retry of an accepted submission only replays its receipt, so it is
+/// never counted against the ceiling, whatever this process remembers: after
+/// a restart (an empty attempt table), on another instance, or with the
+/// envelope serialised differently, the client gets its receipt rather than
+/// waiting out the hour (#1800 review).
+#[tokio::test]
+async fn account_hourly_submission_ceiling_replays_a_recorded_receipt_this_process_never_saw() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = test_state_with_submission_quota(
+        temp.path().to_path_buf(),
+        TraceSubmissionQuotaConfig {
+            max_per_account_per_hour: 1,
+            ..TraceSubmissionQuotaConfig::default()
+        },
+    );
+    let accepted = low_risk_envelope().await;
+    let Json(first) = test_submit(state.clone(), "token-a", accepted.clone())
+        .await
+        .expect("the first upload of the hour is admitted");
+    assert_eq!(first.status, "accepted", "the fixture only replays");
+
+    // A restart: the recorded count is still at the ceiling, the attempts
+    // this process saw are gone.
+    Arc::make_mut(&mut state).submission_attempts = Arc::new(HourlySubmissionAttempts::default());
+    let Json(replayed) = test_submit(state.clone(), "token-a", accepted.clone())
+        .await
+        .expect("a retry of a recorded submission gets its receipt after a restart");
+    assert_eq!(replayed.status, "accepted");
+
+    let mut reserialised = accepted;
+    reserialised.events[0].redacted_content = Some("Bytes that differ, same id".to_string());
+    let Json(replayed) = test_submit(state, "token-a", reserialised)
+        .await
+        .expect("a retry with other bytes for an accepted id gets its receipt");
+    assert_eq!(replayed.status, "accepted");
+}
+
 /// The in-process attempt table on its own: an identical retry needs a
 /// record and a body this process saw; attempts count by scope, never past
 /// the limit, and leave after an hour; the refusal names the later of the

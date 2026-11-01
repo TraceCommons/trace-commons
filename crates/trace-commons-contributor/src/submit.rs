@@ -3123,6 +3123,23 @@ mod tests {
         }
     }
 
+    /// Ingest's idle-body refusal (`408 upload_body_idle_timeout`, #1800) is
+    /// a stalled connection, not a verdict on the session: it is retried
+    /// like an outage, labelled or bare (a proxy's 408 too).
+    #[test]
+    fn a_408_upload_body_idle_timeout_is_retried_not_a_verdict() {
+        assert!(ingest_unavailable(&labelled(
+            408,
+            "upload_body_idle_timeout",
+            r#"{"error":"upload_body_idle_timeout"}"#
+        )));
+        assert!(ingest_unavailable(&OcError::HttpFailure {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::REQUEST_TIMEOUT,
+            body: String::new(),
+        }));
+    }
+
     /// The CLI names the outcome for what it is and says what to do, rather
     /// than `failed (server-label)`.
     #[test]
@@ -6848,6 +6865,19 @@ mod tests {
         let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
         let raw = build_raw_contribution_with_verdict(&transcript, cfg, Utc::now(), None);
         redact_to_envelope(&redactor, raw).await.unwrap()
+    }
+
+    /// Through `upload_with_retry`: a `408` from ingest (its idle-body
+    /// refusal) comes back as `ingest-unreachable`, which the daemon keeps
+    /// and retries, not as a terminal `server-label` failure.
+    #[tokio::test]
+    async fn an_upload_refused_408_is_kept_for_retry() {
+        let (result, captured) = upload_once(None, 408).await;
+        assert_eq!(
+            result.expect_err("the stub refused the first upload"),
+            REASON_INGEST_UNREACHABLE
+        );
+        assert_eq!(captured.bodies.len(), 1, "handed back, not re-sent here");
     }
 
     #[tokio::test]
