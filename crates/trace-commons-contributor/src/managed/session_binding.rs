@@ -295,33 +295,11 @@ fn validate_transcript(path: &Path) -> Result<(), ManagedError> {
 }
 
 fn read_regular(path: &Path, limit: usize) -> Result<Vec<u8>, ManagedError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| ManagedError::InvalidRequest)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit as u64 {
-        return Err(ManagedError::InvalidRequest);
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|_| ManagedError::InvalidRequest)?
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ManagedError::InvalidRequest)?;
-    if bytes.len() > limit {
-        return Err(ManagedError::InvalidRequest);
-    }
-    Ok(bytes)
+    super::profiles::read_regular_file(path, limit as u64).ok_or(ManagedError::InvalidRequest)
 }
 
 fn create_private(path: &Path) -> Result<std::fs::File, ManagedError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options
-        .open(path)
-        .map_err(|_| ManagedError::StorageUnavailable)
+    super::profiles::create_private_file(path).map_err(|_| ManagedError::StorageUnavailable)
 }
 
 #[derive(Deserialize)]

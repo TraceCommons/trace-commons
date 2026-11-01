@@ -287,16 +287,6 @@ public enum ManagedSurface {
 /// Session row actions (Ron, #1407, 2026-10-14). An action the daemon cannot
 /// do is left out, never drawn disabled.
 public extension ManagedSurface {
-    /// The row's actions. A running row: Show and Stop where the daemon can
-    /// do them. An ended row: Start again where it can be, with a terminal
-    /// to start in, then Dismiss. Anything else: none.
-    static func sessionActions(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
-        if session.state == "running" { return menuActions(session) }
-        guard !session.holdsAccount else { return [] }
-        return (session.canResume && terminalLaunch && resumeCapable ? [.resume] : [])
-            + (session.canStartAgain && terminalLaunch ? [.startAgain] : []) + [.dismiss]
-    }
-
     /// Whether an ended row offers Resume as its primary button.
     static func offersResume(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool) -> Bool {
         !session.holdsAccount && session.canResume && terminalLaunch && resumeCapable

@@ -366,6 +366,36 @@ pub(crate) fn private_directory(path: &Path) -> Result<(), ManagedError> {
     Ok(())
 }
 
+/// Create the file `path` for writing, owner-only, refusing one that is
+/// already there (a link included).
+pub(crate) fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// The whole of `path` when it is a regular file, never a link, of at most
+/// `limit` bytes, however it grows while being read.
+pub(crate) fn read_regular_file(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= limit).then_some(bytes)
+}
+
 /// Create `path` owner-only. Two launches can race here; the loser's
 /// create fails with AlreadyExists, and the directory the winner made is
 /// accepted only as a real directory, never a symlink or a file.

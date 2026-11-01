@@ -50,12 +50,14 @@
 //! Resuming a session (design agreed 2026-10-31,
 //! `docs/superpowers/specs/2026-10-31-managed-session-resume-design.md`):
 //! - `resume` "Resume" -- an ended row's primary button when the row says
-//!   `can_resume` and the snapshot says `capabilities.terminal_launch`,
-//!   before `start_again` and `dismiss`. It continues the session's
-//!   conversation in a new session.
-//! - `copy_resume_command` "Copy resume command" -- an item in the row's
-//!   menu when it says `can_resume`. Copies the command line that resumes
-//!   the session from any terminal.
+//!   `can_resume` and the snapshot says `capabilities.terminal_launch` and
+//!   `capabilities.resume`, before `dismiss`; `start_again` then moves into
+//!   the row's menu. It continues the session's conversation in a new
+//!   session.
+//! - `copy_resume_command` "Copy resume command" -- a link on an ended row
+//!   that says `can_resume`, after its buttons and before `dismiss`, shown
+//!   once the shell knows the config directory it passes. Copies the
+//!   command line that resumes the session from any terminal.
 //! - `resumed` "Resumed" -- a small secondary label on the status line of a
 //!   row that continues an earlier session (the row says `resumed_from`).
 //!   `resumed_from` "Continues {time}" -- the same label with the root

@@ -12,17 +12,13 @@
 use super::{
     AccountId, ManagedError, ToolId,
     opencode::Version,
-    profiles::private_directory,
+    profiles::{create_private_file, private_directory, read_regular_file},
     sessions::{CollectionState, SessionState},
 };
 use crate::config::ConfigStore;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeSet,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeSet, io::Write, path::PathBuf};
 use uuid::Uuid;
 
 pub const DIRECTORY: &str = "managed-collection-plans";
@@ -144,31 +140,6 @@ fn claim_path(store: &ConfigStore, id: Uuid) -> PathBuf {
     directory(store).join(format!("{id}.claim"))
 }
 
-fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
-}
-
-fn read_regular(path: &Path, limit: u64) -> Option<Vec<u8>> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() as u64 <= limit).then_some(bytes)
-}
-
 /// Write `plan` owner-only, all at once: a reader sees the whole plan or
 /// none. Refuses a plan for a row that already has one.
 pub fn write(store: &ConfigStore, plan: &CollectionPlan) -> Result<(), ManagedError> {
@@ -193,7 +164,7 @@ pub fn write(store: &ConfigStore, plan: &CollectionPlan) -> Result<(), ManagedEr
         Uuid::new_v4().simple()
     ));
     let written = (|| {
-        let mut file = create_private(&partial)?;
+        let mut file = create_private_file(&partial)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
         std::fs::rename(&partial, &target)
@@ -208,7 +179,7 @@ pub fn write(store: &ConfigStore, plan: &CollectionPlan) -> Result<(), ManagedEr
 /// The plan of row `id`, when one is there and reads as this build's.
 pub fn read(store: &ConfigStore, id: Uuid) -> Option<CollectionPlan> {
     let plan: CollectionPlan =
-        serde_json::from_slice(&read_regular(&plan_path(store, id), MAX_PLAN)?).ok()?;
+        serde_json::from_slice(&read_regular_file(&plan_path(store, id), MAX_PLAN)?).ok()?;
     (plan.session_id == id && plan.schema_version == SCHEMA_VERSION).then_some(plan)
 }
 
@@ -253,7 +224,7 @@ pub fn claim(
     // holder, so a reader never takes a claim being written for a dead one.
     let partial = root.join(format!("{id}.{}.claiming", Uuid::new_v4().simple()));
     let written = (|| {
-        let mut file = create_private(&partial)?;
+        let mut file = create_private_file(&partial)?;
         file.write_all(&bytes)?;
         file.sync_all()
     })();
@@ -271,7 +242,7 @@ pub fn claim(
 pub fn claimant(store: &ConfigStore, id: Uuid) -> Option<Option<ProcessIdentity>> {
     let path = claim_path(store, id);
     std::fs::symlink_metadata(&path).ok()?;
-    Some(read_regular(&path, MAX_CLAIM).and_then(|bytes| serde_json::from_slice(&bytes).ok()))
+    Some(read_regular_file(&path, MAX_CLAIM).and_then(|bytes| serde_json::from_slice(&bytes).ok()))
 }
 
 /// Collection of row `id` has a final result: remove its plan, then its
@@ -493,7 +464,9 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            let mode = |path: &std::path::Path| {
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+            };
             assert_eq!(mode(&plan_path(&store, id)), 0o600);
             assert_eq!(mode(&directory(&store)), 0o700);
         }
@@ -644,11 +617,25 @@ mod tests {
         );
         // A held claim waits; a dead holder's is a failure.
         assert_eq!(
-            next(&p, row(SessionState::Unknown), false, Some(true), false, now),
+            next(
+                &p,
+                row(SessionState::Unknown),
+                false,
+                Some(true),
+                false,
+                now
+            ),
             Next::Wait
         );
         assert_eq!(
-            next(&p, row(SessionState::Unknown), false, Some(false), false, now),
+            next(
+                &p,
+                row(SessionState::Unknown),
+                false,
+                Some(false),
+                false,
+                now
+            ),
             Next::Fail
         );
         // Bounded.
@@ -675,17 +662,38 @@ mod tests {
             ..p.clone()
         };
         assert_eq!(
-            next(&off_plan, row(SessionState::Unknown), false, None, false, now),
+            next(
+                &off_plan,
+                row(SessionState::Unknown),
+                false,
+                None,
+                false,
+                now
+            ),
             Next::Discard
         );
         // A launcher that still reports is waited for, even when its claim
         // cannot be told from a dead holder's.
         assert_eq!(
-            next(&p, row(SessionState::Running), false, Some(false), false, now),
+            next(
+                &p,
+                row(SessionState::Running),
+                false,
+                Some(false),
+                false,
+                now
+            ),
             Next::Wait
         );
         assert_eq!(
-            next(&p, row(SessionState::Starting), false, Some(false), false, now),
+            next(
+                &p,
+                row(SessionState::Starting),
+                false,
+                Some(false),
+                false,
+                now
+            ),
             Next::Wait
         );
     }
@@ -697,11 +705,25 @@ mod tests {
         let now = Utc::now();
         let p = plan(Uuid::new_v4());
         assert_eq!(
-            next(&p, row(SessionState::Unknown), false, Some(false), true, now),
+            next(
+                &p,
+                row(SessionState::Unknown),
+                false,
+                Some(false),
+                true,
+                now
+            ),
             Next::Collected
         );
         assert_eq!(
-            next(&p, row(SessionState::Unknown), false, Some(false), false, now),
+            next(
+                &p,
+                row(SessionState::Unknown),
+                false,
+                Some(false),
+                false,
+                now
+            ),
             Next::Fail
         );
         assert_eq!(
@@ -725,7 +747,10 @@ mod tests {
             .join(super::super::native_collection::STAGING)
             .join("claude");
         std::fs::create_dir_all(pending.join(format!("{id}.pending"))).unwrap();
-        assert!(!staged(&store, &claude), "a collection still being verified");
+        assert!(
+            !staged(&store, &claude),
+            "a collection still being verified"
+        );
         std::fs::create_dir_all(pending.join(id.to_string())).unwrap();
         assert!(staged(&store, &claude));
         let codex = CollectionPlan {
@@ -757,8 +782,14 @@ mod tests {
     #[test]
     fn an_unreadable_plan_fails_its_rows_collection() {
         assert_eq!(unreadable(row(SessionState::Unknown), None), Next::Fail);
-        assert_eq!(unreadable(row(SessionState::Failed), Some(false)), Next::Fail);
-        assert_eq!(unreadable(row(SessionState::Unknown), Some(true)), Next::Wait);
+        assert_eq!(
+            unreadable(row(SessionState::Failed), Some(false)),
+            Next::Fail
+        );
+        assert_eq!(
+            unreadable(row(SessionState::Unknown), Some(true)),
+            Next::Wait
+        );
         assert_eq!(unreadable(row(SessionState::Running), None), Next::Wait);
         assert_eq!(unreadable(None, None), Next::Discard);
         let done = Some(RowStatus {
@@ -872,7 +903,8 @@ mod tests {
                 }),
                 false,
                 None,
-                false, now
+                false,
+                now
             ),
             Next::Collect
         );

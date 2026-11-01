@@ -8,7 +8,10 @@ use trace_commons_contributor::{
         settings::{DaemonSettings, SourceDeclaration},
         watcher,
     },
-    managed::{AccountId, ToolId, native_collection::NativeCollection, profiles::NativeProfiles},
+    managed::{
+        AccountId, ManagedError, ToolId, native_collection::NativeCollection,
+        profiles::NativeProfiles,
+    },
     source::{SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_OPENCODE, all_sources},
 };
 use uuid::Uuid;
@@ -405,13 +408,11 @@ fn codex(root: &std::path::Path, filename_id: Uuid, metadata_id: Uuid) -> std::p
 }
 
 #[cfg(unix)]
-fn record_codex_start(capture: &mut NativeCollection, native_id: Uuid, path: &std::path::Path) {
+fn record_codex_start(command: &std::process::Command, native_id: Uuid, path: &std::path::Path) {
     use std::{
         io::Write,
         process::{Command, Stdio},
     };
-    let mut command = Command::new("codex");
-    capture.configure_codex(&mut command).unwrap();
     let config = command
         .get_args()
         .find(|arg| arg.to_string_lossy().starts_with("hooks.SessionStart="))
@@ -448,13 +449,13 @@ fn overlapping_codex_collections_use_start_receipts_and_exclude_foreign_optout()
     let a_id = Uuid::new_v4();
     let b_id = Uuid::new_v4();
     let foreign_id = Uuid::new_v4();
-    let mut a = codex_capture(&store, account);
-    let mut b = codex_capture(&store, account);
+    let (a, a_launch) = configured_codex_capture(&store, account);
+    let (b, b_launch) = configured_codex_capture(&store, account);
     let foreign = codex(&root, foreign_id, foreign_id);
     let first = codex(&root, a_id, a_id);
     let second = codex(&root, b_id, b_id);
-    record_codex_start(&mut a, a_id, &first);
-    record_codex_start(&mut b, b_id, &second);
+    record_codex_start(&a_launch, a_id, &first);
+    record_codex_start(&b_launch, b_id, &second);
     a.collect(&store).unwrap();
     assert_eq!(staged_ids(&store, SOURCE_CODEX), vec![a_id.to_string()]);
     b.collect(&store).unwrap();
@@ -486,7 +487,7 @@ fn codex_missing_preexisting_and_mismatched_bindings_fail_collection_without_swe
         } else {
             None
         };
-        let mut capture = codex_capture(&store, account);
+        let (capture, launch) = configured_codex_capture(&store, account);
         let path = preexisting.unwrap_or_else(|| {
             let target = if mode == "outside_profile" {
                 dir.path().join("outside")
@@ -509,7 +510,7 @@ fn codex_missing_preexisting_and_mismatched_bindings_fail_collection_without_swe
         });
         if mode != "missing" {
             record_codex_start(
-                &mut capture,
+                &launch,
                 if mode == "receipt_id" {
                     other
                 } else {
@@ -532,7 +533,6 @@ fn unsupported_codex_binding_refuses_collection_and_preserves_launch_arguments()
     let store = ConfigStore::open(dir.path().join("state")).unwrap();
     let account = AccountId(Uuid::new_v4());
     let root = NativeProfiles::new(&store).profile_root(account).unwrap();
-    let mut capture = codex_capture(&store, account);
     let native_id = Uuid::new_v4();
     let transcript = codex(&root, native_id, native_id);
     let mut command = Command::new("codex");
@@ -540,7 +540,8 @@ fn unsupported_codex_binding_refuses_collection_and_preserves_launch_arguments()
         .args(["exec", "synthetic prompt"])
         .env("CODEX_HOME", &root);
     let before: Vec<_> = command.get_args().map(|a| a.to_owned()).collect();
-    assert!(capture.configure_codex(&mut command).is_err());
+    let (capture, configured) = codex_capture(&store, account, &mut command);
+    assert!(configured.is_err());
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
         before.iter().collect::<Vec<_>>()
@@ -556,17 +557,34 @@ fn unsupported_codex_binding_refuses_collection_and_preserves_launch_arguments()
 }
 
 /// A Codex collection holding the binding a launcher prepares for every
-/// Codex launch.
-fn codex_capture(store: &ConfigStore, account: AccountId) -> NativeCollection {
+/// Codex launch, with `command` configured by that binding as the launcher
+/// does it (`supervisor::codex_binding`); the result says whether it was.
+fn codex_capture(
+    store: &ConfigStore,
+    account: AccountId,
+    command: &mut std::process::Command,
+) -> (NativeCollection, Result<(), ManagedError>) {
     let id = Uuid::new_v4();
-    NativeCollection::snapshot(
-        store,
-        ToolId::Codex,
-        account,
-        id,
-        trace_commons_contributor::managed::session_binding::prepare(store, id).ok(),
-    )
-    .unwrap()
+    let binding = trace_commons_contributor::managed::session_binding::prepare(store, id);
+    let configured = match &binding {
+        Ok(binding) => binding.configure(command),
+        Err(_) => Err(ManagedError::InvalidRequest),
+    };
+    let capture =
+        NativeCollection::snapshot(store, ToolId::Codex, account, id, binding.ok()).unwrap();
+    (capture, configured)
+}
+
+/// [`codex_capture`] of a plain `codex` launch, which must configure.
+#[cfg(unix)]
+fn configured_codex_capture(
+    store: &ConfigStore,
+    account: AccountId,
+) -> (NativeCollection, std::process::Command) {
+    let mut command = std::process::Command::new("codex");
+    let (capture, configured) = codex_capture(store, account, &mut command);
+    configured.unwrap();
+    (capture, command)
 }
 
 /// The staged copy a resumed row `row` published for Claude conversation
@@ -699,7 +717,10 @@ fn fresh_claude_row_stages_its_subagent_transcripts() {
         .unwrap()
         .join(id.to_string())
         .join("subagents/agent-a1.jsonl");
-    assert_eq!(std::fs::read(&staged).unwrap(), std::fs::read(&subagent).unwrap());
+    assert_eq!(
+        std::fs::read(&staged).unwrap(),
+        std::fs::read(&subagent).unwrap()
+    );
 }
 
 /// A resumed Claude row whose root transcript is gone at exit fails
@@ -762,16 +783,13 @@ fn codex_root(
     thread: Uuid,
 ) -> (Uuid, std::path::PathBuf) {
     let id = Uuid::new_v4();
-    let mut capture = NativeCollection::snapshot(
-        store,
-        ToolId::Codex,
-        account,
-        id,
-        trace_commons_contributor::managed::session_binding::prepare(store, id).ok(),
-    )
-    .unwrap();
+    let mut command = std::process::Command::new("codex");
+    let binding = trace_commons_contributor::managed::session_binding::prepare(store, id).unwrap();
+    binding.configure(&mut command).unwrap();
+    let capture =
+        NativeCollection::snapshot(store, ToolId::Codex, account, id, Some(binding)).unwrap();
     let rollout = codex(root, thread, thread);
-    record_codex_start(&mut capture, thread, &rollout);
+    record_codex_start(&command, thread, &rollout);
     capture.collect(store).unwrap();
     (id, rollout)
 }

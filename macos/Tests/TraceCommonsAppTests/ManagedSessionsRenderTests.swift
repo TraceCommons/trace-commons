@@ -142,7 +142,9 @@ final class ManagedSessionsRenderTests: XCTestCase {
         let model = AppModel()
         model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
         let rows = try XCTUnwrap(model.managedSnapshot?.sessions)
-        XCTAssertEqual(rows.map { ManagedSurface.sessionActions($0, terminalLaunch: true, resumeCapable: model.managedSnapshot?.capabilities.resume == true) }, [[.show, .stop], [], [.resume, .startAgain, .dismiss]])
+        let resumeCapable = model.managedSnapshot?.capabilities.resume == true
+        XCTAssertEqual(rows.map { ManagedSurface.rowButtons($0, terminalLaunch: true, resumeCapable: resumeCapable) }, [[], [], [.resume, .dismiss]])
+        XCTAssertEqual(rows.map { ManagedSurface.rowMenuItems($0, terminalLaunch: true, resumeCapable: resumeCapable) }, [[.show, .stop], [], [.startAgain]])
         XCTAssertEqual(ManagedSurface.rowButtons(rows[2], terminalLaunch: true, resumeCapable: true), [.resume, .dismiss])
         XCTAssertEqual(ManagedSurface.rowMenuItems(rows[2], terminalLaunch: true, resumeCapable: true), [.startAgain])
         XCTAssertNotNil(rows[2].resumedFrom)

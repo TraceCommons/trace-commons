@@ -469,15 +469,8 @@ async fn login(
     print_value(result, json_output)
 }
 
-pub fn sessions(
-    store: &ConfigStore,
-    command: SessionCommand,
-    json_output: bool,
-) -> anyhow::Result<()> {
-    if let SessionCommand::Resume { .. } = command {
-        // Runs a tool: `resume`, from the async entry point.
-        return Err(ManagedError::InvalidRequest.into());
-    }
+/// `sessions list`. `sessions resume` runs a tool, so it is [`resume`].
+pub fn list_sessions(store: &ConfigStore, json_output: bool) -> anyhow::Result<()> {
     let snapshot: Value = call(store, "managed_snapshot", json!({}))?;
     print_value(snapshot["sessions"].clone(), json_output)
 }

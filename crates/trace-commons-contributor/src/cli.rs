@@ -658,7 +658,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             let code = crate::managed::cli::resume(&store, session_id).await?;
             std::process::exit(code);
         }
-        Command::Sessions { action } => crate::managed::cli::sessions(&store, action, cli.json),
+        Command::Sessions {
+            action: crate::managed::cli::SessionCommand::List,
+        } => crate::managed::cli::list_sessions(&store, cli.json),
         Command::ManagedSessionBind { .. } => {
             unreachable!("binding recorder handled before config resolution")
         }

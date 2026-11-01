@@ -1291,8 +1291,7 @@ fn collect_abandoned_now(shared: &DaemonShared, now: chrono::DateTime<chrono::Ut
                     None => (collection_plan::unreadable(row, claim), None),
                     Some(plan) => {
                         let tool_running = plan.process.is_running();
-                        let staged =
-                            claim == Some(false) && collection_plan::staged(store, &plan);
+                        let staged = claim == Some(false) && collection_plan::staged(store, &plan);
                         let next =
                             collection_plan::next(&plan, row, tool_running, claim, staged, now);
                         (next, Some((plan, tool_running)))
@@ -3236,10 +3235,7 @@ mod tests {
             };
             let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
             assert_eq!(status(&shared, id).state, SessionState::Unknown);
-            assert_eq!(
-                collect_abandoned(&shared, chrono::Utc::now()).await,
-                1
-            );
+            assert_eq!(collect_abandoned(&shared, chrono::Utc::now()).await, 1);
             assert!(staged(&f, id));
             assert_eq!(status(&shared, id).collection, CollectionState::Collected);
             assert!(!collection_plan::exists(&f.store, id));

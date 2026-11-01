@@ -12,7 +12,6 @@ use crate::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    process::Command,
 };
 use uuid::Uuid;
 
@@ -163,15 +162,6 @@ impl NativeCollection {
     pub fn continuing(mut self, root: Uuid) -> Self {
         self.continues = Some(root);
         self
-    }
-
-    /// Installs only this launch's trusted tracker. A configuration that cannot
-    /// preserve the caller's hooks leaves collection unavailable, not blocked.
-    pub fn configure_codex(&mut self, command: &mut Command) -> Result<(), ManagedError> {
-        self.codex
-            .as_ref()
-            .ok_or(ManagedError::InvalidRequest)?
-            .configure(command)
     }
 
     fn source_at(&self, root: PathBuf) -> Result<Box<dyn TraceSource>, ManagedError> {
