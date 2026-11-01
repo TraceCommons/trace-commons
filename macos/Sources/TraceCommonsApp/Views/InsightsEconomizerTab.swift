@@ -20,28 +20,43 @@ final class InsightsEconomizerModel {
     private let calls: Calls?
     private(set) var answer: DaemonData.EconomizerStatus?
     private(set) var failed = false
+    /// The daemon predates the economizer (`unknown_method`): the tab is
+    /// hidden, since a tab that cannot be used is not drawn greyed.
+    private(set) var notServed = false
     private(set) var busy = false
     /// Folder keys with a "Give back" in flight.
     private(set) var restoring: Set<String> = []
-    /// The request-failed words after a refused write, until the next
-    /// confirmed one.
-    private(set) var refusal: String?
+    /// The request-failed words under the switch after a refused switch
+    /// write, until the next confirmed one.
+    private(set) var switchRefusal: String?
+    /// The request-failed words on a folder's card after its Give back
+    /// failed, by folder key.
+    private(set) var folderRefusals: [String: String] = [:]
+    /// The latest read; an earlier reply that lands after it is dropped.
+    private var generation = 0
 
     init(calls: Calls?) { self.calls = calls }
 
     /// Whether this daemon can answer at all.
-    var available: Bool { calls != nil }
+    var available: Bool { calls != nil && !notServed }
 
     func load() async {
         guard let calls else { failed = true; return }
+        generation += 1
+        let mine = generation
         do {
-            answer = try await calls.status()
+            let reply = try await calls.status()
+            guard mine == generation else { return }
+            answer = reply
             failed = false
         } catch is CancellationError {
             // Leaving the tab is not a failure.
         } catch {
-            answer = nil
-            failed = true
+            guard mine == generation else { return }
+            if (error as? DaemonDataError)?.isNotServed == true { notServed = true }
+            // A failed read after a write keeps what was on screen; only a
+            // first read that fails says the details are unavailable.
+            if answer == nil { failed = true }
         }
     }
 
@@ -53,9 +68,9 @@ final class InsightsEconomizerModel {
         defer { busy = false }
         do {
             let reply = try await calls.setEnabled(on)
-            refusal = reply.enabled == on ? nil : MonitorWords.table?.requestFailed
+            switchRefusal = reply.enabled == on ? nil : MonitorWords.table?.requestFailed
         } catch {
-            refusal = MonitorWords.table?.requestFailed
+            switchRefusal = MonitorWords.table?.requestFailed
         }
         await load()
     }
@@ -67,9 +82,9 @@ final class InsightsEconomizerModel {
         defer { restoring.remove(folder.key) }
         do {
             _ = try await calls.restore(folder.harness, folder.key)
-            refusal = nil
+            folderRefusals[folder.key] = nil
         } catch {
-            refusal = MonitorWords.table?.requestFailed
+            folderRefusals[folder.key] = MonitorWords.table?.requestFailed
         }
         await load()
     }
@@ -172,7 +187,7 @@ struct InsightsEconomizerTab: View {
                 InsightsInfo(text("analytics_econ_switch"), [text("analytics_econ_switch_detail")])
                 Spacer(minLength: 0)
             }
-            if let refusal = model.refusal {
+            if let refusal = model.switchRefusal {
                 GlassNotice(tone: .outside) { Text(refusal) }
             }
         }
@@ -203,6 +218,9 @@ struct InsightsEconomizerTab: View {
                         Text(text("analytics_econ_give_back_detail")).insightsCaption()
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                }
+                if let refusal = model.folderRefusals[folder.key] {
+                    GlassNotice(tone: .outside) { Text(refusal) }
                 }
                 if let given = card.givenBack {
                     Text(text("analytics_econ_given_back")).insightsEyebrow()

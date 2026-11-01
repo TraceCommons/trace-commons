@@ -443,7 +443,7 @@ near-ai economizer off
 ```
 
 On macOS, Insights' Economizer tab shows the same switch and, for each
-folder and coding tool a managed session ran in (from the session rows and
+folder and coding tool a managed session ran in (from the session rows, dismissed ones included, and
 the remembered folder settings), how many sessions it learned from, the tools
 it leaves out with a Give back button, and the commands it tells the agent.
 It reads the daemon's `economizer_status`, and writes through

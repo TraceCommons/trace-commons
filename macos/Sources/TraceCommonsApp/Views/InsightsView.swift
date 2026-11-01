@@ -283,6 +283,12 @@ struct InsightsView: View {
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
         .onAppear { showSampleWeekIfAsked() }
+        // One read up front, so a daemon that predates the economizer hides
+        // its tab before anyone opens it.
+        .task { if economizerModel.answer == nil { await economizerModel.load() } }
+        .onChange(of: economizerModel.available) { _, usable in
+            if !usable, tab == .economizer { tab = .overview }
+        }
         // Breakdown's details are the inspector's while Breakdown is shown.
         .onChange(of: tab, initial: true) { _, shown in showBreakdownDetail(shown) }
         // The sample is built only when it is first needed, and while it

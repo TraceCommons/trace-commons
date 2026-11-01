@@ -7,9 +7,9 @@
 //!   into its folder's state when the session ends, then removed.
 //!
 //! Unreadable or foreign state reads as empty: the economizer then does
-//! less, never something else. Two sessions in one folder that end at once
-//! can lose one session's evidence (the last write wins); that only delays
-//! what is learned.
+//! less, never something else. Every change to a folder's state is made
+//! under that folder's lock ([`Store::update_repo`]), so two sessions
+//! ending at once, or a Give back, never lose each other's change.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -160,6 +160,42 @@ impl Store {
 
     pub fn save_repo(&self, key: &str, state: &RepoState) -> Result<()> {
         self.write(REPOS, key, state)
+    }
+
+    /// Read, change and write one folder's state under an exclusive lock
+    /// on `repos/<key>.lock`, so two writers (a session ending, a Give
+    /// back) never lose each other's change. Returns what `change`
+    /// returns; the state is written only when `change` says so.
+    pub fn update_repo<T>(
+        &self,
+        key: &str,
+        change: impl FnOnce(&mut RepoState) -> (bool, T),
+    ) -> Result<T> {
+        anyhow::ensure!(safe_id(key), "not a usable economizer id");
+        let dir = self.directory(Some(REPOS))?;
+        let lock = dir.join(format!("{key}.lock"));
+        if std::fs::symlink_metadata(&lock)
+            .is_ok_and(|meta| !meta.is_file() || meta.file_type().is_symlink())
+        {
+            anyhow::bail!("economizer lock is not a regular file");
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&lock).context("opening the economizer lock")?;
+        file.lock().context("locking the economizer state")?;
+        let mut state = self.repo(key);
+        let (write, out) = change(&mut state);
+        if write {
+            self.save_repo(key, &state)?;
+        }
+        // Dropping the file releases the lock.
+        drop(file);
+        Ok(out)
     }
 
     pub fn session(&self, id: &str) -> Option<SessionState> {

@@ -49,7 +49,9 @@ pub struct FolderSummary {
 }
 
 impl FolderSummary {
-    fn of(folder: String, harness: Harness, key: String, state: &RepoState) -> Self {
+    /// One folder's row from its state; `near-ai economizer status` and
+    /// [`summarize`] both read it.
+    pub fn of(folder: String, harness: Harness, key: String, state: &RepoState) -> Self {
         let given_back = state
             .tools
             .tools
@@ -130,11 +132,12 @@ pub fn summarize(store: &Store, folders: impl IntoIterator<Item = (Harness, Path
 
 /// Give back every tool left out under `key` for `harness`, for good.
 /// Returns the tools given back; none when nothing was left out.
+///
+/// Written under the folder's lock ([`Store::update_repo`]), so a session
+/// ending in that folder at the same moment cannot undo it.
 pub fn restore(store: &Store, harness: Harness, key: &str) -> anyhow::Result<Vec<String>> {
-    let mut state = store.repo(key);
-    let given = state.tools.restore(harness, &Thresholds::default());
-    if !given.is_empty() {
-        store.save_repo(key, &state)?;
-    }
-    Ok(given)
+    store.update_repo(key, |state| {
+        let given = state.tools.restore(harness, &Thresholds::default());
+        (!given.is_empty(), given)
+    })
 }

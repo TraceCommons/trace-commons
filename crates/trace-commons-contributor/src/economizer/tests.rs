@@ -1094,9 +1094,40 @@ fn the_summary_lists_each_known_folder_once_with_what_it_learned() {
             .unwrap()
             .is_empty()
     );
+    // A name that cannot be a store key is refused; a well-formed one
+    // that names no folder gives back nothing.
+    assert!(restore(&store, Harness::Claude, "../escape").is_err());
     assert!(
-        restore(&store, Harness::Claude, "../escape")
+        restore(&store, Harness::Claude, "repo-unknown")
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn update_repo_writes_only_when_asked_and_serializes_writers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    let key = repo_key(Path::new("/home/a/project"), Harness::Claude);
+    let read = store
+        .update_repo(&key, |state| (false, state.sessions))
+        .unwrap();
+    assert_eq!(read, 0);
+    assert_eq!(store.repo(&key), RepoState::default());
+    assert!(store.update_repo("../escape", |_| (true, ())).is_err());
+
+    // Writers in parallel each add one session; none is lost.
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                store
+                    .update_repo(&key, |state| {
+                        state.sessions += 1;
+                        (true, ())
+                    })
+                    .unwrap();
+            });
+        }
+    });
+    assert_eq!(store.repo(&key).sessions, 8);
 }

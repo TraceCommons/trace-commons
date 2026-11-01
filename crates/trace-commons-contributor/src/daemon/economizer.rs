@@ -33,14 +33,6 @@ use crate::managed::ToolId;
 /// The economizer's state could not be written.
 pub const ERR_ECONOMIZER_WRITE: &str = "economizer-write-failed";
 
-fn harness(tool: ToolId) -> Harness {
-    match tool {
-        ToolId::Claude => Harness::Claude,
-        ToolId::Codex => Harness::Codex,
-        ToolId::Opencode => Harness::Opencode,
-    }
-}
-
 fn store(shared: &DaemonShared) -> Store {
     Store::new(shared.store.dir())
 }
@@ -50,14 +42,14 @@ fn store(shared: &DaemonShared) -> Store {
 fn known_folders(shared: &DaemonShared) -> Vec<(Harness, PathBuf)> {
     let mut folders: Vec<(Harness, PathBuf)> = super::managed::session_folders(shared)
         .into_iter()
-        .map(|(tool, cwd)| (harness(tool), cwd))
+        .map(|(tool, cwd)| (Harness::from(tool), cwd))
         .collect();
     if let Ok(settings) = shared.settings.lock() {
         folders.extend(
             settings
                 .managed_folder_settings
                 .iter()
-                .map(|entry| (harness(entry.tool), entry.cwd.clone())),
+                .map(|entry| (Harness::from(entry.tool), entry.cwd.clone())),
         );
     }
     folders
@@ -97,7 +89,7 @@ pub fn handle_restore(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(params) = serde_json::from_value::<Params>(req.params.clone()) else {
         return Response::err(req.id, ERR_BAD_PARAMS, ERR_BAD_PARAMS);
     };
-    match summary::restore(&store(shared), harness(params.tool), &params.key) {
+    match summary::restore(&store(shared), Harness::from(params.tool), &params.key) {
         Ok(given) => Response::ok(req.id, json!({ "restored": given })),
         Err(_) => Response::err(req.id, ERR_UNAVAILABLE, ERR_ECONOMIZER_WRITE),
     }

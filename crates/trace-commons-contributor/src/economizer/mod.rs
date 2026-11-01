@@ -50,6 +50,16 @@ pub enum Harness {
     Opencode,
 }
 
+impl From<crate::managed::ToolId> for Harness {
+    fn from(tool: crate::managed::ToolId) -> Self {
+        match tool {
+            crate::managed::ToolId::Claude => Self::Claude,
+            crate::managed::ToolId::Codex => Self::Codex,
+            crate::managed::ToolId::Opencode => Self::Opencode,
+        }
+    }
+}
+
 impl Harness {
     pub fn as_str(self) -> &'static str {
         match self {

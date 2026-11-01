@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use super::Harness;
 use super::store::{Store, repo_key};
-use super::tools::Thresholds;
+use super::summary::{self, FolderSummary};
 use crate::config::ConfigStore;
 
 const HARNESSES: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Opencode];
@@ -68,15 +68,15 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
             let cwd = folder(cwd)?;
             let mut rows = Vec::new();
             for harness in HARNESSES {
-                let state = store.repo(&repo_key(&cwd, harness));
-                let left_out = state.tools.deny_list(harness, &Thresholds::default());
-                let facts: Vec<String> = state
-                    .facts
-                    .told()
+                let key = repo_key(&cwd, harness);
+                let state = store.repo(&key);
+                let row = FolderSummary::of(String::new(), harness, key, &state);
+                let facts: Vec<String> = row
+                    .told
+                    .iter()
                     .map(|fact| format!("{} {}", fact.prefix, fact.program))
                     .collect();
-                let forming = state.facts.facts.iter().filter(|f| !f.told()).count();
-                rows.push((harness, state.sessions, left_out, facts, forming));
+                rows.push((harness, row.sessions, row.left_out, facts, row.forming));
             }
             if as_json {
                 let tools: Vec<_> = rows
@@ -124,11 +124,8 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                 .into_iter()
                 .filter(|h| harness.is_none_or(|only| only == *h))
             {
-                let key = repo_key(&cwd, harness);
-                let mut state = store.repo(&key);
-                let given = state.tools.restore(harness, &Thresholds::default());
+                let given = summary::restore(&store, harness, &repo_key(&cwd, harness))?;
                 if !given.is_empty() {
-                    store.save_repo(&key, &state)?;
                     restored.push((harness, given));
                 }
             }

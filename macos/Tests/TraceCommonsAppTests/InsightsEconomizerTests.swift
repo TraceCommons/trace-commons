@@ -59,13 +59,45 @@ final class InsightsEconomizerTests: XCTestCase {
         XCTAssertEqual(model.answer?.enabled, false)
         await model.setEnabled(true)
         XCTAssertEqual(model.answer?.enabled, false)
-        XCTAssertNotNil(model.refusal)
+        XCTAssertNotNil(model.switchRefusal)
 
         await model.restore(Self.folder)
         XCTAssertEqual(box.restored, ["claude", "repo-1"])
         XCTAssertEqual(model.answer?.folders.first?.leftOut.isEmpty, true)
-        XCTAssertNil(model.refusal)
+        XCTAssertTrue(model.folderRefusals.isEmpty)
         XCTAssertTrue(model.restoring.isEmpty)
+    }
+
+    func testAFailedGiveBackStaysOnItsCardAndKeepsTheAnswer() async {
+        final class Box: @unchecked Sendable { var reads = 0 }
+        let box = Box()
+        struct Refused: Error {}
+        let model = InsightsEconomizerModel(calls: .init(
+            status: {
+                box.reads += 1
+                // The read after the failed write fails too.
+                if box.reads > 1 { throw Refused() }
+                return DaemonData.EconomizerStatus(enabled: true, folders: [InsightsEconomizerTests.folder])
+            },
+            setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
+            restore: { _, _ in throw Refused() }))
+        await model.load()
+        await model.restore(Self.folder)
+        XCTAssertNotNil(model.folderRefusals["repo-1"])
+        XCTAssertNil(model.switchRefusal)
+        XCTAssertFalse(model.failed)
+        XCTAssertEqual(model.answer?.folders.first?.key, "repo-1")
+    }
+
+    func testADaemonThatPredatesTheEconomizerHidesTheTab() async {
+        let model = InsightsEconomizerModel(calls: .init(
+            status: { throw DaemonDataError.daemon(code: "unknown_method", message: "unknown_method") },
+            setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
+            restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
+        XCTAssertTrue(model.available)
+        await model.load()
+        XCTAssertTrue(model.notServed)
+        XCTAssertFalse(model.available)
     }
 
     func testWithoutADaemonTheTabIsUnavailable() async {

@@ -82,9 +82,13 @@ pub fn handle(
         "Stop" => {
             let mut session = load();
             if session.turn.ended_well() {
-                let mut state = store.repo(repo);
-                state.envelope.add(session.turn.calls);
-                store.save_repo(repo, &state).ok()?;
+                let calls = session.turn.calls;
+                store
+                    .update_repo(repo, |state| {
+                        state.envelope.add(calls);
+                        (true, ())
+                    })
+                    .ok()?;
             }
             session.turn = Default::default();
             store.save_session(session_id, &session).ok()?;
@@ -94,15 +98,17 @@ pub fn handle(
             let session = store
                 .session(session_id)
                 .filter(|state| state.repo == repo)?;
-            let mut state = store.repo(repo);
-            state
-                .tools
-                .fold_session(harness, session.prompts, &session.used_tools);
-            state
-                .facts
-                .fold_session(&short_digest("session", session_id), &session.observations);
-            state.sessions = state.sessions.saturating_add(1);
-            store.save_repo(repo, &state).ok()?;
+            let digest = short_digest("session", session_id);
+            store
+                .update_repo(repo, |state| {
+                    state
+                        .tools
+                        .fold_session(harness, session.prompts, &session.used_tools);
+                    state.facts.fold_session(&digest, &session.observations);
+                    state.sessions = state.sessions.saturating_add(1);
+                    (true, ())
+                })
+                .ok()?;
             store.remove_session(session_id);
             None
         }
