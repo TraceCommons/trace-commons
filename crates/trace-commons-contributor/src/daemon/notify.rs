@@ -685,7 +685,6 @@ mod tests {
         let mut stated = ContributedSince::default();
         stated.credit_final_by_submission.insert("a".into(), 2.0);
         stated.credit_final_by_submission.insert("b".into(), 1.5);
-        stated.credit_final = 3.5;
         let folded: BTreeSet<String> = ["a".to_string()].into();
         // `b` is not in the fold: its credit is not dropped from the text.
         assert_eq!(stated.credit_final_not_in(&folded), 1.5);
@@ -700,7 +699,7 @@ mod tests {
         );
         // A shell that cannot show the fold gets every earned figure.
         assert_eq!(
-            contribution_text(2, &labels(&["api"]), stated.credit_final, 0.0),
+            contribution_text(2, &labels(&["api"]), stated.credit_final(), 0.0),
             "2 traces contributed from api. 3.5 credit earned."
         );
         // Nothing folded: nothing is left out.
