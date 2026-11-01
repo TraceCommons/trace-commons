@@ -267,8 +267,8 @@ final class ManagedSessionsTests: XCTestCase {
     }
 
     /// Ron, #1407: Show and Stop only where the daemon can do them, hidden
-    /// (not disabled) otherwise; an ended row offers Start again, then
-    /// Dismiss.
+    /// (not disabled) otherwise; an ended row offers Start again, with
+    /// Dismiss in its menu.
     func testRowActionsFollowWhatTheDaemonCanDo() throws {
         XCTAssertEqual(drawn(try session("running", focus: true, stop: true), terminalLaunch: true), [[], [.show, .stop]])
         XCTAssertEqual(drawn(try session("running", stop: true), terminalLaunch: true), [[], [.stop]])
@@ -277,8 +277,8 @@ final class ManagedSessionsTests: XCTestCase {
         // A flag on a row that is not running offers nothing.
         XCTAssertEqual(drawn(try session("starting", focus: true, stop: true), terminalLaunch: true), [[], []])
         XCTAssertEqual(drawn(try session("unknown", focus: true, stop: true), terminalLaunch: true), [[], []])
-        XCTAssertEqual(drawn(try session("exited", again: true), terminalLaunch: true), [[.startAgain, .dismiss], []])
-        XCTAssertEqual(drawn(try session("failed", again: true), terminalLaunch: true), [[.startAgain, .dismiss], []])
+        XCTAssertEqual(drawn(try session("exited", again: true), terminalLaunch: true), [[.startAgain], [.dismiss]])
+        XCTAssertEqual(drawn(try session("failed", again: true), terminalLaunch: true), [[.startAgain], [.dismiss]])
         XCTAssertEqual(drawn(try session("exited", again: true), terminalLaunch: false), [[.dismiss], []])
         XCTAssertEqual(drawn(try session("exited"), terminalLaunch: true), [[.dismiss], []])
         XCTAssertEqual(ManagedSurface.menuActions(try session("running", focus: true, stop: true)), [.show, .stop])
@@ -384,13 +384,13 @@ final class ManagedSessionsTests: XCTestCase {
 
     func testEndedRowOffersResumeFirstOnlyWhenEverythingAllowsIt() throws {
         let row = try session("exited", again: true, resume: true)
-        XCTAssertEqual(drawn(row, terminalLaunch: true, resumeCapable: true), [[.resume, .dismiss], [.startAgain]])
+        XCTAssertEqual(drawn(row, terminalLaunch: true, resumeCapable: true), [[.resume], [.startAgain, .dismiss]])
         // An older daemon without the capability, or no terminal, or no flag.
-        XCTAssertEqual(drawn(row, terminalLaunch: true, resumeCapable: false), [[.startAgain, .dismiss], []])
-        XCTAssertEqual(drawn(row, terminalLaunch: true), [[.startAgain, .dismiss], []])
+        XCTAssertEqual(drawn(row, terminalLaunch: true, resumeCapable: false), [[.startAgain], [.dismiss]])
+        XCTAssertEqual(drawn(row, terminalLaunch: true), [[.startAgain], [.dismiss]])
         XCTAssertEqual(drawn(row, terminalLaunch: false, resumeCapable: true), [[.dismiss], []])
-        XCTAssertEqual(drawn(try session("failed", again: true), terminalLaunch: true, resumeCapable: true), [[.startAgain, .dismiss], []])
-        XCTAssertEqual(drawn(try session("exited", resume: true), terminalLaunch: true, resumeCapable: true), [[.resume, .dismiss], []])
+        XCTAssertEqual(drawn(try session("failed", again: true), terminalLaunch: true, resumeCapable: true), [[.startAgain], [.dismiss]])
+        XCTAssertEqual(drawn(try session("exited", resume: true), terminalLaunch: true, resumeCapable: true), [[.resume], [.dismiss]])
         XCTAssertEqual(drawn(try session("running", focus: true, resume: true), terminalLaunch: true, resumeCapable: true), [[], [.show]])
     }
 

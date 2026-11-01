@@ -21,6 +21,9 @@ struct ManagedSessionsSection: View {
     @State private var stopping: ManagedSession?
     /// The session whose row menu is open.
     @State private var menuFor: String?
+    /// The session whose resume command was just copied: its status reads
+    /// "Copied" for about two seconds.
+    @State private var copiedFor: String?
     /// NEAR AI's display names by model id, read once per tool, so a row
     /// names its model as the picker does.
     @State private var modelNames: [String: String] = [:]
@@ -290,8 +293,11 @@ struct ManagedSessionsSection: View {
         }
         let title = session.purpose == "login" ? model.managedText("sign_in") : session.projectLabel
         let caption = ManagedSurface.caption(meta, startedAt: session.startedAt)
-        let status = GlassStatusLabel(model.managedText(ManagedSurface.stateKey(session.state)), status: ManagedWords.status(session.state))
-        let actions = ManagedSessionActions(session: session, menuFor: $menuFor, onStop: { stopping = session })
+        let justCopied = copiedFor == session.id
+        let status = GlassStatusLabel(
+            model.managedText(justCopied ? "copied" : ManagedSurface.stateKey(session.state)),
+            status: ManagedWords.status(session.state))
+        let actions = ManagedSessionActions(session: session, menuFor: $menuFor, copiedFor: $copiedFor, onStop: { stopping = session })
         // Title, then model, then status, then actions keep their room in
         // that order: the wide layout is tried first at its natural width,
         // and when it does not fit, the status and actions move to a second
@@ -731,6 +737,8 @@ struct ManagedSessionActions: View {
     let session: ManagedSession
     /// The row whose menu is open, shared with the account rows.
     @Binding var menuFor: String?
+    /// Set to this row's id for about two seconds after the command copies.
+    @Binding var copiedFor: String?
     let onStop: () -> Void
     @EnvironmentObject private var model: AppModel
 
@@ -801,6 +809,7 @@ struct ManagedSessionActions: View {
                             menuFor = nil
                             copyResumeCommand()
                         }
+                        .accessibilityLabel(model.managedText("copy_resume_command") + " " + session.projectLabel)
                     }
                     if actions.contains(.dismiss) {
                         GlassMenuItem(model.managedText("dismiss")) {
@@ -827,8 +836,13 @@ struct ManagedSessionActions: View {
             binaryPath: binary, configDirectory: model.configDirectory, sessionID: session.id)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(line, forType: .string)
-        // The menu closes on the click; VoiceOver hears "Copied". No toast
-        // or banner.
+        // The menu closes on the click; the row's status reads "Copied" for
+        // about two seconds and VoiceOver hears it. No toast or banner.
+        let id = session.id
+        copiedFor = id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            if copiedFor == id { copiedFor = nil }
+        }
         NSAccessibility.post(
             element: NSApp as Any, notification: .announcementRequested,
             userInfo: [.announcement: model.managedText("copied"), .priority: NSAccessibilityPriorityLevel.high.rawValue])

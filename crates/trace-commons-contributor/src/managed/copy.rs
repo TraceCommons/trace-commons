@@ -63,8 +63,9 @@
 //!   `resumed_from` "Continues {time}" -- the same label with the root
 //!   row's start time; shells fill `{time}` with it, formatted as they
 //!   format a row's own time.
-//! - `copied` "Copied" -- what a screen reader announces when the "Copy
-//!   resume command" menu item has copied. Not a notice.
+//! - `copied` "Copied" -- the row's status text for about two
+//!   seconds after the "Copy resume command" menu item copies, then it
+//!   reverts. An in-place label change, not a notice.
 //!
 //! Installing a coding tool. Approved 2026-10-15 (#1419 review):
 //! - `tools_title` "Coding tools", above the install block shown when no
