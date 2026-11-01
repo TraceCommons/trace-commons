@@ -219,27 +219,32 @@ impl JudgementRefusal {
     }
 
     /// What a client does with this refusal as v1 sends it: plaintext and
-    /// unsigned. Every refusal is a short retry except the three a forgery
-    /// gains nothing from: `judgement_saturated` and
-    /// `judgement_quote_unavailable` already ask for only a short wait, a
-    /// stale seal sends the client back for a fresh quote it verifies
-    /// itself, and the client can see for itself that a digest is over its
-    /// cap.
+    /// unsigned. A refusal whose stated lifetime a forgery could abuse to
+    /// switch judgements off for long (`request_malformed`,
+    /// `request_replayed`, `account_ineligible`, `credential_refused`,
+    /// `wire_version_unsupported`) is a short retry with a fresh request.
+    /// The rest keep their meaning, because a forgery gains nothing from
+    /// them: `judgement_saturated` and `judgement_quote_unavailable` ask for
+    /// a short wait; a stale seal sends the client back for a quote it
+    /// verifies itself; the client can see for itself that a digest is over
+    /// its cap; a budget refusal waits only for a `reset_at` checked against
+    /// the client's clock; and a model failure, timeout or fault is not
+    /// retried today, because a retry could be charged again and dropping
+    /// the connection would stop the client just as well.
     pub const fn unsigned_retry(self) -> JudgementRetry {
         match self {
             Self::Saturated | Self::QuoteUnavailable => JudgementRetry::AfterRetryAfter,
             Self::SealStale => JudgementRetry::FreshQuote,
             Self::DigestTooLarge => JudgementRetry::DropDigest,
-            Self::AccountBudgetExhausted
-            | Self::OperatorBudgetExhausted
-            | Self::RequestMalformed
+            Self::AccountBudgetExhausted | Self::OperatorBudgetExhausted => {
+                JudgementRetry::UntilReset
+            }
+            Self::ModelUnattested | Self::Timeout | Self::ServiceFault => JudgementRetry::NotToday,
+            Self::RequestMalformed
             | Self::WireVersionUnsupported
             | Self::CredentialRefused
             | Self::AccountIneligible
-            | Self::ModelUnattested
-            | Self::Timeout
-            | Self::RequestReplayed
-            | Self::ServiceFault => JudgementRetry::Soon,
+            | Self::RequestReplayed => JudgementRetry::Soon,
         }
     }
 }
@@ -263,7 +268,17 @@ pub enum JudgementRetry {
     FreshQuote,
     /// Do not send this digest again.
     DropDigest,
-    /// Retry after the client's short backoff, a bounded number of times.
+    /// Wait for [`JudgementRefusalBody::retry_not_before`], which checks the
+    /// sent `reset_at` against the client's clock, so a forged value defers
+    /// at most to the next month start the client itself computes.
+    UntilReset,
+    /// Not again today. A retry could be charged to the account's monthly
+    /// budget again, and a forgery gains nothing that dropping the
+    /// connection would not.
+    NotToday,
+    /// Retry with a fresh request nonce and seal, after the client's short
+    /// backoff, a bounded number of times. Never the same sealed bytes,
+    /// which would be refused as replayed.
     Soon,
 }
 
@@ -343,7 +358,7 @@ impl JudgementRefusalBody {
         let latest = now_unix
             .checked_add(JUDGEMENT_RESET_AT_SKEW_SECS)
             .and_then(next);
-        if earliest == Some(sent) || latest == Some(sent) {
+        if sent > now_unix && (earliest == Some(sent) || latest == Some(sent)) {
             return Some(sent);
         }
         next(now_unix)
@@ -422,7 +437,10 @@ fn parse_closed<T: serde::de::DeserializeOwned>(
     if !value.is_object() || !objects_only(&value, array_fields) {
         return Err(());
     }
-    serde_json::from_value(value).map_err(|_| ())
+    // The walk is the shape check only. Deserialize from the bytes, not the
+    // `Value`: a `Value` keeps the last of duplicate keys, where the derived
+    // struct parse refuses them.
+    serde_json::from_slice(bytes).map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -1215,14 +1233,24 @@ impl JudgementRequest {
         if stuck && judgements.len() > 1 {
             return Err(JudgementRefusal::RequestMalformed);
         }
-        match (stuck, TurnDigest::parse(&digest)) {
-            (true, Ok(_)) | (false, Err(_)) => {}
-            // A newer turn digest is a version the service does not speak
-            // yet, so the client can step down rather than drop the turn.
-            (true, Err(JudgementWireError::WireVersionUnsupported)) => {
-                return Err(JudgementRefusal::WireVersionUnsupported);
+        if stuck {
+            // The digest must be a valid turn digest in its canonical
+            // encoding, so no padding or reordering rides along with the
+            // counts. A newer turn digest is a version the service does not
+            // speak yet, so the client can step down rather than drop it.
+            let turn = TurnDigest::parse(&digest).map_err(|error| match error {
+                JudgementWireError::WireVersionUnsupported => {
+                    JudgementRefusal::WireVersionUnsupported
+                }
+                JudgementWireError::Malformed(_) => JudgementRefusal::RequestMalformed,
+            })?;
+            if turn.to_bytes().ok().as_deref() != Some(digest.as_slice()) {
+                return Err(JudgementRefusal::RequestMalformed);
             }
-            (true, Err(_)) | (false, Ok(_)) => return Err(JudgementRefusal::RequestMalformed),
+        } else if reads_as_turn_digest(&digest) {
+            // Anything that names a turn digest version, valid or not, is
+            // never judged as a session digest.
+            return Err(JudgementRefusal::RequestMalformed);
         }
         let request = Self {
             request_nonce,
@@ -1272,6 +1300,15 @@ impl JudgementRequest {
         })
         .expect("a judgement request is JSON serializable")
     }
+}
+
+/// Whether `digest` is a JSON object with a `digest_version` field: a turn
+/// digest of any version, valid or not. A session digest carries
+/// `schema_version` instead.
+fn reads_as_turn_digest(digest: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(digest)
+        .ok()
+        .is_some_and(|value| value.get("digest_version").is_some())
 }
 
 /// Parse an opened request plaintext into the refusal the service sends
@@ -1777,7 +1814,8 @@ impl TurnDigest {
             && (self.files_edited == 0
                 || self.most_edits_to_one_file >= self.edits.div_ceil(self.files_edited))
             && (self.failures == 0 || self.repeated_failures < self.failures)
-            && (self.checks > 0 || !self.last_check_failed)
+            && (!self.last_check_failed || (self.checks > 0 && self.failures > 0))
+            && self.latest_recent_check_agrees()
             && self.usual_calls != Some(0)
             && within(recent(|call| call.kind == TurnCallKind::Edit), self.edits)
             && within(recent(|call| call.kind == TurnCallKind::Check), self.checks)
@@ -1790,6 +1828,20 @@ impl TurnDigest {
             return Err(JudgementWireError::Malformed("turn_digest"));
         }
         Ok(())
+    }
+
+    /// When the last `Check` among the recent calls has no `Edit` after it,
+    /// it is the latest check since the last edit, so its `failed` must be
+    /// `last_check_failed`.
+    fn latest_recent_check_agrees(&self) -> bool {
+        for call in self.recent.iter().rev() {
+            match call.kind {
+                TurnCallKind::Edit => return true,
+                TurnCallKind::Check => return call.failed == self.last_check_failed,
+                _ => {}
+            }
+        }
+        true
     }
 
     /// The digest's bytes, as sent. Refuses an inconsistent digest.
@@ -1981,6 +2033,23 @@ mod turn_digest_tests {
                 usual_calls: Some(0),
                 ..digest()
             },
+            // A failed check is a failure.
+            TurnDigest {
+                failures: 0,
+                repeated_failures: 0,
+                checks: 1,
+                recent: vec![],
+                ..digest()
+            },
+            // The latest recent check, with no edit after it, passed.
+            TurnDigest {
+                recent: vec![TurnCall {
+                    kind: TurnCallKind::Check,
+                    failed: false,
+                    repeated: false,
+                }],
+                ..digest()
+            },
         ] {
             assert_eq!(
                 broken.to_bytes(),
@@ -2022,6 +2091,12 @@ mod turn_digest_tests {
         assert_eq!(wire, ["stuck", "productive", "unclear"]);
     }
 
+    fn later_turn(turn: &[u8]) -> Vec<u8> {
+        let mut later: serde_json::Value = serde_json::from_slice(turn).unwrap();
+        later["digest_version"] = serde_json::json!(TURN_DIGEST_VERSION + 1);
+        serde_json::to_vec(&later).unwrap()
+    }
+
     /// `stuck` takes a turn digest and nothing else, and a turn digest goes
     /// to `stuck` and nowhere else, on both ends of the wire.
     #[test]
@@ -2061,6 +2136,35 @@ mod turn_digest_tests {
             );
         }
         assert!(parse_judgement_request(wire(&turn, &["stuck"]).as_bytes()).is_ok());
+        // A padded or reordered turn digest is not its canonical encoding.
+        let mut padded = turn.clone();
+        padded.extend_from_slice(&[b' '; 64]);
+        let mut reordered: serde_json::Value = serde_json::from_slice(&turn).unwrap();
+        let reordered = {
+            let map = reordered.as_object_mut().unwrap();
+            let mut keys: Vec<_> = map.keys().cloned().collect();
+            keys.reverse();
+            let fields: Vec<String> = keys
+                .iter()
+                .map(|key| format!("{}:{}", serde_json::json!(key), map[key]))
+                .collect();
+            format!("{{{}}}", fields.join(",")).into_bytes()
+        };
+        assert_ne!(reordered, turn);
+        for noncanonical in [&padded, &reordered] {
+            assert_eq!(
+                parse_judgement_request(wire(noncanonical, &["stuck"]).as_bytes()).err(),
+                Some(JudgementRefusal::RequestMalformed)
+            );
+        }
+        // Anything naming a turn digest version is never a session digest:
+        // an inconsistent one, or a newer one.
+        for task_digest in [&inconsistent, &later_turn(&turn)] {
+            assert_eq!(
+                parse_judgement_request(wire(task_digest, &["task"]).as_bytes()).err(),
+                Some(JudgementRefusal::RequestMalformed)
+            );
+        }
         // A newer turn digest is refused as a version, not as malformed.
         let mut newer: serde_json::Value = serde_json::from_slice(&turn).unwrap();
         newer["digest_version"] = serde_json::json!(TURN_DIGEST_VERSION + 1);
@@ -2348,21 +2452,29 @@ mod tests {
             table,
             [
                 ("judgement_saturated", AfterRetryAfter),
-                ("judgement_account_budget_exhausted", Soon),
-                ("judgement_operator_budget_exhausted", Soon),
+                ("judgement_account_budget_exhausted", UntilReset),
+                ("judgement_operator_budget_exhausted", UntilReset),
                 ("judgement_request_malformed", Soon),
                 ("judgement_digest_too_large", DropDigest),
                 ("judgement_wire_version_unsupported", Soon),
                 ("judgement_credential_refused", Soon),
                 ("judgement_account_ineligible", Soon),
-                ("judgement_model_unattested", Soon),
-                ("judgement_timeout", Soon),
+                ("judgement_model_unattested", NotToday),
+                ("judgement_timeout", NotToday),
                 ("judgement_seal_stale", FreshQuote),
                 ("judgement_request_replayed", Soon),
                 ("judgement_quote_unavailable", AfterRetryAfter),
-                ("judgement_service_fault", Soon),
+                ("judgement_service_fault", NotToday),
             ]
         );
+        // Exactly the refusals that carry `reset_at` wait for it.
+        for refusal in JudgementRefusal::ALL {
+            assert_eq!(
+                refusal.unsigned_retry() == UntilReset,
+                refusal.carries_reset_at(),
+                "{refusal:?}"
+            );
+        }
     }
 
     /// `reset_at` is acted on only as the next month start by the client's
@@ -2387,11 +2499,47 @@ mod tests {
         assert_eq!(at(1_798_761_600, dec_31), Some(1_798_761_600));
         assert_eq!(at(1_801_440_000, dec_31), Some(1_801_440_000));
         assert_eq!(at(1_803_859_200, dec_31), Some(1_798_761_600));
+        // A month start already past is never believed, even within the
+        // skew: 06:00 on Nov 1 with a sent Nov 1 00:00 waits for Dec 1.
+        let nov_1_morning = next + 6 * 3600;
+        assert_eq!(at(next, nov_1_morning), Some(1_796_083_200));
         assert_eq!(
             JudgementRefusalBody::new(JudgementRefusal::Timeout, None)
                 .unwrap()
                 .retry_not_before(now),
             None
+        );
+    }
+
+    /// A duplicate key is refused, as serde's derived parse refuses it,
+    /// rather than read as its last value.
+    #[test]
+    fn no_wire_struct_parses_a_duplicate_key() {
+        assert_eq!(
+            parse_judgement_refusal(
+                JudgementRoute::Judgement,
+                503,
+                br#"{"error":"judgement_timeout","error":"judgement_saturated"}"#
+            ),
+            None
+        );
+        let request = JudgementRequest::new(
+            nonce(),
+            "claim".into(),
+            b"d".to_vec(),
+            vec![JudgementKind::Task],
+        )
+        .unwrap();
+        let json = request.to_json();
+        let doubled = json.replacen(
+            r#""judgements":["task"]"#,
+            r#""judgements":["task"],"judgements":["finished"]"#,
+            1,
+        );
+        assert_ne!(doubled, json);
+        assert_eq!(
+            parse_judgement_request(doubled.as_bytes()).err(),
+            Some(JudgementRefusal::RequestMalformed)
         );
     }
 
