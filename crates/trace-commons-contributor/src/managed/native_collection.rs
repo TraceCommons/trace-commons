@@ -12,7 +12,6 @@ use crate::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    process::Command,
 };
 use uuid::Uuid;
 
@@ -24,6 +23,8 @@ pub struct NativeCollection {
     before: Option<BTreeSet<PathBuf>>,
     id: Uuid,
     codex: Option<super::session_binding::CodexBinding>,
+    /// The root row whose conversation this launch continues, if any.
+    continues: Option<Uuid>,
 }
 
 fn tool_directory(tool: ToolId) -> Result<&'static str, ManagedError> {
@@ -77,11 +78,15 @@ fn files(root: &Path) -> Result<BTreeSet<PathBuf>, ManagedError> {
 impl NativeCollection {
     /// Taken immediately before spawning the native coding process, only when
     /// this launch explicitly opted in. No transcript content is read here.
+    /// `codex` is the binding the launcher prepared for this Codex launch,
+    /// which it prepares whether or not the launch collects (so the
+    /// conversation can be resumed); collection only reads its records.
     pub fn snapshot(
         store: &ConfigStore,
         tool: ToolId,
         account: AccountId,
         id: Uuid,
+        codex: Option<super::session_binding::CodexBinding>,
     ) -> Result<Self, ManagedError> {
         let root = NativeProfiles::new(store)
             .profile_root(account)?
@@ -89,27 +94,74 @@ impl NativeCollection {
         let usable = !std::fs::symlink_metadata(&root)
             .is_ok_and(|meta| !meta.is_dir() || meta.file_type().is_symlink());
         let before = usable.then(|| files(&root).ok()).flatten();
-        let codex = if tool == ToolId::Codex {
-            super::session_binding::prepare(store, id).ok()
-        } else {
-            None
-        };
+        let codex = codex.filter(|_| tool == ToolId::Codex);
         Ok(Self {
             tool,
             root,
             before,
             id,
             codex,
+            continues: None,
         })
     }
 
-    /// Installs only this launch's trusted tracker. A configuration that cannot
-    /// preserve the caller's hooks leaves collection unavailable, not blocked.
-    pub fn configure_codex(&mut self, command: &mut Command) -> Result<(), ManagedError> {
-        self.codex
-            .as_ref()
-            .ok_or(ManagedError::InvalidRequest)?
-            .configure(command)
+    /// What collection needs again after the launcher is gone, for a
+    /// collection plan.
+    pub fn plan(&self) -> super::collection_plan::NativePlan {
+        super::collection_plan::NativePlan {
+            before: self.before.clone(),
+            codex_bound: self.codex.is_some(),
+        }
+    }
+
+    /// The collection a plan describes, as [`Self::snapshot`] took it before
+    /// launch. The profile directory is derived from `account` and a Codex
+    /// binding from `id`, exactly as at launch; the plan names neither.
+    /// Chain [`Self::continuing`] for a resumed row.
+    pub fn from_plan(
+        store: &ConfigStore,
+        tool: ToolId,
+        account: AccountId,
+        id: Uuid,
+        plan: &super::collection_plan::NativePlan,
+    ) -> Result<Self, ManagedError> {
+        let root = NativeProfiles::new(store)
+            .profile_root(account)?
+            .join(suffix(tool)?);
+        let codex = match (tool, plan.codex_bound) {
+            (ToolId::Codex, true) => Some(super::session_binding::reopen(store, id)?),
+            (_, true) => return Err(ManagedError::InvalidRequest),
+            (_, false) => None,
+        };
+        Ok(Self {
+            tool,
+            root,
+            before: plan.before.clone(),
+            id,
+            codex,
+            continues: None,
+        })
+    }
+
+    /// This launch continues the conversation of an earlier row, `root`
+    /// (`LaunchContext::resume_of`). Collection then stages that one
+    /// conversation file, which existed before the launch and has grown
+    /// since: Claude Code's `<root>.jsonl`, or the rollout the root's Codex
+    /// binding recorded. Every other file that was already there stays
+    /// excluded. A resumed launch only collects when its root did: the
+    /// earlier turns are covered by that consent.
+    ///
+    /// The whole file is staged, not the turns added since: the staged
+    /// copy must parse and verify on its own (Codex needs its
+    /// `session_meta` header, Claude Code its `sessionId` lines), and
+    /// nothing downstream merges or supersedes by conversation identity.
+    /// The upload path dedupes only by content hash, so the root's copy
+    /// and this one become separate contributions under the same
+    /// `source_session`, the earlier turns in both. Withdrawal by that
+    /// identity covers both.
+    pub fn continuing(mut self, root: Uuid) -> Self {
+        self.continues = Some(root);
+        self
     }
 
     fn source_at(&self, root: PathBuf) -> Result<Box<dyn TraceSource>, ManagedError> {
@@ -148,8 +200,10 @@ impl NativeCollection {
         Ok(())
     }
 
-    /// Stage only exactly bound, newly created native conversations. Preserve
-    /// their original IDs and filenames: attestation enrichment joins on them.
+    /// Stage only exactly bound, newly created native conversations, or for a
+    /// resumed launch the root's continued one ([`Self::continuing`]), always
+    /// under this launch's own row id. Preserve their original IDs and
+    /// filenames: attestation enrichment joins on them.
     pub fn collect(&self, store: &ConfigStore) -> Result<(), ManagedError> {
         let before = self
             .before
@@ -159,32 +213,46 @@ impl NativeCollection {
         let mut parents = BTreeMap::new();
         match self.tool {
             ToolId::Claude => {
+                // A resumed launch continues `<root>.jsonl`; a fresh one
+                // writes its own, which must be new.
+                let native = self.continues.unwrap_or(self.id);
                 let owned = source::claude_code::ClaudeCodeSource::new(self.root.clone())
-                    .managed_session_paths(&self.id.to_string())
+                    .managed_session_paths(&native.to_string())
                     .map_err(|_| ManagedError::InvalidRequest)?;
                 let parent = owned.first().ok_or(ManagedError::NotFound)?;
                 let relative = parent
                     .strip_prefix(&self.root)
                     .map_err(|_| ManagedError::InvalidRequest)?;
-                if before.contains(relative) {
+                if before.contains(relative) && self.continues.is_none() {
                     return Err(ManagedError::InvalidRequest);
                 }
-                parents.insert(relative.to_path_buf(), self.id);
+                parents.insert(relative.to_path_buf(), native);
+                selected.insert(relative.to_path_buf());
+                // A resumed launch takes the whole conversation: the
+                // subagent transcripts its earlier turns wrote are part of
+                // it. A fresh one takes only what it wrote itself.
                 for path in owned {
                     let relative = path
                         .strip_prefix(&self.root)
                         .map_err(|_| ManagedError::InvalidRequest)?;
-                    if !before.contains(relative) {
+                    if self.continues.is_some() || !before.contains(relative) {
                         selected.insert(relative.to_path_buf());
                     }
                 }
             }
             ToolId::Codex => {
-                let records = self
-                    .codex
-                    .as_ref()
-                    .ok_or(ManagedError::NotFound)?
-                    .records()?;
+                // A resumed launch has no binding of its own: its root's
+                // recorded the conversation it continues.
+                let records = match self.continues {
+                    Some(root) => vec![
+                        super::session_binding::read(store, root).ok_or(ManagedError::NotFound)?,
+                    ],
+                    None => self
+                        .codex
+                        .as_ref()
+                        .ok_or(ManagedError::NotFound)?
+                        .records()?,
+                };
                 let available = files(&self.root)?;
                 let canonical_root =
                     std::fs::canonicalize(&self.root).map_err(|_| ManagedError::NotFound)?;
@@ -210,7 +278,7 @@ impl NativeCollection {
                         return Err(ManagedError::InvalidRequest);
                     }
                     let relative = matches[0];
-                    if before.contains(relative) {
+                    if before.contains(relative) && self.continues.is_none() {
                         continue;
                     }
                     Self::codex_identity(
@@ -245,7 +313,17 @@ impl NativeCollection {
         let result = (|| {
             for relative in selected {
                 let destination = pending.join(&relative);
-                private_directory(destination.parent().ok_or(ManagedError::InvalidRequest)?)?;
+                // Subagent transcripts sit below their conversation's own
+                // directory: create every level, each owner-only.
+                let mut level = pending.clone();
+                for part in relative
+                    .parent()
+                    .ok_or(ManagedError::InvalidRequest)?
+                    .components()
+                {
+                    level.push(part);
+                    private_directory(&level)?;
+                }
                 std::fs::copy(self.root.join(relative), &destination)
                     .map_err(|_| ManagedError::StorageUnavailable)?;
                 #[cfg(unix)]
@@ -287,6 +365,22 @@ impl NativeCollection {
         }
         result
     }
+}
+
+/// Whether row `id`'s collection for `tool` was published: its staged
+/// directory is there, which it is only once it verified.
+pub fn published(store: &ConfigStore, tool: ToolId, id: Uuid) -> bool {
+    let Ok(directory) = tool_directory(tool) else {
+        return false;
+    };
+    std::fs::symlink_metadata(
+        store
+            .dir()
+            .join(STAGING)
+            .join(directory)
+            .join(id.to_string()),
+    )
+    .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
 }
 
 /// Explicit staged roots are separate from automatic native discovery. Only

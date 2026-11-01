@@ -10,9 +10,9 @@ pub fn snapshot(store: &ConfigStore) -> Result<BTreeMap<ToolId, String>, Managed
     let mut values = DaemonSettings::load(store)
         .map_err(|_| ManagedError::StorageUnavailable)?
         .managed_cli_options;
-    for (tool, value) in &values {
-        parse(*tool, value).map_err(|_| ManagedError::StorageUnavailable)?;
-    }
+    // A saved value this build no longer accepts is still shown, so the
+    // person can change it; a launch with it is refused
+    // ([`arguments`] parses it again).
     for tool in [ToolId::Claude, ToolId::Codex, ToolId::Opencode] {
         values.entry(tool).or_default();
     }
@@ -121,6 +121,9 @@ fn validate(tool: ToolId, args: &[String]) -> Result<(), ManagedError> {
                         | "--session-id"
                         | "--resume"
                         | "--continue"
+                        // Forking writes the resumed turns to a new
+                        // conversation the launcher would not collect.
+                        | "--fork-session"
                         | "-r"
                         | "-c"
                 ) || arg
@@ -140,9 +143,38 @@ fn validate(tool: ToolId, args: &[String]) -> Result<(), ManagedError> {
                 }
             }
             ToolId::Codex => {
+                // The value of a flag that takes exactly one is never a
+                // subcommand (`-m fork` names a model). `-i` is left out: it
+                // takes several, so what follows it may still be checked.
+                if matches!(
+                    arg.as_str(),
+                    "-m" | "--model"
+                        | "-s"
+                        | "--sandbox"
+                        | "-a"
+                        | "--ask-for-approval"
+                        | "--enable"
+                        | "--disable"
+                        | "--add-dir"
+                        | "--remote-auth-token-env"
+                ) {
+                    iter.next().ok_or_else(invalid)?;
+                    continue;
+                }
+                // Codex continues a conversation through its `resume` and
+                // `fork` subcommands, which the launcher alone adds.
                 if matches!(
                     flag,
-                    "--profile" | "-p" | "--cd" | "-C" | "--remote" | "--oss" | "--local-provider"
+                    "--profile"
+                        | "-p"
+                        | "--cd"
+                        | "-C"
+                        | "--remote"
+                        | "--oss"
+                        | "--local-provider"
+                        | "resume"
+                        | "fork"
+                        | "--last"
                 ) || (arg.starts_with("-p") && !arg.starts_with("--"))
                     || (arg.starts_with("-C") && !arg.starts_with("--"))
                 {

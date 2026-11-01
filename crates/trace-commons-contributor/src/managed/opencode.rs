@@ -2,7 +2,7 @@
 //! Standard profiles are never read or changed. Exports are local transcripts,
 //! not evidence of attestation or permission to upload.
 use super::{
-    AccountView, ManagedError,
+    AccountView, ConnectionKind, ManagedError,
     profiles::{NativeProfiles, bounded_output_limit, private_directory},
 };
 use crate::{config::ConfigStore, source::opencode::parse_export};
@@ -69,8 +69,9 @@ pub(crate) fn isolate(command: &mut Command, root: &Path) -> Result<(), ManagedE
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Version {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Version {
     V1,
     V2,
 }
@@ -157,8 +158,18 @@ fn limit(model: &super::models::ChatModel) -> Option<serde_json::Value> {
     Some(json!({ "context": context, "output": output }))
 }
 
+/// The title OpenCode shows for a managed session, also in its terminal tab
+/// ("OC | <title>"). Only inference through NEAR AI is private.
+fn session_title(connection: ConnectionKind) -> &'static str {
+    match connection {
+        ConnectionKind::NearAi | ConnectionKind::NearAiSignIn => "NEAR AI private session",
+        ConnectionKind::ApiKey | ConnectionKind::Subscription => "Managed session",
+    }
+}
+
 pub struct OpenCodeSession {
     root: PathBuf,
+    title: &'static str,
     native: PathBuf,
     cwd: PathBuf,
     id: Uuid,
@@ -183,6 +194,7 @@ impl OpenCodeSession {
         private_directory(&root)?;
         Ok(Self {
             root,
+            title: session_title(account.connection),
             native: native.into(),
             cwd: std::fs::canonicalize(cwd).map_err(|_| ManagedError::InvalidRequest)?,
             id,
@@ -210,10 +222,10 @@ impl OpenCodeSession {
         let now = chrono::Utc::now().timestamp_millis();
         let seed = match self.version {
             Version::V1 => {
-                json!({"info":{"id":self.session_id(),"slug":"managed-session","projectID":"global","directory":self.cwd,"title":"Managed session","version":"1.19.0","time":{"created":now,"updated":now}},"messages":[]})
+                json!({"info":{"id":self.session_id(),"slug":"managed-session","projectID":"global","directory":self.cwd,"title":self.title,"version":"1.19.0","time":{"created":now,"updated":now}},"messages":[]})
             }
             Version::V2 => {
-                json!({"info":{"id":self.session_id(),"projectID":"global","location":{"directory":self.cwd},"title":"Managed session","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":now,"updated":now}},"messages":[]})
+                json!({"info":{"id":self.session_id(),"projectID":"global","location":{"directory":self.cwd},"title":self.title,"cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":now,"updated":now}},"messages":[]})
             }
         };
         let profile =
@@ -375,19 +387,95 @@ impl OpenCodeSession {
     /// Validate completely before atomic staging. Failure preserves the native
     /// profile and any previously staged bytes for explicit local recovery.
     pub fn collect(&self, store: &ConfigStore) -> Result<(), ManagedError> {
+        self.collect_as(store, self.id)
+    }
+
+    /// What collecting this session needs again, for a collection plan.
+    pub fn plan(&self) -> super::collection_plan::OpenCodePlan {
+        super::collection_plan::OpenCodePlan {
+            native: self.native.clone(),
+            session: self.id,
+            version: self.version,
+        }
+    }
+
+    /// The session a collection plan names, to export it again. Its
+    /// directory is derived from the account and must already be there;
+    /// nothing is created or seeded.
+    pub fn reopen(
+        store: &ConfigStore,
+        account: super::AccountId,
+        plan: &super::collection_plan::OpenCodePlan,
+        cwd: &Path,
+    ) -> Result<Self, ManagedError> {
+        if !plan.native.is_absolute()
+            || !plan.native.is_file()
+            || !cwd.is_absolute()
+            || !cwd.is_dir()
+        {
+            return Err(ManagedError::InvalidRequest);
+        }
+        let root = NativeProfiles::new(store)
+            .profile_root(account)?
+            .join(plan.session.to_string());
+        if !std::fs::symlink_metadata(&root)
+            .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+        {
+            return Err(ManagedError::NotFound);
+        }
+        Ok(Self {
+            root,
+            // A reopened session is only exported, never seeded again.
+            title: session_title(ConnectionKind::ApiKey),
+            native: plan.native.clone(),
+            cwd: std::fs::canonicalize(cwd).map_err(|_| ManagedError::InvalidRequest)?,
+            id: plan.session,
+            version: plan.version,
+        })
+    }
+
+    /// [`Self::collect`], staged as `<row>.json`: a resumed session's row
+    /// exports its root's whole conversation without replacing the root
+    /// row's earlier export.
+    pub fn collect_as(&self, store: &ConfigStore, row: Uuid) -> Result<(), ManagedError> {
         let bytes = self.export()?;
         let root = store.dir().join(STAGING);
         private_directory(&root)?;
         let staging = ConfigStore::open(root).map_err(|_| ManagedError::StorageUnavailable)?;
         staging
-            .write_daemon_file(&format!("{}.json", self.id), &bytes)
+            .write_daemon_file(&format!("{row}.json"), &bytes)
             .map_err(|_| ManagedError::StorageUnavailable)
     }
+}
+
+/// Whether row `row`'s export was staged ([`OpenCodeSession::collect_as`]).
+pub fn exported(store: &ConfigStore, row: Uuid) -> bool {
+    std::fs::symlink_metadata(store.dir().join(STAGING).join(format!("{row}.json")))
+        .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OpenCode shows the session title in its terminal tab ("OC | <title>").
+    /// Only a session whose inference runs through NEAR AI is called private.
+    #[test]
+    fn session_title_names_near_ai_private_sessions_only() {
+        assert_eq!(
+            session_title(ConnectionKind::NearAiSignIn),
+            "NEAR AI private session"
+        );
+        assert_eq!(
+            session_title(ConnectionKind::NearAi),
+            "NEAR AI private session"
+        );
+        assert_eq!(session_title(ConnectionKind::ApiKey), "Managed session");
+        assert_eq!(
+            session_title(ConnectionKind::Subscription),
+            "Managed session"
+        );
+    }
 
     #[test]
     fn v2_refuses_external_system_configuration() {
@@ -416,10 +504,63 @@ mod tests {
         }
     }
 
+    /// Reopening for collection creates nothing: the session's directory
+    /// must already be there, and the executable and folder must be real.
+    #[test]
+    fn a_session_reopened_for_collection_must_already_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().join("state")).unwrap();
+        let account = super::super::AccountId(Uuid::new_v4());
+        let native = dir.path().join("opencode");
+        std::fs::write(&native, b"").unwrap();
+        let plan = super::super::collection_plan::OpenCodePlan {
+            native: native.clone(),
+            session: Uuid::new_v4(),
+            version: Version::V2,
+        };
+        let cwd = dir.path();
+        assert!(matches!(
+            OpenCodeSession::reopen(&store, account, &plan, cwd),
+            Err(ManagedError::NotFound)
+        ));
+        let root = NativeProfiles::new(&store)
+            .profile_root(account)
+            .unwrap()
+            .join(plan.session.to_string());
+        assert!(!root.exists(), "nothing is created");
+        std::fs::create_dir(&root).unwrap();
+        let session = OpenCodeSession::reopen(&store, account, &plan, cwd).unwrap();
+        assert_eq!(session.plan(), plan);
+        assert_eq!(
+            session.session_id(),
+            format!("ses_{}", plan.session.simple())
+        );
+        for bad in [
+            super::super::collection_plan::OpenCodePlan {
+                native: "opencode".into(),
+                ..plan.clone()
+            },
+            super::super::collection_plan::OpenCodePlan {
+                native: dir.path().into(),
+                ..plan.clone()
+            },
+        ] {
+            assert!(matches!(
+                OpenCodeSession::reopen(&store, account, &bad, cwd),
+                Err(ManagedError::InvalidRequest)
+            ));
+        }
+        assert!(matches!(
+            OpenCodeSession::reopen(&store, account, &plan, std::path::Path::new("relative")),
+            Err(ManagedError::InvalidRequest)
+        ));
+    }
+
     #[test]
     fn v2_uses_private_server_and_native_provider_configuration() {
         let dir = tempfile::tempdir().unwrap();
         let session = OpenCodeSession {
+            title: "Managed session",
             root: dir.path().join("profile"),
             native: dir.path().join("opencode"),
             cwd: dir.path().into(),
@@ -504,6 +645,7 @@ mod tests {
         for version in [Version::V1, Version::V2] {
             let session = OpenCodeSession {
                 root: dir.path().join("profile"),
+                title: "Managed session",
                 native: dir.path().join("opencode"),
                 cwd: dir.path().into(),
                 id: Uuid::new_v4(),
@@ -551,6 +693,7 @@ mod tests {
     fn provider_header_binds_the_exact_seeded_session() {
         let dir = tempfile::tempdir().unwrap();
         let session = OpenCodeSession {
+            title: "Managed session",
             root: dir.path().join("profile"),
             native: dir.path().join("opencode"),
             cwd: dir.path().into(),
@@ -633,6 +776,7 @@ mod tests {
         ];
         for (version, key) in [(Version::V1, "provider"), (Version::V2, "providers")] {
             let session = OpenCodeSession {
+                title: "Managed session",
                 root: dir.path().join("profile"),
                 native: dir.path().join("opencode"),
                 cwd: dir.path().into(),

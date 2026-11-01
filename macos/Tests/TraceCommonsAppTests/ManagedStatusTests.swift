@@ -35,7 +35,7 @@ final class ManagedStatusTests: XCTestCase {
     }
 
     /// (a) A failed launch is said on the NEAR AI card, under the buttons
-    /// that started it; a failed stop, dismiss or start again, or a launch
+    /// that started it; a failed stop, dismiss, start again or resume, or a launch
     /// with no NEAR AI card drawn, on the sessions card. The lines and the
     /// update links are drawn either way.
     func test_aFailureIsSaidWhereItWasAsked() throws {
@@ -43,7 +43,7 @@ final class ManagedStatusTests: XCTestCase {
         XCTAssertTrue(ManagedSessionsSection.failureOnSignInCard(method: "managed_tool_setup", signInCardShown: true))
         XCTAssertFalse(ManagedSessionsSection.failureOnSignInCard(method: "managed_tool_setup", signInCardShown: false))
         XCTAssertFalse(ManagedSessionsSection.failureOnSignInCard(method: "managed_launch_prepare", signInCardShown: false))
-        for method in ["managed_session_stop", "managed_session_dismiss", "managed_session_start_again", nil] {
+        for method in ["managed_session_stop", "managed_session_dismiss", "managed_session_start_again", "managed_session_resume", nil] {
             XCTAssertFalse(ManagedSessionsSection.failureOnSignInCard(method: method, signInCardShown: true), method ?? "nil")
         }
         let source = try Self.source()

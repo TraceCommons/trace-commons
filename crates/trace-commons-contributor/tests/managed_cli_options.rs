@@ -107,6 +107,8 @@ fn routing_and_session_overrides_are_rejected_in_every_spelling() {
         "--session-id other",
         "--resume previous",
         "--continue",
+        "--fork-session",
+        "--fork-session=true",
         "-rSESSION",
         "-cSESSION",
         "-pc",
@@ -126,6 +128,11 @@ fn routing_and_session_overrides_are_rejected_in_every_spelling() {
         "-C/other",
         "--oss",
         "-c profiles.other.model_provider=other",
+        "resume",
+        "resume previous",
+        "resume --last",
+        "fork previous",
+        "--last",
     ] {
         assert!(parse(ToolId::Codex, value).is_err(), "{value}");
     }
@@ -148,6 +155,57 @@ fn routing_and_session_overrides_are_rejected_in_every_spelling() {
     assert!(parse(ToolId::Codex, "--model custom -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox").is_ok());
     assert!(parse(ToolId::Opencode, "--agent build --log-level DEBUG").is_ok());
     assert!(parse(ToolId::Claude, "-dcore --model custom").is_ok());
+}
+
+/// Codex's `resume` and `fork` are refused where Codex reads a subcommand,
+/// after any options too, but not as the value of a flag that takes one.
+#[test]
+fn codex_subcommand_words_are_refused_only_where_codex_reads_a_subcommand() {
+    use trace_commons_contributor::managed::{ToolId, options::parse};
+    for value in [
+        "-m fork",
+        "--model resume --search",
+        "-c model_reasoning_effort=high -m fork",
+        "-s read-only -a never --enable resume",
+        "--add-dir fork",
+    ] {
+        assert!(parse(ToolId::Codex, value).is_ok(), "{value}");
+    }
+    for value in [
+        "-m custom resume",
+        "--search fork previous",
+        "-i image.png resume",
+        "-s read-only fork",
+        "-m",
+    ] {
+        assert!(parse(ToolId::Codex, value).is_err(), "{value}");
+    }
+}
+
+/// A saved value this build refuses is still shown, so Manage sessions
+/// loads and the person can change it, and a launch with it is refused.
+#[test]
+fn a_saved_value_this_build_refuses_is_shown_but_never_launched() {
+    use trace_commons_contributor::managed::{ToolId, options};
+    let home = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+    let mut settings =
+        trace_commons_contributor::daemon::settings::DaemonSettings::load(&store).unwrap();
+    settings
+        .managed_cli_options
+        .insert(ToolId::Codex, "resume".into());
+    settings
+        .managed_cli_options
+        .insert(ToolId::Claude, "--model custom".into());
+    settings.save(&store).unwrap();
+    let shown = options::snapshot(&store).unwrap();
+    assert_eq!(shown[&ToolId::Codex], "resume");
+    assert_eq!(shown[&ToolId::Claude], "--model custom");
+    assert!(options::arguments(&store, ToolId::Codex).is_err());
+    assert_eq!(
+        options::arguments(&store, ToolId::Claude).unwrap(),
+        ["--model", "custom"]
+    );
 }
 
 #[test]

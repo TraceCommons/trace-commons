@@ -79,6 +79,17 @@ impl NativeProfiles {
         roots
     }
 
+    /// The account's profile directory when it is already there, creating
+    /// nothing: for checks that must not leave a directory behind.
+    pub fn existing_profile_root(&self, id: AccountId) -> Option<PathBuf> {
+        let real_dir = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+        };
+        let path = self.root.join(id.to_string());
+        (real_dir(&self.root) && real_dir(&path)).then_some(path)
+    }
+
     pub fn profile_root(&self, id: AccountId) -> Result<PathBuf, ManagedError> {
         private_directory(&self.root)?;
         let path = self.root.join(id.to_string());
@@ -353,6 +364,36 @@ pub(crate) fn private_directory(path: &Path) -> Result<(), ManagedError> {
             .map_err(|_| ManagedError::StorageUnavailable)?;
     }
     Ok(())
+}
+
+/// Create the file `path` for writing, owner-only, refusing one that is
+/// already there (a link included).
+pub(crate) fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// The whole of `path` when it is a regular file, never a link, of at most
+/// `limit` bytes, however it grows while being read.
+pub(crate) fn read_regular_file(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= limit).then_some(bytes)
 }
 
 /// Create `path` owner-only. Two launches can race here; the loser's

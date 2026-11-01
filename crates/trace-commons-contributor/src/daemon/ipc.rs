@@ -356,6 +356,7 @@ pub const METHODS: &[&str] = &[
     "managed_session_focus",
     "managed_session_stop",
     "managed_session_start_again",
+    "managed_session_resume",
     "managed_account_remove",
     "managed_account_reconnect",
     "managed_account_rename",
@@ -3839,6 +3840,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "managed_session_focus" => super::managed::handle(shared, req),
         "managed_session_stop" => super::managed::handle(shared, req),
         "managed_session_start_again" => super::managed::handle(shared, req),
+        "managed_session_resume" => super::managed::handle(shared, req),
         "managed_account_remove" => super::managed::handle(shared, req),
         "managed_account_rename" => super::managed::handle(shared, req),
         "managed_account_set_key" => super::managed::handle(shared, req),
@@ -15308,6 +15310,31 @@ mod tests {
             started["session_id"]
         );
         assert_eq!(*reads.lock().unwrap(), 0);
+
+        // Resuming it is a new session on the sign-in too: it waits for the
+        // balance the same way. Claude wrote the conversation it continues.
+        let project = crate::managed::profiles::NativeProfiles::new(&s.store)
+            .profile_root(
+                crate::managed::signin::account_id(crate::managed::ToolId::Claude).unwrap(),
+            )
+            .unwrap()
+            .join("projects/-project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(format!("{id}.jsonl")), b"{}\n").unwrap();
+        let resume = req(
+            "managed_session_resume",
+            serde_json::json!({"session_id": id, "request_id": uuid::Uuid::new_v4()}),
+        );
+        let r = crate::daemon::managed::handle_async_with(&s, &resume, balance(0)).await;
+        assert_eq!(r.error.unwrap().message, "managed-near-ai-balance-too-low");
+        *reads.lock().unwrap() = 0;
+        let r =
+            crate::daemon::managed::handle_async_with(&s, &resume, balance(12_500_000_000)).await;
+        let resumed = r.result.expect("resumed");
+        assert!(resumed["ticket"].is_string());
+        assert_ne!(resumed["session_id"], prepared["session_id"]);
+        assert_ne!(resumed["session_id"], started["session_id"]);
+        assert_eq!(*reads.lock().unwrap(), 1);
     }
 
     /// #1754 review: `managed_model_favorite_set` publishes
@@ -19289,7 +19316,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 107, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 108, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 81, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

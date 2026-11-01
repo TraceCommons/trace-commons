@@ -13,8 +13,8 @@ use crate::{
         route::{ManagedRoute, near_ai_base_url},
         secrets::{ApiKey, SecretStore},
         sessions::{
-            LaunchContext, LaunchPurpose, LaunchRequest, LifecycleReport, SessionRegistry,
-            SessionState, SessionView,
+            CollectionState, LaunchContext, LaunchPurpose, LaunchRequest, LifecycleReport,
+            SessionRegistry, SessionState, SessionView,
         },
         signin,
         terminal::{self, TerminalApp, TerminalHandle, TerminalSetting},
@@ -118,8 +118,9 @@ impl ManagedService {
         }
     }
 
-    /// Prepare the session a `managed_launch_prepare` or
-    /// `managed_session_start_again` request resolves to.
+    /// Prepare the session a `managed_launch_prepare`,
+    /// `managed_session_start_again` or `managed_session_resume` request
+    /// resolves to.
     fn prepare_launch(&mut self, request: &Request, sign_in: bool) -> Result<Value, ManagedError> {
         match self.resolve_launch(request, sign_in, true)? {
             Resolved::Replayed(existing) => Ok(json!(existing)),
@@ -148,6 +149,11 @@ impl ManagedService {
                 )?;
                 let p: LaunchRequest =
                     serde_json::from_value(params).map_err(|_| ManagedError::InvalidRequest)?;
+                // Only `managed_session_resume` continues a conversation,
+                // from a row it checks.
+                if p.resume_of.is_some() {
+                    return Err(ManagedError::InvalidRequest);
+                }
                 let account = self.launch_account(&p, sign_in)?;
                 let generation = self.accounts.generation(p.tool);
                 if p.expected_generation != generation {
@@ -166,7 +172,7 @@ impl ManagedService {
                 }
                 Ok(Resolved::Launch(p, account))
             }
-            "managed_session_start_again" => {
+            "managed_session_start_again" | "managed_session_resume" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Params {
@@ -174,11 +180,19 @@ impl ManagedService {
                     request_id: Uuid,
                 }
                 let p: Params = parse(request)?;
-                let mut again = self
-                    .sessions
-                    .start_again_request(p.session_id, p.request_id)?;
+                let mut again = if request.method == "managed_session_resume" {
+                    self.sessions.resume_request(p.session_id, p.request_id)?
+                } else {
+                    self.sessions
+                        .start_again_request(p.session_id, p.request_id)?
+                };
                 if let Some(existing) = self.sessions.replayed(&again) {
                     return Ok(Resolved::Replayed(existing));
+                }
+                if again.resume_of.is_some_and(|root| {
+                    !self.knows_conversation(again.tool, again.account_id, root)
+                }) {
+                    return Err(ManagedError::Conflict);
                 }
                 let account = self.launch_account(&again, sign_in)?;
                 if !again.cwd.is_absolute() || !again.cwd.is_dir() {
@@ -229,11 +243,58 @@ impl ManagedService {
                         expected_generation: Generation(0),
                         save_default: false,
                         keep_saved_model: false,
+                        resume_of: None,
                         background_model: None,
                     },
                     sign_in,
                 )
                 .is_ok_and(|a| a.tool == view.tool && a.connection == view.connection)
+    }
+
+    /// Whether the conversation `root` started is there to continue in
+    /// `account`'s profile. Claude Code's id is the root row's, but Claude
+    /// writes `<root>.jsonl` only once the conversation has a turn, and a
+    /// launch can fail before its tool ever starts. OpenCode keeps the
+    /// session's own directory. Codex's id is known only from the root's
+    /// binding, which also requires its transcript.
+    fn knows_conversation(&self, tool: ToolId, account: AccountId, root: Uuid) -> bool {
+        match tool {
+            ToolId::Codex => {
+                crate::managed::session_binding::read(self.sessions.store(), root).is_some()
+            }
+            ToolId::Claude => self
+                .profiles
+                .existing_profile_root(account)
+                .is_some_and(|profile| claude_conversation_written(&profile, root)),
+            ToolId::Opencode => {
+                self.profiles
+                    .existing_profile_root(account)
+                    .is_some_and(|profile| {
+                        std::fs::symlink_metadata(profile.join(root.to_string()))
+                            .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+                    })
+            }
+        }
+    }
+
+    /// Whether an ended row's conversation can be continued in a new
+    /// session: it can be started again, its conversation's root started
+    /// and is not in use (`roots`, from `SessionRegistry::resume_roots`),
+    /// and the tool's id for that conversation is known. `known` keeps
+    /// that last answer for the snapshot, since every row of a chain asks
+    /// it of the same conversation.
+    fn can_resume(
+        &self,
+        view: &SessionView,
+        roots: &std::collections::BTreeMap<Uuid, Uuid>,
+        known: &mut std::collections::BTreeMap<(ToolId, Uuid, Uuid), bool>,
+    ) -> bool {
+        view.can_start_again
+            && roots.get(&view.id).is_some_and(|root| {
+                *known
+                    .entry((view.tool, view.account_id.0, *root))
+                    .or_insert_with(|| self.knows_conversation(view.tool, view.account_id, *root))
+            })
     }
 
     /// Redeem a ticket. A session on the NEAR AI sign-in is refused without
@@ -300,8 +361,11 @@ impl ManagedService {
         match request.method.as_str() {
             "managed_snapshot" => {
                 let mut sessions = self.sessions.views()?;
+                let roots = self.sessions.resume_roots();
+                let mut known = std::collections::BTreeMap::new();
                 for view in &mut sessions {
                     view.can_start_again = self.can_start_again(view, sign_in);
+                    view.can_resume = self.can_resume(view, &roots, &mut known);
                 }
                 let saved = [
                     self.accounts.selection(ToolId::Claude),
@@ -327,7 +391,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
                 )
             }
             "managed_tool_setup" => {
@@ -423,7 +487,9 @@ impl ManagedService {
                 self.sessions.request_stop(p.session_id)?;
                 Ok(json!({"stopping":true}))
             }
-            "managed_session_start_again" => self.prepare_launch(request, sign_in),
+            "managed_session_start_again" | "managed_session_resume" => {
+                self.prepare_launch(request, sign_in)
+            }
             "managed_session_dismiss" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
@@ -503,6 +569,7 @@ impl ManagedService {
                     expected_generation: self.accounts.generation(account.tool),
                     save_default: false,
                     keep_saved_model: false,
+                    resume_of: None,
                     background_model: None,
                 };
                 Ok(json!(self.sessions.prepare(request, &account)?))
@@ -861,7 +928,7 @@ where
 fn prepares_a_session(method: &str) -> bool {
     matches!(
         method,
-        "managed_launch_prepare" | "managed_session_start_again"
+        "managed_launch_prepare" | "managed_session_start_again" | "managed_session_resume"
     )
 }
 
@@ -1199,6 +1266,141 @@ pub async fn sweep(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) {
     }
 }
 
+/// Collect the trace of a collecting session whose launcher went quiet
+/// (terminal window closed, force quit, logout), once its tool has exited,
+/// from the collection plan the launcher left (`managed::collection_plan`).
+/// The daemon's loop runs this on its lease tick, whose first tick is at
+/// startup, so rows a restart found unknown or failed are picked up too.
+/// A row whose tool the daemon saw exit has ended, so its conversation can
+/// be resumed (`SessionRegistry::tool_exited`).
+///
+/// Never while the launcher still reports, never while the tool's process
+/// runs (its pid and start time), never for a row that does not collect,
+/// and never when the launcher took the row's claim first. A plan is read
+/// only for a quiet row still waiting for its result, and all file,
+/// process and collection work runs on a blocking task, off the daemon's
+/// loop and off the managed lock, which is taken only to read rows and
+/// record results. Past `collection_plan::GIVE_UP_AFTER` a running tool's
+/// collection is recorded as failed and its local session is left as it
+/// is. Returns how many rows it collected.
+pub async fn collect_abandoned(
+    shared: &std::sync::Arc<DaemonShared>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> usize {
+    let shared = std::sync::Arc::clone(shared);
+    tokio::task::spawn_blocking(move || collect_abandoned_now(&shared, now))
+        .await
+        .unwrap_or(0)
+}
+
+fn collect_abandoned_now(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) -> usize {
+    use crate::managed::collection_plan::{self, Next, ProcessIdentity};
+    let store = &shared.store;
+    let ids = collection_plan::list(store);
+    if ids.is_empty() {
+        return 0;
+    }
+    // Rows lapse lazily (a shell's snapshot, or a sweep while the daemon
+    // hosts a route); lapse them here so a quiet launcher is seen.
+    let Ok(rows) = with_service(shared, |service| {
+        service.sessions.sweep(now)?;
+        Ok(ids
+            .iter()
+            .map(|id| service.sessions.collection_status(*id))
+            .collect::<Vec<_>>())
+    }) else {
+        return 0;
+    };
+    let record = |id, collection, tool_exited: bool| {
+        let _ = with_service(shared, |service| {
+            service.sessions.record_collection(id, collection)?;
+            if tool_exited {
+                service.sessions.tool_exited(id)?;
+            }
+            Ok(())
+        });
+    };
+    let mut me = None;
+    let mut collected = 0;
+    for (id, row) in ids.into_iter().zip(rows) {
+        let (next, plan) = match collection_plan::before_reading(row) {
+            Some(decided) => (decided, None),
+            None => {
+                let claim = collection_plan::claimant(store, id)
+                    .map(|holder| holder.is_some_and(|holder| holder.is_running()));
+                match collection_plan::read(store, id) {
+                    None => (collection_plan::unreadable(row, claim), None),
+                    Some(plan) => {
+                        let tool_running = plan.process.is_running();
+                        let staged = claim == Some(false) && collection_plan::staged(store, &plan);
+                        let next =
+                            collection_plan::next(&plan, row, tool_running, claim, staged, now);
+                        (next, Some((plan, tool_running)))
+                    }
+                }
+            }
+        };
+        // Whether the tool is known to be gone: only a plan names it.
+        let tool_exited = plan.as_ref().is_some_and(|(_, running)| !running);
+        match next {
+            Next::Wait => {}
+            Next::Discard => collection_plan::finish(store, id),
+            Next::Fail => {
+                record(id, CollectionState::Failed, tool_exited);
+                collection_plan::finish(store, id);
+            }
+            Next::Collected => {
+                record(id, CollectionState::Collected, tool_exited);
+                collection_plan::finish(store, id);
+            }
+            Next::Collect => {
+                let Some((plan, _)) = plan else {
+                    continue;
+                };
+                let me = me.get_or_insert_with(ProcessIdentity::current);
+                if collection_plan::claim(store, id, me) != Ok(true) {
+                    continue;
+                }
+                let result = match collection_plan::collect(store, &plan) {
+                    Ok(()) => CollectionState::Collected,
+                    Err(_) => {
+                        tracing::warn!(pass = "managed-collection", "collection failed");
+                        CollectionState::Failed
+                    }
+                };
+                record(id, result, true);
+                collection_plan::finish(store, id);
+                collected += 1;
+            }
+        }
+    }
+    collected
+}
+
+/// Whether Claude Code wrote the conversation `id` in the profile at
+/// `profile`: a regular `projects/<project>/<id>.jsonl`, links refused.
+/// Only names are read, since a snapshot asks this of every ended row;
+/// collection verifies the transcript's own identity when it stages it.
+fn claude_conversation_written(profile: &std::path::Path, id: Uuid) -> bool {
+    let real = |path: &std::path::Path, dir: bool| {
+        std::fs::symlink_metadata(path).is_ok_and(|m| {
+            !m.file_type().is_symlink() && if dir { m.is_dir() } else { m.is_file() }
+        })
+    };
+    let projects = profile.join("projects");
+    if !real(&projects, true) {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(&projects) else {
+        return false;
+    };
+    let name = format!("{id}.jsonl");
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .any(|project| real(&project, true) && real(&project.join(&name), false))
+}
+
 /// The check before a ticket is issued, against the executable this
 /// process can see. The tool runs where the helper runs: a CLI launch from
 /// a terminal whose PATH holds a tool the daemon cannot see is not refused
@@ -1491,6 +1693,7 @@ mod tests {
             expected_generation: Generation(0),
             save_default: false,
             keep_saved_model: false,
+            resume_of: None,
             background_model: None,
             model: None,
             collect_traces: false,
@@ -1571,6 +1774,7 @@ mod tests {
                     expected_generation: Generation(0),
                     save_default: false,
                     keep_saved_model: false,
+                    resume_of: None,
                     background_model: None,
                     model: None,
                     collect_traces: false,
@@ -2440,5 +2644,739 @@ mod tests {
             label(ManagedError::NearAiSignInRequired),
             label(ManagedError::SignInRequired)
         );
+    }
+    /// A shell offers Resume only to a daemon that says it has it.
+    #[test]
+    fn the_snapshot_says_it_resumes_sessions() {
+        let (_dir, _store, mut service) = service();
+        let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
+        assert_eq!(snapshot["capabilities"]["resume"], true);
+    }
+
+    /// Only `managed_session_resume` continues a conversation; a prepare
+    /// that names one is refused, so no shell can resume an arbitrary row.
+    #[test]
+    fn a_prepare_cannot_name_a_conversation_to_continue() {
+        let (home, _store, mut service) = service();
+        let mut params = launch(ToolId::Claude, home.path());
+        params["resume_of"] = json!(Uuid::new_v4());
+        assert_eq!(
+            call(&mut service, "managed_launch_prepare", params, true),
+            Err(ManagedError::InvalidRequest)
+        );
+    }
+
+    /// An ended coding row on `tool`'s saved subscription, in `cwd`.
+    fn ended_on(service: &mut ManagedService, tool: ToolId, cwd: &std::path::Path) -> Uuid {
+        let account = service
+            .accounts
+            .add(tool, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let mut request: LaunchRequest = serde_json::from_value(launch(tool, cwd)).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(service, "managed_launch_prepare", json!(request), false).unwrap(),
+        )
+        .unwrap();
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        report(
+            service,
+            prepared.session_id,
+            &context.proof,
+            "running",
+            None,
+        )
+        .unwrap();
+        report(
+            service,
+            prepared.session_id,
+            &context.proof,
+            "exited",
+            Some(0),
+        )
+        .unwrap();
+        prepared.session_id
+    }
+
+    /// Claude Code's transcript of row `id`'s conversation in its account's
+    /// profile, which Claude writes once the conversation has a turn.
+    fn claude_transcript(service: &mut ManagedService, id: Uuid) {
+        let account: AccountId =
+            serde_json::from_value(row(service, id, true)["account_id"].clone()).unwrap();
+        let project = service
+            .profiles
+            .profile_root(account)
+            .unwrap()
+            .join("projects/-project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(format!("{id}.jsonl")), b"{}\n").unwrap();
+    }
+
+    /// A Claude Code row whose tool never wrote its conversation (a launch
+    /// refused before the tool started, or quit before the first turn) can
+    /// be started again but not resumed.
+    #[test]
+    fn a_claude_row_resumes_only_once_its_conversation_is_written() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let id = ended_on(&mut service, ToolId::Claude, &folder);
+        let row_now = row(&mut service, id, false);
+        assert_eq!(row_now["can_start_again"], true);
+        assert_eq!(row_now["can_resume"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_resume",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::Conflict)
+        );
+        claude_transcript(&mut service, id);
+        assert_eq!(row(&mut service, id, false)["can_resume"], true);
+    }
+
+    /// An OpenCode row resumes only while its session's own directory is
+    /// still in the account's profile.
+    #[test]
+    fn an_opencode_row_resumes_only_with_its_session_directory() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let account = service
+            .accounts
+            .add(ToolId::Opencode, ConnectionKind::ApiKey, "Work")
+            .unwrap();
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Opencode, &folder)).unwrap();
+        request.connection = ConnectionKind::ApiKey;
+        request.account_id = account.id;
+        request.model = Some("gpt-test".into());
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_launch_prepare",
+                json!(request),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let id = prepared.session_id;
+        let context = service
+            .sessions
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        report(&mut service, id, &context.proof, "exited", Some(0)).unwrap();
+        assert_eq!(row(&mut service, id, false)["can_start_again"], true);
+        assert_eq!(row(&mut service, id, false)["can_resume"], false);
+        std::fs::create_dir(
+            service
+                .profiles
+                .profile_root(account.id)
+                .unwrap()
+                .join(id.to_string()),
+        )
+        .unwrap();
+        assert_eq!(row(&mut service, id, false)["can_resume"], true);
+    }
+
+    /// Start again on a resumed row starts a fresh conversation, so its
+    /// launcher is told no root.
+    #[test]
+    fn starting_a_resumed_row_again_continues_nothing() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let root = ended_on(&mut service, ToolId::Claude, &folder);
+        claude_transcript(&mut service, root);
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_session_resume",
+                json!({"session_id":root,"request_id":Uuid::new_v4()}),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let resumed = prepared.session_id;
+        let context = service
+            .sessions
+            .redeem(resumed, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(context.resume_of, Some(root));
+        report(&mut service, resumed, &context.proof, "exited", Some(0)).unwrap();
+        let again: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_session_start_again",
+                json!({"session_id":resumed,"request_id":Uuid::new_v4()}),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let context = service
+            .sessions
+            .redeem(again.session_id, again.ticket.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(context.resume_of, None);
+    }
+
+    /// While a resume of a conversation runs, no row on that conversation
+    /// offers Resume.
+    #[test]
+    fn resume_is_withheld_while_the_conversation_runs_elsewhere() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let root = ended_on(&mut service, ToolId::Claude, &folder);
+        claude_transcript(&mut service, root);
+        assert_eq!(row(&mut service, root, false)["can_resume"], true);
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_session_resume",
+                json!({"session_id":root,"request_id":Uuid::new_v4()}),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(row(&mut service, root, false)["can_resume"], false);
+        assert_eq!(row(&mut service, root, false)["can_start_again"], true);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_resume",
+                json!({"session_id":root,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::Conflict)
+        );
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        report(
+            &mut service,
+            prepared.session_id,
+            &context.proof,
+            "exited",
+            Some(0),
+        )
+        .unwrap();
+        assert_eq!(row(&mut service, root, false)["can_resume"], true);
+        assert_eq!(
+            row(&mut service, prepared.session_id, false)["can_resume"],
+            true
+        );
+    }
+
+    #[test]
+    fn resume_continues_the_root_and_replays_on_retry() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let (id, proof) = running(&mut service, &folder);
+        let resume = json!({"session_id":id,"request_id":Uuid::new_v4()});
+        // Running: nothing to resume.
+        assert_eq!(row(&mut service, id, false)["can_resume"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_resume",
+                resume.clone(),
+                false
+            ),
+            Err(ManagedError::Conflict)
+        );
+        report(&mut service, id, &proof, "exited", Some(0)).unwrap();
+        assert_eq!(
+            row(&mut service, id, false)["can_resume"],
+            false,
+            "no turn yet"
+        );
+        claude_transcript(&mut service, id);
+        assert_eq!(row(&mut service, id, false)["can_resume"], true);
+
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_session_resume",
+                resume.clone(),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(prepared.session_id, id, "a resumed launch is a new row");
+        assert!(prepared.ticket.is_some());
+        let fresh = row(&mut service, prepared.session_id, false);
+        let old = row(&mut service, id, false);
+        for field in ["tool", "connection", "account_id", "cwd", "purpose"] {
+            assert_eq!(fresh[field], old[field], "{field}");
+        }
+        // The same request twice is one session.
+        let repeated: PreparedLaunch = serde_json::from_value(
+            call(&mut service, "managed_session_resume", resume, false).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(repeated.session_id, prepared.session_id);
+        assert!(repeated.ticket.is_none());
+        let context = service
+            .sessions
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(context.resume_of, Some(id));
+    }
+
+    #[test]
+    fn resume_is_withheld_when_the_folder_or_account_is_gone() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let id = ended_on(&mut service, ToolId::Claude, &folder);
+        claude_transcript(&mut service, id);
+        assert_eq!(row(&mut service, id, false)["can_resume"], true);
+        std::fs::remove_dir(&folder).unwrap();
+        assert_eq!(row(&mut service, id, false)["can_resume"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_resume",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::InvalidRequest)
+        );
+        std::fs::create_dir(&folder).unwrap();
+        let account = service.accounts.list()[0].id;
+        service.accounts.remove(account).unwrap();
+        assert_eq!(row(&mut service, id, false)["can_resume"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_resume",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::NotFound)
+        );
+    }
+
+    /// Codex's own thread id is known only from the root's binding. Without
+    /// one, the row can be started again but not resumed.
+    #[test]
+    fn a_codex_row_resumes_only_with_its_recorded_thread() {
+        let (home, store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let id = ended_on(&mut service, ToolId::Codex, &folder);
+        let row_now = row(&mut service, id, false);
+        assert_eq!(row_now["can_start_again"], true);
+        assert_eq!(row_now["can_resume"], false);
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_resume",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            ),
+            Err(ManagedError::Conflict)
+        );
+
+        let binding = crate::managed::session_binding::prepare(&store, id).unwrap();
+        let transcript = std::fs::canonicalize(home.path())
+            .unwrap()
+            .join("rollout.jsonl");
+        std::fs::write(&transcript, b"{}\n").unwrap();
+        let nonce = std::fs::read_to_string(binding.directory().join("nonce")).unwrap();
+        crate::managed::session_binding::record(
+            binding.directory(),
+            &nonce,
+            std::io::Cursor::new(
+                serde_json::to_vec(&json!({
+                    "session_id": Uuid::new_v4(), "transcript_path": transcript,
+                    "hook_event_name": "SessionStart",
+                }))
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(row(&mut service, id, false)["can_resume"], true);
+        assert!(
+            call(
+                &mut service,
+                "managed_session_resume",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false
+            )
+            .unwrap()["ticket"]
+                .is_string()
+        );
+    }
+
+    /// A sign-in row resumes only while signed in, and its resume waits for
+    /// the sign-in's balance like any new session on it.
+    #[test]
+    fn a_sign_in_session_resumes_only_while_signed_in() {
+        let (home, _store, mut service) = service();
+        let prepared = prepare(&mut service, ToolId::Claude, home.path());
+        let (context, _) = service
+            .redeem(
+                prepared.session_id,
+                prepared.ticket.as_deref().unwrap(),
+                true,
+            )
+            .unwrap();
+        let id = prepared.session_id;
+        report(&mut service, id, &context.proof, "running", None).unwrap();
+        report(&mut service, id, &context.proof, "exited", Some(0)).unwrap();
+        claude_transcript(&mut service, id);
+        assert_eq!(row(&mut service, id, true)["can_resume"], true);
+        assert_eq!(row(&mut service, id, false)["can_resume"], false);
+        let params = json!({"session_id":id,"request_id":Uuid::new_v4()});
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_session_resume",
+                params.clone(),
+                false
+            ),
+            Err(ManagedError::NearAiSignInRequired)
+        );
+        let request = Request {
+            id: 1,
+            method: "managed_session_resume".into(),
+            params: params.clone(),
+        };
+        assert!(service.prepares_on_sign_in(&request, true));
+        assert!(
+            call(&mut service, "managed_session_resume", params, true).unwrap()["ticket"]
+                .is_string()
+        );
+    }
+
+    /// Collection after the launcher is gone (`collection_plan`). Unix:
+    /// the fixtures start `true` and `sleep`.
+    #[cfg(unix)]
+    mod abandoned {
+        use super::*;
+        use crate::managed::{
+            collection_plan::{self, CollectionPlan, ProcessIdentity},
+            native_collection::NativeCollection,
+            sessions::CollectionState,
+        };
+        use std::sync::Arc;
+
+        struct Fixture {
+            _home: tempfile::TempDir,
+            store: ConfigStore,
+            account: AccountView,
+        }
+
+        fn fixture() -> Fixture {
+            let home = tempfile::tempdir().unwrap();
+            let store = ConfigStore::open(home.path().join("state")).unwrap();
+            let account = AccountStore::open(&store)
+                .unwrap()
+                .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+                .unwrap();
+            Fixture {
+                _home: home,
+                store,
+                account,
+            }
+        }
+
+        fn transcript(f: &Fixture, id: Uuid) {
+            let root = NativeProfiles::new(&f.store)
+                .profile_root(f.account.id)
+                .unwrap();
+            let path = root
+                .join("projects/-Users-test-project")
+                .join(format!("{id}.jsonl"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!(r#"{{"type":"user","message":{{"role":"user","content":"Please fix the test"}},"cwd":"/Users/test/project","timestamp":"2026-08-08T10:00:00Z","version":"2.0.1","sessionId":"{id}","uuid":"u1"}}
+"#)).unwrap();
+        }
+
+        fn staged(f: &Fixture, id: Uuid) -> bool {
+            f.store
+                .dir()
+                .join(crate::managed::native_collection::STAGING)
+                .join("claude")
+                .join(id.to_string())
+                .is_dir()
+        }
+
+        /// A collecting Claude Code row, redeemed and reported running by
+        /// `process`, its plan written and its transcript there, as a
+        /// launcher leaves it when it dies.
+        fn running(
+            f: &Fixture,
+            sessions: &mut SessionRegistry,
+            process: ProcessIdentity,
+            collect_traces: bool,
+        ) -> Uuid {
+            let prepared = sessions
+                .prepare(
+                    LaunchRequest {
+                        cli_options: None,
+                        model: None,
+                        collect_traces,
+                        purpose: LaunchPurpose::Coding,
+                        request_id: Uuid::new_v4(),
+                        tool: ToolId::Claude,
+                        connection: ConnectionKind::Subscription,
+                        account_id: f.account.id,
+                        cwd: f.store.dir().to_path_buf(),
+                        expected_generation: Generation(0),
+                        save_default: false,
+                        keep_saved_model: false,
+                        resume_of: None,
+                        background_model: None,
+                    },
+                    &f.account,
+                )
+                .unwrap();
+            let id = prepared.session_id;
+            let context = sessions
+                .redeem(id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            sessions
+                .report(LifecycleReport {
+                    model: None,
+                    collection: None,
+                    session_id: id,
+                    proof: context.proof,
+                    state: SessionState::Running,
+                    process_id: Some(process.pid),
+                    process_identity: Some(
+                        process
+                            .label()
+                            .unwrap_or_else(|| format!("{}:0", process.pid)),
+                    ),
+                    exit_code: None,
+                })
+                .unwrap();
+            let collection =
+                NativeCollection::snapshot(&f.store, ToolId::Claude, f.account.id, id, None)
+                    .unwrap();
+            let plan = CollectionPlan {
+                schema_version: 1,
+                session_id: id,
+                tool: ToolId::Claude,
+                account_id: f.account.id,
+                resume_root: None,
+                cwd: f.store.dir().to_path_buf(),
+                collect_traces: true,
+                created_at: chrono::Utc::now(),
+                native: Some(collection.plan()),
+                opencode: None,
+                process,
+            };
+            if collect_traces {
+                collection_plan::write(&f.store, &plan).unwrap();
+            } else {
+                // A plan no launcher writes for such a row.
+                let dir = f.store.dir().join(collection_plan::DIRECTORY);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(
+                    dir.join(format!("{id}.json")),
+                    serde_json::to_vec(&plan).unwrap(),
+                )
+                .unwrap();
+            }
+            transcript(f, id);
+            id
+        }
+
+        fn status(shared: &DaemonShared, id: Uuid) -> crate::managed::collection_plan::RowStatus {
+            sessions_of(shared, |sessions| sessions.collection_status(id).unwrap())
+        }
+
+        fn sessions_of<T>(shared: &DaemonShared, f: impl FnOnce(&mut SessionRegistry) -> T) -> T {
+            let mut held = shared.managed.lock().unwrap();
+            f(&mut held.as_mut().unwrap().sessions)
+        }
+
+        fn exited() -> ProcessIdentity {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let process = ProcessIdentity::of(child.id());
+            child.wait().unwrap();
+            process
+        }
+
+        fn lapsed() -> chrono::DateTime<chrono::Utc> {
+            chrono::Utc::now() + crate::managed::sessions::LEASE + chrono::Duration::seconds(1)
+        }
+
+        #[tokio::test]
+        async fn a_lapsed_rows_exited_tool_is_collected_once() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
+            assert_eq!(
+                collect_abandoned(&shared, chrono::Utc::now()).await,
+                0,
+                "a launcher inside its lease collects for itself"
+            );
+            assert!(!staged(&f, id));
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 1);
+            assert!(staged(&f, id));
+            let row = status(&shared, id);
+            assert_eq!(row.collection, CollectionState::Collected);
+            assert_eq!(
+                row.state,
+                SessionState::Failed,
+                "its tool exited: the row has ended"
+            );
+            assert!(!collection_plan::exists(&f.store, id), "removed once final");
+            assert!(collection_plan::claimant(&f.store, id).is_none());
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
+        }
+
+        #[tokio::test]
+        async fn nothing_is_collected_while_the_tool_runs() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let mut tool = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let process = ProcessIdentity::of(tool.id());
+            let id = sessions_of(&shared, |s| running(&f, s, process, true));
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
+            assert!(!staged(&f, id));
+            assert_eq!(status(&shared, id).collection, CollectionState::Pending);
+            assert!(collection_plan::exists(&f.store, id));
+            tool.kill().unwrap();
+            tool.wait().unwrap();
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 1);
+            assert!(staged(&f, id));
+            assert_eq!(status(&shared, id).collection, CollectionState::Collected);
+        }
+
+        #[tokio::test]
+        async fn a_row_that_does_not_collect_is_never_collected() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), false));
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
+            assert!(!staged(&f, id));
+            assert_eq!(status(&shared, id).collection, CollectionState::Off);
+            assert!(
+                !collection_plan::exists(&f.store, id),
+                "the stray plan is dropped"
+            );
+        }
+
+        #[tokio::test]
+        async fn rows_a_restart_found_unknown_are_collected_at_startup() {
+            let f = fixture();
+            let id = {
+                let mut sessions = SessionRegistry::open(&f.store).unwrap();
+                running(&f, &mut sessions, exited(), true)
+            };
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            assert_eq!(status(&shared, id).state, SessionState::Unknown);
+            assert_eq!(collect_abandoned(&shared, chrono::Utc::now()).await, 1);
+            assert!(staged(&f, id));
+            assert_eq!(status(&shared, id).collection, CollectionState::Collected);
+            assert!(!collection_plan::exists(&f.store, id));
+        }
+
+        /// A collected row whose launcher was killed has ended once its
+        /// tool is gone, so its conversation can be resumed.
+        #[tokio::test]
+        async fn a_killed_rows_conversation_can_be_resumed_once_collected() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
+            let can_resume = |shared: &DaemonShared| {
+                let mut held = shared.managed.lock().unwrap();
+                let service = held.as_mut().unwrap();
+                service.sessions.sweep(lapsed()).unwrap();
+                row(service, id, false)["can_resume"].clone()
+            };
+            assert_eq!(can_resume(&shared), false, "unknown: it may still run");
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 1);
+            assert_eq!(status(&shared, id).state, SessionState::Failed);
+            assert_eq!(can_resume(&shared), true);
+        }
+
+        /// A plan this build cannot read fails its row's collection and is
+        /// removed, so the row does not stay pending.
+        #[tokio::test]
+        async fn an_unreadable_plan_fails_its_rows_collection_and_is_removed() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
+            let path = f
+                .store
+                .dir()
+                .join(collection_plan::DIRECTORY)
+                .join(format!("{id}.json"));
+            let mut plan: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            plan["schema_version"] = json!(2);
+            std::fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+            assert_eq!(collect_abandoned(&shared, chrono::Utc::now()).await, 0);
+            assert!(path.exists(), "its launcher still reports");
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
+            assert!(!staged(&f, id));
+            assert_eq!(status(&shared, id).collection, CollectionState::Failed);
+            assert!(!path.exists());
+        }
+
+        /// A holder that died after staging the row's trace, before it
+        /// recorded the result, leaves the row collected, not failed.
+        #[tokio::test]
+        async fn a_dead_holder_that_staged_the_trace_leaves_the_row_collected() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
+            let plan = collection_plan::read(&f.store, id).unwrap();
+            assert_eq!(collection_plan::claim(&f.store, id, &exited()), Ok(true));
+            collection_plan::collect(&f.store, &plan).unwrap();
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
+            assert!(staged(&f, id));
+            let row = status(&shared, id);
+            assert_eq!(row.collection, CollectionState::Collected);
+            assert_eq!(row.state, SessionState::Failed);
+            assert!(!collection_plan::exists(&f.store, id));
+        }
+
+        /// The launcher took the claim: the daemon does nothing while that
+        /// launcher lives, and records a failure once it died holding it.
+        #[tokio::test]
+        async fn the_daemon_never_collects_a_row_the_launcher_claimed() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
+            let mut launcher = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let holder = ProcessIdentity::of(launcher.id());
+            assert_eq!(collection_plan::claim(&f.store, id, &holder), Ok(true));
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
+            assert!(!staged(&f, id));
+            assert_eq!(status(&shared, id).collection, CollectionState::Pending);
+            assert_eq!(collection_plan::claimant(&f.store, id), Some(Some(holder)));
+            launcher.kill().unwrap();
+            launcher.wait().unwrap();
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
+            assert!(!staged(&f, id), "a dead holder's claim is not taken over");
+            assert_eq!(status(&shared, id).collection, CollectionState::Failed);
+            assert!(!collection_plan::exists(&f.store, id));
+        }
     }
 }

@@ -37,13 +37,19 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     public let canStop: Bool
     /// The ended session can be launched again as it was.
     public let canStartAgain: Bool
+    /// The ended session can be resumed: its conversation continues. False
+    /// from an older daemon.
+    public let canResume: Bool
+    /// For a resumed row, when its conversation's root row started; nil for
+    /// a fresh row, from an older daemon, or when unreadable.
+    public let resumedFrom: Date?
     /// When the session started; nil when absent or unreadable.
     public let startedAt: Date?
     public var holdsAccount: Bool { state != "exited" && state != "failed" }
     enum CodingKeys: String, CodingKey {
         case id, tool, connection, cwd, state, purpose, model, collection
         case accountID = "account_id", accountLabel = "account_label", projectLabel = "project_label", exitCode = "exit_code"
-        case canFocus = "can_focus", canStop = "can_stop", canStartAgain = "can_start_again", startedAt = "started_at"
+        case canFocus = "can_focus", canStop = "can_stop", canStartAgain = "can_start_again", canResume = "can_resume", resumedFrom = "resumed_from", startedAt = "started_at"
     }
 
     /// Decodes its own timestamp, as `PastSession` does: chrono writes
@@ -65,6 +71,8 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
         canFocus = try c.decodeIfPresent(Bool.self, forKey: .canFocus) ?? false
         canStop = try c.decodeIfPresent(Bool.self, forKey: .canStop) ?? false
         canStartAgain = try c.decodeIfPresent(Bool.self, forKey: .canStartAgain) ?? false
+        canResume = try c.decodeIfPresent(Bool.self, forKey: .canResume) ?? false
+        resumedFrom = try c.decodeIfPresent(String.self, forKey: .resumedFrom).flatMap(SourceCandidate.Wire.parseTimestamp)
         startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt).flatMap(SourceCandidate.Wire.parseTimestamp)
     }
 }
@@ -75,6 +83,8 @@ public enum ManagedSessionAction: Equatable, Sendable {
     case show
     /// Stop the session, after a confirmation.
     case stop
+    /// Continue the ended session's conversation.
+    case resume
     /// Launch the ended session again, same tool, account and folder.
     case startAgain
     /// Take the ended row off the list.
@@ -116,6 +126,9 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         public let backgroundModel: Bool?
         public let managedLaunch: Bool
         public let terminalLaunch: Bool
+        /// The daemon supports `managed_session_resume`; absent from an
+        /// older daemon, which reads as no.
+        public let resume: Bool?
         /// Terminal installer support; absent from older daemons.
         public let toolSetup: Bool?
         public let terminalDestination: String?
@@ -140,6 +153,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case nearAiSignin = "near_ai_signin"
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
             case terminalChosen = "terminal_chosen"
+            case resume
         }
     }
     public var cliOptions: [String: String]?
@@ -277,13 +291,39 @@ public enum ManagedSurface {
 /// Session row actions (Ron, #1407, 2026-10-14). An action the daemon cannot
 /// do is left out, never drawn disabled.
 public extension ManagedSurface {
-    /// The row's actions. A running row: Show and Stop where the daemon can
-    /// do them. An ended row: Start again where it can be, with a terminal
-    /// to start in, then Dismiss. Anything else: none.
-    static func sessionActions(_ session: ManagedSession, terminalLaunch: Bool) -> [ManagedSessionAction] {
-        if session.state == "running" { return menuActions(session) }
+    /// Whether an ended row offers Resume as its primary button.
+    static func offersResume(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool) -> Bool {
+        !session.holdsAccount && session.canResume && terminalLaunch && resumeCapable
+    }
+
+    /// The buttons drawn on the row: an ended row's Resume, or Start again
+    /// when it has no Resume, then Dismiss. Start again moves into the menu
+    /// when Resume is offered (`rowMenuItems`). A running row draws none.
+    static func rowButtons(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
         guard !session.holdsAccount else { return [] }
+        if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) { return [.resume, .dismiss] }
         return (session.canStartAgain && terminalLaunch ? [.startAgain] : []) + [.dismiss]
+    }
+
+    /// The items in the row's menu: Show and Stop for a running row; for an
+    /// ended row that offers Resume, Start again.
+    static func rowMenuItems(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
+        if session.state == "running" { return menuActions(session) }
+        guard offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) else { return [] }
+        return session.canStartAgain ? [.startAgain] : []
+    }
+
+    /// The row's continuation marker, "Resumed · Continues 2:14 PM": the
+    /// copy `resumed`, then `resumed_from` with `{time}` filled by the
+    /// root's start time in the app's row-time format. nil for a row that is
+    /// not resumed (the daemon sends `resumed_from` only for one).
+    static func resumedMarker(
+        _ session: ManagedSession, resumed: String, resumedFrom: String, relative: (Date) -> String = Format.when
+    ) -> String? {
+        guard let root = session.resumedFrom else { return nil }
+        let marker = [resumed, resumedFrom.replacingOccurrences(of: "{time}", with: relative(root))]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+        return marker.isEmpty ? nil : marker
     }
 
     /// The row menu's items: Show and Stop, for a running row only.
@@ -306,6 +346,25 @@ public extension ManagedSurface {
     /// request id, nothing the shell could change.
     static func startAgainParams(sessionID: String, requestID: String) -> [String: Any] {
         ["session_id": sessionID, "request_id": requestID]
+    }
+
+    /// The `managed_session_resume` request: same shape as start again.
+    static func resumeParams(sessionID: String, requestID: String) -> [String: Any] {
+        ["session_id": sessionID, "request_id": requestID]
+    }
+
+    /// The line "Copy resume command" copies: the bundled CLI, the config
+    /// directory the app uses, and the session. Each part is single-quoted
+    /// when it holds anything the shell would read.
+    static func resumeCommandLine(binaryPath: String, configDirectory: String, sessionID: String) -> String {
+        [shellQuoted(binaryPath), "--config-dir", shellQuoted(configDirectory), "sessions", "resume", shellQuoted(sessionID)]
+            .joined(separator: " ")
+    }
+
+    static func shellQuoted(_ word: String) -> String {
+        let safe = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./:@%+=,")
+        if !word.isEmpty, word.unicodeScalars.allSatisfy(safe.contains) { return word }
+        return "'" + word.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// The row's caption: its parts, then the start time in the app's
