@@ -109,9 +109,9 @@ final class InsightsEconomizerModel {
             if let page = answer {
                 answer = DaemonData.EconomizerStatus(
                     enabled: reply.enabled, folders: page.folders, foldersTruncated: page.foldersTruncated)
-                started += 1
-                shown = started
             }
+            started += 1
+            shown = started
         } catch {
             switchRefusal = MonitorWords.table?.requestFailed
         }

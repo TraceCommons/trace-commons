@@ -1499,6 +1499,39 @@ fn labels_grow_until_they_differ_and_never_name_the_home_folder() {
         .collect();
         recorded_through_link.sort();
         assert_eq!(recorded_through_link, ["srv/api", "~/api"]);
+
+        // A project inside home that links out of it keeps its `~`.
+        let outside = root.join("volume").join("someone").join("work");
+        std::fs::create_dir_all(outside.join("api")).unwrap();
+        let linked_work = home.join("work");
+        std::os::unix::fs::symlink(&outside, &linked_work).unwrap();
+        let linked_api = linked_work.join("api");
+        let state = RepoState {
+            sessions: 1,
+            ..RepoState::default()
+        };
+        store
+            .save_repo(&repo_key(&linked_api, Harness::Claude), &state)
+            .unwrap();
+        let other_work = root.join("x").join("work").join("api");
+        std::fs::create_dir_all(&other_work).unwrap();
+        store
+            .save_repo(&repo_key(&other_work, Harness::Claude), &state)
+            .unwrap();
+        let mut linked_out: Vec<String> = summarize_in(
+            &store,
+            [
+                (Harness::Claude, linked_api.clone()),
+                (Harness::Claude, other_work.clone()),
+            ],
+            Some(&home),
+        )
+        .folders
+        .into_iter()
+        .map(|row| row.folder)
+        .collect();
+        linked_out.sort();
+        assert_eq!(linked_out, ["x/work/api", "~/work/api"]);
     }
 }
 

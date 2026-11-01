@@ -136,9 +136,11 @@ pub fn summarize_in(
         if !seen.insert(key.clone()) {
             continue;
         }
-        // Labelled from the resolved path, so a folder recorded under a
-        // symlinked spelling of home is still seen as under home.
-        let resolved = std::fs::canonicalize(&path).unwrap_or(path);
+        // Labelled from the path as recorded when it is under home, so a
+        // project symlinked out of home keeps its `~`. Otherwise from the
+        // resolved path, when that is under home (a folder recorded under
+        // a symlinked spelling of home). `repo_key` resolved it already.
+        let resolved = label_path(path, &homes);
         let row = FolderSummary::of(
             label(&resolved, 0, &homes),
             harness,
@@ -192,12 +194,17 @@ pub fn summarize_in(
     }
 }
 
-/// Whether two spellings name the same folder: equal, or on macOS, whose
-/// default volume ignores case, equal ignoring case.
-fn same_folder(a: &Path, b: &Path) -> bool {
-    a == b
-        || (cfg!(target_os = "macos")
-            && a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase())
+/// The spelling of `path` to label: as recorded when under home,
+/// otherwise resolved when that is under home, otherwise as recorded.
+fn label_path(path: PathBuf, homes: &[PathBuf]) -> PathBuf {
+    let under_home = |p: &Path| homes.iter().any(|home| p.starts_with(home));
+    if under_home(&path) {
+        return path;
+    }
+    match std::fs::canonicalize(&path) {
+        Ok(resolved) if under_home(&resolved) => resolved,
+        _ => path,
+    }
 }
 
 /// `path`'s last `depth + 1` components, joined with `/`. The home folder
@@ -207,7 +214,7 @@ fn label(path: &Path, depth: usize, homes: &[PathBuf]) -> String {
     let mut current = Some(path);
     for _ in 0..=depth {
         let Some(here) = current else { break };
-        if homes.iter().any(|home| same_folder(home, here)) {
+        if homes.iter().any(|home| home == here) {
             parts.push("~".to_owned());
             break;
         }

@@ -115,35 +115,45 @@ final class InsightsEconomizerTests: XCTestCase {
     }
 
     func testAReadBegunBeforeTheSwitchCannotOverwriteIt() async {
-        // A read that is held until released, then answers "off".
-        final class Gate: @unchecked Sendable {
-            var held: CheckedContinuation<Void, Never>?
+        // Reads 2 and 3 are each held until released: read 2 began before
+        // the switch and answers "off"; read 3 is the one after it, and fails.
+        final class Gates: @unchecked Sendable {
+            var early: CheckedContinuation<Void, Never>?
+            var after: CheckedContinuation<Void, Never>?
             var reads = 0
         }
-        let gate = Gate()
+        let gates = Gates()
         struct Stopped: Error {}
         let model = InsightsEconomizerModel(calls: .init(
             served: { true },
             status: {
-                gate.reads += 1
-                switch gate.reads {
+                gates.reads += 1
+                switch gates.reads {
                 case 1: return DaemonData.EconomizerStatus(enabled: false)
                 case 2:
-                    await withCheckedContinuation { gate.held = $0 }
+                    await withCheckedContinuation { gates.early = $0 }
                     return DaemonData.EconomizerStatus(enabled: false)
-                default: throw Stopped()
+                default:
+                    await withCheckedContinuation { gates.after = $0 }
+                    throw Stopped()
                 }
             },
             setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
             restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
         await model.load()
         let early = Task { await model.load() }
-        while gate.held == nil { await Task.yield() }
-        // The switch is confirmed on, and the read after it fails.
-        await model.setEnabled(true)
-        gate.held?.resume()
+        while gates.early == nil { await Task.yield() }
+        let switching = Task { await model.setEnabled(true) }
+        while gates.after == nil { await Task.yield() }
+        // The switch is confirmed and its read is pending: the earlier read
+        // lands now, then the read after the switch fails.
+        gates.early?.resume()
         await early.value
         XCTAssertEqual(model.answer?.enabled, true)
+        gates.after?.resume()
+        await switching.value
+        XCTAssertEqual(model.answer?.enabled, true)
+        XCTAssertTrue(model.stale)
     }
 
     func testAFailedReadWhenTheTabOpensIsNotHiddenByAnEarlierAnswer() async {
