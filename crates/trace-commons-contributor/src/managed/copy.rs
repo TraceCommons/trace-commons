@@ -153,6 +153,9 @@
 //!   step can choose its own model, so it may not stay in this session's
 //!   privacy tier." A notice the launcher prints in the session's terminal
 //!   before Claude Code starts, on NEAR AI only; the session still starts.
+//!   The macOS launch sheet also shows it as a caption under the model
+//!   pickers, for a folder `managed_folder_settings_get` reports
+//!   `project_workflows` for, on a NEAR AI session (owner, 2026-11-01).
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "My Private AI sessions",

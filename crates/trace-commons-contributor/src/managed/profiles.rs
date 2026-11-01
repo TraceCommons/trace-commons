@@ -853,11 +853,29 @@ fn project_model_check_in(
             }
         }
     }
-    let workflows = project
-        .iter()
-        .chain(&added)
-        .any(|dir| holds_an_entry(&dir.join(".claude/workflows")));
+    let workflows = project.iter().chain(&added).any(|dir| holds_workflows(dir));
     Ok(ProjectNotice { workflows })
+}
+
+/// Whether Claude Code would find workflows for a launch of `tool` in
+/// `cwd`, in any folder it reads the project from ([`claude_project_dirs`]),
+/// whatever the connection. The macOS sheet reads it from
+/// `managed_folder_settings_get` and shows the `project_workflows` line on
+/// a NEAR AI session. A folder Claude Code's walk cannot read has none.
+pub fn project_has_workflows(tool: ToolId, cwd: &Path) -> bool {
+    project_has_workflows_in(tool, cwd, dirs::home_dir().as_deref())
+}
+
+/// [`project_has_workflows`] with the home folder given.
+fn project_has_workflows_in(tool: ToolId, cwd: &Path, home: Option<&Path>) -> bool {
+    tool == ToolId::Claude
+        && claude_project_dirs(cwd, home)
+            .is_ok_and(|dirs| dirs.iter().any(|dir| holds_workflows(dir)))
+}
+
+/// Whether `dir/.claude/workflows` holds a workflow ([`holds_an_entry`]).
+fn holds_workflows(dir: &Path) -> bool {
+    holds_an_entry(&dir.join(".claude/workflows"))
 }
 
 /// The folders Claude Code's `--add-dir` names in `cli_options`, relative
@@ -1579,6 +1597,25 @@ mod tests {
             crate::managed::copy::copy()["project_workflows"],
             "This project has Claude Code workflows. A workflow step can choose its own model, so it may not stay in this session's privacy tier."
         );
+    }
+
+    /// Whether a folder has Claude Code workflows, whatever the connection:
+    /// the shells decide when that matters. Read where the launch reads
+    /// them, parent folders up to the git root included.
+    #[test]
+    fn project_workflows_are_found_for_claude_code_only() {
+        let dir = project(&[(".claude/workflows/release.js", "")]);
+        let inner = dir.path().join("src");
+        std::fs::create_dir_all(&inner).unwrap();
+        assert!(project_has_workflows_in(ToolId::Claude, &inner, None));
+        assert!(!project_has_workflows_in(ToolId::Codex, &inner, None));
+        assert!(!project_has_workflows_in(ToolId::Opencode, &inner, None));
+        let plain = project(&[(".claude/workflows/.gitkeep", "")]);
+        assert!(!project_has_workflows_in(
+            ToolId::Claude,
+            plain.path(),
+            None
+        ));
     }
 
     #[test]

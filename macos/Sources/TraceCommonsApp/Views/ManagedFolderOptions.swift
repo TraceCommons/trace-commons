@@ -89,6 +89,14 @@ struct ManagedFolderOptions: View {
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
             }
+            if ManagedSurface.showsProjectWorkflows(draft, tool: tool, connection: connection) {
+                let line = model.managedText("project_workflows")
+                Text(line)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(line)
+            }
         } else if mode == .text {
             GlassTextField(model.managedText("model"), text: Binding(
                 get: { draft.model ?? "" }, set: { draft.model = $0.isEmpty ? nil : $0 }))

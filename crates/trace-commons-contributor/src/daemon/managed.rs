@@ -680,6 +680,10 @@ pub fn folder_snapshot(
         let mut value = serde_json::to_value(crate::managed::folder::lookup(&store, tool, cwd)?)
             .map_err(|_| ManagedError::StorageUnavailable)?;
         value["revision"] = service.sessions.revision().into();
+        // Whether the folder has Claude Code workflows; the sheet shows the
+        // `project_workflows` line when it does and the session is NEAR AI.
+        value["project_workflows"] =
+            crate::managed::profiles::project_has_workflows(tool, cwd).into();
         Ok(value)
     })
     .map_err(refusal_label)
