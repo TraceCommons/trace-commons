@@ -1560,6 +1560,7 @@ mod tests {
             status: reqwest::StatusCode::CONFLICT,
             label: label.into(),
             body: format!("{{\"error\":\"{label}\"}}"),
+            retry_after: None,
         };
         let revoked = finish_refusal(&refused(DEVICE_KEY_REVOKED_WIRE), "fallback");
         assert_eq!(revoked.to_string(), ENROLL_DEVICE_KEY_REVOKED);

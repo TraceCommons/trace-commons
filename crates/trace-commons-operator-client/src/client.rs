@@ -375,6 +375,14 @@ impl Client {
             }
         };
         let status = response.status();
+        // The standard `Retry-After` of a refusal, kept verbatim for the
+        // caller to interpret (delta-seconds or an HTTP date). Read here,
+        // before the body consumes the response.
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().to_string());
         let selected_header = match header_name.as_ref() {
             Some(name) => response
                 .headers()
@@ -465,11 +473,13 @@ impl Client {
                     status,
                     label,
                     body: response_body,
+                    retry_after,
                 }),
                 None => Err(Error::HttpFailure {
                     url: url.to_string(),
                     status,
                     body: response_body,
+                    retry_after,
                 }),
             }
         };
@@ -969,6 +979,65 @@ mod tests {
             .await;
         assert!(matches!(response.result, Err(Error::Transport { .. })));
         assert_eq!(response.status, None);
+    }
+
+    /// A refusal's `Retry-After` reaches the error verbatim, for a labelled
+    /// and a bare body alike; an answer without one carries `None`.
+    #[tokio::test]
+    async fn an_http_error_carries_the_retry_after_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/labelled"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("retry-after", "7")
+                    .set_body_json(serde_json::json!({"error": "Busy"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bare"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")
+                    .set_body_string("slow down"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/none"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("down"))
+            .mount(&server)
+            .await;
+        let client = Client::builder(server.uri(), "unused")
+            .bearer_token("synthetic-token")
+            .build()
+            .expect("client builds");
+        let call = |p: &'static str| {
+            let client = &client;
+            async move {
+                client
+                    .call_json::<(), serde_json::Value>(Method::GET, p, &[], None)
+                    .await
+            }
+        };
+        match call("/labelled").await {
+            Err(Error::ServerLabel { retry_after, .. }) => {
+                assert_eq!(retry_after.as_deref(), Some("7"))
+            }
+            other => panic!("{other:?}"),
+        }
+        match call("/bare").await {
+            Err(Error::HttpFailure { retry_after, .. }) => assert_eq!(
+                retry_after.as_deref(),
+                Some("Wed, 21 Oct 2026 07:28:00 GMT")
+            ),
+            other => panic!("{other:?}"),
+        }
+        match call("/none").await {
+            Err(Error::HttpFailure { retry_after, .. }) => assert_eq!(retry_after, None),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[tokio::test]

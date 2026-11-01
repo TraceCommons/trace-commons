@@ -6956,9 +6956,86 @@ fn assert_submit_rate_limited(error: &ApiError) {
 /// A concurrency refusal carries the same label and the short fixed hint.
 fn assert_submit_concurrency_limited(error: &ApiError) {
     assert_eq!(error.error, SUBMIT_RATE_LIMITED_LABEL);
-    assert_eq!(
-        error.retry_after_seconds,
-        Some(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS)
+    assert!(
+        error
+            .retry_after_seconds
+            .is_some_and(is_concurrency_retry_hint),
+        "{:?}",
+        error.retry_after_seconds
+    );
+}
+
+/// A concurrency hint is 2 to 5 seconds (a fixed number made every refused
+/// client return in the same second).
+fn is_concurrency_retry_hint(seconds: i64) -> bool {
+    (SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS
+        ..=SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS + SUBMIT_CONCURRENCY_RETRY_AFTER_SPREAD_SECONDS)
+        .contains(&seconds)
+}
+
+/// The spread is bounded whatever the random value is, and does spread.
+#[test]
+fn retry_after_spread_stays_in_bounds_and_varies() {
+    let mut seen = std::collections::BTreeSet::new();
+    for random in (0..1000_u64).chain([u64::MAX, u64::MAX - 1, 1 << 63]) {
+        let hint = retry_after_with_spread(
+            SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS,
+            SUBMIT_CONCURRENCY_RETRY_AFTER_SPREAD_SECONDS,
+            random,
+        );
+        assert!(is_concurrency_retry_hint(hint), "{hint}");
+        seen.insert(hint);
+    }
+    assert_eq!(seen.len(), 4, "2, 3, 4 and 5 all occur: {seen:?}");
+    for random in (0..1000_u64).chain([u64::MAX]) {
+        let hint = retry_after_with_spread(
+            TRANSIENT_UNAVAILABLE_RETRY_AFTER_SECONDS,
+            TRANSIENT_UNAVAILABLE_RETRY_AFTER_SPREAD_SECONDS,
+            random,
+        );
+        assert!((5..=15).contains(&hint), "{hint}");
+    }
+}
+
+/// A transient 503 carries `Retry-After` and the body's `retry_after_seconds`
+/// with the same value, through the response the submit route builds.
+#[tokio::test]
+async fn a_transient_503_carries_a_matching_retry_after_header_and_body() {
+    let response = api_error_response_with_retry_after(routing_read_failed(&"db down"));
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let header: i64 = response
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .expect("a transient 503 carries Retry-After")
+        .to_str()
+        .expect("ASCII")
+        .parse()
+        .expect("delta-seconds");
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("body reads");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("JSON body");
+    assert_eq!(value["error"], PIPELINE_ROUTING_UNAVAILABLE_LABEL);
+    assert_eq!(value["retry_after_seconds"], header);
+    assert!((5..=15).contains(&header), "{header}");
+}
+
+/// A 503 that means a missing control, not a passing condition, has no
+/// retry hint: waiting does not fix it.
+#[test]
+fn a_not_transient_503_has_no_retry_hint() {
+    let (status, Json(error)) = api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        PIPELINE_BUNDLE_NOT_QUALIFIED_LABEL,
+    );
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.retry_after_seconds, None);
+    let response = api_error_response_with_retry_after((status, Json(error)));
+    assert!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .is_none()
     );
 }
 
@@ -7183,22 +7260,21 @@ async fn submit_rate_limit_refusal_sends_retry_after_header_through_the_router()
 async fn large_body_concurrency_refusal_names_the_rate_limit_and_retry_hint() {
     let response = large_body_concurrency_refusal();
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    let expected_header = SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS.to_string();
-    assert_eq!(
-        response
-            .headers()
-            .get(axum::http::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok()),
-        Some(expected_header.as_str())
-    );
+    let header: i64 = response
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("a numeric Retry-After");
+    assert!(is_concurrency_retry_hint(header), "{header}");
     let body = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .expect("refusal body reads");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("refusal body is JSON");
     assert_eq!(value["error"], SUBMIT_RATE_LIMITED_LABEL);
     assert_eq!(
-        value["retry_after_seconds"],
-        SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS
+        value["retry_after_seconds"], header,
+        "the body and the header carry one value"
     );
 }
 
@@ -82380,9 +82456,14 @@ async fn submit_concurrency_refusal_does_not_spend_the_rate_window() {
             panic!("the principal's only slot is held");
         };
         assert_eq!(refused.0, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(
-            refused.1.0.retry_after_seconds,
-            Some(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS)
+        assert!(
+            refused
+                .1
+                .0
+                .retry_after_seconds
+                .is_some_and(is_concurrency_retry_hint),
+            "{:?}",
+            refused.1.0.retry_after_seconds
         );
     }
     assert_eq!(count(), 1, "concurrency refusals are not counted");
