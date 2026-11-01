@@ -398,3 +398,143 @@ fn unsupported_version_refuses_ticket_and_preserves_account() {
     assert_eq!(snapshot["accounts"][0], account);
     assert_eq!(snapshot["tools"][0]["installed"], true);
 }
+
+/// A launch the Launch sheet fell back to the default for, because NEAR
+/// AI's catalogue omitted the folder's saved model, says
+/// `keep_saved_model`: its other choices are remembered, the saved model
+/// is not replaced by the fallback (#1754 review).
+#[test]
+fn a_fallback_launch_keeps_the_folders_saved_model() {
+    if native_fixture_child("a_fallback_launch_keeps_the_folders_saved_model") {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let daemon = DaemonShared::load(ConfigStore::open(home.path().into()).unwrap()).unwrap();
+    let account = call(
+        &daemon,
+        "managed_account_add",
+        json!({"tool":"opencode","connection":"api_key","label":"Current"}),
+    );
+    call(
+        &daemon,
+        "set_settings",
+        json!({"managed_folder_settings":[{"tool":"opencode","cwd":project.path(),"model":"provider/saved","cli_options":""}]}),
+    );
+    let lookup = json!({"tool":"opencode","cwd":project.path()});
+    let params = json!({"request_id":uuid::Uuid::new_v4(),"tool":"opencode","connection":"api_key","account_id":account["id"],"cwd":project.path(),"model":"provider/fallback","collect_traces":true,"cli_options":"--agent build","expected_generation":0,"keep_saved_model":true});
+    call(&daemon, "managed_launch_prepare", params);
+    let prefs = call(&daemon, "managed_folder_settings_get", lookup.clone());
+    assert_eq!(prefs["model"], "provider/saved");
+    assert_eq!(prefs["collect_traces"], true);
+    assert_eq!(prefs["cli_options"], "--agent build");
+    // Without the flag, the launch's model is remembered, as before.
+    let params = json!({"request_id":uuid::Uuid::new_v4(),"tool":"opencode","connection":"api_key","account_id":account["id"],"cwd":project.path(),"model":"provider/chosen","collect_traces":true,"cli_options":"","expected_generation":0});
+    let r = handle_request(
+        &daemon,
+        &Request {
+            id: 1,
+            method: "managed_launch_prepare".into(),
+            params,
+        },
+    );
+    // The first session may still hold the account; only the remembered
+    // model matters here, and a refused launch remembers nothing.
+    if r.error.is_none() {
+        assert_eq!(
+            call(&daemon, "managed_folder_settings_get", lookup)["model"],
+            "provider/chosen"
+        );
+    }
+}
+
+#[test]
+fn prepared_folder_choices_are_captured_without_remembering_an_account() {
+    if native_fixture_child("prepared_folder_choices_are_captured_without_remembering_an_account") {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let daemon = DaemonShared::load(ConfigStore::open(home.path().into()).unwrap()).unwrap();
+    let account = call(
+        &daemon,
+        "managed_account_add",
+        json!({"tool":"opencode","connection":"api_key","label":"Current"}),
+    );
+    let params = json!({"request_id":uuid::Uuid::new_v4(),"tool":"opencode","connection":"api_key","account_id":account["id"],"cwd":project.path(),"model":"provider/model","collect_traces":true,"cli_options":"--agent build","expected_generation":0});
+    let prepared = call(&daemon, "managed_launch_prepare", params.clone());
+    let lookup = json!({"tool":"opencode","cwd":project.path()});
+    let prefs = call(&daemon, "managed_folder_settings_get", lookup.clone());
+    assert_eq!(prefs["model"], "provider/model");
+    assert_eq!(prefs["collect_traces"], true);
+    assert_eq!(prefs["cli_options"], "--agent build");
+    assert!(prefs.get("account_id").is_none());
+    // A cached request can never overwrite a later change in preferences.
+    call(
+        &daemon,
+        "set_settings",
+        json!({"managed_folder_settings":[{"tool":"opencode","cwd":project.path(),"model":"provider/new","cli_options":""}]}),
+    );
+    assert_eq!(
+        call(&daemon, "managed_launch_prepare", params)["session_id"],
+        prepared["session_id"]
+    );
+    assert_eq!(
+        call(&daemon, "managed_folder_settings_get", lookup)["model"],
+        "provider/new"
+    );
+    let context = call(
+        &daemon,
+        "managed_launch_redeem",
+        json!({"session_id":prepared["session_id"],"ticket":prepared["ticket"]}),
+    );
+    assert_eq!(context["cli_options"], json!(["--agent", "build"]));
+    assert_eq!(context["session"]["model"], "provider/model");
+    assert_eq!(context["session"]["collect_traces"], true);
+    let settings = call(&daemon, "get_settings", json!({}));
+    let entry = &settings["managed_folder_settings"][0];
+    assert!(entry.get("account_id").is_none());
+}
+
+#[test]
+fn failed_folder_preference_save_rolls_back_the_unredeemed_launch() {
+    if native_fixture_child("failed_folder_preference_save_rolls_back_the_unredeemed_launch") {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let daemon = DaemonShared::load(ConfigStore::open(home.path().into()).unwrap()).unwrap();
+    let account = call(
+        &daemon,
+        "managed_account_add",
+        json!({"tool":"claude","connection":"subscription","label":"Selected"}),
+    );
+    call(
+        &daemon,
+        "set_settings",
+        json!({"notifications_enabled":true}),
+    );
+    let path = home.path().join("daemon-settings.json");
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let params = json!({"request_id":uuid::Uuid::new_v4(),"tool":"claude","connection":"subscription","account_id":account["id"],"cwd":home.path(),"cli_options":"","expected_generation":0});
+    let refused = handle_request(
+        &daemon,
+        &Request {
+            id: 1,
+            method: "managed_launch_prepare".into(),
+            params: params.clone(),
+        },
+    );
+    assert!(refused.error.is_some());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    assert!(
+        call(&daemon, "managed_snapshot", json!({}))["sessions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let retry = call(&daemon, "managed_launch_prepare", params);
+    assert!(retry["ticket"].is_string());
+}

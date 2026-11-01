@@ -13,6 +13,22 @@ final class PrivateAIRenderTests: XCTestCase {
     func test_thePageAndTheInspectorRenderAtTheirPaneWidths() async throws {
         let model = AppModel()
         model.setStartupForTesting(.running)
+        // The three persistent default connections belong to Settings.
+        let rows = ["claude", "codex", "opencode"].map { id in
+            ["id": id, "name": id == "claude" ? "Claude Code" : id == "codex" ? "Codex" : "OpenCode",
+             "installed": true, "connected": false, "connect_command": "", "state": "not_connected",
+             "can_connect": true, "can_disconnect": false] as [String: Any]
+        }
+        let wire: [String: Any] = [
+            "harnesses": rows, "catalog_present": false, "destination_port": 8471,
+            "destination_credentialed": true,
+            "activity": ["readable": false, "window_hours": 24, "families": []],
+            "spend": ["known": false]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: wire)
+        let harnesses = HarnessSurface.list(fromJSON: String(decoding: data, as: UTF8.self))
+        XCTAssertEqual(harnesses.harnesses.map(\.id), ["claude", "codex", "opencode"])
+        model.setHarnessesForTesting(harnesses)
         XCTAssertNotNil(model.privateInferenceCopy, "the page draws nothing without the core's words")
         let store = InferenceStore(client: SampleDaemonClient(.normalDay))
         await store.load()

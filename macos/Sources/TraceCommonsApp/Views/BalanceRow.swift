@@ -23,9 +23,6 @@ import TCShellCore
 struct BalanceRow: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
-    /// Whether the row says what the figures cover. The Private AI tab's
-    /// icon card says it in its head instead.
-    var showsScope = true
 
     var body: some View {
         let status = model.balanceStatus
@@ -42,15 +39,6 @@ struct BalanceRow: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else if BalanceSurface.showsFigures(status, calls: model.balanceCalls) {
                 figures(status)
-            }
-            // What the figures cover, and what they therefore are not. Drawn
-            // in every state: it qualifies the heading, which names an
-            // account, as much as it qualifies any number under it.
-            if showsScope {
-                Text(copy.balanceWhat)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -74,6 +62,10 @@ struct BalanceRow: View {
                     .glassType(GlassTokens.TypeScale.number)
                     .foregroundStyle(GlassColor.textPrimary)
                     .textSelection(.enabled)
+            case .unavailable:
+                Text("—")
+                    .glassType(GlassTokens.TypeScale.number)
+                    .foregroundStyle(GlassColor.textPrimary)
             case .sentence(let sentence):
                 Text(sentence)
                     .glassType(GlassTokens.TypeScale.body)
@@ -91,10 +83,12 @@ struct BalanceRow: View {
             }
             // When the question was put -- not when the service updated
             // anything, which is a claim nothing here supports.
-            if let observed = BalanceSurface.observedLine(
-                status, now: Date(), calls: model.balanceCalls)
-            {
-                Text(observed).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                if let observed = BalanceSurface.observedLine(
+                    status, now: context.date, calls: model.balanceCalls)
+                {
+                    Text(observed).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
+                }
             }
         }
     }

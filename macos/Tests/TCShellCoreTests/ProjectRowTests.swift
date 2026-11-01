@@ -13,12 +13,12 @@ final class ProjectRowTests: XCTestCase {
     /// RFC 3339, optionally with fractional seconds.
     private func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
         decoder.dateDecodingStrategy = .custom { d in
             let text = try d.singleValueContainer().decode(String.self)
+            let withFraction = ISO8601DateFormatter()
+            withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let plain = ISO8601DateFormatter()
+            plain.formatOptions = [.withInternetDateTime]
             if let x = withFraction.date(from: text) { return x }
             if let x = plain.date(from: text) { return x }
             throw DecodingError.dataCorrupted(
@@ -104,6 +104,13 @@ final class ProjectRowTests: XCTestCase {
             "a real project named unknown-project is still a real project"
         )
         XCTAssertTrue(decoded[1].isUnresolvedBucket)
+    }
+
+    func testDaemonOfferableModesExcludeAskUnderBroadAutomatic() throws {
+        let decoded = try rows(#"{"projects":[{"project_id":"p_a","project_label":"repo","mode":"auto_upload","offerable_modes":["auto_upload","ignore"]}]}"#)
+        XCTAssertEqual(decoded[0].offerableModes, [.autoUpload, .ignore])
+        let unresolved = try rows(#"{"projects":[{"project_id":"p_b","project_label":"unknown","mode":"notify_only","is_unresolved_bucket":true,"offerable_modes":["auto_upload","ignore"]}]}"#)
+        XCTAssertFalse(unresolved[0].offerableModes.contains(.autoUpload))
     }
 
     /// The bucket can never be armed, and that is the daemon's rule rather

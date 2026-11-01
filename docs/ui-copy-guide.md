@@ -59,7 +59,6 @@ string for both just because they initially have the same wording.
 
 | Title | Button |
 | --- | --- |
-| Create new passkey | Create |
 | Launch managed session | Launch |
 | Clear episode assessment | Clear |
 
@@ -118,6 +117,17 @@ not approval. Raise the notice as a question instead.
 The switch-on rewording notice and the Scrub-check notice were built this way
 and removed on 2026-10-16 (owner decision) as noise the contributor did not
 need.
+
+## 10. Let the layout explain the screen
+
+Cut taglines, helper text, and secondary labels. Use one heading for each
+section, group related controls, and put actions beside their targets. If a
+screen needs prose to explain its structure, fix the structure.
+
+Keep the edge-rail and animation tutorials, field labels, actual status, and
+information needed to decide: scope, consent, consequences, and recovery from
+a failure. Show each disclosure once at the decision it applies to; do not
+repeat it in the page and modal chrome.
 
 ## Review checklist
 

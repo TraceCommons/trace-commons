@@ -13,9 +13,8 @@ autotests = false
 name = "contracts"
 path = "tests/contracts/main.rs"
 
-# OpenSSL in the server's passkey dependency chain cannot link on the CI
-# Windows runner. These suites were already non-Windows before extraction.
-# All dependencies are test-only; this package ships no library or binary.
+# These suites were non-Windows before extraction and stay so. All
+# dependencies are test-only; this package ships no library or binary.
 [target.'cfg(not(windows))'.dev-dependencies]
 async-trait = "0.1"
 axum = "0.8"

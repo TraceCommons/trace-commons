@@ -28,6 +28,8 @@ const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
 /// device key and are removed by `wipe()`, so a logout cannot leave one
 /// contributor's auto-upload opt-ins in place for whoever enrolls next.
 pub const DAEMON_SETTINGS_FILE: &str = "daemon-settings.json";
+/// Explicit CLI setup completion for one enrollment in this state directory.
+pub const DAEMON_SETUP_COMPLETION_FILE: &str = "daemon-setup-completion.json";
 pub const DAEMON_STATE_FILE: &str = "daemon-state.json";
 pub const DAEMON_PROJECTS_FILE: &str = "daemon-projects.json";
 pub const DAEMON_QUEUE_FILE: &str = "daemon-queue.jsonl";
@@ -53,6 +55,17 @@ pub const ACCOUNT_SESSION_FILE: &str = "account-session.json";
 /// installation wrote into the config. Belongs to this enrollment, so it is
 /// swept by `wipe()` with the config it describes.
 pub const DAEMON_INFERENCE_CONNECTION_FILE: &str = "daemon-inference-connection.json";
+/// The payout links confirmed from this device (`daemon::payout_link`): per
+/// rail, the idempotency key and NEAR AI org id the link was made with, so
+/// the recipient ref the commons reports can be recomputed here. Never an
+/// org name. Belongs to this enrollment; swept by `wipe()`.
+pub const DAEMON_PAYOUT_LINK_FILE: &str = "daemon-payout-link.json";
+/// The display name of the NEAR AI org a payout link from this device names
+/// (`daemon::payout_link`): org id to the name last read from NEAR AI, for
+/// the linked or pending org only, never the rest of the listing, so status
+/// can show it after a restart. Cleared with the NEAR AI session on forget;
+/// belongs to this enrollment and swept by `wipe()`.
+pub const DAEMON_PAYOUT_ORG_NAMES_FILE: &str = "daemon-payout-org-names.json";
 /// The reference to the second device key a legacy invite migration stages
 /// for the NEAR AI identity it is moving to (`daemon::legacy_migration`).
 /// Swept by `wipe()`: a logout mid-migration ends the migration.
@@ -74,14 +87,27 @@ pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
 /// the daemon stops offering it (`daemon::legacy_migration`). Hashes only;
 /// belongs to this enrollment and swept by `wipe()`.
 pub const LEGACY_INVITE_REFUSAL_FILE: &str = "legacy-invite-refusal.json";
-/// The passkeys used on this Mac, remembered for the first run's "Welcome
-/// back" (`daemon::remembered_passkeys`). Names and account hashes only.
-/// Survives sign-out; swept by `wipe()`.
-pub const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
+/// The list of passkeys a daemon from before their removal kept. Named only
+/// so it can be deleted: at daemon startup
+/// ([`ConfigStore::remove_retired_files`]) and by `wipe()`.
+const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
 pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
+
+/// The marker a device that joined its account by one-time code keeps
+/// (`daemon::device_codes`): such a device renews its session with its device
+/// key. It belongs to that enrollment, so it goes with it. Its body is not
+/// read.
+pub const JOINED_BY_CODE_FILE: &str = "joined-by-device-code";
+
+/// Written when the commons refused this device's key as revoked by its
+/// account (`daemon::account_session_renewal::key_revoked`), naming that
+/// key by digest. Stops further renewals of a key that can never sign in
+/// again. It goes with the enrollment, so unenrolling and enrolling again (a
+/// new key) starts clean; sign-out keeps the key, and so keeps the marker.
+pub const DEVICE_KEY_REVOKED_FILE: &str = "device-key-revoked";
 
 /// The plain files that belong to one enrollment, apart from the credential
 /// references `commons_credentials` owns (device key, account session,
@@ -91,15 +117,19 @@ pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
 /// Not here, deliberately: receipts, history and the audit log (the local
 /// record of what this device did, and the audit log records the unenroll
 /// itself), settings, folder rules and the queue (the person's choices about
-/// this Mac, not about an account), the NEAR AI notice marker, and the
-/// remembered passkeys (a passkey is not an enrollment).
-pub(crate) const ENROLLMENT_FILES: [&str; 6] = [
+/// this Mac, not about an account), and the NEAR AI notice marker.
+pub(crate) const ENROLLMENT_FILES: [&str; 11] = [
     CONFIG_FILE,
+    DAEMON_SETUP_COMPLETION_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
+    DAEMON_PAYOUT_LINK_FILE,
+    DAEMON_PAYOUT_ORG_NAMES_FILE,
     IDENTITY_SWITCH_JOURNAL_FILE,
     LEGACY_INVITE_LINK_FILE,
     INVITE_SUBJECT_FILE,
     LEGACY_INVITE_REFUSAL_FILE,
+    JOINED_BY_CODE_FILE,
+    DEVICE_KEY_REVOKED_FILE,
 ];
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
@@ -896,8 +926,10 @@ pub struct Receipt {
     pub uploaded_bytes: Option<u64>,
 }
 
-/// The state directory's name under whichever per-user base the platform uses.
-const STATE_DIR_NAME: &str = "trace-commons";
+/// The state directory's name under whichever per-user base the platform
+/// uses: the channel's (`crate::channel`), so a staging build never opens
+/// production's directory by default.
+const STATE_DIR_NAME: &str = crate::channel::STATE_DIR_NAME;
 
 /// The default state directory for this platform.
 ///
@@ -921,7 +953,7 @@ const STATE_DIR_NAME: &str = "trace-commons";
 /// So on Windows the preferred directory is LocalAppData, and an enrollment
 /// left behind in the roaming location is migrated on the next run. See
 /// [`adopt_state_dir`].
-fn platform_default_dir() -> Result<PathBuf> {
+pub(crate) fn platform_default_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     {
         let preferred = dirs::config_local_dir()
@@ -937,6 +969,17 @@ fn platform_default_dir() -> Result<PathBuf> {
         Ok(dirs::config_dir()
             .context("could not determine a config directory for this platform")?
             .join(STATE_DIR_NAME))
+    }
+}
+
+/// Read-only counterpart of Windows enrollment adoption. Keep a running
+/// legacy daemon addressable without moving its socket or account state.
+#[cfg(any(windows, test))]
+fn existing_state_dir(preferred: &Path, legacy: &Path) -> PathBuf {
+    if preferred.join(CONFIG_FILE).exists() || !legacy.join(CONFIG_FILE).exists() {
+        preferred.to_path_buf()
+    } else {
+        legacy.to_path_buf()
     }
 }
 
@@ -971,28 +1014,209 @@ fn adopt_state_dir(preferred: &Path, legacy: &Path) -> PathBuf {
     }
 }
 
+/// The other channel's default state directories on this platform: where a
+/// build of that channel keeps its enrollment when no override is set. On
+/// Windows that is both the LocalAppData directory and the roaming one it
+/// migrates from. Computing them has no side effect; [`adopt_state_dir`] is
+/// never run for the other channel.
+fn other_channel_default_dirs() -> Result<Vec<PathBuf>> {
+    let name = crate::channel::OTHER_STATE_DIR_NAME;
+    Ok(vec![
+        #[cfg(windows)]
+        dirs::config_local_dir()
+            .context("could not determine a local config directory for this platform")?
+            .join(name),
+        dirs::config_dir()
+            .context("could not determine a config directory for this platform")?
+            .join(name),
+    ])
+}
+
+/// The fixed refusal for a state directory override that resolves to the
+/// other channel's default state directory or anything inside it. It names
+/// no path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("state-dir-other-channel")]
+pub struct OtherChannelStateDir;
+
+/// `path` with symlinks resolved, including for a path that does not exist
+/// yet: the nearest existing ancestor is canonicalized and the rest is
+/// re-appended with `.` dropped and `..` applied, so a missing tail cannot
+/// step back out past the comparison.
+fn resolve_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let components: Vec<Component> = absolute.components().collect();
+    // The longest prefix that exists anchors the result; what follows it does
+    // not exist, so it holds no symlink and its `..` steps are lexical.
+    let (mut resolved, rest) = (0..=components.len())
+        .rev()
+        .find_map(|split| {
+            let prefix: PathBuf = components[..split].iter().collect();
+            let real = if split == 0 {
+                Some(PathBuf::new())
+            } else {
+                prefix.canonicalize().ok()
+            };
+            real.map(|real| (real, &components[split..]))
+        })
+        .unwrap_or_default();
+    for component in rest {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    resolved
+}
+
+/// Refuse `dir`, a state directory named by the channel's override variable,
+/// when it resolves to one of `other_defaults` or a path inside one. Both
+/// sides are resolved first ([`resolve_path`]) and compared by path
+/// component, so `trace-commons-staging` is not inside `trace-commons`.
+///
+/// The channels already keep apart by default: different directory names,
+/// different override variables, separate keychain services and a refusal of
+/// the other channel's hosts. This covers the one remaining case, an override
+/// set by hand to the other channel's directory.
+pub(crate) fn refuse_other_channel_state_dir(
+    dir: &Path,
+    other_defaults: &[PathBuf],
+) -> Result<(), OtherChannelStateDir> {
+    let dir = resolve_path(dir);
+    for other in other_defaults {
+        if path_is_within(&dir, &resolve_path(other)) {
+            return Err(OtherChannelStateDir);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `path` is `base` or inside it, compared component by component.
+///
+/// On macOS and Windows a component matches ignoring ASCII case, because
+/// their default filesystems (APFS, NTFS) treat `Trace-Commons` and
+/// `trace-commons` as one directory. [`resolve_path`] canonicalizes only the
+/// part that exists, so without this an override differing in case from a
+/// directory that is not there yet would pass, and then be the same folder
+/// once the other channel creates it. Elsewhere the comparison is exact.
+fn path_is_within(path: &Path, base: &Path) -> bool {
+    let mut path = path.components();
+    base.components().all(|want| {
+        path.next()
+            .is_some_and(|have| component_matches(have.as_os_str(), want.as_os_str()))
+    })
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn component_matches(have: &std::ffi::OsStr, want: &std::ffi::OsStr) -> bool {
+    have.as_encoded_bytes()
+        .eq_ignore_ascii_case(want.as_encoded_bytes())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn component_matches(have: &std::ffi::OsStr, want: &std::ffi::OsStr) -> bool {
+    have == want
+}
+
+/// The state directory [`ConfigStore::resolve`] would open, without opening
+/// or creating it (on Windows the platform default may still move a legacy
+/// enrollment, `adopt_state_dir`). Precedence:
+/// 1. `explicit`, used as given
+/// 2. `override_dir`, the value of the channel's override variable,
+///    refused with [`OtherChannelStateDir`] when it resolves to the other
+///    channel's default directory or inside it
+/// 3. the platform default, see `platform_default_dir`
+///
+/// The C ABI's `tc_resolve_state_dir` calls this, so the macOS app, which picks its
+/// directory in Swift, gets the same refusal as the CLI.
+pub fn resolve_state_dir(
+    explicit: Option<PathBuf>,
+    override_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(dir) = explicit {
+        return Ok(dir);
+    }
+    if let Some(dir) = override_dir {
+        refuse_other_channel_state_dir(&dir, &other_channel_default_dirs()?)?;
+        return Ok(dir);
+    }
+    platform_default_dir()
+}
+
 /// Filesystem-backed store for contributor config, device key, and receipts.
 #[derive(Clone)]
 pub struct ConfigStore {
     dir: PathBuf,
 }
 
+/// Test-lowered envelope limits, by state directory. See
+/// `ConfigStore::lower_envelope_limit_for_tests`.
+#[cfg(any(test, feature = "test-credential-store"))]
+fn test_envelope_limits() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, usize>> {
+    static LIMITS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>,
+    > = std::sync::OnceLock::new();
+    LIMITS.get_or_init(Default::default)
+}
+
+/// A config naming the other channel's issuer or ingest is neither loaded nor
+/// saved: a production build never talks to the staging server, nor the
+/// reverse, whether the address came from an invite or a hand edit.
+fn refuse_other_channel_services(cfg: &ContributorConfig) -> Result<()> {
+    for url in [&cfg.issuer_url, &cfg.ingest_url] {
+        crate::channel::refuse_other_channel_origin(url)?;
+    }
+    Ok(())
+}
+
 impl ConfigStore {
     /// Resolve the contributor state directory using precedence:
     /// 1. `explicit` flag
-    /// 2. `TRACE_COMMONS_CONTRIBUTOR_DIR` env var
+    /// 2. the channel's override variable, `crate::channel::STATE_DIR_ENV`
+    ///    (`TRACE_COMMONS_CONTRIBUTOR_DIR` in a production build); a staging
+    ///    build ignores the production variable. A value that resolves to
+    ///    the other channel's default directory, or inside it, is refused
+    ///    ([`refuse_other_channel_state_dir`])
     /// 3. the platform default, see [`platform_default_dir`]
     ///
     /// Creates the directory (mode 0700 on unix) if it does not exist.
     pub fn resolve(explicit: Option<PathBuf>) -> Result<Self> {
-        let dir = if let Some(dir) = explicit {
-            dir
-        } else if let Ok(dir) = std::env::var("TRACE_COMMONS_CONTRIBUTOR_DIR") {
-            PathBuf::from(dir)
+        let override_dir = std::env::var(crate::channel::STATE_DIR_ENV)
+            .ok()
+            .map(PathBuf::from);
+        Self::open(resolve_state_dir(explicit, override_dir)?)
+    }
+
+    /// Locate state for an already-running daemon without creating a directory,
+    /// changing permissions, or migrating a legacy Windows enrollment.
+    /// A missing directory remains missing; the socket client reports it unreachable.
+    pub(crate) fn resolve_existing(explicit: Option<PathBuf>) -> Result<Self> {
+        let override_dir = std::env::var(crate::channel::STATE_DIR_ENV)
+            .ok()
+            .map(PathBuf::from);
+        let dir = if explicit.is_some() || override_dir.is_some() {
+            resolve_state_dir(explicit, override_dir)?
         } else {
-            platform_default_dir()?
+            #[cfg(windows)]
+            {
+                let preferred = dirs::config_local_dir()
+                    .context("config-state-dir-unavailable")?
+                    .join(STATE_DIR_NAME);
+                let legacy = dirs::config_dir()
+                    .context("config-state-dir-unavailable")?
+                    .join(STATE_DIR_NAME);
+                existing_state_dir(&preferred, &legacy)
+            }
+            #[cfg(not(windows))]
+            {
+                platform_default_dir()?
+            }
         };
-        Self::open(dir)
+        Ok(Self { dir })
     }
 
     /// Open (creating if necessary) the given directory as a contributor
@@ -1016,6 +1240,47 @@ impl ConfigStore {
         &self.dir
     }
 
+    /// The envelope size every check against this state directory refuses
+    /// over: the preview's `envelope-too-large` label, `approve`, the stored
+    /// approved envelope, and `submit`'s and the witness path's size
+    /// refusals all read it from here, so they cannot disagree.
+    ///
+    /// `MAX_ENVELOPE_BYTES` in every shipped build. Only a test build can
+    /// lower it, per directory, with [`Self::lower_envelope_limit_for_tests`].
+    pub fn envelope_limit_bytes(&self) -> usize {
+        #[cfg(any(test, feature = "test-credential-store"))]
+        if let Some(limit) = test_envelope_limits()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&self.dir)
+        {
+            return *limit;
+        }
+        crate::envelope::MAX_ENVELOPE_BYTES
+    }
+
+    /// Lowers [`Self::envelope_limit_bytes`] for this state directory, so a
+    /// test can drive the oversized path without building a 256 MiB session.
+    /// Every store opened on the same directory sees it, and no other
+    /// directory does, so tests running in parallel do not see each other's
+    /// limits. The directory is matched as the store was opened: a store
+    /// opened under another spelling of the same path sees
+    /// `MAX_ENVELOPE_BYTES`, which admits the test's oversized payload and
+    /// fails its refusal assertion rather than passing it. Compiled only into
+    /// test builds (`cfg(test)`, or the test-only
+    /// `test-credential-store` feature; see `Cargo.toml`).
+    #[cfg(any(test, feature = "test-credential-store"))]
+    pub fn lower_envelope_limit_for_tests(&self, limit: usize) {
+        assert!(
+            limit <= crate::envelope::MAX_ENVELOPE_BYTES,
+            "a test may lower the envelope limit, never raise it"
+        );
+        test_envelope_limits()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(self.dir.clone(), limit);
+    }
+
     fn config_path(&self) -> PathBuf {
         self.dir.join(CONFIG_FILE)
     }
@@ -1027,12 +1292,14 @@ impl ConfigStore {
         }
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let cfg =
+        let cfg: ContributorConfig =
             serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        refuse_other_channel_services(&cfg)?;
         Ok(Some(cfg))
     }
 
     pub fn save_config(&self, cfg: &ContributorConfig) -> Result<()> {
+        refuse_other_channel_services(cfg)?;
         let body = serde_json::to_vec_pretty(cfg).context("serializing contributor config")?;
         crate::daemon::commons_credentials::save_config(self, cfg, &body)
     }
@@ -1141,6 +1408,12 @@ impl ConfigStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
+    }
+
+    /// Delete files only an older daemon wrote and nothing reads any more.
+    /// A file that is already gone is not an error.
+    pub(crate) fn remove_retired_files(&self) -> Result<()> {
+        self.remove_daemon_file(REMEMBERED_PASSKEYS_FILE)
     }
 
     /// Remove a daemon runtime file (socket, lock). Missing is not an error.
@@ -1254,16 +1527,23 @@ impl ConfigStore {
         // substituted link into an agent's session directory. Remaining raw
         // capture leases expire independently in Ironwire's bounded spool.
         // Collected exports belong to this contributor, while the native
-        // OpenCode profiles remain local session history. Never follow a
+        // agent profiles remain local session history. Never follow a
         // substituted staging symlink into someone else's files.
-        let staged = self.dir.join(crate::managed::opencode::STAGING);
-        match std::fs::symlink_metadata(&staged) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-                std::fs::remove_dir_all(&staged).context("removing managed exports")?
+        for directory in [
+            crate::managed::opencode::STAGING,
+            crate::managed::native_collection::STAGING,
+            crate::managed::session_binding::DIRECTORY,
+            crate::managed::collection_plan::DIRECTORY,
+        ] {
+            let staged = self.dir.join(directory);
+            match std::fs::symlink_metadata(&staged) {
+                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+                    std::fs::remove_dir_all(&staged).context("removing managed exports")?
+                }
+                Ok(_) => std::fs::remove_file(&staged).context("removing managed export link")?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("reading managed exports"),
             }
-            Ok(_) => std::fs::remove_file(&staged).context("removing managed export link")?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("reading managed exports"),
         }
         let bundles = self.dir.join("token-bundles");
         match std::fs::symlink_metadata(&bundles) {
@@ -1280,6 +1560,7 @@ impl ConfigStore {
             RECEIPTS_FILE,
             NEAR_AI_NOTICE_MARKER_FILE,
             DAEMON_SETTINGS_FILE,
+            DAEMON_SETUP_COMPLETION_FILE,
             DAEMON_STATE_FILE,
             DAEMON_PROJECTS_FILE,
             DAEMON_QUEUE_FILE,
@@ -1287,6 +1568,8 @@ impl ConfigStore {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            DAEMON_PAYOUT_LINK_FILE,
+            DAEMON_PAYOUT_ORG_NAMES_FILE,
             STAGED_DEVICE_KEY_FILE,
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
@@ -1307,6 +1590,7 @@ impl ConfigStore {
             DEVICE_KEY_FILE,
             RECEIPTS_FILE,
             DAEMON_SETTINGS_FILE,
+            DAEMON_SETUP_COMPLETION_FILE,
             DAEMON_STATE_FILE,
             DAEMON_PROJECTS_FILE,
             DAEMON_QUEUE_FILE,
@@ -1314,6 +1598,8 @@ impl ConfigStore {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            DAEMON_PAYOUT_LINK_FILE,
+            DAEMON_PAYOUT_ORG_NAMES_FILE,
             STAGED_DEVICE_KEY_FILE,
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
@@ -1363,6 +1649,17 @@ impl ConfigStore {
 pub(crate) mod tests_support {
     use super::ConfigStore;
     use sha2::Digest as _;
+
+    /// A loopback address that refuses connections and that no test can be
+    /// handed. A port bound and released goes back to the pool, and a
+    /// server another test binds to port 0 could take it and answer
+    /// (#1759). Port 1 (tcpmux) is below every ephemeral range, nothing
+    /// listens there, and the refusal is immediate on every platform; a
+    /// socket bound and never listening is refused on Linux but silently
+    /// dropped on macOS.
+    pub(crate) fn refusing_addr() -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([127, 0, 0, 1], 1))
+    }
 
     pub(crate) fn temp_store() -> (tempfile::TempDir, ConfigStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -1517,6 +1814,167 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
         (dir, store)
+    }
+
+    /// A tempdir's path with symlinks resolved (on macOS `/var` is a link to
+    /// `/private/var`), so expected paths compare like the check's own.
+    fn real_root() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().canonicalize().unwrap();
+        (root, real)
+    }
+
+    fn refused_as_other_channel(candidate: &Path, other_default: &Path) -> bool {
+        match refuse_other_channel_state_dir(candidate, &[other_default.to_path_buf()]) {
+            Ok(()) => false,
+            Err(err) => {
+                assert_eq!(err.to_string(), "state-dir-other-channel");
+                true
+            }
+        }
+    }
+
+    #[test]
+    fn an_override_naming_the_other_channel_default_is_refused() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        // Whether or not the other channel has ever run here.
+        assert!(refused_as_other_channel(&other, &other));
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(refused_as_other_channel(&other, &other));
+        assert!(refused_as_other_channel(&other.join(""), &other));
+    }
+
+    #[test]
+    fn an_override_inside_the_other_channel_default_is_refused() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        std::fs::create_dir_all(other.join("nested")).unwrap();
+        assert!(refused_as_other_channel(&other.join("nested"), &other));
+    }
+
+    #[test]
+    fn an_override_under_a_missing_child_of_the_other_channel_default_is_refused() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(refused_as_other_channel(
+            &other.join("not-yet").join("deeper"),
+            &other
+        ));
+        // `..` is resolved, not compared as text, in both directions.
+        assert!(refused_as_other_channel(
+            &root
+                .join("elsewhere")
+                .join("..")
+                .join(crate::channel::OTHER_STATE_DIR_NAME),
+            &other
+        ));
+        assert!(!refused_as_other_channel(
+            &other.join("not-yet").join("..").join(".."),
+            &other
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_override_symlinked_to_the_other_channel_default_is_refused() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        std::fs::create_dir_all(&other).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        assert!(refused_as_other_channel(&link, &other));
+        assert!(refused_as_other_channel(&link.join("missing"), &other));
+        // The other default reached through a link of its own.
+        let (_second, second) = real_root();
+        let other_link = second.join(crate::channel::OTHER_STATE_DIR_NAME);
+        std::os::unix::fs::symlink(&other, &other_link).unwrap();
+        assert!(refused_as_other_channel(&other, &other_link));
+    }
+
+    /// Paths compare by component: `trace-commons` and
+    /// `trace-commons-staging` share a prefix and nothing else.
+    #[test]
+    fn a_sibling_sharing_the_other_channel_name_prefix_is_allowed() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        let own = root.join(crate::channel::STATE_DIR_NAME);
+        let longer = root.join(format!("{}-x", crate::channel::OTHER_STATE_DIR_NAME));
+        for dir in [&other, &own, &longer] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        assert!(!refused_as_other_channel(&own, &other));
+        assert!(!refused_as_other_channel(&longer, &other));
+        assert!(!refused_as_other_channel(&root, &other));
+        assert!(refused_as_other_channel(&other, &other));
+    }
+
+    /// APFS and NTFS are case-insensitive by default, so on macOS and
+    /// Windows a case variant of the other channel's directory is that
+    /// directory, whether or not it exists yet. Linux compares exactly.
+    #[test]
+    fn a_case_variant_of_a_missing_other_channel_default_follows_the_platform() {
+        let (_root, root) = real_root();
+        let other = root.join(crate::channel::OTHER_STATE_DIR_NAME);
+        let upper = root.join(crate::channel::OTHER_STATE_DIR_NAME.to_ascii_uppercase());
+        assert!(!other.exists() && !upper.exists());
+        let case_insensitive = cfg!(any(target_os = "macos", windows));
+        assert_eq!(refused_as_other_channel(&upper, &other), case_insensitive);
+        assert_eq!(
+            refused_as_other_channel(&upper.join("nested"), &other),
+            case_insensitive
+        );
+        // Still by component: a case variant of a longer sibling is not it.
+        let longer = root.join(format!(
+            "{}-X",
+            crate::channel::OTHER_STATE_DIR_NAME.to_ascii_uppercase()
+        ));
+        assert!(!refused_as_other_channel(&longer, &other));
+    }
+
+    #[test]
+    fn resolve_state_dir_takes_explicit_then_override_then_the_default() {
+        let other = other_channel_default_dirs().unwrap().remove(0);
+        // An explicit directory is the caller's own choice and is not checked.
+        assert_eq!(
+            resolve_state_dir(Some(other.clone()), Some(PathBuf::from("/elsewhere"))).unwrap(),
+            other
+        );
+        let (_root, root) = real_root();
+        let own = root.join("own");
+        assert_eq!(resolve_state_dir(None, Some(own.clone())).unwrap(), own);
+        assert_eq!(
+            resolve_state_dir(None, None).unwrap(),
+            platform_default_dir().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_state_dir_refuses_an_override_naming_the_other_channel_default() {
+        for other in other_channel_default_dirs().unwrap() {
+            for candidate in [other.clone(), other.join("nested")] {
+                let err = resolve_state_dir(None, Some(candidate)).unwrap_err();
+                assert!(err.downcast_ref::<OtherChannelStateDir>().is_some());
+                assert_eq!(err.to_string(), "state-dir-other-channel");
+            }
+        }
+    }
+
+    #[test]
+    fn the_other_channel_default_dirs_carry_the_other_channel_name() {
+        let dirs = other_channel_default_dirs().unwrap();
+        assert!(!dirs.is_empty());
+        for dir in dirs {
+            assert_eq!(
+                dir.file_name().unwrap(),
+                std::ffi::OsStr::new(crate::channel::OTHER_STATE_DIR_NAME)
+            );
+        }
+        assert_ne!(
+            crate::channel::OTHER_STATE_DIR_NAME,
+            crate::channel::STATE_DIR_NAME
+        );
     }
 
     /// A directory that looks enrolled: what `adopt_state_dir` keys off.
@@ -1870,11 +2328,19 @@ mod tests {
         let staged = store.dir.join(crate::managed::opencode::STAGING);
         std::fs::create_dir(&staged).unwrap();
         std::fs::write(staged.join("trace.json"), b"private").unwrap();
+        let native_staged = store.dir.join(crate::managed::native_collection::STAGING);
+        std::fs::create_dir(&native_staged).unwrap();
+        std::fs::write(native_staged.join("trace.jsonl"), b"private").unwrap();
+        let plans = store.dir.join(crate::managed::collection_plan::DIRECTORY);
+        std::fs::create_dir(&plans).unwrap();
+        std::fs::write(plans.join("plan.json"), b"private").unwrap();
         let profile = store.dir.join("managed-profiles");
         std::fs::create_dir(&profile).unwrap();
         std::fs::write(profile.join("native-session"), b"original").unwrap();
         store.wipe().unwrap();
         assert!(!staged.exists());
+        assert!(!native_staged.exists());
+        assert!(!plans.exists());
         assert_eq!(
             std::fs::read(profile.join("native-session")).unwrap(),
             b"original"
@@ -1889,6 +2355,7 @@ mod tests {
         let (_d, store) = store();
         let names = [
             DAEMON_SETTINGS_FILE,
+            DAEMON_SETUP_COMPLETION_FILE,
             DAEMON_STATE_FILE,
             DAEMON_PROJECTS_FILE,
             DAEMON_QUEUE_FILE,
@@ -1896,6 +2363,10 @@ mod tests {
             DAEMON_AUDIT_FILE,
             ACCOUNT_SESSION_FILE,
             DAEMON_INFERENCE_CONNECTION_FILE,
+            DAEMON_PAYOUT_LINK_FILE,
+            DAEMON_PAYOUT_ORG_NAMES_FILE,
+            JOINED_BY_CODE_FILE,
+            DEVICE_KEY_REVOKED_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();
@@ -1907,6 +2378,23 @@ mod tests {
                 "{name} survived logout"
             );
         }
+    }
+
+    #[test]
+    fn unenroll_removes_the_joined_by_code_marker() {
+        // A marker that outlived its enrollment would make a later NEAR AI
+        // enrollment renew by device key, which the commons refuses.
+        let (_d, store) = store();
+        store
+            .write_daemon_file(JOINED_BY_CODE_FILE, b"1\n")
+            .unwrap();
+        store.remove_enrollment_files().unwrap();
+        assert!(
+            store
+                .read_daemon_file(JOINED_BY_CODE_FILE)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2371,5 +2859,25 @@ mod tests {
         let record = value["witness_origin"].to_string();
         assert!(!record.contains("w.example"), "{record}");
         assert!(!record.contains("0xab"), "{record}");
+    }
+}
+
+#[cfg(test)]
+mod existing_state_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_resolution_never_migrates_legacy_enrollment() {
+        let root = tempfile::tempdir().unwrap();
+        let preferred = root.path().join("local");
+        let legacy = root.path().join("roaming");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join(CONFIG_FILE), b"legacy").unwrap();
+        assert_eq!(existing_state_dir(&preferred, &legacy), legacy);
+        assert!(!preferred.exists());
+        assert_eq!(std::fs::read(legacy.join(CONFIG_FILE)).unwrap(), b"legacy");
+        std::fs::create_dir(&preferred).unwrap();
+        std::fs::write(preferred.join(CONFIG_FILE), b"current").unwrap();
+        assert_eq!(existing_state_dir(&preferred, &legacy), preferred);
     }
 }

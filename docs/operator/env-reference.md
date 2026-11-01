@@ -42,7 +42,7 @@ explicitly (no implicit zero defaults).
 | `TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL` | Phase B | (none) | Attestation verifier label. Unused in v1. |
 | `TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on aggregate perplexity (micros). Pass if measured >= floor. Pilot-launch default: `0` (disabled) — see A2.5 spec / `calibration.md` Phase 1. |
 | `TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on tail fraction (micros). Pilot-launch default: `0` — calibrate post-first-1000-pilot-traces per A2.5 spec / `calibration.md` Phase 1. |
-| `TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on novelty score (micros). Pilot-launch recommendation: `500000` (cosine novelty 0.5); primary active floor at launch under A2.5. |
+| `TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS` | R when enclave_local_gpu | (none) | Inclusive lower bound on novelty score (micros). Provisional BGE-large-en-v1.5 holding value: `100000` (cosine novelty 0.10); see calibration.md and the October 24 isolated controls. |
 | `TRACE_COMMONS_GATE_POLICY_VERSION` | R when enclave_local_gpu | (none) | Human label for the policy version (e.g. `pilot-v1`). Stamps audit rows. |
 | `TRACE_COMMONS_GATE_TOP_K` | optional | `5` | Number of nearest neighbors used for novelty. |
 
@@ -131,8 +131,11 @@ procedure.
 | `TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST` | optional | — | Page cap for export endpoints. |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR` | optional | — | Rate-limit budget per tenant. |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR` | optional | — | Rate-limit budget per principal. |
-| `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` | optional | `30` | In-process `POST /v1/traces` limit per authenticated principal per 60 s fixed window, applied before any other submit work. Integer `1`–`600`; anything else refuses startup. Over it, ingest answers `429` `{"error":"submit_rate_limited","retry_after_seconds":N}` with a matching `Retry-After: N` header, where `N` is the whole seconds until the principal's window turns (at least 1). Read once at startup; single-instance only. |
-| `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY` | optional | `2` | `POST /v1/traces` requests one principal may have in flight at once. Integer `1`–`4`; anything else refuses startup. The ceiling is the large-body upload middleware's own per-principal cap of 4, which runs first: a higher submit cap could never be reached. Over it, the same `429` `submit_rate_limited` answer with `retry_after_seconds` `2` and `Retry-After: 2`; the large-body middleware's own in-flight refusal (submit and token-bundle uploads) answers the same way. |
+| `TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR` | optional | `600` | Per-account hourly submission ceiling: a circuit breaker on intake, on by default. Counts two things over the last rolling hour and refuses when either has reached the value: a contributor's recorded submissions (rows in `trace_submissions`, or file records without a mirror), and the submit attempts this process let through past the ceiling, whatever the account's admission authority (bounded, invited or attested). An account tenant (`near-`/`nearai-`) is counted as one, across all its devices; a tenant outside those namespaces (a legacy invite or pooled tenant) is counted per authenticated principal. Checked right after the per-principal rate limit and before admission reserves anything, so a refused upload holds no lease, is not charged, and is not re-scrubbed. It never reads or charges the weekly account admission budget. The attempt count covers uploads refused after this check (by admission, the re-scrub, the tombstone, or a gate), which leave no record, so the ceiling bounds re-scrub work as well as accepted intake. The attempt count is in-process memory, per process like the per-minute limiter: a restart empties it and each ingest instance keeps its own (with N instances a scope can make up to N times the value in attempts), while the recorded count holds across both. Within one process the attempt count is taken under a lock, so uploads in flight at once cannot overshoot it; across processes, or after a restart, nothing is reserved between the recorded count and the record, so uploads in flight at once can overshoot by up to the number in flight. It is a circuit breaker, not an exact bound. A retry of a submission id that already has a record in the same scope (the account tenant, or the uploading principal) is not counted or refused: it only replays its receipt, whichever instance serves it and whatever bytes it carries. A re-POST of an owned quarantined id that the legacy path remediates (re-running the re-scrub) is counted every time, an identical body included, and refused past the ceiling. Another principal's submission id in a pooled tenant is not exempt. The attempt table holds at most 16,384 scopes; a new scope that finds it full of scopes with attempts in the hour is refused with `Retry-After: 60`. Over it, ingest answers `429` `{"error":"submit_rate_limited","retry_after_seconds":N}` with `Retry-After: N`, `N` being the seconds until the counts have room again, when the oldest counted submission or attempt leaves the hour (1 to 3600); the contributor keeps the upload queued and retries. Counted from `trace_submissions` when a PostgreSQL mirror is configured (for an account tenant a read bounded by this value; for a pooled tenant bounded by the tenant's last-hour volume), otherwise from the file records (a full record read per contributor upload, so a deployment without a mirror that has large tenants should configure the mirror or set `0`, which turns the ceiling off for every tenant: the variable is deployment-wide). `0` turns it off; anything that is not a non-negative integer refuses startup. Contributor tokens only. |
+| `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` | optional | `30` | In-process submit limit per authenticated principal per 60 s fixed window, shared by `POST /v1/traces` and token-bundle finalize (which runs the same submit work). Through the router it is counted before the request body is read, after the large-body upload middleware's own in-flight and byte checks and after the submit in-flight slot below, so a request refused by any of those is not counted. Every request counted here stays counted, whether or not its body arrives, parses, or reaches submit work: an upload that aborts mid-body or is refused for an idle body, a malformed body, and a finalize that is refused after its bundle check (incomplete, a digest or consent mismatch) or replays an already-finalized bundle each spend one. A finalize for a bundle that cannot be finalized (token bundles not enabled on the deployment, an unknown bundle, or a revoked one) is refused before the submit slot and the rate are taken, and spends nothing of them. Its bundle lookup is bounded by a separate in-process counter at this same rate per principal, so past it a finalize is refused with the same `429` before the lookup. Integer `1`–`600`; anything else refuses startup. Over it, ingest answers `429` `{"error":"submit_rate_limited","retry_after_seconds":N}` with a matching `Retry-After: N` header, where `N` is the whole seconds until the principal's window turns (at least 1). Read once at startup; single-instance only. |
+| `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY` | optional | `2` | `POST /v1/traces` and token-bundle finalize requests one principal may have in flight at once, together; each holds its slot from before its body is read until it is answered. Integer `1`–`4`; anything else refuses startup. Taken before the request body is read. The ceiling is the large-body upload middleware's own per-principal cap of 4, which is taken first: a higher submit cap could never be reached. Over it, the same `429` `submit_rate_limited` answer with `retry_after_seconds` `2` and `Retry-After: 2`; the large-body middleware's own in-flight refusal (submit and token-bundle uploads) answers the same way. A slot held by an upload whose body stops arriving is released when the upload is refused for the 60 s idle timeout (see `TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET`). |
+| `TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET` | optional | `MAX_INGEST_BODY_BYTES` + 128 MiB (406,847,488) | Deployment-wide budget of upload body bytes in flight (`POST /v1/traces` and the token-bundle upload routes), taken per upload by its declared `Content-Length` (a body without one is weighed at its route's ceiling) before the body is read. An upload that does not fit is refused with the same `429` `submit_rate_limited` answer and `Retry-After: 2`; a declared length over the route's ceiling is refused with `413` at once. Integer from `MAX_INGEST_BODY_BYTES` (272,629,760: one maximal upload) to 4,294,967,295; anything else refuses startup. Ingest holds several copies of a body while it is processed, so resident memory for uploads is a multiple of this budget (measured 2026-10-29 at 200 MB, debug build: about 7.5x through a local encrypted store, 8.7x through the pilot's legacy shape -- remote store plus PostgreSQL mirror -- and about 12x through the pipeline receipt path including its worker's first steps; see `large_envelope_tests`); size it against the host's memory with that multiple. Every upload route reads its body under a fixed 60 s idle timeout between chunks (not a total timeout: an upload that keeps moving finishes however long it takes); an upload whose body sends nothing for 60 s is refused `408` `{"error":"upload_body_idle_timeout"}` and releases its bytes and in-flight slots, so a stalled connection (a sleeping laptop, a NAT drop with no FIN) holds them for at most that long. Not configurable. |
+| `TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES` | optional | half of `TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET`, but at least `MAX_INGEST_BODY_BYTES` (with the default budget: 272,629,760) | Most of the upload byte budget one authenticated principal may hold in flight at once, across `POST /v1/traces` and the token-bundle upload routes, weighed exactly as the budget weighs an upload and checked before it, before the body is read. An upload that would take the principal past it is refused with the same `429` `submit_rate_limited` answer and `Retry-After: 2`, while other principals' uploads are still admitted against the remaining budget. Integer from `MAX_INGEST_BODY_BYTES` (one maximal upload, so the largest accepted upload always fits) to the configured `TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET`; anything else refuses startup. With the default budget the share is one maximal upload, about two thirds of the budget, so it changes little there, and a `POST /v1/traces` body sent without a `Content-Length` (weighed at the route's ceiling) takes the whole share, so the principal's other uploads, token-bundle puts included, are refused until it finishes; raise `TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET` (for example to twice `MAX_INGEST_BODY_BYTES`, with the host memory that implies) or set this variable so the share is a real fraction of the budget. Read once at startup; single-instance only. |
 | `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` | optional | `false` | When `true`, accepts medium residual-risk submissions after server-side re-scrub. High residual-risk submissions still quarantine. Intended for tightly scoped pilots where message text/tool payloads are included. Governs both paths: the legacy path accepts every Medium; a tenant routed to the versioned pipeline has Admission admit only a Medium whose server-side basis is `found_and_removed` (alone or with `consent_content_flag`), recorded under the Admission rule `minimal_admission_v1_accept_found_and_removed`; any other Medium is still quarantined `privacy_review_required`. See [`pipeline-activation.md`](pipeline-activation.md#admission-and-trace_commons_accept_medium_risk_submissions). |
 | `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` | optional, emergency only | `false` | When `true`, `POST /v1/admin/audit-chain-repair` may resume the DB audit chain across a legacy segment (`"accept_legacy_segment": true`) after a rollback to a pre-#1043 build. Off, a non-dry run that asks for it is refused `409` `legacy_segment_resume_disabled` and writes nothing; the dry run still diagnoses `file_ahead_through_legacy_rows`. Read once at startup. Off by default since 2026-10-02, when the pilot's pre-#1043 rollback target was retired. See [`audit-trail-forensics.md`](audit-trail-forensics.md). |
 | `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | optional | (none, driver fails closed) | Separate connection string for the narrow `trace_gate_driver` role pool used by the perplexity-scoring driver (Task 5/6). Mirrors `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`'s shape: points at a LOGIN role granted membership in `trace_gate_driver` (V36 policies + V42 column-scoped SELECT). See [`perplexity-scoring-driver.md`](perplexity-scoring-driver.md). |
@@ -205,8 +208,9 @@ configured, and prints all three assignments in env-file format.
 
 | Var | R? | Default | Description |
 |---|---|---|---|
-| `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` | R for live | `0` | Per-pass credit points. Set to `0` during calibration; flip to configured value at cutover. |
-| `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` | R for live | `false` | Refuse to emit novelty-utility credit unless gate is `enclave_local_gpu`. |
+| `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` | R for live | `0` | Per-pass credit points of the gate's scoring award. Set to `0` during calibration; flip to configured value at cutover. The award is settlement-eligible: a non-zero value settles at the next live settlement run and is paid out. A value above `0` refuses to start unless `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` is true (`novelty_utility_credit_requires_production_gate`) and `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` is set (`novelty_utility_settle_from_missing`). A submission earns at most one paid award (a positive delta, written at or after the cut-over), whichever gate version scored it, through the gate worker route or the perplexity driver. A $0 award, or one written before the cut-over, never settles and does not stand in the way of a later paid award. |
+| `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE` | R for live | `false` | Refuse to emit novelty-utility credit unless the gate is a production gate (`enclave_local_gpu`, `dstack` or `enclave_near_ai`); any other gate's decision, including the test gates `in_memory`, `enclave_mock`, `legacy_deterministic` and `dstack_stub`, is recorded with `credit_withheld_reason = non_production_gate`. Required when the delta is above `0`. |
+| `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` | R when delta > 0 | — | RFC 3339 cut-over for the scoring award, for example `2026-11-01T00:00:00Z`. Settlement, the credit risk summary, withdrawal's `credit_retained` and the legacy drain report count a `novelty_utility` event only when it was written at or after this instant; earlier awards (from a test gate, or at a delta nobody meant to pay) never settle, and do not stop a submission earning its one paid award after it. Unset, no scoring award settles. A value that is not RFC 3339 refuses to start (`novelty_utility_settle_from_invalid`). Set it to the time the paying delta goes live. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` | R for prod | — | Hard cap per account per settlement. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS` | R for prod | — | Allowlist of policy versions accepted for settlement. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_ISSUER_APPROVAL` | R for prod | `false` | Require central-issuer approval signature. |
@@ -217,7 +221,8 @@ configured, and prints all three assignments in env-file format.
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID` | optional | — | NEAR contract id for settlement. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_NEAR_CONTRACT` | optional | `false` | Require NEAR contract presence. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED` | optional | `false` | Toggles the settlement scheduler. |
-| `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN` | R when enabled | — | Scheduler bearer token. |
+| `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_SCOPE` | optional | `tenant` | `tenant` uses the configured tenant bearer; explicit `all_tenants` uses the deployment's private internal scheduler and bounded database enumeration. See [automatic credit settlement](automatic-credit-settlement.md). |
+| `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN` | R for enabled tenant scope | — | Scheduler bearer token; must be absent for `all_tenants`. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_INTERVAL_SECONDS` | optional | — | Run cadence. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION` | R when enabled | — | Pinned policy version. |
 | `TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_REASON` | optional | — | Reason label written to audit. |
@@ -345,7 +350,7 @@ runbook, including why the floor stays 0.
 
 | Var | R? | Default | Description |
 |---|---|---|---|
-| `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED` | optional | `false` | Toggle. Off by default; existing deployments and CI are unaffected until an operator opts in. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_ENABLED` | optional | `false` | Toggle. Off by default; existing deployments and CI are unaffected until an operator opts in. A trace the driver scores earns the gate's scoring award as the gate worker route would (cached and skipped-duplicate decisions earn none). The driver issues it as `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`; with `TRACE_COMMONS_CREDIT_SETTLEMENT_CENTRAL_ISSUER_PRINCIPAL_REFS` set and that issuer unset or not listed, every driver award is withheld as `central_issuer_denied`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS` | optional | `45` | Cadence between enumeration batches. Clamped to `[5, 86400]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE` | optional | `5` | Submissions enumerated per tick. Clamped to `[1, 1000]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS` | optional | `5` | Bounded attempt counter per submission before the driver stops retrying it. Clamped to `[1, 1000]`. |
@@ -511,6 +516,8 @@ credentials and adds two of its own. See
 | `TRACE_COMMONS_NEAR_AI_BASE_URL` | R for the drill | (none) | Shared with the gate scorer. Missing, and the drill refuses with `missing_control:near_ai_base_url`. |
 | `TRACE_COMMONS_NEAR_AI_MODEL` | R for the drill | (none) | Shared with the gate scorer. |
 | `TRACE_COMMONS_NEAR_AI_API_KEY` | R for the drill | (none) | Shared with the gate scorer. Never logged; the drill's evidence carries no part of it. |
+| `TRACE_COMMONS_NEAR_AI_SCORER_API_KEY` | optional | (none) | The scorer's own key. Set, the gate scorer and the drill's calls to `TRACE_COMMONS_NEAR_AI_BASE_URL` (report, completion, receipt) use it, and the registry fetch from the attestation gateway keeps `TRACE_COMMONS_NEAR_AI_API_KEY`. Unset, everything uses `TRACE_COMMONS_NEAR_AI_API_KEY` as before. Never logged. Required with the scorer production-host exception below. |
+| `TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST` | `near-ai-staging` builds only | (unset) | `true` lets a staging ingest score against a NEAR AI production direct-completions host (`https://<model>.completions.near.ai`, no port or userinfo), with `TRACE_COMMONS_NEAR_AI_SCORER_API_KEY` set (staging design 3.9, owner exception 2026-10-24). Every other NEAR AI host is still checked as staging. Any other value, another scorer host, or a missing scorer key refuses boot with `missing_control:near_ai_scorer_production_host`; a default build refuses it at any value. |
 | `TRACE_COMMONS_NEAR_AI_EXPECTED_MEASUREMENTS` | **R for the drill to mean anything** | (none) | Comma-separated `key=value` pins over `mrtd`, `rtmr0`..`rtmr3`, each 96 hex characters. Unset, the drill runs and **fails** with `missing_control:near_ai_expected_measurements` -- an unpinned drill proves the endpoint is *an* enclave, not *the* enclave. Take the values from a verified quote, never from the report's own `info.tcb_info` JSON. |
 | `TRACE_COMMONS_NEAR_AI_PCCS_URL` | optional | `https://api.trustedservices.intel.com` | Where Intel DCAP collateral is fetched from. Defaults to Intel's own PCS rather than a caching mirror: the collateral is what a quote is verified against. |
 | `TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS` | optional | `60` | Shared with the gate scorer; bounds each of the drill's four calls. |
@@ -547,6 +554,38 @@ bounded allowance.
 
 See [account trust](./account-trust.md) for the activation and response contract.
 
+## Client daily upload allowances (retired)
+
+The contributor clients have no daily upload limit, and
+`GET /v1/account/upload-allowance` always answers `{"allowance":null}`.
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_CLIENT_MAX_UPLOADS_PER_DAY` | deprecated | (none) | No longer read. A deployment that still sets it starts normally and ignores it; remove it at the next configuration change. |
+| `TRACE_COMMONS_CLIENT_MAX_BYTES_PER_DAY` | deprecated | (none) | No longer read; as above. |
+| `TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY_JSON` | optional pair | (none) | Independent `tiered-v1` policy for the staging trust evaluator. Still validated at startup and still drives the scheduler's applied evaluations, but nothing reads them since client caps were retired; do not enable anew. Mutually exclusive with account-admission configuration; requires durable forced-RLS DB, external invalidation/read and tiered recorder/writer readiness. |
+| `TRACE_COMMONS_CLIENT_UPLOAD_TRUST_POLICY_VERSION` | R with JSON | (none) | Must equal the independent policy's `version`; staging template uses `staging-earned-upload-v1`. |
+| `TRACE_COMMONS_CLIENT_UPLOAD_TRUST_DATABASE_URL` | optional | main DB pool | Dedicated non-owner trust worker/read connection, available to shadow and independent applied policies. Must name the same endpoint/database as the main DB and satisfy forced-RLS/readiness controls. Staging renderer sets the local `tc_upload_trust_login` URL from its feature-only secret; it leaves `DATABASE_URL` unchanged. |
+
+The staging renderer accepts `TC_CLIENT_UPLOAD_TRUST_MODE=shadow|applied`
+(default unset/disabled), plus required live decision labels
+`TC_UPLOAD_TRUST_GATE_POLICY_VERSION` and
+`TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION`. Each label is 1–64 ASCII
+letters/digits or `._+-`; labels without a mode refuse. Only enabled modes
+read `tc-staging-account-trust-worker-token` and
+`tc-staging-db-upload-trust-password` (16 or more ASCII letters/digits).
+The trust login is non-owner, NOSUPERUSER, NOBYPASSRLS and NOCREATEROLE;
+grant only `trace_client_upload_trust_runtime`, which carries the reviewed
+worker/status-read grants. No `trace_account_admission_runtime`, `app`, guard
+or evaluator membership or direct writes. Apply migrations through V138; historical
+credits must not be fabricated to qualify recorder history. Shadow uses the existing
+shadow policy pair; applied uses the independent client-upload pair. Both
+render the scoped scheduler at 300 seconds and limit 10000, leave both
+admission switches off and add no witness settings. The renderer validates
+JWT shape; ingest validates the scoped `account_trust_worker` token and DB
+contracts. See [client allowances](client-upload-allowance.md) for
+qualification, rotation and rollback.
+
 ## Earned account trust
 
 | Var | R? | Default | Description |
@@ -559,7 +598,8 @@ See [account trust](./account-trust.md) for the activation and response contract
 | `TRACE_COMMONS_ACCOUNT_TRUST_SCHEDULER_LIMIT` | optional | `10000` | Sources per recorder pass, 1 to 10000. A tick makes at most 10 passes, then evaluates. |
 
 Each scheduler tick records missing facts, then evaluates `applied` when the
-admission policy names `tiered-v1` and `shadow` when a shadow policy is set.
+admission policy or independent client-upload policy names `tiered-v1`, and
+`shadow` when a shadow policy is set.
 Startup refuses a scheduler with neither. Its liveness name is
 `account_trust_scheduler`. See [account trust](./account-trust.md#earned-growth-live-tiered-v1).
 
@@ -570,6 +610,81 @@ Startup refuses a scheduler with neither. Its liveness name is
 | `TRACE_COMMONS_LEGACY_INVITE_LINK_ENABLED` | optional | `false` | `true`/`1` opens `POST /v1/account/invites/legacy-link[/challenge]`; anything but `true`/`1`/`false`/`0` fails startup. On requires the `TRACE_COMMONS_INGEST_ATTESTATION_*` key, which countersigns link records. Mark pooled tenants first. |
 
 See [legacy invite migration](./legacy-invite-migration.md).
+
+## Payout rails (default off)
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` | optional | `disabled` | `disabled`, `dry_run` or `live` for the NEAR AI payout rail. Anything else fails startup, as does `dry_run` or `live` with a required rail setting missing or malformed (the credential id below is the one optional setting). |
+| `TRACE_COMMONS_NEAR_AI_PAYOUT_CREDENTIAL_ID` | optional | (unset) | The payout credential's UUID. Not secret; it only labels log lines, as a hash. Unset, they carry `credential=unset`. Set but not a UUID (an empty value included) fails startup (`near_ai_payout_config_missing`). `render-env.sh` takes it from `TC_NEAR_AI_PAYOUT_CREDENTIAL_ID` and writes the line only when that is set. |
+| `TRACE_COMMONS_PAYOUT_CONTROL_TOKEN` | R when any rail is `live` | (none) | The operator's payout control token, at least 32 characters; only its hash is kept. It is the only credential `POST /v1/admin/payout-rails/{rail_id}/halt` and `.../resume` and the hold list and clear routes accept; tenant tokens, a tenant admin's included, are refused. Shorter than 32 characters fails startup. Unset fails startup when any rail is `live` (`payout_control_token_unconfigured`), because the kill switch would be unreachable. A `dry_run` rail sends nothing and starts without it, logging the same label; the controls then answer 503 `payout_control_unconfigured`. Rotate by env reload and restart. |
+
+See the [payout design](../superpowers/specs/2026-10-21-nearai-credit-payout-design.md).
+
+## Referral rewards (default off)
+
+Unset means off: with no `TRACE_COMMONS_REFERRAL_PROGRAM_START` no code can
+be made or applied, and with `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE` unset or
+`disabled` the bonus pass and the referral payout stream do not run. A value
+that is present but malformed or out of range (an empty one included) fails
+startup with the setting's name and a label, never the value; nothing falls
+back to a default. Referrals count as configured when a program start is set
+or the mode is not `disabled`; then startup also requires the network mark
+key and a login that can assume `trace_referral_resolver`
+(`referral_resolver_unprovisioned`, see
+[referral-resolver role](./referral-resolver-role.md)). On staging,
+`deploy/staging-gcp/render-env.sh` writes these from `TC_REFERRAL_*` and
+`TC_NEAR_AI_REFERRAL_*`.
+
+| Var | R? | Default | Description |
+|---|---|---|---|
+| `TRACE_COMMONS_REFERRAL_PROGRAM_START` | optional | (unset: not started) | RFC 3339. The program accepts codes from this time. Malformed fails startup (`referral_config_invalid`). |
+| `TRACE_COMMONS_REFERRAL_PROGRAM_END` | optional | (none) | RFC 3339, after the start. |
+| `TRACE_COMMONS_REFERRAL_LATE_DAYS` | optional | `30` | How long after its creation an account may still apply a code, 1 to 365. |
+| `TRACE_COMMONS_REFERRAL_EARN_DAYS` | optional | `92` | How long after a referee's account creation the referrer earns, 92 to 3650. Under 92 fails startup (`referral_earn_days_below_promise`). Stamped on each referral when applied; a referral earns until the later of that and the current setting, so raising it extends live referrals and lowering it never shortens one. |
+| `TRACE_COMMONS_REFERRAL_BONUS_BPS` | optional | `1000` | The referrer's bonus in basis points of each referee accrual, 1 to 10000. |
+| `TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY` | R when referrals are configured | (none) | Base64 of at least 32 bytes (`openssl rand -base64 32`), the HMAC key for network marks; never reaches the database. Missing fails startup (`referral_network_mark_key_missing`), malformed (`referral_network_mark_key_invalid`). Never logged. |
+| `TRACE_COMMONS_NEAR_AI_REFERRAL_MODE` | optional | `disabled` | `disabled`, `dry_run` or `live` for the referral payout stream. Anything else fails startup (`near_ai_referral_mode_invalid`). `dry_run` and `live` need `TRACE_COMMONS_NEAR_AI_PAYOUT_MODE` on, and `live` needs it `live` (`near_ai_referral_config_missing`). `dry_run` writes bonus rows and sends nothing. `live` sends with the payout credential unless the two settings below name a dedicated one. Shared, both streams have one lifetime budget and one send window, so referral sends draw down the contributor payout budget. |
+| `TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL` | optional, with its id | (the payout credential) | A dedicated NEAR AI org credential (`oc_` and 64 hex) for the referral stream, so a NEAR AI-side cap on it bounds referrals alone. Unset with its id, a `live` stream sends with the payout credential; set to the payout credential with the payout id, the same. Set without its id, or half of the payout pair beside half of another, fails startup (`near_ai_referral_config_missing`). Never logged. |
+| `TRACE_COMMONS_NEAR_AI_REFERRAL_CREDENTIAL_ID` | optional, with the credential | (the payout credential's, if it has one) | The credential's UUID. Set without the credential fails startup. With the payout credential id unset, the payout credential beside any referral id also fails startup, since the budget would be shared and the id dropped: leave both referral settings unset to share it. |
+| `TRACE_COMMONS_REFERRAL_ACCOUNT_CEILING_NANO` | optional | `250000000000` | Per-account referral ceiling in nano-USD, above zero; owed referral credit over it is held. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_MIN_REFEREES` | optional | `5` | A code is scored once it has this many referees, 1 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_REFUSED_SHARE_BPS` | optional | `4000` | Refused-referee share that suspends a code, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_REFUSED_MIN_SUBMISSIONS` | optional | `5` | Submissions before a referee counts toward the refused share, 1 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_CREDIT_HOLD_SHARE_BPS` | optional | `2000` | Credit-hold share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_ADVANCE_FORFEIT_SHARE_BPS` | optional | `2000` | Advance-forfeit share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_SHARED_IDENTITY_CLUSTER` | optional | `3` | Referees in one identity cluster, 2 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_DUPLICATE_SHARE_BPS` | optional | `2000` | Duplicate-trace share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_BURST_COUNT` | optional | `20` | More referees than this in 24 hours trips, 1 to 100000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_NEVER_SETTLES_SHARE_BPS` | optional | `6000` | Never-settles share, 0 to 10000. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_NEVER_SETTLES_DAYS` | optional | `30` | Days after joining before a referee can count as never settling, 1 to 3650. |
+| `TRACE_COMMONS_REFERRAL_ABUSE_TRIP_CODES` | optional | `2` | More codes suspended than this in 24 hours switches the stream to `dry_run`, 1 to 100000. |
+
+The abuse thresholds fail startup with `referral_abuse_setting_invalid` when
+set but not a plain decimal in range. See the
+[referral rewards design](../superpowers/specs/2026-10-29-referral-rewards-design.md).
+
+## Removed variables (passkeys)
+
+Passkey sign-in was removed in migration V144. The ingest still accepts the
+variables below and ignores them; none of them is a startup failure. Each is
+safe to delete from env files once the deployment is past V144.
+
+| Var | Status | Notes |
+|---|---|---|
+| `TRACE_COMMONS_WEBAUTHN_RP_ID` | ignored since V144 | Passkey relying-party ID. |
+| `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` | ignored since V144 | Passkey relying-party origins. |
+| `TRACE_COMMONS_WEBAUTHN_RP_NAME` | ignored since V144 | Passkey relying-party display name. |
+| `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING` | ignored since V144 | Cap on unbound passkey accounts. |
+| `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` | ignored since V144 | Native passkey account creations per IP per day. |
+| `TRACE_COMMONS_UNBOUND_REAPER_ENABLED` | ignored since V144 | Unbound-account reaper switch. |
+| `TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL` | ignored since V144 | Reaper worker database URL. |
+| `TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS` | ignored since V144 | Reaper pass interval. |
+| `TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE` | ignored since V144 | Reaper batch size. |
+| `TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS` | ignored since V144 | Reaper age limit for unbound accounts. |
+| `TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS` | ignored since V144 | Reaper age limit for closed accounts. |
+| `TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS` | ignored since V144 | Earlier name of the reaper age limit. |
+| `TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS` | ignored since V144 | Earlier name of the reaper age limit. |
 
 ## Build-time features (Cargo)
 

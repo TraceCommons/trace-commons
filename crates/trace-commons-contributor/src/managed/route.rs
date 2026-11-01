@@ -1,10 +1,8 @@
 //! One NEAR AI proxy and host-owned credential source per managed session.
 use super::{ManagedError, ToolId, secrets::ApiKey};
 use crate::config::ConfigStore;
-use ironwire_proxy::embed::{
-    self, EmbedOptions, EmbeddedProxy, HostSecret, StartupProbes, UpdateChecks,
-};
-use std::path::PathBuf;
+use ironwire_proxy::embed::{self, EmbedOptions, HostSecret, StartupProbes, UpdateChecks};
+use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;
 
 /// The route pins the NEAR AI backend only, never a model: a request that
@@ -13,7 +11,9 @@ use uuid::Uuid;
 /// given a listed model of the same tier by IronWire's routing, so every
 /// launcher maps its tool's model names onto [`ManagedRoute::models`].
 pub struct ManagedRoute {
-    proxy: EmbeddedProxy,
+    port: u16,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    owner: tokio::task::JoinHandle<()>,
     home: PathBuf,
     /// NEAR AI's chat models, as read when the route started.
     models: Vec<super::models::ChatModel>,
@@ -33,7 +33,7 @@ pub(crate) fn near_ai_base_url() -> &'static str {
     if let Some(base_url) = TEST_BASE_URL.get() {
         return base_url;
     }
-    "https://cloud-api.near.ai/v1"
+    crate::channel::NEAR_AI_INFERENCE_BASE
 }
 
 /// The IronWire home of session `id`'s route: `<config dir>/managed-routes/
@@ -113,23 +113,22 @@ impl ManagedRoute {
             super::profiles::private_directory(root)?;
         }
         super::profiles::private_directory(&home)?;
+        let bodies = crate::daemon::settings::DaemonSettings::load(store)
+            .map_err(|_| ManagedError::StorageUnavailable)?
+            .ironwire_attested_bodies;
         let config =
             ConfigStore::open(home.clone()).map_err(|_| ManagedError::StorageUnavailable)?;
         config
             .write_daemon_file(
                 "config.toml",
-                // The call log is on, as the person's record of the session;
-                // the status line does not read it. Bodies are off, so a
-                // completed call is recorded as what it was (models, tokens,
-                // timings, status), never what it said. A refused call's
-                // error column holds IronWire's text for the error, which
-                // includes up to 600 characters of the provider's error
-                // message, and a provider can quote the request there. The
-                // log lives in this home and goes with it at shutdown.
+                // The private ledger retains provider errors locally, including
+                // possible quoted request text. Readers expose only safe fields.
+                // Receipt checking never grants body or token consent.
                 format!(
                     r#"[capture]
 enabled = true
-bodies = false
+bodies = {bodies}
+receipts = true
 [privacy]
 mode = "full"
 trusted_backends = ["nearai"]
@@ -137,18 +136,37 @@ trusted_backends = ["nearai"]
 id = "nearai"
 kind = "nearai"
 base_url = {base_url}
+responses_via_chat = {responses_via_chat}
 "#,
-                    base_url = toml::Value::String(base_url.into())
+                    base_url = toml::Value::String(base_url.into()),
+                    bodies = bodies,
+                    responses_via_chat = tool == ToolId::Codex
                 )
                 .as_bytes(),
             )
             .map_err(|_| ManagedError::StorageUnavailable)?;
-        let options = EmbedOptions::default()
+        let attestor = crate::daemon::ipc::signer_attestor_for(
+            store,
+            Some(key.expose().to_owned()),
+            Arc::new(crate::routing::proof_attestor::PinProvider::for_daemon(
+                if cfg!(test) {
+                    None
+                } else {
+                    Some(store.clone())
+                },
+                &|name| std::env::var(name).ok(),
+            )),
+        );
+        let mut options = EmbedOptions::default()
             .with_update_checks(UpdateChecks::Off)
             .with_startup_probes(StartupProbes::Configured)
             .with_credentials(move |name| {
                 (name == "NEARAI_API_KEY").then(|| HostSecret::from(key.expose().to_owned()))
             });
+        options.token_capture_enabled = Some(false);
+        if let Some(attestor) = attestor {
+            options = options.with_signer_attestor(attestor);
+        }
         let proxy = embed::start_with_options(&home, Some(0), options, |_, _| {})
             .await
             .map_err(|_| ManagedError::LaunchUnknown)?;
@@ -195,8 +213,35 @@ base_url = {base_url}
         if !pinned.status().is_success() {
             return Err(ManagedError::LaunchUnknown);
         }
+        let port = proxy.port();
+        let (shutdown, mut requested) = tokio::sync::oneshot::channel();
+        let consent_store = store.clone();
+        let retained_home = home.clone();
+        let owner = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                tokio::select! {
+                    // Dropping a route also closes the sender and stops its
+                    // listener. Reenabling consent never revives this route.
+                    _ = &mut requested => break,
+                    _ = interval.tick(), if bodies => {
+                        if !crate::daemon::settings::DaemonSettings::load(&consent_store)
+                            .is_ok_and(|settings| settings.ironwire_attested_bodies)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Stop accepting calls before draining previously consented ones.
+            // Proof workers may stop with pending rows; never invent settlement.
+            proxy.shutdown().await;
+            let _ = std::fs::remove_file(retained_home.join("control.token"));
+        });
         Ok(Self {
-            proxy,
+            port,
+            shutdown,
+            owner,
             home,
             models,
             default_model: selected_model,
@@ -209,7 +254,7 @@ base_url = {base_url}
     }
 
     pub fn port(&self) -> u16 {
-        self.proxy.port()
+        self.port
     }
 
     /// The model a tool starts on. Not a pin: the tool may ask for any of
@@ -225,8 +270,8 @@ base_url = {base_url}
     }
 
     pub async fn shutdown(self) {
-        self.proxy.shutdown().await;
-        let _ = std::fs::remove_dir_all(self.home);
+        let _ = self.shutdown.send(());
+        let _ = self.owner.await;
     }
 }
 
@@ -352,6 +397,11 @@ mod tests {
             }
             let config = std::fs::read_to_string(route.home.join("config.toml")).unwrap();
             assert!(!config.contains("fixture-"));
+            assert!(config.contains(if route.port() == a.port() {
+                "responses_via_chat = false"
+            } else {
+                "responses_via_chat = true"
+            }));
             let listed: Vec<&str> = route.models().iter().map(|m| m.id.as_str()).collect();
             // Codex's routes leave out the model NEAR AI refuses Codex.
             let offered: Vec<&str> = chat_ids
@@ -402,11 +452,343 @@ mod tests {
         server.abort();
     }
 
+    /// Codex replays an answer as output_text on the next turn. NEAR AI
+    /// accepts that same assistant text only as input_text in request history.
+    #[tokio::test]
+    async fn native_near_responses_replays_assistant_text_without_losing_history() {
+        type Seen = Arc<Mutex<Vec<Value>>>;
+        async fn response(
+            State(seen): State<Seen>,
+            Json(body): Json<Value>,
+        ) -> (axum::http::StatusCode, Json<Value>) {
+            seen.lock().unwrap().push(body.clone());
+            let rejected = body["input"].as_array().unwrap().iter().any(|item| {
+                item["role"] == "assistant"
+                    && item["content"].as_array().is_some_and(|content| {
+                        content.iter().any(|part| part["type"] == "output_text")
+                    })
+            });
+            if rejected {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"message":"input did not match ResponseInput"}})),
+                );
+            }
+            (
+                axum::http::StatusCode::OK,
+                Json(json!({
+                    "id":"resp_fixture","object":"response","status":"completed",
+                    "model":"deepseek/deepseek-v4.1-flash-1017",
+                    "output":[{"type":"message","role":"assistant","status":"completed",
+                        "content":[{"type":"output_text","text":"OK","annotations":[]}]}],
+                    "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+                })),
+            )
+        }
+        let seen: Seen = Arc::new(Mutex::new(vec![]));
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({"data":[{
+                        "id":"deepseek/deepseek-v4.1-flash-1017",
+                        "input_modalities":["text"],"output_modalities":["text"]
+                    }]}))
+                }),
+            )
+            .route("/v1/responses", post(response))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().into()).unwrap();
+        let route = ManagedRoute::start_at(
+            &store,
+            Uuid::new_v4(),
+            ApiKey::new("fixture-codex".into()).unwrap(),
+            &endpoint,
+            // Non-Codex routes retain the native Responses lane.
+            ToolId::Claude,
+            Some("deepseek/deepseek-v4.1-flash-1017"),
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://127.0.0.1:{}/openai/v1/responses", route.port());
+        let first = json!({"type":"message","role":"user",
+            "content":[{"type":"input_text","text":"Say OK."}]});
+        let history = json!([
+            first,
+            {"type":"message","role":"assistant","status":"completed",
+                "content":[{"type":"output_text","text":"OK","annotations":[]}]},
+            {"type":"message","role":"user",
+                "content":[{"type":"input_text","text":"Say OK again."}]}
+        ]);
+        let mut outcomes = vec![];
+        for input in [json!([first]), history.clone()] {
+            let result = client
+                .post(&url)
+                .json(&json!({"model":route.default_model(),"input":input,"stream":false}))
+                .send()
+                .await
+                .unwrap();
+            outcomes.push((result.status(), result.text().await.unwrap()));
+        }
+        route.shutdown().await;
+        server.abort();
+        assert!(outcomes[0].0.is_success(), "first turn: {:?}", outcomes[0]);
+        assert!(outcomes[1].0.is_success(), "follow-up: {:?}", outcomes[1]);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0]["input"], json!([first]));
+        let mut expected = history;
+        expected[1]["content"][0]["type"] = json!("input_text");
+        assert_eq!(seen[1]["input"], expected);
+    }
+
+    /// The hosted model's Responses stream can finish without the tool call
+    /// its Chat stream carries. Codex must receive the call and be able to
+    /// replay its result, rather than silently ending an otherwise successful turn.
+    #[tokio::test]
+    async fn codex_tools_execute_and_replay_results_through_near_chat() {
+        const MODEL: &str = "abliteration/abliterated-model";
+        type Seen = Arc<Mutex<Vec<Value>>>;
+        fn sse(events: Vec<Value>) -> ([(&'static str, &'static str); 1], String) {
+            let mut body = events
+                .into_iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect::<String>();
+            body.push_str("data: [DONE]\n\n");
+            ([("content-type", "text/event-stream")], body)
+        }
+        async fn blank_response() -> ([(&'static str, &'static str); 1], String) {
+            sse(vec![json!({"type":"response.completed","response":{
+                "id":"resp_empty","object":"response","status":"completed",
+                "model":MODEL,"output":[]
+            }})])
+        }
+        async fn chat(
+            State(seen): State<Seen>,
+            Json(body): Json<Value>,
+        ) -> ([(&'static str, &'static str); 1], String) {
+            let replay = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["role"] == "tool");
+            seen.lock().unwrap().push(body);
+            let chunk = |delta: Value, finish: Value| {
+                json!({
+                    "id":"chatcmpl_fixture","object":"chat.completion.chunk",
+                    "created":1,"model":MODEL,
+                    "choices":[{"index":0,"delta":delta,"finish_reason":finish}]
+                })
+            };
+            if replay {
+                sse(vec![
+                    chunk(
+                        json!({"role":"assistant","content":"Tool returned synthetic-tool-check."}),
+                        Value::Null,
+                    ),
+                    chunk(json!({}), json!("stop")),
+                ])
+            } else {
+                sse(vec![
+                    chunk(
+                        json!({"role":"assistant","tool_calls":[{
+                            "index":0,"id":"call_probe","type":"function",
+                            "function":{"name":"probe_echo","arguments":"{\"marker\":"}
+                        }]}),
+                        Value::Null,
+                    ),
+                    chunk(
+                        json!({"tool_calls":[{
+                            "index":0,"function":{"arguments":"\"synthetic-tool-check\"}"}
+                        }]}),
+                        Value::Null,
+                    ),
+                    chunk(json!({}), json!("tool_calls")),
+                ])
+            }
+        }
+        fn events(body: &str) -> Vec<Value> {
+            body.lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter(|data| *data != "[DONE]")
+                .map(|data| serde_json::from_str(data).unwrap())
+                .collect()
+        }
+        let seen: Seen = Arc::new(Mutex::new(vec![]));
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({"data":[{"id":MODEL,
+                    "input_modalities":["text"],"output_modalities":["text"]}]}))
+                }),
+            )
+            .route("/v1/responses", post(blank_response))
+            .route("/v1/chat/completions", post(chat))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().into()).unwrap();
+        let route = ManagedRoute::start_at(
+            &store,
+            Uuid::new_v4(),
+            ApiKey::new("fixture-tool".into()).unwrap(),
+            &endpoint,
+            ToolId::Codex,
+            Some(MODEL),
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://127.0.0.1:{}/openai/v1/responses", route.port());
+        let tool = json!({"type":"function","name":"probe_echo",
+            "description":"Return a marker",
+            "parameters":{"type":"object","properties":{"marker":{"type":"string"}},
+                "required":["marker"],"additionalProperties":false}});
+        let user = json!({"role":"user","content":[{"type":"input_text",
+            "text":"Call probe_echo with marker synthetic-tool-check."}]});
+        let request = |input: Value, choice: &str| {
+            json!({
+                "model":MODEL,"stream":true,"input":input,"tools":[tool],"tool_choice":choice
+            })
+        };
+        let first = client
+            .post(&url)
+            .header("session-id", "managed-tool-roundtrip")
+            .json(&request(json!([user]), "required"))
+            .send()
+            .await
+            .unwrap();
+        assert!(first.status().is_success());
+        let first = first.text().await.unwrap();
+        let first_events = events(&first);
+        let call = first_events
+            .iter()
+            .find(|event| {
+                event["type"] == "response.output_item.done"
+                    && event["item"]["type"] == "function_call"
+            })
+            .map(|event| event["item"].clone());
+        let Some(call) = call else {
+            route.shutdown().await;
+            server.abort();
+            panic!("successful Codex turn lost its executable tool call: {first}");
+        };
+        assert_eq!(call["name"], "probe_echo");
+        assert_eq!(call["call_id"], "call_probe");
+        let arguments: Value = serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments, json!({"marker":"synthetic-tool-check"}));
+        // A harmless executor echoes the marker from the received arguments.
+        let result = json!({"type":"function_call_output","call_id":call["call_id"],
+            "output":arguments["marker"]});
+        let second = client
+            .post(&url)
+            .header("session-id", "managed-tool-roundtrip")
+            .json(&request(json!([user, call, result]), "auto"))
+            .send()
+            .await
+            .unwrap();
+        assert!(second.status().is_success());
+        let second = second.text().await.unwrap();
+        route.shutdown().await;
+        server.abort();
+        let second_events = events(&second);
+        assert!(
+            second_events
+                .iter()
+                .any(|event| event["type"] == "response.completed"),
+            "{second}"
+        );
+        let text: String = second_events
+            .iter()
+            .filter(|event| event["type"] == "response.output_text.delta")
+            .filter_map(|event| event["delta"].as_str())
+            .collect();
+        assert_eq!(text, "Tool returned synthetic-tool-check.");
+        let completed = second_events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .unwrap();
+        let message = &completed["response"]["output"][0];
+        assert_eq!(message["type"], "message");
+        assert_eq!(message["role"], "assistant");
+        assert_eq!(message["content"][0]["text"], text);
+        assert!(second_events.iter().any(|event| {
+            event["type"] == "response.output_item.done" && event["item"] == *message
+        }));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0]["model"], MODEL);
+        assert_eq!(seen[0]["tool_choice"], "required");
+        assert_eq!(seen[0]["tools"][0]["function"]["name"], "probe_echo");
+        assert_eq!(
+            seen[0]["tools"][0]["function"]["parameters"],
+            tool["parameters"]
+        );
+        assert_eq!(seen[1]["messages"][0], seen[0]["messages"][0]);
+        assert_eq!(seen[1]["messages"].as_array().unwrap().len(), 3);
+        let replay_call = &seen[1]["messages"][1];
+        assert_eq!(replay_call["role"], "assistant");
+        assert_eq!(replay_call["tool_calls"][0]["id"], "call_probe");
+        assert_eq!(
+            replay_call["tool_calls"][0]["function"]["name"],
+            "probe_echo"
+        );
+        let replay_arguments: Value = serde_json::from_str(
+            replay_call["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replay_arguments, arguments);
+        assert_eq!(
+            seen[1]["messages"][2],
+            json!({
+                "role":"tool","tool_call_id":"call_probe","content":"synthetic-tool-check"
+            })
+        );
+    }
+
     /// A real route serves the `statusline` subcommand's line from its
     /// home, which is where the launcher computes it, and its call log
     /// records the exchange but never a request body.
     #[tokio::test]
     async fn a_route_serves_the_status_line_and_logs_calls_without_bodies() {
+        retained_route_capture(false, None).await;
+    }
+
+    #[tokio::test]
+    async fn a_route_retains_bodies_only_with_attested_body_consent() {
+        retained_route_capture(true, None).await;
+    }
+
+    #[tokio::test]
+    async fn revoking_body_consent_stops_the_route_and_retains_history() {
+        retained_route_capture(true, Some(false)).await;
+    }
+
+    #[tokio::test]
+    async fn unreadable_body_consent_stops_the_route_and_retains_history() {
+        retained_route_capture(true, Some(true)).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_only_route_stays_live_when_body_consent_is_unreadable() {
+        retained_route_capture(false, Some(true)).await;
+    }
+
+    async fn retained_route_capture(bodies: bool, unreadable_consent: Option<bool>) {
         const MARKER: &str = "statusline-body-marker-5f2c9e";
         async fn completion(Json(body): Json<Value>) -> Json<Value> {
             assert!(body.to_string().contains(MARKER));
@@ -433,6 +815,11 @@ mod tests {
         });
         let dir = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(dir.path().into()).unwrap();
+        let mut settings = crate::daemon::settings::DaemonSettings {
+            ironwire_attested_bodies: bodies,
+            ..Default::default()
+        };
+        settings.save(&store).unwrap();
         let id = Uuid::new_v4();
         let route = ManagedRoute::start_at(
             &store,
@@ -444,6 +831,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let exact_session = format!("ses_{}", id.simple());
         // The launcher of a sign-in session computes the daemon's route
         // home from the session id alone.
         assert_eq!(route.home(), home_for(&store, id));
@@ -459,6 +847,7 @@ mod tests {
                 route.port()
             ))
             .header("anthropic-version", "2023-06-01")
+            .header("x-ironwire-session-id", &exact_session)
             .json(&json!({"model":"anthropic/claude-sonnet-5-5","max_tokens":16,"messages":[{"role":"user","content":MARKER}]}))
             .send()
             .await
@@ -483,7 +872,13 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "no call logged");
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        // No file anywhere under the home holds the request body.
+        let config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(route.home().join("config.toml")).unwrap())
+                .unwrap();
+        assert_eq!(config["capture"]["bodies"].as_bool(), Some(bodies));
+        assert_eq!(config["capture"]["receipts"].as_bool(), Some(true));
+        assert!(config["capture"].get("token_capture").is_none());
+        let mut marker_seen = false;
         let mut pending = vec![route.home().to_path_buf()];
         let mut files = 0;
         while let Some(path) = pending.pop() {
@@ -491,18 +886,108 @@ mod tests {
                 pending.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
             } else if let Ok(bytes) = std::fs::read(&path) {
                 files += 1;
-                assert!(
-                    !bytes.windows(MARKER.len()).any(|w| w == MARKER.as_bytes()),
-                    "{}",
-                    path.display()
-                );
+                marker_seen |= bytes.windows(MARKER.len()).any(|w| w == MARKER.as_bytes());
             }
         }
         assert!(files > 0);
-        assert!(!route.home().join("bodies").exists());
+        assert_eq!(marker_seen, bodies);
+        assert_eq!(route.home().join("bodies").exists(), bodies);
         let home = route.home().to_path_buf();
-        route.shutdown().await;
-        assert!(!home.exists());
+        if let Some(unreadable) = unreadable_consent {
+            let known_good_settings = store
+                .read_daemon_file("daemon-settings.json")
+                .unwrap()
+                .unwrap();
+            if unreadable {
+                store
+                    .write_daemon_file("daemon-settings.json", b"{")
+                    .unwrap();
+            } else {
+                settings.ironwire_attested_bodies = false;
+                settings.save(&store).unwrap();
+            }
+            if bodies {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                while home.join("endpoint.json").exists() {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "revoked route remained live"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                assert!(
+                    client
+                        .get(format!(
+                            "http://127.0.0.1:{}/openai/v1/models",
+                            route.port()
+                        ))
+                        .send()
+                        .await
+                        .is_err()
+                );
+                if unreadable {
+                    // Recover the deliberately corrupted fixture explicitly;
+                    // production preference saves correctly reject corruption.
+                    store
+                        .write_daemon_file("daemon-settings.json", &known_good_settings)
+                        .unwrap();
+                }
+                settings.ironwire_attested_bodies = true;
+                settings.save(&store).unwrap();
+                assert!(
+                    client
+                        .get(format!(
+                            "http://127.0.0.1:{}/openai/v1/models",
+                            route.port()
+                        ))
+                        .send()
+                        .await
+                        .is_err(),
+                    "reenabling needs a fresh route"
+                );
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                assert!(
+                    client
+                        .get(format!(
+                            "http://127.0.0.1:{}/openai/v1/models",
+                            route.port()
+                        ))
+                        .send()
+                        .await
+                        .unwrap()
+                        .status()
+                        .is_success()
+                );
+                assert!(home.join("endpoint.json").exists());
+            }
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), route.shutdown())
+            .await
+            .expect("explicit shutdown after revocation must finish");
+        assert!(home.join("ledger.sqlite").exists());
+        assert!(!home.join("control.token").exists());
+        assert!(!home.join("endpoint.json").exists());
+        assert!(logged(&home.join("ledger.sqlite")));
+        let db = rusqlite::Connection::open_with_flags(
+            home.join("ledger.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let (session, proof): (Option<String>, Option<String>) = db
+            .query_row(
+                "SELECT client_session_id, proof FROM exchanges",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(session.as_deref(), Some(exact_session.as_str()));
+        assert_ne!(
+            proof.as_deref(),
+            Some("verified"),
+            "an unsigned fixture is never verified"
+        );
+        assert_eq!(home.join("bodies").exists(), bodies);
         server.abort();
     }
 

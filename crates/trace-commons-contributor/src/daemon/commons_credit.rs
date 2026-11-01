@@ -50,7 +50,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::ipc::{DaemonShared, Request, Response};
-use super::withdraw::{account_session, keep_rotated_token};
+use super::withdraw::keep_rotated_token;
 use crate::commons_credit::{CommonsCreditSummary, CommonsSettlementPosture};
 
 /// How long an answer with both halves known is served from the cache.
@@ -82,13 +82,18 @@ pub(super) async fn handle_commons_credit_summary(
     }
     let observed_at = chrono::Utc::now();
     let Ok(Some(cfg)) = shared.store.load_config() else {
-        let value = summary_value(None, None, observed_at);
+        let value = summary_value(None, None, false, observed_at);
         remember(key, UNKNOWN_TTL, &value);
         return Response::ok(req.id, value);
     };
     let posture = crate::commons_credit::fetch_settlement_posture(&shared.store, &cfg).await;
     let mut credential_persisted = true;
-    let points = match account_session(shared) {
+    let mut session_required = false;
+    // A status read: renewed in the background, waited for briefly.
+    let points = match super::account_session_renewal::account_session_for_read(shared)
+        .await
+        .map(|(session, _)| session)
+    {
         Ok(Some(mut session)) => {
             let call = crate::commons_credit::call_credit_summary(
                 &cfg.ingest_url,
@@ -103,12 +108,18 @@ pub(super) async fn handle_commons_credit_summary(
             credential_persisted = keep_rotated_token(shared, &mut session, call.rotated_token);
             call.result
         }
-        // No session, or the credential store could not be read: a fact
-        // about the machine, not a caller error -- see the module doc.
-        _ => None,
+        // No session and none could be renewed: the one unknown a person
+        // can act on, so it is named (`points_unknown_reason`).
+        Ok(None) => {
+            session_required = true;
+            None
+        }
+        // The credential store could not be read: a fact about the
+        // machine, not a caller error -- see the module doc.
+        Err(_) => None,
     };
     let both_known = posture.is_some() && points.is_some();
-    let mut value = summary_value(posture, points, observed_at);
+    let mut value = summary_value(posture, points, session_required, observed_at);
     if credential_persisted {
         remember(
             key,
@@ -127,6 +138,14 @@ fn cached(key: &PathBuf) -> Option<serde_json::Value> {
     (at.elapsed() < *ttl).then(|| value.clone())
 }
 
+/// Drop `dir`'s cached summary: the account session changed (a renewal or
+/// Sign in again), so a "sign in" answer cached a moment ago is stale.
+pub(crate) fn forget(dir: &std::path::Path) {
+    if let Ok(mut cache) = cache().lock() {
+        cache.remove(dir);
+    }
+}
+
 fn remember(key: PathBuf, ttl: Duration, value: &serde_json::Value) {
     if let Ok(mut cache) = cache().lock() {
         cache.insert(key, (Instant::now(), ttl, value.clone()));
@@ -136,6 +155,7 @@ fn remember(key: PathBuf, ttl: Duration, value: &serde_json::Value) {
 fn summary_value(
     posture: Option<CommonsSettlementPosture>,
     points: Option<CommonsCreditSummary>,
+    session_required: bool,
     observed_at: chrono::DateTime<chrono::Utc>,
 ) -> serde_json::Value {
     let state = |known: bool| if known { "known" } else { "unknown" };
@@ -146,6 +166,11 @@ fn summary_value(
             posture.as_ref().map(|p| p.commons_settlement_explanation.clone()),
         "commons_graded": posture.as_ref().map(|p| p.commons_graded),
         "points_state": state(points.is_some()),
+        // Why the points are unknown, only when a person can act on it:
+        // `account-session-required` (no account session, none renewable).
+        // Every other unknown stays unexplained, as before.
+        "points_unknown_reason":
+            (points.is_none() && session_required).then_some("account-session-required"),
         "commons_points_earned_this_period":
             points.as_ref().map(|p| p.commons_points_earned_this_period),
         "commons_points_lifetime_earned": points.as_ref().map(|p| p.commons_points_lifetime_earned),
@@ -179,6 +204,7 @@ mod tests {
         "commons_settlement_explanation",
         "commons_graded",
         "points_state",
+        "points_unknown_reason",
         "commons_points_earned_this_period",
         "commons_points_lifetime_earned",
         "commons_pending_review",
@@ -333,6 +359,74 @@ mod tests {
             0,
             "no account session, no account call"
         );
+    }
+
+    /// An enrolled device with no account session that could be used or
+    /// renewed says why its points are unknown, so a shell can say "Sign in
+    /// again" rather than draw a dash with no reason.
+    #[tokio::test]
+    async fn a_missing_account_session_is_named_as_the_reason_points_are_unknown() {
+        let base = serve(stub_posture_route(
+            StatusCode::OK,
+            "disabled",
+            Default::default(),
+        ))
+        .await;
+        let s = shared();
+        enrolled_against(&s, &base);
+
+        let v = handle_commons_credit_summary(&s, &req())
+            .await
+            .result
+            .unwrap();
+        assert_eq!(v["points_state"], "unknown");
+        assert_eq!(v["points_unknown_reason"], "account-session-required");
+    }
+
+    /// Any other way points are unknown keeps today's silence: no config,
+    /// a server refusal, and a known half all name no reason.
+    #[tokio::test]
+    async fn other_unknowns_and_known_points_name_no_reason() {
+        let s = shared();
+        let v = handle_commons_credit_summary(&s, &req())
+            .await
+            .result
+            .unwrap();
+        assert!(v["points_unknown_reason"].is_null(), "no config: {v}");
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let base = serve(credit_summary_route(
+            stub_posture_route(StatusCode::OK, "disabled", Default::default()),
+            None,
+            calls,
+            None,
+        ))
+        .await;
+        let s = shared();
+        enrolled_against(&s, &base);
+        sign_in(&s);
+        let v = handle_commons_credit_summary(&s, &req())
+            .await
+            .result
+            .unwrap();
+        assert_eq!(v["points_state"], "known");
+        assert!(v["points_unknown_reason"].is_null(), "known: {v}");
+
+        let base = serve(stub_posture_route(
+            StatusCode::OK,
+            "disabled",
+            Default::default(),
+        ))
+        .await;
+        let s = shared();
+        enrolled_against(&s, &base);
+        sign_in(&s);
+        let v = handle_commons_credit_summary(&s, &req())
+            .await
+            .result
+            .unwrap();
+        assert_eq!(v["points_state"], "unknown", "route missing: {v}");
+        assert!(v["points_unknown_reason"].is_null(), "refused call: {v}");
     }
 
     /// Handler-level rotation: the account route rotates the session, the

@@ -274,7 +274,7 @@ the default thread pool intermittently fails with
 `invalid or expired account session` (HTTP 401) — even though the same
 tests pass one at a time.
 **Root cause:** The 700+ DB-backed ingest tests (including the
-account / passkey / session / rotation suite) all operate on a **shared**
+account / session / rotation suite) all operate on a **shared**
 `tenant-a` and clean it per-test via `cleanup_pg_trace_tenant`. Run
 concurrently they race: one test's cleanup deletes another's live session
 rows (401), and concurrent `mint_login_link` calls for the same principal
@@ -289,6 +289,6 @@ cargo test -p trace-commons-ingest --lib -- --test-threads=1
 ```
 
 CI runs this suite serially for the same reason. The
-in-process limiter reset makes each account/passkey test independent of
+in-process limiter reset makes each account test independent of
 limiter state, but it does **not** remove the `--test-threads=1`
 requirement for the shared-`tenant-a` DB rows.

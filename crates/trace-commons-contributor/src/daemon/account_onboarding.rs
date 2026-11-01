@@ -215,6 +215,13 @@ fn derive_signup_allowlist(
     origin: &str,
     published: &[&str],
 ) -> Result<HostAllowlist> {
+    // The other channel's hosts are refused whatever the allowlist says, and
+    // before any caller has fetched, posted or spent anything: every signup
+    // and enrollment path derives its allowlist here first.
+    for url in std::iter::once(origin).chain(published.iter().copied()) {
+        crate::channel::refuse_other_channel_origin(url)
+            .map_err(|_| anyhow!("near_signup_endpoint_refused"))?;
+    }
     if configured.is_enforcing() {
         return Ok(configured.clone());
     }
@@ -340,9 +347,26 @@ pub(super) async fn validated_capability(
     url: &str,
     path: Path,
 ) -> std::result::Result<(String, String, WitnessSettings, Option<String>), SignupRefusal> {
+    capability_from(&origin_only_client(url)?, url, path).await
+}
+
+/// The client every capability fetch dials: `url`'s own host and nothing else.
+fn origin_only_client(
+    url: &str,
+) -> std::result::Result<trace_commons_operator_client::Client, SignupRefusal> {
     let origin_only = signup_allowlist(url, &[]).map_err(|_| SignupRefusal::AddressRefused)?;
-    let capability: Capability = client(url, &origin_only)
-        .map_err(|_| SignupRefusal::AddressRefused)?
+    client(url, &origin_only).map_err(|_| SignupRefusal::AddressRefused)
+}
+
+/// [`validated_capability`] over a client the caller built: the request and
+/// the validation, with no client construction of its own. `commons` must be
+/// the origin-only client for `url`, as [`origin_only_client`] builds it.
+async fn capability_from(
+    commons: &trace_commons_operator_client::Client,
+    url: &str,
+    path: Path,
+) -> std::result::Result<(String, String, WitnessSettings, Option<String>), SignupRefusal> {
+    let capability: Capability = commons
         .call_json(
             reqwest::Method::GET,
             "/v1/account/near/provision/capabilities",
@@ -352,6 +376,130 @@ pub(super) async fn validated_capability(
         .await
         .map_err(|_| SignupRefusal::Unreachable)?;
     validate_capability(url, capability, path)
+}
+
+/// What the NEAR AI login enrollment needs from its commons: where upload
+/// claims are minted, for which audience, the witness when the commons
+/// publishes one, and the receipt service when it names one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LoginCapability {
+    pub issuer_url: String,
+    pub audience: String,
+    /// Always present in a production build, which enrolls through the
+    /// capabilities route that requires it. Absent in a `near-ai-staging`
+    /// build, whose commons runs without a witness (staging spec S12).
+    pub witness: Option<WitnessSettings>,
+    pub receipt_endpoint: Option<String>,
+}
+
+/// The NEAR AI login path's capability, over the origin-only client for
+/// `url`. Which route is asked is a property of the build, not a setting:
+///
+/// - a default (production) build asks `/v1/account/near/provision/capabilities`
+///   exactly as before, and requires its witness;
+/// - a `near-ai-staging` build asks [`NEAR_AI_CAPABILITIES_V2_PATH`], which
+///   publishes no witness.
+pub(super) async fn login_capability_from(
+    commons: &trace_commons_operator_client::Client,
+    url: &str,
+) -> std::result::Result<LoginCapability, SignupRefusal> {
+    #[cfg(not(feature = "near-ai-staging"))]
+    {
+        let (issuer_url, audience, witness, receipt_endpoint) =
+            capability_from(commons, url, Path::NearAiLogin).await?;
+        Ok(LoginCapability {
+            issuer_url,
+            audience,
+            witness: Some(witness),
+            receipt_endpoint,
+        })
+    }
+    #[cfg(feature = "near-ai-staging")]
+    {
+        let document: serde_json::Value = commons
+            .call_json(
+                reqwest::Method::GET,
+                NEAR_AI_CAPABILITIES_V2_PATH,
+                &[],
+                None::<&serde_json::Value>,
+            )
+            .await
+            .map_err(|_| SignupRefusal::Unreachable)?;
+        validate_near_ai_capability_v2(url, document)
+    }
+}
+
+/// [`login_capability_from`], building the origin-only client itself.
+pub(super) async fn validated_login_capability(
+    url: &str,
+) -> std::result::Result<LoginCapability, SignupRefusal> {
+    login_capability_from(&origin_only_client(url)?, url).await
+}
+
+/// The v2 capabilities route (`capabilities_v2` in the ingest).
+pub const NEAR_AI_CAPABILITIES_V2_PATH: &str = "/v1/account/near/provision/capabilities/v2";
+/// The `contract_version` the v2 capabilities route answers with.
+pub const NEAR_AI_CAPABILITIES_V2_CONTRACT: &str = "near-provision-capabilities-v2";
+/// The v2 NEAR AI login provisioning start route.
+pub const NEAR_AI_START_V2_PATH: &str = "/v1/account/near-ai/provision/start/v2";
+/// The v2 NEAR AI login provisioning finish route.
+pub const NEAR_AI_FINISH_V2_PATH: &str = "/v1/account/near-ai/provision/finish/v2";
+
+/// The fields of the v2 capabilities document this client reads. Not
+/// `deny_unknown_fields`: the document also carries wallet and
+/// inference-connection fields this path does not use.
+#[derive(Deserialize)]
+struct CapabilityV2 {
+    contract_version: String,
+    near_ai_login_ready: bool,
+    near_ai_start_path: String,
+    near_ai_finish_path: String,
+    issuer_url: Option<String>,
+    audience: Option<String>,
+    inference_receipt_endpoint: Option<String>,
+}
+
+/// Everything a v2 capabilities document has to satisfy for the NEAR AI
+/// login path, with no I/O of its own.
+///
+/// # Why this is `pub` and compiled into every build
+///
+/// Only a `near-ai-staging` build enrolls through it. It is `pub` so the
+/// ingest's own suite can hand it the document the real `capabilities_v2`
+/// handler serves -- the seam at which the two halves can be shown to agree,
+/// the same reason `nearai_onboarding::start_payload` is `pub`.
+///
+/// Fail-closed on every field: an explicit `near_ai_login_ready: true` (no
+/// fallback to the wallet's `ready`), the contract version, the two ceremony
+/// routes this client calls, and the issuer and audience under the same rules
+/// the v1 document's are held to. There is no witness in this contract, and
+/// none is read.
+pub fn validate_near_ai_capability_v2(
+    origin: &str,
+    document: serde_json::Value,
+) -> std::result::Result<LoginCapability, SignupRefusal> {
+    let capability: CapabilityV2 =
+        serde_json::from_value(document).map_err(|_| SignupRefusal::Unsupported)?;
+    if capability.contract_version != NEAR_AI_CAPABILITIES_V2_CONTRACT
+        || !capability.near_ai_login_ready
+        || capability.near_ai_start_path != NEAR_AI_START_V2_PATH
+        || capability.near_ai_finish_path != NEAR_AI_FINISH_V2_PATH
+    {
+        return Err(SignupRefusal::Unsupported);
+    }
+    let issuer = capability.issuer_url.ok_or(SignupRefusal::Unsupported)?;
+    let audience = capability.audience.ok_or(SignupRefusal::Unsupported)?;
+    if audience.trim().is_empty() || audience.len() > 256 {
+        return Err(SignupRefusal::Unsupported);
+    }
+    let receipt =
+        admit_published_hosts(origin, &issuer, None, capability.inference_receipt_endpoint)?;
+    Ok(LoginCapability {
+        issuer_url: issuer,
+        audience,
+        witness: None,
+        receipt_endpoint: receipt,
+    })
 }
 
 /// Everything the capabilities response has to satisfy, with no I/O of its
@@ -371,6 +519,26 @@ fn validate_capability(
     }
     let witness = published_witness(capability.witness.ok_or(SignupRefusal::Unsupported)?)
         .map_err(|_| SignupRefusal::Unsupported)?;
+    let receipt = admit_published_hosts(
+        origin,
+        &issuer,
+        Some(&witness),
+        capability.inference_receipt_endpoint,
+    )?;
+    Ok((issuer, audience, witness, receipt))
+}
+
+/// The host checks both capability documents share: every host this origin
+/// published (issuer, witness when there is one, receipt service) is admitted
+/// on the list that origin derives, and an issuer or witness that list
+/// refuses refuses the enrollment. Returns the receipt endpoint, or `None`
+/// when it is absent or refused.
+fn admit_published_hosts(
+    origin: &str,
+    issuer: &str,
+    witness: Option<&WitnessSettings>,
+    inference_receipt_endpoint: Option<String>,
+) -> std::result::Result<Option<String>, SignupRefusal> {
     // The issuer, the witness and the receipt service are hosts this origin
     // named for itself. They enter the list because the person chose this
     // origin, and only for as long as this call: an operator's own allowlist,
@@ -380,26 +548,29 @@ fn validate_capability(
     // every host it is given, so a commons publishing a receipt endpoint that
     // is not even a URL would otherwise refuse the whole derivation and take
     // enrollment down with it. The endpoint is the optional one of the three.
-    let receipt = capability
-        .inference_receipt_endpoint
+    let receipt = inference_receipt_endpoint
         .filter(|endpoint| reqwest::Url::parse(endpoint).is_ok_and(|url| url.host_str().is_some()));
-    let mut named = vec![issuer.as_str(), witness.url.as_str()];
+    let mut named = vec![issuer];
+    if let Some(witness) = witness {
+        named.push(witness.url.as_str());
+    }
     if let Some(endpoint) = receipt.as_deref() {
         named.push(endpoint);
     }
     let published = signup_allowlist(origin, &named).map_err(|_| SignupRefusal::AddressRefused)?;
-    client(&issuer, &published).map_err(|_| SignupRefusal::AddressRefused)?;
-    client(&witness.url, &published).map_err(|_| SignupRefusal::AddressRefused)?;
+    client(issuer, &published).map_err(|_| SignupRefusal::AddressRefused)?;
+    if let Some(witness) = witness {
+        client(&witness.url, &published).map_err(|_| SignupRefusal::AddressRefused)?;
+    }
     // Gated by the list its own source produced. A published endpoint is
     // admitted on the same basis the issuer and witness are -- this origin
     // named it -- and an operator's own allowlist, when set, is what
     // `signup_allowlist` returns instead and refuses it against. Dropped
     // rather than fatal: a commons naming a receipt service this client will
     // not call still enrolls the person, and they contribute unattested.
-    let receipt = receipt.filter(|endpoint| {
+    Ok(receipt.filter(|endpoint| {
         crate::config::validate_inference_receipt_endpoint(endpoint, &published).is_ok()
-    });
-    Ok((issuer, audience, witness, receipt))
+    }))
 }
 
 /// Ask a commons what receipt endpoint it publishes, for a client that is
@@ -417,10 +588,19 @@ fn validate_capability(
 /// Never fatal to the caller: no endpoint simply means the refusal the caller
 /// was already going to make.
 pub(super) async fn published_receipt_endpoint(ingest_url: &str, path: Path) -> Option<String> {
-    validated_capability(ingest_url, path)
-        .await
-        .ok()
-        .and_then(|(_, _, _, endpoint)| endpoint)
+    match path {
+        Path::Wallet => validated_capability(ingest_url, path)
+            .await
+            .ok()
+            .and_then(|(_, _, _, endpoint)| endpoint),
+        // The route enrollment itself asked, so a staging client enrolled
+        // through v2 asks v2 here too. A production build asks exactly what
+        // it asked before.
+        Path::NearAiLogin => validated_login_capability(ingest_url)
+            .await
+            .ok()
+            .and_then(|capability| capability.receipt_endpoint),
+    }
 }
 
 pub const CEREMONY_MISMATCH: &str = "near_signup_ceremony_mismatch";
@@ -708,7 +888,7 @@ async fn finish(
     if result.account_id != options.account_id {
         bail!("near_signup_account_changed")
     }
-    client.call_json(reqwest::Method::POST,"/v1/account/near/provision/finish",&[],Some(&serde_json::json!({"ceremony_id":signed.ceremony_id,"account_id":options.account_id,"device_public_key":identity.public_key_b64,"wallet_public_key":result.wallet_public_key,"wallet_signature":result.wallet_signature,"device_signature":device_signature,"code_verifier":verifier}))).await.map_err(|_|anyhow!("near_signup_verification_failed"))
+    client.call_json(reqwest::Method::POST,"/v1/account/near/provision/finish",&[],Some(&serde_json::json!({"ceremony_id":signed.ceremony_id,"account_id":options.account_id,"device_public_key":identity.public_key_b64,"wallet_public_key":result.wallet_public_key,"wallet_signature":result.wallet_signature,"device_signature":device_signature,"code_verifier":verifier}))).await.map_err(|error| super::nearai_onboarding::finish_refusal(&error, "near_signup_verification_failed"))
 }
 
 fn parse_callback(target: &str, state: &str) -> Result<WalletResult> {
@@ -1151,12 +1331,15 @@ mod tests {
             capability_publishing(
                 "https://issuer.example",
                 "https://witness.example",
-                Some("https://cloud-api.near.ai/v1"),
+                Some(crate::channel::NEAR_AI_INFERENCE_BASE),
             ),
             Path::Wallet,
         )
         .expect("a ready commons");
-        assert_eq!(receipt.as_deref(), Some("https://cloud-api.near.ai/v1"));
+        assert_eq!(
+            receipt.as_deref(),
+            Some(crate::channel::NEAR_AI_INFERENCE_BASE)
+        );
     }
 
     /// A commons that publishes none is not a commons that fails. The person
@@ -1540,6 +1723,181 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             "alice.near"
+        );
+    }
+}
+
+/// The v2 capabilities document as the NEAR AI login path reads it. Compiled
+/// into both builds, like the validator: only a staging build enrolls
+/// through it, and a production build must refuse the same documents for the
+/// same reasons should it ever be pointed at one.
+#[cfg(test)]
+mod capability_v2_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    const ORIGIN: &str = "https://commons.example";
+
+    fn document() -> Value {
+        json!({
+            "contract_version": "near-provision-capabilities-v2",
+            "ready": false,
+            "near_ai_login_ready": true,
+            "network": null,
+            "wallet_start_path": "/v1/account/near/provision/start/v2",
+            "wallet_finish_path": "/v1/account/near/provision/finish/v2",
+            "near_ai_start_path": "/v1/account/near-ai/provision/start/v2",
+            "near_ai_finish_path": "/v1/account/near-ai/provision/finish/v2",
+            "inference_connection_selection_required": true,
+            "offers_available": false,
+            "funding_available": false,
+            "issuer_url": "https://issuer.example",
+            "audience": "upload",
+            "inference_receipt_endpoint": "https://receipts.example/v1",
+        })
+    }
+
+    #[test]
+    fn a_ready_document_yields_the_issuer_and_no_witness() {
+        assert_eq!(
+            validate_near_ai_capability_v2(ORIGIN, document()),
+            Ok(LoginCapability {
+                issuer_url: "https://issuer.example".into(),
+                audience: "upload".into(),
+                witness: None,
+                receipt_endpoint: Some("https://receipts.example/v1".into()),
+            })
+        );
+        // The receipt endpoint is optional, as on the v1 document.
+        let mut without = document();
+        without
+            .as_object_mut()
+            .unwrap()
+            .remove("inference_receipt_endpoint");
+        assert_eq!(
+            validate_near_ai_capability_v2(ORIGIN, without)
+                .unwrap()
+                .receipt_endpoint,
+            None
+        );
+    }
+
+    /// Each field that makes the document usable is required, and a commons
+    /// that has not said the login path is open has not opened it: there is no
+    /// fallback to the wallet's `ready` on this contract.
+    #[test]
+    fn every_required_field_refuses_on_its_own() {
+        let cases: Vec<(&str, Box<dyn Fn(&mut serde_json::Map<String, Value>)>)> = vec![
+            (
+                "contract version",
+                Box::new(|d| {
+                    d.insert(
+                        "contract_version".into(),
+                        json!("near-provision-capabilities-v3"),
+                    );
+                }),
+            ),
+            (
+                "login closed",
+                Box::new(|d| {
+                    d.insert("near_ai_login_ready".into(), json!(false));
+                }),
+            ),
+            (
+                "login readiness absent, wallet ready",
+                Box::new(|d| {
+                    d.remove("near_ai_login_ready");
+                    d.insert("ready".into(), json!(true));
+                }),
+            ),
+            (
+                "the old start route",
+                Box::new(|d| {
+                    d.insert(
+                        "near_ai_start_path".into(),
+                        json!("/v1/account/near-ai/provision/start"),
+                    );
+                }),
+            ),
+            (
+                "the old finish route",
+                Box::new(|d| {
+                    d.insert(
+                        "near_ai_finish_path".into(),
+                        json!("/v1/account/near-ai/provision/finish"),
+                    );
+                }),
+            ),
+            (
+                "no issuer",
+                Box::new(|d| {
+                    d.remove("issuer_url");
+                }),
+            ),
+            (
+                "no audience",
+                Box::new(|d| {
+                    d.remove("audience");
+                }),
+            ),
+            (
+                "blank audience",
+                Box::new(|d| {
+                    d.insert("audience".into(), json!("  "));
+                }),
+            ),
+            (
+                "overlong audience",
+                Box::new(|d| {
+                    d.insert("audience".into(), json!("a".repeat(257)));
+                }),
+            ),
+        ];
+        for (name, mutate) in cases {
+            let mut document = document();
+            mutate(document.as_object_mut().unwrap());
+            assert_eq!(
+                validate_near_ai_capability_v2(ORIGIN, document),
+                Err(SignupRefusal::Unsupported),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            validate_near_ai_capability_v2(ORIGIN, json!("not an object")),
+            Err(SignupRefusal::Unsupported)
+        );
+    }
+
+    /// The issuer is dialled under the same rules as the v1 document's: https
+    /// only, and on the list the origin derives.
+    #[test]
+    fn an_issuer_this_client_will_not_dial_refuses_the_address() {
+        for issuer in [
+            "http://issuer.example",
+            "https://user@issuer.example",
+            "https://issuer.example/?q=1",
+        ] {
+            let mut document = document();
+            document["issuer_url"] = json!(issuer);
+            assert_eq!(
+                validate_near_ai_capability_v2(ORIGIN, document),
+                Err(SignupRefusal::AddressRefused),
+                "{issuer}"
+            );
+        }
+    }
+
+    /// A receipt endpoint that is not a dialable address is dropped rather
+    /// than fatal, exactly as on the v1 document.
+    #[test]
+    fn an_undialable_receipt_endpoint_is_dropped() {
+        let mut document = document();
+        document["inference_receipt_endpoint"] = json!("not a url");
+        assert_eq!(
+            validate_near_ai_capability_v2(ORIGIN, document)
+                .unwrap()
+                .receipt_endpoint,
+            None
         );
     }
 }

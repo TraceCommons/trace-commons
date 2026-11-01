@@ -452,6 +452,37 @@ impl Attempt {
     }
 }
 
+/// Whether a staging build lets an anchored tenant's upload through with no
+/// admission ledger (staging spec S12: open sign-up, "skip ledger on
+/// staging"). A staging build creates NEAR AI accounts without the ledger
+/// (`near_provisioning`), so without this every account it creates is
+/// refused at its first upload as `legacy_admission_unconfigured`.
+///
+/// Narrow on purpose: only a `nearai-` tenant (the NEAR AI login namespace;
+/// a staging build refuses the wallet ceremony, so it creates no `near-`
+/// tenant), only while the ledger is unconfigured (an operator who turns it
+/// on gets the full path), and only after [`anchor`] has resolved the
+/// tenant's provisioned device. Compiled to `false` in every build without
+/// `near-ai-staging`, so a production build never takes it.
+#[cfg(feature = "near-ai-staging")]
+pub(super) fn staging_admits_without_ledger(tenant_id: &str, ledger_configured: bool) -> bool {
+    const NEAR_AI_LOGIN_NAMESPACE: &str = "nearai-";
+    debug_assert!(
+        trace_commons_protocol::admission::ANCHOR_NAMESPACES.contains(&NEAR_AI_LOGIN_NAMESPACE)
+    );
+    !ledger_configured
+        && tenant_id
+            .strip_prefix(NEAR_AI_LOGIN_NAMESPACE)
+            .is_some_and(is_hash)
+}
+
+/// See the `near-ai-staging` definition. Every other build requires the
+/// ledger.
+#[cfg(not(feature = "near-ai-staging"))]
+pub(super) fn staging_admits_without_ledger(_tenant_id: &str, _ledger_configured: bool) -> bool {
+    false
+}
+
 pub(super) async fn reserve(
     state: &AppState,
     tenant: &TenantCtx,
@@ -478,6 +509,16 @@ pub(super) async fn reserve(
     let Some(anchor) = anchor(state, tenant).await? else {
         return Ok(None);
     };
+    // After `anchor`, never before it: the provisioned-device row it resolved
+    // is what shows this server created the account, so a staging build
+    // admits only a tenant its own NEAR AI sign-up provisioned.
+    if staging_admits_without_ledger(tenant.tenant_id(), state.admission.is_some()) {
+        tracing::info!(
+            admission_path = "staging_open_sign_up",
+            "admission skipped on a staging build"
+        );
+        return Ok(None);
+    }
     state
         .admission
         .as_ref()
@@ -988,18 +1029,7 @@ async fn reserve_account(
 pub(super) async fn account_status_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
-    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
 ) -> ApiResult<axum::response::Response> {
-    // Z2 S1: an unbound account holds no anchor, principal or device, so it
-    // cannot contribute whatever admission says. Answer with the existing
-    // label, so the client's contribution check stays on, rather than the
-    // generic denial the principal lookup below would produce.
-    if binding.is_gated() {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            AdmissionRefusal::AccountIdentityUnlinked.label(),
-        ));
-    }
     let mut response = if let Some(config) = state.account_admission.as_ref() {
         if !is_anchored_tenant(&ctx.tenant_id) {
             return Err(api_error(
@@ -1122,6 +1152,49 @@ pub(super) async fn challenge_handler(
 mod tests {
     use super::*;
     use axum::http::{HeaderName, HeaderValue};
+
+    const NEAR_AI_TENANT: &str =
+        "nearai-0000000000000000000000000000000000000000000000000000000000000000";
+    const NEAR_WALLET_TENANT: &str =
+        "near-0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// A production build never skips admission, for any tenant, ledger or
+    /// not. The staging twin below is the only build where it can.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_production_build_never_admits_without_the_ledger() {
+        for tenant in [NEAR_AI_TENANT, NEAR_WALLET_TENANT, "tenant-a", ""] {
+            for ledger_configured in [false, true] {
+                assert!(
+                    !staging_admits_without_ledger(tenant, ledger_configured),
+                    "{tenant} {ledger_configured}"
+                );
+            }
+        }
+    }
+
+    /// A staging build skips admission only for a NEAR AI login tenant and
+    /// only while the ledger is unconfigured.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_admits_only_near_ai_tenants_without_the_ledger() {
+        assert!(staging_admits_without_ledger(NEAR_AI_TENANT, false));
+        assert!(!staging_admits_without_ledger(NEAR_AI_TENANT, true));
+        for tenant in [
+            NEAR_WALLET_TENANT,
+            "tenant-a",
+            "nearai-not-a-hash",
+            "NEARAI-0000000000000000000000000000000000000000000000000000000000000000",
+            "",
+        ] {
+            for ledger_configured in [false, true] {
+                assert!(
+                    !staging_admits_without_ledger(tenant, ledger_configured),
+                    "{tenant} {ledger_configured}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn account_configuration_is_default_off_and_requires_independent_evidence_policy() {

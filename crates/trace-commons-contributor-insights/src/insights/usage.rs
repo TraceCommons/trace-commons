@@ -81,7 +81,8 @@ impl NativeTokenCounts {
     }
 
     /// Return disjoint native categories in a stable order. Codex cache and
-    /// reasoning counts are subsets; Claude cache categories are independent.
+    /// reasoning counts are subsets, and Codex counters never decompose (see
+    /// the match arm); Claude cache categories are independent.
     /// No price, model, timestamp, session completeness, or billed-cost claim
     /// follows from successful decomposition.
     ///
@@ -95,25 +96,18 @@ impl NativeTokenCounts {
         use BillableTokenCategory::*;
         self.validate_accounting()?;
         match *self {
-            Self::Codex {
-                input,
-                cached_input,
-                output,
-                ..
-            } => {
-                let uncached = input
-                    .checked_sub(cached_input)
-                    .ok_or(InvalidTokenAccounting)?;
-                Ok(vec![
-                    (UncachedInput, uncached),
-                    (CachedInput, cached_input),
-                    (Output, output),
-                ])
-            }
+            // Codex prices a cache write at its own rate, in place of the
+            // uncached-input rate. These cumulative counters carry no
+            // cache-write count, so they cannot be split into Codex's
+            // priceable categories; reading the write as zero would price it
+            // as uncached input. Per-turn pricing goes through
+            // `session_pricing`, whose turns state the write.
+            Self::Codex { .. } => Err(InvalidTokenAccounting),
             Self::ClaudeCode {
                 input,
                 cache_read_input,
-                cache_creation_input,
+                cache_creation_5m,
+                cache_creation_1h,
                 output,
                 ..
             } => {
@@ -122,7 +116,8 @@ impl NativeTokenCounts {
                 Ok(vec![
                     (UncachedInput, input),
                     (CacheReadInput, cache_read_input),
-                    (CacheCreationInput, cache_creation_input),
+                    (CacheWriteFiveMinuteInput, cache_creation_5m),
+                    (CacheWriteOneHourInput, cache_creation_1h),
                     (Output, output),
                 ])
             }
@@ -386,50 +381,44 @@ mod tests {
     #[test]
     fn accounting_components_are_the_priceable_categories() {
         use BillableTokenCategory::*;
-        for (counts, accounting, expected) in [
-            (
-                NativeTokenCounts::Codex {
-                    input: 0,
-                    cached_input: 0,
-                    output: 0,
-                    reasoning_output: 0,
-                    total: 0,
-                },
-                PricingAccounting::Codex,
-                vec![UncachedInput, CachedInput, Output],
-            ),
-            (
-                NativeTokenCounts::ClaudeCode {
-                    input: 0,
-                    cache_read_input: 0,
-                    cache_creation_input: 0,
-                    cache_creation_5m: 0,
-                    cache_creation_1h: 0,
-                    output: 0,
-                },
-                PricingAccounting::ClaudeCode,
-                vec![UncachedInput, CacheReadInput, CacheCreationInput, Output],
-            ),
-        ] {
-            assert_eq!(counts.pricing_accounting(), accounting);
-            let produced: Vec<_> = counts
-                .accounting_components()
-                .unwrap()
-                .into_iter()
-                .map(|(category, _)| category)
-                .collect();
-            assert_eq!(produced, expected, "pinned decomposition order");
-            assert_eq!(
-                produced,
-                accounting.required_categories(),
-                "decomposition must equal the rate vector the calculator requires"
-            );
-        }
+        let counts = NativeTokenCounts::ClaudeCode {
+            input: 0,
+            cache_read_input: 0,
+            cache_creation_input: 0,
+            cache_creation_5m: 0,
+            cache_creation_1h: 0,
+            output: 0,
+        };
+        assert_eq!(counts.pricing_accounting(), PricingAccounting::ClaudeCode);
+        let produced: Vec<_> = counts
+            .accounting_components()
+            .unwrap()
+            .into_iter()
+            .map(|(category, _)| category)
+            .collect();
+        assert_eq!(
+            produced,
+            vec![
+                UncachedInput,
+                CacheReadInput,
+                CacheWriteFiveMinuteInput,
+                CacheWriteOneHourInput,
+                Output,
+            ],
+            "pinned decomposition order"
+        );
+        assert_eq!(
+            produced,
+            PricingAccounting::ClaudeCode.required_categories(),
+            "decomposition must equal the rate vector the calculator requires"
+        );
     }
 
+    /// Codex prices a cache write at its own rate, and the cumulative
+    /// counters carry no cache-write count, so they never decompose: no
+    /// write count is ever read as zero.
     #[test]
-    fn codex_accounting_never_adds_subset_counters_again() {
-        use BillableTokenCategory::*;
+    fn codex_cumulative_counters_never_decompose_without_a_write_count() {
         let counts = NativeTokenCounts::Codex {
             input: 100,
             cached_input: 80,
@@ -437,10 +426,9 @@ mod tests {
             reasoning_output: 30,
             total: 140,
         };
-        assert_eq!(
-            counts.accounting_components().unwrap(),
-            vec![(UncachedInput, 20), (CachedInput, 80), (Output, 40)]
-        );
+        assert_eq!(counts.pricing_accounting(), PricingAccounting::Codex);
+        assert_eq!(counts.validate_accounting(), Ok(()));
+        assert_eq!(counts.accounting_components(), Err(InvalidTokenAccounting));
         for (input, cached, output, reasoning, total) in [
             (1, 2, 0, 0, 1),
             (0, 0, 1, 2, 1),
@@ -454,6 +442,7 @@ mod tests {
                 reasoning_output: reasoning,
                 total,
             };
+            assert_eq!(counts.validate_accounting(), Err(InvalidTokenAccounting));
             assert_eq!(counts.accounting_components(), Err(InvalidTokenAccounting));
         }
         let zero = NativeTokenCounts::Codex {
@@ -463,10 +452,7 @@ mod tests {
             reasoning_output: 0,
             total: 0,
         };
-        assert_eq!(
-            zero.accounting_components().unwrap(),
-            vec![(UncachedInput, 0), (CachedInput, 0), (Output, 0)]
-        );
+        assert_eq!(zero.accounting_components(), Err(InvalidTokenAccounting));
     }
 
     #[test]
@@ -485,7 +471,8 @@ mod tests {
             vec![
                 (UncachedInput, 3),
                 (CacheReadInput, 100),
-                (CacheCreationInput, 50),
+                (CacheWriteFiveMinuteInput, 20),
+                (CacheWriteOneHourInput, 30),
                 (Output, 7)
             ]
         );
@@ -497,7 +484,7 @@ mod tests {
             cache_creation_1h: 0,
             output: u64::MAX,
         };
-        assert_eq!(large.accounting_components().unwrap().len(), 4);
+        assert_eq!(large.accounting_components().unwrap().len(), 5);
     }
     fn run(source: UsageSource, rows: Vec<Value>) -> UsageSummary {
         extract_usage(

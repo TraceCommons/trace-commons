@@ -1,0 +1,155 @@
+# TraceCommons pilot reverse proxy. Caddy fetches Let's Encrypt certs
+# automatically for both subdomains (nip.io resolves the IP).
+#
+# Render with envsubst before staging as /etc/caddy/Caddyfile.
+#
+# Placeholders:
+#   pilot.example.invalid  e.g. 34-41-15-28.nip.io
+#   ops@example.invalid     ACME account email
+#
+# Layout:
+#   ingest.pilot.example.invalid  -> 127.0.0.1:3907 (trace-commons-ingest)
+#   issuer.pilot.example.invalid  -> 127.0.0.1:3917 (upload-claim-issuer)
+#
+# Both daemons bind loopback only; Caddy is the public TLS edge. Admin
+# endpoints (e.g. issuer's :8081) stay loopback and are not exposed.
+{
+	email ops@example.invalid
+	# Reverse-proxy failures use the default/error logger rather than either
+	# site access logger. Filter it too, or an ordinary upstream restart can
+	# persist a login code to stderr/journald even while access logs are safe.
+	# All three loggers share one policy: the login code is replaced, tenant
+	# identifiers in admin query strings are hashed, and client addresses are
+	# kept only to their /24 (IPv4) or /48 (IPv6) network.
+	log default {
+		format filter {
+			request>uri query {
+				replace code REDACTED
+				hash tenant_id
+				hash tenant_storage_ref
+				hash tenant
+			}
+			request>remote_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			request>client_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			# Client-sent, so not trusted for rate limits, but it can still
+			# carry a real address from a proxy in front of the caller.
+			request>headers>X-Forwarded-For ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			wrap json
+		}
+	}
+	servers {
+		max_header_size 32KB
+		timeouts {
+			# Bounds slow request bodies before they can hold an ingest slot.
+			# This is one deadline for the whole body, and it is global, so it
+			# must fit the largest upload: a 256 MiB envelope plus the 4 MiB
+			# slack ingest accepts (272,629,760 bytes). 2300s needs ~0.95
+			# Mbit/s of upstream, just above the contributor's upload timeout
+			# for that body (1 Mbit/s plus a minute, 2242s). A slow upload holds its share of
+			# ingest's upload byte budget for as long as it takes.
+			read_body 2300s
+		}
+	}
+}
+
+ingest.pilot.example.invalid {
+	encode gzip
+	# Edge ceiling just above ingest's largest accepted body (a 256 MiB
+	# envelope plus 4 MiB of framing, 272,629,760 bytes; Caddy's MB is
+	# decimal), so an oversized upload is refused here before it reaches
+	# ingest at all.
+	request_body {
+		max_size 273MB
+	}
+	reverse_proxy 127.0.0.1:3907 {
+		header_up Host {host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+	log {
+		output file /var/log/caddy/ingest-access.log
+		# Login codes arrive only on the legacy browser hand-off query. Keep
+		# the route observable without persisting the single-use credential.
+		format filter {
+			request>uri query {
+				replace code REDACTED
+				hash tenant_id
+				hash tenant_storage_ref
+				hash tenant
+			}
+			request>remote_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			request>client_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			# Client-sent, so not trusted for rate limits, but it can still
+			# carry a real address from a proxy in front of the caller.
+			request>headers>X-Forwarded-For ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			wrap json
+		}
+	}
+}
+
+issuer.pilot.example.invalid {
+	encode gzip
+	# Some IronClaw clients derive the community profile API from the
+	# upload-claim issuer origin. Keep that path working at the edge while
+	# the canonical ingest host remains the service owner for community APIs.
+	handle /v1/community/profile* {
+		reverse_proxy 127.0.0.1:3907 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+	handle {
+		reverse_proxy 127.0.0.1:3917 {
+			header_up Host {host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+	log {
+		output file /var/log/caddy/issuer-access.log
+		# Defensive parity with ingest: no public access log may retain a
+		# parameter named `code`, even if routing changes later.
+		format filter {
+			request>uri query {
+				replace code REDACTED
+				hash tenant_id
+				hash tenant_storage_ref
+				hash tenant
+			}
+			request>remote_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			request>client_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			# Client-sent, so not trusted for rate limits, but it can still
+			# carry a real address from a proxy in front of the caller.
+			request>headers>X-Forwarded-For ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			wrap json
+		}
+	}
+}

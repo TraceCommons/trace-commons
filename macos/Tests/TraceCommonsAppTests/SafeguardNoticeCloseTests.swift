@@ -19,6 +19,14 @@ final class SafeguardNoticeCloseTests: XCTestCase {
         XCTAssertEqual(first, moved)
     }
 
+    func testPersistentSafeguardIdentityUsesConditionInsteadOfCopyOrStackPosition() {
+        let before = TracesHealth.Banner(title: "Earlier title", detail: "500 waiting", tone: .ask, condition: "queue-full")
+        let after = TracesHealth.Banner(title: "Updated title", detail: "600 waiting", tone: .ask, index: 2, condition: "queue-full")
+        XCTAssertEqual(MonitorNotices.healthCloseID(for: before), "health:queue-full")
+        XCTAssertEqual(MonitorNotices.healthCloseID(for: before), MonitorNotices.healthCloseID(for: after))
+        XCTAssertNil(MonitorNotices.healthCloseID(for: .init(title: "Core down", detail: nil, tone: .outside, condition: "queue-full")))
+    }
+
     func testACoreThatIsDownOrUnreadCannotBeClosed() {
         XCTAssertNil(MonitorNotices.healthCloseID(for: banner("Trace Commons is not running.", .outside)))
     }

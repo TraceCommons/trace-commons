@@ -31,3 +31,14 @@ pub mod os_secret_store;
 #[cfg(windows)]
 #[doc(hidden)]
 pub mod windows;
+
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod native_process_group;
+
+#[doc(hidden)]
+pub mod external_claude_credentials;
+
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub mod native_pty;

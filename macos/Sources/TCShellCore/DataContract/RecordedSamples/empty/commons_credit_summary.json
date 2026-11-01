@@ -4,6 +4,7 @@
   "commons_settlement_explanation": null,
   "commons_graded": null,
   "points_state": "unknown",
+  "points_unknown_reason": null,
   "commons_points_earned_this_period": null,
   "commons_points_lifetime_earned": null,
   "commons_pending_review": null,

@@ -142,6 +142,45 @@ final class NudgeNotificationTests: XCTestCase {
         XCTAssertNil(NudgeSurface.effect(.notNow(.settlementEstimate)).destination)
     }
 
+    private static var credit: DaemonData.ReengageDue {
+        DaemonData.ReengageDue(
+            kind: "near_ai_credit", title: "NEAR AI credit received",
+            body: "$3.20 of NEAR AI credit arrived in your account.",
+            actions: [.init(id: "review", label: "View balance"), .init(id: "not_now", label: "Not now")])
+    }
+
+    /// The credit notification's buttons carry their own words, so its set
+    /// has its own category: sharing the idle set's identifier would put
+    /// "View balance" on the idle notification, or "Review" on this one.
+    func testCreditNotificationHasItsOwnCategoryAndOpensPrivateAI() async throws {
+        let plan = try XCTUnwrap(Notifier.plan(Self.credit))
+        XCTAssertEqual(plan.buttons.map(\.label), ["View balance", "Not now"])
+        XCTAssertEqual(plan.buttons.map(\.opensApp), [true, false])
+        XCTAssertEqual(plan.userInfo[Notifier.kindKey], "near_ai_credit")
+        let others = [Notifier.plan(Self.idle), Notifier.plan(Self.settlement)].compactMap { $0?.categoryIdentifier }
+        XCTAssertFalse(others.contains(plan.categoryIdentifier))
+        XCTAssertNil(Notifier.nudgeIntent(actionIdentifier: "trace-commons.nudge.not_now", userInfo: plan.userInfo))
+        let review = try XCTUnwrap(Notifier.nudgeIntent(
+            actionIdentifier: "trace-commons.nudge.review", userInfo: plan.userInfo))
+        XCTAssertEqual(review, .review(.nearAiCredit))
+        XCTAssertEqual(MonitorDestination(nudge: try XCTUnwrap(NudgeSurface.effect(review).destination)), .inference)
+        // Neither button sends anything to the daemon.
+        let client = SampleDaemonClient(.normalDay)
+        for intent in [NudgeSurface.Intent.notNow(.nearAiCredit), review] {
+            try await NudgeSurface.send(NudgeSurface.effect(intent), through: client)
+        }
+        XCTAssertEqual(client.nudgeCalls, [])
+
+        let launch = Notifier.launchCategories(NudgeCopy(table: [
+            "NOTIFY_ACTION_REVIEW_IDLE": "Review", "NOTIFY_ACTION_NOT_NOW": "Not now",
+            "NOTIFY_NEAR_AI_CREDIT_ACTION_VIEW": "View balance", "NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW": "Not now",
+        ]))
+        let registered = try XCTUnwrap(launch.first { $0.identifier == plan.categoryIdentifier })
+        XCTAssertEqual(registered.buttons, plan.buttons)
+        let ids = launch.map(\.identifier)
+        XCTAssertEqual(Set(ids).count, ids.count)
+    }
+
     func testLaunchRegistersTheSettlementButtonsUnderTheirOwnCategory() {
         let copy = NudgeCopy(table: [
             "NOTIFY_ACTION_REVIEW_IDLE": "Review", "NOTIFY_ACTION_NOT_NOW": "Not now",

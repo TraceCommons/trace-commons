@@ -456,7 +456,7 @@ fn codex_layout(root: &Path) -> Tally {
                 if !digits(&day, 2) {
                     continue;
                 }
-                for file in tally.files(&day.path(), super::codex::is_rollout_file_name) {
+                for file in tally.files(&day.path(), super::codex::is_any_rollout_file_name) {
                     tally.note(file.metadata().ok());
                 }
             }

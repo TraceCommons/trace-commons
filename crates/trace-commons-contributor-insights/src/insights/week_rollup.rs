@@ -15,6 +15,8 @@ use super::analytics_constants::{
     COMPARABLE_COVERAGE, COMPARABLE_MIN_SESSIONS, DEDUPE_TURNS_BY_MSG_KEY,
 };
 use super::cache_share::CacheShare;
+use super::codex_series::CodexTurnSeriesEvidence;
+use super::session_facts::SessionFacts;
 
 /// Which counter rows a figure was computed from. Feeds are never blended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -135,6 +137,10 @@ pub enum SessionBody {
     },
     Codex {
         observed: Option<CodexObserved>,
+        /// The per-turn series, when the transcript was read turn by turn.
+        /// Weekly figures, goals, glance and Patterns read `observed` only;
+        /// the drill and the Models answers read this.
+        series: Option<CodexTurnSeriesEvidence>,
     },
     Unknown {
         source: Option<AnalyticsSource>,
@@ -156,7 +162,19 @@ pub struct SessionInput {
     /// digest key; `None` when unknown or made under another key. Two
     /// snapshots that both carry one overlap only when it is the same.
     pub harness_session: Option<KeyedDigest>,
+    /// Whether the session is known to be automated: started by a tool,
+    /// not by the person (a Codex session its harness spawned itself, such
+    /// as the automatic approvals reviewer or a delegated thread). `false`
+    /// when it is not, or when that cannot be told: a guess never takes the
+    /// contributor's own work out. Weekly token figures count it; the
+    /// Models answers and the Patterns cards leave it out. Always `false`
+    /// for a saved snapshot.
+    pub automated: bool,
     pub body: SessionBody,
+    /// The session's facts beyond its tokens, for the Models answers.
+    /// `None` for a saved snapshot and for a counter row stored without
+    /// them. No weekly figure, goal, glance or Patterns view reads it.
+    pub facts: Option<SessionFacts>,
 }
 
 impl SessionInput {
@@ -178,7 +196,7 @@ impl SessionInput {
                     (low.min(at), high.max(at))
                 }))
             }
-            SessionBody::Codex { observed } => observed.map(|o| (o.first_at, o.last_at)),
+            SessionBody::Codex { observed, .. } => observed.map(|o| (o.first_at, o.last_at)),
             SessionBody::Unknown { .. } => None,
         }
     }
@@ -243,6 +261,12 @@ pub struct SessionWeek {
     /// This session's own share of input read from cache, normalized for its
     /// source. `None` when its figure is unknown.
     pub cache_share: Option<CacheShare>,
+    /// Claude only: this session's tokens on each local date, Monday first,
+    /// from the same turns as the week's `by_day`, so they sum to it day by
+    /// day. `None` for Codex, whose deltas are intervals, and for a session
+    /// with no known figure.
+    #[serde(default)]
+    pub by_day: Option<Vec<u64>>,
 }
 
 /// Claude tokens on one local date, stacked. Cache write is its own series.
@@ -277,6 +301,14 @@ pub struct WeekRollup {
     pub by_day: Option<Vec<DayTokens>>,
     /// Codex deltas, which are intervals and not by day.
     pub codex_interval_tokens: Option<u64>,
+    /// Codex tokens on each local date, Monday first, from the per-turn
+    /// series' dated turns (product owner, 2026-10-28), as `by_day` is
+    /// Claude's. A day is `None` (unknown, never 0) when a Codex session
+    /// active on it has no series, a trimmed one, or a turn with no date
+    /// or no known counters. `None` altogether when no Codex session is in
+    /// the week. Absent from an answer made before it.
+    #[serde(default)]
+    pub codex_by_day: Option<Vec<Option<u64>>>,
     /// Alphabetical by declared label, unknown last. Never by value.
     pub by_model: Vec<ModelTokens>,
     pub sessions: Vec<SessionWeek>,
@@ -364,6 +396,7 @@ struct Contribution {
     cache_read: u64,
     cache_write: u64,
     codex: Option<CodexObserved>,
+    by_day: Option<[u64; 7]>,
 }
 
 /// Roll up the completed local ISO week starting at `week_start`.
@@ -390,6 +423,7 @@ pub fn week_rollup<Tz: TimeZone>(
         .collect();
     let mut any_claude_known = false;
     let mut codex_interval: Option<u64> = None;
+    let mut codex_days: Option<[Option<u64>; 7]> = None;
     let mut models: BTreeMap<String, u64> = BTreeMap::new();
     let mut unknown_label_tokens: Option<u64> = None;
 
@@ -441,6 +475,7 @@ pub fn week_rollup<Tz: TimeZone>(
                     let mut known = 0u32;
                     let mut unknown = 0u32;
                     let mut tokens = 0u64;
+                    let mut session_days = [0u64; 7];
                     for turn in &prepared.kept_turns {
                         let Some(when) = turn.at else {
                             unknown += 1;
@@ -459,7 +494,9 @@ pub fn week_rollup<Tz: TimeZone>(
                         contribution.cache_read += u64::from(usage.cache_read);
                         contribution.cache_write += usage.cache_write.total();
                         let local = when.with_timezone(tz).date_naive();
-                        let day = &mut days[(local - week_start).num_days() as usize];
+                        let offset = (local - week_start).num_days() as usize;
+                        session_days[offset] += usage.total();
+                        let day = &mut days[offset];
                         day.uncached += u64::from(usage.uncached_input);
                         day.cache_read += u64::from(usage.cache_read);
                         day.cache_write += usage.cache_write.total();
@@ -481,6 +518,7 @@ pub fn week_rollup<Tz: TimeZone>(
                     } else {
                         any_claude_known = true;
                         contribution.tokens = Some(tokens);
+                        contribution.by_day = Some(session_days);
                         if unknown > 0 {
                             contribution
                                 .reasons
@@ -493,10 +531,19 @@ pub fn week_rollup<Tz: TimeZone>(
                     true
                 }
             }
-            SessionBody::Codex { observed } => match observed {
+            SessionBody::Codex { observed, series } => match observed {
                 Some(observed) => {
                     let first = local_week_start(&observed.first_at, tz);
                     let last = local_week_start(&observed.last_at, tz);
+                    if !(week_start < first || last < week_start) && !prepared.reimport_overlap {
+                        codex_split(
+                            codex_days.get_or_insert([Some(0); 7]),
+                            observed,
+                            series.as_ref(),
+                            week_start,
+                            tz,
+                        );
+                    }
                     if week_start < first || last < week_start {
                         false
                     } else if prepared.reimport_overlap {
@@ -602,6 +649,10 @@ pub fn week_rollup<Tz: TimeZone>(
             state,
             reasons: contribution.reasons.into_iter().collect(),
             cache_share: session_share,
+            by_day: contribution
+                .tokens
+                .and(contribution.by_day)
+                .map(|days| days.to_vec()),
         });
     }
 
@@ -627,9 +678,125 @@ pub fn week_rollup<Tz: TimeZone>(
         sources: lines.into_values().collect(),
         by_day: any_claude_known.then_some(days),
         codex_interval_tokens: codex_interval,
+        codex_by_day: codex_days.map(|days| days.to_vec()),
         by_model,
         sessions: rows,
     }
+}
+
+/// Add one Codex session's dated turns to `days` (the week from
+/// `week_start`). Days the session was active on (its first to last
+/// reading) that cannot be split, with no series, a trimmed one, or a turn
+/// with no date or no known counters, become unknown.
+fn codex_split<Tz: TimeZone>(
+    days: &mut [Option<u64>; 7],
+    observed: &CodexObserved,
+    series: Option<&CodexTurnSeriesEvidence>,
+    week_start: NaiveDate,
+    tz: &Tz,
+) {
+    let offset =
+        |at: &DateTime<Utc>| -> i64 { (at.with_timezone(tz).date_naive() - week_start).num_days() };
+    let unknown_span = |days: &mut [Option<u64>; 7]| {
+        let (from, to) = (
+            offset(&observed.first_at).max(0),
+            offset(&observed.last_at).min(6),
+        );
+        for day in from..=to {
+            if let Ok(day) = usize::try_from(day) {
+                if let Some(slot) = days.get_mut(day) {
+                    *slot = None;
+                }
+            }
+        }
+    };
+    let Some(series) = series.filter(|series| !series.series.truncated) else {
+        unknown_span(days);
+        return;
+    };
+    for turn in &series.series.turns {
+        let (Some(at), Some(usage)) = (turn.at, turn.known_usage()) else {
+            unknown_span(days);
+            return;
+        };
+        if let Ok(day) = usize::try_from(offset(&at)) {
+            if let Some(Some(slot)) = days.get_mut(day) {
+                *slot += usage.total();
+            }
+        }
+    }
+}
+
+/// How one keyed Claude snapshot relates to the others by the turns they
+/// share. A resumed Claude transcript repeats the turns of the one it
+/// continues, so its session facts (lines, edits) hold that one's too.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClaudeResume {
+    /// The snapshot this one continues: the largest other snapshot whose
+    /// every turn it repeats (of two equal ones, the earlier import).
+    pub continues: Option<usize>,
+    /// Another snapshot repeats every turn of this one: a later transcript
+    /// continues it, or it is the earlier import of two equal ones.
+    pub continued: bool,
+    /// It shares turns with an earlier import without either holding all
+    /// the other's, so which of its facts are new cannot be told.
+    pub tangled: bool,
+}
+
+/// Per session, in input order. Default for a session that is not a keyed
+/// Claude snapshot.
+pub fn claude_resumes(sessions: &[SessionInput]) -> Vec<ClaudeResume> {
+    let keys: Vec<Option<BTreeSet<KeyedDigest>>> = sessions
+        .iter()
+        .map(|input| match &input.body {
+            SessionBody::Claude { series, .. } if input.keyed() => Some(
+                series
+                    .turns
+                    .iter()
+                    .filter_map(|turn| turn.msg_key)
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect();
+    let mut holders: BTreeMap<KeyedDigest, Vec<usize>> = BTreeMap::new();
+    for (index, keys) in keys.iter().enumerate() {
+        for key in keys.iter().flatten() {
+            holders.entry(*key).or_default().push(index);
+        }
+    }
+    let rank = |index: usize| (sessions[index].import_seq, index);
+    let mut out = vec![ClaudeResume::default(); sessions.len()];
+    for (x, x_keys) in keys.iter().enumerate() {
+        let Some(x_keys) = x_keys else {
+            continue;
+        };
+        let mut shared: BTreeMap<usize, usize> = BTreeMap::new();
+        for key in x_keys {
+            for &y in &holders[key] {
+                if y != x {
+                    *shared.entry(y).or_default() += 1;
+                }
+            }
+        }
+        let mut best: Option<(usize, usize)> = None;
+        for (y, count) in shared {
+            let y_len = keys[y].as_ref().map_or(0, BTreeSet::len);
+            let y_in_x = count == y_len;
+            let x_in_y = count == x_keys.len();
+            if y_in_x && (!x_in_y || rank(y) < rank(x)) && best.is_none_or(|(_, len)| y_len > len) {
+                best = Some((y, y_len));
+            }
+            if x_in_y && (!y_in_x || rank(x) < rank(y)) {
+                out[x].continued = true;
+            }
+            if !y_in_x && !x_in_y && rank(y) < rank(x) {
+                out[x].tangled = true;
+            }
+        }
+        out[x].continues = best.map(|(y, _)| y);
+    }
+    out
 }
 
 /// Per session, in input order: for a Claude session the ordinals of the
@@ -793,6 +960,8 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Claude {
                 series: UsageSeries {
                     turns,
@@ -810,6 +979,8 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Codex {
                 observed: Some(CodexObserved {
                     first_at: first,
@@ -820,6 +991,7 @@ mod tests {
                     total: 1_200,
                     baseline_excluded: false,
                 }),
+                series: None,
             },
         }
     }
@@ -830,6 +1002,8 @@ mod tests {
             import_seq: 0,
             placed_at: placed,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Unknown {
                 source: Some(AnalyticsSource::ClaudeCode),
                 reason,
@@ -907,6 +1081,7 @@ mod tests {
         let mut input = codex("c", 1, at(6, 1), at(6, 2));
         if let SessionBody::Codex {
             observed: Some(observed),
+            ..
         } = &mut input.body
         {
             observed.baseline_excluded = true;
@@ -1013,6 +1188,52 @@ mod tests {
         let mut t = turn(ordinal, Some(when), None);
         t.msg_key = Some(KeyedDigest([key; 32]));
         t
+    }
+
+    #[test]
+    fn a_resumed_transcript_continues_the_largest_one_it_repeats() {
+        let first = claude("first", 1, vec![keyed(0, at(6, 9), 1)]);
+        let second = claude(
+            "second",
+            2,
+            vec![keyed(0, at(6, 9), 1), keyed(1, at(6, 10), 2)],
+        );
+        let third = claude(
+            "third",
+            3,
+            vec![
+                keyed(0, at(6, 9), 1),
+                keyed(1, at(6, 10), 2),
+                keyed(2, at(7, 9), 3),
+            ],
+        );
+        // Shares turn 2 with `second` but lacks turn 1: neither holds the other.
+        let tangled = claude(
+            "tangled",
+            4,
+            vec![keyed(0, at(6, 10), 2), keyed(1, at(8, 9), 9)],
+        );
+        let unkeyed = claude("unkeyed", 5, vec![turn(0, Some(at(6, 9)), None)]);
+        let resumes = claude_resumes(&[third, first, second, tangled, unkeyed]);
+        assert_eq!(resumes[0].continues, Some(2));
+        assert!(!resumes[0].continued);
+        assert_eq!(resumes[1].continues, None);
+        assert!(resumes[1].continued);
+        assert_eq!(resumes[2].continues, Some(1));
+        assert!(resumes[2].continued);
+        assert!(resumes[3].tangled);
+        assert_eq!(resumes[3].continues, None);
+        assert_eq!(resumes[4], ClaudeResume::default());
+    }
+
+    #[test]
+    fn of_two_equal_transcripts_the_later_import_continues_the_earlier() {
+        let turns = vec![keyed(0, at(6, 9), 1)];
+        let resumes = claude_resumes(&[claude("b", 2, turns.clone()), claude("a", 1, turns)]);
+        assert_eq!(resumes[0].continues, Some(1));
+        assert!(!resumes[0].continued);
+        assert_eq!(resumes[1].continues, None);
+        assert!(resumes[1].continued);
     }
 
     #[test]
@@ -1253,11 +1474,159 @@ mod tests {
         assert_eq!(days[0].output, 0);
     }
 
+    /// Each day's per-session amounts, summed, against the week's `by_day`.
+    fn assert_sessions_sum_to_by_day(rollup: &WeekRollup) {
+        let days = rollup.by_day.as_ref().unwrap();
+        for (offset, day) in days.iter().enumerate() {
+            let sessions: u64 = rollup
+                .sessions
+                .iter()
+                .filter_map(|s| s.by_day.as_ref())
+                .map(|by_day| by_day[offset])
+                .sum();
+            assert_eq!(
+                sessions,
+                day.uncached + day.cache_read + day.cache_write + day.output,
+                "day {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_claude_session_carries_its_tokens_by_day_summing_to_the_week() {
+        let rollup = roll(&[
+            // Crosses midnight from Tuesday into Wednesday.
+            claude(
+                "late",
+                1,
+                vec![
+                    turn(0, Some(at(6, 23)), None),
+                    turn(1, Some(at(7, 0)), None),
+                    turn(2, Some(at(7, 1)), None),
+                ],
+            ),
+            claude("early", 2, vec![turn(0, Some(at(6, 9)), None)]),
+            codex("c", 3, at(6, 1), at(6, 2)),
+        ]);
+        assert_eq!(
+            session(&rollup, "late").by_day,
+            Some(vec![0, TURN_TOTAL, 2 * TURN_TOTAL, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            session(&rollup, "early").by_day,
+            Some(vec![0, TURN_TOTAL, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(session(&rollup, "c").by_day, None);
+        assert_sessions_sum_to_by_day(&rollup);
+    }
+
+    #[test]
+    fn a_session_by_day_counts_a_reimported_turn_once() {
+        let first = claude(
+            "old",
+            1,
+            vec![keyed(0, at(6, 9), 1), keyed(1, at(7, 10), 2)],
+        );
+        let regrown = claude(
+            "new",
+            2,
+            vec![
+                keyed(0, at(6, 9), 1),
+                keyed(1, at(7, 10), 2),
+                keyed(2, at(8, 11), 3),
+            ],
+        );
+        let wholly = claude("again", 3, vec![keyed(0, at(6, 9), 1)]);
+        let rollup = roll(&[regrown, first, wholly]);
+        assert_eq!(
+            session(&rollup, "old").by_day,
+            Some(vec![0, TURN_TOTAL, TURN_TOTAL, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            session(&rollup, "new").by_day,
+            Some(vec![0, 0, 0, TURN_TOTAL, 0, 0, 0])
+        );
+        assert_eq!(session(&rollup, "again").by_day, None);
+        assert_sessions_sum_to_by_day(&rollup);
+    }
+
+    #[test]
+    fn a_session_by_day_leaves_out_an_overlapped_unkeyed_snapshot() {
+        let older = claude(
+            "older",
+            1,
+            vec![turn(0, Some(at(6, 1)), None), turn(1, Some(at(6, 5)), None)],
+        );
+        let newer = claude(
+            "newer",
+            2,
+            vec![turn(0, Some(at(6, 5)), None), turn(1, Some(at(7, 5)), None)],
+        );
+        let rollup = roll(&[older, newer]);
+        assert_eq!(session(&rollup, "older").by_day, None);
+        assert_eq!(
+            session(&rollup, "newer").by_day,
+            Some(vec![0, TURN_TOTAL, TURN_TOTAL, 0, 0, 0, 0])
+        );
+        assert_sessions_sum_to_by_day(&rollup);
+    }
+
+    #[test]
+    fn a_session_with_no_known_turn_has_no_by_day() {
+        let mut only = turn(0, Some(at(6, 9)), None);
+        only.cache_read = None;
+        let rollup = roll(&[
+            claude("a", 1, vec![only]),
+            claude("b", 2, vec![turn(0, Some(at(8, 9)), None)]),
+        ]);
+        assert_eq!(session(&rollup, "a").by_day, None);
+        assert_sessions_sum_to_by_day(&rollup);
+    }
+
     #[test]
     fn codex_goes_on_its_own_interval_row() {
         let rollup = roll(&[codex("c", 1, at(6, 1), at(6, 2))]);
         assert_eq!(rollup.codex_interval_tokens, Some(1_200));
         assert_eq!(rollup.by_day, None);
+    }
+
+    /// Product owner, 2026-10-28: Codex by local day, from the per-turn
+    /// series' dated turns, as Claude's days are; a day that cannot be
+    /// split is unknown, never 0.
+    #[test]
+    fn codex_tokens_split_by_day_from_dated_turns() {
+        let mut split = codex("split", 1, at(6, 1), at(7, 2));
+        if let SessionBody::Codex { series, .. } = &mut split.body {
+            *series = Some(CodexTurnSeriesEvidence {
+                model_labels: vec![],
+                series: UsageSeries {
+                    turns: vec![turn(0, Some(at(6, 1)), None), turn(1, Some(at(7, 2)), None)],
+                    tool_calls: vec![],
+                    truncated: false,
+                },
+            });
+        }
+        let rollup = roll(&[split.clone()]);
+        let days = rollup.codex_by_day.unwrap();
+        let monday = monday();
+        let offset = |at: DateTime<Utc>| (at.date_naive() - monday).num_days() as usize;
+        assert_eq!(days[offset(at(6, 1))], Some(TURN_TOTAL));
+        assert_eq!(days[offset(at(7, 2))], Some(TURN_TOTAL));
+        assert_eq!(days.iter().flatten().sum::<u64>(), 2 * TURN_TOTAL);
+        assert_eq!(days.len(), 7);
+
+        // A session with no series makes its active days unknown, and only
+        // those.
+        let rollup = roll(&[split, codex("whole", 2, at(8, 1), at(8, 3))]);
+        let days = rollup.codex_by_day.unwrap();
+        assert_eq!(days[offset(at(8, 1))], None);
+        assert_eq!(days[offset(at(6, 1))], Some(TURN_TOTAL));
+
+        // No Codex session in the week: no figure at all.
+        assert_eq!(
+            roll(&[claude("a", 1, vec![turn(0, Some(at(6, 1)), None)])]).codex_by_day,
+            None
+        );
     }
 
     #[test]

@@ -30,9 +30,18 @@ pub struct LaunchArgs {
     /// tool's default; it must be a NEAR AI chat model.
     #[arg(long)]
     pub model: Option<String>,
-    /// Collect this OpenCode session on exit for the usual review pipeline.
+    /// Collect this managed session on exit for the usual review pipeline.
     #[arg(long)]
     pub collect_traces: bool,
+    /// Disable remembered trace collection for this launch.
+    #[arg(long, conflicts_with = "collect_traces")]
+    pub no_collect_traces: bool,
+    /// Use the selected account's default model instead of its folder choice.
+    #[arg(long, conflicts_with = "model")]
+    pub default_model: bool,
+    /// Override this folder's saved CLI options; an empty string clears them.
+    #[arg(long, allow_hyphen_values = true)]
+    pub cli_options: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -78,6 +87,12 @@ pub enum AccountCommand {
 #[derive(Subcommand)]
 pub enum SessionCommand {
     List,
+    /// Continue an ended session's conversation in this terminal, as a new
+    /// session with the same account, folder and options.
+    Resume {
+        /// The session's id, as `sessions list` shows it.
+        session_id: Uuid,
+    },
 }
 
 #[derive(Deserialize)]
@@ -98,11 +113,20 @@ pub fn call<T: DeserializeOwned>(
     let response =
         client::try_call(store, method, &params)?.ok_or(ManagedError::DaemonUnavailable)?;
     if let Some(error) = response.error {
-        anyhow::bail!("{}", error.code);
+        return Err(refusal(&error.code));
     }
     Ok(serde_json::from_value(
         response.result.ok_or(ManagedError::InvalidRequest)?,
     )?)
+}
+
+/// The error for a daemon refusal labelled `code`: its label, except for a
+/// refusal whose sentence tells the person what to change.
+fn refusal(code: &str) -> anyhow::Error {
+    if code == super::PROJECT_CHOOSES_MODEL_LABEL {
+        return ManagedError::ProjectChoosesModel.into();
+    }
+    anyhow::anyhow!("{code}")
 }
 
 /// Whether `--connection asked` admits an account on `connection`. The
@@ -273,9 +297,37 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
         .get(&args.tool)
         .copied()
         .unwrap_or_default();
+    let remembered: Option<super::folder::FolderSnapshot> = {
+        let response = client::try_call(
+            store,
+            "managed_folder_settings_get",
+            &json!({"tool":args.tool,"cwd":cwd}),
+        )?
+        .ok_or(ManagedError::DaemonUnavailable)?;
+        match response.error {
+            Some(error) if error.code == crate::daemon::ipc::ERR_UNKNOWN_METHOD => None,
+            Some(error) => anyhow::bail!("{}", error.code),
+            None => Some(serde_json::from_value(
+                response.result.ok_or(ManagedError::InvalidRequest)?,
+            )?),
+        }
+    };
+    let model = effective_model(
+        args.tool,
+        account.connection,
+        args.model,
+        args.default_model,
+        remembered.as_ref().and_then(|value| value.model.clone()),
+    );
+    let collect_traces = !args.no_collect_traces
+        && (args.collect_traces
+            || remembered
+                .as_ref()
+                .is_some_and(|value| value.collect_traces));
     let request = LaunchRequest {
-        model: args.model,
-        collect_traces: args.collect_traces,
+        cli_options: args.cli_options,
+        model,
+        collect_traces,
         purpose: super::sessions::LaunchPurpose::Coding,
         request_id: Uuid::new_v4(),
         tool: args.tool,
@@ -284,9 +336,37 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
         cwd,
         expected_generation,
         save_default: false,
+        keep_saved_model: false,
+        resume_of: None,
+        background_model: None,
     };
     let prepared: PreparedLaunch = call(store, "managed_launch_prepare", json!(request))?;
     super::supervisor::redeem_and_run(store, prepared).await
+}
+
+fn effective_model(
+    tool: ToolId,
+    connection: ConnectionKind,
+    explicit: Option<String>,
+    default_model: bool,
+    remembered: Option<String>,
+) -> Option<String> {
+    if explicit.is_some() {
+        return explicit;
+    }
+    if default_model {
+        return None;
+    }
+    if tool == ToolId::Opencode
+        || matches!(
+            connection,
+            ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
+        )
+    {
+        remembered
+    } else {
+        None
+    }
 }
 
 fn print_value(value: Value, _json_output: bool) -> anyhow::Result<()> {
@@ -399,17 +479,42 @@ async fn login(
     print_value(result, json_output)
 }
 
-pub fn sessions(
-    store: &ConfigStore,
-    _command: SessionCommand,
-    json_output: bool,
-) -> anyhow::Result<()> {
+/// `sessions list`. `sessions resume` runs a tool, so it is [`resume`].
+pub fn list_sessions(store: &ConfigStore, json_output: bool) -> anyhow::Result<()> {
     let snapshot: Value = call(store, "managed_snapshot", json!({}))?;
     print_value(snapshot["sessions"].clone(), json_output)
 }
 
+/// Continue the conversation of the ended session `session_id` in this
+/// terminal: the daemon prepares a new session that resumes it, with the
+/// checks Start again makes, and this process runs the tool as `launch`
+/// does. Returns the tool's exit code.
+pub async fn resume(store: &ConfigStore, session_id: Uuid) -> anyhow::Result<i32> {
+    let prepared: PreparedLaunch = call(
+        store,
+        "managed_session_resume",
+        json!({"session_id":session_id,"request_id":Uuid::new_v4()}),
+    )?;
+    super::supervisor::redeem_and_run(store, prepared).await
+}
+
 #[cfg(test)]
 mod tests {
+    /// A refusal the person can act on reads as its sentence in the
+    /// terminal, not as its label (owner, 2026-11-01); any other refusal
+    /// keeps its label.
+    #[test]
+    fn a_project_model_refusal_prints_why() {
+        assert_eq!(
+            refusal(crate::managed::PROJECT_CHOOSES_MODEL_LABEL).to_string(),
+            crate::managed::ManagedError::ProjectChoosesModel.to_string()
+        );
+        assert_eq!(
+            refusal("managed-model-unavailable").to_string(),
+            "managed-model-unavailable"
+        );
+    }
+
     use super::*;
     use crate::managed::{AccountId, AuthState, signin};
 
@@ -549,5 +654,62 @@ mod tests {
         for no in ["n\n", "no", "later", "q"] {
             assert!(!agrees(no), "{no:?}");
         }
+    }
+    #[test]
+    fn remembered_models_follow_the_current_connection_and_explicit_choices() {
+        let remembered = Some("provider/model".to_string());
+        for tool in [ToolId::Claude, ToolId::Codex, ToolId::Opencode] {
+            assert_eq!(
+                effective_model(
+                    tool,
+                    ConnectionKind::NearAiSignIn,
+                    None,
+                    false,
+                    remembered.clone()
+                ),
+                remembered
+            );
+            assert_eq!(
+                effective_model(
+                    tool,
+                    ConnectionKind::NearAiSignIn,
+                    None,
+                    true,
+                    remembered.clone()
+                ),
+                None
+            );
+            assert_eq!(
+                effective_model(
+                    tool,
+                    ConnectionKind::NearAiSignIn,
+                    Some("provider/explicit".into()),
+                    false,
+                    remembered.clone()
+                )
+                .as_deref(),
+                Some("provider/explicit")
+            );
+        }
+        assert_eq!(
+            effective_model(
+                ToolId::Claude,
+                ConnectionKind::Subscription,
+                None,
+                false,
+                remembered.clone()
+            ),
+            None
+        );
+        assert_eq!(
+            effective_model(
+                ToolId::Codex,
+                ConnectionKind::ApiKey,
+                None,
+                false,
+                remembered
+            ),
+            None
+        );
     }
 }

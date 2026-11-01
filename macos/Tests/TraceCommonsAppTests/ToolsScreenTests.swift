@@ -10,46 +10,65 @@ import XCTest
 /// more than one asks which, none is refused. Read from the screen's pure
 /// layout and its source, the house pattern for a SwiftUI view.
 final class ToolsScreenTests: XCTestCase {
-    /// Ron's review of #1419 (2026-10-15), decisions 1 and 2: first run
-    /// keeps a row for every tool. A missing tool offers Install; an
-    /// installed one with no folder found offers "Choose folder" where the
-    /// picker would be.
-    func testEveryToolKeepsItsRowAndAnInstalledOneOffersChooseFolder() throws {
-        let missing = SourceCandidate(source: .opencode, path: "/missing", exists: false, sessionCount: 0, mostRecent: nil, relocatedByEnv: false)
-        let state = FirstRunState()
-        let url = URL(string: "https://opencode.ai/docs/")
-        // Installed, no folder: Choose folder, not Install, not the picker.
-        XCTAssertTrue(ToolAnswerRowLayout.offersChooseFolder(missing, installed: true, in: state))
-        XCTAssertFalse(ToolAnswerRowLayout.offersGetTool(missing, installURL: url, installed: true, in: state))
-        XCTAssertEqual(ToolAnswerRowLayout.options(for: missing, in: state), [])
-        // Not installed, or not known: Install, as today.
-        for installed in [false, nil] as [Bool?] {
-            XCTAssertFalse(ToolAnswerRowLayout.offersChooseFolder(missing, installed: installed, in: state))
-            XCTAssertTrue(ToolAnswerRowLayout.offersGetTool(missing, installURL: url, installed: installed, in: state))
-        }
-        // Picking a folder makes the row ask, with the picker on Watch.
-        var chosen = state
-        ToolAnswerRowLayout.choose(folder: "/picked", for: missing, in: &chosen)
-        XCTAssertTrue(ToolAnswerRowLayout.asks(missing, in: chosen))
-        XCTAssertFalse(ToolAnswerRowLayout.offersChooseFolder(missing, installed: true, in: chosen))
-        XCTAssertEqual(ToolAnswerRowLayout.answer(in: chosen, for: missing), .watch)
-        XCTAssertEqual(state.sessionRoots.opencode, .undecided)
-        let tools = try JSONDecoder().decode([ManagedToolAvailability].self, from: Data(#"[{"tool":"claude","installed":true,"install_url":"https://code.claude.com/docs/en/setup"},{"tool":"opencode","installed":false,"install_url":"https://opencode.ai/docs/"}]"#.utf8))
-        XCTAssertEqual(ToolsScreenLayout.installed(.claudeCode, tools: tools), true)
-        XCTAssertEqual(ToolsScreenLayout.installed(.opencode, tools: tools), false)
-        XCTAssertNil(ToolsScreenLayout.installed(.codex, tools: tools))
-        XCTAssertNil(ToolsScreenLayout.installed(.geminiCli, tools: tools))
-        XCTAssertNil(ToolsScreenLayout.installed(.claudeCode, tools: nil))
+    /// Ron's 2026-10-21 canvas: every tool bursts out of the N into the
+    /// ring, a tool not found drifts out of view as the sweep passes it, and
+    /// once the turn is over the rest re-space and the ring tightens. The
+    /// list then offers only the tools found here (this reverses Ron's
+    /// review of #1419, where every tool kept a row with Install).
+    func testTheRingNarrowsToTheToolsFoundHere() throws {
+        let rows = FirstRunStageLayout.ringRows([
+            Self.candidate(.opencode, exists: true), Self.candidate(.claudeCode, exists: true),
+            Self.candidate(.geminiCli, exists: false), Self.candidate(.codex, exists: true),
+            Self.candidate(.cline, exists: false),
+        ])
+        XCTAssertEqual(rows.map(\.source), [.claudeCode, .geminiCli, .codex, .cline, .opencode])
+
+        // Before the burst everything sits in the N.
+        XCTAssertEqual(ToolsRingLayout.placement(0, rows: rows, elapsed: 0).radius, 0)
+        // The sweep reaches the tiles in order round the ring.
+        let moments = (0..<rows.count).map { FirstRunStageLayout.scanMoment($0, of: rows.count) }
+        XCTAssertEqual(moments, moments.sorted())
+        XCTAssertGreaterThan(moments[0], FirstRunStageLayout.scanLead)
+        XCTAssertLessThan(moments[4], FirstRunStageLayout.scanLead + FirstRunStageLayout.scanTurn)
+        // A tool not found has gone once the sweep has passed it.
+        let gone = ToolsRingLayout.placement(1, rows: rows, elapsed: moments[1] + 1)
+        XCTAssertEqual(gone.opacity, 0, accuracy: 0.001)
+        XCTAssertEqual(gone.radius, ToolsRingLayout.goneRadius, accuracy: 0.5)
+        // Settled: the found tools evenly round a tighter ring.
+        let settled = [0, 2, 4].map { ToolsRingLayout.placement($0, rows: rows, elapsed: nil) }
+        XCTAssertEqual(settled.map(\.angle), [-90, 30, 150])
+        XCTAssertEqual(Set(settled.map(\.radius)), [ToolsRingLayout.tightRadius])
+        XCTAssertEqual(ToolsRingLayout.placement(1, rows: rows, elapsed: nil).opacity, 0)
+        // The scan's end lands where settled is.
+        let late = ToolsRingLayout.placement(2, rows: rows, elapsed: 10)
+        XCTAssertEqual(late.angle, 30, accuracy: 0.001)
+        XCTAssertEqual(late.radius, ToolsRingLayout.tightRadius, accuracy: 0.001)
+
+        let state = FirstRunState(step: .tools)
+        XCTAssertEqual(ToolsScreenLayout.listed(rows, state: state).map(\.source), [.claudeCode, .codex, .opencode])
     }
 
-    /// No "none installed" block, no filtered rows and no separate setup
-    /// card on first run; install links come from the one shared table.
+    /// The sweep turns once, from 36 degrees before the top to the top.
+    func testTheSweepTurnsOnce() {
+        XCTAssertNil(FirstRunStageLayout.sweepRotation(after: 0.5))
+        XCTAssertEqual(try XCTUnwrap(FirstRunStageLayout.sweepRotation(after: FirstRunStageLayout.scanLead)), -36)
+        XCTAssertEqual(
+            try XCTUnwrap(FirstRunStageLayout.sweepRotation(
+                after: FirstRunStageLayout.scanLead + FirstRunStageLayout.scanTurn)), 360)
+        XCTAssertNil(FirstRunStageLayout.sweepRotation(after: 4))
+        XCTAssertFalse(FirstRunStageLayout.scanDone(after: 3))
+        XCTAssertTrue(FirstRunStageLayout.scanDone(after: 3.25))
+    }
+
+    /// No install block, no filtered rows and no separate setup card on
+    /// first run; the list is the found tools, in the ring's order.
     func testFirstRunDrawsNoSeparateInstallBlock() throws {
         let screen = try Self.source("ToolsScreen.swift")
         XCTAssertFalse(screen.contains("ManagedToolInstallation"))
         XCTAssertFalse(screen.contains("shownRows"))
         XCTAssertFalse(screen.contains("setupRows"))
-        XCTAssertTrue(screen.contains("ForEach(ToolsScreenLayout.rows(discovered, state: runner.state), id: \\.source)"))
+        XCTAssertTrue(screen.contains("ToolsScreenLayout.listed($0, state: runner.state)"))
+        XCTAssertTrue(screen.contains("FirstRunMarkerCheckStyle()"))
     }
 
     private static func source(_ name: String) throws -> String {
@@ -99,7 +118,7 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertEqual(outcome, .added(AddedFolder(kind: .source(.codex), path: path)))
 
         let discovered = [Self.candidate(.claudeCode, exists: true), Self.candidate(.codex, exists: true)]
-        var state = FirstRunState(tier: .custom, step: .tools)
+        var state = FirstRunState(step: .tools)
         state.answer(.codex, .off)
         XCTAssertTrue(ToolsScreenLayout.apply(outcome, to: &state))
         XCTAssertEqual(state.toolAnswers[.codex], .off, "the Codex row is not answered for the person")
@@ -160,10 +179,9 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertTrue(screen.contains("GlassToolTile(.folder"))
         XCTAssertTrue(screen.contains("FolderPanel.choose()"))
         XCTAssertTrue(screen.contains(".onDrop("))
-        XCTAssertTrue(screen.contains(".commit(.leaveRoots)"))
+        XCTAssertTrue(screen.contains(".commit(.leaveTools)"))
         XCTAssertTrue(screen.contains("FolderMatch.decodeList("))
         XCTAssertTrue(screen.contains("copy.tools.addedByYou"))
-        XCTAssertTrue(screen.contains("GlassFolderButton("))
         XCTAssertFalse(screen.contains("SourceCandidate.decodeList("))
         XCTAssertFalse(screen.contains(".toolAnswers["))
         XCTAssertFalse(screen.contains(".addedFolders.append"))
@@ -174,7 +192,7 @@ final class ToolsScreenTests: XCTestCase {
     func test_aToolWatchedTwiceIsSaidOnTheAddedRow() throws {
         let copy = try firstRunCopy()
         let discovered = [Self.candidate(.claudeCode, exists: true), Self.candidate(.codex, exists: true)]
-        var state = FirstRunState(tier: .custom, step: .tools)
+        var state = FirstRunState(step: .tools)
         state.answer(.claudeCode, .off)
         state.answer(.codex, .watch(path: "/Users/someone/.codex"))
         ToolsScreenLayout.apply(.added(AddedFolder(kind: .source(.codex), path: "/v/codex")), to: &state)
@@ -198,9 +216,9 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertEqual(outcome, .ask(path: path, kinds: [.source(.opencode), .trajectory]))
 
         // Asking writes nothing.
-        var state = FirstRunState(tier: .custom, step: .tools)
+        var state = FirstRunState(step: .tools)
         XCTAssertTrue(ToolsScreenLayout.apply(outcome, to: &state))
-        XCTAssertEqual(state, FirstRunState(tier: .custom, step: .tools))
+        XCTAssertEqual(state, FirstRunState(step: .tools))
 
         // The person's choice is what gets added.
         ToolsScreenLayout.choose(.trajectory, path: path, in: &state)
@@ -231,7 +249,7 @@ final class ToolsScreenTests: XCTestCase {
     /// trajectory export, then again as OpenCode, it is declared once.
     func test_anAmbiguousFolderCanBeAnsweredAgain() {
         let path = "/Users/someone/exports"
-        var state = FirstRunState(tier: .custom, step: .tools)
+        var state = FirstRunState(step: .tools)
         ToolsScreenLayout.choose(.trajectory, path: path, in: &state)
         ToolsScreenLayout.choose(.source(.opencode), path: path, in: &state)
         XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.opencode), path: path)])
@@ -253,7 +271,7 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertEqual(options.map(\.value), [.kind(0), .kind(1), .neither])
 
         let discovered = [Self.candidate(.claudeCode, exists: true)]
-        var state = FirstRunState(tier: .custom, step: .tools)
+        var state = FirstRunState(step: .tools)
         state.answer(.claudeCode, .watch(path: "/Users/someone/.claude/projects"))
         state.answer(.codex, .off)
         let before = state
@@ -280,7 +298,7 @@ final class ToolsScreenTests: XCTestCase {
 
     /// The trajectory row is withdrawn with "Not used" on its picker.
     func test_theTrajectoryRowCanBeWithdrawn() throws {
-        var state = FirstRunState(tier: .custom, step: .tools)
+        var state = FirstRunState(step: .tools)
         ToolsScreenLayout.choose(.trajectory, path: "/t", in: &state)
         ToolsScreenLayout.selectTrajectory(.watch, in: &state)
         XCTAssertEqual(state.sessionRoots.trajectory, .watch(path: "/t"))
@@ -296,7 +314,7 @@ final class ToolsScreenTests: XCTestCase {
     /// An open question holds Continue, as does a commit.
     func test_anOpenQuestionHoldsContinue() throws {
         let discovered = [Self.candidate(.claudeCode, exists: true)]
-        var state = FirstRunState(tier: .custom, step: .tools)
+        var state = FirstRunState(step: .tools)
         state.answer(.claudeCode, .watch(path: "/c"))
         state.answer(.codex, .off)
         XCTAssertTrue(
@@ -317,76 +335,54 @@ final class ToolsScreenTests: XCTestCase {
     func test_aFolderArrivingDuringACommitOrAfterToolsIsIgnored() throws {
         XCTAssertTrue(ToolsScreenLayout.acceptsFolder(step: .tools, isCommitting: false))
         XCTAssertFalse(ToolsScreenLayout.acceptsFolder(step: .tools, isCommitting: true))
-        XCTAssertFalse(ToolsScreenLayout.acceptsFolder(step: .rules, isCommitting: false))
-        // Quick's Folders takes folders too (owner, 2026-10-08).
-        XCTAssertTrue(ToolsScreenLayout.acceptsFolder(step: .folders, isCommitting: false))
-        XCTAssertFalse(ToolsScreenLayout.acceptsFolder(step: .folders, isCommitting: true))
-        XCTAssertFalse(ToolsScreenLayout.acceptsFolder(step: .uses, isCommitting: false))
-        XCTAssertFalse(ToolsScreenLayout.acceptsFolder(step: .join, isCommitting: false))
+        for step: FirstRunStep in [.welcome, .uses, .traces, .privateAI, .join] {
+            XCTAssertFalse(ToolsScreenLayout.acceptsFolder(step: step, isCommitting: false), "\(step)")
+        }
         let screen = try Self.source("ToolsScreen.swift")
         XCTAssertTrue(screen.contains("ToolsScreenLayout.acceptsFolder("))
         // The core walks the folder off the main actor.
         XCTAssertTrue(screen.contains("Task.detached"))
     }
 
-    /// Owner, 2026-10-08: Quick's Folders and Custom's Tools give the same
-    /// add-tool component and behaviour; the cards scroll in the frame's
-    /// body while the add tile is pinned under them, above the footer; and
-    /// a card shows no session count and no "not found" line, its answer
-    /// centred beside the tile and name.
-    func test_bothToolScreensShareTheCardsAndThePinnedAddTile() throws {
-        for file in ["FoldersScreen.swift", "ToolsScreen.swift"] {
-            let screen = try Self.source(file)
-            let content = try XCTUnwrap(screen.range(of: "} content: {"), file)
-            let pinned = try XCTUnwrap(screen.range(of: "} pinned: {"), file)
-            XCTAssertLessThan(content.lowerBound, pinned.lowerBound, file)
-            let body = String(screen[content.upperBound..<pinned.lowerBound])
-            XCTAssertTrue(body.contains("ToolList("), file)
-            XCTAssertFalse(body.contains("AddToolTile("), "\(file): the add tile does not scroll")
-            let pinnedBody = String(screen[pinned.upperBound...].prefix(200))
-            XCTAssertTrue(pinnedBody.contains("AddToolTile(copy: copy, runner: runner, adding: adding)"), file)
-            XCTAssertTrue(screen.contains("@StateObject private var adding = AddToolModel()"), file)
-            XCTAssertTrue(screen.contains("ToolsScreenLayout.canContinue("), file)
-            XCTAssertTrue(screen.contains("pending: adding.pending != nil"), file)
-        }
-        // One tile and one list, defined once.
+    /// The list under the ring: each found tool's tile, name and trace
+    /// count (the canvas's rows) and its marker check, the added folders
+    /// with "Added by you", and the add row under the card, one tile and one
+    /// list defined once. Continue waits on an open question.
+    func test_theListShowsEachToolWithItsCheckAndTheAddRow() throws {
         let tools = try Self.source("ToolsScreen.swift")
         XCTAssertEqual(tools.components(separatedBy: "struct AddToolTile: View").count - 1, 1)
-        XCTAssertEqual(tools.components(separatedBy: "struct ToolList: View").count - 1, 1)
-        XCTAssertFalse(try Self.source("FoldersScreen.swift").contains(".onDrop("))
+        XCTAssertEqual(tools.components(separatedBy: "struct ToolChecks: View").count - 1, 1)
+        XCTAssertTrue(tools.contains("copy.frame.sessionCount"))
+        XCTAssertTrue(tools.contains("ToolAnswerRowLayout.fill(copy.folders.watchQuestion, tool: row.source)"))
+        XCTAssertTrue(tools.contains("AddToolTile(copy: copy, runner: runner, adding: adding)"))
+        XCTAssertTrue(tools.contains("@StateObject private var adding = AddToolModel()"))
+        XCTAssertTrue(tools.contains("pending: adding.pending != nil"))
+        XCTAssertTrue(tools.contains("meta: copy.tools.addedByYou"))
 
-        // No session count or evidence line on a card; the found tool reads
-        // nothing, a missing one too.
+        // The add row sits under the scrolling card, not in it.
+        let checks = try XCTUnwrap(tools.range(of: "struct ToolChecks: View {"))
+        let body = String(tools[checks.upperBound...])
+        let scroll = try XCTUnwrap(body.range(of: "ScrollView { list }"))
+        let add = try XCTUnwrap(body.range(of: "AddToolTile(copy: copy, runner: runner, adding: adding)"))
+        XCTAssertLessThan(scroll.lowerBound, add.lowerBound)
+
+        // The caption is "Added by you" for a folder the person gave
+        // through a missing tool's row, nothing otherwise.
         let copy = try firstRunCopy()
         let found = Self.candidate(.claudeCode, exists: true)
         let missing = Self.candidate(.codex, exists: false)
-        let state = FirstRunState(tier: .quick, step: .folders)
+        var state = FirstRunState(step: .tools)
         XCTAssertNil(ToolsScreenLayout.meta(for: found, in: state, discovered: [found, missing], copy: copy))
-        XCTAssertNil(ToolsScreenLayout.meta(for: missing, in: state, discovered: [found, missing], copy: copy))
-        for file in ["ToolAnswerRow.swift", "ToolsScreen.swift", "FoldersScreen.swift"] {
-            let source = try Self.source(file)
-            XCTAssertFalse(source.contains(".evidence(now:"), file)
-            XCTAssertFalse(source.contains("copy.frame.sessionCount"), file)
-        }
-        // The answer is centred beside the tile and name, in one row.
-        let row = try Self.source("ToolAnswerRow.swift")
-        let card = try XCTUnwrap(row.range(of: "GlassCard {\n            HStack(alignment: .center"))
-        let picker = try XCTUnwrap(row.range(of: "GlassPicker("))
-        XCTAssertLessThan(card.lowerBound, picker.lowerBound)
-        XCTAssertTrue(tools.contains("HStack(alignment: .center, spacing: GlassTokens.Space.s6) {\n            GlassToolTile(.folder"))
-
-        // The frame puts the pinned area between the scrolling cards and the
-        // footer.
-        let frame = try Self.source("FirstRunFrame.swift")
-        let scroll = try XCTUnwrap(frame.range(of: "ScrollView {"))
-        let pinnedSlot = try XCTUnwrap(frame.range(of: "                pinned\n                    .padding(.horizontal, FirstRunFrameLayout.contentInset)\n                GlassActionBar("))
-        XCTAssertLessThan(scroll.lowerBound, pinnedSlot.lowerBound)
+        state.answer(.codex, .watch(path: "/Volumes/work/codex"))
+        XCTAssertEqual(
+            ToolsScreenLayout.meta(for: missing, in: state, discovered: [found, missing], copy: copy),
+            copy.tools.addedByYou)
     }
 
     func test_anUnrecognisedFolderIsRefused() throws {
         let copy = try firstRunCopy()
         let path = "/Users/someone/Documents"
-        var state = FirstRunState(tier: .custom, step: .tools)
+        var state = FirstRunState(step: .tools)
         let before = state
 
         for json in ["[]", nil, "not json", Self.describe(["some-future-tool"], path: path)] as [String?] {
@@ -418,7 +414,7 @@ final class ToolsScreenTests: XCTestCase {
     /// folder on any other row watches it. A tool row's folder button never
     /// touches an added row.
     func test_anAddedRowsFolderButtonReplacesItsFolder() throws {
-        var state = FirstRunState(tier: .custom, step: .tools)
+        var state = FirstRunState(step: .tools)
         ToolsScreenLayout.apply(.added(AddedFolder(kind: .source(.opencode), path: "/a")), to: &state)
         XCTAssertTrue(
             ToolsScreenLayout.replace(
@@ -442,7 +438,5 @@ final class ToolsScreenTests: XCTestCase {
         let codex = try XCTUnwrap(ToolsScreenLayout.rows([missing], state: state).first { $0.source == .codex })
         XCTAssertTrue(codex.exists)
         XCTAssertEqual(codex.path, "/d")
-        XCTAssertFalse(
-            ToolAnswerRowLayout.offersGetTool(codex, installURL: URL(string: "https://example.com"), in: state))
     }
 }

@@ -166,6 +166,13 @@ public enum TCCoreCopy {
         take(tc_first_run_copy_json())
     }
 
+    /// `tc_first_run_estimate_line`: Traces' one estimate line, worded,
+    /// multiplied and formatted by the core from `requestJSON` (`traces`,
+    /// `usd_micros_per_accepted_trace`, `credit_range`). Nil draws no line.
+    public static func firstRunEstimateLine(requestJSON: String) -> String? {
+        take(requestJSON.withCString { tc_first_run_estimate_line($0) })
+    }
+
     /// `tc_install_guides_json`: each coding tool's setup guide, keyed by
     /// discovery slug. Decoded by `TCShellCore.InstallGuides`.
     public static func installGuidesJSON() -> String? {
@@ -209,6 +216,11 @@ public enum TCCoreCopy {
     /// Decoded by `TCShellCore.MonitorScreensCopy`.
     public static func monitorScreensCopyJSON() -> String? {
         take(tc_monitor_screens_copy_json())
+    }
+
+    /// The compiled default for the remotely editable campaign card.
+    public static func privateAICampaignJSON() -> String? {
+        take(tc_private_ai_campaign_json())
     }
 
     /// `tc_shell_words_copy_json`: the words this shell used to write in

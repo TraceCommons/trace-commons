@@ -3,8 +3,9 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// Where the Rules screen reads its folders and their past sessions. Nil is
-/// a refusal or no daemon, never an empty answer.
+/// Where Customize on Tools reads the repos and their past sessions (Ron's
+/// #1030 Rules screen, folded into Tools on 2026-10-21). Nil is a refusal or
+/// no daemon, never an empty answer.
 @MainActor
 protocol FirstRunRulesSource: AnyObject {
     func rulesProjects() async -> [ProjectRow]?
@@ -13,7 +14,8 @@ protocol FirstRunRulesSource: AnyObject {
 
 extension AppModel: FirstRunRulesSource {}
 
-/// The Rules screen's decisions, apart from the view so they can be tested
+/// The per-repo rules' decisions, which Customize on Tools draws, apart from
+/// the view so they can be tested
 /// (#1030 `ftux-model.ts`: `groupState`, `toggleGroup`, `applyRule`,
 /// `pastSessionSummary`).
 ///
@@ -81,49 +83,54 @@ enum RulesScreenLayout {
         /// Automatic: nothing is written until the core's arming
         /// confirmation is accepted (`confirmArming`).
         case needsConfirmation
-        /// Not for this person or this folder; nothing is written.
+        /// Not for this folder; nothing is written.
         case refused
     }
 
-    /// The modes a folder's picker offers. Automatic needs an enrollment the
-    /// daemon holds (`FirstRunState.holdsEnrolment`), so a person without
-    /// one -- watching only, a passkey not yet bound -- is not offered it; a folder the daemon already
-    /// arms keeps it, so the picker can show what is in force, and picking
-    /// it again is not a change.
+    /// The modes a folder's picker offers: every mode the daemon would set
+    /// for it. Automatic is offered before sign-in, as on Uses (Ron,
+    /// 2026-10-22): it is confirmed when picked and armed at Start, once the
+    /// enrollment it needs is held (`FirstRunPlan`), and until then the row
+    /// says it turns on once the person signs in (`armsAfterSignIn`).
     static func offeredModes(_ project: ProjectRow, state: FirstRunState) -> [ProjectMode] {
-        let modes = project.offerableModes
-        guard !FirstRunNavigation.canChooseAutomatic(state), project.mode != .autoUpload else { return modes }
-        return modes.filter { $0 != .autoUpload }
+        project.offerableModes
     }
 
-    /// A pick on a folder's picker. The daemon's own mode clears the
-    /// folder's answer, so it is not sent again. Automatic is a grant, so
-    /// it is never silent: it waits for the arming confirmation, and a
-    /// person without an enrollment is refused it.
+    /// A pick on a folder's picker. The daemon's own Never or Automatic
+    /// clears the folder's answer, so it is not sent again. Ask is kept
+    /// even when the daemon already reads Ask: an Ask the person picked
+    /// stays an exception to "Automatic, including existing history" chosen
+    /// later on Uses (owner decision 2026-10-29, #1747), and `FirstRunPlan`
+    /// sends it after the grant. Automatic is a grant, so it is never
+    /// silent: it waits for the arming confirmation.
     static func pick(_ state: inout FirstRunState, project: ProjectRow, wanted: ProjectMode) -> PickOutcome {
         let id = project.projectId
-        if wanted == project.mode {
+        if wanted == project.mode, wanted != .ask {
             state.rules[id] = nil
             if wanted == .ignore { state.pastSelections[id] = nil }
             return .applied
         }
         guard project.offerableModes.contains(wanted) else { return .refused }
-        if wanted == .autoUpload {
-            return FirstRunNavigation.canChooseAutomatic(state) ? .needsConfirmation : .refused
-        }
+        if wanted == .autoUpload { return .needsConfirmation }
         setRule(&state, projectID: id, mode: wanted)
         return .applied
     }
 
     /// The arming confirmation was accepted: the only writer of Automatic.
-    /// Refused for a person without an enrollment and for a folder the daemon will
-    /// not arm, whatever the view asked.
+    /// Refused for a folder the daemon will not arm, whatever the view
+    /// asked. Without an enrollment it is recorded, not sent: Start arms it
+    /// after sign-in.
     static func confirmArming(_ state: inout FirstRunState, project: ProjectRow) -> Bool {
-        guard FirstRunNavigation.canChooseAutomatic(state),
-            project.offerableModes.contains(.autoUpload)
-        else { return false }
+        guard project.offerableModes.contains(.autoUpload) else { return false }
         state.rules[project.projectId] = .autoUpload
         return true
+    }
+
+    /// A folder set to Automatic in this first run that cannot be armed yet,
+    /// for want of an enrollment: its row says it turns on once the person
+    /// signs in, as Uses' Automatic does.
+    static func armsAfterSignIn(_ state: FirstRunState, project: ProjectRow) -> Bool {
+        state.rules[project.projectId] == .autoUpload && !FirstRunNavigation.canChooseAutomatic(state)
     }
 
     /// Set a folder's rule other than Automatic, which only
@@ -266,16 +273,6 @@ enum RulesScreenLayout {
         return ListFormatter.localizedString(byJoining: watched.map(\.displayName))
     }
 
-    /// Ron's #1030 `RULE_DOTS`: Ask on the ask colour, Automatic on the
-    /// on colour, Never on the off colour.
-    static func dot(for mode: ProjectMode) -> GlassStatus? {
-        switch mode {
-        case .ask: return .ask
-        case .autoUpload: return .on
-        case .ignore: return .off
-        }
-    }
-
     /// The retry beside `rules.unavailable`: Rules' own word, `rules.retry`
     /// (owner ruling, 2026-10-06), not the one Folders and Tools offer when
     /// discovery fails.
@@ -292,384 +289,15 @@ enum RulesScreenLayout {
         return loadFailed && !loading ? .failed : .loading
     }
 
-    /// Continue waits for the folders: never while they are loading or
-    /// could not be read.
-    static func canContinue(projects: [ProjectRow]?) -> Bool {
-        projects != nil
-    }
-
     /// The folder as a row names it: its path, or its label without one.
     static func folder(_ project: ProjectRow) -> String {
         project.projectPath.isEmpty ? project.displayLabel : project.projectPath
     }
 }
 
-/// What Rules draws in place of its cards (`RulesScreenLayout.phase`).
+/// What Customize draws in place of its repos (`RulesScreenLayout.phase`).
 enum RulesLoadPhase: Equatable {
     case loading
     case failed
     case loaded([ProjectRow])
-}
-
-/// Ron's Rules screen (#1030 `rules-screen.tsx`, Custom setup's W-5) in
-/// glass: a rule per folder found in the watched tools' sessions, then the
-/// past sessions of each folder to include as the person's own approval.
-struct RulesScreen: View {
-    private static let collapsedSessions = 2
-
-    let copy: FirstRunCopy
-    @ObservedObject var runner: FirstRunRunner
-    /// Where the folders and their past sessions are read (the app model).
-    let source: any FirstRunRulesSource
-
-    @State private var projects: [ProjectRow]?
-    @State private var loadFailed = false
-    /// A read is in flight, so a second press of Retry does not start another.
-    @State private var loading = false
-    @State private var sessions: [String: [PastSession]] = [:]
-    /// Each folder's older sessions beyond the ones listed (`not_listed`).
-    @State private var notListed: [String: Int] = [:]
-    /// Folders whose past sessions were refused: drawn as unavailable, not
-    /// as an empty list beside card 1's count.
-    @State private var refused: Set<String> = []
-    @State private var armingCandidate: ProjectRow?
-    @State private var open: Set<String> = []
-    @State private var showingAll: Set<String> = []
-
-    private var modeCopy: ContributionModeCopy? { ProjectModeWords.table }
-
-    var body: some View {
-        FirstRunFrame(
-            copy: copy,
-            state: $runner.state,
-            footer: FirstRunFooter(
-                title: copy.frame.continueButton,
-                isEnabled: RulesScreenLayout.canContinue(projects: projects),
-                action: { runner.state = FirstRunNavigation.next(runner.state) })
-        ) {
-            FirstRunTitle(light: copy.rules.titleLight, bold: copy.rules.titleBold)
-        } content: {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                content
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .task { await load() }
-        // One dialog for the list, named by whichever folder is being armed.
-        // Not presented without the core's words: arming is never confirmed
-        // against a sentence this shell wrote.
-        .glassModal(isPresented: Binding(
-            get: { armingCandidate.flatMap(armingCopy) != nil },
-            set: { if !$0 { armingCandidate = nil } })
-        ) {
-            if let project = armingCandidate, let words = armingCopy(project) {
-                GlassConfirmation(
-                    title: words.question, message: words.body,
-                    actions: [
-                        .cancel(words.decline) { armingCandidate = nil },
-                        GlassModalAction(words.confirm, isDefault: true) {
-                            _ = RulesScreenLayout.confirmArming(&runner.state, project: project)
-                            armingCandidate = nil
-                        },
-                    ],
-                    onCancel: { armingCandidate = nil })
-            }
-        }
-    }
-
-    /// The arming confirmation's words, from the core, as Settings asks
-    /// them. No count is in hand here, so the evidence line is not drawn.
-    private func armingCopy(_ project: ProjectRow) -> ProjectArmingCopy? {
-        ProjectArmingCopy.decode(
-            fromJSON: TCCoreCopy.armingOfferCopyJSON(
-                project: project.displayLabel,
-                count: 0))
-    }
-
-    @ViewBuilder private var content: some View {
-        switch RulesScreenLayout.phase(projects: projects, loadFailed: loadFailed, loading: loading) {
-        case .loaded(let projects):
-            if projects.isEmpty {
-                GlassCard(quiet: true) {
-                    Text(copy.rules.empty)
-                        .glassType(GlassTokens.TypeScale.body)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else {
-                rulesCard(projects)
-                pastSessionsCard(projects)
-            }
-        case .failed:
-            // No Back to retry through (Ron's review of #1235, item 9): the
-            // core's retry reads the folders again.
-            HStack(spacing: GlassTokens.Space.s4) {
-                GlassNotice(tone: .outside) {
-                    Text(copy.rules.unavailable)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                Button(RulesScreenLayout.retryTitle(copy)) { Task { await load() } }
-                    .buttonStyle(GlassButtonStyle(.secondary))
-                    .disabled(loading)
-            }
-        case .loading:
-            HStack(spacing: GlassTokens.Space.s4) {
-                GlassSpinner()
-                Text(copy.rules.loading)
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textSecondary)
-            }
-        }
-    }
-
-    // MARK: Card 1: a rule per folder
-
-    private func rulesCard(_ projects: [ProjectRow]) -> some View {
-        GlassEyebrowCard(
-            FirstRunCopy.fill(copy.rules.reposFound, ["tools": RulesScreenLayout.toolNames(runner.state)])
-        ) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(projects.enumerated()), id: \.element.id) { index, project in
-                    GlassTableRow(first: index == 0) { ruleRow(project) }
-                }
-            }
-        }
-    }
-
-    private func ruleRow(_ project: ProjectRow) -> some View {
-        let folder = RulesScreenLayout.folder(project)
-        return HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(folder)
-                    .glassType(GlassTokens.TypeScale.mono)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if let count = sessionCount(project) {
-                    Text(FirstRunCopy.fill(copy.frame.sessionCount, ["count": String(count)]))
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
-                }
-            }
-            Spacer(minLength: 0)
-            if let modeCopy {
-                GlassPicker(
-                    FirstRunCopy.fill(copy.rules.ruleFor, ["folder": folder]),
-                    selection: Binding<ProjectMode?>(
-                        get: { RulesScreenLayout.rule(runner.state, for: project) },
-                        set: { wanted in
-                            guard let wanted else { return }
-                            // Arming is a grant, so it is never silent.
-                            if RulesScreenLayout.pick(&runner.state, project: project, wanted: wanted) == .needsConfirmation {
-                                armingCandidate = project
-                            }
-                        }),
-                    options: ProjectModeChoices.options(
-                        for: RulesScreenLayout.offeredModes(project, state: runner.state),
-                        copy: modeCopy, dot: RulesScreenLayout.dot(for:)),
-                    placeholder: copy.frame.choose)
-            }
-        }
-    }
-
-    /// A folder's session count as card 1 and a Never folder show it: the
-    /// sessions of its watched tools (`watchedSessionCount`), since Rules
-    /// offers no other. The selection counts ("{selected} of {total}") are
-    /// over listed rows, what a person could tick.
-    private func sessionCount(_ project: ProjectRow) -> Int? {
-        RulesScreenLayout.watchedSessionCount(project, state: runner.state)
-    }
-
-    // MARK: Card 2: past sessions, by folder
-
-    private func pastSessionsCard(_ projects: [ProjectRow]) -> some View {
-        let summary = RulesScreenLayout.summary(runner.state, projects: projects, sessions: sessions)
-        return GlassCard {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                HStack {
-                    Text(copy.rules.pastSessions)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    Spacer(minLength: GlassTokens.Space.s4)
-                    Text(
-                        FirstRunCopy.fill(
-                            copy.rules.selectedSummary,
-                            ["selected": String(summary.selected), "total": String(summary.total)])
-                    )
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                }
-                if let note = RulesScreenLayout.pastSessionsNote(runner.state, copy: copy.rules) {
-                    Text(note)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                ForEach(projects) { project in
-                    folderSessions(project)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private func folderSessions(_ project: ProjectRow) -> some View {
-        let id = project.projectId
-        let folder = RulesScreenLayout.folder(project)
-        let rows = sessions[id] ?? []
-        if RulesScreenLayout.rule(runner.state, for: project) == .ignore {
-            // Ron's dimmed Never row (`ftux-muted-row`), dimmed by ink, not
-            // opacity: tertiary text still clears 4.5:1 in both appearances
-            // (owner ruling, 2026-10-07: the floors win everywhere).
-            HStack(spacing: GlassTokens.Space.s4) {
-                GlassCheckMark(checked: false)
-                Text(folder)
-                    .glassType(GlassTokens.TypeScale.mono)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
-                Text(FirstRunCopy.fill(copy.rules.neverCount, ["count": String(sessionCount(project) ?? rows.count)]))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(FirstRunCopy.fill(copy.rules.neverLabel, ["folder": folder]))
-        } else if refused.contains(id) {
-            HStack(spacing: GlassTokens.Space.s4) {
-                Text(folder)
-                    .glassType(GlassTokens.TypeScale.mono)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
-                Text(copy.rules.sessionsUnavailable)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-            }
-        } else {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                HStack(spacing: GlassTokens.Space.s4) {
-                    includeEvery(project, rows: rows, folder: folder)
-                    GlassExpander(folder, isOpen: openBinding(id))
-                    Text(
-                        FirstRunCopy.fill(
-                            copy.rules.folderSelected,
-                            [
-                                "selected": String(rows.filter { runner.state.pastSelections[id]?.contains($0.id) == true }.count),
-                                "total": String(rows.count),
-                            ])
-                    )
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                }
-                if open.contains(id) {
-                    sessionList(project, rows: rows)
-                        .padding(.leading, GlassTokens.Space.s8)
-                    if let note = RulesScreenLayout.notListedNote(notListed[id] ?? 0, copy: copy.rules) {
-                        Text(note)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .padding(.leading, GlassTokens.Space.s8)
-                    }
-                }
-            }
-        }
-    }
-
-    /// The folder's mixed-state box. Each tickable row is one source, so the
-    /// style reads mixed from the rows; every source writes the whole folder
-    /// through `includeEvery`. The folder is named once, by the expander
-    /// beside the box, so the box's sentence is its accessibility label and
-    /// not drawn. With nothing to tick the box is off and disabled.
-    @ViewBuilder private func includeEvery(_ project: ProjectRow, rows: [PastSession], folder: String) -> some View {
-        let label = FirstRunCopy.fill(copy.rules.includeEvery, ["folder": folder])
-        let tickable = rows.filter(RulesScreenLayout.isTickable)
-        if tickable.isEmpty {
-            Toggle(isOn: .constant(false)) { EmptyView() }
-                .toggleStyle(GlassCheckboxStyle())
-                .disabled(true)
-                .accessibilityLabel(label)
-        } else {
-            Toggle(sources: tickable.map { groupBinding(project.projectId, rows: rows, $0) }, isOn: \.self) {
-                EmptyView()
-            }
-            .toggleStyle(GlassCheckboxStyle())
-            .accessibilityLabel(label)
-        }
-    }
-
-    private func sessionList(_ project: ProjectRow, rows: [PastSession]) -> some View {
-        let id = project.projectId
-        let all = showingAll.contains(id)
-        let visible = all ? rows : Array(rows.prefix(Self.collapsedSessions))
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            ForEach(visible) { session in
-                Toggle(isOn: tickBinding(id, session)) {
-                    Text(RulesScreenLayout.labelParts(session, copy: copy.rules).joined(separator: " · "))
-                }
-                .toggleStyle(GlassCheckboxStyle())
-                .disabled(!RulesScreenLayout.isTickable(session))
-            }
-            if rows.count > Self.collapsedSessions {
-                Button(all ? copy.rules.showFewer : FirstRunCopy.fill(copy.rules.showAll, ["count": String(rows.count)])) {
-                    withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
-                        if all { showingAll.remove(id) } else { showingAll.insert(id) }
-                    }
-                }
-                .buttonStyle(GlassButtonStyle(.link))
-            }
-        }
-    }
-
-    private func tickBinding(_ projectID: String, _ session: PastSession) -> Binding<Bool> {
-        Binding(
-            get: { runner.state.pastSelections[projectID]?.contains(session.id) == true },
-            set: { on in RulesScreenLayout.setTicked(&runner.state, projectID: projectID, session: session, on: on) })
-    }
-
-    /// One row as a source of the folder's box: read per row, written for
-    /// the whole folder.
-    private func groupBinding(_ projectID: String, rows: [PastSession], _ session: PastSession) -> Binding<Bool> {
-        Binding(
-            get: { runner.state.pastSelections[projectID]?.contains(session.id) == true },
-            set: { on in RulesScreenLayout.includeEvery(&runner.state, projectID: projectID, sessions: rows, on: on) })
-    }
-
-    private func openBinding(_ id: String) -> Binding<Bool> {
-        Binding(
-            get: { open.contains(id) },
-            set: { isOpen in
-                if isOpen { open.insert(id) } else { open.remove(id) }
-            })
-    }
-
-    // MARK: Loading
-
-    /// The folders, then each folder's past sessions. The first folder opens,
-    /// as Ron's does. Folders that cannot be read say so with a retry, which
-    /// calls this again, and Continue stays disabled until they load; a
-    /// folder whose sessions are refused is drawn as unavailable and lists
-    /// nothing to tick.
-    private func load() async {
-        guard projects == nil, !loading else { return }
-        loading = true
-        defer { loading = false }
-        guard let all = await source.rulesProjects() else {
-            loadFailed = true
-            return
-        }
-        let loaded = RulesScreenLayout.offered(all, state: runner.state)
-        loadFailed = false
-        if let first = loaded.first { open.insert(first.projectId) }
-        projects = loaded
-        for project in loaded {
-            guard let list = await source.pastSessions(projectID: project.projectId) else {
-                refused.insert(project.projectId)
-                continue
-            }
-            sessions[project.projectId] = RulesScreenLayout.offered(list.sessions, state: runner.state)
-            notListed[project.projectId] = list.notListed
-        }
-    }
 }

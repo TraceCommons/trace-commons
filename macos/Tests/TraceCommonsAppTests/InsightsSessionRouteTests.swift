@@ -204,6 +204,32 @@ final class InsightsSessionRouteTests: XCTestCase {
         XCTAssertNil(InsightsRouteWords.split(unobserved, copy: copy), "no record has no figures to split")
     }
 
+    /// A session the proxy saw none of (no record, or no route at all) draws
+    /// no Private AI line: on a week of direct calls every row said "No
+    /// record" (owner, 2026-10-29). Every other category still draws it.
+    func testNoProxyRecordDrawsNoPrivateAILine() throws {
+        XCTAssertFalse(InsightsRouteWords.drawsLine(nil))
+        XCTAssertFalse(InsightsRouteWords.drawsLine(try Self.route("unobserved")))
+        for category in ["unrecorded", "outside", "mixed", "check_failed", "routed_verified",
+                         "routed_unverified", "from_the_future"] {
+            XCTAssertTrue(InsightsRouteWords.drawsLine(try Self.route(category)), category)
+        }
+        let source = try InsightsGlassConventionsTests.text("Views/InsightsOverviewTab.swift")
+        XCTAssertTrue(source.contains("if routed, InsightsRouteWords.drawsLine(row.session.routing) {"))
+        XCTAssertTrue(source.contains("if routed, rows.contains(where: { InsightsRouteWords.drawsLine($0.session.routing) }) {"),
+                      "the per-call note goes with the lines")
+    }
+
+    /// A row's state and reasons are one line, the full text on hover and
+    /// read whole by VoiceOver (owner, 2026-10-29: the day's rows felt
+    /// crowded).
+    func testARowsReasonsAreOneLineWithTheFullTextOnHover() throws {
+        let glass = try InsightsGlassConventionsTests.text("Views/InsightsGlass.swift")
+        XCTAssertTrue(glass.contains(
+            "Text(coverage).insightsCaption()\n                    .lineLimit(1).truncationMode(.tail)\n                    .help(coverage)"),
+            "the reasons line wraps again")
+    }
+
     func testTheSplitLineIsInProxyTokensWithTheDashForUnknown() throws {
         let copy = try Self.coreCopy()
         let rows = try XCTUnwrap(Self.decode(Self.recorded()).rollup?.sessions)
@@ -245,10 +271,16 @@ final class InsightsSessionRouteTests: XCTestCase {
                        "an unknown reason is left out, never shown as its wire label")
     }
 
-    func testARowIsLabelledFromItsFirstEventAndHarness() throws {
+    func testARowWithoutLastActivityIsLabelledFromItsFirstEventAndHarness() throws {
         let copy = try Self.coreCopy()
         let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
-        let rows = try XCTUnwrap(Self.decode(Self.recorded()).rollup?.sessions)
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var recorded = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        for index in recorded.indices { recorded[index].removeValue(forKey: "last_event_at") }
+        rollup["sessions"] = recorded
+        object["rollup"] = rollup
+        let rows = try XCTUnwrap(Self.decode(object).rollup?.sessions)
         let claude = try XCTUnwrap(rows.first { $0.source == "claude_code" })
         let label = InsightsSessionsWords.counterLabel(claude, copy: copy, timeZone: utc)
         let first = try XCTUnwrap(DateComponents(calendar: Calendar(identifier: .gregorian), timeZone: utc,
@@ -268,10 +300,111 @@ final class InsightsSessionRouteTests: XCTestCase {
                        ]))
     }
 
+    func testBreakdownUsesFolderAndSessionReference() throws {
+        let copy = try Self.coreCopy()
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        rows[0]["folder"] = "trace-commons-server"
+        rows[0]["session_ref"] = "t42"
+        rows[1]["folder"] = "trace-commons-server"
+        rows[1]["session_ref"] = "t43"
+        rollup["sessions"] = rows
+        object["rollup"] = rollup
+        let sessions = try XCTUnwrap(Self.decode(object).rollup?.sessions)
+        XCTAssertEqual(InsightsSessionsWords.counterTitle(sessions[0], copy: copy),
+                       "trace-commons-server · t42")
+        XCTAssertEqual(InsightsSessionsWords.counterTitle(sessions[1], copy: copy),
+                       "trace-commons-server · t43")
+        XCTAssertEqual(sessions[0].sessionRef, "t42")
+    }
+
+    func testOlderBreakdownPayloadUsesUnknownFolderWithoutInventingAnIdentifier() throws {
+        let copy = try Self.coreCopy()
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        for index in rows.indices {
+            rows[index].removeValue(forKey: "folder")
+            rows[index].removeValue(forKey: "session_ref")
+        }
+        rollup["sessions"] = rows
+        object["rollup"] = rollup
+        let session = try XCTUnwrap(Self.decode(object).rollup?.sessions.first)
+        XCTAssertEqual(InsightsSessionsWords.counterTitle(session, copy: copy),
+                       try XCTUnwrap(copy["analytics_folder_unknown"]))
+        XCTAssertNil(session.sessionRef)
+    }
+
+    func testBreakdownShowsLastRecordedActivityInItsTimeRange() throws {
+        let copy = try Self.coreCopy()
+        _ = try XCTUnwrap(copy["analytics_session_label_range"])
+        let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        rows[0]["started_at"] = "2026-10-22T13:53:00Z"
+        for end in ["2026-10-22T15:05:00Z", "2026-10-23T01:05:00Z"] {
+            rows[0]["last_event_at"] = end
+            rollup["sessions"] = rows
+            object["rollup"] = rollup
+            let session = try XCTUnwrap(Self.decode(object).rollup?.sessions.first)
+            let label = InsightsSessionsWords.counterLabel(session, copy: copy, timeZone: utc)
+            let last = try Date(end, strategy: .iso8601)
+            XCTAssertTrue(label.contains(last.formatted(Date.FormatStyle(timeZone: utc).hour().minute())),
+                          "Last recorded activity must distinguish sessions: \(label)")
+            if end.contains("10-23") {
+                XCTAssertTrue(label.contains(last.formatted(Date.FormatStyle(timeZone: utc)
+                    .month(.abbreviated).day())), "An overnight session must show the end date")
+            }
+        }
+    }
+
+    func testBreakdownTimeRangeUsesEachEventsLocalOffsetAcrossDaylightSaving() throws {
+        let copy = try Self.coreCopy()
+        let zone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        rows[0]["started_at"] = "2026-11-01T08:30:00Z"
+        rows[0]["last_event_at"] = "2026-11-01T10:30:00Z"
+        rollup["sessions"] = rows
+        object["rollup"] = rollup
+        let row = try XCTUnwrap(Self.decode(object).rollup?.sessions.first)
+        let last = try Date("2026-11-01T10:30:00Z", strategy: .iso8601)
+        let label = InsightsSessionsWords.counterLabel(row, copy: copy, timeZone: zone)
+        XCTAssertTrue(label.contains(last.formatted(Date.FormatStyle(timeZone: zone).hour().minute())),
+                      "End time must use its own daylight-saving offset: \(label)")
+    }
+
+    func testBreakdownDoesNotInventAnEndTimeForOlderOrInvalidPayloads() throws {
+        let copy = try Self.coreCopy()
+        let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        var object = try Self.recorded()
+        var rollup = try XCTUnwrap(object["rollup"] as? [String: Any])
+        var rows = try XCTUnwrap(rollup["sessions"] as? [[String: Any]])
+        rows[0]["started_at"] = "2026-10-22T13:53:00Z"
+        rows[0].removeValue(forKey: "last_event_at")
+        rollup["sessions"] = rows
+        object["rollup"] = rollup
+        let older = try XCTUnwrap(Self.decode(object).rollup?.sessions.first)
+        let expected = InsightsSessionsWords.counterLabel(older, copy: copy, timeZone: utc)
+        for end in ["invalid", "2026-10-21T12:00:00Z"] {
+            rows[0]["last_event_at"] = end
+            rollup["sessions"] = rows
+            object["rollup"] = rollup
+            let session = try XCTUnwrap(Self.decode(object).rollup?.sessions.first)
+            XCTAssertEqual(InsightsSessionsWords.counterLabel(session, copy: copy, timeZone: utc), expected)
+        }
+    }
+
     // MARK: The model
 
+    /// Under feed T the Sessions figure's breakdown is the daemon's counted
+    /// sessions, always there while the week shows (owner, 2026-10-22: no
+    /// chevron), and the core is never asked; no figure drills.
     @MainActor
-    func testUnderFeedTOnlyTheSessionsCardDrillsAndItAsksNobody() async throws {
+    func testUnderFeedTTheSessionsBreakdownIsTheDaemonsAndAsksNobody() async throws {
         let calls = CallCounter()
         let model = InsightsOverviewModel(service: { _ in
             await calls.bump(); throw InsightsError.invalidResponse
@@ -282,52 +415,48 @@ final class InsightsSessionRouteTests: XCTestCase {
         let week = try Self.decode(Self.recorded())
         model.showCounter(week.coreOverview, sessions: InsightsCounterSessions(week: week))
 
-        XCTAssertTrue(model.drills("sessions"))
-        XCTAssertFalse(model.drills("tokens"), "feed T rows carry no reference for the core's drill")
-        XCTAssertFalse(model.drills("cache_share"))
+        for card in ["sessions", "tokens", "cache_share"] {
+            XCTAssertFalse(model.drills(card), "feed T rows carry no reference for the core's drill: \(card)")
+        }
+        let breakdown = try XCTUnwrap(model.counterSessions)
+        XCTAssertEqual(breakdown.rows.count, 2)
+        XCTAssertEqual(breakdown.column, .shown)
 
         model.showInputs("tokens")
-        XCTAssertNil(model.counterInputs)
-        XCTAssertNil(model.openCard)
         model.showInputs("sessions")
-        let open = try XCTUnwrap(model.counterInputs)
-        XCTAssertEqual(open.rows.count, 2)
-        XCTAssertEqual(open.column, .shown)
-        XCTAssertEqual(model.openCard, "sessions")
+        XCTAssertNil(model.openCard)
         let after = await calls.count
         XCTAssertEqual(after, before, "feed T's rows are the daemon's; the core is not asked")
 
-        model.hideInputs()
-        XCTAssertNil(model.counterInputs)
-        model.showInputs("sessions")
         model.showCounter(nil)
-        XCTAssertNil(model.counterInputs, "going back to the saved week closes feed T's drill")
-        XCTAssertFalse(model.drills("sessions") && model.counter != nil)
+        XCTAssertNil(model.counterSessions, "going back to the saved week drops feed T's rows")
         model.close()
     }
 
+    /// Under feed S the tokens and cache share figures still drill; the
+    /// Sessions figure does not, since its breakdown is always shown.
     @MainActor
-    func testUnderFeedSEveryCardStillDrills() {
+    func testUnderFeedSTheFiguresStillDrill() {
         let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
-        for card in ["tokens", "cache_share", "sessions"] { XCTAssertTrue(model.drills(card), card) }
+        for card in ["tokens", "cache_share"] { XCTAssertTrue(model.drills(card), card) }
+        XCTAssertFalse(model.drills("sessions"))
     }
 
     @MainActor
-    func testAClosedOverviewOpensNoFeedTDrill() throws {
-        // As under the saved week: nothing opens while the tab is closed.
+    func testAClosedOverviewOpensNoDrill() throws {
+        // Nothing opens while the tab is closed.
         let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
-        let week = try Self.decode(Self.recorded())
-        model.showCounter(week.coreOverview, sessions: InsightsCounterSessions(week: week))
-        model.showInputs("sessions")
-        XCTAssertNil(model.counterInputs)
+        model.showInputs("tokens")
         XCTAssertNil(model.openCard)
+        XCTAssertNil(model.sessionsInputs)
     }
 
     @MainActor
-    func testAFeedTWeekWithoutRowsDoesNotDrill() throws {
+    func testAFeedTWeekWithoutRowsHasNoBreakdown() throws {
         let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
         let week = try Self.decode(Self.recorded())
         model.showCounter(week.coreOverview, sessions: nil)
+        XCTAssertNil(model.counterSessions)
         XCTAssertFalse(model.drills("sessions"))
     }
 
@@ -339,7 +468,10 @@ final class InsightsSessionRouteTests: XCTestCase {
         // A figure drills only when `drills` says so; one that does not is
         // drawn plain, not as a disabled button.
         XCTAssertTrue(source.contains("if model.drills(inputs) {"))
-        XCTAssertTrue(source.contains("InsightsCounterSessionsView("))
+        // A picked day's sessions are drawn in the window's inspector
+        // (owner, 2026-10-29).
+        XCTAssertTrue(try InsightsGlassConventionsTests.text("Views/InsightsBreakdownInspector.swift")
+            .contains("InsightsCounterSessionsView("))
         for key in ["analytics_drill_private", "analytics_route_measure_note"] {
             XCTAssertTrue(source.contains("\"\(key)\""), key)
         }

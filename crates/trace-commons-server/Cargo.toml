@@ -61,7 +61,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 toml = "1"
-zstd = "0.13"
+zstd = "0.14.3"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
 # `receipt`: this crate recovers EIP-191 signers, both for NEAR AI inference
 # receipts and for redaction-witness certificates. The feature is off by
@@ -82,7 +82,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
-webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
 google-cloud-storage = { version = "0.24", optional = true }
 google-cloud-kms = { version = "0.6", optional = true }
 hf-hub = { version = "0.4.3", default-features = false, features = ["tokio", "rustls-tls"] }
@@ -124,6 +123,14 @@ near-ai-scorer = ["trace-commons-gate-enclave/near-ai-scorer"]
 # is not the alternative: FMSPC extraction and CRL handling are exactly what
 # `dcap-qvl` gets right.
 near-attestation-collateral = ["trace-commons-attestation/collateral-client"]
+# Switch the compiled-in NEAR AI API base (`src/near_ai_api.rs`) to NEAR AI
+# staging, for login introspection and the NEAR AI payout rail together.
+# Readiness reports it. Never enabled in a release workflow or a shipped
+# manifest: scripts/ci/check-release-staging-feature.sh refuses one that does.
+# One line, so that script can permit this exact definition. It also
+# compiles the attestation crate's signed pin-set format, which the staging
+# pin re-sign tool (`trace-commons-staging-pins`) signs and checks.
+near-ai-staging = ["trace-commons-attestation/near-ai-staging"]
 
 [[bin]]
 name = "trace-commons-gate-calibrate"
@@ -147,6 +154,10 @@ name = "trace-commons-review"
 path = "src/bin/trace-commons-review.rs"
 
 [[bin]]
+name = "trace-commons-repair-upload-ownership"
+path = "src/bin/trace-commons-repair-upload-ownership.rs"
+
+[[bin]]
 name = "trace-commons-admin"
 path = "src/bin/trace-commons-admin.rs"
 
@@ -166,6 +177,15 @@ path = "src/bin/trace-commons-smoke-envelope.rs"
 name = "trace-commons-witness"
 path = "src/bin/trace-commons-witness.rs"
 
+# The staging NEAR AI pin re-sign tool: observes NEAR AI staging's enclave
+# measurements and signs the pin set a staging app trusts. Operators run it;
+# nothing ships it. `observe` also needs `near-attestation-collateral` to
+# fetch Intel collateral, and refuses with that control's name without it.
+[[bin]]
+name = "trace-commons-staging-pins"
+path = "src/bin/trace-commons-staging-pins.rs"
+required-features = ["near-ai-staging"]
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 # The contributor crate, for `tests/witness_certificate_cross_implementation.rs`
@@ -179,14 +199,3 @@ tower = { version = "0.5", features = ["util"] }
 # promoted to a normal dependency.
 trace-commons-contributor = { path = "../trace-commons-contributor" }
 wiremock = "0.6"
-# Test-only software WebAuthn authenticator (SoftPasskey) used to drive the
-# passkey enrollment/login ceremonies end-to-end. Pinned to =0.5.5 because that
-# release pins webauthn-rs-core/proto =0.5.5, matching our webauthn-rs 0.5.5 so
-# the ceremony types interop. default-features = false keeps the hardware
-# hardware backends (USB/NFC/BLE) out; the "softpasskey" feature pulls in only
-# the software authenticator (and its crypto/ctap2 encode path, no hardware
-# transports). This is a [dev-dependencies] entry and MUST NOT be promoted to a
-# normal dependency — it must never link into the shipped binaries.
-webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = [
-    "softpasskey",
-] }

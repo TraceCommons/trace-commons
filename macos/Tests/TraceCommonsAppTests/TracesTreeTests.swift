@@ -197,13 +197,17 @@ final class TracesTreeTests: XCTestCase {
         XCTAssertNil(selection, "a second click on the folder clears it")
         XCTAssertFalse(showsInspector, "clearing is not a demand to open the inspector")
 
-        // Both rows toggle; the Review pill always selects, as Ron's onSubmit.
+        // Both rows toggle. A session's pill is Submit (owner, 2026-10-22):
+        // it sends the trace while it can be sent, and Return still opens
+        // the selected session's review.
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
         XCTAssertTrue(source.contains(
             "onSelect: { selection = Self.toggled(.folder(projectID: folder.id), current: selection) }"))
         XCTAssertTrue(source.contains(
             "onSelect: { selection = Self.toggled(.session(entryID: entry.entryId), current: selection) }"))
-        XCTAssertTrue(source.contains("onSubmit: { onReview(entry.entryId) }"))
+        XCTAssertTrue(source.contains("onSubmit: store.maySubmitSession(entry, folderIgnored: off)\n"
+            + "                ? { Task { await store.submitSession(entry, folderIgnored: off) } } : nil,"))
+        XCTAssertTrue(source.contains("onReview(entryID)"), "Return opens the review")
     }
 
     /// Up and down walk the rows as drawn, folders included, so the
@@ -671,59 +675,72 @@ final class TracesQueueStateTests: XCTestCase {
         return try DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: data)
     }
 
-    private static func spend(_ object: inout [String: Any]) {
-        var budget = object["daily_budget"] as? [String: Any] ?? [:]
-        budget["blocked"] = true
-        budget["blocked_entries"] = 2
-        object["daily_budget"] = budget
-    }
-
-    /// A spent budget says so, in the words the main window uses for it; a
-    /// healthy queue says nothing.
-    func test_aSpentBudgetIsSaid() async throws {
+    /// A healthy queue says nothing. Nor does a blocked `daily_budget` from
+    /// an older daemon: the daily upload limit is retired.
+    func test_aHealthyQueueAndARetiredBudgetSayNothing() async throws {
         let healthy = try await status()
         XCTAssertTrue(TracesStore.safeguards(healthy).isEmpty)
-        let spent = try await status(Self.spend)
-        XCTAssertEqual(TracesStore.safeguards(spent).map(\.title), [DailyBudgetCopy.title])
+        let blocked = try await status {
+            $0["daily_budget"] = ["blocked": true, "blocked_entries": 2]
+        }
+        XCTAssertTrue(TracesStore.safeguards(blocked).isEmpty)
         XCTAssertTrue(TracesStore.safeguards(nil).isEmpty)
     }
 
-    /// The health label is said when nothing more specific already says it,
-    /// and not twice when the budget does.
+    /// The health label is said when nothing more specific already says it.
     func test_theHealthLabelIsNotSaidTwice() async throws {
-        let full = try await status { $0["health"] = ["last_error_label": "queue-full"] }
-        XCTAssertEqual(TracesStore.safeguards(full).map(\.title), [HealthCopy.core(label: "queue-full", maxQueueEntries: nil).title])
-        let capped = try await status {
-            $0["health"] = ["last_error_label": "daily-cap-reached"]
-            Self.spend(&$0)
+        let full = try await status {
+            $0["health"] = ["last_error_label": "queue-full"]
+            $0["queue_at_capacity"] = true
+            $0["queue_capacity_used"] = 500
         }
-        XCTAssertEqual(TracesStore.safeguards(capped).map(\.title), [DailyBudgetCopy.title])
+        XCTAssertEqual(TracesStore.safeguards(full).map(\.title), [HealthCopy.core(label: "queue-full", maxQueueEntries: nil).title])
+    }
+
+    func testExplicitSpareCapacitySuppressesOnlyTheStaleQueueFullLabel() async throws {
+        for capacity in [false, true, nil] as [Bool?] {
+            let read = try await status {
+                $0["health"] = ["last_error_label": "queue-full"]
+                $0["queue_at_capacity"] = capacity
+            }
+            let conditions = TracesStore.safeguards(read).map(\.condition)
+            XCTAssertEqual(conditions.contains("queue-full"), capacity != false,
+                           "only an authoritative capacity clear can retire the legacy label")
+        }
+    }
+
+    func testSpareQueueCapacityPreservesOtherHealth() async throws {
+        let other = try await status {
+            $0["queue_at_capacity"] = false
+            $0["health"] = ["last_error_label": "privacy-filter-canary-failed"]
+        }
+        XCTAssertTrue(TracesStore.safeguards(other).map(\.condition).contains("privacy-filter-canary-failed"))
+        let stale = try await status {
+            $0["queue_at_capacity"] = false
+            $0["health"] = ["last_error_label": "queue-full"]
+        }
+        XCTAssertFalse(TracesStore.safeguards(stale).map(\.condition).contains("queue-full"))
+    }
+
+    func testCapacityAloneDoesNotIntroduceANewQueueBanner() async throws {
+        let read = try await status {
+            $0["queue_at_capacity"] = true
+            $0["health"] = [:] as [String: String]
+        }
+        XCTAssertTrue(TracesStore.safeguards(read).isEmpty)
     }
 
     /// A full queue names the configured limit when the settings were read,
     /// in the core's words, as the main window's banner does.
     func test_aFullQueueNamesItsLimit() async throws {
-        let full = try await status { $0["health"] = ["last_error_label": "queue-full"] }
+        let full = try await status {
+            $0["health"] = ["last_error_label": "queue-full"]
+            $0["queue_at_capacity"] = true
+            $0["queue_capacity_used"] = 500
+        }
         let named = TracesStore.safeguards(full, maxQueueEntries: 500).first?.body
         XCTAssertEqual(named, HealthCopy.core(label: "queue-full", maxQueueEntries: 500).detail)
         XCTAssertNotEqual(named, TracesStore.safeguards(full, maxQueueEntries: nil).first?.body)
-    }
-
-    /// The badge pairs with the queue shield: something waiting that is
-    /// worth a second look adds the core's words to its text equivalent.
-    func test_theBadgeSaysWhenSomethingIsWorthASecondLook() throws {
-        let plain = try recordedEntry(["second_look": [String]()])
-        let flagged = try recordedEntry(["entry_id": "00000000-0000-4000-8000-000000000002", "second_look": ["nothing-matched"]])
-        XCTAssertEqual(TracesStore.shield([]), .clear)
-        XCTAssertEqual(TracesStore.shield([plain]), .waiting)
-        XCTAssertEqual(TracesStore.shield([plain, flagged]), .attention)
-
-        let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
-        let said = try XCTUnwrap(MonitorWindowView.tracesDescription(2, shield: .attention, secondLook: words.secondLookWaiting))
-        XCTAssertTrue(said.hasSuffix(words.secondLookWaiting), said)
-        XCTAssertEqual(
-            MonitorWindowView.tracesDescription(2, shield: .waiting, secondLook: words.secondLookWaiting),
-            TCCoreCopy.decisionsOwedText(2))
     }
 }
 

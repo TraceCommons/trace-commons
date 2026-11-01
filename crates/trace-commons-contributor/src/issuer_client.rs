@@ -181,8 +181,8 @@ impl IssuerClient {
     /// it, so partial codes burn it and the user is throttled just as the
     /// code completes.
     ///
-    /// Clients MUST present the returned `credit_range` as "estimated credit
-    /// per accepted trace, not yet settled", never as a payment promise. The
+    /// Clients MUST present the returned `credit_range` as an estimate,
+    /// never as a payment promise. The
     /// range is operator-set and not enforced by the ledger.
     pub async fn lookup_invite(
         &self,

@@ -44,6 +44,8 @@ pub enum Error {
         url: String,
         status: reqwest::StatusCode,
         body: String,
+        /// The response's `Retry-After` header, verbatim, if it sent one.
+        retry_after: Option<String>,
     },
 
     /// Server returned non-success status WITH a typed label in the body.
@@ -54,6 +56,8 @@ pub enum Error {
         status: reqwest::StatusCode,
         label: String,
         body: String,
+        /// The response's `Retry-After` header, verbatim, if it sent one.
+        retry_after: Option<String>,
     },
 
     /// A caller-supplied request header is not a legal HTTP header value.
@@ -234,6 +238,7 @@ mod tests {
             status: reqwest::StatusCode::FORBIDDEN,
             label: "PilotAllowlistNotMatched".into(),
             body: "{}".into(),
+            retry_after: None,
         };
         assert_eq!(labeled.server_label(), Some("PilotAllowlistNotMatched"));
 
@@ -249,6 +254,7 @@ mod tests {
             url: "https://api.example/v1/traces?token=secret".into(),
             status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             body: "...".into(),
+            retry_after: None,
         };
         let diag = err.user_diagnostic();
         assert!(

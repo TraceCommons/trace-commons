@@ -20,7 +20,7 @@ import TCShellCore
 /// The `call` requirement itself lives in `TCShellCore.DaemonTransport`,
 /// which this refines, so C1's `LiveDaemonClient` runs over the same
 /// seam (and the same `TCDaemon`) as `DaemonClient` without a parallel one.
-protocol DaemonCalling: DaemonTransport {
+protocol DaemonCalling: DaemonTransport, Sendable {
     func openPreview(entryID: String) throws -> TCPreview
     /// A COUNT of `needle` in the PRE-redaction session, never content.
     /// `nil` when it could not be checked -- which is not the same as zero,

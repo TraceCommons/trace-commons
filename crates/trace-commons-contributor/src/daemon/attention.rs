@@ -112,6 +112,12 @@ pub const N5_MIN_INTERVAL: Duration = Duration::hours(72);
 /// owner decision pending.
 pub const N5_STANDALONE_PER_WEEK: u32 = 1;
 
+/// NEAR AI credit received (N6): minimum interval between two
+/// notifications. The 25%-and-$1 rule in
+/// `nearai_credential::arrivals::credit_candidacy` is what keeps this kind
+/// rare; this only stops two in one day. DRAFT, owner decision pending.
+pub const N6_MIN_INTERVAL: Duration = Duration::hours(24);
+
 /// A re-engagement notification kind. The digest (N0) is not one: it is
 /// decided by `notify::digest_due_for_schedule` and arrives here as a
 /// [`DigestPlan`].
@@ -134,16 +140,20 @@ pub enum Kind {
     /// N5: the machine-wide settlement estimate grew, or its pricing moved.
     /// Never folds.
     SettlementEstimate,
+    /// N6: NEAR AI credit arrived, past the 25%-and-$1 rule since the last
+    /// one. Never folds.
+    NearAiCredit,
 }
 
 impl Kind {
-    /// Every kind, highest precedence first: N1 > N4 > N2 > N3 > N5.
-    pub const ALL: [Kind; 5] = [
+    /// Every kind, highest precedence first: N1 > N4 > N2 > N3 > N5 > N6.
+    pub const ALL: [Kind; 6] = [
         Kind::IdleSessions,
         Kind::InsightsTip,
         Kind::VerdictsLanded,
         Kind::WeeklyRecap,
         Kind::SettlementEstimate,
+        Kind::NearAiCredit,
     ];
 
     /// The stable label used on the wire, in settings keys and in logs.
@@ -155,6 +165,7 @@ impl Kind {
             Kind::VerdictsLanded => "verdicts_landed",
             Kind::WeeklyRecap => "weekly_recap",
             Kind::SettlementEstimate => "settlement_estimate",
+            Kind::NearAiCredit => "near_ai_credit",
         }
     }
 
@@ -168,6 +179,7 @@ impl Kind {
             Kind::VerdictsLanded => 2,
             Kind::WeeklyRecap => 3,
             Kind::SettlementEstimate => 4,
+            Kind::NearAiCredit => 5,
         }
     }
 
@@ -201,6 +213,11 @@ impl Kind {
                 per_week: Some(N5_STANDALONE_PER_WEEK),
                 counts_folds: false,
             },
+            Kind::NearAiCredit => KindCaps {
+                min_interval: N6_MIN_INTERVAL,
+                per_week: None,
+                counts_folds: false,
+            },
         }
     }
 }
@@ -222,6 +239,9 @@ pub enum Fact {
     /// The settlement estimate was announced; the candidate is built again
     /// only when the estimate has grown past the figures last announced.
     EstimateAnnounced,
+    /// The credit received was announced; the candidate is built again only
+    /// when enough more has arrived since.
+    CreditAnnounced,
 }
 
 impl Fact {
@@ -233,6 +253,7 @@ impl Fact {
             Fact::WeekEnded => "week_ended",
             Fact::SessionEnded => "session_ended",
             Fact::EstimateAnnounced => "estimate_announced",
+            Fact::CreditAnnounced => "credit_announced",
         }
     }
 }
@@ -290,6 +311,8 @@ pub struct NotifySettings {
     pub weekly_recap: bool,
     /// `notify.settlement_estimate`.
     pub settlement_estimate: bool,
+    /// `notify.near_ai_credit`.
+    pub near_ai_credit: bool,
     /// At least one live subscriber declared it can render `reengage_due`.
     /// Gates standalone only: a fold rides in `digest_due`.
     pub renderer: bool,
@@ -304,6 +327,7 @@ impl NotifySettings {
             Kind::VerdictsLanded => self.verdicts_landed,
             Kind::WeeklyRecap => self.weekly_recap,
             Kind::SettlementEstimate => self.settlement_estimate,
+            Kind::NearAiCredit => self.near_ai_credit,
         }
     }
 }
@@ -602,13 +626,17 @@ mod tests {
     fn cand(kind: Kind, since: DateTime<Utc>) -> Candidate {
         Candidate {
             kind,
-            foldable: !matches!(kind, Kind::InsightsTip | Kind::SettlementEstimate),
+            foldable: !matches!(
+                kind,
+                Kind::InsightsTip | Kind::SettlementEstimate | Kind::NearAiCredit
+            ),
             resolves: match kind {
                 Kind::IdleSessions => Fact::QueueDecided,
                 Kind::InsightsTip => Fact::SessionEnded,
                 Kind::VerdictsLanded => Fact::NewsAcknowledged,
                 Kind::WeeklyRecap => Fact::WeekEnded,
                 Kind::SettlementEstimate => Fact::EstimateAnnounced,
+                Kind::NearAiCredit => Fact::CreditAnnounced,
             },
             since,
             ttl: (kind == Kind::VerdictsLanded).then_some(N2_NEWS_TTL),
@@ -625,6 +653,7 @@ mod tests {
             verdicts_landed: true,
             weekly_recap: true,
             settlement_estimate: true,
+            near_ai_credit: true,
             renderer: true,
         }
     }
@@ -695,13 +724,17 @@ mod tests {
                 Kind::InsightsTip,
                 Kind::VerdictsLanded,
                 Kind::WeeklyRecap,
-                Kind::SettlementEstimate
+                Kind::SettlementEstimate,
+                Kind::NearAiCredit
             ]
         );
         assert_eq!(Kind::SettlementEstimate.label(), "settlement_estimate");
         assert_eq!(Kind::SettlementEstimate.precedence(), 4);
         assert_eq!(Fact::EstimateAnnounced.label(), "estimate_announced");
-        assert_eq!(Kind::ALL.len(), 5);
+        assert_eq!(Kind::NearAiCredit.label(), "near_ai_credit");
+        assert_eq!(Kind::NearAiCredit.precedence(), 5);
+        assert_eq!(Fact::CreditAnnounced.label(), "credit_announced");
+        assert_eq!(Kind::ALL.len(), 6);
         assert_eq!(Kind::IdleSessions.label(), "idle_sessions");
         assert_eq!(Reason::NoRenderer.label(), "no_renderer");
     }
@@ -728,7 +761,7 @@ mod tests {
             .collect();
         let out = run(&cands, &quiet_plan(), &[], &s, now);
         assert_eq!(out.standalone, Some(Kind::IdleSessions));
-        assert_eq!(out.deferred.len(), 4);
+        assert_eq!(out.deferred.len(), Kind::ALL.len() - 1);
         assert!(out.deferred.iter().all(|(_, r)| *r == Reason::MinGap));
     }
 
@@ -1305,7 +1338,7 @@ mod tests {
         };
         let mut pending = usize::from(saturate);
         let mut contributed = 0usize;
-        let mut present: [Option<DateTime<Utc>>; 5] = [None; 5];
+        let mut present: [Option<DateTime<Utc>>; Kind::ALL.len()] = [None; Kind::ALL.len()];
         let mut last_digest_at: Option<DateTime<Utc>> = None;
         let mut log: Vec<AttentionEntry> = Vec::new();
         let mut tally = Tally::default();
@@ -1313,8 +1346,8 @@ mod tests {
         while now < end {
             // The world moves. Draw the same number of values every tick so
             // the stream does not depend on the arbiter's answers.
-            let draws: Vec<bool> = (0..13)
-                .map(|i| rng.chance([4, 3, 2, 2, 2, 2, 1, 2, 1, 2, 1, 2, 1][i]))
+            let draws: Vec<bool> = (0..15)
+                .map(|i| rng.chance([4, 3, 2, 2, 2, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1][i]))
                 .collect();
             if !saturate {
                 if draws[0] {
@@ -1391,7 +1424,10 @@ mod tests {
                     let h = local.hour();
                     assert!((QUIET_END_HOUR..QUIET_START_HOUR).contains(&h), "{local}");
                 }
-                if !matches!(kind, Kind::InsightsTip | Kind::SettlementEstimate) && settings.digest
+                if !matches!(
+                    kind,
+                    Kind::InsightsTip | Kind::SettlementEstimate | Kind::NearAiCredit
+                ) && settings.digest
                 {
                     assert_eq!(pending, 0, "foldable standalone beside a guaranteed digest");
                 }

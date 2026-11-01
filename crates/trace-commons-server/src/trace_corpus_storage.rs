@@ -1006,6 +1006,23 @@ pub struct TraceSubmissionKeysetCursor {
     pub submission_id: Uuid,
 }
 
+/// The recent submissions of one contributor scope, as an hourly submission
+/// ceiling needs them: how many arrived since the window start (counted up
+/// to the caller's limit, never past it), the oldest of those counted, and
+/// whether the submission being uploaded already has a row.
+///
+/// `counted` stops at the limit the caller passed, so the read is bounded by
+/// the limit and not by the scope's history. When `counted` reached the
+/// limit, `oldest_counted_at` is the arrival of the limit-th most recent
+/// submission: the scope falls back under the limit once that one leaves
+/// the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecentTraceSubmissionWindow {
+    pub counted: i64,
+    pub oldest_counted_at: Option<DateTime<Utc>>,
+    pub submission_known: bool,
+}
+
 /// Fallback label for a status reason that is not on the allowlist below.
 pub const STATUS_REASON_OTHER: &str = "other";
 
@@ -2437,6 +2454,12 @@ pub struct TraceGateCreditDecisionRow {
     pub chunk_count: Option<i32>,
     pub total_chunk_count: Option<i32>,
     pub chunks_capped: Option<bool>,
+    /// The decision's two floors. `Some` on a stored decision (both
+    /// columns are NOT NULL); `None` on a gate-equivalent decision derived
+    /// from a pipeline run before Settle stored one, which records no
+    /// floors.
+    pub perplexity_passed: Option<bool>,
+    pub novelty_passed: Option<bool>,
 }
 
 /// Safe, label-only missing-control name returned when a storage backend has
@@ -2797,6 +2820,31 @@ pub trait TraceCorpusStore: Send + Sync {
         cursor: Option<TraceSubmissionKeysetCursor>,
         limit: i64,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+
+    /// The submissions of `tenant_id` received after `since`, counted up to
+    /// `limit` in `(received_at DESC)` order, for an hourly submission
+    /// ceiling. `principal_refs` narrows the scope to those principals; `None`
+    /// counts the whole tenant. `submission_known` says whether
+    /// `submission_id` already has a row in the same scope (the tenant, or
+    /// one of those principals), whatever its age, so a retry of a recorded
+    /// submission is never counted against itself and another principal's
+    /// id is not exempt.
+    /// Tenant and principals MUST come from authentication.
+    ///
+    /// A store that cannot answer refuses, labelled: the caller decides what
+    /// an unanswerable ceiling means, rather than reading an empty window.
+    async fn recent_trace_submission_window(
+        &self,
+        _tenant_id: &str,
+        _principal_refs: Option<&[String]>,
+        _submission_id: Uuid,
+        _since: DateTime<Utc>,
+        _limit: i64,
+    ) -> Result<RecentTraceSubmissionWindow, DatabaseError> {
+        Err(DatabaseError::Query(
+            "TraceSubmissionWindowUnavailable".into(),
+        ))
+    }
 
     /// Read-only activity projection under one statement snapshot. Tenant and
     /// principals MUST come from account authentication, never a request body.

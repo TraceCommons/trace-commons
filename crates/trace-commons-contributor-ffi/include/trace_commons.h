@@ -29,7 +29,8 @@
  *
  * tc_daemon_stop is idempotent, but it is NOT a teardown barrier for a
  * SECOND CONCURRENT CALLER. If two threads call it at once, one thread
- * performs the teardown and blocks until it completes; the other returns
+ * performs the teardown and waits for it, for at most 2 seconds (see
+ * TEARDOWN BOUNDS below); the other returns
  * IMMEDIATELY, possibly while the daemon is still stopping. Do not treat a
  * tc_daemon_stop return on thread B as proof that thread A's teardown
  * finished. (An earlier revision made the second caller wait; that was
@@ -37,6 +38,23 @@
  * the waiter had to re-acquire, and a waiter parked on one of the daemon
  * runtime's own worker threads could deadlock the teardown it was waiting
  * for. A weaker honest guarantee is better than a stronger false one.)
+ *
+ * TEARDOWN BOUNDS: neither tc_daemon_stop nor tc_handle_free waits on
+ * daemon work without a deadline, so a host may call them on its UI
+ * thread while quitting. tc_daemon_stop waits at most 2 seconds for the
+ * daemon's loop to end: its current pass, which checks for stop only
+ * between steps (a step can block for longer), then the private AI
+ * listener's drain of in-flight model calls. Past the 2 seconds it
+ * returns, and the rest of the teardown finishes on its own thread: the
+ * daemon keeps its exclusive
+ * lock on the state directory until that pass has ended, so a new
+ * tc_daemon_start on the same directory fails, as against any running
+ * daemon, until then. tc_handle_free waits at most 1 second more, for
+ * blocking work outside the pass; if the pass is still running it leaks
+ * the handle's runtime instead of cancelling the pass part way. Neither
+ * bound makes a return mean the daemon has finished stopping, and neither
+ * cancels the pass or any blocking work: what is still running when the
+ * process exits stops there, as it would on a force quit.
  *
  * Every function here catches Rust panics at the boundary and converts them
  * to an ordinary error; a panic never unwinds into the caller. Every
@@ -260,9 +278,9 @@ tc_handle*  tc_daemon_start(const char* config_dir, char** err);
  *
  * settings_json accepts exactly the fields tc_call(handle, "set_settings",
  * ...) does: quiescence_secs, digest_interval_secs, approval_hold_secs,
- * local_notifications, claude_root, codex_root, max_uploads_per_day,
- * max_bytes_per_day -- one shared validation, so there is one
- * definition of "a valid settings object" for both entry points. An
+ * local_notifications, claude_root, codex_root -- one shared validation,
+ * so there is one definition of "a valid settings object" for both entry
+ * points. An
  * unrecognized top-level key, or a recognized key holding the wrong JSON
  * type, is rejected with a fixed error label rather than silently ignored
  * -- silently ignoring a misspelled claude_root would leave the daemon
@@ -303,15 +321,93 @@ tc_handle*  tc_daemon_start_with_settings(const char* config_dir, const char* se
  *
  * {"quiescence_secs":{"min":0,"max":14400},
  *  "approval_hold_secs":{"min":0,"max":300},
- *  "digest_interval_secs":{"min":3600,"max":86400},
- *  "max_uploads_per_day":{"min":1,"max":1000},
- *  "max_bytes_per_day":{"min":1,"max":5368709120}}
+ *  "digest_interval_secs":{"min":3600,"max":86400}}
  *
  * Reads nothing and writes nothing; the same object for every caller on
  * this build. Returns an owned string; free it with tc_string_free. NULL
  * only on a caught panic.
  */
 char*       tc_settings_ranges_json(void);
+
+/* This build's channel identity, as a JSON object:
+ *
+ * {"channel":"production","state_dir_name":"trace-commons",
+ *  "state_dir_env":"TRACE_COMMONS_CONTRIBUTOR_DIR",
+ *  "url_scheme":"tracecommons",
+ *  "near_ai_dashboard_origin":"<NEAR AI dashboard origin>",
+ *  "near_ai_sign_in_providers":["near","github","google"]}
+ *
+ * channel is "production" or "staging". The macOS app compares channel with
+ * its Info.plist TCChannel and starts nothing on a mismatch.
+ * near_ai_dashboard_origin is where the funding row's credits link points;
+ * it takes no part in that check. near_ai_sign_in_providers is the NEAR AI
+ * sign-in providers this build offers, in order; a staging build names
+ * "google" only. No key, secret or
+ * keychain name is in it. Reads nothing and writes nothing. Returns an owned
+ * string; free it with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_build_channel_json(void);
+
+/* The command-line tool's state for the app at bundle_path, as a JSON
+ * object:
+ *
+ * {"command_name":"near-ai","link_path":"/usr/local/bin/near-ai",
+ *  "state":"not_installed","install_script":"do shell script ...",
+ *  "uninstall_script":null}
+ *
+ * state is "not_installed", "installed", "stale" (our link to an app that
+ * moved), "foreign" (something this app did not create; no script is
+ * offered) or "unavailable" (bundle_path is not an app bundle with an
+ * executable Contents/MacOS/near-ai). Each script is present only when its
+ * action is offered: one "do shell script ... with administrator
+ * privileges" statement of fixed text and single-quoted, validated paths.
+ * Reads without following the link and writes nothing. NULL or a non-UTF-8
+ * bundle_path reads as "unavailable". Returns an owned string; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_cli_tool_json(const char* bundle_path);
+
+/* The sentence the app shows instead of starting when its bundle and this
+ * library disagree on the channel. Returns an owned string; free it with
+ * tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_channel_mismatch_line(void);
+
+/* The label a shell shows in its windows to mark a staging build: the
+ * core's word on staging, the empty string on production (which shows
+ * nothing). Returns an owned string; free it with tc_string_free. NULL only
+ * on a caught panic.
+ */
+char*       tc_channel_window_label(void);
+
+/* The state directory the core would pick, so a shell that chooses its own
+ * directory still gets the core's refusal of the other channel's.
+ *
+ * Precedence: explicit_dir, used as given; then override_dir, the value of
+ * this build's override variable (state_dir_env in tc_build_channel_json),
+ * refused when it resolves to the other channel's default directory or
+ * inside it; then the platform default. NULL or "" is unset. The shell
+ * passes the variable's value; this library does not read the environment.
+ *
+ * Returns the directory as an owned string; free it with tc_string_free.
+ * No store is opened and no directory is created (on Windows the platform
+ * default may still move a legacy enrollment, as ConfigStore::resolve
+ * does). On failure returns NULL and, when err is
+ * non-NULL, sets *err to an owned label that names no path (free it with
+ * tc_string_free):
+ *   "state-dir-other-channel"  the override names the other channel's
+ *                              directory
+ *   "state-dir-unresolved"     anything else, including non-UTF-8 input
+ *   "panic"                    a caught panic
+ */
+char*       tc_resolve_state_dir(const char* explicit_dir, const char* override_dir,
+                                 char** err);
+
+/* The sentence the app shows instead of starting when tc_resolve_state_dir
+ * refuses its override. It names no path. Returns an owned string; free it
+ * with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_state_dir_override_refused_line(void);
 
 /* Attach to a daemon ALREADY RUNNING in another process, over its socket.
  *
@@ -797,6 +893,26 @@ int32_t     tc_private_inference_quit_needs_notice(int32_t requested_on, const c
  */
 char*       tc_private_inference_state_line(const char* state);
 
+/* The menu-bar popover's one word for one private_inference_state label: "On",
+ * "Off", "Stopping", "Not working", or "Unknown" for an unreported or
+ * unfamiliar label. The full sentence stays at tc_private_inference_state_line.
+ * A shell must not re-implement this mapping. Its dot is
+ * tc_private_inference_menu_tone.
+ *
+ * An empty, NULL or non-UTF-8 label answers the unknown word. Returns an owned
+ * string; free it with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_private_inference_menu_word(const char* state);
+
+/* The tone of the dot beside tc_private_inference_menu_word's word: one of the
+ * TC_PRIVATE_INFERENCE_TONE_* values. CLEAR is green, ATTENTION amber, REFUSED
+ * red, NEUTRAL grey.
+ *
+ * Answers TC_PRIVATE_INFERENCE_TONE_NEUTRAL for a label this build has never
+ * heard of, for a NULL or non-UTF-8 state, and on a caught panic.
+ */
+int32_t     tc_private_inference_menu_tone(const char* state);
+
 /* The Private AI runtime tile's word for one private_inference_state label:
  * every running label is "On", a stopped one "Off", and an unreported or
  * unfamiliar label "Unknown", never "Off". A shell must not re-implement this
@@ -1178,19 +1294,6 @@ int64_t     tc_contribution_group_eligible_count(int64_t pending, int64_t contri
  */
 int64_t     tc_contribution_group_withheld_count(int64_t pending, int64_t contributable);
 
-/* K9 (#1118): the toast after a submit -- "Sent. N left to decide - upload
- * limit X of Y", the WYSIWYG design's Flow 2/3 example.
- *
- * uploads_today and max_uploads_per_day are status.daily_budget's fields of
- * the same names; decisions_owed is status.decisions_owed (K6, a separate
- * branch). All three are clamped to 0 on a negative value, which no honest
- * caller sends.
- *
- * Returns an owned string; free it with tc_string_free. NULL only on a
- * caught panic.
- */
-char*       tc_toast_sent_text(int64_t uploads_today, int64_t max_uploads_per_day, int64_t decisions_owed);
-
 /* The sentence for one near_ai_balance state.
  *
  * state is the state field of a near_ai_balance answer. A NULL or non-UTF-8
@@ -1405,6 +1508,8 @@ int32_t     tc_private_inference_write_confirmed(int32_t requested_on, int32_t e
 #define TC_HARNESS_PLAN_NOT_INSTALLED  44
 #define TC_HARNESS_PLAN_ENTRY_UNUSABLE 45
 #define TC_HARNESS_PLAN_NO_CONFIG_PATH 46
+#define TC_HARNESS_PLAN_UNSUPPORTED_VERSION 47
+#define TC_HARNESS_PLAN_MODELS_UNAVAILABLE 48
 
 /* One harness_list row's state field, as a TC_HARNESS_STATE_* code.
  *
@@ -2020,12 +2125,22 @@ char*       tc_witness_copy(void);
 char*       tc_onboarding_copy(void);
 
 /* The first-run wording of #1030 (first_run_copy::first_run_copy): {frame,
- * join, folders, tools, rules, uses, passkey, private_ai}, each a map of
- * strings with {tool}, {host}, {pay_range}, {count}, {folder}, {name},
+ * join, folders, tools, rules, uses, private_ai}, each a map of
+ * strings with {tool}, {host}, {pay_range}, {count}, {folder},
  * {max}, {selected}, {total} and {tools} placeholders the shell fills. NULL
  * only on a caught panic.
  */
 char*       tc_first_run_copy_json(void);
+
+/* The first run's Traces estimate, one line, worded and formatted by the
+ * core (first_run_copy::traces_estimate_line). `request` is a JSON object:
+ * {"traces": <found>, "usd_micros_per_accepted_trace": {min,max},
+ * "credit_range": <an invite lookup's>}, each optional. A dollar total when
+ * the commons published a range, else points. Returns an OWNED string; free
+ * with tc_string_free. NULL draws no line: nothing found or counted yet, a
+ * total past range, or a NULL or unreadable request.
+ */
+char*       tc_first_run_estimate_line(const char* request);
 
 /* The sentence for a witness state, given a TC_WITNESS_STATE_* value.
  * Returns an OWNED string; free with tc_string_free.
@@ -2077,6 +2192,10 @@ int32_t     tc_witness_last_result_tone(void);
  * threads. Does NOT free the handle; call tc_handle_free once nothing else
  * will use it again. Safe to call with NULL.
  *
+ * Waits at most 2 seconds for the daemon's current pass to end, then
+ * returns and leaves the teardown to finish in the background -- see
+ * TEARDOWN BOUNDS above.
+ *
  * Idempotent, but NOT a teardown barrier for a second concurrent caller:
  * of two simultaneous callers, one performs the teardown and the other
  * returns immediately, possibly before the daemon has finished stopping.
@@ -2103,6 +2222,12 @@ void        tc_daemon_stop(tc_handle*);
  * own worker threads is refused (leaking the handle, recorded via
  * tc_last_error) rather than risking the crash that would otherwise
  * follow.
+ *
+ * Bounded like tc_daemon_stop (see TEARDOWN BOUNDS above): up to 2 seconds
+ * for its own stop when tc_daemon_stop was not called first, then at most
+ * 1 second for the runtime's other blocking work. If the daemon's pass is
+ * still running after the stop's bound, the runtime is leaked rather than
+ * shut down, so that pass is never cancelled part way.
  */
 void        tc_handle_free(tc_handle*);
 
@@ -2153,11 +2278,11 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * session's per-turn counters (an unknown turn is null, never 0) and lettered
  * markers; Codex series is null as not_recorded. No path, digest or what-if.
  * Comparisons (feed T): comparisons {counter_weeks?,week_start?,tz,
- * recap_card_enabled?} marks each goal over the daemon's insights_week
- * history passed through, and returns the lever and the weekly summary card;
- * without counter_weeks nothing is compared. goal_set {id?,goal},
- * goal_delete {id}, lever_feedback {kind,week_start,action?} and
- * recap_opened {week_start} write rule IDs and Monday dates only.
+ * recap_card_enabled?} reads the daemon's insights_week history passed
+ * through, and returns the lever and the weekly summary card; without
+ * counter_weeks nothing is compared. Goals are the daemon's (insights_week
+ * goals). lever_feedback {kind,week_start,action?} and recap_opened
+ * {week_start} write rule IDs and Monday dates only.
  * lever_card {enabled} is the Settings switch for the lever's card; on, it
  * turns back on every kind repeated "Not useful" turned off. Its state is
  * comparisons' lever.card_enabled.
@@ -2544,6 +2669,9 @@ char*       tc_monitor_traces_copy_json(void);
  */
 char*       tc_monitor_screens_copy_json(void);
 
+/* The compiled default Private AI campaign, as JSON. Free with tc_string_free. */
+char*       tc_private_ai_campaign_json(void);
+
 /* The words the macOS shell used to write itself
  * (shell_words_copy::shell_words_copy): withdrawal, the public profile, the
  * queue's and History's legacy words, the scrubbing caveat and the Settings
@@ -2569,6 +2697,37 @@ char*       tc_decisions_owed_text(int64_t decisions_owed);
  * consent_copy::inference_connection_copy). NULL only on a caught panic.
  */
 char*       tc_inference_connection_copy_json(void);
+
+/* The payout-link section's words (consent_copy::payout_link_copy), every
+ * one a draft for owner review. Templates carry {org_name}. NULL only on a
+ * caught panic.
+ */
+char*       tc_payout_link_copy_json(void);
+
+/* The referral words (referral_copy::referral_copy): the Settings Referrals
+ * section, the code field on the NEAR AI sign-in step and the Insights
+ * credit split, every one a draft for owner review. Templates carry {code},
+ * {n}, {date} or {amount}. NULL only on a caught panic.
+ */
+char*       tc_referral_copy_json(void);
+
+/* A typed referral code as it is shown, TC-XXXXX-XXXXX, read the way the
+ * daemon reads it before sending one. NULL for text that is not a code, a
+ * NULL or non-UTF-8 typed, and on a caught panic.
+ */
+char*       tc_referral_code_display(const char* typed);
+
+/* The Devices section's words (consent_copy::account_devices_copy), every
+ * one a draft for owner review. Templates carry {device}, {code} or {when}.
+ * NULL only on a caught panic.
+ */
+char*       tc_account_devices_copy_json(void);
+
+/* The words for adding Train coding models to traces already sent
+ * (consent_copy::sent_traces_training_copy), every one a draft for owner
+ * review. Count templates carry {count}. NULL only on a caught panic.
+ */
+char*       tc_sent_traces_training_copy_json(void);
 
 /* The Flow 1 grant screens' sentences for the configuration in config_dir
  * (consent_copy::automatic_contribution_copy). The core chooses the

@@ -647,6 +647,7 @@ private struct InstalledSkillPanel: View {
 }
 
 /// A field's eyebrow label, as `GlassTextField` draws its own.
+@MainActor
 private func skillFieldLabel(_ label: String) -> some View {
     Text(label)
         .glassType(GlassTokens.TypeScale.eyebrow)
@@ -707,6 +708,7 @@ enum SkillLearningGate {
 }
 
 /// A package, marker or model output shown verbatim in an inset well.
+@MainActor
 private func skillCodeBlock(_ text: String) -> some View {
     GlassWell {
         Text(text)

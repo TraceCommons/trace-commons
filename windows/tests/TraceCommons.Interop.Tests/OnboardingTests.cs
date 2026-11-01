@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Text.Json;
 using TraceCommons.Interop;
 using Xunit;
 
@@ -145,6 +146,61 @@ public sealed class OnboardingStateTests : IDisposable
         File.WriteAllText(StorePath, "{ this is not a json array");
 
         Assert.False(new OnboardingState(StorePath).IsComplete("tenant-a"));
+    }
+
+    [Theory]
+    [InlineData("{}", null)]
+    [InlineData("{\"setup_complete\":null}", null)]
+    [InlineData("{\"setup_complete\":false}", false)]
+    [InlineData("{\"setup_complete\":true}", true)]
+    public void SharedCompletionIsAnOptionalWireField(string json, bool? expected)
+    {
+        Assert.Equal(expected, JsonSerializer.Deserialize<DaemonStatus>(json)!.SetupComplete);
+    }
+
+    [Fact]
+    public void CliCompletionReleasesTheGateWithoutWritingTheLegacyMarker()
+    {
+        var state = new OnboardingState(StorePath);
+        var status = new DaemonStatus { LoggedIn = true, TenantId = "tenant-a" };
+        Assert.False(state.IsSetupComplete(status));
+        status.SetupComplete = true;
+        Assert.True(state.IsSetupComplete(status));
+        Assert.True(OnboardingState.HasSharedCompletion(status));
+        Assert.False(state.IsComplete("tenant-a"));
+        Assert.False(File.Exists(StorePath));
+        status.SetupComplete = false;
+        Assert.False(state.IsSetupComplete(status));
+        status.TenantId = "tenant-b";
+        status.SetupComplete = null;
+        Assert.False(state.IsSetupComplete(status));
+    }
+
+    [Theory]
+    [InlineData(false, "tenant-a")]
+    [InlineData(true, null)]
+    [InlineData(true, "")]
+    public void SharedCompletionRequiresCurrentEnrollment(bool loggedIn, string? tenant)
+    {
+        var state = new OnboardingState(StorePath);
+        var status = new DaemonStatus { LoggedIn = loggedIn, TenantId = tenant, SetupComplete = true };
+        Assert.False(state.IsSetupComplete(status));
+        Assert.False(OnboardingState.HasSharedCompletion(status));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(false)]
+    public void OlderDaemonsAndIncompleteCliSetupPreserveTheGuiMarker(bool? sharedComplete)
+    {
+        var state = new OnboardingState(StorePath);
+        state.MarkComplete("tenant-a");
+        var status = new DaemonStatus { LoggedIn = true, TenantId = "tenant-a", SetupComplete = sharedComplete };
+        Assert.True(state.IsSetupComplete(status));
+        Assert.False(OnboardingState.HasSharedCompletion(status));
+        status.LoggedIn = false;
+        Assert.False(state.IsSetupComplete(status));
+        Assert.False(state.IsSetupComplete(null));
     }
 
     public void Dispose()

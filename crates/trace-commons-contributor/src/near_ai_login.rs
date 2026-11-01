@@ -17,6 +17,13 @@
 //! (`handle_local`), against the same configuration directory and credential
 //! store. Nothing here re-implements the ceremony or the enrollment.
 //!
+//! On macOS the CLI bundled in the app cannot answer them itself: the NEAR
+//! AI session lives in the app's keychain access group, and only the app is
+//! signed with it. With no daemon running, `login` starts the app in the
+//! background (no window, not brought forward) and waits for its daemon, or
+//! opens the app's first run when this Mac has not been set up, since the
+//! app starts no daemon until first run has the session folders.
+//!
 //! # Secrets
 //!
 //! The refresh token and NEAR AI's short-lived JWT never leave the daemon's
@@ -25,6 +32,7 @@
 //! to fixed sentences and the account id is not shown at all.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -38,6 +46,18 @@ pub(crate) const OPENING: &str = "Opening near.ai in your browser to sign in.";
 /// Printed with the address, before the browser is asked to open, so a failed
 /// or hung `open` never hides it.
 pub(crate) const OPEN_FALLBACK_PREFIX: &str = "If it doesn't open, go to:";
+/// Printed with the address when no browser is opened here (`--no-browser`).
+pub(crate) const OPEN_PROMPT: &str = "Open this address in your browser to sign in:";
+/// Printed when no browser on this machine can reach the person: over SSH,
+/// or on a Linux machine with no display. The sign-in finishes on a loopback
+/// address, so the browser on their own computer needs the port forwarded.
+pub(crate) const REMOTE_INTRO: &str =
+    "No browser on this machine can reach you, so sign in from your own computer:";
+/// Printed first when no browser here can reach the person: a server is
+/// linked more simply with a code from a signed-in computer.
+pub(crate) const CODE_HINT: &str = "On a server? From a computer that's signed in, run `trace-commons-contributor devices add`, then run `trace-commons-contributor login --code <code>` here.";
+/// Stands in for the host in the printed `ssh` command.
+pub(crate) const REMOTE_HOST_PLACEHOLDER: &str = "<this-machine>";
 /// The invite route, named wherever the NEAR AI route is taken by default.
 pub(crate) const INVITE_HINT: &str =
     "Have an invite? Run `trace-commons-contributor login --invite <link>`.";
@@ -83,7 +103,7 @@ impl Consent {
     /// The `set_consent_scopes` list. Default answers send an empty list:
     /// the daemon saves the floor scope for it and records no choice, which
     /// is what an invite enrollment with the default answers records.
-    fn request_scopes(&self) -> Vec<String> {
+    pub(crate) fn request_scopes(&self) -> Vec<String> {
         if self.chosen {
             self.scopes.clone()
         } else {
@@ -92,10 +112,129 @@ impl Consent {
     }
 }
 
+/// Where the sign-in's browser is, decided once from the flags and the
+/// environment before anything is printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BrowserPlan {
+    /// Ask the platform opener to open the address here.
+    pub open: bool,
+    /// No browser here reaches the person: print how to forward the loopback
+    /// port from their own computer.
+    pub remote: bool,
+}
+
+impl BrowserPlan {
+    /// Open a browser here and print the address in case it doesn't.
+    #[cfg(test)]
+    pub(crate) const LOCAL: Self = Self {
+        open: true,
+        remote: false,
+    };
+
+    /// Decide from `--no-browser` and the process environment.
+    pub(crate) fn detect(no_browser: bool) -> Self {
+        Self::from_env(
+            no_browser,
+            cfg!(any(target_os = "macos", target_os = "windows")),
+            &|name| std::env::var_os(name),
+        )
+    }
+
+    /// The decision, with the environment passed in so it is testable.
+    ///
+    /// - An SSH session (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`) is
+    ///   remote: a browser opened here, if any, is not in front of the
+    ///   person. On macOS `open` would put it on the console's screen.
+    /// - Off macOS and Windows, no `DISPLAY` and no `WAYLAND_DISPLAY` means
+    ///   no graphical session, so nothing can open; `xdg-open` would only
+    ///   list the text browsers it could not find.
+    /// - Off macOS and Windows, `BROWSER` names an opener the person set up,
+    ///   which can work over SSH (an editor's remote terminal forwards it),
+    ///   and `xdg-open` falls back to it, so it is still tried; the
+    ///   forwarding steps are printed either way. On macOS and Windows the
+    ///   opener (`open`, `start`) never reads `BROWSER`, so it counts for
+    ///   nothing there.
+    pub(crate) fn from_env(
+        no_browser: bool,
+        graphical_os: bool,
+        env: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    ) -> Self {
+        let set = |name: &str| env(name).is_some_and(|value| !value.is_empty());
+        let ssh = set("SSH_CONNECTION") || set("SSH_CLIENT") || set("SSH_TTY");
+        let display = graphical_os || set("DISPLAY") || set("WAYLAND_DISPLAY");
+        let remote = ssh || !display;
+        Self {
+            open: !no_browser && ((!graphical_os && set("BROWSER")) || !remote),
+            remote,
+        }
+    }
+}
+
+/// The loopback port a sign-in finishes on: the address's own port when it
+/// is `http://127.0.0.1:<port>/...` (the NEAR wallet page), or the port of
+/// its `frontend_callback` (an OAuth provider, which redirects there).
+fn loopback_port(url: &str) -> Option<u16> {
+    fn own_port(parsed: &url::Url) -> Option<u16> {
+        if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1") {
+            return None;
+        }
+        parsed.port()
+    }
+    let parsed = url::Url::parse(url).ok()?;
+    own_port(&parsed).or_else(|| {
+        let callback = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "frontend_callback")?
+            .1;
+        own_port(&url::Url::parse(&callback).ok()?)
+    })
+}
+
+/// Print where to finish the sign-in, as `plan` says.
+pub(crate) fn print_sign_in_address(
+    out: &mut dyn Write,
+    plan: BrowserPlan,
+    url: &str,
+) -> std::io::Result<()> {
+    match (plan.remote, loopback_port(url)) {
+        (true, Some(port)) => {
+            writeln!(out, "{CODE_HINT}")?;
+            writeln!(out, "{REMOTE_INTRO}")?;
+            writeln!(
+                out,
+                "  1. In a terminal on your computer, forward the sign-in port and leave it running:"
+            )?;
+            writeln!(
+                out,
+                "       ssh -N -o ExitOnForwardFailure=yes -L {port}:127.0.0.1:{port} {REMOTE_HOST_PLACEHOLDER}"
+            )?;
+            writeln!(
+                out,
+                "     Put the host you SSH to in place of {REMOTE_HOST_PLACEHOLDER}."
+            )?;
+            writeln!(
+                out,
+                "  2. Open this address in your computer's browser within 5 minutes:"
+            )?;
+            writeln!(out, "       {url}")?;
+        }
+        _ if plan.open => {
+            writeln!(out, "{OPENING}")?;
+            writeln!(out, "{OPEN_FALLBACK_PREFIX} {url}")?;
+        }
+        _ => {
+            writeln!(out, "{OPEN_PROMPT}")?;
+            writeln!(out, "  {url}")?;
+        }
+    }
+    Ok(())
+}
+
 /// Everything the flow touches outside its own logic, so a test can stand in
 /// for the daemon, the browser and the clock.
 pub(crate) struct Ports<'a> {
     pub call: DaemonCaller<'a>,
+    pub browser: BrowserPlan,
     pub open_browser: &'a mut dyn FnMut(&str) -> bool,
     pub sleep: &'a mut dyn FnMut(Duration),
     pub out: &'a mut dyn Write,
@@ -144,6 +283,7 @@ fn answered(response: Result<Response>) -> Option<serde_json::Value> {
 fn sign_in(ports: &mut Ports<'_>, hint: Option<&str>) -> Result<()> {
     let Ports {
         call,
+        browser,
         open_browser,
         sleep,
         out,
@@ -159,14 +299,15 @@ fn sign_in(ports: &mut Ports<'_>, hint: Option<&str>) -> Result<()> {
         ) else {
             bail!(SIGN_IN_UNAVAILABLE)
         };
-        writeln!(out, "{OPENING}")?;
-        writeln!(out, "{OPEN_FALLBACK_PREFIX} {url}")?;
+        print_sign_in_address(&mut **out, *browser, url)?;
         if let Some(hint) = hint {
             writeln!(out, "{hint}")?;
         }
         out.flush()?;
-        // Best effort: the address is already on screen.
-        let _ = open_browser(url);
+        if browser.open {
+            // Best effort: the address is already on screen.
+            let _ = open_browser(url);
+        }
 
         let attempt = serde_json::json!({ "attempt_id": attempt_id });
         let mut waited = Duration::ZERO;
@@ -224,16 +365,17 @@ pub(crate) fn sign_in_and_enroll(mut ports: Ports<'_>, consent: &Consent) -> Res
 
 /// [`sign_in_and_enroll`] against this store: over the running daemon's
 /// socket when one answers, otherwise in this process with one daemon state
-/// loaded for the whole flow.
+/// loaded for the whole flow. A process that cannot keep the session
+/// hands the sign-in to the app instead ([`hand_off_to_app`]).
 ///
 /// Which of the two is decided once. A per-call fallback would load the
 /// daemon state (and read the OS credential store) on every poll, and would
 /// ask a fresh in-process state about an attempt a running daemon holds.
-pub(crate) fn run(store: &ConfigStore, consent: &Consent) -> Result<()> {
+pub(crate) fn run(store: &ConfigStore, consent: &Consent, no_browser: bool) -> Result<()> {
     use crate::daemon::client;
     use crate::daemon::ipc::{DaemonShared, handle_local};
 
-    let running = client::is_running(store);
+    let running = client::is_running(store) || hand_off_to_app(store)?;
     let mut local: Option<DaemonShared> = None;
     let mut call = |method: &str, params: serde_json::Value| -> Result<Response> {
         if running {
@@ -256,6 +398,7 @@ pub(crate) fn run(store: &ConfigStore, consent: &Consent) -> Result<()> {
     sign_in_and_enroll(
         Ports {
             call: &mut call,
+            browser: BrowserPlan::detect(no_browser),
             open_browser: &mut open,
             sleep: &mut sleep,
             out: &mut stdout,
@@ -298,10 +441,245 @@ pub(crate) fn run_for_launch(store: &ConfigStore) -> Result<()> {
     let mut stdout = std::io::stdout();
     sign_in_for_launch(Ports {
         call: &mut call,
+        browser: BrowserPlan::detect(false),
         open_browser: &mut open,
         sleep: &mut sleep,
         out: &mut stdout,
     })
+}
+
+/// The argument the app reads as "started for the CLI": it opens no window
+/// at launch, first run included (`LaunchRouting.isBackgroundLaunch`).
+pub(crate) const BACKGROUND_LAUNCH_ARG: &str = "--background-launch";
+/// How often `login` asks whether the launched app's daemon answers.
+const DAEMON_POLL: Duration = Duration::from_millis(500);
+/// How long it waits for that daemon before saying so.
+const DAEMON_WAIT: Duration = Duration::from_secs(30);
+/// No app around this CLI to hand the sign-in to.
+pub(crate) const OPEN_APP: &str = "Open the Near.ai app, then run this command again.";
+
+/// Who answers `login`'s daemon methods.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+    /// The daemon already running for this store.
+    Daemon,
+    /// This process, which can keep the session itself.
+    InProcess,
+    /// The app around this CLI, started in the background.
+    LaunchApp(PathBuf),
+    /// The app around this CLI, opened on its first run: it starts no
+    /// daemon until first run has the session folders.
+    OpenSetup(PathBuf),
+    /// The app around this CLI is already open and its daemon is not
+    /// answering; launching it again would only re-activate it.
+    AppNotAnswering(PathBuf),
+    /// Nobody: the person opens the app.
+    OpenApp,
+}
+
+/// `kept` is whether this process can keep a NEAR AI session
+/// (`store_is_reachable`); `roots_declared` whether the app would start its
+/// daemon; `app` the bundle this CLI runs from; `app_open` whether that
+/// app is already running.
+fn route(
+    running: bool,
+    kept: bool,
+    roots_declared: bool,
+    app: Option<PathBuf>,
+    app_open: bool,
+) -> Route {
+    if running {
+        return Route::Daemon;
+    }
+    if kept {
+        return Route::InProcess;
+    }
+    match app {
+        None => Route::OpenApp,
+        Some(app) if !roots_declared => Route::OpenSetup(app),
+        Some(app) if app_open => Route::AppNotAnswering(app),
+        Some(app) => Route::LaunchApp(app),
+    }
+}
+
+/// The `.app` this executable is bundled in (`X.app/Contents/MacOS/near-ai`),
+/// or `None` for a CLI installed anywhere else.
+fn app_bundle(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let app = contents.parent()?;
+    let bundled = macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && app.extension()? == "app";
+    bundled.then(|| app.to_path_buf())
+}
+
+/// Whether `ps -axo command=` output lists `exe`, the app's own executable,
+/// as a process: the path alone or followed by its arguments.
+fn app_running_in(ps: &str, exe: &Path) -> bool {
+    let exe = exe.to_string_lossy();
+    ps.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix(exe.as_ref())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    })
+}
+
+/// Whether the app at `app` is running, by its `CFBundleExecutable`. A
+/// failure to tell reads as not running: the launch then waits its bound
+/// and says so.
+fn app_is_open(app: &Path) -> bool {
+    let plist = app.join("Contents/Info.plist");
+    let exe = std::process::Command::new("/usr/bin/plutil")
+        .args(["-extract", "CFBundleExecutable", "raw", "-o", "-"])
+        .arg(&plist)
+        .output();
+    let Ok(exe) = exe else { return false };
+    let name = String::from_utf8_lossy(&exe.stdout).trim().to_string();
+    if !exe.status.success() || name.is_empty() {
+        return false;
+    }
+    let Ok(ps) = std::process::Command::new("/bin/ps")
+        .args(["-axo", "command="])
+        .output()
+    else {
+        return false;
+    };
+    app_running_in(
+        &String::from_utf8_lossy(&ps.stdout),
+        &app.join("Contents/MacOS").join(name),
+    )
+}
+
+/// The store to hand the app, or `None` when it is the platform default,
+/// which the app resolves itself. `--config-dir` and the override variable
+/// both choose a store the app would not, so neither is special-cased.
+fn forwarded_state_dir<'a>(store_dir: &'a Path, default: Option<&Path>) -> Option<&'a Path> {
+    (default != Some(store_dir)).then_some(store_dir)
+}
+
+/// The app's name as Finder shows it: "Near.ai", "Near.ai Staging".
+fn app_name(app: &Path) -> String {
+    app.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Near.ai".to_string())
+}
+
+/// `open` arguments that start the app without bringing it forward (`-g`)
+/// and, through the app's own argument, without a window. Not `-j`: an app
+/// launched hidden can hold back the windows it opens later.
+fn background_launch_args(app: &Path, state_dir: Option<&Path>) -> Vec<String> {
+    let mut args = vec!["-g".to_string()];
+    args.extend(setup_launch_args(app, state_dir));
+    args.extend(["--args".to_string(), BACKGROUND_LAUNCH_ARG.to_string()]);
+    args
+}
+
+/// `open` arguments that open the app as a click does, on its first run.
+/// `state_dir` is the store when it is not the default
+/// ([`forwarded_state_dir`]): `open` does not pass the terminal's
+/// environment to the app.
+fn setup_launch_args(app: &Path, state_dir: Option<&Path>) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(dir) = state_dir {
+        args.push("--env".to_string());
+        args.push(format!(
+            "{}={}",
+            crate::channel::STATE_DIR_ENV,
+            dir.to_string_lossy()
+        ));
+    }
+    args.push(app.to_string_lossy().into_owned());
+    args
+}
+
+fn launching_line(app: &Path) -> String {
+    format!("Starting {} in the background to sign in.", app_name(app))
+}
+
+fn setup_line(app: &Path) -> String {
+    format!(
+        "Finish setting up in {}, which is now open. Sign-in is part of setup.",
+        app_name(app)
+    )
+}
+
+fn not_answering_line(app: &Path) -> String {
+    let name = app_name(app);
+    format!("{name} is open, but its background service isn't answering. Open {name} to see why.")
+}
+
+fn no_daemon_line(app: &Path) -> String {
+    let name = app_name(app);
+    format!("{name} started, but its background service didn't. Open {name} to see why.")
+}
+
+/// Polls `answers` until it is true or [`DAEMON_WAIT`] has passed.
+fn wait_for_daemon(answers: &mut dyn FnMut() -> bool, sleep: &mut dyn FnMut(Duration)) -> bool {
+    let mut waited = Duration::ZERO;
+    loop {
+        if answers() {
+            return true;
+        }
+        if waited >= DAEMON_WAIT {
+            return false;
+        }
+        sleep(DAEMON_POLL);
+        waited += DAEMON_POLL;
+    }
+}
+
+fn open_app(args: &[String]) -> Result<()> {
+    match std::process::Command::new("/usr/bin/open")
+        .args(args)
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        _ => bail!(OPEN_APP),
+    }
+}
+
+/// With no daemon running: `Ok(true)` once the app's daemon answers for this
+/// store, `Ok(false)` to sign in in this process as before. Only on macOS,
+/// where the bundled CLI has no keychain entitlement and so could only fail
+/// at `near_ai_credential_start` (`near_ai_credential_storage_unentitled`).
+fn hand_off_to_app(store: &ConfigStore) -> Result<bool> {
+    if !cfg!(target_os = "macos") {
+        return Ok(false);
+    }
+    let kept = crate::daemon::cloud_credential_lifecycle::store_is_reachable(store).is_ok();
+    // Unreadable settings are treated as not set up: opening the app shows
+    // the person what it makes of them.
+    let roots_declared = crate::daemon::settings::DaemonSettings::load(store)
+        .map(|settings| crate::daemon::settings::roots_declared(&settings))
+        .unwrap_or(false);
+    let app = std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .ok()
+        .and_then(|exe| app_bundle(&exe));
+    let default = crate::config::platform_default_dir().ok();
+    let state_dir = forwarded_state_dir(store.dir(), default.as_deref());
+    let app_open = app.as_deref().is_some_and(app_is_open);
+    match route(false, kept, roots_declared, app, app_open) {
+        Route::Daemon | Route::InProcess => Ok(false),
+        Route::OpenApp => bail!(OPEN_APP),
+        Route::AppNotAnswering(app) => bail!(not_answering_line(&app)),
+        Route::OpenSetup(app) => {
+            open_app(&setup_launch_args(&app, state_dir))?;
+            bail!(setup_line(&app))
+        }
+        Route::LaunchApp(app) => {
+            println!("{}", launching_line(&app));
+            open_app(&background_launch_args(&app, state_dir))?;
+            let mut answers = || crate::daemon::client::is_running(store);
+            let mut sleep = |d: Duration| std::thread::sleep(d);
+            if wait_for_daemon(&mut answers, &mut sleep) {
+                Ok(true)
+            } else {
+                bail!(no_daemon_line(&app))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -389,6 +767,7 @@ mod tests {
             let mut sleep = |_d: Duration| {};
             let ports = Ports {
                 call: &mut caller,
+                browser: BrowserPlan::LOCAL,
                 open_browser: &mut open,
                 sleep: &mut sleep,
                 out: out_ref,
@@ -547,6 +926,7 @@ mod tests {
         sign_in_and_enroll(
             Ports {
                 call: &mut caller,
+                browser: BrowserPlan::LOCAL,
                 open_browser: &mut open,
                 sleep: &mut sleep,
                 out: &mut writer,
@@ -555,6 +935,188 @@ mod tests {
         )
         .unwrap();
         assert!(seen_at_open.contains(URL), "{seen_at_open}");
+    }
+
+    fn env_of(
+        vars: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+        move |name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| std::ffi::OsString::from(v))
+        }
+    }
+
+    #[test]
+    fn the_browser_plan_follows_ssh_display_and_the_flag() {
+        let plan = |no_browser, graphical, vars| {
+            BrowserPlan::from_env(no_browser, graphical, &env_of(vars))
+        };
+        let local = BrowserPlan {
+            open: true,
+            remote: false,
+        };
+        let print_only = BrowserPlan {
+            open: false,
+            remote: false,
+        };
+        let remote = BrowserPlan {
+            open: false,
+            remote: true,
+        };
+        // A desktop session opens the browser.
+        assert_eq!(plan(false, true, &[]), local);
+        assert_eq!(plan(false, false, &[("DISPLAY", ":0")]), local);
+        assert_eq!(
+            plan(false, false, &[("WAYLAND_DISPLAY", "wayland-0")]),
+            local
+        );
+        // --no-browser only stops the opener.
+        assert_eq!(plan(true, true, &[]), print_only);
+        // Linux with no display: nothing to open, forward from elsewhere.
+        assert_eq!(plan(false, false, &[]), remote);
+        assert_eq!(plan(false, false, &[("DISPLAY", "")]), remote);
+        // Any SSH session is remote, even with a display (X forwarding) or
+        // on macOS, where `open` would use the console's screen.
+        for ssh in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] {
+            let vars: &'static [(&'static str, &'static str)] = match ssh {
+                "SSH_CONNECTION" => &[("SSH_CONNECTION", "1 2 3 4"), ("DISPLAY", "localhost:10")],
+                "SSH_CLIENT" => &[("SSH_CLIENT", "1 2 3")],
+                _ => &[("SSH_TTY", "/dev/pts/0")],
+            };
+            assert_eq!(plan(false, true, vars), remote, "{ssh}");
+            assert_eq!(plan(false, false, vars), remote, "{ssh}");
+        }
+        // A BROWSER the person set up is still tried over SSH, and the
+        // forwarding steps are still printed.
+        assert_eq!(
+            plan(
+                false,
+                false,
+                &[("SSH_TTY", "/dev/pts/0"), ("BROWSER", "/opt/helper")]
+            ),
+            BrowserPlan {
+                open: true,
+                remote: true
+            }
+        );
+        assert_eq!(
+            plan(
+                true,
+                false,
+                &[("SSH_TTY", "/dev/pts/0"), ("BROWSER", "/opt/helper")]
+            ),
+            remote
+        );
+        // `open` and `start` never read BROWSER: over SSH into a Mac it
+        // would open on the console's screen, so nothing is opened.
+        assert_eq!(
+            plan(
+                false,
+                true,
+                &[("SSH_TTY", "/dev/pts/0"), ("BROWSER", "/opt/helper")]
+            ),
+            remote
+        );
+    }
+
+    #[test]
+    fn the_loopback_port_comes_from_the_address_or_its_callback() {
+        assert_eq!(loopback_port(URL), Some(49152));
+        assert_eq!(
+            loopback_port(
+                "https://cloud-api.near.ai/v1/auth/github?frontend_callback=http%3A%2F%2F127.0.0.1%3A40001%2Ftrace-commons%2Fnear-ai%2Fcallback"
+            ),
+            Some(40001)
+        );
+        assert_eq!(
+            loopback_port("https://cloud-api.near.ai/v1/auth/github"),
+            None
+        );
+        assert_eq!(loopback_port("http://localhost:40001/x"), None);
+        assert_eq!(loopback_port("not a url"), None);
+    }
+
+    /// One fresh sign-in under `plan`: what was printed, and how many times
+    /// the opener was asked.
+    fn fresh_sign_in_with(plan: BrowserPlan) -> (String, usize) {
+        let mut script = Script::new(vec![
+            (
+                "near_ai_credential_status",
+                vec![
+                    ok(json!({"session_state": "absent"})),
+                    ok(json!({"session_state": "present", "attempt_status": "complete"})),
+                ],
+            ),
+            (
+                "near_ai_credential_start",
+                vec![ok(json!({"attempt_id": "a1", "browser_url": URL}))],
+            ),
+        ]);
+        let mut out = Vec::new();
+        let mut opened = 0;
+        {
+            let mut caller = |m: &str, p: Value| script.answer(m, p);
+            let mut open = |_url: &str| {
+                opened += 1;
+                true
+            };
+            let mut sleep = |_d: Duration| {};
+            sign_in_for_launch(Ports {
+                call: &mut caller,
+                browser: plan,
+                open_browser: &mut open,
+                sleep: &mut sleep,
+                out: &mut out,
+            })
+            .unwrap();
+        }
+        (String::from_utf8(out).unwrap(), opened)
+    }
+
+    /// Over SSH the address alone is a dead end: it names this machine's
+    /// loopback. The output says how to forward that port, with the port
+    /// filled in, and no opener runs to print its own failures.
+    #[test]
+    fn a_remote_sign_in_prints_the_port_forward_and_opens_nothing() {
+        let (out, opened) = fresh_sign_in_with(BrowserPlan {
+            open: false,
+            remote: true,
+        });
+        assert_eq!(opened, 0, "{out}");
+        assert!(out.contains(REMOTE_INTRO), "{out}");
+        // The code route is named first: it needs no port forward.
+        assert!(
+            out.find(CODE_HINT).unwrap() < out.find(REMOTE_INTRO).unwrap(),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "ssh -N -o ExitOnForwardFailure=yes -L 49152:127.0.0.1:49152 {REMOTE_HOST_PLACEHOLDER}"
+            )),
+            "{out}"
+        );
+        assert!(out.contains(URL), "{out}");
+        assert!(!out.contains(OPENING), "{out}");
+        // The command comes before the address it makes reachable.
+        assert!(
+            out.find("ssh -N").unwrap() < out.find(URL).unwrap(),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn no_browser_prints_the_address_without_opening_it() {
+        let (out, opened) = fresh_sign_in_with(BrowserPlan {
+            open: false,
+            remote: false,
+        });
+        assert_eq!(opened, 0, "{out}");
+        assert!(out.contains(OPEN_PROMPT), "{out}");
+        assert!(out.contains(URL), "{out}");
+        assert!(!out.contains(OPENING), "{out}");
+        assert!(!out.contains("ssh -N"), "{out}");
+        assert!(!out.contains(CODE_HINT), "{out}");
     }
 
     /// Fail closed: a commons that does not advertise the NEAR AI login path
@@ -596,6 +1158,7 @@ mod tests {
             let mut sleep = |_d: Duration| {};
             sign_in_for_launch(Ports {
                 call: &mut caller,
+                browser: BrowserPlan::LOCAL,
                 open_browser: &mut open,
                 sleep: &mut sleep,
                 out: &mut out,
@@ -953,5 +1516,238 @@ mod tests {
         let saved = store.load_config().unwrap().unwrap();
         assert!(saved.consent_scopes.contains(&"model_training".to_string()));
         assert_eq!(saved.consent_scopes_chosen, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod app_handoff_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn app() -> PathBuf {
+        PathBuf::from("/Applications/Near.ai Staging.app")
+    }
+
+    #[test]
+    fn a_running_daemon_answers_whatever_else_holds() {
+        assert_eq!(route(true, false, false, Some(app()), false), Route::Daemon);
+        assert_eq!(route(true, true, true, None, false), Route::Daemon);
+    }
+
+    #[test]
+    fn an_entitled_process_signs_in_itself_as_before() {
+        assert_eq!(
+            route(false, true, false, Some(app()), false),
+            Route::InProcess
+        );
+        assert_eq!(route(false, true, true, None, false), Route::InProcess);
+    }
+
+    #[test]
+    fn an_unentitled_cli_inside_a_set_up_app_starts_it_in_the_background() {
+        assert_eq!(
+            route(false, false, true, Some(app()), false),
+            Route::LaunchApp(app())
+        );
+    }
+
+    #[test]
+    fn an_unentitled_cli_on_a_mac_not_set_up_opens_the_apps_setup() {
+        // No folders chosen: the app will not start its daemon until first
+        // run has them, so there is nothing to wait for in the background.
+        assert_eq!(
+            route(false, false, false, Some(app()), false),
+            Route::OpenSetup(app())
+        );
+    }
+
+    #[test]
+    fn an_unentitled_cli_outside_an_app_is_told_to_open_one() {
+        assert_eq!(route(false, false, true, None, false), Route::OpenApp);
+        assert_eq!(route(false, false, false, None, false), Route::OpenApp);
+    }
+
+    /// Already open with its daemon not answering (refused, or still on
+    /// first run's folders): `open` would only re-activate it, since
+    /// LaunchServices drops `--args` and `--env` for a running instance, so
+    /// nothing is waited for.
+    #[test]
+    fn an_app_already_open_without_its_daemon_is_not_waited_on() {
+        assert_eq!(
+            route(false, false, true, Some(app()), true),
+            Route::AppNotAnswering(app())
+        );
+        // With no folders declared it is on first run: bring it forward.
+        assert_eq!(
+            route(false, false, false, Some(app()), true),
+            Route::OpenSetup(app())
+        );
+        assert_eq!(route(true, false, true, Some(app()), true), Route::Daemon);
+    }
+
+    #[test]
+    fn a_running_app_is_found_by_its_executable_path() {
+        let exe = Path::new("/Applications/Near.ai Staging.app/Contents/MacOS/TraceCommonsApp");
+        let ps = "/sbin/launchd\n\
+                  /Applications/Near.ai Staging.app/Contents/MacOS/TraceCommonsApp --background-launch\n";
+        assert!(app_running_in(ps, exe));
+        assert!(app_running_in(
+            "/Applications/Near.ai Staging.app/Contents/MacOS/TraceCommonsApp\n",
+            exe
+        ));
+        // The bundled CLI itself, the production app, and a longer name
+        // sharing the prefix are not it.
+        assert!(!app_running_in(
+            "/Applications/Near.ai Staging.app/Contents/MacOS/near-ai login\n\
+             /Applications/Near.ai.app/Contents/MacOS/TraceCommonsApp\n\
+             /Applications/Near.ai Staging.app/Contents/MacOS/TraceCommonsAppHelper\n",
+            exe
+        ));
+    }
+
+    /// `--config-dir` wins over the override variable in
+    /// `ConfigStore::resolve`, so the store is forwarded whenever it is not
+    /// the default, however it was chosen; the default goes unforwarded, so
+    /// the app resolves it exactly as a click would.
+    #[test]
+    fn a_store_other_than_the_default_is_forwarded_however_it_was_chosen() {
+        let default = Path::new("/Users/x/Library/Application Support/trace-commons-staging");
+        let chosen = Path::new("/Users/x/tc-alt");
+        assert_eq!(forwarded_state_dir(chosen, Some(default)), Some(chosen));
+        assert_eq!(forwarded_state_dir(default, Some(default)), None);
+        // No default to compare with: forward, so the app cannot pick another.
+        assert_eq!(forwarded_state_dir(chosen, None), Some(chosen));
+    }
+
+    #[test]
+    fn the_app_is_found_from_the_bundled_cli_only() {
+        assert_eq!(
+            app_bundle(Path::new(
+                "/Applications/Near.ai Staging.app/Contents/MacOS/near-ai"
+            )),
+            Some(app())
+        );
+        assert_eq!(app_bundle(Path::new("/opt/homebrew/bin/near-ai")), None);
+        assert_eq!(
+            app_bundle(Path::new("/tmp/target/debug/trace-commons-contributor")),
+            None
+        );
+        // Contents/MacOS under something that is not an app bundle.
+        assert_eq!(app_bundle(Path::new("/tmp/x/Contents/MacOS/near-ai")), None);
+        assert_eq!(
+            app_bundle(Path::new("/tmp/x.app/Resources/MacOS/near-ai")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_app_is_launched_without_coming_forward_or_opening_a_window() {
+        let args = background_launch_args(&app(), None);
+        assert_eq!(
+            args,
+            vec![
+                "-g".to_string(),
+                "/Applications/Near.ai Staging.app".to_string(),
+                "--args".to_string(),
+                BACKGROUND_LAUNCH_ARG.to_string(),
+            ]
+        );
+        assert!(
+            !args.iter().any(|a| a == "-j"),
+            "hidden apps can hold back later windows"
+        );
+        assert_eq!(
+            BACKGROUND_LAUNCH_ARG, "--background-launch",
+            "the app matches this spelling"
+        );
+    }
+
+    #[test]
+    fn setup_opens_the_app_normally() {
+        assert_eq!(
+            setup_launch_args(&app(), None),
+            vec!["/Applications/Near.ai Staging.app".to_string()]
+        );
+    }
+
+    /// `open` does not pass the terminal's environment on, so a store
+    /// chosen with the override variable is handed to the app explicitly:
+    /// otherwise the app would start its daemon on the default folder and
+    /// `login` would wait on one that never answers.
+    #[test]
+    fn an_overridden_store_goes_to_the_app_with_it() {
+        let dir = Path::new("/tmp/tc state");
+        let pair = format!("{}=/tmp/tc state", crate::channel::STATE_DIR_ENV);
+        assert_eq!(
+            background_launch_args(&app(), Some(dir)),
+            vec![
+                "-g".to_string(),
+                "--env".to_string(),
+                pair.clone(),
+                "/Applications/Near.ai Staging.app".to_string(),
+                "--args".to_string(),
+                BACKGROUND_LAUNCH_ARG.to_string(),
+            ]
+        );
+        assert_eq!(
+            setup_launch_args(&app(), Some(dir)),
+            vec![
+                "--env".to_string(),
+                pair,
+                "/Applications/Near.ai Staging.app".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn waiting_stops_once_the_daemon_answers() {
+        let mut checks = 0;
+        let mut slept = Duration::ZERO;
+        let up = wait_for_daemon(
+            &mut || {
+                checks += 1;
+                checks == 3
+            },
+            &mut |d| slept += d,
+        );
+        assert!(up);
+        assert_eq!(checks, 3);
+        assert_eq!(slept, DAEMON_POLL * 2);
+    }
+
+    #[test]
+    fn waiting_gives_up_after_its_bound() {
+        let mut checks = 0u32;
+        let mut slept = Duration::ZERO;
+        let up = wait_for_daemon(
+            &mut || {
+                checks += 1;
+                false
+            },
+            &mut |d| slept += d,
+        );
+        assert!(!up);
+        assert!(slept >= DAEMON_WAIT, "waited {slept:?}");
+        assert!(slept < DAEMON_WAIT + DAEMON_POLL * 2, "waited {slept:?}");
+    }
+
+    #[test]
+    fn the_messages_name_the_app() {
+        assert_eq!(
+            launching_line(&app()),
+            "Starting Near.ai Staging in the background to sign in."
+        );
+        assert_eq!(
+            setup_line(&app()),
+            "Finish setting up in Near.ai Staging, which is now open. Sign-in is part of setup."
+        );
+        assert_eq!(
+            not_answering_line(&app()),
+            "Near.ai Staging is open, but its background service isn't answering. Open Near.ai Staging to see why."
+        );
+        assert_eq!(
+            no_daemon_line(&app()),
+            "Near.ai Staging started, but its background service didn't. Open Near.ai Staging to see why."
+        );
     }
 }

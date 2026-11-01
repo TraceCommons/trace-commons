@@ -237,18 +237,8 @@ export function SettingsPage({
               <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
                 LIMITS
               </span>
-              <h2>Daily guardrails</h2>
+              <h2>Local limits</h2>
             </div>
-            <SettingRow
-              label="Uploads per day"
-              value={settingValue(snapshot, "max_uploads_per_day")}
-              detail="Hard daily count cap"
-            />
-            <SettingRow
-              label="Bytes per day"
-              value={settingValue(snapshot, "max_bytes_per_day")}
-              detail="Hard daily volume cap"
-            />
             <SettingRow
               label="Queue capacity"
               value={settingValue(snapshot, "max_queue_entries")}

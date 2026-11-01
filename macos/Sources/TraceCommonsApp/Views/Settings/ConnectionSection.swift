@@ -9,18 +9,20 @@ struct ConnectionSection: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             connection
             ContributionAccountCard()
+            // The devices linked to this account, and Link a server.
+            AccountDevicesView()
             LegacyMigrationSettingsCard()
         }
     }
 
     private var connection: some View {
-        GlassEyebrowCard(SettingsWords.connection, title: connectionTitle) {
+        GlassEyebrowCard(SettingsWords.connection, title: connectionTitle, accessory: {
             if model.statusRead == .answered {
                 GlassChip(glass: model.status.loggedIn ? SettingsLegacyWords.connectionReady
                                                        : SettingsLegacyWords.connectionLocalOnly,
                           muted: !model.status.loggedIn)
             }
-        } content: {
+        }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 if model.statusRead != .answered {
                     SettingsReadNotice(model.statusRead, retry: model.refreshStatus)
@@ -49,9 +51,9 @@ struct ConnectionSection: View {
         }
     }
 
-    /// #1146's head: CONNECTION over Connected or Not connected, with the
-    /// Ready or Local only chip. Before the core's first answer there is no
-    /// title and no chip: "Not connected" would be an answer nothing gave.
+    /// Connected or Not connected beside the Ready or Local only chip.
+    /// Before the core's first answer, use the Connection heading and no
+    /// chip: "Not connected" would be an answer nothing gave.
     private var connectionTitle: String? {
         guard model.statusRead == .answered else { return nil }
         return model.status.loggedIn ? SettingsLegacyWords.connected : SettingsLegacyWords.notConnected

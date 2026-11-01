@@ -221,7 +221,6 @@ final class TracesScalePerfTests: XCTestCase {
         let b = TracesStore.build(read, showsIgnored: true, keepsOrder: true, idleOnly: false)
         Self.time("a.main.treeEquality") { _ = a == b }
         Self.time("a.main.allSessions") { _ = store.tree.allSessions }
-        Self.time("a.main.shield") { _ = store.shield }
         // A full load through the sample client (its JSON decode included),
         // awaited from the main actor.
         let clock = ContinuousClock()
@@ -596,7 +595,6 @@ final class TracesScalePerfTests: XCTestCase {
             for e in sessions { _ = TracesTreeView.rowID(.session(entryID: e.entryId)) }
         }
         // MonitorWindowView reads these on every body pass of the window.
-        Self.time("f.window.shield") { _ = store.shield }
         Self.time("f.window.selectedSession") { _ = store.selectedSession(.session(entryID: sessions.last!.entryId)) }
         Self.time("f.window.folderOfSession(reveal)") {
             _ = TracesTreeView.folder(of: sessions.last!.entryId, in: store.tree)

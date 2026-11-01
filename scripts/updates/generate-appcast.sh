@@ -4,6 +4,13 @@
 # Sparkle verifies this feed with its own EdDSA key AND the app's Developer ID
 # code signature. Both must hold, so a compromised bucket alone cannot push an
 # update.
+#
+# Both channels use this script (staging design 4.7). What differs between
+# them is an argument, never a branch in here: the output path, the signing
+# key file (each channel has its own Sparkle key), the feed title, and
+# `--prerelease <label>`, which makes the short version `X.Y.Z-<label>.N`
+# instead of `X.Y.Z`. Without those flags the appcast is the production one,
+# exactly as before. scripts/ci/test-generate-appcast.sh holds both.
 set -euo pipefail
 
 die() { echo "generate-appcast: $*" >&2; exit 1; }
@@ -22,6 +29,10 @@ SIGN_UPDATE=""     # path to Sparkle's sign_update binary
 # time, when the key was finally needed.
 ED_KEY_FILE=""
 OUT="dist/updates/appcast.xml"
+TITLE="Trace Commons"
+# A pre-release label, e.g. `staging`: the short version must then be
+# X.Y.Z-<label>.<n>. Empty means a plain X.Y.Z release.
+PRERELEASE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,6 +43,8 @@ while [ $# -gt 0 ]; do
     --sign-update)   SIGN_UPDATE="${2:?}"; shift 2 ;;
     --ed-key-file)   ED_KEY_FILE="${2:?}"; shift 2 ;;
     --out)           OUT="${2:?}"; shift 2 ;;
+    --title)         TITLE="${2?}"; shift 2 ;;
+    --prerelease)    PRERELEASE="${2:?}"; shift 2 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -42,8 +55,20 @@ done
 [ -f "$DMG_PATH" ] || die "dmg not found: $DMG_PATH"
 [ -x "$SIGN_UPDATE" ] || die "sign_update not found or not executable: $SIGN_UPDATE"
 
-printf '%s' "$SHORT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
-  || die "short version must be three-part numeric, got '$SHORT_VERSION'"
+# The title lands in the XML unescaped: letters, digits, spaces, dots and
+# hyphens only.
+printf '%s' "$TITLE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9 .-]*$' \
+  || die "title must be letters, digits, spaces, dots and hyphens, got '$TITLE'"
+
+if [ -z "$PRERELEASE" ]; then
+  printf '%s' "$SHORT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    || die "short version must be three-part numeric, got '$SHORT_VERSION'"
+else
+  printf '%s' "$PRERELEASE" | grep -Eq '^[a-z]+$' \
+    || die "pre-release label must be lower-case letters, got '$PRERELEASE'"
+  printf '%s' "$SHORT_VERSION" | grep -Eq "^[0-9]+\.[0-9]+\.[0-9]+-$PRERELEASE\.[0-9]+\$" \
+    || die "short version must be X.Y.Z-$PRERELEASE.N, got '$SHORT_VERSION'"
+fi
 
 LENGTH="$(wc -c < "$DMG_PATH" | tr -d ' ')"
 
@@ -71,7 +96,7 @@ cat > "$OUT" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
-    <title>Trace Commons</title>
+    <title>$TITLE</title>
     <item>
       <title>$SHORT_VERSION</title>
       <pubDate>$PUBDATE</pubDate>

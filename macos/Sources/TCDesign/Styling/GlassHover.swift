@@ -27,13 +27,15 @@ private struct GlassHoverFill<S: Shape>: ViewModifier {
     @State private var hovering = false
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.glassGround) private var ground
 
     func body(content: Content) -> some View {
         let shows = GlassHover.shows(hovering: hovering, enabled: isEnabled)
         content
             .background {
                 shape
-                    .fill(fill.color)
+                    // A control's hover follows its ground (`GlassGround`).
+                    .fill(ground.hover(fill, tier: .control).color)
                     .opacity(shows ? 1 : 0)
                     .animation(GlassMotion.fast(reduceMotion), value: shows)
             }

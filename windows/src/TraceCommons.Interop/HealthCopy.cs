@@ -115,19 +115,6 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 "Near.ai has stopped queuing new traces",
                 "-- 500 are already waiting. Review or clear some to start again.",
                 "Review"),
-            // The fallback for a daemon that reported the label but no
-            // daily_budget object. ForBudget is what normally renders this
-            // condition, because it can say how many are waiting and when
-            // the limit actually resets. This line used to promise "the
-            // rest goes out tomorrow", which the daemon never said: it
-            // rolls its counters at UTC midnight, which is not tomorrow for
-            // most of the world.
-            "daily-cap-reached" => new HealthCopy(
-                BudgetTitle,
-                "Approved traces are waiting. Nothing has been lost -- they go out when the "
-                + "limit resets.",
-                null),
-
             // An unrecognised label is still a real condition, and the daemon
             // is free to grow labels this build has never heard of. Say the
             // thing that holds for every blocking label rather than inventing
@@ -142,51 +129,6 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
         };
     }
 
-    /// <summary>The banner title for a spent daily budget.</summary>
-    public const string BudgetTitle = "Today's upload limit is used up.";
-
-    /// <summary>
-    /// The banner for a spent daily budget, built from the numbers the
-    /// daemon reported, or null when nothing is being held back.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Deliberately not part of <see cref="ForLabel"/>, and deliberately not
-    /// subject to the daemon's health precedence. <c>daily-cap-reached</c>
-    /// is last in that order, so on the machine this was written for the
-    /// single health slot was held by <c>queue-full</c> and the real reason
-    /// approvals were not moving never reached a screen. A window that waits
-    /// for the label will keep missing the condition; it must read
-    /// <c>status.daily_budget</c> instead.
-    /// </para>
-    /// <para>
-    /// No action label: there is nothing a contributor can do about it, and
-    /// the caps are not settable from here.
-    /// </para>
-    /// </remarks>
-    public static HealthCopy? ForBudget(DailyBudget? budget)
-    {
-        if (budget is null || !budget.Blocked)
-        {
-            return null;
-        }
-
-        var waiting = budget.BlockedEntries switch
-        {
-            <= 0 => "Approved traces are waiting",
-            1 => "1 approved trace is waiting",
-            var n => $"{n} approved traces are waiting",
-        };
-
-        var resets = budget.ResetsAtUtc;
-        var detail = resets is null
-            ? $"{waiting}. Nothing has been lost -- they go out when the limit resets."
-            : $"{waiting}. Nothing has been lost -- they go out when the limit resets at "
-                + $"{resets.Value.ToLocalTime():t}.";
-
-        return new HealthCopy(BudgetTitle, detail, null);
-    }
-
     /// <summary>
     /// The banner for approved sessions held on a busy privacy witness, in
     /// the Rust's words: its title, its counted body, and the next try in
@@ -194,8 +136,7 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
     /// there is no notice to show.
     /// </summary>
     /// <remarks>
-    /// Not part of <see cref="ForLabel"/> for the reason
-    /// <see cref="ForBudget"/> is not: a higher label can hold the daemon's
+    /// Not part of <see cref="ForLabel"/> because a higher label can hold the daemon's
     /// single health slot while these sessions are still waiting. No action
     /// label: the daemon retries on its own, and there is nothing to press.
     /// The notice is passed in rather than fetched here, so this stays

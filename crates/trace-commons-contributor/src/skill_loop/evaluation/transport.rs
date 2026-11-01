@@ -16,7 +16,7 @@ use crate::skill_loop::evaluation::{
     EvaluationArm, EvaluationUsage, OUTPUT_TOKEN_LIMIT, REQUEST_TIMEOUT_SECS, SkillEvaluationError,
 };
 
-const CLOUD_API_BASE: &str = "https://cloud-api.near.ai/v1";
+const CLOUD_API_BASE: &str = crate::channel::NEAR_AI_INFERENCE_BASE;
 const MAX_COMPLETION_RESPONSE_BYTES: usize = 128 * 1024;
 const MAX_RETAINED_RAW_OUTPUT_BYTES: usize = 8 * 1024;
 const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;

@@ -12,8 +12,9 @@ use trace_commons_contributor_ffi::{
     TC_CONTRIBUTION_CONTROL_CONTRIBUTE, TC_CONTRIBUTION_CONTROL_NONE, TC_CREDENTIAL_ACTION_CANCEL,
     TC_CREDENTIAL_ACTION_FORGET, TC_CREDENTIAL_ACTION_MIGRATE, TC_CREDENTIAL_ACTION_NONE,
     TC_CREDENTIAL_ACTION_OBTAIN, TC_HARNESS_PLAN_CHANGES, TC_HARNESS_PLAN_ENTRY_UNUSABLE,
-    TC_HARNESS_PLAN_NO_CONFIG_PATH, TC_HARNESS_PLAN_NOOP, TC_HARNESS_PLAN_NOT_INSTALLED,
-    TC_HARNESS_PLAN_UNKNOWN, TC_HARNESS_PLAN_UNPARSEABLE, TC_HARNESS_STATE_ACTIVITY_SHARED,
+    TC_HARNESS_PLAN_MODELS_UNAVAILABLE, TC_HARNESS_PLAN_NO_CONFIG_PATH, TC_HARNESS_PLAN_NOOP,
+    TC_HARNESS_PLAN_NOT_INSTALLED, TC_HARNESS_PLAN_UNKNOWN, TC_HARNESS_PLAN_UNPARSEABLE,
+    TC_HARNESS_PLAN_UNSUPPORTED_VERSION, TC_HARNESS_STATE_ACTIVITY_SHARED,
     TC_HARNESS_STATE_ANSWERING, TC_HARNESS_STATE_CONNECTED_NO_CALLS,
     TC_HARNESS_STATE_NOT_CONNECTED, TC_HARNESS_STATE_UNKNOWN, TC_PRIVATE_INFERENCE_TONE_ATTENTION,
     TC_PRIVATE_INFERENCE_TONE_CLEAR, TC_PRIVATE_INFERENCE_TONE_HELD,
@@ -34,17 +35,17 @@ use trace_commons_contributor_ffi::{
     tc_near_ai_credential_state_line, tc_near_ai_credential_state_tone, tc_near_ai_enroll_line,
     tc_near_ai_enroll_tone, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
     tc_preview_summary_json, tc_preview_turns_json, tc_preview_unsure_spans_json,
-    tc_private_inference_copy, tc_private_inference_quit_needs_notice,
-    tc_private_inference_runtime_word, tc_private_inference_serving_line,
-    tc_private_inference_should_offer, tc_private_inference_state_line,
-    tc_private_inference_state_tone, tc_public_run_copy, tc_public_run_error_line,
-    tc_public_run_validate_editor, tc_routing_copy, tc_routing_discovery_line,
-    tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
-    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
-    tc_scrub_detector_names, tc_search_original, tc_session_detail_error_line,
-    tc_session_notification_copy, tc_skill_draft_validate, tc_skill_learning_copy,
-    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
-    tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
+    tc_private_inference_copy, tc_private_inference_menu_tone, tc_private_inference_menu_word,
+    tc_private_inference_quit_needs_notice, tc_private_inference_runtime_word,
+    tc_private_inference_serving_line, tc_private_inference_should_offer,
+    tc_private_inference_state_line, tc_private_inference_state_tone, tc_public_run_copy,
+    tc_public_run_error_line, tc_public_run_validate_editor, tc_routing_copy,
+    tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
+    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
+    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
+    tc_session_detail_error_line, tc_session_notification_copy, tc_skill_draft_validate,
+    tc_skill_learning_copy, tc_skill_learning_error_line, tc_source_check_line, tc_string_free,
+    tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
     tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
     tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
@@ -1464,7 +1465,7 @@ fn inference_consent_round_trips_without_changing_proxy_or_other_permissions() {
 }
 
 #[test]
-fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
+fn the_pre_start_and_ipc_paths_agree_on_numeric_settings() {
     // `tc_daemon_start_with_settings` and `tc_call(handle, "set_settings",
     // ...)` share one validator (`apply_settings_object`); this proves that
     // in practice, not just by code inspection, by driving both paths for
@@ -1474,8 +1475,8 @@ fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
     write_tempdir_session_roots(dir.path());
 
     let settings_json = serde_json::json!({
-        "max_uploads_per_day": 200,
-        "max_bytes_per_day": 2_147_483_648u64,
+        "quiescence_secs": 600,
+        "approval_hold_secs": 120,
     })
     .to_string();
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -1496,11 +1497,11 @@ fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
     // through the same `get_settings` the IPC path answers.
     let out = call(h, "get_settings", "{}");
     assert!(
-        out.contains("\"max_uploads_per_day\":200"),
+        out.contains("\"quiescence_secs\":600"),
         "pre-start override did not take effect: {out}"
     );
     assert!(
-        out.contains("\"max_bytes_per_day\":2147483648"),
+        out.contains("\"approval_hold_secs\":120"),
         "pre-start override did not take effect: {out}"
     );
 
@@ -1509,15 +1510,15 @@ fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
     let out = call(
         h,
         "set_settings",
-        &serde_json::json!({"max_uploads_per_day": 500}).to_string(),
+        &serde_json::json!({"quiescence_secs": 900}).to_string(),
     );
     assert!(
-        out.contains("\"max_uploads_per_day\":500"),
+        out.contains("\"quiescence_secs\":900"),
         "set_settings did not apply over the socket: {out}"
     );
     // The field it did not touch is untouched.
     assert!(
-        out.contains("\"max_bytes_per_day\":2147483648"),
+        out.contains("\"approval_hold_secs\":120"),
         "set_settings must not disturb a field it was not asked to change: {out}"
     );
 
@@ -1525,11 +1526,11 @@ fn the_pre_start_and_ipc_paths_agree_on_the_daily_caps() {
 }
 
 #[test]
-fn a_daily_cap_above_the_ceiling_is_rejected_on_both_paths() {
+fn a_setting_above_its_range_is_rejected_on_both_paths() {
     let dir = tempfile::tempdir().unwrap();
 
     // The pre-start path.
-    let settings_json = serde_json::json!({ "max_uploads_per_day": 1_000_001u64 }).to_string();
+    let settings_json = serde_json::json!({ "quiescence_secs": 14_401u64 }).to_string();
     let mut err: *mut c_char = std::ptr::null_mut();
     let h = unsafe {
         tc_daemon_start_with_settings(
@@ -1540,7 +1541,7 @@ fn a_daily_cap_above_the_ceiling_is_rejected_on_both_paths() {
     };
     assert!(
         h.is_null(),
-        "an out-of-range cap must not silently start the daemon"
+        "an out-of-range setting must not silently start the daemon"
     );
     assert!(!err.is_null(), "a failure must set the error out-param");
     let msg = take_owned(err);
@@ -1557,11 +1558,11 @@ fn a_daily_cap_above_the_ceiling_is_rejected_on_both_paths() {
     let out = call(
         h2,
         "set_settings",
-        &serde_json::json!({"max_bytes_per_day": 5u64 * 1024 * 1024 * 1024 + 1}).to_string(),
+        &serde_json::json!({"approval_hold_secs": 301}).to_string(),
     );
     assert!(
         out.contains("settings-invalid-value"),
-        "an out-of-range byte cap must be refused over the socket: {out}"
+        "an out-of-range hold must be refused over the socket: {out}"
     );
     stop(h2);
 }
@@ -1668,7 +1669,10 @@ fn tc_daemon_start_with_settings_null_config_dir_is_an_error() {
 /// sentence.
 #[test]
 fn tc_invite_issuer_host_returns_the_host_and_nothing_else() {
-    let invite = cstr_str("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6");
+    use trace_commons_contributor::channel::PUBLIC_SITE_HOST;
+    let invite = cstr_str(&format!(
+        "https://issuer.{PUBLIC_SITE_HOST}/onboard#VQWWPGYSG8Y4LTP6"
+    ));
     let out = unsafe { tc_invite_issuer_host(invite.as_ptr()) };
     assert!(!out.is_null(), "a well-formed invite resolves");
     let host = unsafe { std::ffi::CStr::from_ptr(out) }
@@ -1677,7 +1681,7 @@ fn tc_invite_issuer_host_returns_the_host_and_nothing_else() {
         .to_string();
     unsafe { tc_string_free(out) };
 
-    assert_eq!(host, "issuer.tracecommons.ai");
+    assert_eq!(host, format!("issuer.{PUBLIC_SITE_HOST}"));
     // The point of the narrow return: the credential does not cross.
     assert!(!host.contains("VQWWPGYSG8Y4LTP6"));
 }
@@ -3386,26 +3390,6 @@ fn the_session_notification_copy_crosses_the_abi() {
     );
 }
 
-/// K9 (#1118): the submit toast crosses the ABI unchanged, argument order
-/// intact, and a negative count (nobody's honest answer) clamps to zero
-/// instead of wrapping.
-#[test]
-fn the_sent_toast_crosses_the_abi_and_clamps_negatives() {
-    use trace_commons_contributor::consent_copy as copy;
-    assert_eq!(
-        take_owned(tc_toast_sent_text(7, 20, 1)),
-        copy::toast_sent_text(7, 20, 1)
-    );
-    assert_eq!(
-        take_owned(tc_toast_sent_text(7, 20, 1)),
-        "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
-    );
-    assert_eq!(
-        take_owned(tc_toast_sent_text(-3, -1, -9)),
-        copy::toast_sent_text(0, 0, 0)
-    );
-}
-
 #[test]
 fn the_gate_help_branch_crosses_the_abi() {
     use trace_commons_contributor::consent_copy as copy;
@@ -3487,6 +3471,7 @@ fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
             "evidence_kind_choices" => Some(9),
             "contribution_status_choices" => Some(10),
             "history_status_labels" => Some(11),
+            "credit_outcome_labels" => Some(8),
             "permitted_use_choices" => Some(6),
             "reuse_permissions" => Some(2),
             _ => None,
@@ -3545,7 +3530,10 @@ fn the_public_run_payload_and_error_tables_cross_whole_and_finished() {
             "workflow": "Renew the session, then retry once.",
             "reuse_permission": "cc_by_4_0",
             "evidence": [{"event_id": "00000000-0000-0000-0000-000000000000", "excerpt": "The retry succeeded."}],
-            "source": "https://tracecommons.ai/runs/run-source-workflow"
+            "source": format!(
+                "{}run-source-workflow",
+                trace_commons_contributor::channel::PUBLIC_RUNS_PREFIX
+            )
         })
         .to_string(),
     )
@@ -3772,6 +3760,53 @@ fn the_runtime_word_crosses_as_the_core_picks_it() {
     assert_eq!(
         take_owned(unsafe { tc_private_inference_runtime_word(std::ptr::null()) }),
         copy::RUNTIME_UNKNOWN
+    );
+}
+
+/// The popover's word and its dot cross as the core picks them: every label
+/// maps as `menu_state` does, and an unreported, unfamiliar or missing label
+/// is "Unknown" on a grey dot, never "On" or "Off".
+#[test]
+fn the_menu_word_and_dot_cross_as_the_core_picks_them() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let word = |state: &str| {
+        let state = CString::new(state).unwrap();
+        take_owned(unsafe { tc_private_inference_menu_word(state.as_ptr()) })
+    };
+    let tone = |state: &str| {
+        let state = CString::new(state).unwrap();
+        unsafe { tc_private_inference_menu_tone(state.as_ptr()) }
+    };
+    for label in
+        copy::STATE_LABELS
+            .into_iter()
+            .chain(["", "RUNNING", "a_state_from_a_later_daemon"])
+    {
+        let (expected_word, expected_tone) = copy::menu_state(label);
+        assert_eq!(word(label), expected_word, "{label:?}");
+        let expected = match expected_tone {
+            copy::PrivateInferenceTone::Neutral => TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
+            copy::PrivateInferenceTone::Held => TC_PRIVATE_INFERENCE_TONE_HELD,
+            copy::PrivateInferenceTone::Clear => TC_PRIVATE_INFERENCE_TONE_CLEAR,
+            copy::PrivateInferenceTone::Attention => TC_PRIVATE_INFERENCE_TONE_ATTENTION,
+            copy::PrivateInferenceTone::Refused => TC_PRIVATE_INFERENCE_TONE_REFUSED,
+        };
+        assert_eq!(tone(label), expected, "{label:?}");
+    }
+    assert_eq!(word("running_destination_unknown"), "On");
+    assert_eq!(
+        tone("running_destination_unknown"),
+        TC_PRIVATE_INFERENCE_TONE_ATTENTION
+    );
+    assert_eq!(word("crashed"), "Not working");
+    assert_eq!(tone("crashed"), TC_PRIVATE_INFERENCE_TONE_REFUSED);
+    assert_eq!(
+        take_owned(unsafe { tc_private_inference_menu_word(std::ptr::null()) }),
+        copy::MENU_WORD_UNKNOWN
+    );
+    assert_eq!(
+        unsafe { tc_private_inference_menu_tone(std::ptr::null()) },
+        TC_PRIVATE_INFERENCE_TONE_NEUTRAL
     );
 }
 
@@ -4521,6 +4556,14 @@ fn the_harness_plan_outcome_table_crosses_the_abi() {
     assert_eq!(code("not_installed"), TC_HARNESS_PLAN_NOT_INSTALLED);
     assert_eq!(code("entry_unusable"), TC_HARNESS_PLAN_ENTRY_UNUSABLE);
     assert_eq!(code("no_config_path"), TC_HARNESS_PLAN_NO_CONFIG_PATH);
+    assert_eq!(
+        code("unsupported_version"),
+        TC_HARNESS_PLAN_UNSUPPORTED_VERSION
+    );
+    assert_eq!(
+        code("models_unavailable"),
+        TC_HARNESS_PLAN_MODELS_UNAVAILABLE
+    );
 
     // The distinction the design is emphatic about.
     assert_ne!(
@@ -4588,6 +4631,8 @@ fn the_harness_codes_do_not_collide_with_the_other_ranges() {
         TC_HARNESS_PLAN_NOT_INSTALLED,
         TC_HARNESS_PLAN_ENTRY_UNUSABLE,
         TC_HARNESS_PLAN_NO_CONFIG_PATH,
+        TC_HARNESS_PLAN_UNSUPPORTED_VERSION,
+        TC_HARNESS_PLAN_MODELS_UNAVAILABLE,
     ];
     let others = [
         TC_PRIVATE_INFERENCE_TONE_NEUTRAL,
@@ -5558,6 +5603,81 @@ fn the_inference_connection_and_privacy_scan_copy_cross_the_abi() {
 }
 
 #[test]
+fn the_payout_link_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::payout_link_copy;
+    use trace_commons_contributor_ffi::tc_payout_link_copy_json;
+    let copy = json_owned(tc_payout_link_copy_json());
+    assert_eq!(copy, serde_json::to_value(payout_link_copy()).unwrap());
+    assert!(copy["body"].as_str().unwrap().contains("{org_name}"));
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
+fn the_referral_copy_crosses_the_abi() {
+    use trace_commons_contributor::referral_copy::referral_copy;
+    use trace_commons_contributor_ffi::tc_referral_copy_json;
+    let copy = json_owned(tc_referral_copy_json());
+    assert_eq!(copy, serde_json::to_value(referral_copy()).unwrap());
+    assert!(
+        copy["copy_accessibility_name"]
+            .as_str()
+            .unwrap()
+            .contains("{code}")
+    );
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
+fn a_typed_referral_code_is_shown_as_the_daemon_reads_it() {
+    use trace_commons_contributor_ffi::tc_referral_code_display;
+    for (typed, shown) in [
+        ("tc-7k3m9-qx2rd", "TC-7K3M9-QX2RD"),
+        (" 7K3M9 QX2RD ", "TC-7K3M9-QX2RD"),
+        ("TC-IL0O1-ABCDE", "TC-11001-ABCDE"),
+    ] {
+        let arg = cstr_str(typed);
+        assert_eq!(
+            take_owned(unsafe { tc_referral_code_display(arg.as_ptr()) }),
+            shown,
+            "{typed}"
+        );
+    }
+    for typed in ["", "not a code", "TC-7K3M9-QX2RU", "7K3M9QX2R"] {
+        let arg = cstr_str(typed);
+        assert!(
+            unsafe { tc_referral_code_display(arg.as_ptr()) }.is_null(),
+            "{typed}"
+        );
+    }
+    assert!(unsafe { tc_referral_code_display(std::ptr::null()) }.is_null());
+    let invalid = [0xffu8, 0xfe, 0];
+    assert!(unsafe { tc_referral_code_display(invalid.as_ptr().cast()) }.is_null());
+}
+
+#[test]
+fn the_account_devices_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::account_devices_copy;
+    use trace_commons_contributor_ffi::tc_account_devices_copy_json;
+    let copy = json_owned(tc_account_devices_copy_json());
+    assert_eq!(copy, serde_json::to_value(account_devices_copy()).unwrap());
+    assert!(copy["code_command"].as_str().unwrap().contains("{code}"));
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
+fn the_sent_traces_training_copy_crosses_the_abi() {
+    use trace_commons_contributor::consent_copy::sent_traces_training_copy;
+    use trace_commons_contributor_ffi::tc_sent_traces_training_copy_json;
+    let copy = json_owned(tc_sent_traces_training_copy_json());
+    assert_eq!(
+        copy,
+        serde_json::to_value(sent_traces_training_copy()).unwrap()
+    );
+    assert!(copy["body_other"].as_str().unwrap().contains("{count}"));
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
 fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
     use trace_commons_contributor::daemon::settings::{self, DaemonSettings, settings_ranges};
     use trace_commons_contributor_ffi::tc_settings_ranges_json;
@@ -5570,19 +5690,19 @@ fn the_settings_ranges_cross_the_abi_and_match_what_set_settings_enforces() {
     // and a value at it is the exact value accepted. A drift between the
     // exported range and the enforced one would show up here as one of
     // these two assertions failing, not as a silently wrong control bound.
-    let max_uploads = ranges["max_uploads_per_day"]["max"].as_u64().unwrap();
+    let max_hold = ranges["approval_hold_secs"]["max"].as_u64().unwrap();
     let mut s = DaemonSettings::default();
     assert_eq!(
         settings::apply_settings_object(
             &mut s,
-            &serde_json::json!({ "max_uploads_per_day": max_uploads + 1 }),
+            &serde_json::json!({ "approval_hold_secs": max_hold + 1 }),
         ),
         Err(settings::ERR_SETTINGS_INVALID_VALUE)
     );
     assert_eq!(
         settings::apply_settings_object(
             &mut s,
-            &serde_json::json!({ "max_uploads_per_day": max_uploads }),
+            &serde_json::json!({ "approval_hold_secs": max_hold }),
         ),
         Ok(true)
     );
@@ -5765,8 +5885,11 @@ fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
     );
     assert!(err.is_null());
 
-    let enroll =
-        cstr_str("tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE");
+    // In the build channel's own scheme (staging design 4.5).
+    let enroll = cstr_str(&format!(
+        "{}enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
+        trace_commons_contributor::channel::DEEP_LINK_PREFIX
+    ));
     let value = json_owned(unsafe { tc_parse_deep_link_json(enroll.as_ptr(), &mut err) });
     assert_eq!(
         value,
@@ -5782,7 +5905,10 @@ fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
     for garbage in [
         cstr_str("not-a-deep-link"),
         cstr_str("javascript:alert(1)"),
-        cstr_str("tracecommons://review@evil.example"),
+        cstr_str(&format!(
+            "{}review@evil.example",
+            trace_commons_contributor::channel::DEEP_LINK_PREFIX
+        )),
     ] {
         let mut err: *mut c_char = std::ptr::null_mut();
         assert!(unsafe { tc_parse_deep_link_json(garbage.as_ptr(), &mut err) }.is_null());
@@ -5796,15 +5922,19 @@ fn deep_links_cross_the_abi_as_a_typed_action_or_a_refusal_label() {
 
 #[test]
 fn the_external_url_allowlist_crosses_the_abi() {
+    use trace_commons_contributor::channel::{NEAR_AI_DASHBOARD_ORIGIN, PUBLIC_RUNS_PREFIX};
     use trace_commons_contributor::external_url::is_allowed;
     use trace_commons_contributor_ffi::tc_external_url_is_allowed;
 
+    // The channel's own dashboard and public site, so a staging build is
+    // held to its hosts and a production build to production's.
     for url in [
-        "http://127.0.0.1:49152/near-ai/callback?state=abc",
-        "https://cloud.near.ai/dashboard/organizations/example/credits",
-        "https://tracecommons.ai/runs/repair-a-stalled-upload",
-        "https://github.com/TraceCommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5",
+        "http://127.0.0.1:49152/near-ai/callback?state=abc".to_string(),
+        format!("{NEAR_AI_DASHBOARD_ORIGIN}/dashboard/organizations/example/credits"),
+        format!("{PUBLIC_RUNS_PREFIX}repair-a-stalled-upload"),
+        "https://github.com/TraceCommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5".to_string(),
     ] {
+        let url = url.as_str();
         assert!(is_allowed(url), "{url}");
         let c = cstr_str(url);
         assert_eq!(
@@ -5814,10 +5944,11 @@ fn the_external_url_allowlist_crosses_the_abi() {
         );
     }
     for url in [
-        "https://example.com/redirect",
-        "javascript:alert(1)",
-        "https://cloud.near.ai.evil.example/dashboard/organizations/example/credits",
+        "https://example.com/redirect".to_string(),
+        "javascript:alert(1)".to_string(),
+        format!("{NEAR_AI_DASHBOARD_ORIGIN}.evil.example/dashboard/organizations/example/credits"),
     ] {
+        let url = url.as_str();
         assert!(!is_allowed(url), "{url}");
         let c = cstr_str(url);
         assert_eq!(
@@ -6159,6 +6290,39 @@ fn the_regrant_void_notice_crosses_the_abi_only_on_the_grants_notice() {
     assert!(unsafe { tc_grant_void_notice_regrant_json(std::ptr::null()) }.is_null());
 }
 
+/// Traces' estimate line crosses the ABI as the core words it: a dollar
+/// total when the request carries the commons' range, points otherwise, and
+/// NULL for no line (nothing found, unreadable input). Synthetic values.
+#[test]
+fn the_first_run_estimate_line_crosses_the_abi() {
+    use trace_commons_contributor_ffi::tc_first_run_estimate_line;
+    let line = |request: &str| {
+        let request = cstr_str(request);
+        let out = unsafe { tc_first_run_estimate_line(request.as_ptr()) };
+        if out.is_null() {
+            return None;
+        }
+        let text = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        unsafe { tc_string_free(out) };
+        Some(text)
+    };
+    assert_eq!(
+        line(r#"{"traces":10,"usd_micros_per_accepted_trace":{"min":120000,"max":340000}}"#)
+            .as_deref(),
+        Some("An estimated $1.20–$3.40 in NEAR AI credit")
+    );
+    assert_eq!(
+        line(r#"{"traces":1365}"#).as_deref(),
+        Some("An estimated 4,095–10,920 points")
+    );
+    assert_eq!(line(r#"{"traces":0}"#), None);
+    assert_eq!(line("not json"), None);
+    assert!(unsafe { tc_first_run_estimate_line(std::ptr::null()) }.is_null());
+}
+
 #[test]
 fn the_first_run_copy_crosses_the_abi() {
     use trace_commons_contributor::first_run_copy::first_run_copy;
@@ -6168,7 +6332,7 @@ fn the_first_run_copy_crosses_the_abi() {
     assert_eq!(value["frame"]["quick_setup"], "Quick setup");
 }
 
-/// #1407: Show, Stop and Start again reach the daemon through the same
+/// #1407: Show, Stop, Start again and Resume reach the daemon through the same
 /// `tc_call` as every managed method, and each fails closed on a session
 /// the daemon never opened: a refusal label, never a signal or a window.
 #[test]
@@ -6189,6 +6353,10 @@ fn managed_session_actions_cross_tc_call_and_refuse_an_unknown_session() {
         ),
         (
             "managed_session_start_again",
+            format!(r#"{{"session_id":"{session}","request_id":"{session}"}}"#),
+        ),
+        (
+            "managed_session_resume",
             format!(r#"{{"session_id":"{session}","request_id":"{session}"}}"#),
         ),
     ] {

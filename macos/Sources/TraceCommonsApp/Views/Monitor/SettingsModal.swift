@@ -7,7 +7,7 @@ import TCShellCore
 /// name is kept from the modal it was (#1241 Task 10).
 ///
 /// One pane on the opaque base, so nothing behind it reads through. Its
-/// header is the core's title and subtitle and a Watching or Paused chip
+/// header is the core's title and a Watching or Paused chip
 /// from the daemon's status; the window has its own close button. Its body
 /// is two columns: the section list, which scrolls the body to a section,
 /// and one scrolling body holding every section in order, Compute included.
@@ -53,16 +53,10 @@ struct SettingsModal: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                Text(words?.settingsTitle ?? "")
-                    .glassType(GlassTokens.TypeScale.title.weight(.bold))
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .accessibilityAddTraits(.isHeader)
-                Text(words?.settingsSubtitle ?? "")
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text(words?.settingsTitle ?? "")
+                .glassType(GlassTokens.TypeScale.title.weight(.bold))
+                .foregroundStyle(GlassColor.textPrimary)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
             if let chip = Self.chip(paused: paused, words: words) {
                 GlassChip(chip.word, status: chip.status)
@@ -110,7 +104,7 @@ struct SettingsModal: View {
                 .accessibilityLabel(words?.settingsSections ?? "")
                 rule(.vertical)
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Self.sections) { item in
                             VStack(alignment: .leading, spacing: 0) {
                                 if let name = item.navName(words?.settingsNav) {
