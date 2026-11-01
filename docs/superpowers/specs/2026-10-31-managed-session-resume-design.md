@@ -174,8 +174,10 @@ app; changing collection staging rules.
   claim by hard link). The daemon fallback trusts the plan's OpenCode
   executable path (re-resolving deferred: the daemon's PATH may not see the
   terminal's tool); other plan fields are checked against the registry row.
-- UI as built: Resume primary; Start again moves into the row menu when
-  Resume is offered; Copy resume command link reads "Copied" for 2 s;
+- UI as built: Resume primary; Start again, Copy resume command and
+  Dismiss are items in the row menu (Dismiss stays a link only when it is
+  the row's sole action); after Copy resume command the row's status reads
+  "Copied" with a neutral dot for 2 s;
   resumed rows show "Resumed · Continues <time>" (`SessionView.resumed_from`,
   stored at prepare time).
 - New OpenCode sessions on NEAR AI are titled "NEAR AI private session"

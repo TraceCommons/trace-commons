@@ -155,10 +155,11 @@ final class ManagedSessionsRenderTests: XCTestCase {
         try render(ManagedStopSheet(session: rows[0], onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-stop.png"))
     }
 
-    /// Every row state at a wide and a narrow width, to PNG for review
-    /// (TRACE_COMMONS_SCREENSHOT_DIR), off screen.
+    /// Every row state: what each row draws (one visible action at most,
+    /// the rest in the menu), then a render at a wide and a narrow width to
+    /// PNG for review (TRACE_COMMONS_SCREENSHOT_DIR), off screen.
     @MainActor
-    func testSessionRowStatesRenderWideAndNarrow() throws {
+    func testSessionRowStatesDrawOneActionAndRenderWideAndNarrow() throws {
         let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let fixture = try Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json"))
         var value = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
@@ -185,6 +186,22 @@ final class ManagedSessionsRenderTests: XCTestCase {
         ]
         let model = AppModel()
         model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
+        let rows = try XCTUnwrap(model.managedSnapshot?.sessions)
+        XCTAssertEqual(rows.count, 7)
+        // Each state's one button and its menu (the config directory is
+        // unknown here, so no Copy resume command).
+        let expected: [([ManagedSessionAction], [ManagedSessionAction])] = [
+            ([], [.show, .stop]), ([], []),
+            ([.resume], [.startAgain, .dismiss]), ([.resume], [.dismiss]),
+            ([.startAgain], [.dismiss]), ([.dismiss], []), ([], []),
+        ]
+        for (index, session) in rows.enumerated() {
+            let buttons = ManagedSurface.rowButtons(session, terminalLaunch: true, resumeCapable: true)
+            let items = ManagedSurface.rowMenuItems(session, terminalLaunch: true, resumeCapable: true)
+            XCTAssertLessThanOrEqual(buttons.count, 1, "row \(index + 1) draws more than one visible action")
+            XCTAssertEqual(buttons, expected[index].0, "row \(index + 1) buttons")
+            XCTAssertEqual(items, expected[index].1, "row \(index + 1) menu")
+        }
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }

@@ -44,15 +44,16 @@
 //!   stops what it's doing in {folder}." -- the confirmation, with `cancel`
 //!   and `stop`. Shells fill `{tool}` with the tool's name and `{folder}`
 //!   with the row's folder name.
-//! - `start_again` "Start again" -- an ended row's glass button, before
-//!   `dismiss` as a link.
+//! - `start_again` "Start again" -- an ended row's glass button when it
+//!   has no `resume`; otherwise an item in the row's menu. `dismiss` is that
+//!   row's menu item too, except when it is the row's only action.
 //!
 //! Resuming a session (design agreed 2026-10-31,
 //! `docs/superpowers/specs/2026-10-31-managed-session-resume-design.md`):
 //! - `resume` "Resume" -- an ended row's primary button when the row says
 //!   `can_resume` and the snapshot says `capabilities.terminal_launch` and
-//!   `capabilities.resume`, before `dismiss`; `start_again` then moves into
-//!   the row's menu. It continues the session's conversation in a new
+//!   `capabilities.resume`; `start_again` and `dismiss` then move into the
+//!   row's menu. It continues the session's conversation in a new
 //!   session.
 //! - `copy_resume_command` "Copy resume command" -- an item in the row's
 //!   menu on an ended row that says `can_resume`, shown once the shell

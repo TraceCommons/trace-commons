@@ -341,12 +341,6 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.rowMenuItems(starting, terminalLaunch: true, resumeCapable: true), [])
     }
 
-    func testModelLabelPrefersTheCatalogueName() {
-        XCTAssertEqual(ManagedSurface.modelLabel("z-ai/glm-5.3", names: ["z-ai/glm-5.3": "GLM 5.3 Flash"]), "GLM 5.3 Flash")
-        XCTAssertEqual(ManagedSurface.modelLabel("z-ai/glm-5.3", names: [:]), "z-ai/glm-5.3")
-        XCTAssertEqual(ManagedSurface.modelLabel("m", names: ["m": ""]), "m")
-    }
-
     func testCopyResumeCommandIsAMenuItemNotARowButton() throws {
         let both = try session("exited", again: true, resume: true)
         // Never a visible row button.

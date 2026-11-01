@@ -333,12 +333,6 @@ public extension ManagedSurface {
         return items
     }
 
-    /// The model as the row names it: NEAR AI's display name when the
-    /// catalogue gave one, else the id the session recorded.
-    static func modelLabel(_ id: String, names: [String: String]) -> String {
-        names[id].flatMap { $0.isEmpty ? nil : $0 } ?? id
-    }
-
     /// The row's continuation marker, "Resumed · Continues 2:14 PM": the
     /// copy `resumed`, then `resumed_from` with `{time}` filled by the
     /// root's start time in the app's row-time format. nil for a row that is
