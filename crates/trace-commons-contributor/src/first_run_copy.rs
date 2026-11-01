@@ -190,8 +190,6 @@ pub struct JoinCopy {
     /// Approved 2026-10-08 (button rule). Unread since 2026-10-12, as
     /// `skip_note`.
     pub skip: &'static str,
-    /// After the passkey verification is cancelled (`ftux-page.tsx`).
-    pub signed_out: &'static str,
 }
 
 /// Welcome, the animated first run's splash (Ron's 2026-10-21 canvas).
@@ -543,7 +541,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             no_sharing: "Connecting or creating an account doesn't authorize any data sharing.",
             skip_note: "Skipping sets up watching only. Contributing needs a near.ai account; sign in any time.",
             skip: "Skip",
-            signed_out: "Passkey not verified, so you were signed out. Join again whenever you like.",
         },
         folders: FoldersCopy {
             title_light: "Which folders may this ",
