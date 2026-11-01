@@ -40,6 +40,12 @@ const MAX_FILE: u64 = 1024 * 1024;
 /// this long.
 pub const STALE_SESSION: chrono::Duration = chrono::Duration::days(7);
 
+/// Another writer held a lock past the wait. The only lock error that
+/// trying again can fix.
+#[derive(Debug, thiserror::Error)]
+#[error("the economizer state is busy")]
+pub struct StateBusy;
+
 /// What the economizer knows about one folder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoState {
@@ -200,6 +206,13 @@ impl Store {
         Ok(out)
     }
 
+    /// Whether `id` has a session file, readable or not.
+    pub fn has_session(&self, id: &str) -> bool {
+        safe_id(id)
+            && std::fs::symlink_metadata(self.root.join(SESSIONS).join(format!("{id}.json")))
+                .is_ok_and(|meta| meta.is_file())
+    }
+
     pub fn session(&self, id: &str) -> Option<SessionState> {
         self.read(SESSIONS, id)
             .filter(|state: &SessionState| state.schema == SCHEMA)
@@ -253,9 +266,7 @@ impl Store {
                 Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    anyhow::bail!("the economizer state is busy")
-                }
+                Err(std::fs::TryLockError::WouldBlock) => return Err(StateBusy.into()),
                 Err(std::fs::TryLockError::Error(e)) => {
                     return Err(e).context("locking the economizer state");
                 }
@@ -263,8 +274,10 @@ impl Store {
         }
     }
 
-    /// Remove session files older than [`STALE_SESSION`], and lock files
-    /// with no session state that have not been touched for as long.
+    /// Remove session files and lock files not written for
+    /// [`STALE_SESSION`]: idle ones, never a long-running live session,
+    /// whose file every event rewrites. A lock beside a live session file
+    /// stays.
     pub fn prune_sessions(&self, now: DateTime<Utc>) {
         let Ok(entries) = std::fs::read_dir(self.root.join(SESSIONS)) else {
             return;
@@ -274,26 +287,23 @@ impl Store {
             let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
+            if !safe_id(id) {
+                continue;
+            }
+            let idle = |path: &Path| {
+                std::fs::metadata(path)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .map(DateTime::<Utc>::from)
+                    .is_some_and(|modified| now - modified > STALE_SESSION)
+            };
             match path.extension().and_then(|ext| ext.to_str()) {
-                Some("json") => {
-                    if self
-                        .session(id)
-                        .is_none_or(|state| now - state.started_at > STALE_SESSION)
-                    {
-                        let _ = std::fs::remove_file(&path);
-                        let _ = std::fs::remove_file(path.with_extension("lock"));
-                    }
+                Some("json") if idle(&path) => {
+                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(path.with_extension("lock"));
                 }
-                Some("lock") => {
-                    let stale = entry
-                        .metadata()
-                        .and_then(|meta| meta.modified())
-                        .ok()
-                        .map(DateTime::<Utc>::from)
-                        .is_some_and(|modified| now - modified > STALE_SESSION);
-                    if stale && !path.with_extension("json").exists() {
-                        let _ = std::fs::remove_file(&path);
-                    }
+                Some("lock") if idle(&path) && !path.with_extension("json").exists() => {
+                    let _ = std::fs::remove_file(&path);
                 }
                 _ => {}
             }
