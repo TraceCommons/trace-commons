@@ -2942,8 +2942,9 @@ async fn upload_with_retry(
                     *rate_limit_retry_after = Some(retry_after_secs);
                     return Err(REASON_RATE_LIMITED.to_string());
                 }
-                // Ingest, or something in front of it, is down or failing.
-                // Not a verdict either; the daemon retries it with backoff.
+                // Ingest, or something in front of it, is down or failing,
+                // or timed out a stalled body (408). Not a verdict either;
+                // the daemon retries it with backoff.
                 if ingest_unavailable(&e) {
                     return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
@@ -3018,15 +3019,19 @@ fn upload_rate_limit(e: &OcError) -> Option<u32> {
     )
 }
 
-/// Whether this answer says ingest is down or failing rather than judging the
-/// upload: any `5xx`, labelled or not. See [`REASON_INGEST_UNREACHABLE`].
+/// Whether this answer says ingest is down, failing or could not read the
+/// upload, rather than judging it: any `5xx`, and `408`, labelled or not.
+/// See [`REASON_INGEST_UNREACHABLE`].
 ///
-/// Only the status decides. A `4xx` is a verdict on this request and stays
-/// with the caller's terminal handling.
+/// Only the status decides. `408` is ingest's idle-body refusal
+/// (`upload_body_idle_timeout`: the body stopped arriving, as when a laptop
+/// sleeps mid-upload) or a proxy's request timeout; neither says anything
+/// about the session, so it is retried. Every other `4xx` is a verdict on
+/// this request and stays with the caller's terminal handling.
 fn ingest_unavailable(e: &OcError) -> bool {
     match e {
         OcError::ServerLabel { status, .. } | OcError::HttpFailure { status, .. } => {
-            status.is_server_error()
+            status.is_server_error() || *status == reqwest::StatusCode::REQUEST_TIMEOUT
         }
         _ => false,
     }
@@ -3097,7 +3102,8 @@ mod tests {
     }
 
     /// Any 5xx, labelled or bare, is ingest being unavailable (#1358); no
-    /// 4xx is, including the 409s and 429s that keep their own handling.
+    /// other 4xx than 408 is (see the test below), including the 409s and
+    /// 429s that keep their own handling.
     #[test]
     fn only_a_5xx_reads_as_ingest_unavailable() {
         let bare = |status: u16| OcError::HttpFailure {
@@ -3121,6 +3127,23 @@ mod tests {
             )));
             assert!(!ingest_unavailable(&bare(status)));
         }
+    }
+
+    /// Ingest's idle-body refusal (`408 upload_body_idle_timeout`, #1800) is
+    /// a stalled connection, not a verdict on the session: it is retried
+    /// like an outage, labelled or bare (a proxy's 408 too).
+    #[test]
+    fn a_408_upload_body_idle_timeout_is_retried_not_a_verdict() {
+        assert!(ingest_unavailable(&labelled(
+            408,
+            "upload_body_idle_timeout",
+            r#"{"error":"upload_body_idle_timeout"}"#
+        )));
+        assert!(ingest_unavailable(&OcError::HttpFailure {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::REQUEST_TIMEOUT,
+            body: String::new(),
+        }));
     }
 
     /// The CLI names the outcome for what it is and says what to do, rather
@@ -6848,6 +6871,19 @@ mod tests {
         let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
         let raw = build_raw_contribution_with_verdict(&transcript, cfg, Utc::now(), None);
         redact_to_envelope(&redactor, raw).await.unwrap()
+    }
+
+    /// Through `upload_with_retry`: a `408` from ingest (its idle-body
+    /// refusal) comes back as `ingest-unreachable`, which the daemon keeps
+    /// and retries, not as a terminal `server-label` failure.
+    #[tokio::test]
+    async fn an_upload_refused_408_is_kept_for_retry() {
+        let (result, captured) = upload_once(None, 408).await;
+        assert_eq!(
+            result.expect_err("the stub refused the first upload"),
+            REASON_INGEST_UNREACHABLE
+        );
+        assert_eq!(captured.bodies.len(), 1, "handed back, not re-sent here");
     }
 
     #[tokio::test]

@@ -143,7 +143,9 @@ larger with 413 before ingest reads it. Ingest enforces its own per-route
 limits, in-flight caps and upload byte budget
 (`TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET`) behind it; this is defence in depth,
 so raise both together. A slow upload holds its share of the byte budget for
-as long as its body takes, up to this deadline. Separately, the
+as long as its body takes, up to this deadline; one whose body stops arriving
+for 60 s is refused by ingest itself (`408` `upload_body_idle_timeout`), which
+releases its share and slots sooner. Separately, the
 default/error logger plus both access-log encoders replace the `code` query
 value before JSON is written. Error-log filtering is necessary because a
 reverse-proxy 502 includes the request URI in stderr/journald even when the

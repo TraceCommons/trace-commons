@@ -631,10 +631,18 @@ async fn upload_routes_admit_their_ceiling_by_declared_length() {
             stream
         };
         let mut at = send(ceiling as u64).await;
+        // Bundle finalize checks its bundle after the gate and before the
+        // body, and bundles are not enabled in this fixture: past the gate it
+        // is answered 503 at once rather than waiting for the body.
+        let past_the_gate = if method == "POST" && path.starts_with("/v1/token-bundles/") {
+            Some("HTTP/1.1 503 Service Unavailable".to_string())
+        } else {
+            None
+        };
         assert_eq!(
             response_status_within(&mut at, StdDuration::from_millis(300)).await,
-            None,
-            "{method} {path} admits a declared {ceiling} bytes and waits for them"
+            past_the_gate,
+            "{method} {path} admits a declared {ceiling} bytes past the gate"
         );
         // Give its bytes back, so the next request meets the body limit and
         // not the byte budget.
