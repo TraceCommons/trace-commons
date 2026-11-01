@@ -766,7 +766,7 @@ fn check_project_config_in(
                         return Err(ManagedError::Conflict);
                     }
                     if near_ai && settings_choose_a_model(&value) {
-                        return Err(ManagedError::Conflict);
+                        return Err(ManagedError::ProjectChoosesModel);
                     }
                     if let Some(env) = value.get("env") {
                         let env = env.as_object().ok_or(ManagedError::Conflict)?;
@@ -774,7 +774,7 @@ fn check_project_config_in(
                             return Err(ManagedError::Conflict);
                         }
                         if near_ai && env.keys().any(|k| names_a_claude_model(k)) {
-                            return Err(ManagedError::Conflict);
+                            return Err(ManagedError::ProjectChoosesModel);
                         }
                     }
                 }
@@ -792,18 +792,106 @@ fn check_project_config_in(
             break;
         }
     }
-    if tool == ToolId::Claude && near_ai {
-        let dirs = claude_project_dirs(cwd, home).map_err(|_| ManagedError::Conflict)?;
-        for dir in dirs {
-            for kind in ProjectMarkdown::ALL {
-                let folder = dir.join(".claude").join(kind.folder());
-                if markdown_names_a_model(&folder, kind).unwrap_or(true) {
-                    return Err(ManagedError::Conflict);
-                }
+    project_model_check_in(tool, connection, cwd, &[], home)?;
+    Ok(())
+}
+
+/// What a NEAR AI launch tells the person about its project before the
+/// tool starts. The session starts either way.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectNotice {
+    /// The project has Claude Code workflows, whose steps can choose a
+    /// model this check cannot read (`project_workflows`).
+    pub workflows: bool,
+}
+
+/// On a NEAR AI Claude Code launch, whether any agent, command, routine
+/// or skill Claude Code would read names a model by id
+/// ([`markdown_names_a_model`]), in the project's folders
+/// ([`claude_project_dirs`]) or in a folder `cli_options` adds with
+/// `--add-dir` ([`added_dirs`]): refused with
+/// [`ManagedError::ProjectChoosesModel`]. Otherwise, what the launch should
+/// say ([`ProjectNotice`]). Anything else, and any other connection, has
+/// nothing to say.
+pub fn project_model_check(
+    tool: ToolId,
+    connection: ConnectionKind,
+    cwd: &Path,
+    cli_options: &[String],
+) -> Result<ProjectNotice, ManagedError> {
+    project_model_check_in(
+        tool,
+        connection,
+        cwd,
+        cli_options,
+        dirs::home_dir().as_deref(),
+    )
+}
+
+/// [`project_model_check`] with the home folder given.
+fn project_model_check_in(
+    tool: ToolId,
+    connection: ConnectionKind,
+    cwd: &Path,
+    cli_options: &[String],
+    home: Option<&Path>,
+) -> Result<ProjectNotice, ManagedError> {
+    let near_ai = matches!(
+        connection,
+        ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
+    );
+    if tool != ToolId::Claude || !near_ai {
+        return Ok(ProjectNotice::default());
+    }
+    let project = claude_project_dirs(cwd, home).map_err(|_| ManagedError::Conflict)?;
+    let added = added_dirs(cli_options, cwd);
+    for dir in project.iter().chain(&added) {
+        for kind in ProjectMarkdown::ALL {
+            let folder = dir.join(".claude").join(kind.folder());
+            if markdown_names_a_model(&folder, kind).unwrap_or(true) {
+                return Err(ManagedError::ProjectChoosesModel);
             }
         }
     }
-    Ok(())
+    let workflows = project
+        .iter()
+        .chain(&added)
+        .any(|dir| holds_an_entry(&dir.join(".claude/workflows")));
+    Ok(ProjectNotice { workflows })
+}
+
+/// The folders Claude Code's `--add-dir` names in `cli_options`, relative
+/// ones taken from `cwd`. The flag takes every value up to the next flag,
+/// or one with `=`; Claude Code reads agents and commands from each
+/// folder's `.claude` (2.1.316, its additional directories). Project
+/// settings' `permissions.additionalDirectories` only widen what the tools
+/// may touch and are not read for agents, so they are not listed.
+fn added_dirs(cli_options: &[String], cwd: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![];
+    let mut taking = false;
+    for arg in cli_options {
+        if let Some(value) = arg.strip_prefix("--add-dir=") {
+            dirs.push(cwd.join(value));
+            taking = false;
+        } else if arg == "--add-dir" {
+            taking = true;
+        } else if arg.starts_with('-') {
+            taking = false;
+        } else if taking {
+            dirs.push(cwd.join(arg));
+        }
+    }
+    dirs
+}
+
+/// Whether the folder `dir` holds anything at all. A folder that cannot be
+/// read counts as holding something, so the notice is shown rather than
+/// left out.
+fn holds_an_entry(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 fn codex_auth_override(value: &toml::Value) -> bool {
@@ -993,7 +1081,7 @@ mod tests {
                 for connection in NEAR_AI {
                     assert_eq!(
                         check_project_config(ToolId::Claude, connection, dir.path()),
-                        Err(ManagedError::Conflict),
+                        Err(ManagedError::ProjectChoosesModel),
                         "{var} in {file} on {connection:?}"
                     );
                 }
@@ -1024,7 +1112,7 @@ mod tests {
         std::fs::create_dir_all(&inner).unwrap();
         assert_eq!(
             check_project_config(ToolId::Claude, ConnectionKind::NearAiSignIn, &inner),
-            Err(ManagedError::Conflict)
+            Err(ManagedError::ProjectChoosesModel)
         );
     }
 
@@ -1049,7 +1137,7 @@ mod tests {
                 for connection in NEAR_AI {
                     assert_eq!(
                         check_project_config(ToolId::Claude, connection, dir.path()),
-                        Err(ManagedError::Conflict),
+                        Err(ManagedError::ProjectChoosesModel),
                         "{model} at {path}"
                     );
                 }
@@ -1087,7 +1175,7 @@ mod tests {
         let dir = project(&[(".claude/agents/big.md", &"x".repeat(1024 * 1024 + 1))]);
         assert_eq!(
             check_project_config(ToolId::Claude, ConnectionKind::NearAi, dir.path()),
-            Err(ManagedError::Conflict)
+            Err(ManagedError::ProjectChoosesModel)
         );
     }
 
@@ -1111,7 +1199,7 @@ mod tests {
             for connection in NEAR_AI {
                 assert_eq!(
                     check_project_config(ToolId::Claude, connection, dir.path()),
-                    Err(ManagedError::Conflict),
+                    Err(ManagedError::ProjectChoosesModel),
                     "{path} on {connection:?}"
                 );
             }
@@ -1148,7 +1236,7 @@ mod tests {
                 for connection in NEAR_AI {
                     assert_eq!(
                         check_project_config(ToolId::Claude, connection, dir.path()),
-                        Err(ManagedError::Conflict),
+                        Err(ManagedError::ProjectChoosesModel),
                         "{body} in {file} on {connection:?}"
                     );
                 }
@@ -1244,7 +1332,10 @@ mod tests {
         let parent_agents = home.path().join("work/.claude/agents");
         std::fs::create_dir_all(&parent_agents).unwrap();
         std::fs::write(parent_agents.join("x.md"), &agent).unwrap();
-        assert_eq!(refused(&scratch, home.path()), Err(ManagedError::Conflict));
+        assert_eq!(
+            refused(&scratch, home.path()),
+            Err(ManagedError::ProjectChoosesModel)
+        );
         std::fs::remove_dir_all(home.path().join("work/.claude")).unwrap();
         let home_agents = home.path().join(".claude/agents");
         std::fs::create_dir_all(&home_agents).unwrap();
@@ -1274,7 +1365,7 @@ mod tests {
         std::fs::write(main_commands.join("x.md"), &agent).unwrap();
         assert_eq!(
             refused(&worktree.join("src"), root.path()),
-            Err(ManagedError::Conflict),
+            Err(ManagedError::ProjectChoosesModel),
             "the main checkout's commands"
         );
 
@@ -1291,7 +1382,10 @@ mod tests {
         let between = main.join("nest/.claude/skills/s");
         std::fs::create_dir_all(&between).unwrap();
         std::fs::write(between.join("SKILL.md"), &agent).unwrap();
-        assert_eq!(refused(&nested, root.path()), Err(ManagedError::Conflict));
+        assert_eq!(
+            refused(&nested, root.path()),
+            Err(ManagedError::ProjectChoosesModel)
+        );
 
         // A `.git` that links to a folder is an ordinary checkout.
         #[cfg(unix)]
@@ -1315,6 +1409,156 @@ mod tests {
                 Some(root.path())
             ),
             Err(ManagedError::Conflict)
+        );
+    }
+
+    /// The refusal names what happened, in the owner's words (2026-11-01),
+    /// and is the shared copy line the shells show for its label.
+    #[test]
+    fn the_project_model_refusal_says_why() {
+        let text = "This project's Claude Code settings, agents, commands or skills choose a model. NEAR AI sessions use the session's models.";
+        assert_eq!(ManagedError::ProjectChoosesModel.to_string(), text);
+        assert_eq!(crate::managed::copy::copy()["project_chooses_model"], text);
+        assert_eq!(
+            crate::managed::PROJECT_CHOOSES_MODEL_LABEL,
+            "managed-project-chooses-model"
+        );
+    }
+
+    /// Folders given to Claude Code with `--add-dir` are read for agents
+    /// and commands too, so they are held to the same rule (owner,
+    /// 2026-11-01). Each spelling of the flag counts, and a relative folder
+    /// is the launch folder's.
+    #[test]
+    fn folders_added_with_add_dir_are_held_to_the_same_rule() {
+        let check = |cwd: &Path, args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            project_model_check_in(
+                ToolId::Claude,
+                ConnectionKind::NearAi,
+                cwd,
+                &args,
+                Some(cwd),
+            )
+        };
+        let launch = project(&[]);
+        let extra = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        for kind in ["agents", "commands", "routines"] {
+            let dir = extra.path().join(".claude").join(kind);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("x.md"), markdown(&format!("model: {ID}"))).unwrap();
+            let extra_s = extra.path().to_str().unwrap();
+            let other_s = other.path().to_str().unwrap();
+            for args in [
+                vec!["--add-dir", extra_s],
+                vec![&format!("--add-dir={extra_s}")],
+                vec!["--add-dir", other_s, extra_s, "--verbose"],
+            ] {
+                let args: Vec<&str> = args.iter().map(|a| a.as_ref()).collect();
+                assert_eq!(
+                    check(launch.path(), &args),
+                    Err(ManagedError::ProjectChoosesModel),
+                    "{kind} via {args:?}"
+                );
+            }
+            std::fs::remove_dir_all(extra.path().join(".claude")).unwrap();
+        }
+        let skill = extra.path().join(".claude/skills/s");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), markdown(&format!("model: {ID}"))).unwrap();
+        assert_eq!(
+            check(
+                launch.path(),
+                &["--add-dir", extra.path().to_str().unwrap()]
+            ),
+            Err(ManagedError::ProjectChoosesModel)
+        );
+        // Relative to the launch folder.
+        let nested = launch.path().join("sub/.claude/agents");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("x.md"), markdown(&format!("model: {ID}"))).unwrap();
+        let inner = launch.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        assert_eq!(
+            check(&inner, &["--add-dir", "../sub"]),
+            Err(ManagedError::ProjectChoosesModel)
+        );
+        // An alias is fine there too, and a folder not added is not read.
+        assert_eq!(
+            check(launch.path(), &["--verbose"]),
+            Ok(ProjectNotice::default())
+        );
+        std::fs::write(nested.join("x.md"), markdown("model: opus")).unwrap();
+        assert_eq!(
+            check(&inner, &["--add-dir", "../sub"]),
+            Ok(ProjectNotice::default())
+        );
+        // A subscription session is unchanged.
+        let args = vec!["--add-dir".to_string(), extra.path().display().to_string()];
+        assert_eq!(
+            project_model_check_in(
+                ToolId::Claude,
+                ConnectionKind::Subscription,
+                launch.path(),
+                &args,
+                None
+            ),
+            Ok(ProjectNotice::default())
+        );
+    }
+
+    /// A project's Claude Code workflows do not refuse a NEAR AI session,
+    /// since a step's model cannot be read from the script; the launch
+    /// says so instead (owner, 2026-11-01). Only on NEAR AI.
+    #[test]
+    fn project_workflows_start_with_a_notice_on_near_ai() {
+        let dir = project(&[(".claude/workflows/release.js", "export default {}\n")]);
+        for connection in NEAR_AI {
+            assert_eq!(
+                project_model_check_in(ToolId::Claude, connection, dir.path(), &[], None),
+                Ok(ProjectNotice { workflows: true }),
+                "{connection:?}"
+            );
+            // The launch itself is not refused.
+            assert_eq!(
+                check_project_config(ToolId::Claude, connection, dir.path()),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            project_model_check_in(
+                ToolId::Claude,
+                ConnectionKind::Subscription,
+                dir.path(),
+                &[],
+                None
+            ),
+            Ok(ProjectNotice::default())
+        );
+        let empty = project(&[(".claude/workflows/.keep", "")]);
+        std::fs::remove_file(empty.path().join(".claude/workflows/.keep")).unwrap();
+        assert_eq!(
+            project_model_check_in(
+                ToolId::Claude,
+                ConnectionKind::NearAi,
+                empty.path(),
+                &[],
+                None
+            ),
+            Ok(ProjectNotice::default()),
+            "an empty folder holds no workflow"
+        );
+        // A parent folder's workflows count, as Claude Code reads them.
+        let inner = dir.path().join("src");
+        std::fs::create_dir_all(&inner).unwrap();
+        assert_eq!(
+            project_model_check_in(ToolId::Claude, ConnectionKind::NearAi, &inner, &[], None),
+            Ok(ProjectNotice { workflows: true })
+        );
+        assert_eq!(
+            crate::managed::copy::copy()["project_workflows"],
+            "This project has Claude Code workflows. A workflow step can choose its own model, so it may not stay in this session's privacy tier."
         );
     }
 

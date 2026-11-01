@@ -863,5 +863,6 @@ final class ManagedSessionsTests: XCTestCase {
     func testAnUnavailableModelHasItsOwnLine() {
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-model-unavailable", message: "managed-model-unavailable"), "model_unavailable")
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-near-ai-balance-too-low", message: "managed-near-ai-balance-too-low"), "balance_too_low")
+        XCTAssertEqual(ManagedSurface.errorKey(code: "managed-project-chooses-model", message: "managed-project-chooses-model"), "project_chooses_model")
     }
 }

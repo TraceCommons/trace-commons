@@ -142,6 +142,17 @@
 //! - `balance_too_low` "Add funds to your NEAR AI balance to start a
 //!   session." The line a shell shows for the refusal
 //!   `managed-near-ai-balance-too-low`.
+//!
+//! A NEAR AI Claude Code launch and its project's model choices. Approved by
+//! the owner with this wording, 2026-11-01:
+//! - `project_chooses_model` "This project's Claude Code settings, agents,
+//!   commands or skills choose a model. NEAR AI sessions use the session's
+//!   models." The line a shell shows for the refusal
+//!   `managed-project-chooses-model`; the CLI prints the same sentence.
+//! - `project_workflows` "This project has Claude Code workflows. A workflow
+//!   step can choose its own model, so it may not stay in this session's
+//!   privacy tier." A notice the launcher prints in the session's terminal
+//!   before Claude Code starts, on NEAR AI only; the session still starts.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "My Private AI sessions",
@@ -228,6 +239,8 @@ pub fn copy() -> serde_json::Value {
             "model_favorite_remove_named": "Remove {model} from favorites",
             "favorites_title": "Favorite models",
             "balance_too_low": "Add funds to your NEAR AI balance to start a session.",
+            "project_chooses_model": "This project's Claude Code settings, agents, commands or skills choose a model. NEAR AI sessions use the session's models.",
+            "project_workflows": "This project has Claude Code workflows. A workflow step can choose its own model, so it may not stay in this session's privacy tier.",
             "collect_traces": "Collect this session",
             "opencode_scope": "Uses only the selected key and model in an isolated profile. Project OpenCode settings and plugins are disabled. API key means an OpenAI key; NEAR AI uses a NEAR AI key.",
             "collection_scope": "Collects this session when OpenCode exits, under your existing review and contribution settings. Other sessions created inside OpenCode are not collected.",

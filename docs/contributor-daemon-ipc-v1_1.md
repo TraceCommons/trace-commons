@@ -9467,6 +9467,16 @@ preparing, can also follow a read. An unknown, unreachable or no-limit balance
 lets the launch through. A saved `near_ai` key is not checked: its account's
 balance is not readable here.
 
+A coding launch of Claude Code on `near_ai` or `near_ai_signin` is refused
+with `managed-project-chooses-model`, and nothing is prepared, when its
+project chooses a model other than through an alias: a model variable in a
+project settings `env` block, `fallbackModel`, `advisorModel` or
+`modelOverrides`, or a `model` in an agent, command, routine or skill, in any
+folder Claude Code reads them from or in a folder the launch's CLI options add
+with `--add-dir`. The launcher checks again before the tool starts. A project
+with Claude Code workflows is not refused; the launcher prints the shared
+`project_workflows` line in the session's terminal before the tool starts.
+
 `managed_session_report` answers `{accepted: true, stop: bool}`; an older
 launcher reads only `accepted`.
 

@@ -125,7 +125,18 @@ pub enum ManagedError {
     ModelUnavailable,
     #[error("add funds to NEAR AI before launching")]
     NearAiBalanceTooLow,
+    /// A NEAR AI Claude Code launch whose project, or a folder its CLI
+    /// options add, chooses a model by id (owner's wording, 2026-11-01).
+    #[error(
+        "This project's Claude Code settings, agents, commands or skills choose a model. NEAR AI sessions use the session's models."
+    )]
+    ProjectChoosesModel,
 }
+
+/// The daemon's label for [`ManagedError::ProjectChoosesModel`], which the
+/// CLI turns back into its sentence and the shells map to the shared
+/// `project_chooses_model` line.
+pub const PROJECT_CHOOSES_MODEL_LABEL: &str = "managed-project-chooses-model";
 
 pub mod copy;
 pub mod route;

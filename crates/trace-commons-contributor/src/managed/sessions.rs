@@ -877,6 +877,16 @@ impl SessionRegistry {
             Some(text) => super::options::parse(request.tool, text)?,
             None => vec![],
         };
+        // Refused here, before anything is recorded, so a shell sees why;
+        // the launcher checks again before the tool starts.
+        if request.purpose == LaunchPurpose::Coding {
+            super::profiles::project_model_check(
+                request.tool,
+                request.connection,
+                &request.cwd,
+                &cli_options,
+            )?;
+        }
         Ok(Checked::New {
             cli_options_text,
             cli_options,
@@ -1378,6 +1388,65 @@ mod tests {
         let raw: serde_json::Value =
             serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
         assert!(raw["entries"][1].get("keep_saved_model").is_none());
+    }
+
+    /// A NEAR AI Claude Code launch whose project, or a folder its CLI
+    /// options add, chooses a model is refused before a session is
+    /// recorded, so a shell sees the refusal's own label (owner,
+    /// 2026-11-01), and nothing waits in the registry.
+    #[test]
+    fn a_project_that_chooses_a_model_is_refused_at_prepare() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("config")).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let sign_in = crate::managed::signin::entry(ToolId::Claude).unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        let request = |cli_options: Option<&str>| LaunchRequest {
+            cli_options: cli_options.map(str::to_string),
+            model: None,
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Claude,
+            connection: ConnectionKind::NearAiSignIn,
+            account_id: sign_in.id,
+            cwd: project.clone(),
+            expected_generation: Generation(0),
+            save_default: false,
+            keep_saved_model: false,
+            resume_of: None,
+            background_model: None,
+        };
+        let agent = "---\nname: a\nmodel: anthropic/claude-opus-5-5\n---\n";
+
+        let extra = home.path().join("extra");
+        std::fs::create_dir_all(extra.join(".claude/agents")).unwrap();
+        std::fs::write(extra.join(".claude/agents/a.md"), agent).unwrap();
+        let add_dir = format!("--add-dir {}", extra.display());
+        assert!(!registry.would_prepare_new(request(Some(&add_dir)), &sign_in));
+        assert_eq!(
+            registry
+                .prepare(request(Some(&add_dir)), &sign_in)
+                .map(|p| p.session_id),
+            Err(ManagedError::ProjectChoosesModel)
+        );
+        // Without the added folder the project is fine.
+        assert!(registry.prepare(request(Some("")), &sign_in).is_ok());
+
+        std::fs::create_dir_all(project.join(".claude/commands")).unwrap();
+        std::fs::write(project.join(".claude/commands/c.md"), agent).unwrap();
+        assert_eq!(
+            registry
+                .prepare(request(Some("")), &sign_in)
+                .map(|p| p.session_id),
+            Err(ManagedError::ProjectChoosesModel)
+        );
+        assert_eq!(
+            registry.data.entries.len(),
+            1,
+            "no refused launch is recorded"
+        );
     }
 
     /// A launch's background model is kept on the session's view, which

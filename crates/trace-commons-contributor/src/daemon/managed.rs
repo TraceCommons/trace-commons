@@ -1437,6 +1437,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::TerminalNotFound => "managed-terminal-not-found",
         ManagedError::ModelUnavailable => "managed-model-unavailable",
         ManagedError::NearAiBalanceTooLow => "managed-near-ai-balance-too-low",
+        ManagedError::ProjectChoosesModel => crate::managed::PROJECT_CHOOSES_MODEL_LABEL,
     }
 }
 
@@ -1476,6 +1477,16 @@ mod tests {
         assert_eq!(
             label(ManagedError::NearAiBalanceTooLow),
             "managed-near-ai-balance-too-low"
+        );
+    }
+
+    /// A project that chooses a model has a label of its own, which the
+    /// shells map to the line that says why (owner, 2026-11-01).
+    #[test]
+    fn the_project_model_refusal_has_its_own_label() {
+        assert_eq!(
+            label(ManagedError::ProjectChoosesModel),
+            crate::managed::PROJECT_CHOOSES_MODEL_LABEL
         );
     }
 

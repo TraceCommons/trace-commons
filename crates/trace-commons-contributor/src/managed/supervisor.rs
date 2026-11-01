@@ -147,6 +147,17 @@ async fn run_native(
     } else {
         resume_for(store, row.tool, context.resume_of)?
     };
+    if !login {
+        let notice = super::profiles::project_model_check(
+            row.tool,
+            row.connection,
+            &row.cwd,
+            &context.cli_options,
+        )?;
+        if notice.workflows {
+            best_effort_stderr(&project_workflows_notice());
+        }
+    }
     let mut command = profiles.command(
         &account,
         &native,
@@ -830,6 +841,15 @@ fn forward_signal(pid: u32, identity: &str, signal: sysinfo::Signal) {
     }
 }
 
+/// The line printed in the session's terminal, before Claude Code starts,
+/// when a NEAR AI project has Claude Code workflows (owner, 2026-11-01).
+fn project_workflows_notice() -> String {
+    super::copy::copy()["project_workflows"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
 /// Write `line` to stderr if it is still there. `eprintln!` panics when
 /// it is not, which after a terminal closed would end the launcher before
 /// its final report.
@@ -1000,11 +1020,21 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
+    /// The workflows notice is the owner's approved line, from the shared
+    /// copy table.
+    #[test]
+    fn the_workflows_notice_is_the_approved_line() {
+        assert_eq!(
+            project_workflows_notice(),
+            "This project has Claude Code workflows. A workflow step can choose its own model, so it may not stay in this session's privacy tier."
+        );
+    }
+
     #[cfg(unix)]
     use super::{PARENT_SESSION_ENV, clear_parent_session, with_open_files_floor};
     use super::{near_ai_route, sign_in_route_command, status_line, stop_asked};
     #[cfg(unix)]
-    use super::{opencode_route_command, opencode_sign_in_command};
+    use super::{opencode_route_command, opencode_sign_in_command, project_workflows_notice};
     use crate::config::ConfigStore;
     #[cfg(unix)]
     use crate::managed::{ConnectionKind, opencode::OpenCodeSession};

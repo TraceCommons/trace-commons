@@ -113,11 +113,20 @@ pub fn call<T: DeserializeOwned>(
     let response =
         client::try_call(store, method, &params)?.ok_or(ManagedError::DaemonUnavailable)?;
     if let Some(error) = response.error {
-        anyhow::bail!("{}", error.code);
+        return Err(refusal(&error.code));
     }
     Ok(serde_json::from_value(
         response.result.ok_or(ManagedError::InvalidRequest)?,
     )?)
+}
+
+/// The error for a daemon refusal labelled `code`: its label, except for a
+/// refusal whose sentence tells the person what to change.
+fn refusal(code: &str) -> anyhow::Error {
+    if code == super::PROJECT_CHOOSES_MODEL_LABEL {
+        return ManagedError::ProjectChoosesModel.into();
+    }
+    anyhow::anyhow!("{code}")
 }
 
 /// Whether `--connection asked` admits an account on `connection`. The
@@ -491,6 +500,21 @@ pub async fn resume(store: &ConfigStore, session_id: Uuid) -> anyhow::Result<i32
 
 #[cfg(test)]
 mod tests {
+    /// A refusal the person can act on reads as its sentence in the
+    /// terminal, not as its label (owner, 2026-11-01); any other refusal
+    /// keeps its label.
+    #[test]
+    fn a_project_model_refusal_prints_why() {
+        assert_eq!(
+            refusal(crate::managed::PROJECT_CHOOSES_MODEL_LABEL).to_string(),
+            crate::managed::ManagedError::ProjectChoosesModel.to_string()
+        );
+        assert_eq!(
+            refusal("managed-model-unavailable").to_string(),
+            "managed-model-unavailable"
+        );
+    }
+
     use super::*;
     use crate::managed::{AccountId, AuthState, signin};
 
