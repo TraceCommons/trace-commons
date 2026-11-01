@@ -98,7 +98,7 @@ impl NativeProfiles {
         }
         let root = self.profile_root(account.id)?;
         if matches!(action, NativeAction::Run) {
-            check_project_config(account.tool, cwd)?;
+            check_project_config(account.tool, account.connection, cwd)?;
         }
         let mut command = Command::new(native);
         command.current_dir(cwd);
@@ -379,9 +379,106 @@ fn create_private_directory(path: &Path) -> Result<(), ManagedError> {
     }
 }
 
+/// Whether `name`, a Claude Code environment variable, chooses a model:
+/// the main model, the small, fast model, a family alias (any
+/// `ANTHROPIC_DEFAULT_*_MODEL`), the custom picker entry, or one of the
+/// `CLAUDE_CODE_*_MODEL` variables that set a subagent's, a workflow's or a
+/// classifier's model. A display name (`*_NAME`) chooses nothing.
+fn names_a_claude_model(name: &str) -> bool {
+    matches!(
+        name,
+        "ANTHROPIC_MODEL" | "ANTHROPIC_SMALL_FAST_MODEL" | "ANTHROPIC_CUSTOM_MODEL_OPTION"
+    ) || (name.starts_with("ANTHROPIC_DEFAULT_") && name.ends_with("_MODEL"))
+        || (name.starts_with("CLAUDE_CODE_") && name.ends_with("_MODEL"))
+}
+
+/// Claude Code's model aliases, which it maps onto the session's own
+/// family variables, so a subagent naming one stays on the session's
+/// models. Matched before any `[...]` suffix (`opus[1m]`).
+const CLAUDE_MODEL_ALIASES: &[&str] = &[
+    "inherit", "default", "sonnet", "opus", "haiku", "fable", "opusplan", "best",
+];
+
+/// The model a subagent file's frontmatter names, when it names one: the
+/// `model:` line of the block between the opening `---` and the next.
+fn agent_model(text: &str) -> Option<&str> {
+    let mut lines = text.lines();
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    lines
+        .take_while(|line| line.trim_end() != "---")
+        .find_map(|line| line.strip_prefix("model:"))
+        .map(|value| value.trim().trim_matches(['"', '\'']))
+        .filter(|value| !value.is_empty())
+}
+
+/// Whether a project's `.claude/agents` under `dir` holds a subagent that
+/// names a model by id rather than by alias. A file that cannot be read
+/// whole, or a tree past its limits, counts as one: nothing is guessed.
+fn agents_name_a_model(dir: &Path) -> Result<bool, ()> {
+    const MAX_FILES: usize = 1000;
+    const MAX_DEPTH: usize = 8;
+    let mut pending = vec![(dir.to_path_buf(), 0usize)];
+    let mut seen = 0usize;
+    while let Some((folder, depth)) = pending.pop() {
+        let entries = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && depth == 0 => return Ok(false),
+            Err(_) => return Err(()),
+        };
+        for entry in entries {
+            let path = entry.map_err(|_| ())?.path();
+            let kind = std::fs::metadata(&path).map_err(|_| ())?;
+            if kind.is_dir() {
+                if depth + 1 > MAX_DEPTH {
+                    return Err(());
+                }
+                pending.push((path, depth + 1));
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            seen += 1;
+            if seen > MAX_FILES || kind.len() > 1024 * 1024 {
+                return Err(());
+            }
+            let text = std::fs::read_to_string(&path).map_err(|_| ())?;
+            if let Some(model) = agent_model(&text) {
+                let alias = model
+                    .split('[')
+                    .next()
+                    .unwrap_or(model)
+                    .to_ascii_lowercase();
+                if !CLAUDE_MODEL_ALIASES.contains(&alias.as_str()) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Project configuration can outrank the isolated profile. Never claim a
 /// selected subscription while a project requests a different credential.
-fn check_project_config(tool: ToolId, cwd: &Path) -> Result<(), ManagedError> {
+///
+/// On a NEAR AI session a project also may not choose Claude Code's models
+/// (owner, 2026-11-01): its settings' `env` may not set a model variable
+/// ([`names_a_claude_model`]), and none of its `.claude/agents` may name a
+/// model by id, either of which would outrank the launcher's own model
+/// variables and could send work to a less private model. The launch is
+/// refused rather than run without them, so the person sees why. A
+/// subscription session has no tiers to leave and is unchanged.
+fn check_project_config(
+    tool: ToolId,
+    connection: ConnectionKind,
+    cwd: &Path,
+) -> Result<(), ManagedError> {
+    let near_ai = matches!(
+        connection,
+        ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
+    );
     // OpenCode runs in pure mode with project config disabled.
     if tool == ToolId::Opencode {
         return Ok(());
@@ -424,6 +521,9 @@ fn check_project_config(tool: ToolId, cwd: &Path) -> Result<(), ManagedError> {
                         if env.keys().any(|k| AUTH_ENV.contains(&k.as_str())) {
                             return Err(ManagedError::Conflict);
                         }
+                        if near_ai && env.keys().any(|k| names_a_claude_model(k)) {
+                            return Err(ManagedError::Conflict);
+                        }
                     }
                 }
                 ToolId::Codex => {
@@ -435,6 +535,12 @@ fn check_project_config(tool: ToolId, cwd: &Path) -> Result<(), ManagedError> {
                     }
                 }
             }
+        }
+        if tool == ToolId::Claude
+            && near_ai
+            && agents_name_a_model(&ancestor.join(".claude/agents")).unwrap_or(true)
+        {
+            return Err(ManagedError::Conflict);
         }
         if ancestor == project_root {
             break;
@@ -589,6 +695,144 @@ pub fn tools() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A project folder inside a git root, with `files` written under it.
+    fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        for (name, body) in files {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        dir
+    }
+
+    const NEAR_AI: [ConnectionKind; 2] = [ConnectionKind::NearAi, ConnectionKind::NearAiSignIn];
+
+    /// A project's Claude Code settings may not name a model through their
+    /// `env` block on a NEAR AI session: it would outrank the launcher's
+    /// own model variables and could send work to a less private model
+    /// (owner, 2026-11-01). The launch is refused, as an auth override is.
+    #[test]
+    fn a_project_cannot_set_claude_model_variables_on_a_near_ai_session() {
+        for var in [
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_NEXT_MODEL",
+            "ANTHROPIC_CUSTOM_MODEL_OPTION",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+            "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL",
+            "CLAUDE_CODE_AUTO_MODE_MODEL",
+            "CLAUDE_CODE_BG_CLASSIFIER_MODEL",
+        ] {
+            for file in [".claude/settings.json", ".claude/settings.local.json"] {
+                let body = format!(r#"{{"env":{{"{var}":"anthropic/claude-opus-5-5"}}}}"#);
+                let dir = project(&[(file, &body)]);
+                for connection in NEAR_AI {
+                    assert_eq!(
+                        check_project_config(ToolId::Claude, connection, dir.path()),
+                        Err(ManagedError::Conflict),
+                        "{var} in {file} on {connection:?}"
+                    );
+                }
+                // A subscription has no tiers to leave: unchanged.
+                assert_eq!(
+                    check_project_config(ToolId::Claude, ConnectionKind::Subscription, dir.path()),
+                    Ok(()),
+                    "{var}"
+                );
+            }
+        }
+        // A display name selects nothing, and other variables stay the
+        // project's.
+        let dir = project(&[(
+            ".claude/settings.json",
+            r#"{"env":{"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":"Sonnet","BASH_DEFAULT_TIMEOUT_MS":"1000"}}"#,
+        )]);
+        assert_eq!(
+            check_project_config(ToolId::Claude, ConnectionKind::NearAi, dir.path()),
+            Ok(())
+        );
+        // A parent folder up to the git root counts too.
+        let dir = project(&[(
+            ".claude/settings.json",
+            r#"{"env":{"ANTHROPIC_MODEL":"x/y"}}"#,
+        )]);
+        let inner = dir.path().join("src/deep");
+        std::fs::create_dir_all(&inner).unwrap();
+        assert_eq!(
+            check_project_config(ToolId::Claude, ConnectionKind::NearAiSignIn, &inner),
+            Err(ManagedError::Conflict)
+        );
+    }
+
+    /// A project's subagent that names a model of its own by id, in its
+    /// `.claude/agents` frontmatter, would run there whatever the session's
+    /// tier, so a NEAR AI session refuses to start rather than skip it
+    /// silently (owner, 2026-11-01). An alias Claude Code maps onto the
+    /// session's own model variables is fine, as is no model at all.
+    #[test]
+    fn a_project_agent_naming_a_model_refuses_a_near_ai_session() {
+        let agent = |model: &str| {
+            format!("---\nname: helper\ndescription: d\nmodel: {model}\n---\nBody.\n")
+        };
+        for model in [
+            "anthropic/claude-opus-5-5",
+            "\"anthropic/claude-haiku-4-5\"",
+            "claude-opus-4-1",
+            "Qwen/Qwen3.8-27B",
+        ] {
+            for path in [".claude/agents/helper.md", ".claude/agents/team/helper.md"] {
+                let dir = project(&[(path, &agent(model))]);
+                for connection in NEAR_AI {
+                    assert_eq!(
+                        check_project_config(ToolId::Claude, connection, dir.path()),
+                        Err(ManagedError::Conflict),
+                        "{model} at {path}"
+                    );
+                }
+                assert_eq!(
+                    check_project_config(ToolId::Claude, ConnectionKind::Subscription, dir.path()),
+                    Ok(())
+                );
+            }
+        }
+        for model in [
+            "inherit", "haiku", "sonnet", "opus", "fable", "'sonnet'", "opus[1m]",
+        ] {
+            let dir = project(&[(".claude/agents/helper.md", &agent(model))]);
+            assert_eq!(
+                check_project_config(ToolId::Claude, ConnectionKind::NearAi, dir.path()),
+                Ok(()),
+                "{model}"
+            );
+        }
+        let dir = project(&[
+            (
+                ".claude/agents/plain.md",
+                "---\nname: plain\ndescription: d\n---\nmodel: x/y is prose here\n",
+            ),
+            (
+                ".claude/agents/notes.txt",
+                "model: anthropic/claude-opus-5-5\n",
+            ),
+        ]);
+        assert_eq!(
+            check_project_config(ToolId::Claude, ConnectionKind::NearAi, dir.path()),
+            Ok(())
+        );
+        // An agent file that cannot be read whole is not guessed at.
+        let dir = project(&[(".claude/agents/big.md", &"x".repeat(1024 * 1024 + 1))]);
+        assert_eq!(
+            check_project_config(ToolId::Claude, ConnectionKind::NearAi, dir.path()),
+            Err(ManagedError::Conflict)
+        );
+    }
 
     #[test]
     fn existing_roots_lists_account_folders_and_creates_none() {
