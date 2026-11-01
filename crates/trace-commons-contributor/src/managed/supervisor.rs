@@ -196,6 +196,7 @@ async fn run_native(
                     &session,
                     proxy.port(),
                     proxy.default_model(),
+                    row.background_model.as_deref(),
                     proxy.models(),
                 )?;
                 route = Some(proxy);
@@ -259,6 +260,10 @@ async fn run_native(
                     proxy.default_model(),
                     proxy.models(),
                     codex_catalog.as_ref().map(|file| file.path()),
+                    Choices {
+                        background: row.background_model.as_deref(),
+                        cli_options: &context.cli_options,
+                    },
                 )?;
                 if !login {
                     status_line(&mut command, row.tool, proxy.home());
@@ -518,6 +523,10 @@ fn sign_in_route_command(
         &default,
         &models,
         catalog.as_ref().map(|file| file.path()),
+        Choices {
+            background: row.background_model.as_deref(),
+            cli_options: &context.cli_options,
+        },
     )?;
     if !login {
         status_line(command, row.tool, &super::route::home_for(store, row.id));
@@ -553,20 +562,29 @@ fn opencode_sign_in_command(
     context: &LaunchContext,
 ) -> Result<std::process::Command, ManagedError> {
     let (port, default, models) = sign_in_route(context)?;
-    opencode_route_command(session, port, &default, &models)
+    opencode_route_command(
+        session,
+        port,
+        &default,
+        context.session.background_model.as_deref(),
+        &models,
+    )
 }
 
 /// OpenCode on a session's local NEAR AI proxy, the launcher's own (a
 /// saved key) or the daemon's (the sign-in): it starts on `default` and
-/// offers every model in `models`, with a placeholder key.
+/// offers every model in `models`, with a placeholder key. Its background
+/// model is `background` when that is no less private than `default`.
 fn opencode_route_command(
     session: &super::opencode::OpenCodeSession,
     port: u16,
     default: &str,
+    background: Option<&str>,
     models: &[super::models::ChatModel],
 ) -> Result<std::process::Command, ManagedError> {
     session.command_with_models(
         default,
+        background,
         models,
         &format!("http://127.0.0.1:{port}/openai/v1"),
         "managed-local-session",
@@ -578,6 +596,13 @@ fn opencode_route_command(
 /// `default`, and can name only models in `models`: the proxy serves a
 /// listed model as named and gives an unlisted id a substitute. Codex
 /// reads its list from `codex_catalog` ([`super::codex`]).
+///
+/// Every other model the tool is set to use follows the model in use: the
+/// one the person's own model flag names in `choices.cli_options` when it
+/// is listed, else `default` (owner, 2026-10-31). Claude Code's background
+/// model and aliases come from its tier or a more private one
+/// ([`super::models::claude_env`]); Codex's reviewer, subagent and memory
+/// models are that model.
 fn near_ai_route(
     command: &mut std::process::Command,
     tool: super::ToolId,
@@ -585,15 +610,19 @@ fn near_ai_route(
     default: &str,
     models: &[super::models::ChatModel],
     codex_catalog: Option<&std::path::Path>,
+    choices: Choices<'_>,
 ) -> Result<(), ManagedError> {
     let base = format!("http://127.0.0.1:{port}");
+    let in_use = super::models::flag_model(tool, choices.cli_options)
+        .filter(|id| models.iter().any(|m| m.id == *id))
+        .unwrap_or(default);
     match tool {
         super::ToolId::Opencode => return Err(ManagedError::InvalidRequest),
         super::ToolId::Claude => {
             command
                 .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
                 .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session");
-            for (name, value) in super::models::claude_env(default, models) {
+            for (name, value) in super::models::claude_env(in_use, choices.background, models) {
                 match value {
                     Some(value) => command.env(name, value),
                     None => command.env_remove(name),
@@ -633,9 +662,26 @@ fn near_ai_route(
                 .arg(format!("model_catalog_json={}", quoted(catalog)))
                 .arg("-c")
                 .arg(format!("model={}", quoted(default)));
+            // Codex's reviewer (/review), subagents and memory jobs each
+            // name a model of their own, which may be one NEAR AI does not
+            // list or a less private one: all of them are the model in
+            // use. The auto-mode reviewer's model is set per catalog entry
+            // ([`super::codex::catalog`]). The person's CLI options cannot
+            // set these keys ([`super::options`]).
+            for key in super::codex::SECONDARY_MODEL_KEYS {
+                command.arg("-c").arg(format!("{key}={}", quoted(in_use)));
+            }
         }
     }
     Ok(())
+}
+
+/// What the person chose beyond the main model, for [`near_ai_route`].
+struct Choices<'a> {
+    /// The background model the launch named; none for the default.
+    background: Option<&'a str>,
+    /// The session's CLI options, which may name the model in use.
+    cli_options: &'a [String],
 }
 
 /// For Claude Code, show the route's status line: `--settings` naming
@@ -735,13 +781,13 @@ mod tests {
             ChatModel {
                 id: "deepseek-ai/DeepSeek-V3.1".into(),
                 name: None,
-                tier: None,
+                tier: Some(crate::managed::models::ModelTier::Incognito),
                 ..Default::default()
             },
             ChatModel {
                 id: "anthropic/claude-sonnet-5-5".into(),
                 name: Some("Claude Sonnet 5.5".into()),
-                tier: None,
+                tier: Some(crate::managed::models::ModelTier::Incognito),
                 ..Default::default()
             },
         ]
@@ -760,6 +806,10 @@ mod tests {
             "deepseek-ai/DeepSeek-V3.1",
             &listed(),
             None,
+            super::Choices {
+                background: None,
+                cli_options: &[],
+            },
         )
         .unwrap();
         let env = |name| env_of(&command, name);
@@ -885,6 +935,177 @@ mod tests {
         }
     }
 
+    /// Models a catalogue with a NEAR AI private model and Incognito
+    /// Anthropic models, as NEAR AI lists them.
+    fn tiered() -> Vec<ChatModel> {
+        use crate::managed::models::ModelTier;
+        [
+            ("anthropic/claude-haiku-4-5", ModelTier::Incognito),
+            ("anthropic/claude-sonnet-5-5", ModelTier::Incognito),
+            ("anthropic/claude-opus-5-5", ModelTier::Incognito),
+            ("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+            ("z-ai/glm-5.3", ModelTier::NearAi),
+        ]
+        .into_iter()
+        .map(|(id, tier)| ChatModel {
+            id: id.into(),
+            tier: Some(tier),
+            ..Default::default()
+        })
+        .collect()
+    }
+
+    /// The sign-in session the daemon hands a launcher, on `model`, with
+    /// an optional background model.
+    fn sign_in_context(
+        home: &std::path::Path,
+        tool: ToolId,
+        model: &str,
+        background: Option<&str>,
+    ) -> LaunchContext {
+        let account = signin::entry(tool).unwrap();
+        let mut session = json!({
+            "id": uuid::Uuid::new_v4(), "tool": tool, "connection": "near_ai_signin",
+            "account_id": account.id, "account_label": "NEAR AI",
+            "selection_generation": 0, "project_label": "p", "cwd": home,
+            "started_at": "2026-10-16T00:00:00Z", "state": "starting",
+            "exit_code": null, "can_focus": false,
+        });
+        if let Some(background) = background {
+            session["background_model"] = json!(background);
+        }
+        serde_json::from_value(json!({
+            "session": session, "proof": "p", "route_port": 4100,
+            "route_model": model, "route_models": tiered(),
+        }))
+        .unwrap()
+    }
+
+    /// A contributor's explicit NEAR AI private pick, on the sign-in, with
+    /// Incognito Anthropic models listed and a stale Incognito background
+    /// choice: no variable Claude Code is started with names an Incognito
+    /// model (owner, 2026-10-31).
+    #[test]
+    fn claude_on_an_explicit_private_pick_names_no_incognito_model() {
+        use crate::managed::profiles::NativeProfiles;
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("state")).unwrap();
+        let account = signin::entry(ToolId::Claude).unwrap();
+        let incognito = |id: &str| id.starts_with("anthropic/");
+        for background in [
+            None,
+            Some("anthropic/claude-haiku-4-5"),
+            Some("z-ai/glm-5.3"),
+        ] {
+            let context =
+                sign_in_context(home.path(), ToolId::Claude, "Qwen/Qwen3.8-27B", background);
+            let mut command = std::process::Command::new("claude");
+            sign_in_route_command(
+                &mut command,
+                &store,
+                &NativeProfiles::new(&store),
+                &account,
+                &home.path().join("claude"),
+                &context,
+                true,
+            )
+            .unwrap();
+            for (name, value) in command.get_envs() {
+                if let Some(value) = value.and_then(|v| v.to_str()) {
+                    assert!(!incognito(value), "{name:?}={value} {background:?}");
+                }
+            }
+            let expected = background
+                .filter(|id| !incognito(id))
+                .unwrap_or("Qwen/Qwen3.8-27B");
+            assert_eq!(
+                env_of(&command, "ANTHROPIC_SMALL_FAST_MODEL"),
+                Some(Some(expected.into()))
+            );
+        }
+    }
+
+    /// Every other model Codex uses follows the model in use: the
+    /// reviewer, the default subagent and the memory jobs, set to the
+    /// session's default, or to the model the person's own `-m` names when
+    /// NEAR AI lists it.
+    #[test]
+    fn codex_sets_every_secondary_model_to_the_model_in_use() {
+        let path = std::path::Path::new("/c.json");
+        let keys = |cli: &[String]| {
+            let mut command = std::process::Command::new("codex");
+            near_ai_route(
+                &mut command,
+                ToolId::Codex,
+                4321,
+                "Qwen/Qwen3.8-27B",
+                &tiered(),
+                Some(path),
+                super::Choices {
+                    background: None,
+                    cli_options: cli,
+                },
+            )
+            .unwrap();
+            let args: Vec<String> = command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            crate::managed::codex::SECONDARY_MODEL_KEYS
+                .iter()
+                .map(|key| {
+                    args.windows(2)
+                        .find(|pair| pair[0] == "-c" && pair[1].starts_with(&format!("{key}=")))
+                        .map(|pair| pair[1][key.len() + 1..].to_owned())
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&[]), vec![Some("\"Qwen/Qwen3.8-27B\"".to_owned()); 4]);
+        let flag = vec!["-m".to_owned(), "z-ai/glm-5.3".to_owned()];
+        assert_eq!(keys(&flag), vec![Some("\"z-ai/glm-5.3\"".to_owned()); 4]);
+        // A flag naming a model NEAR AI does not list changes nothing.
+        let unlisted = vec!["--model=gone/model".to_owned()];
+        assert_eq!(
+            keys(&unlisted),
+            vec![Some("\"Qwen/Qwen3.8-27B\"".to_owned()); 4]
+        );
+        assert_eq!(
+            crate::managed::codex::SECONDARY_MODEL_KEYS,
+            [
+                "review_model",
+                "agents.default_subagent_model",
+                "memories.extract_model",
+                "memories.consolidation_model"
+            ]
+        );
+    }
+
+    /// Claude Code's own `--model` in the CLI options moves the model in
+    /// use, so its aliases follow that model's tier.
+    #[test]
+    fn claude_follows_its_own_model_flag() {
+        let mut command = std::process::Command::new("claude");
+        let cli = vec!["--model".to_owned(), "Qwen/Qwen3.8-27B".to_owned()];
+        near_ai_route(
+            &mut command,
+            ToolId::Claude,
+            4321,
+            "anthropic/claude-sonnet-5-5",
+            &tiered(),
+            None,
+            super::Choices {
+                background: None,
+                cli_options: &cli,
+            },
+        )
+        .unwrap();
+        for (name, value) in command.get_envs() {
+            if let Some(value) = value.and_then(|v| v.to_str()) {
+                assert!(!value.starts_with("anthropic/"), "{name:?}={value}");
+            }
+        }
+    }
+
     /// Codex on a NEAR AI route reads its model list from the session's
     /// catalog file and starts on the default; without the file, no run.
     #[test]
@@ -898,6 +1119,10 @@ mod tests {
             "anthropic/claude-sonnet-5-5",
             &listed(),
             Some(path),
+            super::Choices {
+                background: None,
+                cli_options: &[],
+            },
         )
         .unwrap();
         let args: Vec<String> = command
@@ -924,7 +1149,19 @@ mod tests {
         );
         let mut command = std::process::Command::new("codex");
         assert_eq!(
-            near_ai_route(&mut command, ToolId::Codex, 4321, "x/a", &listed(), None).err(),
+            near_ai_route(
+                &mut command,
+                ToolId::Codex,
+                4321,
+                "x/a",
+                &listed(),
+                None,
+                super::Choices {
+                    background: None,
+                    cli_options: &[]
+                }
+            )
+            .err(),
             Some(ManagedError::InvalidRequest)
         );
     }
@@ -1058,9 +1295,14 @@ mod tests {
         let session =
             OpenCodeSession::new(&store, &account, &native, uuid::Uuid::new_v4(), home.path())
                 .unwrap();
-        let command =
-            opencode_route_command(&session, 4321, "anthropic/claude-sonnet-5-5", &listed())
-                .unwrap();
+        let command = opencode_route_command(
+            &session,
+            4321,
+            "anthropic/claude-sonnet-5-5",
+            None,
+            &listed(),
+        )
+        .unwrap();
         let content = command
             .get_envs()
             .find(|(key, _)| *key == "OPENCODE_CONFIG_CONTENT")

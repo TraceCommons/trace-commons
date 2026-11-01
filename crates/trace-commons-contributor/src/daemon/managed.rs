@@ -229,6 +229,7 @@ impl ManagedService {
                         expected_generation: Generation(0),
                         save_default: false,
                         keep_saved_model: false,
+                        background_model: None,
                     },
                     sign_in,
                 )
@@ -326,7 +327,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
                 )
             }
             "managed_tool_setup" => {
@@ -502,6 +503,7 @@ impl ManagedService {
                     expected_generation: self.accounts.generation(account.tool),
                     save_default: false,
                     keep_saved_model: false,
+                    background_model: None,
                 };
                 Ok(json!(self.sessions.prepare(request, &account)?))
             }
@@ -634,12 +636,17 @@ fn remember_prepared(
         if let Some(mut prefs) = prefs {
             // A launch that fell back to the default because NEAR AI no
             // longer lists the saved model remembers its other choices but
-            // not the fallback: the folder keeps the model it had.
+            // not the fallback: the folder keeps the model it had, and the
+            // background model saved with it, which this launch weighed
+            // against the default instead (#1798 review).
             // When the saved model cannot be read, nothing is written: a
             // default must never replace it (#1754 review).
             if keep {
                 match saved_folder_model(shared, &prefs) {
-                    Ok(model) => prefs.model = model,
+                    Ok((model, background)) => {
+                        prefs.model = model;
+                        prefs.background_model = background;
+                    }
                     Err(()) => {
                         with_service(shared, |service| service.sessions.rollback_prepared(id))?;
                         return Err(Refusal::Unavailable("managed-folder-settings-save-failed"));
@@ -675,14 +682,15 @@ enum Resolved {
 fn saved_folder_model(
     shared: &DaemonShared,
     prefs: &crate::managed::folder::FolderSettings,
-) -> Result<Option<String>, ()> {
+) -> Result<(Option<String>, Option<String>), ()> {
     let cwd = crate::managed::folder::canonical(&prefs.cwd).map_err(|_| ())?;
     let settings = shared.settings.lock().map_err(|_| ())?;
     Ok(settings
         .managed_folder_settings
         .iter()
         .find(|entry| entry.tool == prefs.tool && entry.cwd == cwd)
-        .and_then(|entry| entry.model.clone()))
+        .map(|entry| (entry.model.clone(), entry.background_model.clone()))
+        .unwrap_or_default())
 }
 
 fn refusal_label(refusal: Refusal) -> &'static str {
@@ -769,6 +777,9 @@ fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
 /// Synchronous entry. A proxy whose session ended is dropped, which
 /// requests its shutdown; the asynchronous entry also awaits it.
 pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
+    if request.method == "managed_cli_model" {
+        return cli_model(request);
+    }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
     let mut ended = vec![];
@@ -807,6 +818,9 @@ where
     }
     if request.method == "managed_model_favorite_set" {
         return favorite_set(shared, request).await;
+    }
+    if request.method == "managed_cli_model" {
+        return cli_model(request);
     }
     // A launch that would prepare a new session on the sign-in waits for
     // the balance before anything is committed: a refusal, a cancelled
@@ -966,6 +980,10 @@ fn too_low(report: &BalanceReport) -> bool {
 /// NEAR AI cannot be read there is no answer, so nothing is marked.
 /// `tier` is NEAR AI's privacy tier (`models::ModelTier`); `tier_order` is
 /// the tiers a picker groups by, most private first (`ModelTier::ORDER`).
+/// `background` maps each model's id, as the main model, to its background
+/// default and the index in `background_sets` of the background ids it
+/// allows (`models::background_table`; both empty for Codex). A background
+/// picker lists those and keeps no rule of its own.
 async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -992,15 +1010,38 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
                 .map(String::as_str)
                 .filter(|id| !listed.iter().any(|m| m.id == *id))
                 .collect();
+            let background = models::background_table(p.tool, &models);
             Ok(json!({
                 "models":models,"default":default,"favorites":favorites,
                 "unavailable_favorites":unavailable,
                 "tier_order":models::ModelTier::ORDER,
+                "background_sets":background["sets"],
+                "background":background["models"],
             }))
         }
         _ => Err(ManagedError::ModelUnavailable.into()),
     };
     respond(request, result)
+}
+
+/// `managed_cli_model {tool, cli_options}`: the model the tool's own flag
+/// names in `cli_options` (`models::flag_model`), which the launcher runs
+/// instead of the picker's (#1798 review). Local only: nothing is read from
+/// NEAR AI. Options that do not parse name none, as a launch refuses them.
+fn cli_model(request: &Request) -> Response {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        tool: ToolId,
+        cli_options: String,
+    }
+    let p: Params = match parse(request) {
+        Ok(p) => p,
+        Err(error) => return respond(request, Err(error.into())),
+    };
+    let args = crate::managed::options::parse(p.tool, &p.cli_options).unwrap_or_default();
+    let model = models::flag_model(p.tool, &args);
+    respond(request, Ok(json!({ "model": model })))
 }
 
 /// `managed_model_favorite_set {model, favorite}`: star or unstar one model
@@ -1346,6 +1387,8 @@ mod tests {
         let (_dir, _store, mut service) = service();
         let snapshot = call(&mut service, "managed_snapshot", json!({}), false).unwrap();
         assert_eq!(snapshot["capabilities"]["keep_saved_model"], true);
+        // And `background_model`, which an older daemon refuses.
+        assert_eq!(snapshot["capabilities"]["background_model"], true);
     }
 
     /// #1754 review: "no saved model" and "could not tell" are different
@@ -1361,10 +1404,14 @@ mod tests {
             tool: ToolId::Codex,
             cwd: cwd.to_path_buf(),
             model: None,
+            background_model: None,
             collect_traces: false,
             cli_options: String::new(),
         };
-        assert_eq!(saved_folder_model(&shared, &prefs(&folder)), Ok(None));
+        assert_eq!(
+            saved_folder_model(&shared, &prefs(&folder)),
+            Ok((None, None))
+        );
         shared
             .settings
             .lock()
@@ -1372,11 +1419,14 @@ mod tests {
             .managed_folder_settings
             .push(crate::managed::folder::FolderSettings {
                 model: Some("provider/saved".into()),
+                background_model: Some("provider/small".into()),
                 ..prefs(&crate::managed::folder::canonical(&folder).unwrap())
             });
+        // #1798 review: a fallback launch keeps the folder's saved
+        // background model with its saved model, never this launch's.
         assert_eq!(
             saved_folder_model(&shared, &prefs(&folder)),
-            Ok(Some("provider/saved".into()))
+            Ok((Some("provider/saved".into()), Some("provider/small".into())))
         );
         // The folder went away between prepare and this write.
         assert!(saved_folder_model(&shared, &prefs(&home.path().join("gone"))).is_err());
@@ -1441,6 +1491,7 @@ mod tests {
             expected_generation: Generation(0),
             save_default: false,
             keep_saved_model: false,
+            background_model: None,
             model: None,
             collect_traces: false,
         })
@@ -1520,6 +1571,7 @@ mod tests {
                     expected_generation: Generation(0),
                     save_default: false,
                     keep_saved_model: false,
+                    background_model: None,
                     model: None,
                     collect_traces: false,
                 }),

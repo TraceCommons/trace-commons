@@ -98,6 +98,14 @@
 //!   no longer lists now falls back to the default instead of holding the
 //!   launch, and this line says so.
 //!
+//! The background model picker, under the model picker for Claude Code and
+//! OpenCode on NEAR AI. Approved by the owner 2026-10-31:
+//! - `background_model_title` "Background model" -- the field's visible
+//!   label above the picker.
+//! - `background_model_choice` "Model for background tasks" -- the
+//!   picker's accessible name, apart from the model picker's `model_choice`.
+//!   Its default row reuses `model_default` and `model_default_unknown`.
+//!
 //! The model picker's group headings, one per NEAR AI privacy tier
 //! (`managed::models::ModelTier`). Named by the owner 2026-10-30; the
 //! picker lists them most private first (owner, 2026-10-31):
@@ -186,6 +194,8 @@ pub fn copy() -> serde_json::Value {
             "opencode": "OpenCode",
             "model": "Model ID",
             "model_choice": "Model",
+            "background_model_title": "Background model",
+            "background_model_choice": "Model for background tasks",
             "model_default": "Default: {model}",
             "model_default_unknown": "Default",
             "model_group_incognito": "Incognito models",
