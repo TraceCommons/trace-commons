@@ -414,13 +414,15 @@ impl TokenCache {
             return;
         };
         let mut document = self.document();
-        // In memory mode the store may still hold this login's entry.
-        self.tombstone(Some(login));
         let before = document.entries.len();
         document.entries.retain(|e| e.login != login);
         if document.entries.len() != before {
             self.save(&document);
         }
+        // In memory mode the store may still hold this login's entry. Last,
+        // and whether or not anything was removed, so a refusal that first
+        // arrives on the write above is covered too.
+        self.tombstone(Some(login));
     }
 
     /// Invalidate writes already in flight without touching the store, so a
@@ -980,6 +982,64 @@ mod tests {
         assert!(!cache.unentitled());
         assert_eq!(stored_logins(&inner), ["login-b"]);
         assert!(cache.lookup("login-b", "bind", now()).is_some());
+    }
+
+    /// Answers reads, and refuses writes while `refuse_writes` is set.
+    struct WriteRefusingStore {
+        refuse_writes: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        inner: std::sync::Arc<MemoryStore>,
+    }
+    impl TokenStore for WriteRefusingStore {
+        fn read(&self) -> Result<Option<SecretBytes>, &'static str> {
+            self.inner.read()
+        }
+        fn write(&self, bytes: &[u8]) -> Result<(), &'static str> {
+            if self.refuse_writes.load(Ordering::SeqCst) {
+                return Err(UNENTITLED);
+            }
+            self.inner.write(bytes)
+        }
+        fn clear(&self) -> Result<(), &'static str> {
+            if self.refuse_writes.load(Ordering::SeqCst) {
+                return Err(UNENTITLED);
+            }
+            self.inner.clear()
+        }
+    }
+
+    #[test]
+    fn a_forget_whose_write_is_the_first_refusal_stays_forgotten() {
+        let refuse_writes = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let inner = std::sync::Arc::new(MemoryStore::default());
+        let cache = TokenCache::new(Box::new(WriteRefusingStore {
+            refuse_writes: std::sync::Arc::clone(&refuse_writes),
+            inner: std::sync::Arc::clone(&inner),
+        }))
+        .with_reprobe_after(Duration::from_secs(600));
+        cache.remember(
+            cache.epoch(),
+            "login-a",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-a",
+        );
+        cache.remember(
+            cache.epoch(),
+            "login-b",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-b",
+        );
+        // The store still reads, then refuses the forget's write.
+        refuse_writes.store(true, Ordering::SeqCst);
+        cache.forget("login-a");
+        assert!(cache.unentitled());
+        refuse_writes.store(false, Ordering::SeqCst);
+        cache.expire_window();
+        assert!(cache.lookup("login-a", "bind", now()).is_none());
+        assert_eq!(stored_logins(&inner), ["login-b"]);
     }
 
     #[test]

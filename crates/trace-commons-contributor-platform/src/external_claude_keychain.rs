@@ -741,7 +741,6 @@ fn silent_access(persistent_ref: Ref, search_list: Option<Ref>, context: &NoUiCo
         {
             Access::Allowed
         }
-        Err(_) => Access::Allowed,
         Ok(entries) if is_type(entries.0, unsafe { CFArrayGetTypeID() }) => {
             list_access((0..unsafe { CFArrayGetCount(entries.0) }).map(|index| {
                 let entry = unsafe { CFArrayGetValueAtIndex(entries.0, index) };
@@ -767,7 +766,8 @@ fn silent_access(persistent_ref: Ref, search_list: Option<Ref>, context: &NoUiCo
                 )
             }))
         }
-        Ok(_) => Access::Indeterminate,
+        // NULL is an error, not an empty list: fail closed.
+        _ => Access::Indeterminate,
     };
     if partition != Access::Allowed {
         return partition;
