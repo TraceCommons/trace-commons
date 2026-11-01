@@ -1204,22 +1204,27 @@ fn the_summary_lists_each_known_folder_once_with_what_it_learned() {
 
 #[test]
 fn update_repo_writes_only_when_asked_and_serializes_writers() {
+    const LONG: std::time::Duration = std::time::Duration::from_secs(30);
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path());
     let key = repo_key(Path::new("/home/a/project"), Harness::Claude);
     let read = store
-        .update_repo(&key, |state| (false, state.sessions))
+        .try_update_repo(&key, LONG, |state| (false, state.sessions))
         .unwrap();
     assert_eq!(read, 0);
     assert_eq!(store.repo(&key), RepoState::default());
-    assert!(store.update_repo("../escape", |_| (true, ())).is_err());
+    assert!(
+        store
+            .try_update_repo("../escape", LONG, |_| (true, ()))
+            .is_err()
+    );
 
     // Writers in parallel each add one session; none is lost.
     std::thread::scope(|scope| {
         for _ in 0..8 {
             scope.spawn(|| {
                 store
-                    .update_repo(&key, |state| {
+                    .try_update_repo(&key, LONG, |state| {
                         state.sessions += 1;
                         (true, ())
                     })
@@ -1278,12 +1283,15 @@ fn folders_with_the_same_name_are_told_apart_by_their_parent() {
 fn labels_grow_until_they_differ_and_never_name_the_home_folder() {
     use super::summary::summarize_in;
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::new(dir.path());
-    let home = dir.path().join("someone");
+    // Resolved first: on macOS the temp folder sits under `/var`, itself a
+    // symlink to `/private/var`.
+    let root = dir.path().canonicalize().unwrap();
+    let store = Store::new(&root);
+    let home = root.join("someone");
     let deep_a = home.join("a").join("x").join("api");
     let deep_b = home.join("b").join("x").join("api");
     let at_home = home.join("api");
-    let elsewhere = dir.path().join("srv").join("api");
+    let elsewhere = root.join("srv").join("api");
     for folder in [&deep_a, &deep_b, &at_home, &elsewhere] {
         std::fs::create_dir_all(folder).unwrap();
         let state = RepoState {
@@ -1325,7 +1333,7 @@ fn labels_grow_until_they_differ_and_never_name_the_home_folder() {
     // its resolved path.
     #[cfg(unix)]
     {
-        let link = dir.path().join("home-link");
+        let link = root.join("home-link");
         std::os::unix::fs::symlink(&home, &link).unwrap();
         let mut through_link: Vec<String> = summarize_in(
             &store,
@@ -1341,6 +1349,23 @@ fn labels_grow_until_they_differ_and_never_name_the_home_folder() {
         .collect();
         through_link.sort();
         assert_eq!(through_link, ["srv/api", "~/api"]);
+
+        // And the other way: home resolved, the folder recorded through
+        // the symlink.
+        let mut recorded_through_link: Vec<String> = summarize_in(
+            &store,
+            [
+                (Harness::Claude, link.join("api")),
+                (Harness::Claude, elsewhere.clone()),
+            ],
+            Some(&home),
+        )
+        .folders
+        .into_iter()
+        .map(|row| row.folder)
+        .collect();
+        recorded_through_link.sort();
+        assert_eq!(recorded_through_link, ["srv/api", "~/api"]);
     }
 }
 

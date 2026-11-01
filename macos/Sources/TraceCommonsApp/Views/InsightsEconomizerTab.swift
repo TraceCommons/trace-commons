@@ -104,10 +104,13 @@ final class InsightsEconomizerModel {
             let reply = try await calls.setEnabled(on)
             switchRefusal = reply.enabled == on ? nil : MonitorWords.table?.requestFailed
             // Draw what the daemon confirmed, even if the read after this
-            // fails and the rest of the page stays as it was.
-            if let shown = answer {
+            // fails and the rest of the page stays as it was. It counts as
+            // a reply shown, so a read begun before the switch is dropped.
+            if let page = answer {
                 answer = DaemonData.EconomizerStatus(
-                    enabled: reply.enabled, folders: shown.folders, foldersTruncated: shown.foldersTruncated)
+                    enabled: reply.enabled, folders: page.folders, foldersTruncated: page.foldersTruncated)
+                started += 1
+                shown = started
             }
         } catch {
             switchRefusal = MonitorWords.table?.requestFailed

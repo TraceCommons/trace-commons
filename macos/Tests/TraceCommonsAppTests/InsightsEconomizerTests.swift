@@ -114,6 +114,38 @@ final class InsightsEconomizerTests: XCTestCase {
         XCTAssertTrue(model.stale)
     }
 
+    func testAReadBegunBeforeTheSwitchCannotOverwriteIt() async {
+        // A read that is held until released, then answers "off".
+        final class Gate: @unchecked Sendable {
+            var held: CheckedContinuation<Void, Never>?
+            var reads = 0
+        }
+        let gate = Gate()
+        struct Stopped: Error {}
+        let model = InsightsEconomizerModel(calls: .init(
+            served: { true },
+            status: {
+                gate.reads += 1
+                switch gate.reads {
+                case 1: return DaemonData.EconomizerStatus(enabled: false)
+                case 2:
+                    await withCheckedContinuation { gate.held = $0 }
+                    return DaemonData.EconomizerStatus(enabled: false)
+                default: throw Stopped()
+                }
+            },
+            setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
+            restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
+        await model.load()
+        let early = Task { await model.load() }
+        while gate.held == nil { await Task.yield() }
+        // The switch is confirmed on, and the read after it fails.
+        await model.setEnabled(true)
+        gate.held?.resume()
+        await early.value
+        XCTAssertEqual(model.answer?.enabled, true)
+    }
+
     func testAFailedReadWhenTheTabOpensIsNotHiddenByAnEarlierAnswer() async {
         final class Box: @unchecked Sendable { var up = true }
         let box = Box()

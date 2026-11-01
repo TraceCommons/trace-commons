@@ -136,14 +136,17 @@ pub fn summarize_in(
         if !seen.insert(key.clone()) {
             continue;
         }
+        // Labelled from the resolved path, so a folder recorded under a
+        // symlinked spelling of home is still seen as under home.
+        let resolved = std::fs::canonicalize(&path).unwrap_or(path);
         let row = FolderSummary::of(
-            label(&path, 0, &homes),
+            label(&resolved, 0, &homes),
             harness,
             key.clone(),
             &store.repo(&key),
         );
         if row.learned_anything() {
-            rows.push((row, path));
+            rows.push((row, resolved));
         }
     }
     // Lengthen colliding labels, one parent at a time, until they differ
@@ -189,6 +192,14 @@ pub fn summarize_in(
     }
 }
 
+/// Whether two spellings name the same folder: equal, or on macOS, whose
+/// default volume ignores case, equal ignoring case.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    a == b
+        || (cfg!(target_os = "macos")
+            && a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase())
+}
+
 /// `path`'s last `depth + 1` components, joined with `/`. The home folder
 /// is `~` and ends the label, so its name never shows.
 fn label(path: &Path, depth: usize, homes: &[PathBuf]) -> String {
@@ -196,7 +207,7 @@ fn label(path: &Path, depth: usize, homes: &[PathBuf]) -> String {
     let mut current = Some(path);
     for _ in 0..=depth {
         let Some(here) = current else { break };
-        if homes.iter().any(|home| home == here) {
+        if homes.iter().any(|home| same_folder(home, here)) {
             parts.push("~".to_owned());
             break;
         }
@@ -211,7 +222,7 @@ fn label(path: &Path, depth: usize, homes: &[PathBuf]) -> String {
 /// Give back every tool left out under `key` for `harness`, for good.
 /// Returns the tools given back; none when nothing was left out.
 ///
-/// Written under the folder's lock ([`Store::update_repo`]), so a session
+/// Written under the folder's lock ([`Store::try_update_repo`]), so a session
 /// ending in that folder at the same moment cannot undo it.
 pub fn restore(store: &Store, harness: Harness, key: &str) -> anyhow::Result<Vec<String>> {
     anyhow::ensure!(safe_id(key), "not a usable economizer id");
