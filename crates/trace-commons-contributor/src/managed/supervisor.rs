@@ -139,7 +139,7 @@ async fn run_native(
     let version = profiles.verify_version(&account, &native)?;
     if row.connection == ConnectionKind::Subscription
         && !login
-        && profiles.inspect(&account, &native)? != AuthState::Ready
+        && profiles.inspect_verified(&account, &native)? != AuthState::Ready
     {
         return Err(ManagedError::SignInRequired.into());
     }

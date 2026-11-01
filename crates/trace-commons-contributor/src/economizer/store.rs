@@ -4,7 +4,10 @@
 //! - `repos/<key>.json`: one folder's [`RepoState`] for one harness, where
 //!   `<key>` is a digest of both ([`repo_key`]), never the path;
 //! - `sessions/<id>.json`: one running session's [`SessionState`], folded
-//!   into its folder's state when the session ends, then removed.
+//!   into its folder's state when the session ends, then removed;
+//! - `repos/<key>.lock`, `sessions/<id>.lock`: empty lock files. A
+//!   session's is removed only by the stale prune, never while a hook may
+//!   hold it; a folder's stays beside its state.
 //!
 //! Unreadable or foreign state reads as empty: the economizer then does
 //! less, never something else. Every change to a folder's state is made
@@ -15,7 +18,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::Harness;
 use super::facts::{FactBook, Observations};
@@ -178,62 +183,29 @@ impl Store {
     /// written and an error is returned, so a stalled writer (an agent
     /// suspended mid-write) never holds the hook or a daemon thread for
     /// good, and giving up never undoes another writer's change.
-    ///
-    /// The lock file stays beside the state file once made: it is empty,
-    /// mode 0600, and one per folder that was written.
     pub fn try_update_repo<T>(
         &self,
         key: &str,
-        wait: std::time::Duration,
+        wait: Duration,
         change: impl FnOnce(&mut RepoState) -> (bool, T),
     ) -> Result<T> {
-        self.locked_update(key, wait, change)
+        self.locked_update(key, Some(wait), change)
     }
 
     fn locked_update<T>(
         &self,
         key: &str,
-        wait: std::time::Duration,
+        wait: Option<Duration>,
         change: impl FnOnce(&mut RepoState) -> (bool, T),
     ) -> Result<T> {
-        anyhow::ensure!(safe_id(key), "not a usable economizer id");
-        let dir = self.directory(Some(REPOS))?;
-        let lock = dir.join(format!("{key}.lock"));
-        if std::fs::symlink_metadata(&lock)
-            .is_ok_and(|meta| !meta.is_file() || meta.file_type().is_symlink())
-        {
-            anyhow::bail!("economizer lock is not a regular file");
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(false).read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&lock).context("opening the economizer lock")?;
-        let deadline = std::time::Instant::now() + wait;
-        loop {
-            match file.try_lock() {
-                Ok(()) => break,
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    anyhow::bail!("the economizer state is busy")
-                }
-                Err(std::fs::TryLockError::Error(e)) => {
-                    return Err(e).context("locking the economizer state");
-                }
-            }
-        }
+        let lock = self.lock(REPOS, key, wait)?;
         let mut state = self.repo(key);
         let (write, out) = change(&mut state);
         if write {
             self.save_repo(key, &state)?;
         }
         // Dropping the file releases the lock.
-        drop(file);
+        drop(lock);
         Ok(out)
     }
 
@@ -246,10 +218,12 @@ impl Store {
         self.write(SESSIONS, id, state)
     }
 
+    /// Remove a session's state. Its lock file stays: a hook of the same
+    /// session may hold it or be waiting on it, and a new file in its
+    /// place would let two hooks run at once. The stale prune removes it.
     pub fn remove_session(&self, id: &str) {
         if safe_id(id) {
             let _ = std::fs::remove_file(self.root.join(SESSIONS).join(format!("{id}.json")));
-            let _ = std::fs::remove_file(self.root.join(SESSIONS).join(format!("{id}.lock")));
         }
     }
 
@@ -257,11 +231,17 @@ impl Store {
     /// file is dropped. The coding tool runs the hooks of parallel tool
     /// calls as concurrent processes; each holds this lock from reading the
     /// session to writing it back, so none loses another's update.
-    pub fn lock_session(&self, id: &str) -> Result<std::fs::File> {
+    pub fn lock_session(&self, id: &str) -> Result<File> {
+        self.lock(SESSIONS, id, None)
+    }
+
+    /// An exclusive lock on `<sub>/<id>.lock`, made owner-only if missing.
+    /// With `wait`, gives up once that has passed.
+    fn lock(&self, sub: &str, id: &str, wait: Option<Duration>) -> Result<File> {
         anyhow::ensure!(safe_id(id), "not a usable economizer id");
-        let dir = self.directory(Some(SESSIONS))?;
-        let lock = dir.join(format!("{id}.lock"));
-        if std::fs::symlink_metadata(&lock)
+        let dir = self.directory(Some(sub))?;
+        let path = dir.join(format!("{id}.lock"));
+        if std::fs::symlink_metadata(&path)
             .is_ok_and(|meta| !meta.is_file() || meta.file_type().is_symlink())
         {
             anyhow::bail!("economizer lock is not a regular file");
@@ -273,12 +253,30 @@ impl Store {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options.open(&lock).context("opening the economizer lock")?;
-        file.lock().context("locking the economizer session")?;
-        Ok(file)
+        let file = options.open(&path).context("opening the economizer lock")?;
+        let Some(wait) = wait else {
+            file.lock().context("locking the economizer state")?;
+            return Ok(file);
+        };
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    anyhow::bail!("the economizer state is busy")
+                }
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(e).context("locking the economizer state");
+                }
+            }
+        }
     }
 
-    /// Remove session files older than [`STALE_SESSION`].
+    /// Remove session files older than [`STALE_SESSION`], and lock files
+    /// with no session state that have not been touched for as long.
     pub fn prune_sessions(&self, now: DateTime<Utc>) {
         let Ok(entries) = std::fs::read_dir(self.root.join(SESSIONS)) else {
             return;
@@ -288,13 +286,28 @@ impl Store {
             let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            if self
-                .session(id)
-                .is_none_or(|state| now - state.started_at > STALE_SESSION)
-                && path.extension().is_some_and(|ext| ext == "json")
-            {
-                let _ = std::fs::remove_file(&path);
-                let _ = std::fs::remove_file(path.with_extension("lock"));
+            match path.extension().and_then(|ext| ext.to_str()) {
+                Some("json") => {
+                    if self
+                        .session(id)
+                        .is_none_or(|state| now - state.started_at > STALE_SESSION)
+                    {
+                        let _ = std::fs::remove_file(&path);
+                        let _ = std::fs::remove_file(path.with_extension("lock"));
+                    }
+                }
+                Some("lock") => {
+                    let stale = entry
+                        .metadata()
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                        .map(DateTime::<Utc>::from)
+                        .is_some_and(|modified| now - modified > STALE_SESSION);
+                    if stale && !path.with_extension("json").exists() {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+                _ => {}
             }
         }
     }

@@ -449,6 +449,80 @@ fn a_full_fact_book_still_learns_a_new_repair() {
     );
 }
 
+/// With every kept fact told, a new repair still survives its own fold,
+/// the oldest told fact goes, and the most recently confirmed are told.
+#[test]
+fn a_book_of_told_facts_still_learns_a_new_repair() {
+    use super::facts::{CONFIRMATIONS, MAX_KEPT, MAX_TOLD};
+    let mut book = FactBook::default();
+    for i in 0..MAX_KEPT {
+        let mut once = Observations::default();
+        once.repairs
+            .insert((format!("tool{i}"), "python -m".to_owned()));
+        for c in 0..CONFIRMATIONS {
+            book.fold_session(&format!("old{i}-{c}"), &once);
+        }
+    }
+    assert!(book.facts.iter().all(|fact| fact.told()));
+    book.fold_session("s1", &repair_session());
+    assert_eq!(book.facts.len(), MAX_KEPT);
+    assert!(
+        book.facts.iter().any(|fact| fact.program == "pytest"),
+        "the new fact survives its own fold"
+    );
+    assert!(
+        !book.facts.iter().any(|fact| fact.program == "tool0"),
+        "the oldest told fact went"
+    );
+    let told: Vec<_> = book.told().map(|fact| fact.program.clone()).collect();
+    assert_eq!(told.len(), MAX_TOLD);
+    assert_eq!(
+        told[0],
+        format!("tool{}", MAX_KEPT - 1),
+        "newest told first"
+    );
+}
+
+/// Codex reports a failed command through `PostToolUse`; its exit status
+/// marks it failed, check or not.
+#[test]
+fn a_non_zero_exit_is_a_failure_for_any_command() {
+    let codex = |response: Value| {
+        ToolCall::from_hook(
+            &json!({"tool_name": "exec_command", "tool_input": {"cmd": "python repro.py"},
+                    "tool_response": response}),
+            false,
+        )
+        .unwrap()
+    };
+    assert!(codex(json!({"output": "Traceback", "exit_code": 1})).is_failure());
+    assert!(codex(json!({"output": "x", "metadata": {"exit_code": 2}})).is_failure());
+    assert!(codex(json!("Exit code: 1\nWall time: 0.1 seconds\nOutput:\nboom")).is_failure());
+    assert!(!codex(json!({"output": "Traceback in a log", "exit_code": 0})).is_failure());
+}
+
+/// A passing check's output may name an exception or log `error:`: a pass
+/// line is not a failure, and an unpiped check that exited 0 passed.
+#[test]
+fn a_passing_check_is_not_a_failure() {
+    assert!(
+        !bash(
+            "pytest -v | tail",
+            "tests/a.py::test_raises_TimeoutException PASSED"
+        )
+        .is_failure()
+    );
+    assert!(!bash("cargo test | tail", "test error_path ... ok").is_failure());
+    let exited_zero = ToolCall::from_hook(
+        &json!({"tool_name": "Bash", "tool_input": {"command": "cargo test -- --nocapture"},
+                "tool_response": {"stdout": "error: logged by a test\ntest result: ok", "exit_code": 0}}),
+        false,
+    )
+    .unwrap();
+    assert!(!exited_zero.is_failure());
+    assert!(bash("pytest | tail", "FAILED tests/a.py::test_x").is_failure());
+}
+
 /// Source printed by a command is content: `error:` or `Exception` in it is
 /// not a failure. A check's output still is.
 #[test]
@@ -623,6 +697,65 @@ fn parallel_hooks_of_one_session_lose_no_update() {
     let session = store.session("p1").unwrap();
     assert_eq!(session.turn.calls, calls);
     assert!(session.used_tools.contains("WebFetch"));
+}
+
+/// A session's lock file outlives its state, so a late hook of the same
+/// session locks the same file; the stale prune removes it later.
+#[test]
+fn a_session_lock_is_left_for_the_stale_prune() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    store.set_enabled(true).unwrap();
+    run_session(&store, "repo1", "s1", 2);
+    let lock = store.root().join("sessions").join("s1.lock");
+    assert!(lock.exists(), "kept after SessionEnd");
+    assert!(!store.root().join("sessions").join("s1.json").exists());
+    store.prune_sessions(Utc::now());
+    assert!(lock.exists(), "a fresh lock is kept");
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&lock)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    store.prune_sessions(Utc::now());
+    assert!(!lock.exists(), "a stale orphan lock is removed");
+}
+
+/// Give back takes the folder's lock: it waits for a writer holding it.
+#[test]
+fn give_back_waits_for_the_folder_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    store
+        .try_update_repo("repo1", std::time::Duration::from_secs(30), |_| (true, ()))
+        .unwrap();
+    assert!(
+        store
+            .try_update_repo("repo1", std::time::Duration::from_millis(10), |_| (
+                false,
+                ()
+            ))
+            .is_ok()
+    );
+    std::thread::scope(|scope| {
+        let held = store.try_update_repo("repo1", std::time::Duration::from_secs(30), |_| {
+            let busy = scope
+                .spawn(|| {
+                    store.try_update_repo("repo1", std::time::Duration::from_millis(50), |_| {
+                        (false, ())
+                    })
+                })
+                .join()
+                .unwrap();
+            (false, busy.is_err())
+        });
+        assert!(
+            held.unwrap(),
+            "a second writer is refused while one holds it"
+        );
+    });
 }
 
 #[test]

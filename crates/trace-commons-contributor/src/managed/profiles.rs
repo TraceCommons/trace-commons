@@ -244,6 +244,16 @@ impl NativeProfiles {
 
     pub fn inspect(&self, account: &AccountView, native: &Path) -> Result<AuthState, ManagedError> {
         self.verify_version(account, native)?;
+        self.inspect_verified(account, native)
+    }
+
+    /// [`Self::inspect`] for a caller that has just run
+    /// [`Self::verify_version`] itself, so `--version` runs once.
+    pub fn inspect_verified(
+        &self,
+        account: &AccountView,
+        native: &Path,
+    ) -> Result<AuthState, ManagedError> {
         let root = self.profile_root(account.id)?;
         let output = bounded_output(self.command(account, native, NativeAction::Status, &root)?)?;
         if !output.status.success() {

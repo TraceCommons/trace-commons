@@ -3,11 +3,16 @@
 //!
 //! Pure: no I/O. Claude Code reports a call that failed through
 //! `PostToolUseFailure` with the text the model saw (`error`), and a call
-//! that succeeded through `PostToolUse` with its `tool_response`. A Bash
-//! call carries no exit code there, and a piped command (`pytest | tail`)
-//! exits 0 whatever the tests did, so a check's output is also read for
-//! failure markers. Only a check's: any other command may be printing
-//! source (`cat`, `rg Exception`, `git diff`), where `error:` is content.
+//! that succeeded through `PostToolUse` with its `tool_response`. Codex
+//! reports both through `PostToolUse`, so a command's exit status is read
+//! from its response wherever one is given (`exit_code`, or an
+//! `Exit code N` line). A non-zero exit is a failure for any command.
+//!
+//! A piped command (`pytest | tail`) exits 0 whatever the tests did, so a
+//! check whose exit is unknown or piped is also read for failure markers,
+//! skipping lines that report a pass (`PASSED`, `... ok`). Only a check's:
+//! any other command may be printing source (`cat`, `rg Exception`,
+//! `git diff`), where `error:` is content.
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -39,6 +44,8 @@ pub struct ToolCall {
     pub output: String,
     /// Claude Code reported the call as failed (`PostToolUseFailure`).
     pub failed: bool,
+    /// A command's exit status, when the harness gave one.
+    pub exit_code: Option<i64>,
 }
 
 impl ToolCall {
@@ -65,6 +72,7 @@ impl ToolCall {
             "Read" | "Grep" | "Glob" | "read" | "grep" | "glob" | "list" => CallKind::Content,
             _ => CallKind::Other,
         };
+        let response = input.get("tool_response").unwrap_or(&Value::Null);
         let output = if failed {
             input
                 .get("error")
@@ -72,21 +80,41 @@ impl ToolCall {
                 .unwrap_or_default()
                 .to_owned()
         } else {
-            response_text(input.get("tool_response").unwrap_or(&Value::Null))
+            response_text(response)
+        };
+        let exit_code = match kind {
+            CallKind::Command { .. } => {
+                response_exit_code(response).or_else(|| exit_code_line(&output))
+            }
+            _ => None,
         };
         Some(Self {
             tool,
             kind,
             output: cap(output),
             failed,
+            exit_code,
         })
     }
 
-    /// Whether the call's outcome was a failure: reported as failed, or a
-    /// check whose output carries a failure marker. Another command's
+    /// Whether the call's outcome was a failure: reported as failed, a
+    /// command that exited non-zero, or a check whose exit is unknown or
+    /// piped and whose output carries a failure marker. Another command's
     /// output is not read for markers: it may be file content.
     pub fn is_failure(&self) -> bool {
-        self.failed || self.is_check() && marker_line(&self.output).is_some()
+        if self.failed {
+            return true;
+        }
+        let CallKind::Command { command } = &self.kind else {
+            return false;
+        };
+        match self.exit_code {
+            Some(code) if code != 0 => true,
+            // An unpiped command's exit is its own: a check that exited 0
+            // passed, whatever its output logs.
+            Some(_) if !command.contains('|') => false,
+            _ => self.is_check() && marker_line(&self.output).is_some(),
+        }
     }
 
     /// Whether the call ran a check: tests, a build or a type check.
@@ -159,6 +187,29 @@ fn response_text(response: &Value) -> String {
     }
 }
 
+/// The exit status a response object carries: `exit_code`, `exitCode`, or
+/// either under `metadata`.
+fn response_exit_code(response: &Value) -> Option<i64> {
+    let read = |value: &Value| {
+        ["exit_code", "exitCode"]
+            .iter()
+            .find_map(|key| value.get(key).and_then(Value::as_i64))
+    };
+    read(response).or_else(|| response.get("metadata").and_then(read))
+}
+
+/// The exit status an output reports on its own line near the top:
+/// `Exit code 1`, `Exit code: 1` or `Process exited with code 1`.
+fn exit_code_line(output: &str) -> Option<i64> {
+    output.lines().take(8).find_map(|line| {
+        let line = line.trim();
+        let rest = line
+            .strip_prefix("Exit code")
+            .or_else(|| line.strip_prefix("Process exited with code"))?;
+        rest.trim_start_matches(':').trim().parse().ok()
+    })
+}
+
 fn cap(mut text: String) -> String {
     if text.len() > OUTPUT_CAP {
         let mut end = OUTPUT_CAP;
@@ -190,10 +241,22 @@ const MARKERS: &[&str] = &[
     "No module named",
 ];
 
-/// The first line of `text` that carries a failure marker.
+/// The first line of `text` that carries a failure marker and does not
+/// report a pass.
 pub fn marker_line(text: &str) -> Option<&str> {
     text.lines()
-        .find(|line| MARKERS.iter().any(|marker| line.contains(marker)))
+        .find(|line| !passing_line(line) && MARKERS.iter().any(|marker| line.contains(marker)))
+}
+
+/// A line that reports a passing test, whatever its name says:
+/// `test_raises_TimeoutException PASSED`, `test error_path ... ok`,
+/// `--- PASS: TestError`, Go's `ok  pkg 0.1s`.
+fn passing_line(line: &str) -> bool {
+    let line = line.trim();
+    line.contains(" PASSED")
+        || line.ends_with(" ... ok")
+        || line.starts_with("--- PASS")
+        || line.starts_with("ok ")
 }
 
 /// A digest of how a failing output failed: its first failure line, with
