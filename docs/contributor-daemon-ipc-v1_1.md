@@ -715,7 +715,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `managed_model_favorite_set` | `model` (**required**, a model id), `favorite` (**required**, boolean) | `favorites` (`[string]`, the stored list) | async only; stars or unstars one model for the Launch sheet's picker; writes `managed_favorite_models` through `set_settings`; see "Managed session model choice" below |
 | `managed_cli_model` | `tool` (**required**), `cli_options` (**required**, the session's CLI options text) | `model` (string or null) | local only, reads nothing from NEAR AI; the model the tool's own flag names in `cli_options` (Claude Code `--model`; Codex `-m`/`--model`), which the launcher runs instead of the picker's and weighs every secondary model against; options that do not parse name none. The macOS background picker reads `managed_model_catalogue`'s `background`/`background_sets` for this model |
 | `managed_cli_options_set` | `tool` (`claude`, `codex`, `opencode`), `options` (string) | `tool`, `options`, `revision` | validates and saves through `set_settings.managed_cli_options`; returns the current saved value and managed revision so older snapshots cannot undo an acknowledged save; invalid quoting or reserved flags return `managed-cli-options-invalid` |
-| `managed_folder_settings_get` | `tool`, `cwd` (existing absolute folder) | `tool`, `model`, `collect_traces`, `cli_options`, `remembered`, `revision` | canonical folder/agent preferences; falls back to global CLI options, default model and collection off; never selects an account |
+| `managed_folder_settings_get` | `tool`, `cwd` (existing absolute folder) | `tool`, `model`, `collect_traces`, `cli_options`, `remembered`, `revision`, `project_workflows` | canonical folder/agent preferences; falls back to global CLI options, default model and collection off; never selects an account. `project_workflows` (boolean; absent from an older daemon) says whether Claude Code would find workflows for this folder, in the folders the launch reads; always `false` for other tools. The macOS sheet shows the shared `project_workflows` line when it is `true` and the session is on NEAR AI |
 | `managed_folder_settings_reset` | `tool`, `cwd` | same as lookup | removes only this canonical folder/agent profile through the normal settings writer and returns effective defaults |
 | `set_notifications_enabled` | `on` (**required**, boolean) | `notifications_enabled` | "Notifications from Trace Commons", the master switch; writes `notifications_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
@@ -9466,6 +9466,16 @@ once funded. `managed-folder-settings-save-failed`, which comes after
 preparing, can also follow a read. An unknown, unreachable or no-limit balance
 lets the launch through. A saved `near_ai` key is not checked: its account's
 balance is not readable here.
+
+A coding launch of Claude Code on `near_ai` or `near_ai_signin` is refused
+with `managed-project-chooses-model`, and nothing is prepared, when its
+project chooses a model other than through an alias: a model variable in a
+project settings `env` block, `fallbackModel`, `advisorModel` or
+`modelOverrides`, or a `model` in an agent, command, routine or skill, in any
+folder Claude Code reads them from or in a folder the launch's CLI options add
+with `--add-dir`. The launcher checks again before the tool starts. A project
+with Claude Code workflows is not refused; the launcher prints the shared
+`project_workflows` line in the session's terminal before the tool starts.
 
 `managed_session_report` answers `{accepted: true, stop: bool}`; an older
 launcher reads only `accepted`.

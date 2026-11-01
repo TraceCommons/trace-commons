@@ -187,13 +187,15 @@ fn action(app: &Rc<App>, method: &str, params: Value, terminal: bool) {
 
 /// The copy key for a refused managed action, as the macOS shell maps it:
 /// no NEAR AI sign-in asks for one, a model NEAR AI does not offer says so,
-/// and a balance too low for a session's first calls asks for funds;
-/// anything else is the general failure.
+/// a balance too low for a session's first calls asks for funds, and a NEAR
+/// AI project that chooses a model says why; anything else is the general
+/// failure.
 fn refusal_key(label: &str) -> &'static str {
     match label {
         "managed-near-ai-sign-in-required" => "sign_in_needed",
         "managed-model-unavailable" => "model_unavailable",
         "managed-near-ai-balance-too-low" => "balance_too_low",
+        "managed-project-chooses-model" => "project_chooses_model",
         _ => "action_failed",
     }
 }
@@ -542,7 +544,16 @@ mod tests {
             refusal_key("managed-model-unavailable"),
             "model_unavailable"
         );
-        for key in ["balance_too_low", "sign_in_needed", "model_unavailable"] {
+        assert_eq!(
+            refusal_key("managed-project-chooses-model"),
+            "project_chooses_model"
+        );
+        for key in [
+            "balance_too_low",
+            "sign_in_needed",
+            "model_unavailable",
+            "project_chooses_model",
+        ] {
             assert!(!super::text(key).is_empty(), "{key}");
         }
         assert_eq!(refusal_key("managed-conflict"), "action_failed");

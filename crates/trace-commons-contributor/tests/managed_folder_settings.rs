@@ -265,3 +265,38 @@ fn exact_collection_allows_running_unknown_and_parallel_optout_but_login_stays_l
         sessions.prepare(request, &opencode).unwrap();
     }
 }
+
+/// The folder settings the macOS sheet reads say whether the folder has
+/// Claude Code workflows, as the launch reads the project (owner,
+/// 2026-11-01), so the sheet can show the workflows line without a scan
+/// of its own. Only Claude Code has them.
+#[test]
+fn folder_settings_say_whether_the_project_has_claude_workflows() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join(".git")).unwrap();
+    let daemon = DaemonShared::load(ConfigStore::open(home.path().into()).unwrap()).unwrap();
+    let claude = json!({"tool":"claude","cwd":project.path()});
+    assert_eq!(
+        call(&daemon, "managed_folder_settings_get", claude.clone())["project_workflows"],
+        false
+    );
+    std::fs::create_dir_all(project.path().join(".claude/workflows")).unwrap();
+    std::fs::write(project.path().join(".claude/workflows/release.js"), "").unwrap();
+    assert_eq!(
+        call(&daemon, "managed_folder_settings_get", claude.clone())["project_workflows"],
+        true
+    );
+    assert_eq!(
+        call(&daemon, "managed_folder_settings_reset", claude)["project_workflows"],
+        true
+    );
+    assert_eq!(
+        call(
+            &daemon,
+            "managed_folder_settings_get",
+            json!({"tool":"codex","cwd":project.path()})
+        )["project_workflows"],
+        false
+    );
+}

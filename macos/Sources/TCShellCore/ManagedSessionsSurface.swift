@@ -278,6 +278,9 @@ public enum ManagedSurface {
         // asks for funds.
         let balanceTooLow = "managed-near-ai-balance-too-low"
         if code == balanceTooLow || message == balanceTooLow { return "balance_too_low" }
+        // A NEAR AI project that chooses a model: the line that says why.
+        let projectChoosesModel = "managed-project-chooses-model"
+        if code == projectChoosesModel || message == projectChoosesModel { return "project_chooses_model" }
         return "action_failed"
     }
 

@@ -16,6 +16,42 @@ final class ManagedFolderSettingsTests: XCTestCase {
         XCTAssertEqual(value.revision, 7)
     }
 
+    /// The workflows line (owner, 2026-11-01): the daemon says whether the
+    /// folder has Claude Code workflows; the sheet shows the line only for
+    /// that folder, and only on a NEAR AI session. An older daemon that
+    /// does not say shows nothing.
+    func testTheWorkflowsLineShowsOnlyForAFolderWithWorkflowsOnNearAI() throws {
+        func folder(_ workflows: String) throws -> ManagedFolderSettings {
+            let json = #"{"tool":"claude","model":null,"collect_traces":false,"cli_options":"","remembered":false,"revision":1"# + workflows + "}"
+            return try JSONDecoder().decode(ManagedFolderSettings.self, from: Data(json.utf8))
+        }
+        XCTAssertEqual(try folder(#","project_workflows":true"#).projectWorkflows, true)
+        XCTAssertNil(try folder("").projectWorkflows, "an older daemon says nothing")
+
+        var draft = ManagedFolderDraft()
+        var token = draft.begin(tool: "claude", cwd: "/with-workflows")
+        XCTAssertTrue(draft.complete(try folder(#","project_workflows":true"#), token: token))
+        XCTAssertTrue(draft.projectWorkflows)
+        for connection in ["near_ai", "near_ai_signin"] {
+            XCTAssertTrue(ManagedSurface.showsProjectWorkflows(draft, tool: "claude", connection: connection), connection)
+        }
+        for connection in ["subscription", "api_key"] {
+            XCTAssertFalse(ManagedSurface.showsProjectWorkflows(draft, tool: "claude", connection: connection), connection)
+        }
+        XCTAssertFalse(ManagedSurface.showsProjectWorkflows(draft, tool: "codex", connection: "near_ai"))
+
+        // Another folder: nothing while it loads, then that folder's answer.
+        token = draft.begin(tool: "claude", cwd: "/plain")
+        XCTAssertFalse(ManagedSurface.showsProjectWorkflows(draft, tool: "claude", connection: "near_ai"))
+        XCTAssertTrue(draft.complete(try folder(#","project_workflows":false"#), token: token))
+        XCTAssertFalse(ManagedSurface.showsProjectWorkflows(draft, tool: "claude", connection: "near_ai"))
+        token = draft.begin(tool: "claude", cwd: "/older")
+        XCTAssertTrue(draft.complete(try folder(""), token: token))
+        XCTAssertFalse(ManagedSurface.showsProjectWorkflows(draft, tool: "claude", connection: "near_ai"))
+        draft.useDefaults(tool: "claude", cwd: "/project", cliOptions: "")
+        XCTAssertFalse(ManagedSurface.showsProjectWorkflows(draft, tool: "claude", connection: "near_ai"))
+    }
+
     func testOnlyTheCurrentFolderResponseCanRestoreTheDraft() throws {
         var draft = ManagedFolderDraft()
         let old = draft.begin(tool: "codex", cwd: "/first")

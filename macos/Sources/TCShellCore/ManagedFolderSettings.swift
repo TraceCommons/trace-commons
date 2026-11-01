@@ -10,11 +10,15 @@ public struct ManagedFolderSettings: Codable, Equatable, Sendable {
     public let cliOptions: String
     public let remembered: Bool
     public let revision: UInt64
+    /// Whether Claude Code would find workflows for this folder, as the
+    /// daemon reads the project; absent (unknown) from an older daemon.
+    public let projectWorkflows: Bool?
 
     enum CodingKeys: String, CodingKey {
         case tool, model, remembered, revision
         case backgroundModel = "background_model"
         case collectTraces = "collect_traces", cliOptions = "cli_options"
+        case projectWorkflows = "project_workflows"
     }
 }
 
@@ -49,6 +53,9 @@ public struct ManagedFolderDraft: Equatable, Sendable {
     public private(set) var backgroundModel: String?
     public var collectTraces = false
     public var cliOptions = ""
+    /// The daemon found Claude Code workflows for this folder
+    /// (`project_workflows`); false while loading and from an older daemon.
+    public private(set) var projectWorkflows = false
     /// The core's reading of `cliOptions` (`managed_cli_model`): the text
     /// it read and the model it found there.
     private var cliAnswer: CLIAnswer?
@@ -87,6 +94,7 @@ public struct ManagedFolderDraft: Equatable, Sendable {
         collectTraces = settings.collectTraces
         cliOptions = settings.cliOptions
         remembered = settings.remembered
+        projectWorkflows = settings.projectWorkflows == true
         phase = .ready
         return true
     }
@@ -165,6 +173,14 @@ public struct ManagedFolderDraft: Equatable, Sendable {
 public enum ManagedFolderModelMode: Equatable, Sendable { case none, catalogue, text }
 
 public extension ManagedSurface {
+    /// Whether the sheet shows the `project_workflows` line (owner,
+    /// 2026-11-01): the loaded folder has Claude Code workflows and the
+    /// session is on NEAR AI. The daemon found them; nothing is scanned here.
+    static func showsProjectWorkflows(_ draft: ManagedFolderDraft, tool: String, connection: String) -> Bool {
+        draft.phase == .ready && draft.projectWorkflows && tool == "claude"
+            && ["near_ai", "near_ai_signin"].contains(connection)
+    }
+
     static func folderModelMode(tool: String, connection: String) -> ManagedFolderModelMode {
         if tool == "opencode" { return connection == "near_ai_signin" ? .catalogue : .text }
         return ["near_ai", "near_ai_signin"].contains(connection) ? .catalogue : .none

@@ -680,6 +680,10 @@ pub fn folder_snapshot(
         let mut value = serde_json::to_value(crate::managed::folder::lookup(&store, tool, cwd)?)
             .map_err(|_| ManagedError::StorageUnavailable)?;
         value["revision"] = service.sessions.revision().into();
+        // Whether the folder has Claude Code workflows; the sheet shows the
+        // `project_workflows` line when it does and the session is NEAR AI.
+        value["project_workflows"] =
+            crate::managed::profiles::project_has_workflows(tool, cwd).into();
         Ok(value)
     })
     .map_err(refusal_label)
@@ -1437,6 +1441,7 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::TerminalNotFound => "managed-terminal-not-found",
         ManagedError::ModelUnavailable => "managed-model-unavailable",
         ManagedError::NearAiBalanceTooLow => "managed-near-ai-balance-too-low",
+        ManagedError::ProjectChoosesModel => crate::managed::PROJECT_CHOOSES_MODEL_LABEL,
     }
 }
 
@@ -1476,6 +1481,16 @@ mod tests {
         assert_eq!(
             label(ManagedError::NearAiBalanceTooLow),
             "managed-near-ai-balance-too-low"
+        );
+    }
+
+    /// A project that chooses a model has a label of its own, which the
+    /// shells map to the line that says why (owner, 2026-11-01).
+    #[test]
+    fn the_project_model_refusal_has_its_own_label() {
+        assert_eq!(
+            label(ManagedError::ProjectChoosesModel),
+            crate::managed::PROJECT_CHOOSES_MODEL_LABEL
         );
     }
 
