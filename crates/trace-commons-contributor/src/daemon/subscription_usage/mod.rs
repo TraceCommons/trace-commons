@@ -1531,6 +1531,7 @@ mod integration_tests {
             cache.epoch(),
             "login",
             "binding",
+            "revision",
             (Utc::now() + Duration::hours(1)).timestamp_millis(),
             b"fixture-token",
         );
