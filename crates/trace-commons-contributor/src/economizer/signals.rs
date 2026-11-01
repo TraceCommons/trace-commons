@@ -5,8 +5,9 @@
 //! `PostToolUseFailure` with the text the model saw (`error`), and a call
 //! that succeeded through `PostToolUse` with its `tool_response`. A Bash
 //! call carries no exit code there, and a piped command (`pytest | tail`)
-//! exits 0 whatever the tests did, so a command's output is also read for
-//! failure markers.
+//! exits 0 whatever the tests did, so a check's output is also read for
+//! failure markers. Only a check's: any other command may be printing
+//! source (`cat`, `rg Exception`, `git diff`), where `error:` is content.
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -82,10 +83,10 @@ impl ToolCall {
     }
 
     /// Whether the call's outcome was a failure: reported as failed, or a
-    /// command whose output carries a failure marker.
+    /// check whose output carries a failure marker. Another command's
+    /// output is not read for markers: it may be file content.
     pub fn is_failure(&self) -> bool {
-        self.failed
-            || matches!(self.kind, CallKind::Command { .. }) && marker_line(&self.output).is_some()
+        self.failed || self.is_check() && marker_line(&self.output).is_some()
     }
 
     /// Whether the call ran a check: tests, a build or a type check.

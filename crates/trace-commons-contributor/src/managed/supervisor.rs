@@ -135,7 +135,8 @@ async fn run_native(
     };
     let profiles = NativeProfiles::new(store);
     let native = find_native(row.tool)?;
-    profiles.verify_version(&account, &native)?;
+    // Read once: the economizer needs it too.
+    let version = profiles.verify_version(&account, &native)?;
     if row.connection == ConnectionKind::Subscription
         && !login
         && profiles.inspect(&account, &native)? != AuthState::Ready
@@ -185,7 +186,6 @@ async fn run_native(
         // Every connection below runs on this session, seeded only when new.
         let mut session = opencode_session(store, &account, &native, row, resume)?;
         if !login {
-            let version = profiles.native_version(&account, &native).ok().flatten();
             let launch = economizer_launch(context, version, resume.is_some());
             if let Ok(exe) = std::env::current_exe() {
                 let economizer = crate::economizer::store::Store::new(store.dir());
@@ -317,13 +317,7 @@ async fn run_native(
         }
     }
     if !login {
-        economize(
-            &mut settings,
-            store,
-            context,
-            profiles.native_version(&account, &native).ok().flatten(),
-            resume.is_some(),
-        );
+        economize(&mut settings, store, context, version, resume.is_some());
     }
     apply_settings(&mut command, settings);
     // Signals were registered before ticket redemption. A terminal closed
@@ -345,7 +339,6 @@ async fn run_native(
     }
     // After every other argument, so a hook the person passed is seen.
     let codex_binding = if row.tool == super::ToolId::Codex && !login && resume.is_none() {
-        let version = profiles.native_version(&account, &native).ok().flatten();
         let launch = economizer_launch(context, version, false);
         let economizer = std::env::current_exe().ok().and_then(|exe| {
             crate::economizer::launch::codex(

@@ -319,19 +319,9 @@ pub fn record(directory: &Path, nonce: &str, reader: impl Read) -> Result<(), Ma
 /// The hidden hook command is deliberately silent and cannot open a daemon or
 /// config store. A blocked stdin writer cannot keep its process alive forever.
 pub fn run_record(directory: &Path, nonce: &str) {
-    use std::io::IsTerminal;
-    if std::io::stdin().is_terminal() {
-        return;
-    }
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = std::io::stdin()
-            .take(MAX_DOCUMENT as u64 + 1)
-            .read_to_end(&mut bytes);
-        let _ = sender.send(result.map(|_| bytes));
-    });
-    if let Ok(Ok(bytes)) = receiver.recv_timeout(std::time::Duration::from_secs(1)) {
+    if let Some(bytes) =
+        super::read_stdin_bounded(std::time::Duration::from_secs(1), MAX_DOCUMENT as u64 + 1)
+    {
         let _ = record(directory, nonce, bytes.as_slice());
     }
 }

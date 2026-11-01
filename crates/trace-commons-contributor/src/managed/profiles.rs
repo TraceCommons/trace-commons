@@ -221,7 +221,13 @@ impl NativeProfiles {
         Ok(numeric)
     }
 
-    pub fn verify_version(&self, account: &AccountView, native: &Path) -> Result<(), ManagedError> {
+    /// Refuse an unsupported version; return the version it read, so a
+    /// caller that needs it does not run the native tool again.
+    pub fn verify_version(
+        &self,
+        account: &AccountView,
+        native: &Path,
+    ) -> Result<Option<(u32, u32, u32)>, ManagedError> {
         let numeric = self.native_version(account, native)?;
         let supported = match account.tool {
             ToolId::Claude => numeric.is_some_and(|v| v.0 == 2 && v >= (2, 1, 289)),
@@ -233,7 +239,7 @@ impl NativeProfiles {
         if !supported {
             return Err(ManagedError::UnsupportedVersion);
         }
-        Ok(())
+        Ok(numeric)
     }
 
     pub fn inspect(&self, account: &AccountView, native: &Path) -> Result<AuthState, ManagedError> {

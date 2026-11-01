@@ -44,6 +44,9 @@ pub fn handle(
     }
     let event = input.get("hook_event_name")?.as_str()?;
     let session_id = input.get("session_id")?.as_str()?;
+    // Held for the whole event, so concurrent hooks of one session (parallel
+    // tool calls) apply one after another.
+    let _lock = store.lock_session(session_id).ok()?;
     let load = || {
         store
             .session(session_id)
@@ -82,9 +85,13 @@ pub fn handle(
         "Stop" => {
             let mut session = load();
             if session.turn.ended_well() {
-                let mut state = store.repo(repo);
-                state.envelope.add(session.turn.calls);
-                store.save_repo(repo, &state).ok()?;
+                let calls = session.turn.calls;
+                store
+                    .update_repo(repo, |state| {
+                        state.envelope.add(calls);
+                        (true, ())
+                    })
+                    .ok()?;
             }
             session.turn = Default::default();
             store.save_session(session_id, &session).ok()?;
@@ -94,15 +101,17 @@ pub fn handle(
             let session = store
                 .session(session_id)
                 .filter(|state| state.repo == repo)?;
-            let mut state = store.repo(repo);
-            state
-                .tools
-                .fold_session(harness, session.prompts, &session.used_tools);
-            state
-                .facts
-                .fold_session(&short_digest("session", session_id), &session.observations);
-            state.sessions = state.sessions.saturating_add(1);
-            store.save_repo(repo, &state).ok()?;
+            let digest = short_digest("session", session_id);
+            store
+                .update_repo(repo, |state| {
+                    state
+                        .tools
+                        .fold_session(harness, session.prompts, &session.used_tools);
+                    state.facts.fold_session(&digest, &session.observations);
+                    state.sessions = state.sessions.saturating_add(1);
+                    (true, ())
+                })
+                .ok()?;
             store.remove_session(session_id);
             None
         }
@@ -140,21 +149,7 @@ pub fn run(state: Option<&Path>, repo: Option<&str>, harness: Harness) {
     }
 }
 
-/// The event on stdin, read for at most [`BUDGET`]. The reader is a
-/// detached thread, so one blocked on stdin never holds the process open.
+/// The event on stdin, read for at most [`BUDGET`].
 fn read_input() -> Option<String> {
-    use std::io::{IsTerminal, Read};
-    if std::io::stdin().is_terminal() {
-        return None;
-    }
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buffer = String::new();
-        let read = std::io::stdin()
-            .take(MAX_INPUT)
-            .read_to_string(&mut buffer)
-            .ok();
-        let _ = sender.send(read.map(|_| buffer));
-    });
-    receiver.recv_timeout(BUDGET).ok().flatten()
+    String::from_utf8(crate::managed::read_stdin_bounded(BUDGET, MAX_INPUT)?).ok()
 }
