@@ -2679,3 +2679,144 @@ async fn each_listed_device_says_what_it_has_contributed() {
     task.abort();
     other_task.abort();
 }
+
+/// A NEAR AI device provisioned before sign-up wrote grants gets its grant
+/// backfilled by a judgement claim too, as it would by an upload claim, so
+/// the two routes admit the same devices.
+#[tokio::test]
+async fn a_judgement_claim_backfills_the_near_ai_signup_grant_like_an_upload_claim() {
+    use axum::body::{Body, to_bytes};
+    use std::sync::Arc;
+    use tower::ServiceExt as _;
+    use trace_commons_protocol::insights_judgement::{
+        JUDGEMENT_CLAIM_PATH, JUDGEMENT_CLAIM_REQUEST_SCHEMA_VERSION,
+    };
+    use trace_commons_server::trace_upload_claim_issuer::{
+        TraceUploadClaimIssuerConfig, generate_upload_claim_keypair,
+        trace_upload_claim_issuer_router,
+    };
+
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let db = Arc::new(db);
+    let issuer_keys = generate_upload_claim_keypair().unwrap();
+    let workload_keys = generate_upload_claim_keypair().unwrap();
+    let config = |template: Option<&str>| TraceUploadClaimIssuerConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        signing_private_key_pem: issuer_keys.private_key_pem.clone(),
+        signing_public_key_pem: issuer_keys.public_key_pem.clone(),
+        signing_kid: "issuer-test".into(),
+        issuer: "trace-commons-upload-issuer".into(),
+        audience: "trace-commons-upload".into(),
+        max_ttl_seconds: 300,
+        workload_public_key_pem: workload_keys.public_key_pem.clone(),
+        workload_issuer: None,
+        workload_audience: None,
+        tenant_access_grant_db: Some(db.clone() as Arc<dyn Database>),
+        require_tenant_access_grants: true,
+        shutdown_grace_seconds: 30,
+        request_timeout_seconds: 10,
+        max_request_bytes: 64 * 1024,
+        allowlist_source: None,
+        allowlist_refresh_interval_seconds: 60,
+        allowlist_max_stale_seconds: 3600,
+        onboarding_device_key_db: Some(db.clone() as Arc<dyn Database>),
+        onboarding_ingest_url: Some("https://ingest.example".into()),
+        onboarding_community_url: None,
+        onboarding_profile_url: None,
+        onboarding_leaderboard_url: None,
+        admin_bind: None,
+        invite_admin_backend: None,
+        invite_admin_registry: None,
+        invite_registry_authoritative: false,
+        near_ai_signup_policy_template: template.map(signup_template),
+    };
+    let judgement_claim = |config: TraceUploadClaimIssuerConfig,
+                           tenant: String,
+                           device_key_id: String,
+                           device: &Ed25519KeyPair| {
+        let body = serde_json::json!({
+            "schema_version": JUDGEMENT_CLAIM_REQUEST_SCHEMA_VERSION,
+            "tenant_id": tenant,
+            "device_key_id": device_key_id,
+            "issued_at": Utc::now().timestamp(),
+        })
+        .to_string();
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(device.sign(body.as_bytes()).as_ref());
+        let router = trace_upload_claim_issuer_router(config).expect("router");
+        async move {
+            let response = router
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(axum::http::Method::POST)
+                        .uri(JUDGEMENT_CLAIM_PATH)
+                        .header("content-type", "application/json")
+                        .header("x-trace-device-key-id", device_key_id)
+                        .header("x-trace-device-signature", signature)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            (status, body)
+        }
+    };
+
+    // Provisioned the way every NEAR AI account was before sign-up wrote
+    // grants: no grant row.
+    let (login, task) = stub_near_ai_login("judgement-claim-backfill").await;
+    let device = fresh_keypair();
+    let t = session_hash("judgement-claim-backfill");
+    let account = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&device),
+            native_session(&t),
+            &identity(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        signup_grants(&admin, &account.tenant_id, &account.device_key_id)
+            .await
+            .is_empty()
+    );
+
+    // Without the sign-up template there is nothing to backfill, so the
+    // grant rule refuses.
+    let (status, body) = judgement_claim(
+        config(None),
+        account.tenant_id.clone(),
+        account.device_key_id.clone(),
+        &device,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "judgement_claim_grant_required", "{body}");
+
+    // With it, the judgement claim backfills the grant and is issued.
+    let (status, body) = judgement_claim(
+        config(Some(SIGNUP_TEMPLATE)),
+        account.tenant_id.clone(),
+        account.device_key_id.clone(),
+        &device,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(body["access_token"].is_string(), "{body}");
+    assert_eq!(
+        signup_grants(&admin, &account.tenant_id, &account.device_key_id).await,
+        vec![template_grant_row(SIGNUP_TEMPLATE)]
+    );
+    task.abort();
+}
