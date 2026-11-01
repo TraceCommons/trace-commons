@@ -82,7 +82,11 @@ export const TraceCommonsEconomizer = async () => {
         hook_event_name: failed ? "PostToolUseFailure" : "PostToolUse",
         tool_name: input.tool,
         tool_input: input.args ?? {},
-        ...(failed ? { error: text } : { tool_response: text }),
+        // The exit status rides beside the text, so a passing check that
+        // logs `error:` is not read as failed.
+        ...(failed
+          ? { error: text }
+          : { tool_response: typeof exit === "number" ? { output: text, exit_code: exit } : text }),
       });
       if (context && typeof output?.output === "string") output.output += "\n\n" + context;
     },

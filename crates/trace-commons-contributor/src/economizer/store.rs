@@ -189,15 +189,6 @@ impl Store {
         wait: Duration,
         change: impl FnOnce(&mut RepoState) -> (bool, T),
     ) -> Result<T> {
-        self.locked_update(key, Some(wait), change)
-    }
-
-    fn locked_update<T>(
-        &self,
-        key: &str,
-        wait: Option<Duration>,
-        change: impl FnOnce(&mut RepoState) -> (bool, T),
-    ) -> Result<T> {
         let lock = self.lock(REPOS, key, wait)?;
         let mut state = self.repo(key);
         let (write, out) = change(&mut state);
@@ -230,14 +221,15 @@ impl Store {
     /// An exclusive lock on one session's state, held until the returned
     /// file is dropped. The coding tool runs the hooks of parallel tool
     /// calls as concurrent processes; each holds this lock from reading the
-    /// session to writing it back, so none loses another's update.
-    pub fn lock_session(&self, id: &str) -> Result<File> {
-        self.lock(SESSIONS, id, None)
+    /// session to writing it back, so none loses another's update. Gives
+    /// up after `wait`, so a stalled holder never holds the agent.
+    pub fn lock_session(&self, id: &str, wait: Duration) -> Result<File> {
+        self.lock(SESSIONS, id, wait)
     }
 
     /// An exclusive lock on `<sub>/<id>.lock`, made owner-only if missing.
-    /// With `wait`, gives up once that has passed.
-    fn lock(&self, sub: &str, id: &str, wait: Option<Duration>) -> Result<File> {
+    /// Gives up once `wait` has passed. Every wait is bounded.
+    fn lock(&self, sub: &str, id: &str, wait: Duration) -> Result<File> {
         anyhow::ensure!(safe_id(id), "not a usable economizer id");
         let dir = self.directory(Some(sub))?;
         let path = dir.join(format!("{id}.lock"));
@@ -254,10 +246,6 @@ impl Store {
             options.mode(0o600);
         }
         let file = options.open(&path).context("opening the economizer lock")?;
-        let Some(wait) = wait else {
-            file.lock().context("locking the economizer state")?;
-            return Ok(file);
-        };
         let deadline = std::time::Instant::now() + wait;
         loop {
             match file.try_lock() {

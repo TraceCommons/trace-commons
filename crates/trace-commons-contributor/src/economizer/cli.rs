@@ -120,13 +120,20 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
         EconomizerCommand::Restore { cwd, harness } => {
             let cwd = folder(cwd)?;
             let mut restored = Vec::new();
+            let mut busy = Vec::new();
             for harness in HARNESSES
                 .into_iter()
                 .filter(|h| harness.is_none_or(|only| only == *h))
             {
-                let given = summary::restore(&store, harness, &repo_key(&cwd, harness))?;
-                if !given.is_empty() {
-                    restored.push((harness, given));
+                // Under the folder's lock (`summary::restore`), so a session
+                // ending at the same time neither loses its fold nor undoes
+                // the Give back. A busy folder does not stop the others:
+                // what was given back is still reported, then the busy ones
+                // as an error.
+                match summary::restore(&store, harness, &repo_key(&cwd, harness)) {
+                    Ok(given) if !given.is_empty() => restored.push((harness, given)),
+                    Ok(_) => {}
+                    Err(_) => busy.push(harness),
                 }
             }
             if as_json {
@@ -134,8 +141,8 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                     .iter()
                     .map(|(harness, tools)| json!({ "harness": harness, "restored": tools }))
                     .collect();
-                println!("{}", json!({ "restored": rows }));
-            } else if restored.is_empty() {
+                println!("{}", json!({ "restored": rows, "busy": busy }));
+            } else if restored.is_empty() && busy.is_empty() {
                 println!("Nothing was left out here.");
             } else {
                 for (harness, tools) in restored {
@@ -145,6 +152,13 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                         tools.join(", ")
                     );
                 }
+            }
+            if !busy.is_empty() {
+                let names: Vec<_> = busy.iter().map(|harness| label(*harness)).collect();
+                anyhow::bail!(
+                    "Couldn't give back for {} here: a session is writing. Try again.",
+                    names.join(", ")
+                );
             }
         }
     }

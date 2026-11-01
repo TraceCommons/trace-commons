@@ -33,6 +33,9 @@ pub const BUDGET: Duration = Duration::from_secs(3);
 /// a record, so the economizer learns from one session fewer; it never undoes another writer's change, and the agent
 /// is never held at the end of a turn.
 const HOOK_LOCK_WAIT: Duration = Duration::from_millis(500);
+/// How long the hook waits for its session's lock. Longer than the folder
+/// wait: parallel tool calls of one session queue on it, each briefly.
+const SESSION_LOCK_WAIT: Duration = Duration::from_secs(2);
 /// The largest input read.
 const MAX_INPUT: u64 = 4 * 1024 * 1024;
 
@@ -52,23 +55,23 @@ pub fn handle(
     let session_id = input.get("session_id")?.as_str()?;
     // Held for the whole event, so concurrent hooks of one session (parallel
     // tool calls) apply one after another.
-    let _lock = store.lock_session(session_id).ok()?;
-    let load = || {
-        store
-            .session(session_id)
-            .filter(|state| state.repo == repo)
-            .unwrap_or_else(|| SessionState::new(repo, now))
-    };
+    // Bounded, so a stalled hook of the same session never holds the
+    // agent at the end of a turn; giving up drops this event.
+    let _lock = store.lock_session(session_id, SESSION_LOCK_WAIT).ok()?;
+    // Only `SessionStart` makes session state. Any later event of a session
+    // with none (one that ended, or was pruned) does nothing, so a hook
+    // that ran late never leaves an orphan behind.
+    let load = || store.session(session_id).filter(|state| state.repo == repo);
     match event {
         "SessionStart" => {
             store.prune_sessions(now);
-            let session = load();
+            let session = load().unwrap_or_else(|| SessionState::new(repo, now));
             store.save_session(session_id, &session).ok()?;
             let context = store.repo(repo).facts.render()?;
             Some(context_output(event, &context))
         }
         "UserPromptSubmit" => {
-            let mut session = load();
+            let mut session = load()?;
             session.prompts = session.prompts.saturating_add(1);
             session.turn = Default::default();
             store.save_session(session_id, &session).ok()?;
@@ -78,11 +81,12 @@ pub fn handle(
             let mut call = ToolCall::from_hook(input, event == "PostToolUseFailure")?;
             // Claude Code reports a command that exited non-zero through
             // `PostToolUseFailure`, so one it reports through `PostToolUse`
-            // exited 0.
-            if harness == Harness::Claude && !call.failed && call.exit_code.is_none() {
+            // exited 0. That known status wins over an `Exit code` line the
+            // command itself printed.
+            if harness == Harness::Claude && !call.failed {
                 call.exit_code = matches!(call.kind, CallKind::Command { .. }).then_some(0);
             }
-            let mut session = load();
+            let mut session = load()?;
             if session.used_tools.len() < 512 {
                 session.used_tools.insert(call.tool.clone());
             }
@@ -95,7 +99,7 @@ pub fn handle(
             redirect.then(|| context_output(event, &loop_guard::redirect_text(&session.turn)))
         }
         "Stop" => {
-            let mut session = load();
+            let mut session = load()?;
             if session.turn.ended_well() {
                 let calls = session.turn.calls;
                 // Any failure to write (a busy lock, a full disk, an I/O
