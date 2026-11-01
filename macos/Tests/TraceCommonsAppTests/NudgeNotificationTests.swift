@@ -76,6 +76,15 @@ final class NudgeNotificationTests: XCTestCase {
         XCTAssertNotNil(Notifier.digestBody(text: "", pendingCount: 1, projects: ["api"]))
     }
 
+    /// A daemon that sent no text gets the counts' own digest, with decided
+    /// credit worded as earned.
+    func testTheCountsDigestReportsEarnedCredit() {
+        XCTAssertEqual(
+            Notifier.digestBody(text: "", pendingCount: 0, projects: [], contributedCount: 2,
+                                contributedProjects: ["api"], creditFinal: 4.25, creditPending: 0),
+            "2 traces contributed from api. 4.3 credit earned.")
+    }
+
     /// Launch registers every category a delivered notification can name:
     /// `setNotificationCategories` replaces the whole set, so a
     /// re-engagement notification still in Notification Center after a

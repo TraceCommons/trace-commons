@@ -924,8 +924,19 @@ public sealed class DaemonEvent
     public int ContributedCount => IntField("contributed");
 
     /// <summary>
-    /// Pending credit carried by those contributions. Pending, never earned:
-    /// settlement is off on every deployment shipped so far.
+    /// Credit the server has decided for those contributions: earned.
+    /// </summary>
+    public double CreditFinal =>
+        Data is { } data
+        && data.ValueKind == JsonValueKind.Object
+        && data.TryGetProperty("credit_final", out JsonElement credit)
+        && credit.TryGetDouble(out double value)
+            ? value
+            : 0;
+
+    /// <summary>
+    /// Credit for those contributions still being scored. Pending, never
+    /// earned.
     /// </summary>
     public double CreditPending =>
         Data is { } data

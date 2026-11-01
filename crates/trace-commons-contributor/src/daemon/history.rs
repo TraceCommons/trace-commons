@@ -555,6 +555,8 @@ pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
 pub struct ContributedSince {
     pub count: usize,
     pub project_labels: BTreeSet<String>,
+    /// Credit the server has decided (a final figure, 0 included).
+    pub credit_final: f32,
     pub credit_pending: f32,
 }
 
@@ -579,8 +581,9 @@ pub fn contributed_since(
         if !rec.project_label.is_empty() {
             out.project_labels.insert(rec.project_label.clone());
         }
-        if rec.credit_points_final.is_none() {
-            out.credit_pending += rec.credit_points_pending;
+        match rec.credit_points_final {
+            Some(f) => out.credit_final += f,
+            None => out.credit_pending += rec.credit_points_pending,
         }
     }
     out
@@ -1035,6 +1038,22 @@ mod tests {
         assert_eq!(r.credit_final, 0.0);
         let since = contributed_since(&[decided], None);
         assert_eq!(since.credit_pending, 0.0);
+        assert_eq!(since.credit_final, 0.0);
+    }
+
+    /// A decided trace's credit is earned: it counts toward the digest's
+    /// final figure, and its leftover pending figure counts toward nothing.
+    #[test]
+    fn contributed_since_sums_final_credit_apart_from_pending() {
+        let mut decided = record("accepted", "2026-08-08T13:00:00Z");
+        decided.credit_points_pending = 9.0;
+        decided.credit_points_final = Some(2.5);
+        let mut scoring = record("submitted", "2026-08-08T13:00:00Z");
+        scoring.credit_points_pending = 1.5;
+        scoring.credit_points_final = None;
+        let out = contributed_since(&[decided, scoring], None);
+        assert_eq!(out.credit_final, 2.5);
+        assert_eq!(out.credit_pending, 1.5);
     }
 
     /// The server's reason label rides from the status read-back onto the

@@ -1196,7 +1196,9 @@ extension DaemonData {
         public let contributed: Int?
         /// The folders they went from, as labels, never keys.
         public let contributedProjects: [String]?
-        /// Pending credit for them; pending, never earned.
+        /// Credit the server has decided for them: earned.
+        public let creditFinal: Double?
+        /// Credit for them still being scored: pending, never earned.
         public let creditPending: Double?
         /// The core's notification body, posted unchanged. When the
         /// attention arbiter folded a re-engagement sentence in, it already
@@ -1208,11 +1210,12 @@ extension DaemonData {
 
         public init(
             pending: Int?, contributed: Int? = nil, contributedProjects: [String]? = nil,
-            creditPending: Double? = nil, text: String?, fold: DigestFold? = nil
+            creditFinal: Double? = nil, creditPending: Double? = nil, text: String?, fold: DigestFold? = nil
         ) {
             self.pending = pending
             self.contributed = contributed
             self.contributedProjects = contributedProjects
+            self.creditFinal = creditFinal
             self.creditPending = creditPending
             self.text = text
             self.fold = fold
@@ -1221,6 +1224,7 @@ extension DaemonData {
         public enum CodingKeys: String, CodingKey {
             case pending, contributed, text, fold
             case contributedProjects = "contributed_projects"
+            case creditFinal = "credit_final"
             case creditPending = "credit_pending"
         }
     }

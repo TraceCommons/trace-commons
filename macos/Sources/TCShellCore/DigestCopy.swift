@@ -18,12 +18,30 @@ import Foundation
 /// WYSIWYG design's evening-digest examples, K9 #1118), and each pins the
 /// design's two example sentences verbatim.
 public enum DigestCopy {
+    /// The digest's credit wording, in one place: "{amount} credit earned."
+    /// (approved by the owner, 2026-11-01) and "{amount} credit pending.".
+    /// The daemon's `notify::credit_sentences` is the Rust original.
+    static let earnedWord = "earned"
+    static let pendingWord = "pending"
+
+    /// Rounded half away from zero before formatting, matching the daemon
+    /// and the other shells. `%.1f` alone rounds half to even while .NET's
+    /// "0.0" rounds half away from zero, so 4.25 would read as 4.2 here and
+    /// 4.3 on Windows -- the same contribution, a different figure depending
+    /// which machine the contributor read it on.
+    static func creditSentence(_ amount: Double, word: String) -> String {
+        guard amount.isFinite, amount > 0 else { return "" }
+        let rounded = (amount * 10).rounded() / 10
+        return String(format: " %.1f credit %@.", rounded, word)
+    }
+
     /// Nil when nothing was contributed -- the caller then has only the
     /// waiting half, or nothing to say at all. A line reading "0 traces
     /// contributed" is worse than no line.
     public static func contributionLine(
         count: Int,
         projects: [String],
+        creditFinal: Double = 0,
         creditPending: Double
     ) -> String? {
         guard count > 0 else { return nil }
@@ -36,21 +54,13 @@ public enum DigestCopy {
             line += " from \(only)"
         }
         line += "."
-        // Stated only when there is some. "0 credit pending" reads as a
+        // Each stated only when there is some. "0 credit pending" reads as a
         // failure rather than as a fresh start, and the first digest after
-        // arming a project is exactly when that would show. Always
-        // "pending", never "earned": settlement is off on every deployment
-        // shipped so far, so a bare figure would be read as money.
-        if creditPending > 0 {
-            // Rounded half away from zero before formatting, matching the
-            // daemon and the other two shells. `%.1f` alone rounds half to
-            // even while .NET's "0.0" rounds half away from zero, so 4.25
-            // would read as 4.2 here and 4.3 on Windows -- the same
-            // contribution, a different figure depending which machine the
-            // contributor read it on.
-            let rounded = (creditPending * 10).rounded() / 10
-            line += String(format: " %.1f credit pending.", rounded)
-        }
+        // arming a project is exactly when that would show. Earned is credit
+        // the server has decided; pending is credit still being scored and is
+        // never called earned.
+        line += creditSentence(creditFinal, word: earnedWord)
+        line += creditSentence(creditPending, word: pendingWord)
         return line
     }
 }

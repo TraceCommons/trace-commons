@@ -428,6 +428,7 @@ pub struct DaemonEvent {
 pub struct DigestFacts {
     pub contributed: usize,
     pub contributed_projects: Vec<String>,
+    pub credit_final: f32,
     pub credit_pending: f32,
 }
 
@@ -454,6 +455,10 @@ fn digest_facts(name: &str, data: &serde_json::Value) -> Option<DigestFacts> {
                     .collect()
             })
             .unwrap_or_default(),
+        credit_final: data
+            .get("credit_final")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32,
         credit_pending: data
             .get("credit_pending")
             .and_then(|v| v.as_f64())

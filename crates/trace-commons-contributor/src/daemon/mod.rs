@@ -2507,6 +2507,7 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
             notify::contribution_text(
                 contributed.count,
                 &contributed.project_labels,
+                contributed.credit_final,
                 contributed.credit_pending,
             )
         });
@@ -2529,6 +2530,7 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
             // these (each platform's notification centre words things
             // differently), so it needs the names and not just the count.
             "contributed_projects": contributed.project_labels,
+            "credit_final": contributed.credit_final,
             "credit_pending": contributed.credit_pending,
             "text": body,
         });

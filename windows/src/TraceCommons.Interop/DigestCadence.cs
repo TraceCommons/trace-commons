@@ -46,7 +46,8 @@ public sealed record DigestFacts(
     int PendingCount,
     int ContributedCount,
     IReadOnlyList<string> ContributedProjects,
-    double CreditPending);
+    double CreditPending,
+    double CreditFinal = 0);
 
 public sealed class DigestCadence
 {

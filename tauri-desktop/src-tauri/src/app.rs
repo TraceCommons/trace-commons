@@ -64,6 +64,7 @@ fn digest_body(
     pending_projects: &[String],
     contributed_count: usize,
     contributed_projects: &[String],
+    credit_final: f64,
     credit_pending: f64,
 ) -> Option<String> {
     if pending_count == 0 && contributed_count == 0 {
@@ -102,10 +103,13 @@ fn digest_body(
             _ => String::new(),
         };
         let mut line = format!("{contributed_count} {noun} contributed{from}.");
-        if credit_pending.is_finite() && credit_pending > 0.0 {
-            let rounded = (credit_pending * 10.0).round() / 10.0;
-            line.push_str(&format!(" {rounded:.1} credit pending."));
-        }
+        // Earned, then pending, in the daemon's one wording.
+        line.push_str(
+            &trace_commons_contributor::daemon::notify::credit_sentences(
+                credit_final as f32,
+                credit_pending as f32,
+            ),
+        );
         lines.push(line);
     }
     Some(lines.join("\n"))
@@ -162,6 +166,11 @@ fn schedule_digest_notification<R: Runtime>(app: &tauri::AppHandle<R>, event: Ev
             Vec::new()
         };
         let contributed_projects = labels_from_value(event.data.get("contributed_projects"));
+        let credit_final = event
+            .data
+            .get("credit_final")
+            .and_then(Value::as_f64)
+            .unwrap_or_default();
         let credit_pending = event
             .data
             .get("credit_pending")
@@ -172,6 +181,7 @@ fn schedule_digest_notification<R: Runtime>(app: &tauri::AppHandle<R>, event: Ev
             &pending_projects,
             contributed_count,
             &contributed_projects,
+            credit_final,
             credit_pending,
         ) {
             if state.event_stopped() {
@@ -481,7 +491,7 @@ mod tests {
         let projects = vec!["alpha".to_owned(), "beta".to_owned()];
         let contributed = vec!["alpha".to_owned()];
         assert_eq!(
-            digest_body(2, &projects, 1, &contributed, 4.25).as_deref(),
+            digest_body(2, &projects, 1, &contributed, 0.0, 4.25).as_deref(),
             Some(
                 "2 traces ready from alpha and beta.\nNothing is sent until you review them.\n1 trace contributed from alpha. 4.3 credit pending."
             )
@@ -493,8 +503,12 @@ mod tests {
     #[test]
     fn contribution_line_matches_the_design_examples() {
         assert_eq!(
-            digest_body(0, &[], 1, &["orchard-api".to_owned()], 6.0).as_deref(),
+            digest_body(0, &[], 1, &["orchard-api".to_owned()], 0.0, 6.0).as_deref(),
             Some("1 trace contributed from orchard-api. 6.0 credit pending.")
+        );
+        assert_eq!(
+            digest_body(0, &[], 1, &["orchard-api".to_owned()], 6.0, 1.5).as_deref(),
+            Some("1 trace contributed from orchard-api. 6.0 credit earned. 1.5 credit pending.")
         );
         assert_eq!(
             digest_body(
@@ -502,6 +516,7 @@ mod tests {
                 &[],
                 2,
                 &["orchard-api".to_owned(), "portfolio".to_owned()],
+                0.0,
                 10.5
             )
             .as_deref(),

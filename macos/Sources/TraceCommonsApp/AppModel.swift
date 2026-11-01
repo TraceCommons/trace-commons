@@ -1809,7 +1809,7 @@ final class AppModel: ObservableObject {
             refreshHarnesses()
         case .reengageDue(let due):
             Notifier.shared.postReengage(due)
-        case .digestDue(let count, let contributed, let contributedProjects, let credit, let text):
+        case .digestDue(let count, let contributed, let contributedProjects, let creditFinal, let credit, let text):
             refreshQueue()
             // A digest can now be about what went out unasked, with nothing
             // waiting at all -- so this also refreshes history, which is the
@@ -1824,6 +1824,7 @@ final class AppModel: ObservableObject {
                 projects: waitingByProject.map(\.label),
                 contributedCount: contributed,
                 contributedProjects: contributedProjects,
+                creditFinal: creditFinal,
                 creditPending: credit
             )
         case .resyncRequired, .lagged:

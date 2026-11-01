@@ -110,6 +110,7 @@ pub fn digest_body(pending: usize, project_labels: &[String]) -> String {
 pub fn contribution_body(
     contributed: usize,
     project_labels: &[String],
+    credit_final: f32,
     credit_pending: f32,
 ) -> Option<String> {
     if contributed == 0 {
@@ -126,17 +127,12 @@ pub fn contribution_body(
         _ => String::new(),
     };
     let mut line = format!("{contributed} {sessions} contributed{projects}.");
-    // Only when there is some: "0 credit pending" reads as a failure rather
-    // than as a fresh start. Always "pending", never "earned" -- settlement
-    // is off on every deployment shipped so far.
-    if credit_pending > 0.0 {
-        // Rounded half away from zero before formatting, matching the daemon
-        // and the other two shells. Left to `{:.1}` alone this rounds half to
-        // even and Windows rounds half away from zero, so 4.25 would read as
-        // 4.2 here and 4.3 there for the same contribution.
-        let rounded = (credit_pending * 10.0).round() / 10.0;
-        line.push_str(&format!(" {rounded:.1} credit pending."));
-    }
+    // Earned and pending, each only when there is some: "0 credit pending"
+    // reads as a failure rather than as a fresh start. The wording and the
+    // rounding live in one place, the daemon's `credit_sentences`.
+    line.push_str(
+        &trace_commons_contributor::daemon::notify::credit_sentences(credit_final, credit_pending),
+    );
     Some(line)
 }
 
@@ -146,12 +142,12 @@ mod tests {
 
     #[test]
     fn nothing_contributed_produces_no_line() {
-        assert_eq!(contribution_body(0, &[], 0.0), None);
+        assert_eq!(contribution_body(0, &[], 0.0, 0.0), None);
     }
 
     #[test]
     fn the_contribution_line_names_the_one_project_and_never_a_path() {
-        let line = contribution_body(3, &["trace-commons-server".to_string()], 0.0).unwrap();
+        let line = contribution_body(3, &["trace-commons-server".to_string()], 0.0, 0.0).unwrap();
         assert_eq!(line, "3 traces contributed from trace-commons-server.");
         assert!(!line.contains('/'), "{line}");
     }
@@ -161,13 +157,14 @@ mod tests {
     #[test]
     fn the_contribution_line_matches_the_design_examples() {
         assert_eq!(
-            contribution_body(1, &["orchard-api".to_string()], 6.0).as_deref(),
+            contribution_body(1, &["orchard-api".to_string()], 0.0, 6.0).as_deref(),
             Some("1 trace contributed from orchard-api. 6.0 credit pending.")
         );
         assert_eq!(
             contribution_body(
                 2,
                 &["orchard-api".to_string(), "portfolio".to_string()],
+                0.0,
                 10.5
             )
             .as_deref(),
@@ -177,7 +174,7 @@ mod tests {
 
     #[test]
     fn one_contributed_session_is_singular() {
-        let line = contribution_body(1, &["a".to_string()], 0.0).unwrap();
+        let line = contribution_body(1, &["a".to_string()], 0.0, 0.0).unwrap();
         assert!(line.starts_with("1 trace contributed from a."), "{line}");
     }
 
@@ -187,25 +184,36 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let line = contribution_body(9, &labels, 0.0).unwrap();
+        let line = contribution_body(9, &labels, 0.0, 0.0).unwrap();
         assert_eq!(line, "9 traces contributed.");
         // Duplicates and blanks do not make a second project.
         let labels: Vec<String> = ["a", "a", ""].iter().map(|s| s.to_string()).collect();
-        let line = contribution_body(2, &labels, 0.0).unwrap();
+        let line = contribution_body(2, &labels, 0.0, 0.0).unwrap();
         assert_eq!(line, "2 traces contributed from a.");
     }
 
     #[test]
     fn credit_is_stated_only_when_there_is_some() {
-        let with = contribution_body(2, &["a".to_string()], 4.25).unwrap();
+        let with = contribution_body(2, &["a".to_string()], 0.0, 4.25).unwrap();
         assert!(with.ends_with("4.3 credit pending."), "{with}");
-        let without = contribution_body(2, &["a".to_string()], 0.0).unwrap();
+        let without = contribution_body(2, &["a".to_string()], 0.0, 0.0).unwrap();
         assert!(!without.contains("credit"), "{without}");
     }
 
     #[test]
+    fn final_credit_is_earned_then_pending_follows() {
+        let line = contribution_body(2, &["a".to_string()], 4.25, 0.0).unwrap();
+        assert_eq!(line, "2 traces contributed from a. 4.3 credit earned.");
+        let both = contribution_body(3, &["a".to_string()], 6.0, 1.5).unwrap();
+        assert_eq!(
+            both,
+            "3 traces contributed from a. 6.0 credit earned. 1.5 credit pending."
+        );
+    }
+
+    #[test]
     fn pending_credit_is_never_called_earned() {
-        let line = contribution_body(2, &["a".to_string()], 4.25).unwrap();
+        let line = contribution_body(2, &["a".to_string()], 0.0, 4.25).unwrap();
         assert!(line.contains("pending"), "{line}");
         for word in ["earned", "paid", "settled", "worth"] {
             assert!(!line.contains(word), "must not say {word}: {line}");

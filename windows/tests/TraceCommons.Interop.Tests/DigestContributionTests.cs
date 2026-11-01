@@ -133,8 +133,28 @@ public class DigestContributionTests
     }
 
     /// <summary>
-    /// Settlement is off on every deployment shipped so far, so a bare figure
-    /// would be read as money that exists. The word is always "pending".
+    /// Credit the server has decided is reported as earned (owner,
+    /// 2026-11-01), and never called pending.
+    /// </summary>
+    [Fact]
+    public void FinalCreditIsReportedAsEarned()
+    {
+        string? line = DigestText.ContributionLine(2, new[] { "api" }, 0, creditFinal: 4.25);
+        Assert.Equal("2 traces contributed from api. 4.3 credit earned.", line);
+        Assert.DoesNotContain("pending", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>Both kinds: earned first, each only when above zero.</summary>
+    [Fact]
+    public void EarnedComesBeforePending()
+    {
+        Assert.Equal(
+            "3 traces contributed from api. 6.0 credit earned. 1.5 credit pending.",
+            DigestText.ContributionLine(3, new[] { "api" }, 1.5, creditFinal: 6.0));
+    }
+
+    /// <summary>
+    /// Pending credit is still being scored, so the word is never "earned".
     /// </summary>
     [Theory]
     [InlineData("earned")]
@@ -195,6 +215,7 @@ public class DigestContributionTests
         Assert.Equal(0, evt.ContributedCount);
         Assert.Empty(evt.ContributedProjects);
         Assert.Equal(0, evt.CreditPending);
+        Assert.Equal(0, evt.CreditFinal);
     }
 
     [Fact]
@@ -202,11 +223,12 @@ public class DigestContributionTests
     {
         DaemonEvent? evt = DaemonEvent.Parse(
             "{\"event\":\"digest_due\",\"data\":{\"pending\":0,\"contributed\":5,"
-            + "\"contributed_projects\":[\"api\",\"web\"],\"credit_pending\":2.5,\"text\":\"x\"}}");
+            + "\"contributed_projects\":[\"api\",\"web\"],\"credit_final\":4.5,\"credit_pending\":2.5,\"text\":\"x\"}}");
         Assert.NotNull(evt);
         Assert.Equal(0, evt!.PendingCount);
         Assert.Equal(5, evt.ContributedCount);
         Assert.Equal(new[] { "api", "web" }, evt.ContributedProjects);
         Assert.Equal(2.5, evt.CreditPending);
+        Assert.Equal(4.5, evt.CreditFinal);
     }
 }

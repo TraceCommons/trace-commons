@@ -539,7 +539,8 @@ public sealed partial class MainWindow : Window
         if (DigestText.ContributionLine(
                 facts.ContributedCount,
                 facts.ContributedProjects,
-                facts.CreditPending) is { } contributed)
+                facts.CreditPending,
+                facts.CreditFinal) is { } contributed)
         {
             lines.Add(contributed);
         }
