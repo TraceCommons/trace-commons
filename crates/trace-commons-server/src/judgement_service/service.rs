@@ -493,10 +493,15 @@ pub(crate) mod tests {
         let mut with_text: serde_json::Value = serde_json::from_str(&turn_digest()).unwrap();
         with_text["prompt"] = serde_json::json!(CANARY);
         for digest in [digest(1), with_text.to_string()] {
-            let refused = request(h.issuer.valid_claim(), digest, vec![JudgementKind::Stuck]);
+            // The protocol will not build this request, so a client bug or a
+            // hostile client has to write it by hand: a `task` request with
+            // its judgements rewritten to `stuck`.
+            let task = request(h.issuer.valid_claim(), digest, vec![JudgementKind::Task]);
+            let mut refused: serde_json::Value = serde_json::from_str(&task.to_json()).unwrap();
+            refused["judgements"] = serde_json::json!(["stuck"]);
             assert_eq!(
                 h.service
-                    .judge(&plaintext(&refused), NOW, no_permit)
+                    .judge(refused.to_string().as_bytes(), NOW, no_permit)
                     .await
                     .err(),
                 Some(JudgementRefusal::RequestMalformed)
