@@ -56,6 +56,14 @@ unsafe extern "C" {
     fn CFDateGetAbsoluteTime(value: Ref) -> f64;
     fn CFDataGetLength(value: Ref) -> isize;
     fn CFDataGetBytePtr(value: Ref) -> *const u8;
+    fn CFDataCreate(allocator: Ref, bytes: *const u8, length: isize) -> Ref;
+    fn CFPropertyListCreateWithData(
+        allocator: Ref,
+        data: Ref,
+        options: usize,
+        format: *mut isize,
+        error: *mut Ref,
+    ) -> Ref;
 }
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
@@ -78,6 +86,8 @@ unsafe extern "C" {
     static kSecUseAuthenticationContext: Ref;
     static kSecReturnRef: Ref;
     static kSecACLAuthorizationDecrypt: Ref;
+    static kSecACLAuthorizationPartitionID: Ref;
+    static kSecCodeInfoTeamIdentifier: Ref;
     fn SecItemCopyMatching(query: Ref, result: *mut Ref) -> i32;
     fn SecKeychainItemGetTypeID() -> usize;
     fn SecKeychainItemCopyAccess(item: Ref, access: *mut Ref) -> i32;
@@ -90,6 +100,8 @@ unsafe extern "C" {
     ) -> i32;
     fn SecCodeCopySelf(flags: u32, code: *mut Ref) -> i32;
     fn SecCodeCheckValidity(code: Ref, flags: u32, requirement: Ref) -> i32;
+    fn SecCodeCopySigningInformation(code: Ref, flags: u32, information: *mut Ref) -> i32;
+    fn SecRequirementCopyData(requirement: Ref, flags: u32, data: *mut Ref) -> i32;
 }
 #[link(name = "objc")]
 unsafe extern "C" {
@@ -106,6 +118,11 @@ const RTLD_NOW: i32 = 0x2;
 /// errSecCSReqFailed: the code ran its check to completion and does not
 /// satisfy the requirement.
 const REQUIREMENT_FAILED: i32 = -67050;
+/// kSecCSBasicValidateOnly: check the signature against the requirement
+/// without rehashing the executable or the bundle's resources.
+const BASIC_VALIDATE_ONLY: u32 = (1 << 1) | (1 << 2);
+/// kSecCSSigningInformation.
+const SIGNING_INFORMATION: u32 = 1 << 1;
 
 struct Owned(Ref);
 impl Owned {
@@ -295,16 +312,21 @@ fn query_entries(
     }
     entries
 }
-/// Build a query. A kind that must not show UI fails closed when its no-UI
-/// context cannot be made, rather than running without one.
-fn query(kind: Query, selector: Ref, search_list: Option<Ref>) -> Result<Owned, &'static str> {
-    let context = match kind {
-        Query::ExplicitSecret => None,
-        _ => Some(NoUiContext::new()?),
+/// Build a query. A kind that must not show UI fails closed without its
+/// no-UI context, rather than running without one. The dictionary retains
+/// the context, so one context serves every query of a read.
+fn query(
+    kind: Query,
+    selector: Ref,
+    search_list: Option<Ref>,
+    context: Option<&NoUiContext>,
+) -> Result<Owned, &'static str> {
+    let context = match (kind, context) {
+        (Query::ExplicitSecret, _) => std::ptr::null(),
+        (_, Some(context)) => context.0,
+        (_, None) => return Err("unavailable"),
     };
-    let context_ref = context.as_ref().map_or(std::ptr::null(), |c| c.0);
-    // The dictionary retains the context; ours is released on return.
-    dictionary(&query_entries(kind, selector, search_list, context_ref))
+    dictionary(&query_entries(kind, selector, search_list, context))
 }
 fn execute(query: &Owned) -> Result<Option<Owned>, &'static str> {
     let mut result = std::ptr::null();
@@ -344,52 +366,65 @@ impl Metadata {
             Err("unavailable")
         }
     }
-    fn revision(&self) -> Result<String, &'static str> {
-        let mut material = data(self.persistent_ref()?)?;
+    fn revision(&self) -> Result<ItemRevision, &'static str> {
+        let reference = data(self.persistent_ref()?)?;
+        let mut dates = Vec::new();
         for key in unsafe { [kSecAttrCreationDate, kSecAttrModificationDate] } {
             let value = self.value(key);
             if !is_type(value, unsafe { CFDateGetTypeID() }) {
                 return Err("unavailable");
             }
             // Exact f64 bits preserve subsecond changes; no timestamp rounding.
-            material.extend_from_slice(
-                &unsafe { CFDateGetAbsoluteTime(value) }
+            dates.push(
+                unsafe { CFDateGetAbsoluteTime(value) }
                     .to_bits()
                     .to_be_bytes(),
             );
         }
-        let account = self.value(unsafe { kSecAttrAccount });
-        if !is_type(account, unsafe { CFStringGetTypeID() }) {
-            return Err("unavailable");
-        }
-        // SAFETY: validated CFString retained by rows throughout copying.
-        let capacity =
-            unsafe { CFStringGetMaximumSizeForEncoding(CFStringGetLength(account), UTF8) };
-        if !(0..=32768).contains(&capacity) {
-            return Err("unavailable");
-        }
-        let mut bytes = vec![0u8; capacity as usize + 1];
-        if unsafe {
-            CFStringGetCString(
-                account,
-                bytes.as_mut_ptr().cast(),
-                bytes.len() as isize,
-                UTF8,
-            )
-        } == 0
-        {
-            return Err("unavailable");
-        }
-        let end = bytes.iter().position(|b| *b == 0).ok_or("unavailable")?;
-        material.extend_from_slice(&bytes[..end]);
-        // Revision contains no raw account names or persistent references. This
-        // is an equality discriminator, not a security digest or account ID.
-        Ok(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &material).to_string())
+        let account = cf_string(self.value(unsafe { kSecAttrAccount }))?;
+        // Neither part contains raw account names or persistent references.
+        // They are equality discriminators, not security digests or IDs.
+        let digest = |parts: &[&[u8]]| {
+            let mut material = Vec::new();
+            for part in parts {
+                material.extend_from_slice(&(part.len() as u64).to_be_bytes());
+                material.extend_from_slice(part);
+            }
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &material).to_string()
+        };
+        Ok(ItemRevision {
+            item: digest(&[&reference, &dates[0], account.as_bytes()]),
+            content: digest(&[&reference, &dates[0], &dates[1], account.as_bytes()]),
+        })
     }
 }
-fn metadata(service: &str, search_list: Option<Ref>) -> Result<Option<Metadata>, &'static str> {
+/// A CFString's UTF-8 contents, bounded.
+fn cf_string(value: Ref) -> Result<String, &'static str> {
+    if !is_type(value, unsafe { CFStringGetTypeID() }) {
+        return Err("unavailable");
+    }
+    // SAFETY: a validated CFString the caller keeps alive through the copy.
+    let capacity = unsafe { CFStringGetMaximumSizeForEncoding(CFStringGetLength(value), UTF8) };
+    if !(0..=32768).contains(&capacity) {
+        return Err("unavailable");
+    }
+    let mut bytes = vec![0u8; capacity as usize + 1];
+    if unsafe { CFStringGetCString(value, bytes.as_mut_ptr().cast(), bytes.len() as isize, UTF8) }
+        == 0
+    {
+        return Err("unavailable");
+    }
+    let end = bytes.iter().position(|b| *b == 0).ok_or("unavailable")?;
+    bytes.truncate(end);
+    String::from_utf8(bytes).map_err(|_| "unavailable")
+}
+fn metadata(
+    service: &str,
+    search_list: Option<Ref>,
+    context: &NoUiContext,
+) -> Result<Option<Metadata>, &'static str> {
     let service = string(service)?;
-    let query = query(Query::Metadata, service.0, search_list)?;
+    let query = query(Query::Metadata, service.0, search_list, Some(context))?;
     let Some(rows) = execute(&query)? else {
         return Ok(None);
     };
@@ -485,31 +520,151 @@ fn list_access(entries: impl IntoIterator<Item = Access>) -> Access {
 /// public header. Resolved at run time so its absence means "cannot tell".
 type CopyRequirement = unsafe extern "C" fn(Ref, *mut Ref) -> i32;
 fn copy_requirement() -> Option<CopyRequirement> {
-    // SAFETY: a constant system framework path and symbol name. The handle
-    // is never closed, so the function pointer stays valid.
-    let symbol = unsafe {
-        let handle = dlopen(
-            c"/System/Library/Frameworks/Security.framework/Security".as_ptr(),
-            RTLD_NOW,
-        );
-        if handle.is_null() {
-            return None;
-        }
-        dlsym(handle, c"SecTrustedApplicationCopyRequirement".as_ptr())
-    };
-    // SAFETY: the symbol has this signature in every macOS that exports it.
-    (!symbol.is_null())
-        .then(|| unsafe { std::mem::transmute::<*mut c_void, CopyRequirement>(symbol) })
+    static SYMBOL: std::sync::OnceLock<Option<CopyRequirement>> = std::sync::OnceLock::new();
+    *SYMBOL.get_or_init(|| {
+        // SAFETY: a constant system framework path and symbol name. The
+        // handle is never closed, so the function pointer stays valid.
+        let symbol = unsafe {
+            let handle = dlopen(
+                c"/System/Library/Frameworks/Security.framework/Security".as_ptr(),
+                RTLD_NOW,
+            );
+            if handle.is_null() {
+                return None;
+            }
+            dlsym(handle, c"SecTrustedApplicationCopyRequirement".as_ptr())
+        };
+        // SAFETY: the symbol has this signature in every macOS that exports it.
+        (!symbol.is_null())
+            .then(|| unsafe { std::mem::transmute::<*mut c_void, CopyRequirement>(symbol) })
+    })
 }
 
-/// Whether the item's decrypt access list admits this running process
-/// without a prompt. Reads the item reference and its access list only,
-/// never the payload, with UI suppressed.
-fn decrypt_access(persistent_ref: Ref, search_list: Option<Ref>) -> Access {
+/// A requirement's check of this process, remembered per requirement. Only
+/// a finished answer (satisfied or `REQUIREMENT_FAILED`) is kept: the running
+/// image does not change, so neither does that answer, including after the
+/// app is updated on disk underneath it. Anything else is asked again.
+fn remembered_check(
+    memo: &std::sync::Mutex<std::collections::HashMap<Vec<u8>, i32>>,
+    requirement: Vec<u8>,
+    check: impl FnOnce() -> i32,
+) -> i32 {
+    if let Some(status) = memo.lock().ok().and_then(|m| m.get(&requirement).copied()) {
+        return status;
+    }
+    let status = check();
+    if status == 0 || status == REQUIREMENT_FAILED {
+        if let Ok(mut memo) = memo.lock() {
+            memo.insert(requirement, status);
+        }
+    }
+    status
+}
+fn requirement_checks() -> &'static std::sync::Mutex<std::collections::HashMap<Vec<u8>, i32>> {
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Vec<u8>, i32>>> =
+        std::sync::OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+/// This process's signing team, or `None` for an ad-hoc or unsigned build.
+fn own_team() -> Option<&'static str> {
+    static TEAM: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TEAM.get_or_init(|| {
+        let mut code = std::ptr::null();
+        // SAFETY: default flags; the copy is released by Owned.
+        if unsafe { SecCodeCopySelf(0, &mut code) } != 0 {
+            return None;
+        }
+        let code = Owned::new(code).ok()?;
+        let mut information = std::ptr::null();
+        // SAFETY: a live code object; the copy is released by Owned.
+        if unsafe { SecCodeCopySigningInformation(code.0, SIGNING_INFORMATION, &mut information) }
+            != 0
+        {
+            return None;
+        }
+        let information = Owned::new(information).ok()?;
+        if !is_type(information.0, unsafe { CFDictionaryGetTypeID() }) {
+            return None;
+        }
+        let team = unsafe { CFDictionaryGetValue(information.0, kSecCodeInfoTeamIdentifier) };
+        cf_string(team).ok().filter(|team| !team.is_empty())
+    })
+    .as_deref()
+}
+
+/// The partition IDs in a `partition_id` access-list entry's description:
+/// a hex-encoded XML property list whose `Partitions` key holds strings.
+fn partitions(description: &str) -> Option<Vec<String>> {
+    if !description.len().is_multiple_of(2) || description.len() > 65_536 {
+        return None;
+    }
+    let bytes = (0..description.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(description.get(i..i + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    // SAFETY: a bounded local buffer copied into a new CFData.
+    let data =
+        Owned::new(unsafe { CFDataCreate(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize) })
+            .ok()?;
+    let list = Owned::new(unsafe {
+        CFPropertyListCreateWithData(
+            std::ptr::null(),
+            data.0,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    })
+    .ok()?;
+    if !is_type(list.0, unsafe { CFDictionaryGetTypeID() }) {
+        return None;
+    }
+    let key = string("Partitions").ok()?;
+    let array = unsafe { CFDictionaryGetValue(list.0, key.0) };
+    if !is_type(array, unsafe { CFArrayGetTypeID() }) {
+        return None;
+    }
+    (0..unsafe { CFArrayGetCount(array) })
+        .map(|i| cf_string(unsafe { CFArrayGetValueAtIndex(array, i) }).ok())
+        .collect()
+}
+
+/// One `partition_id` entry. `None` partitions: the description could not be
+/// read. A process outside the listed partitions is asked for the keychain
+/// password even when the access list trusts it, so only this build's own
+/// `teamid:` partition admits it; an unsigned or ad-hoc build has none.
+fn partition_access(partitions: Option<&[String]>, team: Option<&str>) -> Access {
+    let (Some(partitions), Some(team)) = (partitions, team) else {
+        return Access::Indeterminate;
+    };
+    let own = format!("teamid:{team}");
+    if partitions.contains(&own) {
+        Access::Allowed
+    } else {
+        Access::Rejected
+    }
+}
+
+/// Both checks must admit this process: the decrypt access list and the
+/// partition list.
+fn both(decrypt: Access, partition: Access) -> Access {
+    match (decrypt, partition) {
+        (Access::Allowed, Access::Allowed) => Access::Allowed,
+        (Access::Rejected, _) | (_, Access::Rejected) => Access::Rejected,
+        _ => Access::Indeterminate,
+    }
+}
+
+/// Whether the item admits this running process without a prompt: its
+/// decrypt access list trusts this code, and its partition list holds this
+/// build's team. Reads the item reference and its access list only, never
+/// the payload, with UI suppressed.
+fn silent_access(persistent_ref: Ref, search_list: Option<Ref>, context: &NoUiContext) -> Access {
     let Some(copy_requirement) = copy_requirement() else {
         return Access::Indeterminate;
     };
-    let Ok(query) = query(Query::ItemRef, persistent_ref, search_list) else {
+    let Ok(query) = query(Query::ItemRef, persistent_ref, search_list, Some(context)) else {
         return Access::Indeterminate;
     };
     let Ok(Some(item)) = execute(&query) else {
@@ -543,8 +698,37 @@ fn decrypt_access(persistent_ref: Ref, search_list: Option<Ref>) -> Access {
     let Ok(code) = Owned::new(code) else {
         return Access::Indeterminate;
     };
+    // SAFETY: a live SecAccess and an exported authorization constant.
+    let partition = match Owned::new(unsafe {
+        SecAccessCopyMatchingACLList(access.0, kSecACLAuthorizationPartitionID)
+    }) {
+        Ok(entries) if is_type(entries.0, unsafe { CFArrayGetTypeID() }) => {
+            list_access((0..unsafe { CFArrayGetCount(entries.0) }).map(|index| {
+                let entry = unsafe { CFArrayGetValueAtIndex(entries.0, index) };
+                let mut applications = std::ptr::null();
+                let mut description = std::ptr::null();
+                let mut selector = 0u16;
+                if unsafe {
+                    SecACLCopyContents(entry, &mut applications, &mut description, &mut selector)
+                } != 0
+                {
+                    return Access::Indeterminate;
+                }
+                let _applications = Owned::new(applications).ok();
+                let listed = Owned::new(description)
+                    .ok()
+                    .and_then(|description| cf_string(description.0).ok())
+                    .and_then(|description| partitions(&description));
+                partition_access(listed.as_deref(), own_team())
+            }))
+        }
+        _ => Access::Indeterminate,
+    };
+    if partition != Access::Allowed {
+        return partition;
+    }
     let count = unsafe { CFArrayGetCount(acls.0) };
-    list_access((0..count).map(|index| {
+    let decrypt = list_access((0..count).map(|index| {
         // SAFETY: index is within the array's count; acls outlives the call.
         let acl = unsafe { CFArrayGetValueAtIndex(acls.0, index) };
         let mut applications = std::ptr::null();
@@ -571,21 +755,35 @@ fn decrypt_access(persistent_ref: Ref, search_list: Option<Ref>) -> Access {
                     return None;
                 }
                 let requirement = Owned::new(requirement).ok()?;
-                // SAFETY: this process's code and a live requirement.
-                Some(unsafe { SecCodeCheckValidity(code.0, 0, requirement.0) })
+                let mut bytes = std::ptr::null();
+                // SAFETY: a live requirement; the copy is released by Owned.
+                if unsafe { SecRequirementCopyData(requirement.0, 0, &mut bytes) } != 0 {
+                    return None;
+                }
+                let bytes = data(Owned::new(bytes).ok()?.0).ok()?;
+                // SAFETY: this process's code and a live requirement. Basic
+                // validation matches the signing identity securityd checks,
+                // without rehashing the bundle on every call.
+                Some(remembered_check(requirement_checks(), bytes, || unsafe {
+                    SecCodeCheckValidity(code.0, BASIC_VALIDATE_ONLY, requirement.0)
+                }))
             })
             .collect();
         entry_access(selector, Some(&statuses))
-    }))
+    }));
+    both(decrypt, partition)
 }
 
 // errSecInteractionNotAllowed. Callers above this module see it only from a
 // silent read; everywhere else it is a permission need.
 use super::INTERACTION_REQUIRED;
 
+use super::ItemRevision;
+
 #[cfg(not(test))]
-pub(super) fn version(service: &str) -> Result<Option<String>, &'static str> {
-    metadata(service, None)
+pub(super) fn version(service: &str) -> Result<Option<ItemRevision>, &'static str> {
+    let context = NoUiContext::new()?;
+    metadata(service, None, &context)
         .map_err(permission_label)?
         .map(|m| m.revision())
         .transpose()
@@ -606,9 +804,11 @@ fn read_in(
     search_list: Option<Ref>,
     allow_ui: bool,
 ) -> Result<Option<Vec<u8>>, &'static str> {
+    // One no-UI context serves every query of this read.
+    let context = NoUiContext::new()?;
     // A locked keychain can refuse even the attribute query. On a silent
     // read that is an interaction need; with UI allowed it is final.
-    let item = metadata(service, search_list).map_err(|reason| {
+    let item = metadata(service, search_list, &context).map_err(|reason| {
         if allow_ui {
             permission_label(reason)
         } else {
@@ -621,7 +821,8 @@ fn read_in(
     let before = item.revision()?;
     // Without UI, read the payload only when the access list already admits
     // this process; anything else is left to a user-pressed Refresh.
-    if !allow_ui && decrypt_access(item.persistent_ref()?, search_list) != Access::Allowed {
+    if !allow_ui && silent_access(item.persistent_ref()?, search_list, &context) != Access::Allowed
+    {
         return Err(INTERACTION_REQUIRED);
     }
     let query = query(
@@ -632,15 +833,16 @@ fn read_in(
         },
         item.persistent_ref()?,
         search_list,
+        Some(&context),
     )?;
     let Some(result) = execute(&query)? else {
         return Ok(None);
     };
-    let after = metadata(service, search_list)
+    let after = metadata(service, search_list, &context)
         .map_err(permission_label)?
         .map(|m| m.revision())
         .transpose()?;
-    if after.as_deref() != Some(before.as_str()) {
+    if after.as_ref() != Some(&before) {
         return Err("credential_changed");
     }
     data(result.0).map(Some)
@@ -690,6 +892,104 @@ mod tests {
     }
 
     #[test]
+    fn a_no_ui_query_without_its_context_is_refused() {
+        let service = string("Claude Code-credentials-fixture").unwrap();
+        for kind in [Query::Metadata, Query::ItemRef, Query::SilentSecret] {
+            assert!(query(kind, service.0, None, None).is_err());
+        }
+        assert!(query(Query::ExplicitSecret, service.0, None, None).is_ok());
+    }
+
+    /// The live Claude Code item's `partition_id` description, recorded
+    /// 2026-11-01 from its access list (attributes only).
+    const LIVE_PARTITIONS: &str = "3c3f786d6c2076657273696f6e3d22312e302220656e636f64696e673d225554462d38223f3e0a3c21444f435459504520706c697374205055424c494320222d2f2f4170706c652f2f44544420504c49535420312e302f2f454e222022687474703a2f2f7777772e6170706c652e636f6d2f445444732f50726f70657274794c6973742d312e302e647464223e0a3c706c6973742076657273696f6e3d22312e30223e0a3c646963743e0a093c6b65793e506172746974696f6e733c2f6b65793e0a093c61727261793e0a09093c737472696e673e6170706c652d746f6f6c3a3c2f737472696e673e0a09093c737472696e673e7465616d69643a4b5853574a4e375759383c2f737472696e673e0a093c2f61727261793e0a3c2f646963743e0a3c2f706c6973743e0a";
+
+    #[test]
+    fn the_partition_list_is_read_from_its_description() {
+        assert_eq!(
+            partitions(LIVE_PARTITIONS).unwrap(),
+            ["apple-tool:", "teamid:KXSWJN7WY8"]
+        );
+        assert!(partitions("zz").is_none());
+        assert!(partitions("abc").is_none());
+        assert!(partitions("3c3f").is_none());
+    }
+
+    #[test]
+    fn only_this_builds_team_partition_admits_a_silent_read() {
+        let listed = partitions(LIVE_PARTITIONS).unwrap();
+        assert_eq!(
+            partition_access(Some(&listed), Some("KXSWJN7WY8")),
+            Access::Allowed
+        );
+        // Trusted by the access list is not enough: another team, or an
+        // ad-hoc build with no team, is outside the partition list.
+        assert_eq!(
+            partition_access(Some(&listed), Some("OTHERTEAM1")),
+            Access::Rejected
+        );
+        assert_eq!(partition_access(Some(&listed), None), Access::Indeterminate);
+        // `apple-tool:` names Apple's tools, never this app.
+        assert_eq!(
+            partition_access(Some(&["apple-tool:".to_string()]), Some("KXSWJN7WY8")),
+            Access::Rejected
+        );
+        assert_eq!(
+            partition_access(None, Some("KXSWJN7WY8")),
+            Access::Indeterminate
+        );
+
+        assert_eq!(both(Access::Allowed, Access::Allowed), Access::Allowed);
+        assert_eq!(both(Access::Allowed, Access::Rejected), Access::Rejected);
+        assert_eq!(
+            both(Access::Allowed, Access::Indeterminate),
+            Access::Indeterminate
+        );
+        assert_eq!(
+            both(Access::Indeterminate, Access::Allowed),
+            Access::Indeterminate
+        );
+    }
+
+    #[test]
+    fn a_finished_requirement_check_is_remembered_and_nothing_else_is() {
+        let memo = std::sync::Mutex::new(std::collections::HashMap::new());
+        let counter = std::cell::Cell::new(0);
+        let calls = &counter;
+        let check = |status| {
+            move || {
+                calls.set(calls.get() + 1);
+                status
+            }
+        };
+        assert_eq!(remembered_check(&memo, b"req-a".to_vec(), check(0)), 0);
+        assert_eq!(remembered_check(&memo, b"req-a".to_vec(), check(-1)), 0);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            remembered_check(&memo, b"req-b".to_vec(), check(REQUIREMENT_FAILED)),
+            REQUIREMENT_FAILED
+        );
+        assert_eq!(
+            remembered_check(&memo, b"req-b".to_vec(), check(0)),
+            REQUIREMENT_FAILED
+        );
+        assert_eq!(calls.get(), 2);
+        // An error (for example the code changed on disk) is asked again.
+        assert_eq!(
+            remembered_check(&memo, b"req-c".to_vec(), check(-67068)),
+            -67068
+        );
+        assert_eq!(remembered_check(&memo, b"req-c".to_vec(), check(0)), 0);
+        assert_eq!(calls.get(), 4);
+    }
+
+    #[test]
+    fn the_symbol_lookup_is_made_once() {
+        let first = copy_requirement().map(|f| f as usize);
+        assert_eq!(copy_requirement().map(|f| f as usize), first);
+    }
+
+    #[test]
     fn the_no_ui_context_forbids_interaction() {
         let context = NoUiContext::new().unwrap();
         assert!(context.interaction_not_allowed());
@@ -702,12 +1002,16 @@ mod tests {
     fn built_no_ui_queries_retain_their_context() {
         let service = string("Claude Code-credentials-fixture").unwrap();
         for kind in [Query::Metadata, Query::ItemRef, Query::SilentSecret] {
-            let built = query(kind, service.0, None).unwrap();
+            let built = {
+                let context = NoUiContext::new().unwrap();
+                query(kind, service.0, None, Some(&context)).unwrap()
+            };
             let context = unsafe { CFDictionaryGetValue(built.0, kSecUseAuthenticationContext) };
             assert!(!context.is_null());
             assert!(interaction_not_allowed(context));
         }
-        let built = query(Query::ExplicitSecret, service.0, None).unwrap();
+        let context = NoUiContext::new().unwrap();
+        let built = query(Query::ExplicitSecret, service.0, None, Some(&context)).unwrap();
         assert!(unsafe { CFDictionaryGetValue(built.0, kSecUseAuthenticationContext) }.is_null());
     }
 
@@ -879,9 +1183,12 @@ mod tests {
         );
         let item = Owned::new(item).unwrap();
         // The creating process is the item's trusted application.
-        let found = metadata(service, Some(list.0)).unwrap().unwrap();
-        assert_eq!(
-            decrypt_access(found.persistent_ref().unwrap(), Some(list.0)),
+        let context = NoUiContext::new().unwrap();
+        let found = metadata(service, Some(list.0), &context).unwrap().unwrap();
+        // The test binary is the item's trusted application, but an ad-hoc
+        // build has no team partition, so a silent read is not admitted.
+        assert_ne!(
+            silent_access(found.persistent_ref().unwrap(), Some(list.0), &context),
             Access::Allowed
         );
         let before = found.revision().unwrap();
@@ -903,20 +1210,22 @@ mod tests {
             },
             0
         );
-        let after = metadata(service, Some(list.0))
+        let after = metadata(service, Some(list.0), &context)
             .unwrap()
             .unwrap()
             .revision()
             .unwrap();
-        assert_ne!(before, after);
+        // An in-place write moves the content, not the item.
+        assert_ne!(before.content, after.content);
+        assert_eq!(before.item, after.item);
         assert!(
-            metadata("different-exact-profile", Some(list.0))
+            metadata("different-exact-profile", Some(list.0), &context)
                 .unwrap()
                 .is_none()
         );
         assert_eq!(unsafe { SecKeychainLock(keychain.0.0) }, 0);
         let started = std::time::Instant::now();
-        let locked = metadata(service, Some(list.0));
+        let locked = metadata(service, Some(list.0), &context);
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         // A locked store may expose attributes or report interaction required;
         // neither outcome implies that decrypting its secret is authorized.
