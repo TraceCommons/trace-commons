@@ -24,11 +24,8 @@ struct ManagedSessionsSection: View {
     /// The session whose resume command was just copied: its status reads
     /// "Copied" for about two seconds.
     @State private var copiedFor: ManagedCopyMark?
-<<<<<<< HEAD
     /// Display names by model id, read from the daemon's cache only.
     @State private var modelNames: [String: String] = [:]
-=======
->>>>>>> origin/main
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn {
@@ -331,7 +328,6 @@ struct ManagedSessionsSection: View {
         return ManagedSessionRowActions(session: session, onStop: { stopping = session }) { row }
     }
 
-<<<<<<< HEAD
     /// Names from the daemon's cache for the tools whose sessions name a
     /// model. An error or an empty cache leaves the raw ids.
     private func loadModelNames(tools: Set<String>) {
@@ -342,8 +338,6 @@ struct ManagedSessionsSection: View {
         }
     }
 
-=======
->>>>>>> origin/main
     private func sessionText(title: String, caption: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(title)
@@ -415,15 +409,12 @@ struct SessionRowLayout: Layout {
     }
 }
 
-<<<<<<< HEAD
 /// What the session rows' display names were last read for.
 struct ModelNamesRead: Equatable {
     let tools: Set<String>
     let revision: UInt64
 }
 
-=======
->>>>>>> origin/main
 /// A copy of one row's resume command; the token tells a stale reset from
 /// the latest copy.
 struct ManagedCopyMark: Equatable {
