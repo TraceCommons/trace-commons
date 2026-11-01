@@ -440,24 +440,106 @@ const CLAUDE_MODEL_ALIASES: &[&str] = &[
     "inherit", "default", "sonnet", "opus", "haiku", "fable", "opusplan", "best",
 ];
 
-/// The model a subagent file's frontmatter names, when it names one: the
-/// `model:` line of the block between the opening `---` and the next.
-fn agent_model(text: &str) -> Option<&str> {
-    let mut lines = text.lines();
-    if lines.next()?.trim_end() != "---" {
-        return None;
-    }
-    lines
-        .take_while(|line| line.trim_end() != "---")
-        .find_map(|line| line.strip_prefix("model:"))
-        .map(|value| value.trim().trim_matches(['"', '\'']))
-        .filter(|value| !value.is_empty())
+/// Whether `value`, a model setting, is one of [`CLAUDE_MODEL_ALIASES`],
+/// optionally with one `[...]` suffix (`opus[1m]`).
+fn is_claude_model_alias(value: &str) -> bool {
+    let (alias, rest) = value.split_at(value.find('[').unwrap_or(value.len()));
+    let suffix_ok =
+        rest.is_empty() || (rest.ends_with(']') && !rest[1..rest.len() - 1].contains(['[', ']']));
+    suffix_ok && CLAUDE_MODEL_ALIASES.contains(&alias.to_ascii_lowercase().as_str())
 }
 
-/// Whether a project's `.claude/agents` under `dir` holds a subagent that
-/// names a model by id rather than by alias. A file that cannot be read
-/// whole, or a tree past its limits, counts as one: nothing is guessed.
-fn agents_name_a_model(dir: &Path) -> Result<bool, ()> {
+/// Whether a project markdown file's frontmatter may give Claude Code a
+/// `model` other than an alias.
+///
+/// Claude Code parses the block between the opening `---` and the next one
+/// as YAML, so a line-prefix match is not enough: a value on the next line,
+/// a space before the colon, a quoted or complex key, a flow mapping, an
+/// anchor or a tag can all set `model`. Without a YAML parser here, this
+/// reads the block conservatively: the only accepted form is a top-level
+/// line `model: <alias>` (optionally quoted, optionally with a trailing
+/// comment) that no indented line continues. Any other top-level line that
+/// is not a plain `key: value` counts as naming a model, so a form this
+/// cannot read is refused rather than guessed at. Indented lines belong to
+/// the key above them and cannot set a top-level `model`.
+fn frontmatter_names_a_model(text: &str) -> bool {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return false;
+    }
+    let block: Vec<&str> = lines.take_while(|line| line.trim_end() != "---").collect();
+    let indented = |line: &str| line.starts_with([' ', '\t']);
+    for (index, line) in block.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || indented(line) {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            return true;
+        };
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return true;
+        }
+        if !key.eq_ignore_ascii_case("model") {
+            continue;
+        }
+        let value = match value.find(" #").or_else(|| value.find("\t#")) {
+            Some(comment) => &value[..comment],
+            None => value,
+        }
+        .trim();
+        let unquoted = [('"', '"'), ('\'', '\'')]
+            .iter()
+            .find_map(|(open, close)| {
+                value
+                    .strip_prefix(*open)
+                    .and_then(|v| v.strip_suffix(*close))
+            })
+            .unwrap_or(value);
+        let continued = block
+            .get(index + 1)
+            .is_some_and(|next| indented(next) && !next.trim().is_empty());
+        if continued || !is_claude_model_alias(unquoted) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Which project markdown Claude Code reads a `model` from, under a
+/// folder's `.claude`: subagents, slash commands and routines at any depth,
+/// and each skill's `SKILL.md`.
+#[derive(Clone, Copy)]
+enum ProjectMarkdown {
+    Agents,
+    Commands,
+    Routines,
+    Skills,
+}
+
+impl ProjectMarkdown {
+    const ALL: [ProjectMarkdown; 4] = [Self::Agents, Self::Commands, Self::Routines, Self::Skills];
+
+    fn folder(self) -> &'static str {
+        match self {
+            Self::Agents => "agents",
+            Self::Commands => "commands",
+            Self::Routines => "routines",
+            Self::Skills => "skills",
+        }
+    }
+}
+
+/// Whether the project markdown of `kind` under `dir` names a model by id
+/// rather than by alias ([`frontmatter_names_a_model`]). A file that cannot
+/// be read whole, or a tree past its limits, counts as one: nothing is
+/// guessed.
+fn markdown_names_a_model(dir: &Path, kind: ProjectMarkdown) -> Result<bool, ()> {
     const MAX_FILES: usize = 1000;
     const MAX_DEPTH: usize = 8;
     let mut pending = vec![(dir.to_path_buf(), 0usize)];
@@ -470,35 +552,149 @@ fn agents_name_a_model(dir: &Path) -> Result<bool, ()> {
         };
         for entry in entries {
             let path = entry.map_err(|_| ())?.path();
-            let kind = std::fs::metadata(&path).map_err(|_| ())?;
-            if kind.is_dir() {
-                if depth + 1 > MAX_DEPTH {
-                    return Err(());
+            let metadata = std::fs::metadata(&path).map_err(|_| ())?;
+            if metadata.is_dir() {
+                // A skill is one folder deep; nothing below it is a skill.
+                let descend = match kind {
+                    ProjectMarkdown::Skills => depth == 0,
+                    ProjectMarkdown::Agents
+                    | ProjectMarkdown::Commands
+                    | ProjectMarkdown::Routines => true,
+                };
+                if descend {
+                    if depth + 1 > MAX_DEPTH {
+                        return Err(());
+                    }
+                    pending.push((path, depth + 1));
                 }
-                pending.push((path, depth + 1));
                 continue;
             }
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let read = match kind {
+                ProjectMarkdown::Skills => depth == 1 && name.eq_ignore_ascii_case("SKILL.md"),
+                ProjectMarkdown::Agents | ProjectMarkdown::Commands | ProjectMarkdown::Routines => {
+                    path.extension().and_then(|e| e.to_str()) == Some("md")
+                }
+            };
+            if !read {
                 continue;
             }
             seen += 1;
-            if seen > MAX_FILES || kind.len() > 1024 * 1024 {
+            if seen > MAX_FILES || metadata.len() > 1024 * 1024 {
                 return Err(());
             }
             let text = std::fs::read_to_string(&path).map_err(|_| ())?;
-            if let Some(model) = agent_model(&text) {
-                let alias = model
-                    .split('[')
-                    .next()
-                    .unwrap_or(model)
-                    .to_ascii_lowercase();
-                if !CLAUDE_MODEL_ALIASES.contains(&alias.as_str()) {
-                    return Ok(true);
-                }
+            if frontmatter_names_a_model(&text) {
+                return Ok(true);
             }
         }
     }
     Ok(false)
+}
+
+/// The main checkout of the linked git worktree whose `.git` is the file
+/// at `dot_git`: `gitdir:` names the worktree's admin folder, whose
+/// `commondir` names the shared `.git`. `Ok(None)` for a `.git` file with
+/// no `commondir` (a submodule), or a shared `.git` that is not a
+/// checkout's. A `.git` file that cannot be read is an error.
+fn linked_worktree_main(dot_git: &Path) -> Result<Option<PathBuf>, ()> {
+    let base = dot_git.parent().ok_or(())?;
+    let text = read_regular_file(dot_git, 64 * 1024).ok_or(())?;
+    let text = std::str::from_utf8(&text).map_err(|_| ())?;
+    let gitdir = text
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+        .ok_or(())?;
+    let gitdir = base.join(gitdir);
+    let commondir = match std::fs::read_to_string(gitdir.join("commondir")) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let common = normalize_lexically(&gitdir.join(commondir.trim()));
+    Ok(match common.file_name() {
+        Some(name) if name == ".git" => common.parent().map(Path::to_path_buf),
+        _ => None,
+    })
+}
+
+/// `path` with `.` and `..` resolved without touching the file system.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The folders whose `.claude` Claude Code reads project agents, commands
+/// and skills from, as 2.1.316 finds them: from `cwd` upward, stopping
+/// before `home` and at the git root. A linked worktree nested inside its
+/// main checkout walks on up to the main checkout's root, and a linked
+/// worktree also gets its main checkout's folder. With no git root the
+/// walk goes up to `home`, or to the file system root when `cwd` is not
+/// under it. This may list more than Claude Code would read; never less.
+fn claude_project_dirs(cwd: &Path, home: Option<&Path>) -> Result<Vec<PathBuf>, ()> {
+    let git_root = cwd
+        .ancestors()
+        .find(|p| std::fs::symlink_metadata(p.join(".git")).is_ok());
+    let mut stop = git_root.map(Path::to_path_buf);
+    let mut main_checkout = None;
+    if let Some(root) = git_root {
+        let dot_git = root.join(".git");
+        // Followed: a `.git` that links to a folder is an ordinary checkout.
+        let metadata = std::fs::metadata(&dot_git).map_err(|_| ())?;
+        if !metadata.is_dir() {
+            main_checkout = linked_worktree_main(&dot_git)?;
+            if let Some(main) = &main_checkout {
+                if root.starts_with(main) {
+                    stop = Some(main.clone());
+                }
+            }
+        }
+    }
+    let mut dirs = vec![];
+    for ancestor in cwd.ancestors() {
+        if home == Some(ancestor) {
+            break;
+        }
+        dirs.push(ancestor.to_path_buf());
+        if stop.as_deref() == Some(ancestor) {
+            break;
+        }
+    }
+    if let Some(main) = main_checkout {
+        if !dirs.contains(&main) {
+            dirs.push(main);
+        }
+    }
+    Ok(dirs)
+}
+
+/// Whether a project settings key outside `env` chooses a model other than
+/// by alias: `fallbackModel` (a name or a list of them, tried when the
+/// session's model is unavailable), `advisorModel` (the advisor tool's
+/// model), and any non-empty `modelOverrides` (a remapping of model ids).
+fn settings_choose_a_model(value: &serde_json::Value) -> bool {
+    let not_alias = |v: &serde_json::Value| !v.as_str().is_some_and(is_claude_model_alias);
+    let fallback = match value.get("fallbackModel") {
+        None => false,
+        Some(serde_json::Value::Array(models)) => models.iter().any(not_alias),
+        Some(model) => not_alias(model),
+    };
+    let advisor = value.get("advisorModel").is_some_and(not_alias);
+    let overrides = value
+        .get("modelOverrides")
+        .is_some_and(|o| o.as_object().is_none_or(|map| !map.is_empty()));
+    fallback || advisor || overrides
 }
 
 /// Project configuration can outrank the isolated profile. Never claim a
@@ -506,15 +702,27 @@ fn agents_name_a_model(dir: &Path) -> Result<bool, ()> {
 ///
 /// On a NEAR AI session a project also may not choose Claude Code's models
 /// (owner, 2026-11-01): its settings' `env` may not set a model variable
-/// ([`names_a_claude_model`]), and none of its `.claude/agents` may name a
-/// model by id, either of which would outrank the launcher's own model
-/// variables and could send work to a less private model. The launch is
-/// refused rather than run without them, so the person sees why. A
+/// ([`names_a_claude_model`]), its settings may not choose one another way
+/// ([`settings_choose_a_model`]), and none of its agents, commands or
+/// skills may name a model by id ([`markdown_names_a_model`], wherever
+/// Claude Code looks for them: [`claude_project_dirs`]). Each would outrank
+/// the launcher's own model variables and could send work to a less
+/// private model. The launch is refused rather than run without them. A
 /// subscription session has no tiers to leave and is unchanged.
 fn check_project_config(
     tool: ToolId,
     connection: ConnectionKind,
     cwd: &Path,
+) -> Result<(), ManagedError> {
+    check_project_config_in(tool, connection, cwd, dirs::home_dir().as_deref())
+}
+
+/// [`check_project_config`] with the home folder given.
+fn check_project_config_in(
+    tool: ToolId,
+    connection: ConnectionKind,
+    cwd: &Path,
+    home: Option<&Path>,
 ) -> Result<(), ManagedError> {
     let near_ai = matches!(
         connection,
@@ -557,6 +765,9 @@ fn check_project_config(
                     {
                         return Err(ManagedError::Conflict);
                     }
+                    if near_ai && settings_choose_a_model(&value) {
+                        return Err(ManagedError::Conflict);
+                    }
                     if let Some(env) = value.get("env") {
                         let env = env.as_object().ok_or(ManagedError::Conflict)?;
                         if env.keys().any(|k| AUTH_ENV.contains(&k.as_str())) {
@@ -577,14 +788,19 @@ fn check_project_config(
                 }
             }
         }
-        if tool == ToolId::Claude
-            && near_ai
-            && agents_name_a_model(&ancestor.join(".claude/agents")).unwrap_or(true)
-        {
-            return Err(ManagedError::Conflict);
-        }
         if ancestor == project_root {
             break;
+        }
+    }
+    if tool == ToolId::Claude && near_ai {
+        let dirs = claude_project_dirs(cwd, home).map_err(|_| ManagedError::Conflict)?;
+        for dir in dirs {
+            for kind in ProjectMarkdown::ALL {
+                let folder = dir.join(".claude").join(kind.folder());
+                if markdown_names_a_model(&folder, kind).unwrap_or(true) {
+                    return Err(ManagedError::Conflict);
+                }
+            }
         }
     }
     Ok(())
@@ -871,6 +1087,233 @@ mod tests {
         let dir = project(&[(".claude/agents/big.md", &"x".repeat(1024 * 1024 + 1))]);
         assert_eq!(
             check_project_config(ToolId::Claude, ConnectionKind::NearAi, dir.path()),
+            Err(ManagedError::Conflict)
+        );
+    }
+
+    const ID: &str = "anthropic/claude-opus-5-5";
+
+    fn markdown(model_block: &str) -> String {
+        format!("---\nname: helper\ndescription: d\n{model_block}\n---\nBody.\n")
+    }
+
+    /// Claude Code reads a `model:` from project slash commands and skills
+    /// as well as subagents (#1803 review). Each is held to the same rule.
+    #[test]
+    fn a_project_command_or_skill_naming_a_model_refuses_a_near_ai_session() {
+        for path in [
+            ".claude/commands/review.md",
+            ".claude/commands/team/review.md",
+            ".claude/skills/review/SKILL.md",
+            ".claude/routines/nightly.md",
+        ] {
+            let dir = project(&[(path, &markdown(&format!("model: {ID}")))]);
+            for connection in NEAR_AI {
+                assert_eq!(
+                    check_project_config(ToolId::Claude, connection, dir.path()),
+                    Err(ManagedError::Conflict),
+                    "{path} on {connection:?}"
+                );
+            }
+            assert_eq!(
+                check_project_config(ToolId::Claude, ConnectionKind::Subscription, dir.path()),
+                Ok(()),
+                "{path}"
+            );
+            let dir = project(&[(path, &markdown("model: opus"))]);
+            assert_eq!(
+                check_project_config(ToolId::Claude, ConnectionKind::NearAi, dir.path()),
+                Ok(()),
+                "{path} with an alias"
+            );
+        }
+    }
+
+    /// Settings keys that choose a model outside the `env` block: the
+    /// fallback list, the advisor's model, and a remapping of model ids
+    /// (#1803 review). Aliases still follow the session's tier.
+    #[test]
+    fn project_settings_choosing_a_model_outside_env_refuse_a_near_ai_session() {
+        for body in [
+            format!(r#"{{"fallbackModel":["{ID}"]}}"#),
+            format!(r#"{{"fallbackModel":["sonnet","{ID}"]}}"#),
+            format!(r#"{{"fallbackModel":"{ID}"}}"#),
+            r#"{"fallbackModel":[1]}"#.to_string(),
+            format!(r#"{{"advisorModel":"{ID}"}}"#),
+            r#"{"advisorModel":7}"#.to_string(),
+            format!(r#"{{"modelOverrides":{{"claude-opus-5-5":"{ID}"}}}}"#),
+        ] {
+            for file in [".claude/settings.json", ".claude/settings.local.json"] {
+                let dir = project(&[(file, &body)]);
+                for connection in NEAR_AI {
+                    assert_eq!(
+                        check_project_config(ToolId::Claude, connection, dir.path()),
+                        Err(ManagedError::Conflict),
+                        "{body} in {file} on {connection:?}"
+                    );
+                }
+                assert_eq!(
+                    check_project_config(ToolId::Claude, ConnectionKind::Subscription, dir.path()),
+                    Ok(()),
+                    "{body}"
+                );
+            }
+        }
+        for body in [
+            r#"{"fallbackModel":["default","sonnet","opus[1m]"]}"#,
+            r#"{"fallbackModel":"haiku"}"#,
+            r#"{"fallbackModel":[]}"#,
+            r#"{"advisorModel":"opus"}"#,
+            r#"{"modelOverrides":{}}"#,
+        ] {
+            let dir = project(&[(".claude/settings.json", body)]);
+            assert_eq!(
+                check_project_config(ToolId::Claude, ConnectionKind::NearAi, dir.path()),
+                Ok(()),
+                "{body}"
+            );
+        }
+    }
+
+    /// YAML forms Claude Code reads as a `model` that a line-prefix match
+    /// missed, and forms it cannot be sure of, all count as naming a model
+    /// (#1803 review). Aliases written plainly still pass, and a `model:`
+    /// that is only text inside another field stays allowed.
+    #[test]
+    fn frontmatter_naming_a_model_in_any_yaml_form_is_caught() {
+        for block in [
+            format!("model:\n  {ID}"),
+            format!("model : {ID}"),
+            format!("model:\t{ID}"),
+            "model: opus\n  -4-1".to_string(),
+            format!("\"model\": {ID}"),
+            format!("'model': {ID}"),
+            format!("? model\n: {ID}"),
+            format!("{{model: {ID}}}"),
+            format!("model: !!str {ID}"),
+            format!("model: |\n  {ID}"),
+            format!("base: &b {ID}\nmodel: *b"),
+            format!("<<: {{model: {ID}}}"),
+            "model:".to_string(),
+            "Model: x/y".to_string(),
+            "model: opus\nmodel: x/y".to_string(),
+        ] {
+            assert!(
+                frontmatter_names_a_model(&markdown(&block)),
+                "{block:?} should count as naming a model"
+            );
+        }
+        for block in [
+            "model: opus",
+            "model: 'sonnet'",
+            "model: \"opus[1m]\"",
+            "model: inherit # the session's",
+            "description2: |\n  model: x/y is prose",
+            "tools: Read, Grep",
+            "",
+        ] {
+            assert!(
+                !frontmatter_names_a_model(&markdown(block)),
+                "{block:?} should not count"
+            );
+        }
+        assert!(frontmatter_names_a_model(&format!(
+            "\u{feff}---\r\nmodel: {ID}\r\n---\r\n"
+        )));
+        assert!(!frontmatter_names_a_model(&format!(
+            "no frontmatter\nmodel: {ID}\n"
+        )));
+    }
+
+    /// Claude Code looks for project agents, commands and skills in more
+    /// folders than the git root's ancestors (#1803 review): with no git
+    /// repository it walks up to (not including) the home folder; a linked
+    /// worktree also gets the main checkout's; and a worktree nested inside
+    /// the main checkout walks up to the main checkout's root.
+    #[test]
+    fn project_markdown_is_found_where_claude_code_looks_for_it() {
+        let agent = markdown(&format!("model: {ID}"));
+        let refused = |cwd: &Path, home: &Path| {
+            check_project_config_in(ToolId::Claude, ConnectionKind::NearAi, cwd, Some(home))
+        };
+
+        // No git repository: every folder up to home counts, home does not.
+        let home = tempfile::tempdir().unwrap();
+        let scratch = home.path().join("work/scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let parent_agents = home.path().join("work/.claude/agents");
+        std::fs::create_dir_all(&parent_agents).unwrap();
+        std::fs::write(parent_agents.join("x.md"), &agent).unwrap();
+        assert_eq!(refused(&scratch, home.path()), Err(ManagedError::Conflict));
+        std::fs::remove_dir_all(home.path().join("work/.claude")).unwrap();
+        let home_agents = home.path().join(".claude/agents");
+        std::fs::create_dir_all(&home_agents).unwrap();
+        std::fs::write(home_agents.join("x.md"), &agent).unwrap();
+        assert_eq!(
+            refused(&scratch, home.path()),
+            Ok(()),
+            "home's own .claude is the person's, not a project's"
+        );
+
+        // A linked worktree outside the main checkout.
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        let wt_git = main.join(".git/worktrees/wt");
+        std::fs::create_dir_all(&wt_git).unwrap();
+        std::fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+        let worktree = root.path().join("wt");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", wt_git.display()),
+        )
+        .unwrap();
+        assert_eq!(refused(&worktree.join("src"), root.path()), Ok(()));
+        let main_commands = main.join(".claude/commands");
+        std::fs::create_dir_all(&main_commands).unwrap();
+        std::fs::write(main_commands.join("x.md"), &agent).unwrap();
+        assert_eq!(
+            refused(&worktree.join("src"), root.path()),
+            Err(ManagedError::Conflict),
+            "the main checkout's commands"
+        );
+
+        // A worktree nested inside the main checkout walks up to its root.
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        let wt_git = main.join(".git/worktrees/x");
+        std::fs::create_dir_all(&wt_git).unwrap();
+        std::fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+        let nested = main.join("nest/x");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(".git"), "gitdir: ../../.git/worktrees/x\n").unwrap();
+        assert_eq!(refused(&nested, root.path()), Ok(()));
+        let between = main.join("nest/.claude/skills/s");
+        std::fs::create_dir_all(&between).unwrap();
+        std::fs::write(between.join("SKILL.md"), &agent).unwrap();
+        assert_eq!(refused(&nested, root.path()), Err(ManagedError::Conflict));
+
+        // A `.git` that links to a folder is an ordinary checkout.
+        #[cfg(unix)]
+        {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("real-git")).unwrap();
+            let repo = root.path().join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            std::os::unix::fs::symlink(root.path().join("real-git"), repo.join(".git")).unwrap();
+            assert_eq!(refused(&repo, root.path()), Ok(()));
+        }
+
+        // A `.git` file that cannot be understood is not guessed at.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".git"), "not a gitdir line\n").unwrap();
+        assert_eq!(
+            check_project_config_in(
+                ToolId::Claude,
+                ConnectionKind::NearAi,
+                root.path(),
+                Some(root.path())
+            ),
             Err(ManagedError::Conflict)
         );
     }
