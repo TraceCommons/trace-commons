@@ -9812,7 +9812,7 @@ fn admit_submit_principal(
     // on requests that were refused anyway. A rate refusal drops the slot.
     let slot = ACCOUNT_RATE_LIMITER
         .acquire(&submit_key, concurrency)
-        .ok_or_else(|| submit_rate_limited(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS))?;
+        .ok_or_else(|| submit_rate_limited(submit_concurrency_retry_after_seconds()))?;
     if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, rate) {
         return Err(submit_rate_limited(
             ACCOUNT_RATE_LIMITER.principal_retry_after_seconds(&submit_key),
@@ -15618,15 +15618,18 @@ async fn pipeline_owner_and_routing_for_new_upload(
 }
 
 /// `503 pipeline_routing_unavailable` for a routing read that failed, with a
-/// hash-only log line.
+/// hash-only log line. A failed read is transient, so the answer says when to
+/// come back (`retry_after_seconds`, and `Retry-After` on the submit route),
+/// with a spread so clients refused together do not return together.
 fn routing_read_failed(error: &impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
     tracing::warn!(
         error_hash = %safe_display_error_hash(error),
         "Trace Commons pipeline routing read failed"
     );
-    api_error(
+    api_error_with_retry(
         StatusCode::SERVICE_UNAVAILABLE,
         PIPELINE_ROUTING_UNAVAILABLE_LABEL,
+        Some(transient_unavailable_retry_after_seconds()),
     )
 }
 
@@ -22141,10 +22144,53 @@ const SUBMIT_PER_PRINCIPAL_RATE_MAX: u32 = 600;
 /// `retry_after_seconds` rather than giving it up, so it is a wire contract.
 /// The status stays 429.
 const SUBMIT_RATE_LIMITED_LABEL: &str = "submit_rate_limited";
-/// The retry hint for an in-flight (concurrency) refusal. A slot frees when
-/// one of the principal's own uploads returns, which has no deadline to
-/// report, so this is a short constant rather than a computed wait.
+/// The shortest retry hint for an in-flight (concurrency) refusal. A slot
+/// frees when one of the principal's own uploads returns, which has no
+/// deadline to report, so the hint is a short number rather than a computed
+/// wait. It is not one fixed number: see
+/// [`submit_concurrency_retry_after_seconds`].
 const SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS: i64 = 2;
+/// How many seconds above [`SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS`] a
+/// concurrency hint may spread, so the hint is 2 to 5 seconds.
+const SUBMIT_CONCURRENCY_RETRY_AFTER_SPREAD_SECONDS: i64 = 3;
+/// The retry hint, in seconds, of a transient `503` (a read the service could
+/// not complete right now): this many seconds at least, and up to
+/// [`TRANSIENT_UNAVAILABLE_RETRY_AFTER_SPREAD_SECONDS`] more.
+const TRANSIENT_UNAVAILABLE_RETRY_AFTER_SECONDS: i64 = 5;
+const TRANSIENT_UNAVAILABLE_RETRY_AFTER_SPREAD_SECONDS: i64 = 10;
+
+/// `base` plus a spread in `0..=spread` taken from `random`. Pure, so the
+/// bounds are testable without a random source.
+fn retry_after_with_spread(base: i64, spread: i64, random: u64) -> i64 {
+    base + (random % (spread as u64 + 1)) as i64
+}
+
+fn random_u64_for_retry_hint() -> u64 {
+    use rand::RngCore as _;
+    rand::rngs::OsRng.next_u64()
+}
+
+/// The retry hint of an in-flight (concurrency) or byte-budget refusal, 2 to
+/// 5 seconds. A fixed 2 s made every client refused in the same second return
+/// in the same second; the spread desynchronises them. The header and the
+/// body carry this one value.
+fn submit_concurrency_retry_after_seconds() -> i64 {
+    retry_after_with_spread(
+        SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS,
+        SUBMIT_CONCURRENCY_RETRY_AFTER_SPREAD_SECONDS,
+        random_u64_for_retry_hint(),
+    )
+}
+
+/// The retry hint of a transient `503`, with the same spread idea: 5 to 15
+/// seconds.
+fn transient_unavailable_retry_after_seconds() -> i64 {
+    retry_after_with_spread(
+        TRANSIENT_UNAVAILABLE_RETRY_AFTER_SECONDS,
+        TRANSIENT_UNAVAILABLE_RETRY_AFTER_SPREAD_SECONDS,
+        random_u64_for_retry_hint(),
+    )
+}
 
 /// The per-principal submission limits in force, from
 /// `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` and
@@ -22305,7 +22351,9 @@ fn api_error_response_with_retry_after(
 /// The large-body middleware's per-principal (or deployment-wide) in-flight
 /// refusal. Same label and header as the handler's own concurrency refusal.
 fn large_body_concurrency_refusal() -> axum::response::Response {
-    api_error_response_with_retry_after(submit_rate_limited(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS))
+    api_error_response_with_retry_after(submit_rate_limited(
+        submit_concurrency_retry_after_seconds(),
+    ))
 }
 
 fn submit_principal_rate_limit_key(

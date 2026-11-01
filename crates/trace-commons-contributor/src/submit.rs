@@ -726,6 +726,10 @@ pub struct SubmitContext<'a> {
     /// seconds; zero for none. Reset like `last_witness_retry_after`. See
     /// [`REASON_RATE_LIMITED`].
     last_rate_limit_retry_after: std::sync::atomic::AtomicU32,
+    /// The wait, in seconds, a `503` from ingest asked for with `Retry-After`
+    /// (or a body `retry_after_seconds`) on the most recent submission; zero
+    /// for none. Reset like `last_rate_limit_retry_after`.
+    last_unavailable_retry_after: std::sync::atomic::AtomicU32,
     /// When the last submission started sending to ingest, or `None` if it
     /// stopped before any send (a hold, a local refusal, a classifier
     /// failure, a dry run). Reset at the start of each submission. The
@@ -814,6 +818,7 @@ impl<'a> SubmitContext<'a> {
             upload_provenance: None,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_rate_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_unavailable_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_ingest_send_at: None,
             #[cfg(test)]
             receipt_override: None,
@@ -1497,6 +1502,18 @@ impl<'a> SubmitContext<'a> {
         .filter(|secs| *secs > 0)
     }
 
+    /// The wait, in seconds, a `503` from ingest asked for on the most recent
+    /// submission, or `None` if it sent none. Meaningful immediately after a
+    /// submission returns `Failed` with [`REASON_INGEST_UNREACHABLE`].
+    #[must_use]
+    pub fn last_unavailable_retry_after(&self) -> Option<u32> {
+        Some(
+            self.last_unavailable_retry_after
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|secs| *secs > 0)
+    }
+
     /// The wait, in seconds, ingest's rate limit asked for on the most recent
     /// submission, or `None` if it was not rate limited. Meaningful
     /// immediately after a submission returns `Failed` with
@@ -1562,6 +1579,8 @@ impl<'a> SubmitContext<'a> {
         self.last_witness_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_rate_limit_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_unavailable_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_ingest_send_at = None;
         let opts = self.opts;
@@ -2017,6 +2036,7 @@ impl<'a> SubmitContext<'a> {
             .as_ref()
             .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
         let mut rate_limit_retry_after = None;
+        let mut unavailable_retry_after = None;
         self.last_ingest_send_at = Some(Utc::now());
         let uploaded = upload_with_retry(
             self.cfg,
@@ -2027,11 +2047,16 @@ impl<'a> SubmitContext<'a> {
             &self.effective_cfg,
             witnessed.as_ref(),
             &mut rate_limit_retry_after,
+            &mut unavailable_retry_after,
             envelope_limit,
         )
         .await;
         if let Some(seconds) = rate_limit_retry_after {
             self.last_rate_limit_retry_after
+                .store(seconds, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(seconds) = unavailable_retry_after {
+            self.last_unavailable_retry_after
                 .store(seconds, std::sync::atomic::Ordering::Relaxed);
         }
         match uploaded {
@@ -2854,6 +2879,9 @@ async fn upload_with_retry(
     effective_cfg: &ContributorConfig,
     witnessed: Option<&WitnessedEnvelope>,
     rate_limit_retry_after: &mut Option<u32>,
+    // Written with the wait a `503` asked for (`Retry-After` or the body's
+    // `retry_after_seconds`), clamped like the rate limit's.
+    unavailable_retry_after: &mut Option<u32>,
     // The state directory's envelope limit (`ConfigStore::envelope_limit_bytes`).
     envelope_limit: usize,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
@@ -2942,8 +2970,11 @@ async fn upload_with_retry(
                 if transport_attempts >= 3 {
                     return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
-                let delay_secs = if transport_attempts == 1 { 1 } else { 4 };
-                tokio::time::sleep(StdDuration::from_secs(delay_secs)).await;
+                tokio::time::sleep(in_call_retry_delay(
+                    transport_attempts,
+                    crate::retry_jitter::random_u64(),
+                ))
+                .await;
             }
             Err(e) => {
                 // A refusal the gate sent deliberately, before anything reads
@@ -2963,6 +2994,7 @@ async fn upload_with_retry(
                 // or timed out a stalled body (408). Not a verdict either;
                 // the daemon retries it with backoff.
                 if ingest_unavailable(&e) {
+                    *unavailable_retry_after = unavailable_retry_hint(&e, Utc::now());
                     return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
                 if !is_auth_failure(&e) {
@@ -3015,25 +3047,80 @@ fn admission_refusal(e: &OcError) -> Option<AdmissionRefusal> {
 /// `1..=RATE_LIMIT_MAX_RETRY_SECS`, or [`RATE_LIMIT_DEFAULT_RETRY_SECS`] when
 /// the body has none (an older server, or something in front of ingest).
 fn upload_rate_limit(e: &OcError) -> Option<u32> {
+    upload_rate_limit_at(e, Utc::now())
+}
+
+/// [`upload_rate_limit`] measured from `now`, which only matters for a
+/// `Retry-After` given as an HTTP date.
+///
+/// The body's `retry_after_seconds` wins when it is present; the standard
+/// `Retry-After` header (delta-seconds or an HTTP date) is read only when the
+/// body has none. Both are clamped the same way.
+fn upload_rate_limit_at(e: &OcError, now: DateTime<Utc>) -> Option<u32> {
     if admission_refusal(e).is_some() {
         return None;
     }
-    let body = match e {
-        OcError::ServerLabel { status, body, .. } | OcError::HttpFailure { status, body, .. }
-            if status.as_u16() == 429 =>
-        {
-            body
+    let (body, header) = match e {
+        OcError::ServerLabel {
+            status,
+            body,
+            retry_after,
+            ..
         }
+        | OcError::HttpFailure {
+            status,
+            body,
+            retry_after,
+            ..
+        } if status.as_u16() == 429 => (body, retry_after.as_deref()),
         _ => return None,
     };
-    let hint = serde_json::from_str::<serde_json::Value>(body.trim())
-        .ok()
-        .and_then(|value| value.get("retry_after_seconds")?.as_u64())
-        .map(|seconds| u32::try_from(seconds).unwrap_or(u32::MAX));
+    let hint = crate::retry_jitter::server_retry_after(body_retry_after_seconds(body), header, now);
     Some(
         hint.unwrap_or(RATE_LIMIT_DEFAULT_RETRY_SECS)
             .clamp(1, RATE_LIMIT_MAX_RETRY_SECS),
     )
+}
+
+/// The `retry_after_seconds` field of a JSON error body, if it has one.
+fn body_retry_after_seconds(body: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(body.trim())
+        .ok()?
+        .get("retry_after_seconds")?
+        .as_u64()
+}
+
+/// The wait a `503` from ingest asked for, clamped to
+/// `1..=RATE_LIMIT_MAX_RETRY_SECS`; `None` for any other answer or a `503`
+/// that named none. The body's `retry_after_seconds` wins over the header.
+fn unavailable_retry_hint(e: &OcError, now: DateTime<Utc>) -> Option<u32> {
+    let (body, header) = match e {
+        OcError::ServerLabel {
+            status,
+            body,
+            retry_after,
+            ..
+        }
+        | OcError::HttpFailure {
+            status,
+            body,
+            retry_after,
+            ..
+        } if status.as_u16() == 503 => (body, retry_after.as_deref()),
+        _ => return None,
+    };
+    crate::retry_jitter::server_retry_after(body_retry_after_seconds(body), header, now)
+        .map(|secs| secs.clamp(1, RATE_LIMIT_MAX_RETRY_SECS))
+}
+
+/// How long to wait before the next in-call transport retry, after the
+/// `attempt`-th failure: a second, then four, with equal jitter
+/// ([`crate::retry_jitter`]) so contributors that lost the same connection do
+/// not all come back on the same tick. Between half the base and the base, so
+/// the schedule never gets longer than the old fixed one.
+fn in_call_retry_delay(attempt: u32, random: u64) -> StdDuration {
+    let base_ms = if attempt <= 1 { 1_000 } else { 4_000 };
+    StdDuration::from_millis(crate::retry_jitter::equal_jitter_millis(base_ms, random))
 }
 
 /// Whether this answer says ingest is down, failing or could not read the
@@ -3115,6 +3202,7 @@ mod tests {
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             label: label.into(),
             body: body.into(),
+            retry_after: None,
         }
     }
 
@@ -3127,6 +3215,7 @@ mod tests {
             url: "http://127.0.0.1/v1/traces".into(),
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             body: "Bad Gateway".into(),
+            retry_after: None,
         };
         for status in [500, 502, 503, 504] {
             assert!(ingest_unavailable(&labelled(
@@ -3160,7 +3249,107 @@ mod tests {
             url: "http://127.0.0.1/v1/traces".into(),
             status: reqwest::StatusCode::REQUEST_TIMEOUT,
             body: String::new(),
+            retry_after: None,
         }));
+    }
+
+    fn with_retry_after(status: u16, body: &str, header: Option<&str>) -> OcError {
+        OcError::HttpFailure {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            body: body.into(),
+            retry_after: header.map(str::to_string),
+        }
+    }
+
+    /// The standard `Retry-After` header is read on a 429 when the body has
+    /// no `retry_after_seconds`; the body wins when both are present; both are
+    /// clamped alike.
+    #[test]
+    fn a_429_retry_after_header_is_read_when_the_body_has_no_hint() {
+        let now = DateTime::parse_from_rfc3339("2026-10-21T07:27:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            upload_rate_limit_at(&with_retry_after(429, "Too Many Requests", Some("45")), now),
+            Some(45)
+        );
+        assert_eq!(
+            upload_rate_limit_at(&with_retry_after(429, "{}", Some("86400")), now),
+            Some(RATE_LIMIT_MAX_RETRY_SECS)
+        );
+        assert_eq!(
+            upload_rate_limit_at(&with_retry_after(429, "", Some("0")), now),
+            Some(1)
+        );
+        assert_eq!(
+            upload_rate_limit_at(
+                &with_retry_after(429, "", Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+                now
+            ),
+            Some(60)
+        );
+        assert_eq!(
+            upload_rate_limit_at(
+                &with_retry_after(
+                    429,
+                    r#"{"error":"submit_rate_limited","retry_after_seconds":17}"#,
+                    Some("90")
+                ),
+                now
+            ),
+            Some(17),
+            "the body's field wins over the header"
+        );
+        assert_eq!(
+            upload_rate_limit_at(&with_retry_after(429, "", Some("soon")), now),
+            Some(RATE_LIMIT_DEFAULT_RETRY_SECS),
+            "an unreadable header is no hint"
+        );
+    }
+
+    /// A 503 that names a wait is read the same way; other statuses and a 503
+    /// naming none yield nothing.
+    #[test]
+    fn a_503_retry_after_is_read_from_the_header_or_the_body() {
+        let now = Utc::now();
+        assert_eq!(
+            unavailable_retry_hint(&with_retry_after(503, "", Some("12")), now),
+            Some(12)
+        );
+        assert_eq!(
+            unavailable_retry_hint(
+                &with_retry_after(503, r#"{"error":"x","retry_after_seconds":9}"#, Some("12")),
+                now
+            ),
+            Some(9)
+        );
+        assert_eq!(
+            unavailable_retry_hint(&with_retry_after(503, "", Some("99999")), now),
+            Some(RATE_LIMIT_MAX_RETRY_SECS)
+        );
+        assert_eq!(
+            unavailable_retry_hint(&with_retry_after(503, "", None), now),
+            None
+        );
+        assert_eq!(
+            unavailable_retry_hint(&with_retry_after(502, "", Some("12")), now),
+            None
+        );
+    }
+
+    /// The in-call transport waits keep the old 1 s and 4 s as their ceiling
+    /// and never fall below half of it.
+    #[test]
+    fn the_in_call_retry_wait_is_jittered_within_the_old_fixed_wait() {
+        for (attempt, base_ms) in [(1_u32, 1_000_u64), (2, 4_000)] {
+            let waits: std::collections::BTreeSet<u128> = (0..500_u64)
+                .map(|r| in_call_retry_delay(attempt, r).as_millis())
+                .collect();
+            assert!(waits.iter().all(|w| *w >= u128::from(base_ms / 2)));
+            assert!(waits.iter().all(|w| *w <= u128::from(base_ms)));
+            assert!(waits.len() > 1, "attempt {attempt} did not spread");
+        }
     }
 
     /// The CLI names the outcome for what it is and says what to do, rather
@@ -3201,6 +3390,7 @@ mod tests {
                 url: "http://127.0.0.1/v1/traces".into(),
                 status: reqwest::StatusCode::TOO_MANY_REQUESTS,
                 body: "Too Many Requests".into(),
+                retry_after: None,
             }),
             Some(RATE_LIMIT_DEFAULT_RETRY_SECS),
             "a proxy in front of ingest"
@@ -6873,6 +7063,7 @@ mod tests {
             &mut envelope,
             &cfg,
             witnessed,
+            &mut None,
             &mut None,
             MAX_ENVELOPE_BYTES,
         )

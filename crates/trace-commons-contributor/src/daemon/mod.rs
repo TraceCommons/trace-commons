@@ -1505,7 +1505,14 @@ async fn drain_approved(
                         let observed_at = observed_at();
                         q.record_attempt(
                             entry.entry_id,
-                            Some(observed_at + transient_upload_retry_delay(failures)),
+                            Some(
+                                observed_at
+                                    + transient_upload_retry_wait(
+                                        failures,
+                                        ctx.last_unavailable_retry_after(),
+                                        crate::retry_jitter::random_u64(),
+                                    ),
+                            ),
                         );
                         q.set_state(
                             entry.entry_id,
@@ -1557,7 +1564,19 @@ async fn drain_approved(
                 // attempt; this daemon's own burst guard (`Paced`) does not,
                 // since it sent nothing, and the witness and classifier
                 // backoffs grow with `attempts`.
-                let wait = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
+                let hint = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
+                // A server `429` hint is a floor with a random extra on top,
+                // so contributors told the same wait do not return together.
+                // The daemon's own pacing is exact: it is not a herd.
+                let wait = if matches!(decision, uploader::UploadDecision::Paced { .. }) {
+                    hint
+                } else {
+                    crate::retry_jitter::hint_with_extra_secs(
+                        hint,
+                        crate::submit::RATE_LIMIT_MAX_RETRY_SECS,
+                        crate::retry_jitter::random_u64(),
+                    )
+                };
                 let retry_at = observed_at() + chrono::Duration::seconds(i64::from(wait));
                 if matches!(decision, uploader::UploadDecision::Paced { .. }) {
                     q.defer_without_attempt(entry.entry_id, retry_at);
@@ -1766,6 +1785,33 @@ fn transient_upload_kind(reason_label: &str) -> Option<TransientUpload> {
 fn transient_upload_retry_delay(failures: u32) -> chrono::Duration {
     let exponent = failures.saturating_sub(1).min(6);
     chrono::Duration::seconds((60_i64 * (1_i64 << exponent)).min(3_600))
+}
+
+/// The wait until the next pass retries an entry after its `failures`-th
+/// upload in a row that reached no verdict.
+///
+/// The scheduled backoff ([`transient_upload_retry_delay`]) gets equal
+/// jitter (between half and the whole of it, so the cap of an hour holds), so
+/// every daemon refused by the same restart does not return on the same
+/// minute. If ingest answered `503` with a `Retry-After` (`server_hint`), the
+/// wait is never shorter than that hint (with the usual random extra on top,
+/// see [`crate::retry_jitter::hint_with_extra_secs`]).
+fn transient_upload_retry_wait(
+    failures: u32,
+    server_hint: Option<u32>,
+    random: u64,
+) -> chrono::Duration {
+    let scheduled = transient_upload_retry_delay(failures).num_seconds().max(0) as u64;
+    let mut wait = crate::retry_jitter::equal_jitter_secs(scheduled, random);
+    if let Some(hint) = server_hint {
+        let hinted = crate::retry_jitter::hint_with_extra_secs(
+            hint,
+            crate::submit::RATE_LIMIT_MAX_RETRY_SECS,
+            random.rotate_left(17),
+        );
+        wait = wait.max(u64::from(hinted));
+    }
+    chrono::Duration::seconds(wait as i64)
 }
 
 /// Most sessions one upload pass puts on the wire.
@@ -4279,10 +4325,13 @@ mod tests {
             Some(crate::submit::REASON_RATE_LIMITED)
         );
         let due = held.retry_after.expect("a retry time");
+        // The window is the floor; the random extra on top is at most a fifth
+        // of it (at least 5 s, at most 30 s).
         let window = i64::from(crate::submit::RATE_LIMIT_DEFAULT_RETRY_SECS);
+        let extra = (window / 5).clamp(5, 30);
         assert!(
             due >= now + chrono::Duration::seconds(window)
-                && due <= now + pass_took + chrono::Duration::seconds(window),
+                && due <= now + pass_took + chrono::Duration::seconds(window + extra),
             "{due}"
         );
     }
@@ -4642,14 +4691,23 @@ mod tests {
     async fn a_transport_failure_keeps_the_session_approved() {
         let h = TransientRetryHarness::with_ingest_unreachable().await;
         let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
         h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
         let held = h.entry();
         assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
         assert_eq!(
             held.reason_label.as_deref(),
             Some(health::LABEL_INGEST_UNREACHABLE)
         );
-        assert!(held.retry_after.expect("a retry time") >= now + chrono::Duration::seconds(60));
+        // The first failure's minute, with equal jitter: between half of it
+        // and all of it.
+        let due = held.retry_after.expect("a retry time");
+        assert!(due >= now + chrono::Duration::seconds(30), "{due}");
+        assert!(
+            due <= now + pass_took + chrono::Duration::seconds(60),
+            "{due}"
+        );
     }
 
     /// The issuer briefly unreachable is the same kind of pause.
@@ -4787,6 +4845,37 @@ mod tests {
             h.last_error_label.as_deref(),
             Some(health::LABEL_INGEST_UNREACHABLE)
         );
+    }
+
+    /// The outage backoff is jittered between half and the whole of the
+    /// scheduled wait (so the one-hour cap holds), and a server's
+    /// `Retry-After` is a floor on it.
+    #[test]
+    fn transient_upload_retry_wait_is_jittered_and_honours_a_server_hint() {
+        for failures in 1..=12_u32 {
+            let scheduled = transient_upload_retry_delay(failures).num_seconds();
+            let mut distinct = std::collections::BTreeSet::new();
+            for i in 0..400_u64 {
+                // Spread across the whole 64-bit range, as the real source is.
+                let r = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let wait = transient_upload_retry_wait(failures, None, r).num_seconds();
+                assert!(
+                    wait >= scheduled / 2 && wait <= scheduled,
+                    "{failures}: {wait}"
+                );
+                assert!(wait <= 3_600);
+                distinct.insert(wait);
+            }
+            assert!(distinct.len() > 1, "failure {failures} did not spread");
+        }
+        for r in 0..400_u64 {
+            let wait = transient_upload_retry_wait(1, Some(300), r).num_seconds();
+            assert!(wait >= 300, "a 300 s hint came back as {wait}");
+            assert!(wait <= 300 + 60, "{wait}");
+        }
+        // A hint above the client's cap is bounded by it.
+        let capped = transient_upload_retry_wait(1, Some(u32::MAX), 7).num_seconds();
+        assert_eq!(capped, i64::from(crate::submit::RATE_LIMIT_MAX_RETRY_SECS));
     }
 
     #[test]

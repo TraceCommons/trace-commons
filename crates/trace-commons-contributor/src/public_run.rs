@@ -685,6 +685,7 @@ mod tests {
             status,
             label: label.to_string(),
             body: String::new(),
+            retry_after: None,
         };
         assert_eq!(
             classify(&labeled(
@@ -729,6 +730,7 @@ mod tests {
             url: "https://ingest.example/v1/account/traces/id/publication".to_string(),
             status: reqwest::StatusCode::NOT_FOUND,
             body: String::new(),
+            retry_after: None,
         };
         assert_eq!(classify(&untyped), PublicRunClientError::NotFound);
     }
