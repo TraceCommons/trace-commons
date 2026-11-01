@@ -764,15 +764,15 @@ fn a_late_hook_after_session_end_leaves_no_state() {
     run_session(&store, "repo1", "s1", 1);
     let state = store.root().join("sessions").join("s1.json");
     assert!(!state.exists());
-    for name in ["UserPromptSubmit", "Stop"] {
-        handle(
-            &store,
-            "repo1",
-            Harness::Claude,
-            &event(name, "s1"),
-            Utc::now(),
-        );
-    }
+    // A prompt may restart a session left idle past the prune; the other
+    // events of a session with no file do nothing.
+    handle(
+        &store,
+        "repo1",
+        Harness::Claude,
+        &event("Stop", "s1"),
+        Utc::now(),
+    );
     handle(
         &store,
         "repo1",
@@ -855,6 +855,43 @@ fn a_long_live_session_survives_the_prune() {
         .unwrap();
     store.prune_sessions(Utc::now());
     assert!(!file.exists(), "an idle file is pruned");
+}
+
+/// A session left idle past the prune starts over at its next prompt, and
+/// a session file of another folder is left alone.
+#[test]
+fn an_idle_session_restarts_at_its_next_prompt_and_others_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    store.set_enabled(true).unwrap();
+    handle(
+        &store,
+        "repo1",
+        Harness::Claude,
+        &event("UserPromptSubmit", "idle"),
+        Utc::now(),
+    );
+    assert_eq!(store.session("idle").unwrap().prompts, 1, "restarted");
+    handle(
+        &store,
+        "repo2",
+        Harness::Claude,
+        &event("UserPromptSubmit", "idle"),
+        Utc::now(),
+    );
+    handle(
+        &store,
+        "repo2",
+        Harness::Claude,
+        &event("Stop", "idle"),
+        Utc::now(),
+    );
+    let kept = store.session("idle").unwrap();
+    assert_eq!(
+        (kept.repo.as_str(), kept.prompts),
+        ("repo1", 1),
+        "another folder's file is kept"
+    );
 }
 
 /// Give back takes the folder's lock: it waits for a writer holding it.

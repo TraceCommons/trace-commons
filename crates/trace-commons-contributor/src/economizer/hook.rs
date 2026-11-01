@@ -63,26 +63,34 @@ pub fn handle(
     // does nothing, so a hook that ran late never leaves an orphan behind.
     // A file that exists but does not read (an upgrade changed its schema)
     // starts over, so a live session is never switched off.
-    let load = || {
-        store
-            .session(session_id)
-            .filter(|state| state.repo == repo)
-            .or_else(|| {
-                store
-                    .has_session(session_id)
-                    .then(|| SessionState::new(repo, now))
-            })
+    //
+    // A file that reads but names another folder is that folder's, and is
+    // left alone.
+    let load = || match store.session(session_id) {
+        Some(state) => (state.repo == repo).then_some(state),
+        None => store
+            .has_session(session_id)
+            .then(|| SessionState::new(repo)),
     };
     match event {
         "SessionStart" => {
             store.prune_sessions(now);
-            let session = load().unwrap_or_else(|| SessionState::new(repo, now));
+            let session = store
+                .session(session_id)
+                .filter(|state| state.repo == repo)
+                .unwrap_or_else(|| SessionState::new(repo));
             store.save_session(session_id, &session).ok()?;
             let context = store.repo(repo).facts.render()?;
             Some(context_output(event, &context))
         }
         "UserPromptSubmit" => {
-            let mut session = load()?;
+            // A new turn may also start over a session whose file is gone:
+            // one left idle past the stale prune is still running.
+            let mut session = match store.session(session_id) {
+                Some(state) if state.repo != repo => return None,
+                Some(state) => state,
+                None => SessionState::new(repo),
+            };
             session.prompts = session.prompts.saturating_add(1);
             session.turn = Default::default();
             store.save_session(session_id, &session).ok()?;

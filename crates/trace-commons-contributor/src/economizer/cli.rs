@@ -121,6 +121,7 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
             let cwd = folder(cwd)?;
             let mut restored = Vec::new();
             let mut busy = Vec::new();
+            let mut failed: Option<anyhow::Error> = None;
             for harness in HARNESSES
                 .into_iter()
                 .filter(|h| harness.is_none_or(|only| only == *h))
@@ -134,23 +135,31 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                     Ok(given) if !given.is_empty() => restored.push((harness, given)),
                     Ok(_) => {}
                     Err(error) if error.is::<StateBusy>() => busy.push(harness),
+                    // Not one trying again can fix. The other harnesses are
+                    // still tried; the first such error is returned last.
                     Err(error) => {
-                        // Not one trying again can fix: report what was
-                        // given back so far, then the cause.
-                        if !restored.is_empty() {
-                            report_restored(&restored, &busy, as_json);
-                        }
-                        return Err(error);
+                        failed.get_or_insert(error);
                     }
                 }
             }
-            report_restored(&restored, &busy, as_json);
-            if !busy.is_empty() {
+            if !(restored.is_empty() && busy.is_empty() && failed.is_some()) {
+                report_restored(&restored, &busy, as_json);
+            }
+            let busy_line = (!busy.is_empty()).then(|| {
                 let names: Vec<_> = busy.iter().map(|harness| label(*harness)).collect();
-                anyhow::bail!(
+                format!(
                     "Couldn't give back for {} here: a session is writing. Try again.",
                     names.join(", ")
-                );
+                )
+            });
+            if let Some(error) = failed {
+                if let Some(line) = busy_line {
+                    eprintln!("{line}");
+                }
+                return Err(error);
+            }
+            if let Some(line) = busy_line {
+                anyhow::bail!(line);
             }
         }
     }
