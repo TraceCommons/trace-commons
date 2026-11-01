@@ -325,7 +325,7 @@ final class ManagedSessionsTests: XCTestCase {
           {"id":"x/untiered"},
           {"id":"openai/gpt-6-sol","tier":"incognito"},
           {"id":"x/future","tier":"some_future_tier"}
-        ],"default":"anthropic/claude-sonnet-5-5"}
+        ],"tier_order":["near_ai","external","incognito"],"default":"anthropic/claude-sonnet-5-5"}
         """#.utf8))
         let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
         XCTAssertEqual(options.map(\.value), [
@@ -352,7 +352,7 @@ final class ManagedSessionsTests: XCTestCase {
           {"id":"x/untiered"},
           {"id":"openai/gpt-6-sol","tier":"incognito"},
           {"id":"x/future","tier":"some_future_tier"}
-        ],"default":"anthropic/claude-sonnet-5-5","favorites":["z-ai/glm-5.3","openai/gpt-6-sol"]}
+        ],"tier_order":["near_ai","external","incognito"],"default":"anthropic/claude-sonnet-5-5","favorites":["z-ai/glm-5.3","openai/gpt-6-sol"]}
         """#.utf8))
         let favored = ManagedSurface.modelOptions(starred) { Self.modelCopy[$0] ?? "" }
         XCTAssertEqual(favored.map(\.value), [
@@ -373,6 +373,54 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.modelOptions(flat) { Self.modelCopy[$0] ?? "" }.map(\.section), [nil, nil])
     }
 
+    /// The groups follow the order the core sends (`tier_order`), not a
+    /// table in the shell: a core that listed the tiers the other way round
+    /// would be followed, and a tier it does not list falls under no heading.
+    func testTheModelPickerFollowsTheCoresTierOrder() throws {
+        let models = #"""
+        "models":[
+          {"id":"n/one","tier":"near_ai"},
+          {"id":"e/one","tier":"external"},
+          {"id":"i/one","tier":"incognito"}
+        ],"default":null
+        """#
+        let reversed = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(
+            ("{" + models + #","tier_order":["incognito","external","near_ai"]}"#).utf8))
+        XCTAssertEqual(
+            ManagedSurface.modelOptions(reversed) { Self.modelCopy[$0] ?? "" }.map(\.value),
+            [ManagedSurface.defaultModel, "i/one", "e/one", "n/one"])
+        let partial = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(
+            ("{" + models + #","tier_order":["external"]}"#).utf8))
+        let options = ManagedSurface.modelOptions(partial) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(options.map(\.value), [ManagedSurface.defaultModel, "e/one", "n/one", "i/one"])
+        XCTAssertEqual(options.map(\.section), [nil, "External private models", nil, nil])
+    }
+
+    /// A favorite heads no group, so its tier is carried by its own dot and
+    /// an accessibility value of the tier's existing heading (the dot alone
+    /// would say nothing to VoiceOver). A model with no known tier has none.
+    func testAFavoriteCarriesItsTiersHeadingForTheDot() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
+        {"models":[
+          {"id":"n/star","tier":"near_ai"},
+          {"id":"e/star","tier":"external"},
+          {"id":"i/star","tier":"incognito"},
+          {"id":"x/star"},
+          {"id":"i/plain","tier":"incognito"}
+        ],"tier_order":["near_ai","external","incognito"],"default":null,
+        "favorites":["n/star","e/star","i/star","x/star"]}
+        """#.utf8))
+        let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(options.map(\.value), [
+            ManagedSurface.defaultModel, "n/star", "e/star", "i/star", "x/star", "i/plain",
+        ])
+        XCTAssertEqual(options.map(\.tier), [nil, "near_ai", "external", "incognito", nil, nil])
+        XCTAssertEqual(options.map(\.tierHeading), [
+            nil, "NEAR AI private models", "External private models", "Incognito models", nil, nil,
+        ])
+        XCTAssertEqual(options.map(\.section), [nil, nil, nil, nil, nil, "Incognito models"])
+    }
+
     /// Every tier holds more than one unstarred model, listed in NEAR AI's
     /// order within its group, and a starred Incognito model sits among the
     /// favorites, ahead of every group, whatever the tier order.
@@ -386,7 +434,7 @@ final class ManagedSessionsTests: XCTestCase {
           {"id":"e/one","tier":"external"},
           {"id":"n/one","tier":"near_ai"},
           {"id":"i/one","tier":"incognito"}
-        ],"default":null,"favorites":["i/star"]}
+        ],"tier_order":["near_ai","external","incognito"],"default":null,"favorites":["i/star"]}
         """#.utf8))
         let options = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }
         XCTAssertEqual(options.map(\.value), [
