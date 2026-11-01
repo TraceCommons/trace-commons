@@ -6675,6 +6675,16 @@ pub(super) fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Respo
     };
     candidate.cloud_credentials = persisted.cloud_credentials;
     match super::settings::apply_settings_object(&mut candidate, &req.params) {
+        // Only retired keys, such as an older shell's daily-limit control
+        // sends: accepted with nothing to change, so nothing is saved or
+        // rebuilt, and the reply is the settings as they stand.
+        Ok(false) if req.params.as_object().is_some_and(|obj| !obj.is_empty()) => {
+            let mut value = redacted_settings(&settings);
+            drop(settings);
+            drop(commit);
+            add_admission_setting(shared, &mut value);
+            Response::ok(req.id, value)
+        }
         Ok(false) => Response::err(req.id, ERR_BAD_PARAMS, "no-known-setting-supplied"),
         Ok(true) => {
             if let Err(_e) = candidate.save_locked(&shared.store) {
@@ -16923,6 +16933,19 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&*s.settings.lock().unwrap()).unwrap(),
             before
+        );
+        // Nothing changed, so nothing was saved, and the reply is the
+        // settings as they stand.
+        assert!(
+            !s.store
+                .dir()
+                .join(crate::config::DAEMON_SETTINGS_FILE)
+                .exists(),
+            "a request holding only retired keys must not write the settings file"
+        );
+        assert_eq!(
+            r.result.as_ref().unwrap()["quiescence_secs"],
+            serde_json::json!(s.settings.lock().unwrap().quiescence_secs)
         );
         let got = handle_request(&s, &req("get_settings", serde_json::json!({})))
             .result

@@ -726,6 +726,11 @@ pub struct SubmitContext<'a> {
     /// seconds; zero for none. Reset like `last_witness_retry_after`. See
     /// [`REASON_RATE_LIMITED`].
     last_rate_limit_retry_after: std::sync::atomic::AtomicU32,
+    /// When the last submission started sending to ingest, or `None` if it
+    /// stopped before any send (a hold, a local refusal, a classifier
+    /// failure, a dry run). Reset at the start of each submission. The
+    /// daemon's burst window counts exactly these.
+    last_ingest_send_at: Option<DateTime<Utc>>,
     /// Stands in for a fetched provider receipt, tests only.
     ///
     /// `receipt_for_attested_call` refuses a plaintext endpoint before it
@@ -809,6 +814,7 @@ impl<'a> SubmitContext<'a> {
             upload_provenance: None,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_rate_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_ingest_send_at: None,
             #[cfg(test)]
             receipt_override: None,
             #[cfg(test)]
@@ -1504,6 +1510,14 @@ impl<'a> SubmitContext<'a> {
         .filter(|secs| *secs > 0)
     }
 
+    /// When the last submission started sending to ingest, or `None` if it
+    /// returned before sending anything. Meaningful immediately after
+    /// [`Self::submit_loaded`] returns.
+    #[must_use]
+    pub fn last_ingest_send_at(&self) -> Option<DateTime<Utc>> {
+        self.last_ingest_send_at
+    }
+
     pub async fn submit_one(
         &mut self,
         source: &dyn TraceSource,
@@ -1549,6 +1563,7 @@ impl<'a> SubmitContext<'a> {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_rate_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_ingest_send_at = None;
         let opts = self.opts;
         // Every size refusal below is against the state directory's limit.
         let envelope_limit = self.store.envelope_limit_bytes();
@@ -1970,6 +1985,7 @@ impl<'a> SubmitContext<'a> {
             journal.validate_review(&bundle, &response.envelope_bytes)?;
             let uploaded_bytes = sent_envelope_bytes(&envelope, Some(response));
             let client = build_ingest_client(self.cfg, &token)?;
+            self.last_ingest_send_at = Some(Utc::now());
             match journal.upload_approved(bundle.journal_id, &client).await {
                 Ok(_) => {
                     let receipt = Receipt {
@@ -2001,6 +2017,7 @@ impl<'a> SubmitContext<'a> {
             .as_ref()
             .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
         let mut rate_limit_retry_after = None;
+        self.last_ingest_send_at = Some(Utc::now());
         let uploaded = upload_with_retry(
             self.cfg,
             &self.issuer,

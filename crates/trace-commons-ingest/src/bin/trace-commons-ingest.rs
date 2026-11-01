@@ -22055,9 +22055,15 @@ struct ConfirmLoginBody {
 /// not sleep. See `confirm_login_handler`.
 const REDEEM_MIN_LATENCY: StdDuration = StdDuration::from_millis(250);
 
-/// Fixed-window length for all account-surface rate limiters.
-const ACCOUNT_RATE_WINDOW: StdDuration =
-    StdDuration::from_secs(trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS);
+/// Fixed-window length for all account-surface rate limiters. A literal: the
+/// login and content limits below are sized per 60 s, so retuning the submit
+/// pacing must not move them.
+const ACCOUNT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
+// The submit limiter shares this window, and the daemon paces itself against
+// the protocol's value, so the two must still agree.
+const _: () = assert!(
+    ACCOUNT_RATE_WINDOW.as_secs() == trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS
+);
 
 /// Per-IP cap on `GET /account/login` interstitial renders per window.
 const INTERSTITIAL_PER_IP_LIMIT: u32 = 120;

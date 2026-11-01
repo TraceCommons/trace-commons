@@ -2086,10 +2086,11 @@ pub struct RedeemedSession {
 
 /// Outcome of a successful [`Database::validate_session`] lookup. Carries the
 /// durable account id and the `auth_credential_id` recorded on the session row
-/// (the NEAR access key that authenticated a NEAR session, the device key of a
-/// native device session, the WebAuthn credential id of a session minted before
-/// passkeys were removed, or `None` for a device-link session). The credential
-/// id is a public identifier, never key material.
+/// (the NEAR access key that authenticated a NEAR session, the WebAuthn
+/// credential id of a session minted before passkeys were removed, or `None`
+/// otherwise, which covers device-link and native sessions; a keyed native
+/// session names its device in `device_key_id`). The credential id is a public
+/// identifier, never key material.
 #[derive(Debug, Clone)]
 pub struct ValidatedSession {
     pub account_id: uuid::Uuid,
@@ -2356,9 +2357,9 @@ pub struct RevokeAccountDeviceResult {
     pub removed: bool,
     pub sessions_revoked: u64,
     pub grants_revoked: u64,
-    /// The account's live native sessions that named neither a device key nor
-    /// a credential (issued before V139, or by the login-link native sign-in),
-    /// revoked with the
+    /// The account's live native sessions that named no device key (issued
+    /// before V139, by the login-link native sign-in, or by a passkey sign-in
+    /// before V144, whatever credential id it carries), revoked with the
     /// device because they cannot be told apart from its own. The caller's
     /// session is never among them.
     pub unattributed_sessions_revoked: u64,

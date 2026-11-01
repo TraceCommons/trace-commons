@@ -1082,9 +1082,9 @@ pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
         "legacy_migration_admission_not_ready" => {
             "This commons isn't accepting contributions by account yet. Your invite keeps working; try again later."
         }
-        // Reworded 2026-10-11 around the passkey step; not yet approved.
+        // Approved 2026-10-31, when passkeys were removed.
         "legacy_migration_no_near_ai_session" => {
-            "Finish the passkey step in your browser first, then try again. Your invite keeps working."
+            "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
         }
         "legacy_migration_invite_needed" => {
             "We couldn't tell which invite you joined with. Paste your invite link to continue."
@@ -4004,17 +4004,18 @@ mod tests {
         assert_eq!(offer.passkey_failed, LEGACY_MIGRATION_PASSKEY_FAILED);
         assert_eq!(offer.passkey_cancel, LEGACY_MIGRATION_PASSKEY_CANCEL);
         let no_session = legacy_migration_refusal_line("legacy_migration_no_near_ai_session");
-        for line in [offer.body, offer.passkey_waiting] {
+        for line in [offer.body, offer.passkey_waiting, no_session] {
             assert!(!line.to_lowercase().contains("passkey"), "{line}");
         }
-        for line in [
-            offer.body,
-            offer.passkey_waiting,
-            offer.passkey_failed,
-            no_session,
-        ] {
+        for line in [offer.body, offer.passkey_waiting, offer.passkey_failed] {
             assert!(!line.to_lowercase().contains("sign in"), "{line}");
         }
+        // The refusal names the step it sends the contributor to (owner,
+        // 2026-10-31).
+        assert_eq!(
+            no_session,
+            "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
+        );
         assert!(offer.passkey_failed.contains("nothing was moved"));
         assert!(offer.passkey_failed.contains("keeps working"));
         assert!(offer.passkey_cancel.split_whitespace().count() <= 2);

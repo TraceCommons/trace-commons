@@ -182,6 +182,36 @@ pub struct SettingsRanges {
     pub digest_interval_secs: SettingRange,
 }
 
+impl SettingsRanges {
+    /// Each range with its key and its agent-facing description. Destructured
+    /// without `..`, so a range added to the struct does not compile until it
+    /// is listed here with its text.
+    pub(crate) fn described(&self) -> [(&'static str, SettingRange, &'static str); 3] {
+        let Self {
+            quiescence_secs,
+            approval_hold_secs,
+            digest_interval_secs,
+        } = *self;
+        [
+            (
+                "quiescence_secs",
+                quiescence_secs,
+                "Seconds without writes before a trace is considered finished.",
+            ),
+            (
+                "approval_hold_secs",
+                approval_hold_secs,
+                "Seconds before an approved upload can start; zero removes the undo hold.",
+            ),
+            (
+                "digest_interval_secs",
+                digest_interval_secs,
+                "Seconds between interval notifications.",
+            ),
+        ]
+    }
+}
+
 /// The ranges [`apply_settings_object`] validates every numeric setting
 /// against. See [`SettingsRanges`].
 #[must_use]
@@ -1886,6 +1916,11 @@ pub fn gemini_declared(settings: &DaemonSettings) -> bool {
     settings.gemini_source.is_some()
 }
 
+/// A settings key retired with the daily upload limit.
+fn is_retired_key(key: &str) -> bool {
+    matches!(key, "max_uploads_per_day" | "max_bytes_per_day")
+}
+
 /// Apply a partial settings object -- the shape `tc_call(handle,
 /// "set_settings", ...)` takes over the socket, and the shape
 /// `tc_daemon_start_with_settings` takes over the C ABI before the daemon's
@@ -1908,18 +1943,21 @@ pub fn gemini_declared(settings: &DaemonSettings) -> bool {
 /// caller-supplied text. The values themselves (which is where a
 /// filesystem path lives) never cross into an error string.
 ///
-/// Returns whether anything was applied. An empty object (or one holding
-/// only keys whose values happen to match the current setting) still
-/// reports `true` for any key present and accepted -- this always applies
-/// every key it accepts, so `Ok(false)` only ever means "the object had no
-/// keys at all". Callers that require at least one recognized field (as
-/// `set_settings` does, to catch an empty or accidental call) check that
-/// themselves; `tc_daemon_start_with_settings` does not, since "nothing to
-/// override" is its documented no-op case.
+/// Returns whether anything was applied. A key whose value happens to match
+/// the current setting still reports `true` -- this always applies every
+/// live key it accepts. `Ok(false)` means no live key was present, which is
+/// one of two cases:
 ///
-/// `max_uploads_per_day` and `max_bytes_per_day` are accepted and ignored:
-/// the daemon has no daily upload limit, and a shell built while it had one
-/// may still send them.
+/// - the object had no keys at all, which `set_settings` and the agent
+///   preview refuse as `no-known-setting-supplied` (an empty or accidental
+///   call), and `tc_daemon_start_with_settings` treats as its documented
+///   "nothing to override" no-op;
+/// - every key was a retired one (below), which every caller treats as
+///   accepted with nothing to change: no save, no error.
+///
+/// `max_uploads_per_day` and `max_bytes_per_day` are retired: accepted,
+/// whatever the value, and ignored. The daemon has no daily upload limit,
+/// and a shell built while it had one may still send them.
 pub fn apply_settings_object(
     settings: &mut DaemonSettings,
     params: &serde_json::Value,
@@ -1931,8 +1969,7 @@ pub fn apply_settings_object(
         // and ignored, so a shell built while the limit existed can still
         // save its other settings. Outside the marked region below: the
         // agent schema and the IPC doc's key lists name settable keys only.
-        if matches!(key.as_str(), "max_uploads_per_day" | "max_bytes_per_day") {
-            changed = true;
+        if is_retired_key(key) {
             continue;
         }
         // SET-SETTINGS-KEYS-BEGIN
@@ -2458,7 +2495,8 @@ mod tests {
 
     /// A shell built while the daily limit existed may still send its two
     /// keys. They are accepted, whatever the value, and change nothing, so
-    /// the rest of that shell's save still lands.
+    /// the rest of that shell's save still lands. Alone they apply nothing,
+    /// so nothing is saved for them.
     #[test]
     fn the_retired_daily_limit_keys_are_accepted_and_ignored() {
         let mut s = DaemonSettings::default();
@@ -2469,8 +2507,16 @@ mod tests {
             serde_json::json!({"max_bytes_per_day": "lots"}),
             serde_json::json!({"max_uploads_per_day": null, "max_bytes_per_day": null}),
         ] {
-            assert_eq!(apply_settings_object(&mut s, &params), Ok(true), "{params}");
+            assert_eq!(
+                apply_settings_object(&mut s, &params),
+                Ok(false),
+                "{params}"
+            );
         }
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({})),
+            Ok(false)
+        );
         assert_eq!(serde_json::to_value(&s).unwrap(), before);
         assert_eq!(
             apply_settings_object(

@@ -2221,6 +2221,15 @@ impl Queue {
         }
     }
 
+    /// Set when the entry may next be tried, without counting an attempt,
+    /// for a pause that tried nothing: this daemon's own burst guard. Unlike
+    /// [`Queue::record_attempt`], `attempts` stays as it was.
+    pub fn defer_without_attempt(&mut self, entry_id: Uuid, retry_after: DateTime<Utc>) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            e.retry_after = Some(retry_after);
+        }
+    }
+
     /// Count one more transient classifier failure against the entry's
     /// current approval, returning the new count (0 for an unknown id).
     pub fn record_transient_redaction_failure(&mut self, entry_id: Uuid) -> u32 {
