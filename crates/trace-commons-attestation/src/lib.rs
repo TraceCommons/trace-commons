@@ -11,6 +11,10 @@ pub mod address;
 /// signed this way and is not a NEAR AI receipt, so a client that verifies
 /// one must not have to enable a receipt feature to do it.
 pub mod eip191;
+/// The Insights judgement seal: a request sealed to the service's per-boot
+/// key, and a response sealed back to the one request that asked. Ungated,
+/// like [`report_data`]: the contributor seals with it, the service opens.
+pub mod judgement_seal;
 pub mod measurements;
 pub mod quote;
 /// NEAR AI inference-receipt parsing and verification.
@@ -28,6 +32,12 @@ pub mod quote;
 /// only needs the other.
 #[cfg(feature = "receipt")]
 pub mod receipt;
+/// The 64-byte TDX report-data layouts Trace Commons enclaves bind: an
+/// 8-byte domain tag, what the service's quote vouches for (the witness's
+/// signing address, or a hash of the judgement service's per-boot keys) and
+/// a client nonce. Ungated, like [`eip191`]: verifying a quote before
+/// sending anything needs it.
+pub mod report_data;
 /// The signed NEAR AI pin-set format a staging build takes its measurement
 /// sets from, and its verifier.
 ///
