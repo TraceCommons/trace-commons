@@ -2942,8 +2942,9 @@ async fn upload_with_retry(
                     *rate_limit_retry_after = Some(retry_after_secs);
                     return Err(REASON_RATE_LIMITED.to_string());
                 }
-                // Ingest, or something in front of it, is down or failing.
-                // Not a verdict either; the daemon retries it with backoff.
+                // Ingest, or something in front of it, is down or failing,
+                // or timed out a stalled body (408). Not a verdict either;
+                // the daemon retries it with backoff.
                 if ingest_unavailable(&e) {
                     return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
@@ -3018,15 +3019,19 @@ fn upload_rate_limit(e: &OcError) -> Option<u32> {
     )
 }
 
-/// Whether this answer says ingest is down or failing rather than judging the
-/// upload: any `5xx`, labelled or not. See [`REASON_INGEST_UNREACHABLE`].
+/// Whether this answer says ingest is down, failing or could not read the
+/// upload, rather than judging it: any `5xx`, and `408`, labelled or not.
+/// See [`REASON_INGEST_UNREACHABLE`].
 ///
-/// Only the status decides. A `4xx` is a verdict on this request and stays
-/// with the caller's terminal handling.
+/// Only the status decides. `408` is ingest's idle-body refusal
+/// (`upload_body_idle_timeout`: the body stopped arriving, as when a laptop
+/// sleeps mid-upload) or a proxy's request timeout; neither says anything
+/// about the session, so it is retried. Every other `4xx` is a verdict on
+/// this request and stays with the caller's terminal handling.
 fn ingest_unavailable(e: &OcError) -> bool {
     match e {
         OcError::ServerLabel { status, .. } | OcError::HttpFailure { status, .. } => {
-            status.is_server_error()
+            status.is_server_error() || *status == reqwest::StatusCode::REQUEST_TIMEOUT
         }
         _ => false,
     }
@@ -3097,7 +3102,8 @@ mod tests {
     }
 
     /// Any 5xx, labelled or bare, is ingest being unavailable (#1358); no
-    /// 4xx is, including the 409s and 429s that keep their own handling.
+    /// other 4xx than 408 is (see the test below), including the 409s and
+    /// 429s that keep their own handling.
     #[test]
     fn only_a_5xx_reads_as_ingest_unavailable() {
         let bare = |status: u16| OcError::HttpFailure {

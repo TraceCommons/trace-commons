@@ -16228,7 +16228,7 @@ async fn submit_trace_handler_authenticated(
         state.as_ref(),
         &authenticated_tenant,
         envelope.submission_id,
-        &raw_body,
+        HourlyCeilingCharge::Upload,
     )
     .await?;
     let mut admission = admission::reserve(
@@ -16441,6 +16441,16 @@ async fn submit_trace_handler_authenticated(
         // quota slot -- the prior quarantined row already counted.
         if remediating_prior.is_none() {
             enforce_submission_quota(state.as_ref(), &tenant)?;
+        } else {
+            // A remediation re-runs the re-scrub, so it is charged to the
+            // hourly ceiling, which let the known id through uncharged.
+            enforce_account_hourly_submission_ceiling(
+                state.as_ref(),
+                &tenant,
+                envelope.submission_id,
+                HourlyCeilingCharge::Remediation,
+            )
+            .await?;
         }
 
         // AT RECEIPT: against `raw_body`, the bytes the extractor captured before
@@ -62057,106 +62067,88 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantCtx) -> ApiResult<(
 ///
 /// An attempt is recorded only while its scope is under the limit, and only
 /// attempts inside the hour are kept, so a scope holds at most `limit`
-/// entries and the table is bounded by the active scopes times the ceiling.
-/// A sweep, at most once a minute, drops scopes with nothing left in the
-/// hour. A poisoned lock fails closed, as [`AccountRateLimiter`] does.
-#[derive(Default)]
+/// timestamps. The time is read under the lock, so each scope's timestamps
+/// are in order and the oldest is at the front. A sweep, at most once a
+/// minute, drops scopes with nothing left in the hour, and the table holds
+/// at most `max_scopes` scopes: a new scope that finds it full, even after a
+/// sweep, is refused ([`HourlySubmissionAttemptDecision::Full`]). A poisoned
+/// lock fails closed, as [`AccountRateLimiter`] does.
 struct HourlySubmissionAttempts {
     table: std::sync::Mutex<HourlySubmissionAttemptTable>,
+    max_scopes: usize,
+}
+
+impl Default for HourlySubmissionAttempts {
+    fn default() -> Self {
+        Self {
+            table: std::sync::Mutex::default(),
+            max_scopes: MAX_HOURLY_SUBMISSION_ATTEMPT_SCOPES,
+        }
+    }
 }
 
 #[derive(Default)]
 struct HourlySubmissionAttemptTable {
-    scopes: HashMap<String, VecDeque<HourlySubmissionAttempt>>,
+    scopes: HashMap<String, VecDeque<DateTime<Utc>>>,
     last_sweep: Option<DateTime<Utc>>,
 }
 
-/// One attempt: when it was let through, and the submission id and body
-/// digest that decide whether a later upload is an identical retry of it.
-struct HourlySubmissionAttempt {
-    at: DateTime<Utc>,
-    submission_id: Uuid,
-    body_digest: [u8; 32],
-}
+/// Most scopes [`HourlySubmissionAttempts`] holds at once, the same bound
+/// the per-minute limiter puts on its keys.
+const MAX_HOURLY_SUBMISSION_ATTEMPT_SCOPES: usize = MAX_ACCOUNT_RATE_WINDOWS;
 
 /// What [`HourlySubmissionAttempts::admit`] decided.
 #[derive(Debug, PartialEq, Eq)]
 enum HourlySubmissionAttemptDecision {
     /// Under the limit; the attempt was recorded.
     Admitted,
-    /// The same submission id with the same body as an attempt this process
-    /// let through in the hour, whose record exists: neither counted nor
-    /// refused (decision 6 on #1794).
-    IdenticalRetry,
     /// At the limit. The scope has room again an hour after this instant
     /// (`None`: no instant known, a full hour).
     Refused { room_after: Option<DateTime<Utc>> },
+    /// A new scope, and the table already holds `max_scopes` scopes with
+    /// attempts in the hour. Refused for the sweep interval.
+    Full,
 }
 
 /// How often [`HourlySubmissionAttempts`] drops scopes with nothing left in
-/// the hour.
+/// the hour, and the `Retry-After` of a [`HourlySubmissionAttemptDecision::Full`]
+/// refusal.
 const HOURLY_SUBMISSION_ATTEMPT_SWEEP_INTERVAL_SECONDS: i64 = 60;
 
 impl HourlySubmissionAttempts {
+    #[cfg(test)]
+    fn with_max_scopes_for_test(max_scopes: usize) -> Self {
+        Self {
+            table: std::sync::Mutex::default(),
+            max_scopes,
+        }
+    }
+
     /// Decide one upload against the ceiling `limit` for `scope`, given the
-    /// scope's recorded window `recorded`, and record it when it is let
-    /// through. `None` when the table's lock is poisoned: the caller refuses.
+    /// scope's recorded window `recorded`, and record it, at the current
+    /// time read under the lock, when it is let through. `None` when the
+    /// table's lock is poisoned: the caller refuses.
     fn admit(
         &self,
         scope: &str,
         limit: usize,
-        now: DateTime<Utc>,
         recorded: &trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow,
-        submission_id: Uuid,
-        body_digest: [u8; 32],
     ) -> Option<HourlySubmissionAttemptDecision> {
-        let window_start = now - Duration::hours(1);
         let mut table = self.table.lock().ok()?;
-        table.sweep(now, window_start);
-        let attempts = table.scopes.entry(scope.to_string()).or_default();
-        while attempts
-            .front()
-            .is_some_and(|attempt| attempt.at <= window_start)
-        {
-            attempts.pop_front();
-        }
-        // An identical retry needs both halves: a record exists for the id,
-        // and this process saw the same body for it. A body it has no digest
-        // for (after a restart, or from before this table) is counted, which
-        // is the safe direction: exempting it would let a remediation loop
-        // through again.
-        if recorded.submission_known
-            && attempts.iter().any(|attempt| {
-                attempt.submission_id == submission_id && attempt.body_digest == body_digest
-            })
-        {
-            return Some(HourlySubmissionAttemptDecision::IdenticalRetry);
-        }
-        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
-        let recorded_full = recorded.counted >= limit_i64;
-        let attempts_full = attempts.len() >= limit;
-        if recorded_full || attempts_full {
-            // Room returns once every full count has dropped below the
-            // limit, so the later of the two instants decides.
-            let recorded_room = recorded_full.then_some(recorded.oldest_counted_at);
-            let attempts_room = attempts_full.then(|| attempts.front().map(|attempt| attempt.at));
-            let room_after = match (recorded_room, attempts_room) {
-                (Some(None), _) | (_, Some(None)) => None,
-                (Some(Some(a)), Some(Some(b))) => Some(a.max(b)),
-                (Some(Some(a)), None) | (None, Some(Some(a))) => Some(a),
-                (None, None) => None,
-            };
-            if attempts.is_empty() {
-                table.scopes.remove(scope);
-            }
-            return Some(HourlySubmissionAttemptDecision::Refused { room_after });
-        }
-        attempts.push_back(HourlySubmissionAttempt {
-            at: now,
-            submission_id,
-            body_digest,
-        });
-        Some(HourlySubmissionAttemptDecision::Admitted)
+        Some(table.admit_at(scope, limit, recorded, Utc::now(), self.max_scopes))
+    }
+
+    /// [`Self::admit`] at a given instant, for tests.
+    #[cfg(test)]
+    fn admit_at_for_test(
+        &self,
+        scope: &str,
+        limit: usize,
+        recorded: &trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow,
+        now: DateTime<Utc>,
+    ) -> Option<HourlySubmissionAttemptDecision> {
+        let mut table = self.table.lock().ok()?;
+        Some(table.admit_at(scope, limit, recorded, now, self.max_scopes))
     }
 
     #[cfg(test)]
@@ -62177,18 +62169,64 @@ impl HourlySubmissionAttempts {
 }
 
 impl HourlySubmissionAttemptTable {
-    fn sweep(&mut self, now: DateTime<Utc>, window_start: DateTime<Utc>) {
-        if self.last_sweep.is_some_and(|last| {
-            now - last < Duration::seconds(HOURLY_SUBMISSION_ATTEMPT_SWEEP_INTERVAL_SECONDS)
-        }) {
+    fn admit_at(
+        &mut self,
+        scope: &str,
+        limit: usize,
+        recorded: &trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow,
+        now: DateTime<Utc>,
+        max_scopes: usize,
+    ) -> HourlySubmissionAttemptDecision {
+        let window_start = now - Duration::hours(1);
+        let new_scope = !self.scopes.contains_key(scope);
+        self.sweep(
+            now,
+            window_start,
+            new_scope && self.scopes.len() >= max_scopes,
+        );
+        if new_scope && self.scopes.len() >= max_scopes {
+            return HourlySubmissionAttemptDecision::Full;
+        }
+        let attempts = self.scopes.entry(scope.to_string()).or_default();
+        while attempts.front().is_some_and(|at| *at <= window_start) {
+            attempts.pop_front();
+        }
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let recorded_full = recorded.counted >= limit_i64;
+        let attempts_full = attempts.len() >= limit;
+        if recorded_full || attempts_full {
+            // Room returns once every full count has dropped below the
+            // limit, so the later of the two instants decides.
+            let recorded_room = recorded_full.then_some(recorded.oldest_counted_at);
+            let attempts_room = attempts_full.then(|| attempts.front().copied());
+            let room_after = match (recorded_room, attempts_room) {
+                (Some(None), _) | (_, Some(None)) => None,
+                (Some(Some(a)), Some(Some(b))) => Some(a.max(b)),
+                (Some(Some(a)), None) | (None, Some(Some(a))) => Some(a),
+                (None, None) => None,
+            };
+            if attempts.is_empty() {
+                self.scopes.remove(scope);
+            }
+            return HourlySubmissionAttemptDecision::Refused { room_after };
+        }
+        attempts.push_back(now);
+        HourlySubmissionAttemptDecision::Admitted
+    }
+
+    /// Drop the scopes with nothing left in the hour, at most once a sweep
+    /// interval unless `force`d (a full table meeting a new scope).
+    fn sweep(&mut self, now: DateTime<Utc>, window_start: DateTime<Utc>, force: bool) {
+        if !force
+            && self.last_sweep.is_some_and(|last| {
+                now - last < Duration::seconds(HOURLY_SUBMISSION_ATTEMPT_SWEEP_INTERVAL_SECONDS)
+            })
+        {
             return;
         }
         self.last_sweep = Some(now);
         self.scopes.retain(|_, attempts| {
-            while attempts
-                .front()
-                .is_some_and(|attempt| attempt.at <= window_start)
-            {
+            while attempts.front().is_some_and(|at| *at <= window_start) {
                 attempts.pop_front();
             }
             !attempts.is_empty()
@@ -62197,23 +62235,36 @@ impl HourlySubmissionAttemptTable {
 }
 
 /// The key [`HourlySubmissionAttempts`] counts an upload under: the same
-/// scope the recorded window counts (the tenant for an account tenant, the
-/// authenticated principal otherwise), length-prefixed so no two scopes
-/// share a key.
+/// scope the recorded window counts, length-prefixed so no two scopes share
+/// a key. For an account tenant that is the tenant. Otherwise it is the
+/// principal: its canonical `principal_ref`, from which its legacy alias is
+/// derived, and not the authentication method, so the attempts of one
+/// principal share one budget as its recorded submissions share one count.
 fn hourly_submission_attempt_scope(tenant: &TenantCtx, whole_tenant: bool) -> String {
+    let tenant_id = tenant.tenant_id();
     if whole_tenant {
-        let tenant_id = tenant.tenant_id();
         format!("hourly-tenant:{}:{tenant_id}", tenant_id.len())
     } else {
+        let principal_ref = tenant.principal_ref();
         format!(
-            "hourly-{}",
-            submit_principal_rate_limit_key(
-                tenant.tenant_id(),
-                tenant.safe_auth_method(),
-                tenant.principal_ref(),
-            )
+            "hourly-principal:{}:{tenant_id}:{}:{principal_ref}",
+            tenant_id.len(),
+            principal_ref.len()
         )
     }
+}
+
+/// What an upload is charged for at [`enforce_account_hourly_submission_ceiling`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HourlyCeilingCharge {
+    /// The ceiling's own check, before admission. A submission id that
+    /// already has a record in scope is not charged here: the handler either
+    /// replays its receipt (no work), or remediates it, and a remediation is
+    /// charged when the handler decides on it.
+    Upload,
+    /// A re-POST of an owned quarantined id, which the handler re-scrubs:
+    /// always charged, whatever its body.
+    Remediation,
 }
 
 /// The per-account hourly submission ceiling: a circuit breaker on intake,
@@ -62245,15 +62296,16 @@ fn hourly_submission_attempt_scope(tenant: &TenantCtx, whole_tenant: bool) -> St
 /// overshoot the ceiling by up to the number in flight; within one process
 /// the attempt count is taken under a lock, so they cannot.
 ///
-/// Only an identical retry is exempt (decision 6 on #1794): the same
-/// submission id with the same body (by SHA-256 digest) as an attempt this
-/// process let through in the hour, for an id that has a record of the same
-/// scope (the tenant for an account tenant, the uploading principal
-/// otherwise). It is neither counted nor refused; any other refusal for it
-/// comes from the checks after this one. A re-POST of a known id with a new
-/// body (a quarantine remediation, which re-runs the re-scrub) counts like
-/// a new upload, and so does a retry whose body this process has no digest
-/// for (after a restart). An id another principal of a pooled tenant
+/// What is charged follows what the handler will do (decision 6 on #1794,
+/// as revised in the #1800 review). A submission id that already has a
+/// record in scope (the tenant for an account tenant, the uploading
+/// principal otherwise) is not charged at this check: a retry of a recorded
+/// submission only replays its receipt, so it is never refused here,
+/// whatever this process remembers and whatever bytes it carries. When the
+/// handler instead remediates a quarantined record (the legacy path, which
+/// re-runs the re-scrub), it charges the ceiling again with
+/// [`HourlyCeilingCharge::Remediation`], which counts every remediation,
+/// an identical body included. An id another principal of a pooled tenant
 /// recorded is not exempt.
 ///
 /// Without a PostgreSQL mirror the window is counted from the tenant's file
@@ -62266,14 +62318,13 @@ async fn enforce_account_hourly_submission_ceiling(
     state: &AppState,
     tenant: &TenantCtx,
     submission_id: Uuid,
-    raw_body: &Bytes,
+    charge: HourlyCeilingCharge,
 ) -> ApiResult<()> {
     let limit = state.submission_quota.max_per_account_per_hour;
     if limit == 0 || tenant.role() != TokenRole::Contributor {
         return Ok(());
     }
-    let now = Utc::now();
-    let window_start = now - Duration::hours(1);
+    let window_start = Utc::now() - Duration::hours(1);
     let whole_tenant = trace_commons_protocol::admission::is_anchored_tenant(tenant.tenant_id());
     let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
     let window = match state.db_mirror.as_ref() {
@@ -62319,39 +62370,30 @@ async fn enforce_account_hourly_submission_ceiling(
             .map_err(internal_error)?
         }
     };
-    // The digest decides an identical retry, which needs a record for the
-    // id, and is kept with an admitted attempt. An id with no record when
-    // the recorded count alone has reached the limit is refused with
-    // neither, so its body is not hashed.
-    let body_digest: [u8; 32] = if !window.submission_known && window.counted >= limit_i64 {
-        [0; 32]
-    } else {
-        // Linear in the body, which at the cap is hundreds of MB: off the
-        // runtime workers, as the re-scrub is.
-        let body = raw_body.clone();
-        tokio::task::spawn_blocking(move || Sha256::digest(&body).into())
-            .await
-            .map_err(internal_error)?
-    };
+    if charge == HourlyCeilingCharge::Upload && window.submission_known {
+        return Ok(());
+    }
     let decision = state
         .submission_attempts
         .admit(
             &hourly_submission_attempt_scope(tenant, whole_tenant),
             limit,
-            now,
             &window,
-            submission_id,
-            body_digest,
         )
         .ok_or_else(|| internal_error("hourly submission attempt table unavailable"))?;
-    let HourlySubmissionAttemptDecision::Refused { room_after } = decision else {
-        return Ok(());
+    let retry_after_seconds = match decision {
+        HourlySubmissionAttemptDecision::Admitted => return Ok(()),
+        HourlySubmissionAttemptDecision::Refused { room_after } => {
+            hourly_ceiling_retry_after_seconds(room_after, Utc::now())
+        }
+        HourlySubmissionAttemptDecision::Full => HOURLY_SUBMISSION_ATTEMPT_SWEEP_INTERVAL_SECONDS,
     };
-    let retry_after_seconds = hourly_ceiling_retry_after_seconds(room_after, now);
     tracing::warn!(
         tenant_id = %tenant.tenant_id(),
         limit,
         per_principal = !whole_tenant,
+        remediation = charge == HourlyCeilingCharge::Remediation,
+        attempt_table_full = matches!(decision, HourlySubmissionAttemptDecision::Full),
         "Trace Commons account hourly submission ceiling reached"
     );
     Err(submit_rate_limited(retry_after_seconds))

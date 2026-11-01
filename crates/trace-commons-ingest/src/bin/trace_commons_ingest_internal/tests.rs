@@ -10527,10 +10527,13 @@ async fn account_hourly_submission_ceiling_refuses_the_next_upload_with_a_retry_
             ..TraceSubmissionQuotaConfig::default()
         },
     );
-    let first = sample_envelope().await;
+    // Accepted, so a retry only replays its receipt (a quarantined one would
+    // be remediated, and counted).
+    let first = low_risk_envelope().await;
     let Json(first_receipt) = test_submit(state.clone(), "token-a", first.clone())
         .await
         .expect("the first upload of the hour is admitted");
+    assert_eq!(first_receipt.status, "accepted");
     let Json(retry_receipt) = test_submit(state.clone(), "token-a", first)
         .await
         .expect("a retry of a recorded submission is not counted against itself");
@@ -10642,10 +10645,10 @@ async fn account_hourly_submission_ceiling_counts_attempts_refused_after_it() {
     );
 }
 
-/// Only an identical retry (the same submission id with the same body) is
-/// exempt from the ceiling (decision 6 on #1794). A re-POST of a known id
-/// with a new body, which for a quarantined record is a remediation that
-/// re-runs the re-scrub, counts like a new upload.
+/// A re-POST of a known quarantined id with a new body is a remediation
+/// that re-runs the re-scrub, so it counts like a new upload (decision 6 on
+/// #1794; an identical body counts too since the #1800 review, see
+/// `account_hourly_submission_ceiling_counts_every_remediation_of_a_quarantined_id`).
 #[tokio::test]
 async fn account_hourly_submission_ceiling_counts_a_known_id_with_a_new_body() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -10657,12 +10660,13 @@ async fn account_hourly_submission_ceiling_counts_a_known_id_with_a_new_body() {
         },
     );
     let first = sample_envelope().await;
-    let _ = test_submit(state.clone(), "token-a", first.clone())
+    let Json(first_receipt) = test_submit(state.clone(), "token-a", first.clone())
         .await
         .expect("the first upload of the hour is admitted");
-    let _ = test_submit(state.clone(), "token-a", first.clone())
-        .await
-        .expect("an identical retry is exempt");
+    assert_eq!(
+        first_receipt.status, "quarantined",
+        "the fixture is remediable"
+    );
 
     let mut new_body = first;
     new_body.events[0].redacted_content = Some("A different body for the same id".to_string());
@@ -10739,10 +10743,9 @@ async fn account_hourly_submission_ceiling_replays_a_recorded_receipt_this_proce
     assert_eq!(replayed.status, "accepted");
 }
 
-/// The in-process attempt table on its own: an identical retry needs a
-/// record and a body this process saw; attempts count by scope, never past
-/// the limit, and leave after an hour; the refusal names the later of the
-/// two counts' room; a sweep drops scopes with nothing left in the hour.
+/// The in-process attempt table on its own: attempts count by scope, never
+/// past the limit, and leave after an hour; the refusal names the later of
+/// the two counts' room; a sweep drops scopes with nothing left in the hour.
 #[test]
 fn hourly_submission_attempts_count_by_scope_and_leave_after_an_hour() {
     use trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow;
@@ -10754,34 +10757,18 @@ fn hourly_submission_attempts_count_by_scope_and_leave_after_an_hour() {
         oldest_counted_at: None,
         submission_known: false,
     };
-    let (id, body) = (Uuid::new_v4(), [1u8; 32]);
+    for _ in 0..2 {
+        assert_eq!(
+            attempts.admit_at_for_test("scope-a", 2, &empty, now),
+            Some(HourlySubmissionAttemptDecision::Admitted)
+        );
+    }
     assert_eq!(
-        attempts.admit("scope-a", 2, now, &empty, id, body),
-        Some(HourlySubmissionAttemptDecision::Admitted)
-    );
-    // The same id and body, but no record yet (the first is still in flight,
-    // or was refused downstream): counted.
-    assert_eq!(
-        attempts.admit("scope-a", 2, now, &empty, id, body),
-        Some(HourlySubmissionAttemptDecision::Admitted)
-    );
-    assert_eq!(attempts.attempts_for_test("scope-a"), 2);
-    let known = RecentTraceSubmissionWindow {
-        counted: 1,
-        oldest_counted_at: Some(now),
-        submission_known: true,
-    };
-    assert_eq!(
-        attempts.admit("scope-a", 2, now, &known, id, body),
-        Some(HourlySubmissionAttemptDecision::IdenticalRetry),
-        "a recorded id with a body this process saw is an identical retry, even at the limit"
-    );
-    assert_eq!(
-        attempts.admit("scope-a", 2, now, &known, id, [2u8; 32]),
+        attempts.admit_at_for_test("scope-a", 2, &empty, now + Duration::seconds(1)),
         Some(HourlySubmissionAttemptDecision::Refused {
             room_after: Some(now)
         }),
-        "a new body for a recorded id counts"
+        "at the limit, room returns when the oldest attempt leaves"
     );
     assert_eq!(
         attempts.attempts_for_test("scope-a"),
@@ -10789,7 +10776,7 @@ fn hourly_submission_attempts_count_by_scope_and_leave_after_an_hour() {
         "never past the limit"
     );
     assert_eq!(
-        attempts.admit("scope-b", 2, now, &empty, Uuid::new_v4(), body),
+        attempts.admit_at_for_test("scope-b", 2, &empty, now),
         Some(HourlySubmissionAttemptDecision::Admitted),
         "another scope has its own count"
     );
@@ -10802,7 +10789,7 @@ fn hourly_submission_attempts_count_by_scope_and_leave_after_an_hour() {
         submission_known: false,
     };
     assert_eq!(
-        attempts.admit("scope-a", 2, later, &recorded_full, Uuid::new_v4(), body),
+        attempts.admit_at_for_test("scope-a", 2, &recorded_full, later),
         Some(HourlySubmissionAttemptDecision::Refused {
             room_after: Some(later)
         })
@@ -10811,15 +10798,56 @@ fn hourly_submission_attempts_count_by_scope_and_leave_after_an_hour() {
     // An hour on, the attempts have left and the sweep drops both scopes.
     let next_hour = now + Duration::hours(1) + Duration::seconds(1);
     assert_eq!(
-        attempts.admit("scope-c", 2, next_hour, &empty, Uuid::new_v4(), body),
+        attempts.admit_at_for_test("scope-c", 2, &empty, next_hour),
         Some(HourlySubmissionAttemptDecision::Admitted)
     );
     assert_eq!(attempts.scopes_for_test(), 1, "only the live scope is kept");
     assert_eq!(
-        attempts.admit("scope-a", 2, next_hour, &empty, Uuid::new_v4(), body),
+        attempts.admit_at_for_test("scope-a", 2, &empty, next_hour),
         Some(HourlySubmissionAttemptDecision::Admitted)
     );
     assert_eq!(attempts.attempts_for_test("scope-a"), 1);
+}
+
+/// The table holds at most `max_scopes` scopes (#1800 review). A new scope
+/// that finds it full is refused, after a sweep that could not make room; an
+/// existing scope is still counted; once scopes leave the hour, new ones are
+/// let in again.
+#[test]
+fn hourly_submission_attempts_cap_the_number_of_scopes() {
+    use trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow;
+
+    let attempts = HourlySubmissionAttempts::with_max_scopes_for_test(2);
+    let now = Utc::now();
+    let empty = RecentTraceSubmissionWindow {
+        counted: 0,
+        oldest_counted_at: None,
+        submission_known: false,
+    };
+    for scope in ["scope-a", "scope-b"] {
+        assert_eq!(
+            attempts.admit_at_for_test(scope, 5, &empty, now),
+            Some(HourlySubmissionAttemptDecision::Admitted)
+        );
+    }
+    assert_eq!(
+        attempts.admit_at_for_test("scope-c", 5, &empty, now),
+        Some(HourlySubmissionAttemptDecision::Full),
+        "a new scope past the cap is refused"
+    );
+    assert_eq!(attempts.scopes_for_test(), 2);
+    assert_eq!(
+        attempts.admit_at_for_test("scope-a", 5, &empty, now),
+        Some(HourlySubmissionAttemptDecision::Admitted),
+        "a scope already held is still counted"
+    );
+    let next_hour = now + Duration::hours(1) + Duration::seconds(1);
+    assert_eq!(
+        attempts.admit_at_for_test("scope-c", 5, &empty, next_hour),
+        Some(HourlySubmissionAttemptDecision::Admitted),
+        "a forced sweep makes room once the old scopes leave the hour"
+    );
+    assert_eq!(attempts.scopes_for_test(), 1);
 }
 
 /// A poisoned attempt table fails closed: the caller refuses the upload.
@@ -10839,10 +10867,7 @@ fn hourly_submission_attempts_fail_closed_on_a_poisoned_lock() {
         oldest_counted_at: None,
         submission_known: false,
     };
-    assert_eq!(
-        attempts.admit("scope", 1, Utc::now(), &empty, Uuid::new_v4(), [0u8; 32]),
-        None
-    );
+    assert_eq!(attempts.admit("scope", 1, &empty), None);
 }
 
 /// The ceiling's `Retry-After` rounds up, so a client that waits exactly as

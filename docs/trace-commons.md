@@ -812,7 +812,7 @@ audit-event ID gaps, control-plane drift, object-ref integrity, and compact
 | `TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST` | Per-request item cap for replay/benchmark/ranker exports; requests above it are clamped. | 500 |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR` | Hourly contributor-upload quota per tenant. | disabled |
 | `TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR` | Hourly contributor-upload quota per principal. | disabled |
-| `TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR` | Hourly ceiling on contributor submissions per account (per principal outside the account namespaces), whatever its admission authority: recorded submissions, and the attempts this process let through (counted in memory, per process); only an identical retry (same id, same body) is exempt. Answered `429` `submit_rate_limited` with `Retry-After`. `0` disables. See [`operator/env-reference.md`](operator/env-reference.md). | 600 |
+| `TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR` | Hourly ceiling on contributor submissions per account (per principal outside the account namespaces), whatever its admission authority: recorded submissions, and the attempts this process let through (counted in memory, per process); a retry of a recorded submission only replays its receipt and is not counted, while every remediation of a quarantined id is. Answered `429` `submit_rate_limited` with `Retry-After`. `0` disables. See [`operator/env-reference.md`](operator/env-reference.md). | 600 |
 | `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` | `POST /v1/traces` and token-bundle finalize requests per authenticated principal per 60 s window, together (1-600). | 30 |
 | `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY` | `POST /v1/traces` and token-bundle finalize requests one principal may have in flight, together (1-4). | 2 |
 
@@ -829,7 +829,8 @@ and retries after `N`; it is not a refusal of the trace.
 
 A token-bundle finalize for a bundle that cannot be finalized (bundles not
 enabled, an unknown bundle, a revoked one) is refused before it takes a submit
-slot or a unit of the rate; a replay of a finalized bundle still counts.
+slot or a unit of the rate (its bundle lookup has its own per-minute counter
+at the same rate); a replay of a finalized bundle still counts.
 
 Every upload route (`POST /v1/traces` and the token-bundle upload routes)
 reads its body under a 60 s idle timeout between chunks: an upload whose body
