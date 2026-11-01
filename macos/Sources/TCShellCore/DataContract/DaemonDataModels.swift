@@ -1200,8 +1200,12 @@ extension DaemonData {
         public let creditFinal: Double?
         /// Credit for them still being scored: pending, never earned.
         public let creditPending: Double?
-        /// The contribution sentence as the core worded it, credit included;
-        /// the same sentence `text` carries. Nil from an older daemon.
+        /// The contribution sentence as the core worded it, with every earned
+        /// figure in it; null when nothing was contributed, and absent from
+        /// an older daemon. This shell does not read it (it posts `text`,
+        /// whose copy leaves out credit the folded verdicts sentence already
+        /// states); it is declared so the contract lists every key the
+        /// daemon sends, and Windows posts it.
         public let contribution: String?
         /// The core's notification body, posted unchanged. When the
         /// attention arbiter folded a re-engagement sentence in, it already

@@ -560,9 +560,22 @@ pub struct ContributedSince {
     pub credit_final: f64,
     /// Credit still being scored, summed the same way.
     pub credit_pending: f64,
+    /// Each decided trace's credit by submission id (opaque, never on the
+    /// wire), so a digest can leave out the traces its verdicts fold states.
+    pub credit_final_by_submission: BTreeMap<String, f64>,
 }
 
 impl ContributedSince {
+    /// Decided credit of the traces NOT in `folded`: what is left to state
+    /// when a verdicts fold already states those traces' credit.
+    pub fn credit_final_not_in(&self, folded: &BTreeSet<String>) -> f64 {
+        self.credit_final_by_submission
+            .iter()
+            .filter(|(id, _)| !folded.contains(*id))
+            .map(|(_, f)| f)
+            .sum()
+    }
+
     /// Decided credit in tenths, rounded once; `None` when it rounds to zero.
     pub fn credit_final_tenths(&self) -> Option<u64> {
         super::nudge::tenths_of(self.credit_final)
@@ -596,7 +609,12 @@ pub fn contributed_since(
             out.project_labels.insert(rec.project_label.clone());
         }
         match rec.credit_points_final {
-            Some(f) => out.credit_final += super::nudge::decimal_credit(f),
+            Some(f) => {
+                let f = super::nudge::decimal_credit(f);
+                out.credit_final += f;
+                out.credit_final_by_submission
+                    .insert(rec.submission_id.to_string(), f);
+            }
             None => out.credit_pending += super::nudge::decimal_credit(rec.credit_points_pending),
         }
     }

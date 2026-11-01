@@ -415,6 +415,11 @@ pub(crate) fn decimal_credit(credit: f32) -> f64 {
 /// should be 0.35 but reads 0.34999999999999998 still gives 4 tenths.
 /// The one rounding every credit sentence goes through.
 pub(crate) fn tenths_of(credit: f64) -> Option<u64> {
+    // Not a number, or not finite, is no credit: the casts below saturate
+    // and would print an enormous figure.
+    if !credit.is_finite() {
+        return None;
+    }
     let millionths = (credit * 1e6).round() as i64;
     let tenths = millionths.saturating_add(50_000).div_euclid(100_000);
     u64::try_from(tenths).ok().filter(|t| *t >= 1)
@@ -974,6 +979,16 @@ pub(crate) fn shared_cooldown_until(
 
 #[cfg(test)]
 mod tests {
+    /// A figure that is not a number is no credit: a sentence for it would
+    /// print a saturated, enormous figure.
+    #[test]
+    fn a_non_finite_credit_figure_has_no_tenths() {
+        assert_eq!(tenths_of(f64::INFINITY), None);
+        assert_eq!(tenths_of(f64::NEG_INFINITY), None);
+        assert_eq!(tenths_of(f64::NAN), None);
+        assert_eq!(tenths_of(0.35), Some(4));
+    }
+
     use super::*;
 
     fn now() -> DateTime<Utc> {

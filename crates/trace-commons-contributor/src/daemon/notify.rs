@@ -397,15 +397,6 @@ pub fn wire_credit(credit: f64) -> f64 {
     super::nudge::tenths_of(credit).map_or(0.0, |t| t as f64 / 10.0)
 }
 
-/// The final credit the contribution line may state. When verdict news is
-/// folded into the same digest it already says decided credit ("is now
-/// final", approved nudge copy), so that sentence owns it and the
-/// contribution line leaves it out rather than say one figure twice in two
-/// words.
-pub fn earned_credit_for_digest(credit_final: f64, fold_is_verdicts: bool) -> f64 {
-    if fold_is_verdicts { 0.0 } else { credit_final }
-}
-
 /// Best-effort local OS notification.
 ///
 /// Never fails the pipeline: a missing notifier, a headless machine, or a
@@ -453,6 +444,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::daemon::test_support::at;
+
+    use crate::daemon::history::ContributedSince;
 
     fn labels(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|n| (*n).to_string()).collect()
@@ -682,13 +675,36 @@ mod tests {
         assert_eq!(text, "1 trace contributed from api.");
     }
 
-    /// Verdict news already says decided credit ("is now final") in the
-    /// digest it is folded into, so that sentence owns it and the
-    /// contribution line does not repeat it as "earned".
+    /// The same credit is stated once on each surface. The digest's `text`
+    /// carries the verdicts fold, whose "now final" sentence already states
+    /// the traces it covers, so the contribution sentence in `text` leaves
+    /// out only those traces' credit. A shell that does not show the fold is
+    /// given the sentence with all of it.
     #[test]
-    fn a_verdicts_fold_owns_the_final_credit() {
-        assert_eq!(earned_credit_for_digest(4.3, true), 0.0);
-        assert_eq!(earned_credit_for_digest(4.3, false), 4.3);
+    fn a_fold_states_only_its_own_traces_credit() {
+        let mut stated = ContributedSince::default();
+        stated.credit_final_by_submission.insert("a".into(), 2.0);
+        stated.credit_final_by_submission.insert("b".into(), 1.5);
+        stated.credit_final = 3.5;
+        let folded: BTreeSet<String> = ["a".to_string()].into();
+        // `b` is not in the fold: its credit is not dropped from the text.
+        assert_eq!(stated.credit_final_not_in(&folded), 1.5);
+        assert_eq!(
+            contribution_text(
+                2,
+                &labels(&["api"]),
+                stated.credit_final_not_in(&folded),
+                0.0
+            ),
+            "2 traces contributed from api. 1.5 credit earned."
+        );
+        // A shell that cannot show the fold gets every earned figure.
+        assert_eq!(
+            contribution_text(2, &labels(&["api"]), stated.credit_final, 0.0),
+            "2 traces contributed from api. 3.5 credit earned."
+        );
+        // Nothing folded: nothing is left out.
+        assert_eq!(stated.credit_final_not_in(&BTreeSet::new()), 3.5);
     }
 
     #[test]
