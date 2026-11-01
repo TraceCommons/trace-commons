@@ -87,14 +87,35 @@ fn saved_options_round_trip_through_ipc_and_restart() {
 #[test]
 fn argv_grouping_preserves_literal_shell_syntax_and_empty_values() {
     use trace_commons_contributor::managed::{ToolId, options::parse};
-    assert_eq!(parse(ToolId::Claude, r#"--model 'custom model' --append-system-prompt "$(touch injected); $HOME *" --name=two\ words ''"#).unwrap(), ["--model", "custom model", "--append-system-prompt", "$(touch injected); $HOME *", "--name=two words", ""]);
+    // A backslash escapes the space off Windows; on Windows it is part of
+    // the word (a path separator there), so the space splits.
+    let escaped_space = if cfg!(windows) {
+        vec!["--name=two\\", "words"]
+    } else {
+        vec!["--name=two words"]
+    };
+    let mut expected = vec![
+        "--model",
+        "custom model",
+        "--append-system-prompt",
+        "$(touch injected); $HOME *",
+    ];
+    expected.extend(escaped_space);
+    expected.push("");
+    assert_eq!(parse(ToolId::Claude, r#"--model 'custom model' --append-system-prompt "$(touch injected); $HOME *" --name=two\ words ''"#).unwrap(), expected);
     assert_eq!(
         parse(ToolId::Claude, "--text \"a\\qb\"").unwrap(),
         ["--text", "a\\qb"]
     );
-    for value in ["'", "\"", "--model trailing\\", "nul\0value"] {
+    for value in ["'", "\"", "nul\0value"] {
         assert!(parse(ToolId::Claude, value).is_err());
     }
+    // A trailing escape with nothing to escape, off Windows; on Windows the
+    // backslash is part of the word.
+    assert_eq!(
+        parse(ToolId::Claude, "--model trailing\\").is_err(),
+        !cfg!(windows)
+    );
     assert!(parse(ToolId::Claude, &"x".repeat(16 * 1024 + 1)).is_err());
 }
 

@@ -879,75 +879,17 @@ fn holds_workflows(dir: &Path) -> bool {
 }
 
 /// The folders Claude Code's `--add-dir` names in `cli_options`, relative
-/// ones taken from `cwd`. The flag takes every value up to the next flag,
-/// or one with `=`; Claude Code reads agents and commands from each
+/// ones taken from `cwd` as Node resolves them
+/// ([`super::options::add_dir_values`]; a drive-relative Windows folder is
+/// refused when the options are parsed). Claude Code reads agents and commands from each
 /// folder's `.claude` (2.1.316, its additional directories). Project
 /// settings' `permissions.additionalDirectories` only widen what the tools
 /// may touch and are not read for agents, so they are not listed.
 fn added_dirs(cli_options: &[String], cwd: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![];
-    let mut taking = false;
-    for arg in cli_options {
-        if let Some(value) = arg.strip_prefix("--add-dir=") {
-            dirs.extend(added_dir_paths(cwd, value, cfg!(windows)));
-            taking = false;
-        } else if arg == "--add-dir" {
-            taking = true;
-        } else if arg.starts_with('-') {
-            taking = false;
-        } else if taking {
-            dirs.extend(added_dir_paths(cwd, arg, cfg!(windows)));
-        }
-    }
-    dirs
-}
-
-/// Where Claude Code reads the folder `value` from, launched in `cwd`.
-///
-/// Node resolves a drive-relative Windows path (`C:shared`, which is what
-/// an unquoted `C:\shared` becomes once the options text is split) against
-/// the launch folder when it is on that drive. `cwd.join` would leave it
-/// drive-relative, read against whichever folder the checking process runs
-/// in. On another drive, Node uses that drive's own current folder, which
-/// is not known here, so the drive's root and the path as given are both
-/// read: more than Claude Code reads, never less. Anything else, and every
-/// path off Windows (`windows` false), is `cwd.join(value)`.
-fn added_dir_paths(cwd: &Path, value: &str, windows: bool) -> Vec<PathBuf> {
-    if windows {
-        if let Some((drive, rest)) = drive_relative(value) {
-            if path_drive(cwd) == Some(drive) {
-                return vec![cwd.join(rest)];
-            }
-            return vec![
-                PathBuf::from(format!("{drive}:\\")).join(rest),
-                cwd.join(value),
-            ];
-        }
-    }
-    vec![cwd.join(value)]
-}
-
-/// The drive and the rest of `value` when it is a Windows drive-relative
-/// path: a drive letter and a colon, then no separator.
-fn drive_relative(value: &str) -> Option<(char, &str)> {
-    let mut chars = value.chars();
-    let drive = chars.next().filter(char::is_ascii_alphabetic)?;
-    let rest = chars.as_str().strip_prefix(':')?;
-    (!rest.starts_with(['\\', '/'])).then_some((drive.to_ascii_uppercase(), rest))
-}
-
-/// The drive letter `path` is on, read from its text (`C:\...` or the
-/// verbatim `\\?\C:\...` a canonical Windows path has), so the same code
-/// reads it on every platform.
-fn path_drive(path: &Path) -> Option<char> {
-    let text = path.to_str()?;
-    let text = text.strip_prefix(r"\\?\").unwrap_or(text);
-    let mut chars = text.chars();
-    let drive = chars.next().filter(char::is_ascii_alphabetic)?;
-    chars
-        .as_str()
-        .starts_with(':')
-        .then_some(drive.to_ascii_uppercase())
+    super::options::add_dir_values(cli_options)
+        .into_iter()
+        .map(|value| cwd.join(value))
+        .collect()
 }
 
 /// Whether the folder `dir` holds anything but hidden files (a
@@ -1666,48 +1608,30 @@ mod tests {
         ));
     }
 
-    /// On Windows a folder like `C:shared`, which is what an unquoted
-    /// `C:\shared` becomes once the options text is split, is relative to
-    /// the launch folder when it is on that drive, as Node resolves it for
-    /// Claude Code. Joined as it is, it would be read relative to whichever
-    /// folder the checking process happens to run in.
+    /// End to end on Windows (#1814 review): options text naming a folder
+    /// the Windows way, unquoted, is parsed and checked as Claude Code would
+    /// read it, and a model an agent there names refuses the launch.
+    #[cfg(windows)]
     #[test]
-    fn a_drive_relative_add_dir_is_read_from_the_launch_folder_on_windows() {
-        assert_eq!(drive_relative("C:shared"), Some(('C', "shared")));
-        assert_eq!(drive_relative("d:"), Some(('D', "")));
-        for not_relative in [
-            r"C:\shared",
-            "C:/shared",
-            "shared",
-            r"\\server\share",
-            "",
-            "1:x",
-        ] {
-            assert_eq!(drive_relative(not_relative), None, "{not_relative:?}");
-        }
-        assert_eq!(path_drive(Path::new(r"C:\proj")), Some('C'));
-        assert_eq!(path_drive(Path::new(r"\\?\c:\proj")), Some('C'));
-        assert_eq!(path_drive(Path::new("/proj")), None);
-
-        let cwd = Path::new(r"C:\proj");
+    fn a_windows_add_dir_is_checked_from_the_options_text() {
+        let launch = project(&[]);
+        let extra = tempfile::tempdir().unwrap();
+        let agents = extra.path().join(".claude/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("x.md"), markdown(&format!("model: {ID}"))).unwrap();
+        let text = format!(r#"--add-dir "{}""#, extra.path().display());
+        assert!(text.contains('\\'), "{text}");
+        let args = crate::managed::options::parse(ToolId::Claude, &text).unwrap();
+        assert_eq!(args[1], extra.path().display().to_string());
         assert_eq!(
-            added_dir_paths(cwd, "C:shared", true),
-            vec![cwd.join("shared")]
-        );
-        assert_eq!(
-            added_dir_paths(Path::new(r"\\?\C:\proj"), "c:shared", true),
-            vec![Path::new(r"\\?\C:\proj").join("shared")]
-        );
-        // Another drive: its root, and the path as given, both read.
-        assert_eq!(
-            added_dir_paths(cwd, "D:shared", true),
-            vec![PathBuf::from(r"D:\").join("shared"), cwd.join("D:shared")]
-        );
-        // Anything else, and everything off Windows, joins as before.
-        assert_eq!(added_dir_paths(cwd, "sub", true), vec![cwd.join("sub")]);
-        assert_eq!(
-            added_dir_paths(cwd, "C:shared", false),
-            vec![cwd.join("C:shared")]
+            project_model_check_in(
+                ToolId::Claude,
+                ConnectionKind::NearAi,
+                launch.path(),
+                &args,
+                None
+            ),
+            Err(ManagedError::ProjectChoosesModel)
         );
     }
 

@@ -29,7 +29,19 @@ pub fn arguments(store: &ConfigStore, tool: ToolId) -> Result<Vec<String>, Manag
 
 /// POSIX-style single/double quotes and backslash escapes, without expansions,
 /// comments, command substitution, globbing, or evaluation of shell operators.
+///
+/// On Windows a backslash is part of the word, outside quotes and inside
+/// double quotes alike, since it separates the folders of a path there: an
+/// unquoted `C:\Users\me` reaches the tool as written, not as `C:Usersme`.
+/// One at the end of a line still continues the options on the next.
+/// The words are the tool's arguments exactly (no shell is invoked), so the
+/// launch checks read the same paths the tool does.
 pub fn parse(tool: ToolId, options: &str) -> Result<Vec<String>, ManagedError> {
+    parse_on(tool, options, cfg!(windows))
+}
+
+/// [`parse`] with Windows' rules (`windows`) or POSIX's.
+fn parse_on(tool: ToolId, options: &str, windows: bool) -> Result<Vec<String>, ManagedError> {
     if options.len() > MAX_BYTES || options.contains('\0') {
         return Err(ManagedError::InvalidCliOptions);
     }
@@ -42,7 +54,7 @@ pub fn parse(tool: ToolId, options: &str) -> Result<Vec<String>, ManagedError> {
         match (quote, ch) {
             (Some('\''), '\'') | (Some('"'), '"') => quote = None,
             (Some('\''), _) => word.push(ch),
-            (_, '\\') => {
+            (_, '\\') if !windows => {
                 let next = chars.next().ok_or(ManagedError::InvalidCliOptions)?;
                 if quote == Some('"') && !matches!(next, '$' | '`' | '"' | '\\' | '\n') {
                     word.push('\\');
@@ -50,6 +62,20 @@ pub fn parse(tool: ToolId, options: &str) -> Result<Vec<String>, ManagedError> {
                 if next != '\n' {
                     word.push(next);
                     started = true;
+                }
+            }
+            // On Windows a backslash at the end of a line still continues
+            // the options on the next one; it ends the word, as the line
+            // break would.
+            (None, '\\')
+                if windows && (chars.peek() == Some(&'\n') || chars.peek() == Some(&'\r')) =>
+            {
+                if chars.next() == Some('\r') && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                if started {
+                    args.push(std::mem::take(&mut word));
+                    started = false;
                 }
             }
             (None, '\'' | '"') => {
@@ -75,7 +101,59 @@ pub fn parse(tool: ToolId, options: &str) -> Result<Vec<String>, ManagedError> {
         args.push(word);
     }
     validate(tool, &args)?;
+    // A drive-relative folder (`C:shared`) resolves against a per-drive
+    // current folder that only the tool's own environment knows, so the
+    // project check could not be sure to read the folder the tool reads.
+    if windows && tool == ToolId::Claude && add_dir_values(&args).into_iter().any(drive_relative) {
+        return Err(ManagedError::InvalidCliOptions);
+    }
     Ok(args)
+}
+
+/// Text that [`parse`] reads back as the single word `word`, on any
+/// platform: single quotes, with each `'` written as `'"'"'`.
+pub fn quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', r#"'"'"'"#))
+}
+
+/// The folders Claude Code's `--add-dir` names in parsed `args`: every
+/// value up to the next flag, or the one after `=`.
+pub(crate) fn add_dir_values(args: &[String]) -> Vec<&str> {
+    let mut values = vec![];
+    let mut taking = false;
+    for arg in args {
+        if let Some(value) = arg.strip_prefix("--add-dir=") {
+            values.push(value);
+            taking = false;
+        } else if arg == "--add-dir" {
+            taking = true;
+        } else if arg.starts_with('-') {
+            taking = false;
+        } else if taking {
+            values.push(arg.as_str());
+        }
+    }
+    values
+}
+
+/// Whether `value` is a Windows drive-relative path: a drive with no root
+/// after it (`C:shared`, `C:`), as `std` reads the prefix. Never off
+/// Windows, where no path has a drive.
+fn drive_relative(value: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Path, Prefix};
+        let mut parts = Path::new(value).components();
+        matches!(
+            parts.next(),
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_))
+        ) && !matches!(parts.next(), Some(Component::RootDir))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = value;
+        false
+    }
 }
 
 /// Whether a `-c` override, as a TOML table, reaches one of Codex's
@@ -249,6 +327,98 @@ fn validate(tool: ToolId, args: &[String]) -> Result<(), ManagedError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On Windows a backslash is a path separator, not an escape (#1814
+    /// review): the options text reaches Claude Code exactly as written, so
+    /// `--add-dir C:\Users\me\shared` names that folder for the tool and for
+    /// the project check alike. Elsewhere the POSIX rules are unchanged.
+    #[test]
+    fn a_windows_backslash_is_part_of_the_word() {
+        let windows = |text: &str| parse_on(ToolId::Claude, text, true).unwrap();
+        assert_eq!(
+            windows(r"--add-dir C:\Users\me\shared"),
+            ["--add-dir", r"C:\Users\me\shared"]
+        );
+        assert_eq!(
+            windows(r#"--add-dir "C:\Program Files\shared\" --verbose"#),
+            ["--add-dir", r"C:\Program Files\shared\", "--verbose"]
+        );
+        assert_eq!(
+            windows(r"--add-dir \\server\share"),
+            ["--add-dir", r"\\server\share"]
+        );
+        assert_eq!(
+            windows(r"--add-dir 'C:\Users\O Brien'"),
+            ["--add-dir", r"C:\Users\O Brien"]
+        );
+        // A line continuation still works.
+        assert_eq!(
+            windows("--model custom \\\r\n --verbose \\\n"),
+            ["--model", "custom", "--verbose"]
+        );
+        assert_eq!(windows("--model trailing\\"), ["--model", "trailing\\"]);
+        // POSIX rules off Windows, as before.
+        let posix = |text: &str| parse_on(ToolId::Claude, text, false).unwrap();
+        assert_eq!(posix(r"--add-dir C:\Users\me"), ["--add-dir", "C:Usersme"]);
+        assert_eq!(posix(r"--add-dir a\ b"), ["--add-dir", "a b"]);
+        assert_eq!(posix(r#"--add-dir "a\"b""#), ["--add-dir", "a\"b"]);
+    }
+
+    /// `quote` gives text `parse` reads back as the one word it was given,
+    /// on this platform: a quote in a folder name (`O'Brien`) included
+    /// (#1814 review).
+    #[test]
+    fn quote_round_trips_through_parse() {
+        for word in [
+            r"C:\Users\O'Brien\Temp",
+            "/tmp/o'brien dir",
+            "plain",
+            "a \"b\" c",
+            "",
+        ] {
+            let text = format!("--add-dir {}", quote(word));
+            assert_eq!(
+                parse(ToolId::Claude, &text).unwrap(),
+                ["--add-dir", word],
+                "{text}"
+            );
+        }
+    }
+
+    /// The `--add-dir` values in parsed options, as Claude Code takes them:
+    /// every value up to the next flag, or the one after `=`.
+    #[test]
+    fn add_dir_values_follow_claude_codes_flag() {
+        let args: Vec<String> = ["--add-dir", "a", "b", "--verbose", "c", "--add-dir=d"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        assert_eq!(add_dir_values(&args), ["a", "b", "d"]);
+    }
+
+    /// A drive-relative folder (`C:shared`) resolves against a per-drive
+    /// current folder the launcher cannot see, so Claude Code and the
+    /// project check could read different folders. Refused as options to
+    /// fix, on Windows, where it means that (#1814 review).
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_relative_add_dir_is_refused_on_windows() {
+        for text in ["--add-dir C:shared", "--add-dir=c:shared", "--add-dir D:"] {
+            assert_eq!(
+                parse(ToolId::Claude, text),
+                Err(ManagedError::InvalidCliOptions),
+                "{text}"
+            );
+        }
+        for text in [
+            r"--add-dir C:\shared",
+            "--add-dir C:/shared",
+            r"--add-dir \shared",
+            "--add-dir shared",
+        ] {
+            assert!(parse(ToolId::Claude, text).is_ok(), "{text}");
+        }
+    }
 
     /// The person's own `-c` cannot name a model Codex uses besides the
     /// session's, by dotted key, quoted key or a table holding it; the
