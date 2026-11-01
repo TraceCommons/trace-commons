@@ -521,6 +521,21 @@ fn a_passing_check_is_not_a_failure() {
     .unwrap();
     assert!(!exited_zero.is_failure());
     assert!(bash("pytest | tail", "FAILED tests/a.py::test_x").is_failure());
+    // A sequence hides the check's exit behind the last command's, so its
+    // markers still count even when the whole exited 0.
+    for command in [
+        "cargo test; echo done",
+        "pytest > out.txt\ntail out.txt",
+        "cargo test && true",
+    ] {
+        let sequenced = ToolCall::from_hook(
+            &json!({"tool_name": "Bash", "tool_input": {"command": command},
+                    "tool_response": {"stdout": "error[E0308]: mismatched types", "exit_code": 0}}),
+            false,
+        )
+        .unwrap();
+        assert!(sequenced.is_failure(), "{command}");
+    }
 }
 
 /// Source printed by a command is content: `error:` or `Exception` in it is
@@ -723,6 +738,70 @@ fn a_session_lock_is_left_for_the_stale_prune() {
     assert!(!lock.exists(), "a stale orphan lock is removed");
 }
 
+/// Only `SessionStart` makes session state: a hook of a session that has
+/// ended leaves nothing behind.
+#[test]
+fn a_late_hook_after_session_end_leaves_no_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    store.set_enabled(true).unwrap();
+    run_session(&store, "repo1", "s1", 1);
+    let state = store.root().join("sessions").join("s1.json");
+    assert!(!state.exists());
+    for name in ["UserPromptSubmit", "Stop"] {
+        handle(
+            &store,
+            "repo1",
+            Harness::Claude,
+            &event(name, "s1"),
+            Utc::now(),
+        );
+    }
+    handle(
+        &store,
+        "repo1",
+        Harness::Claude,
+        &tool_event(
+            "PostToolUse",
+            "s1",
+            json!({"tool_name": "Read", "tool_input": {"file_path": "/r/a"}, "tool_response": "x"}),
+        ),
+        Utc::now(),
+    );
+    assert!(!state.exists(), "no orphan session state");
+}
+
+/// For Claude Code a `PostToolUse` command exited 0, whatever its output
+/// prints: an `Exit code: 1` line in a log it shows is not its status.
+#[test]
+fn claudes_known_exit_status_wins_over_printed_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    store.set_enabled(true).unwrap();
+    handle(
+        &store,
+        "repo1",
+        Harness::Claude,
+        &event("SessionStart", "c1"),
+        Utc::now(),
+    );
+    handle(
+        &store,
+        "repo1",
+        Harness::Claude,
+        &tool_event(
+            "PostToolUse",
+            "c1",
+            json!({"tool_name": "Bash", "tool_input": {"command": "cat ci.log"},
+                   "tool_response": {"stdout": "Exit code: 1\nbuild failed", "stderr": ""}}),
+        ),
+        Utc::now(),
+    );
+    let session = store.session("c1").unwrap();
+    assert_eq!(session.turn.calls, 1);
+    assert!(session.turn.failure_signatures.is_empty(), "not a failure");
+}
+
 /// Give back takes the folder's lock: it waits for a writer holding it.
 #[test]
 fn give_back_waits_for_the_folder_lock() {
@@ -821,13 +900,9 @@ fn a_redirect_answers_the_event_it_was_given() {
     }
     store.save_repo("repo1", &state).unwrap();
     let now = Utc::now();
-    handle(
-        &store,
-        "repo1",
-        Harness::Claude,
-        &event("UserPromptSubmit", "s1"),
-        now,
-    );
+    for name in ["SessionStart", "UserPromptSubmit"] {
+        handle(&store, "repo1", Harness::Claude, &event(name, "s1"), now);
+    }
     let mut answers = Vec::new();
     for _ in 0..8 {
         for call in [

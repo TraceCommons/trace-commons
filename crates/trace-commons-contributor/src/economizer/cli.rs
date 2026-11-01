@@ -123,6 +123,7 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
         EconomizerCommand::Restore { cwd, harness } => {
             let cwd = folder(cwd)?;
             let mut restored = Vec::new();
+            let mut busy = Vec::new();
             for harness in HARNESSES
                 .into_iter()
                 .filter(|h| harness.is_none_or(|only| only == *h))
@@ -133,12 +134,15 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                 }
                 // Under the folder's lock, so a session ending at the same
                 // time neither loses its fold nor undoes the Give back.
-                let given = store.try_update_repo(&key, GIVE_BACK_WAIT, |state| {
+                // A busy folder does not stop the others: what was given
+                // back is still reported, then the busy ones as an error.
+                match store.try_update_repo(&key, GIVE_BACK_WAIT, |state| {
                     let given = state.tools.restore(harness, &Thresholds::default());
                     (!given.is_empty(), given)
-                })?;
-                if !given.is_empty() {
-                    restored.push((harness, given));
+                }) {
+                    Ok(given) if !given.is_empty() => restored.push((harness, given)),
+                    Ok(_) => {}
+                    Err(_) => busy.push(harness),
                 }
             }
             if as_json {
@@ -146,8 +150,8 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                     .iter()
                     .map(|(harness, tools)| json!({ "harness": harness, "restored": tools }))
                     .collect();
-                println!("{}", json!({ "restored": rows }));
-            } else if restored.is_empty() {
+                println!("{}", json!({ "restored": rows, "busy": busy }));
+            } else if restored.is_empty() && busy.is_empty() {
                 println!("Nothing was left out here.");
             } else {
                 for (harness, tools) in restored {
@@ -157,6 +161,13 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                         tools.join(", ")
                     );
                 }
+            }
+            if !busy.is_empty() {
+                let names: Vec<_> = busy.iter().map(|harness| label(*harness)).collect();
+                anyhow::bail!(
+                    "Couldn't give back for {} here: a session is writing. Try again.",
+                    names.join(", ")
+                );
             }
         }
     }

@@ -110,9 +110,10 @@ impl ToolCall {
         };
         match self.exit_code {
             Some(code) if code != 0 => true,
-            // An unpiped command's exit is its own: a check that exited 0
-            // passed, whatever its output logs.
-            Some(_) if !command.contains('|') => false,
+            // A simple command's exit is its own: a check that exited 0
+            // passed, whatever its output logs. A pipe, a sequence or a
+            // second line may hide the check's exit behind another's.
+            Some(_) if is_simple_command(command) => false,
             _ => self.is_check() && marker_line(&self.output).is_some(),
         }
     }
@@ -185,6 +186,12 @@ fn response_text(response: &Value) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// Whether `command` is one command, whose exit status is its own: no
+/// pipe, sequence, background job or second line.
+fn is_simple_command(command: &str) -> bool {
+    !command.trim().contains(['|', ';', '&', '\n'])
 }
 
 /// The exit status a response object carries: `exit_code`, `exitCode`, or
