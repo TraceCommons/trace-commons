@@ -79,7 +79,6 @@ pub struct SessionState {
     pub schema: u32,
     /// The folder's [`repo_key`].
     pub repo: String,
-    pub started_at: DateTime<Utc>,
     #[serde(default)]
     pub prompts: u32,
     #[serde(default)]
@@ -92,11 +91,10 @@ pub struct SessionState {
 }
 
 impl SessionState {
-    pub fn new(repo: &str, now: DateTime<Utc>) -> Self {
+    pub fn new(repo: &str) -> Self {
         Self {
             schema: SCHEMA,
             repo: repo.to_owned(),
-            started_at: now,
             prompts: 0,
             used_tools: BTreeSet::new(),
             turn: TurnState::default(),
