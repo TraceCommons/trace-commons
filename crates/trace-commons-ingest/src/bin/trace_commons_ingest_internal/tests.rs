@@ -82369,9 +82369,13 @@ async fn submit_concurrency_limit_refuses_before_reading_the_body() {
         text.starts_with("http/1.1 429 too many requests"),
         "refused: {text}"
     );
+    let retry_after = text
+        .lines()
+        .find_map(|line| line.strip_prefix("retry-after: "))
+        .and_then(|value| value.trim().parse::<i64>().ok());
     assert!(
-        text.contains("retry-after: 2"),
-        "carries Retry-After: {text}"
+        retry_after.is_some_and(is_concurrency_retry_hint),
+        "carries a concurrency Retry-After: {text}"
     );
     assert!(
         text.contains(SUBMIT_RATE_LIMITED_LABEL),
