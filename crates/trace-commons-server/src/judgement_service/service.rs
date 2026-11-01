@@ -525,14 +525,27 @@ pub(crate) mod tests {
         assert!(h.limiter.account_spent_nanousd(&account, NOW) > 0);
     }
 
+    /// A turn digest in its canonical encoding, as the protocol requires.
     fn turn_digest() -> String {
-        serde_json::json!({
-            "digest_version": 1, "calls": 24, "edits": 9, "files_edited": 1,
-            "most_edits_to_one_file": 9, "failures": 9, "repeated_failures": 7,
-            "checks": 9, "last_check_failed": true, "usual_calls": 15,
-            "recent": [{"kind": "check", "failed": true, "repeated": true}],
-        })
-        .to_string()
+        use trace_commons_protocol::insights_judgement::{TurnCall, TurnCallKind};
+        let turn = TurnDigest {
+            digest_version: 1,
+            calls: 24,
+            edits: 9,
+            files_edited: 1,
+            most_edits_to_one_file: 9,
+            failures: 9,
+            repeated_failures: 7,
+            checks: 9,
+            last_check_failed: true,
+            usual_calls: Some(15),
+            recent: vec![TurnCall {
+                kind: TurnCallKind::Check,
+                failed: true,
+                repeated: true,
+            }],
+        };
+        String::from_utf8(turn.to_bytes().expect("consistent")).expect("JSON")
     }
 
     /// `stuck` judges a turn digest, once. A session digest, or a turn
@@ -562,13 +575,18 @@ pub(crate) mod tests {
 
         let mut with_text: serde_json::Value = serde_json::from_str(&turn_digest()).unwrap();
         with_text["prompt"] = serde_json::json!(CANARY);
-        for digest in [digest(1), with_text.to_string()] {
+        let mut padded = turn_digest();
+        padded.push_str("    ");
+        for sent in [digest(1), with_text.to_string(), padded] {
             // The protocol will not build this request, so a client bug or a
             // hostile client has to write it by hand: a `task` request with
-            // its judgements rewritten to `stuck`.
-            let task = request(h.issuer.valid_claim(), digest, vec![JudgementKind::Task]);
+            // its judgements and digest rewritten.
+            use base64::Engine as _;
+            let task = request(h.issuer.valid_claim(), digest(1), vec![JudgementKind::Task]);
             let mut refused: serde_json::Value = serde_json::from_str(&task.to_json()).unwrap();
             refused["judgements"] = serde_json::json!(["stuck"]);
+            refused["digest_b64"] =
+                serde_json::json!(base64::engine::general_purpose::STANDARD.encode(&sent));
             assert_eq!(
                 h.service
                     .judge(refused.to_string().as_bytes(), NOW, no_permit)
