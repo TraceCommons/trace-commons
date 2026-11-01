@@ -11,6 +11,9 @@ use super::tools::Thresholds;
 use crate::config::ConfigStore;
 
 const HARNESSES: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Opencode];
+/// How long Give back waits for a folder's lock, so a stalled hook never
+/// holds it for good.
+const GIVE_BACK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Subcommand)]
 pub enum EconomizerCommand {
@@ -130,7 +133,7 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                 }
                 // Under the folder's lock, so a session ending at the same
                 // time neither loses its fold nor undoes the Give back.
-                let given = store.update_repo(&key, |state| {
+                let given = store.try_update_repo(&key, GIVE_BACK_WAIT, |state| {
                     let given = state.tools.restore(harness, &Thresholds::default());
                     (!given.is_empty(), given)
                 })?;

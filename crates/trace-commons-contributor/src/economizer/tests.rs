@@ -728,7 +728,9 @@ fn a_session_lock_is_left_for_the_stale_prune() {
 fn give_back_waits_for_the_folder_lock() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path());
-    store.update_repo("repo1", |_| (true, ())).unwrap();
+    store
+        .try_update_repo("repo1", std::time::Duration::from_secs(30), |_| (true, ()))
+        .unwrap();
     assert!(
         store
             .try_update_repo("repo1", std::time::Duration::from_millis(10), |_| (
@@ -738,7 +740,7 @@ fn give_back_waits_for_the_folder_lock() {
             .is_ok()
     );
     std::thread::scope(|scope| {
-        let held = store.update_repo("repo1", |_| {
+        let held = store.try_update_repo("repo1", std::time::Duration::from_secs(30), |_| {
             let busy = scope
                 .spawn(|| {
                     store.try_update_repo("repo1", std::time::Duration::from_millis(50), |_| {

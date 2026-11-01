@@ -28,9 +28,9 @@ use super::store::{SessionState, Store};
 /// How long the hook waits for its input.
 pub const BUDGET: Duration = Duration::from_secs(3);
 /// How long the hook waits for a folder's state lock before giving up
-/// on its write. Giving up drops that turn's calls (`Stop`) or that
-/// session's evidence (`SessionEnd`), so the economizer learns from one
-/// session fewer; it never undoes another writer's change, and the agent
+/// on its write. Giving up, like any other failure to write, drops that
+/// turn's calls (`Stop`) or that session's evidence (`SessionEnd`) without
+/// a record, so the economizer learns from one session fewer; it never undoes another writer's change, and the agent
 /// is never held at the end of a turn.
 const HOOK_LOCK_WAIT: Duration = Duration::from_millis(500);
 /// The largest input read.
@@ -98,8 +98,9 @@ pub fn handle(
             let mut session = load();
             if session.turn.ended_well() {
                 let calls = session.turn.calls;
-                // A busy lock drops this turn's calls from the envelope;
-                // the turn is still reset below.
+                // Any failure to write (a busy lock, a full disk, an I/O
+                // error) drops this turn's calls from the envelope,
+                // unrecorded; the turn is still reset below.
                 let _ = store.try_update_repo(repo, HOOK_LOCK_WAIT, |state| {
                     state.envelope.add(calls);
                     (true, ())
@@ -114,7 +115,8 @@ pub fn handle(
                 .session(session_id)
                 .filter(|state| state.repo == repo)?;
             let digest = short_digest("session", session_id);
-            // A busy lock drops this session's evidence; its file is
+            // Any failure to write (a busy lock, a full disk, an I/O
+            // error) drops this session's evidence, unrecorded; its file is
             // removed either way, as nothing would fold it later.
             let _ = store.try_update_repo(repo, HOOK_LOCK_WAIT, |state| {
                 state

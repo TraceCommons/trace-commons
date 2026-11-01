@@ -11,7 +11,7 @@
 //!
 //! Unreadable or foreign state reads as empty: the economizer then does
 //! less, never something else. Every change to a folder's state is made
-//! under that folder's lock ([`Store::update_repo`]), so two sessions
+//! under that folder's lock ([`Store::try_update_repo`]), so two sessions
 //! ending at once, or a Give back, never lose each other's change.
 
 use anyhow::{Context, Result};
@@ -177,20 +177,12 @@ impl Store {
     /// Read, change and write one folder's state under an exclusive lock
     /// on `repos/<key>.lock`, so two writers (a session ending, a Give
     /// back) never lose each other's change. Returns what `change`
-    /// returns; the state is written only when `change` says so. Waits
-    /// for the lock as long as it takes; the agent's hook uses
-    /// [`Store::try_update_repo`] instead, so it never blocks for long.
-    pub fn update_repo<T>(
-        &self,
-        key: &str,
-        change: impl FnOnce(&mut RepoState) -> (bool, T),
-    ) -> Result<T> {
-        self.locked_update(key, None, change)
-    }
-
-    /// [`Store::update_repo`], giving up after `wait` if another writer
-    /// holds the lock. Giving up writes nothing, so it only delays what a
-    /// session teaches; it never undoes another writer's change.
+    /// returns; the state is written only when `change` says so.
+    ///
+    /// Gives up after `wait` if another writer holds the lock: nothing is
+    /// written and an error is returned, so a stalled writer (an agent
+    /// suspended mid-write) never holds the hook or a daemon thread for
+    /// good, and giving up never undoes another writer's change.
     pub fn try_update_repo<T>(
         &self,
         key: &str,
