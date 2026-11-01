@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "id": "kimi-k3-1-pro",
-  "title": "Meet Kimi K3.1 Pro",
-  "body": "1M-token context for coding and multimodal reasoning. Incognito · provider-hosted.",
-  "action_title": "Explore Kimi",
-  "action_url": "https://near.ai/models/moonshotai/kimi-k3.1-pro",
+  "id": "near-ai-red-cybersecurity-models",
+  "title": "NEAR AI Red: AI that helps with security work",
+  "body": "Abliterated DeepSeek V4.1 Flash and Qwen 3.8 answer security questions instead of refusing them. They run in NEAR AI's secure enclaves, so your findings stay private. NEAR AI private.",
+  "action_title": "Explore NEAR AI Red",
+  "action_url": "https://near.ai/red",
   "symbol": "cpu",
   "image_url": null
 }
