@@ -4,10 +4,17 @@ Sources/CodexBarCore/Providers/Claude/ClaudeOAuth/ClaudeOAuthCredentials.swift
 Sources/CodexBarCore/Providers/Claude/ClaudeOAuth/ClaudeOAuthCredentialModels.swift
 Sources/CodexBarCore/Providers/Claude/ClaudeConfigPaths.swift
 
-Only explicit user Refresh reads provider-owned credentials here. No token
-refresh, credential persistence, ACL preauthorization, or background secret read is
-implemented. Native Claude profile service selection was independently checked
-against the installed Claude Code 2.1.311 bundle.
+No-UI Keychain query and decrypt-ACL preflight design references:
+https://github.com/steipete/CodexBar/tree/897bff3
+Sources/CodexBarCore/KeychainNoUIQuery.swift
+Sources/CodexBarCore/KeychainAccessPreflight.swift
+
+A read without UI carries both the UI-fail policy and an LAContext with
+interactionNotAllowed, and runs only after the item's decrypt access list is
+found to admit this process's code signature. No token refresh, ACL change or
+preauthorization is implemented, and Claude Code's refresh token is never
+parsed, used or stored. Native Claude profile service selection was
+independently checked against the installed Claude Code 2.1.311 bundle.
 
 MIT License
 

@@ -1196,8 +1196,17 @@ extension DaemonData {
         public let contributed: Int?
         /// The folders they went from, as labels, never keys.
         public let contributedProjects: [String]?
-        /// Pending credit for them; pending, never earned.
+        /// Credit the server has decided for them: earned.
+        public let creditFinal: Double?
+        /// Credit for them still being scored: pending, never earned.
         public let creditPending: Double?
+        /// The contribution sentence as the core worded it, with every earned
+        /// figure in it; null when nothing was contributed, and absent from
+        /// an older daemon. This shell does not read it (it posts `text`,
+        /// whose copy leaves out credit the folded verdicts sentence already
+        /// states); it is declared so the contract lists every key the
+        /// daemon sends, and Windows posts it.
+        public let contribution: String?
         /// The core's notification body, posted unchanged. When the
         /// attention arbiter folded a re-engagement sentence in, it already
         /// ends with `fold.text`.
@@ -1208,19 +1217,23 @@ extension DaemonData {
 
         public init(
             pending: Int?, contributed: Int? = nil, contributedProjects: [String]? = nil,
-            creditPending: Double? = nil, text: String?, fold: DigestFold? = nil
+            creditFinal: Double? = nil, creditPending: Double? = nil, contribution: String? = nil, text: String?,
+            fold: DigestFold? = nil
         ) {
             self.pending = pending
             self.contributed = contributed
             self.contributedProjects = contributedProjects
+            self.creditFinal = creditFinal
             self.creditPending = creditPending
+            self.contribution = contribution
             self.text = text
             self.fold = fold
         }
 
         public enum CodingKeys: String, CodingKey {
-            case pending, contributed, text, fold
+            case pending, contributed, contribution, text, fold
             case contributedProjects = "contributed_projects"
+            case creditFinal = "credit_final"
             case creditPending = "credit_pending"
         }
     }

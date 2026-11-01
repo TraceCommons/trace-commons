@@ -8856,7 +8856,7 @@ deletes that file when it starts.
 | `snapshot` | immediately after `subscribe` | `{pending[], status}` |
 | `queue_changed` | queue contents changed | `{}` |
 | `status_changed` | pause/resume, a lapsed timed pause, health changed, a suggestion stamp or switch changed, a history poll found verdict news, dropped waiting news that was taken back or moved to a Never folder, or made a stale `status.nudge` readable again (a routine poll publishes nothing), or a daemon tick found `status.nudge` or `status.idle_sessions` moved by time alone -- an idle threshold crossed, a "Not now" lapsed, the news mark aged out, or the history poll gone stale. The tick compares with the previous tick, so it publishes at most once per change, at most once per `poll_interval_secs`, and never when nothing moved; a change another path already announced may be announced once more | `{}` |
-| `digest_due` | batching interval elapsed with pending work, and the master and digest notification switches are on and no standalone re-engagement notification posted in the last hour | `{pending, contributed, contributed_projects, credit_pending, text, fold?}` -- `fold` is `{kind, text}` when the attention arbiter folded a re-engagement sentence in as the digest's third sentence; `text` already ends with it |
+| `digest_due` | batching interval elapsed with pending work, and the master and digest notification switches are on and no standalone re-engagement notification posted in the last hour | `{pending, contributed, contributed_projects, contribution, credit_final, credit_pending, text, fold?}` -- `contribution` is the contribution sentence as the core worded it (credit included, e.g. "2 traces contributed from api. 4.3 credit earned."), or `null` when nothing was contributed; it states every earned figure, and a shell that builds its own digest (Windows) posts it as the contribution half. `text` states the same sentence but, when the digest folds in verdict news, leaves out the credit of the traces that fold already states ("is now final"), so each earned figure appears once on each surface. The fold states a folded trace's credit as it was when the trace went final (a later revision is not stated again), and each part is rounded on its own, so the fold's figure plus `text`'s earned figure can differ from `contribution` by a rounding step; a fold that states no credit (its finals add to under 0.05) covers none. `credit_final` and `credit_pending` are rounded once to tenths and decimal-clean (0 when they round to nothing); `credit_final` is the final credit (a decided figure, 0 included) of those contributions and `credit_pending` the credit still being scored; the digest says the first as "earned" and the second as "pending", and a daemon that predates `credit_final` omits it (read as 0) -- `fold` is `{kind, text}` when the attention arbiter folded a re-engagement sentence in as the digest's third sentence; `text` already ends with it |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
 | `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
@@ -9501,11 +9501,21 @@ AI does not list as a chat model is refused when the proxy starts, with
 `managed-model-unavailable`: at `managed_launch_redeem` on the sign-in, in the
 launcher on a saved key.
 
-- `managed_model_catalogue {tool}` (async only) answers
+- `managed_model_catalogue {tool, cache_only?}` (async only) answers
   `{models: [{id, name?}], default: string | null}`: NEAR AI's chat models in
   its order, and the model `tool` gets when a launch names none. The catalogue
   is public; no key is read or sent. `managed-model-unavailable` when NEAR AI
-  cannot be read; `managed-invalid-request` for other parameters. It also
+  cannot be read; `managed-invalid-request` for other parameters. The
+  catalogue comes from the daemon's one cache (`managed/catalogue_cache.rs`),
+  shared with the favorites check: a copy under 15 minutes old answers with
+  no read; an older one still answers at once while one refresh runs in the
+  background; only with no copy at all does the call wait on NEAR AI. The
+  last copy is kept in `managed-model-catalogue.json` in the config
+  directory (ids, names, tiers and token limits only, mode 0600), so a
+  restart or an offline start has it too. With `cache_only: true` (default
+  false) the call reads that cache and nothing else, never waits on or starts
+  a read, and fails with `managed-model-unavailable` when it holds nothing:
+  for a row that only wants display names. It also
   carries `favorites` (`[string]`): the starred models NEAR AI offers `tool`,
   in its order; and `unavailable_favorites` (`[string]`): the starred ids
   NEAR AI no longer lists for any tool. A starred model it lists but `tool`

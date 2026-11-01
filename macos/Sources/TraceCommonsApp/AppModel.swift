@@ -50,10 +50,12 @@ final class AppModel: ObservableObject {
     /// NEAR AI's chat models for `tool`'s Launch sheet picker; nil when
     /// they could not be read, which leaves only the default to choose.
     /// No error is shown: launching on the default needs no catalogue.
-    func managedModelCatalogue(tool: String, done: @escaping @MainActor (ManagedModelCatalogue?) -> Void) {
+    /// With `cacheOnly` the daemon answers from its cache and never reads
+    /// NEAR AI: for a session row's display name.
+    func managedModelCatalogue(tool: String, cacheOnly: Bool = false, done: @escaping @MainActor (ManagedModelCatalogue?) -> Void) {
         guard let client else { return done(nil) }
         Task.detached(priority: .userInitiated) {
-            let catalogue = try? client.managedModelCatalogue(tool: tool)
+            let catalogue = try? client.managedModelCatalogue(tool: tool, cacheOnly: cacheOnly)
             await MainActor.run { done(catalogue) }
         }
     }

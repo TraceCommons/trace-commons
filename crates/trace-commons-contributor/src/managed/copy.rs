@@ -44,28 +44,31 @@
 //!   stops what it's doing in {folder}." -- the confirmation, with `cancel`
 //!   and `stop`. Shells fill `{tool}` with the tool's name and `{folder}`
 //!   with the row's folder name.
-//! - `start_again` "Start again" -- an ended row's glass button, before
-//!   `dismiss` as a link.
+//! - `start_again` "Start again" -- an ended row's glass button when it
+//!   has no `resume`; otherwise an item in the row's menu. `dismiss` is that
+//!   row's menu item too, unless neither `resume` nor `start_again` is
+//!   offered; then it is a link, even when the menu holds
+//!   `copy_resume_command`.
 //!
 //! Resuming a session (design agreed 2026-10-31,
 //! `docs/superpowers/specs/2026-10-31-managed-session-resume-design.md`):
 //! - `resume` "Resume" -- an ended row's primary button when the row says
 //!   `can_resume` and the snapshot says `capabilities.terminal_launch` and
-//!   `capabilities.resume`, before `dismiss`; `start_again` then moves into
-//!   the row's menu. It continues the session's conversation in a new
+//!   `capabilities.resume`; `start_again` and `dismiss` then move into the
+//!   row's menu. It continues the session's conversation in a new
 //!   session.
-//! - `copy_resume_command` "Copy resume command" -- a link on an ended row
-//!   that says `can_resume`, after its buttons and before `dismiss`, shown
-//!   once the shell knows the config directory it passes. Copies the
+//! - `copy_resume_command` "Copy resume command" -- an item in the row's
+//!   menu on an ended row that says `can_resume`, shown once the shell
+//!   knows the config directory it passes. Copies the
 //!   command line that resumes the session from any terminal.
 //! - `resumed` "Resumed" -- a small secondary label on the status line of a
 //!   row that continues an earlier session (the row says `resumed_from`).
 //!   `resumed_from` "Continues {time}" -- the same label with the root
 //!   row's start time; shells fill `{time}` with it, formatted as they
 //!   format a row's own time.
-//! - `copied` "Copied" -- the "Copy resume command" link's text for about
-//!   two seconds after it copies, then it reverts. An in-place label
-//!   change, not a notice.
+//! - `copied` "Copied" -- the row's status text for about two
+//!   seconds after the "Copy resume command" menu item copies, then it
+//!   reverts. An in-place label change, not a notice.
 //!
 //! Installing a coding tool. Approved 2026-10-15 (#1419 review):
 //! - `tools_title` "Coding tools", above the install block shown when no

@@ -836,12 +836,30 @@ fn project_model_check_in(
     cli_options: &[String],
     home: Option<&Path>,
 ) -> Result<ProjectNotice, ManagedError> {
+    project_model_check_on(tool, connection, cwd, cli_options, home, cfg!(windows))
+}
+
+/// [`project_model_check_in`] with Windows' path rules (`windows`) or not.
+fn project_model_check_on(
+    tool: ToolId,
+    connection: ConnectionKind,
+    cwd: &Path,
+    cli_options: &[String],
+    home: Option<&Path>,
+    windows: bool,
+) -> Result<ProjectNotice, ManagedError> {
     let near_ai = matches!(
         connection,
         ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
     );
     if tool != ToolId::Claude || !near_ai {
         return Ok(ProjectNotice::default());
+    }
+    // A drive-relative folder (`C:shared`) resolves against a per-drive
+    // current folder only Claude Code's own environment knows, so this
+    // check could not be sure to read the folder Claude Code reads.
+    if windows && super::options::add_dir_values(cli_options).any(super::options::drive_relative) {
+        return Err(ManagedError::InvalidCliOptions);
     }
     let project = claude_project_dirs(cwd, home).map_err(|_| ManagedError::Conflict)?;
     let added = added_dirs(cli_options, cwd);
@@ -879,27 +897,16 @@ fn holds_workflows(dir: &Path) -> bool {
 }
 
 /// The folders Claude Code's `--add-dir` names in `cli_options`, relative
-/// ones taken from `cwd`. The flag takes every value up to the next flag,
-/// or one with `=`; Claude Code reads agents and commands from each
+/// ones taken from `cwd` as Node resolves them
+/// ([`super::options::add_dir_values`]; a drive-relative Windows folder is
+/// refused when the options are parsed). Claude Code reads agents and commands from each
 /// folder's `.claude` (2.1.316, its additional directories). Project
 /// settings' `permissions.additionalDirectories` only widen what the tools
 /// may touch and are not read for agents, so they are not listed.
 fn added_dirs(cli_options: &[String], cwd: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![];
-    let mut taking = false;
-    for arg in cli_options {
-        if let Some(value) = arg.strip_prefix("--add-dir=") {
-            dirs.push(cwd.join(value));
-            taking = false;
-        } else if arg == "--add-dir" {
-            taking = true;
-        } else if arg.starts_with('-') {
-            taking = false;
-        } else if taking {
-            dirs.push(cwd.join(arg));
-        }
-    }
-    dirs
+    super::options::add_dir_values(cli_options)
+        .map(|value| cwd.join(value))
+        .collect()
 }
 
 /// Whether the folder `dir` holds anything but hidden files (a
@@ -1616,6 +1623,86 @@ mod tests {
             plain.path(),
             None
         ));
+    }
+
+    /// End to end on Windows (#1814 review): options text naming a folder
+    /// the Windows way, unquoted, is parsed and checked as Claude Code would
+    /// read it, and a model an agent there names refuses the launch.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_add_dir_is_checked_from_the_options_text() {
+        let launch = project(&[]);
+        let extra = tempfile::tempdir().unwrap();
+        let agents = extra.path().join(".claude/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("x.md"), markdown(&format!("model: {ID}"))).unwrap();
+        let text = format!(r#"--add-dir "{}""#, extra.path().display());
+        assert!(text.contains('\\'), "{text}");
+        let args = crate::managed::options::parse(ToolId::Claude, &text).unwrap();
+        assert_eq!(args[1], extra.path().display().to_string());
+        assert_eq!(
+            project_model_check_in(
+                ToolId::Claude,
+                ConnectionKind::NearAi,
+                launch.path(),
+                &args,
+                None
+            ),
+            Err(ManagedError::ProjectChoosesModel)
+        );
+    }
+
+    /// A drive-relative `--add-dir` (`C:shared`) resolves against a
+    /// per-drive current folder only Claude Code's own environment knows,
+    /// so a NEAR AI launch cannot check it and refuses it as options to
+    /// fix. Any other connection is not checked and launches as before
+    /// (#1817 review).
+    #[test]
+    fn a_drive_relative_add_dir_refuses_only_a_near_ai_windows_launch() {
+        let launch = project(&[]);
+        let args = vec!["--add-dir".to_string(), "C:shared".to_string()];
+        let check = |connection, windows| {
+            project_model_check_on(
+                ToolId::Claude,
+                connection,
+                launch.path(),
+                &args,
+                None,
+                windows,
+            )
+        };
+        for connection in NEAR_AI {
+            assert_eq!(
+                check(connection, true),
+                Err(ManagedError::InvalidCliOptions)
+            );
+            assert_eq!(check(connection, false), Ok(ProjectNotice::default()));
+        }
+        assert_eq!(
+            check(ConnectionKind::Subscription, true),
+            Ok(ProjectNotice::default())
+        );
+    }
+
+    /// A folder whose name starts with `-` is still a folder Claude Code
+    /// adds, and is checked (#1817 review).
+    #[test]
+    fn an_add_dir_starting_with_a_dash_is_checked() {
+        let launch = project(&[]);
+        let agents = launch.path().join("-shared/.claude/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("x.md"), markdown(&format!("model: {ID}"))).unwrap();
+        let args = vec!["--add-dir".to_string(), "-shared".to_string()];
+        assert_eq!(
+            project_model_check_in(
+                ToolId::Claude,
+                ConnectionKind::NearAi,
+                launch.path(),
+                &args,
+                None
+            ),
+            Err(ManagedError::ProjectChoosesModel)
+        );
     }
 
     #[test]

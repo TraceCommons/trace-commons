@@ -646,9 +646,13 @@ public struct GlassPickerOption<Value: Hashable>: Identifiable {
     /// What the dot means, in words, spoken after the title: a dot is never
     /// the only signal. Already in the person's language, from the core.
     public let detail: String?
+    /// A tooltip for the option: for a title that stands in for something
+    /// longer, such as a display name for an id. None draws no tooltip.
+    public let help: String?
     public var id: Value { value }
 
-    public init(_ title: String, value: Value, dot: GlassStatus? = nil, section: String? = nil, detail: String? = nil) {
+    public init(_ title: String, value: Value, dot: GlassStatus? = nil, section: String? = nil, detail: String? = nil, help: String? = nil) {
+        self.help = help
         self.title = title
         self.value = value
         self.dot = dot
@@ -772,8 +776,10 @@ public struct GlassPicker<Value: Hashable>: View {
                     }
                 }
                 .accessibilityLabel(Self.spoken(option))
+                .help(option.help ?? "")
             } else {
                 Button(option.title) { selection = option.value }
+                    .help(option.help ?? "")
             }
         }
     }
@@ -801,6 +807,7 @@ public struct GlassPicker<Value: Hashable>: View {
         .fixedSize()
         .accessibilityLabel(label)
         .accessibilityValue(current.map(Self.spoken) ?? placeholder)
+        .help(current?.help ?? "")
     }
 }
 

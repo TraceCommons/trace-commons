@@ -78,8 +78,8 @@ final class DaemonClient: Sendable {
 
     /// NEAR AI's chat models and `tool`'s default, for the Launch sheet's
     /// model picker.
-    func managedModelCatalogue(tool: String) throws -> ManagedModelCatalogue {
-        try call("managed_model_catalogue", params: ["tool": tool], as: ManagedModelCatalogue.self)
+    func managedModelCatalogue(tool: String, cacheOnly: Bool = false) throws -> ManagedModelCatalogue {
+        try call("managed_model_catalogue", params: ManagedSurface.catalogueParams(tool: tool, cacheOnly: cacheOnly), as: ManagedModelCatalogue.self)
     }
 
     // MARK: - Read

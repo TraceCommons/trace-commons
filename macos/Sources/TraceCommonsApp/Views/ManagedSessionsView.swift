@@ -21,7 +21,11 @@ struct ManagedSessionsSection: View {
     @State private var stopping: ManagedSession?
     /// The session whose row menu is open.
     @State private var menuFor: String?
-
+    /// The session whose resume command was just copied: its status reads
+    /// "Copied" for about two seconds.
+    @State private var copiedFor: ManagedCopyMark?
+    /// Display names by model id, read from the daemon's cache only.
+    @State private var modelNames: [String: String] = [:]
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn {
@@ -260,6 +264,11 @@ struct ManagedSessionsSection: View {
                         }
                         if let failure { actionFailure(failure) }
                     }
+                    // The cache is read again when a session's tool or the
+                    // snapshot changes; a read is local and never asks NEAR AI.
+                    .task(id: ModelNamesRead(tools: Set(snapshot.sessions.filter { $0.model != nil }.map(\.tool)), revision: snapshot.revision)) {
+                        loadModelNames(tools: Set(snapshot.sessions.filter { $0.model != nil }.map(\.tool)))
+                    }
                 })
         }
     }
@@ -273,7 +282,7 @@ struct ManagedSessionsSection: View {
             session.accountLabel,
             model.managedText(session.connection),
         ].compactMap { $0 }.filter { !$0.isEmpty }
-        if let selectedModel = session.model { meta.append(selectedModel) }
+        if let selectedModel = session.model { meta.append(ManagedSurface.rowModel(selectedModel, names: modelNames)) }
         if let collection = session.collection, ["off", "pending", "collected", "failed"].contains(collection) {
             meta.append(model.managedText("collection_" + collection))
         }
@@ -284,24 +293,133 @@ struct ManagedSessionsSection: View {
             session, resumed: model.managedText("resumed"), resumedFrom: model.managedText("resumed_from")) {
             meta.append(marker)
         }
-        let row = HStack(spacing: GlassTokens.Space.s4) {
-            GlassToolTile(.tool(ManagedWords.glassTool(session.tool)))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(session.purpose == "login" ? model.managedText("sign_in") : session.projectLabel)
-                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(1)
-                Text(ManagedSurface.caption(meta, startedAt: session.startedAt))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: GlassTokens.Space.s4)
+        let title = session.purpose == "login" ? model.managedText("sign_in") : session.projectLabel
+        let caption = ManagedSurface.caption(meta, startedAt: session.startedAt)
+        let justCopied = copiedFor?.id == session.id
+        // A row that can copy lays out both labels and draws one, so the
+        // status keeps the width of the wider and a copy never moves the
+        // row's layout; a row that cannot copy lays out only its state.
+        // While copied the dot is neutral, so a failed row does not look
+        // like a failed copy.
+        let canCopy = ManagedSurface.offersCopyResumeCommand(session, configDirectoryKnown: !model.configDirectory.isEmpty)
+        let status = ZStack(alignment: .trailing) {
             GlassStatusLabel(model.managedText(ManagedSurface.stateKey(session.state)), status: ManagedWords.status(session.state))
-            ManagedSessionActions(session: session, menuFor: $menuFor, onStop: { stopping = session })
+                .opacity(justCopied ? 0 : 1)
+                .accessibilityHidden(justCopied)
+            if canCopy {
+                GlassStatusLabel(model.managedText("copied"), status: .off)
+                    .opacity(justCopied ? 1 : 0)
+                    .accessibilityHidden(!justCopied)
+            }
+        }
+        .fixedSize()
+        // One row, one set of actions and one popover. `SessionRowLayout`
+        // puts the status and actions after the text when it all fits on one
+        // line, and on a line below when it does not. The text wraps with no
+        // line limit, so nothing in it is cut.
+        let row = SessionRowLayout(spacing: GlassTokens.Space.s4, lineSpacing: GlassTokens.Space.s3) {
+            GlassToolTile(.tool(ManagedWords.glassTool(session.tool)))
+            sessionText(title: title, caption: caption)
+            HStack(spacing: GlassTokens.Space.s4) {
+                status
+                ManagedSessionActions(session: session, menuFor: $menuFor, copiedFor: $copiedFor, onStop: { stopping = session })
+            }
         }
         return ManagedSessionRowActions(session: session, onStop: { stopping = session }) { row }
     }
+
+    /// Names from the daemon's cache for the tools whose sessions name a
+    /// model. An error or an empty cache leaves the raw ids.
+    private func loadModelNames(tools: Set<String>) {
+        for tool in tools {
+            model.managedModelCatalogue(tool: tool, cacheOnly: true) { catalogue in
+                modelNames.merge(ManagedSurface.modelNames(catalogue)) { _, new in new }
+            }
+        }
+    }
+
+    private func sessionText(title: String, caption: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                .foregroundStyle(GlassColor.textPrimary)
+            Text(caption)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// A session row's layout: tile, text, then the trailing status and
+/// actions. At the width where all three fit on one line the trailing
+/// views sit at the right; otherwise the text takes the full width beside
+/// the tile, wrapping as far as it needs, and the trailing views sit below,
+/// right-aligned and never wider than the row.
+/// The children are the same views either way, so an open menu survives a
+/// resize.
+struct SessionRowLayout: Layout {
+    let spacing: CGFloat
+    let lineSpacing: CGFloat
+
+    private struct Plan {
+        var oneLine: Bool
+        var tile: CGSize
+        var text: CGSize
+        var trailing: CGSize
+        var size: CGSize
+    }
+
+    private func plan(_ proposal: ProposedViewSize, _ subviews: Subviews) -> Plan {
+        let tile = subviews[0].sizeThatFits(.unspecified)
+        let ideal = subviews[1].sizeThatFits(.unspecified)
+        let idealTrailing = subviews[2].sizeThatFits(.unspecified)
+        let trailing = CGSize(width: min(idealTrailing.width, proposal.width ?? idealTrailing.width), height: idealTrailing.height)
+        let oneLineWidth = tile.width + spacing + ideal.width + spacing + trailing.width
+        let available = proposal.width ?? oneLineWidth
+        if oneLineWidth <= available {
+            let height = max(tile.height, ideal.height, trailing.height)
+            return Plan(oneLine: true, tile: tile, text: ideal, trailing: trailing,
+                        size: CGSize(width: proposal.width ?? oneLineWidth, height: height))
+        }
+        let textWidth = max(0, available - tile.width - spacing)
+        let text = subviews[1].sizeThatFits(ProposedViewSize(width: textWidth, height: nil))
+        let top = max(tile.height, text.height)
+        return Plan(oneLine: false, tile: tile, text: text, trailing: trailing,
+                    size: CGSize(width: available, height: top + lineSpacing + trailing.height))
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        plan(proposal, subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let plan = plan(ProposedViewSize(width: bounds.width, height: nil), subviews)
+        if plan.oneLine {
+            let midY = bounds.midY
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: midY), anchor: .leading, proposal: ProposedViewSize(plan.tile))
+            subviews[1].place(at: CGPoint(x: bounds.minX + plan.tile.width + spacing, y: midY), anchor: .leading, proposal: ProposedViewSize(plan.text))
+            subviews[2].place(at: CGPoint(x: bounds.maxX, y: midY), anchor: .trailing, proposal: ProposedViewSize(plan.trailing))
+        } else {
+            let top = max(plan.tile.height, plan.text.height)
+            subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.minY), anchor: .topLeading, proposal: ProposedViewSize(plan.tile))
+            subviews[1].place(at: CGPoint(x: bounds.minX + plan.tile.width + spacing, y: bounds.minY), anchor: .topLeading, proposal: ProposedViewSize(plan.text))
+            subviews[2].place(at: CGPoint(x: bounds.maxX - plan.trailing.width, y: bounds.minY + top + lineSpacing), anchor: .topLeading, proposal: ProposedViewSize(plan.trailing))
+        }
+    }
+}
+
+/// What the session rows' display names were last read for.
+struct ModelNamesRead: Equatable {
+    let tools: Set<String>
+    let revision: UInt64
+}
+
+/// A copy of one row's resume command; the token tells a stale reset from
+/// the latest copy.
+struct ManagedCopyMark: Equatable {
+    let id: String
+    let token = UUID()
 }
 
 /// The "Change global settings" heading above the standard tool settings.
@@ -673,24 +791,37 @@ struct ManagedRemoveSheet: View {
 // MARK: - Session row actions (#1407)
 
 /// A session row's trailing actions (Ron, #1407): a running row's menu with
-/// Show and Stop; an ended row's Resume (Start again moves into the menu
-/// beside it) or else Start again, then Dismiss as a link. What
-/// the daemon cannot do is left out, never drawn disabled.
+/// Show and Stop; an ended row's one button (Resume, else Start again, else
+/// Dismiss as a link) and a menu with what is left: Start again, Copy resume
+/// command, Dismiss. A row whose button is Dismiss keeps its menu only when
+/// Copy resume command is offered. What the daemon cannot do is left out,
+/// never drawn disabled.
 struct ManagedSessionActions: View {
     let session: ManagedSession
     /// The row whose menu is open, shared with the account rows.
     @Binding var menuFor: String?
+    /// Set to a mark of this row for about two seconds after the command copies.
+    @Binding var copiedFor: ManagedCopyMark?
     let onStop: () -> Void
     @EnvironmentObject private var model: AppModel
-    /// The copy link reads "Copied" for about two seconds after it copies.
-    @State private var copied = false
-    @State private var copyToken = 0
+
+    /// The one visible action and the menu's items, from the inputs the
+    /// view passes.
+    static func drawn(
+        _ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool, configDirectoryKnown: Bool
+    ) -> ([ManagedSessionAction], [ManagedSessionAction]) {
+        (ManagedSurface.rowButtons(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable),
+         ManagedSurface.rowMenuItems(
+            session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable,
+            configDirectoryKnown: configDirectoryKnown))
+    }
 
     var body: some View {
         let terminalLaunch = model.managedSnapshot?.capabilities.terminalLaunch == true
         let resumeCapable = model.managedSnapshot?.capabilities.resume == true
-        let actions = ManagedSurface.rowButtons(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable)
-        let menuItems = ManagedSurface.rowMenuItems(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable)
+        let (actions, menuItems) = Self.drawn(
+            session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable,
+            configDirectoryKnown: !model.configDirectory.isEmpty)
         if !menuItems.isEmpty {
             menu(menuItems)
         }
@@ -711,13 +842,8 @@ struct ManagedSessionActions: View {
             .fixedSize()
             .disabled(model.managedBusy)
         }
-        if copiesResumeCommand {
-            Button(copied ? model.managedText("copied") : model.managedText("copy_resume_command")) { copyResumeCommand() }
-                .buttonStyle(GlassButtonStyle(.link))
-                .accessibilityLabel((copied ? model.managedText("copied") : model.managedText("copy_resume_command")) + " " + session.projectLabel)
-                .fixedSize()
-        }
         if actions.contains(.dismiss) {
+            // Dismiss is the row's button only when Resume and Start again are not offered.
             Button(model.managedText("dismiss")) {
                 model.managedAction("managed_session_dismiss", params: ["session_id": session.id])
             }
@@ -751,15 +877,22 @@ struct ManagedSessionActions: View {
                             startAgain()
                         }
                     }
+                    if actions.contains(.copyResumeCommand) {
+                        GlassMenuItem(model.managedText("copy_resume_command")) {
+                            menuFor = nil
+                            copyResumeCommand()
+                        }
+                        .accessibilityLabel(model.managedText("copy_resume_command") + " " + session.projectLabel)
+                    }
+                    if actions.contains(.dismiss) {
+                        GlassMenuItem(model.managedText("dismiss")) {
+                            menuFor = nil
+                            model.managedAction("managed_session_dismiss", params: ["session_id": session.id])
+                        }
+                    }
                 }
                 .disabled(model.managedBusy)
             }
-    }
-
-    /// An ended row the daemon can resume offers the command for a terminal,
-    /// once the app knows its config directory.
-    private var copiesResumeCommand: Bool {
-        session.canResume && !session.holdsAccount && !model.configDirectory.isEmpty
     }
 
     /// The conversation continues; the terminal opens as for any launch.
@@ -776,17 +909,16 @@ struct ManagedSessionActions: View {
             binaryPath: binary, configDirectory: model.configDirectory, sessionID: session.id)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(line, forType: .string)
-        // The link says "Copied" in place for about two seconds, then
-        // reverts. No toast or banner; VoiceOver hears the new word.
-        copyToken += 1
-        let token = copyToken
-        copied = true
+        // The menu closes on the click; the row's status reads "Copied" for
+        // about two seconds and VoiceOver hears it. No toast or banner.
+        let mark = ManagedCopyMark(id: session.id)
+        copiedFor = mark
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            if copiedFor == mark { copiedFor = nil }
+        }
         NSAccessibility.post(
             element: NSApp as Any, notification: .announcementRequested,
             userInfo: [.announcement: model.managedText("copied"), .priority: NSAccessibilityPriorityLevel.high.rawValue])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            if copyToken == token { copied = false }
-        }
     }
 
     /// Same tool, account and folder, with no folder chooser; the terminal
