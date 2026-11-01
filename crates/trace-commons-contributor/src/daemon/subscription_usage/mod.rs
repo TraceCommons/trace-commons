@@ -1531,6 +1531,10 @@ mod integration_tests {
             cache.epoch(),
             "login",
             "binding",
+            &trace_commons_contributor_platform::external_claude_credentials::ItemRevision {
+                item: "item".into(),
+                content: "revision".into(),
+            },
             (Utc::now() + Duration::hours(1)).timestamp_millis(),
             b"fixture-token",
         );

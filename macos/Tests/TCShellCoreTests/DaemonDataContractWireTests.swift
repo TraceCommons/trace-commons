@@ -362,11 +362,11 @@ final class DaemonDataContractWireTests: XCTestCase {
 
     func testDigestDueCarriesWhatWentWithoutYou() {
         let event = DaemonDataEventParser.parse(
-            #"{"event":"digest_due","data":{"pending":2,"contributed":3,"contributed_projects":["api","web"],"credit_pending":1.5,"text":"2 waiting"}}"#)
+            #"{"event":"digest_due","data":{"pending":2,"contributed":3,"contributed_projects":["api","web"],"credit_final":2.5,"credit_pending":1.5,"text":"2 waiting"}}"#)
         XCTAssertEqual(
             event,
             .digestDue(DaemonData.DigestDue(
-                pending: 2, contributed: 3, contributedProjects: ["api", "web"], creditPending: 1.5, text: "2 waiting")))
+                pending: 2, contributed: 3, contributedProjects: ["api", "web"], creditFinal: 2.5, creditPending: 1.5, text: "2 waiting")))
     }
 
     func testAnOlderDigestLeavesTheContributionHalfUnknown() {

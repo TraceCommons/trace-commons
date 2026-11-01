@@ -428,7 +428,8 @@ pub struct DaemonEvent {
 pub struct DigestFacts {
     pub contributed: usize,
     pub contributed_projects: Vec<String>,
-    pub credit_pending: f32,
+    pub credit_final: f64,
+    pub credit_pending: f64,
 }
 
 /// `digest_due`'s `data` is built in `daemon::tick`. Absent fields decode as
@@ -454,10 +455,14 @@ fn digest_facts(name: &str, data: &serde_json::Value) -> Option<DigestFacts> {
                     .collect()
             })
             .unwrap_or_default(),
+        credit_final: data
+            .get("credit_final")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
         credit_pending: data
             .get("credit_pending")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0) as f32,
+            .unwrap_or(0.0),
     })
 }
 

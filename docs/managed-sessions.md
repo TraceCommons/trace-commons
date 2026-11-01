@@ -422,8 +422,16 @@ with Start again. Existing sessions and account sign-in commands keep their
 options. A launch ticket captures the options at preparation, so changing
 Settings while a terminal opens cannot change that launch.
 
-Quote values containing spaces with single or double quotes; backslashes escape
-characters. These values become native process arguments directly. Shell
+Quote values containing spaces with single or double quotes. On macOS and
+Linux a backslash escapes the next character, as in a POSIX shell. On Windows a
+backslash is part of the value, outside quotes and inside double quotes, so a
+path such as `C:\Users\me\shared` can be written as it is. A backslash
+standing alone at the end of a line continues the options on the next line
+on every platform. To put a `"` inside a value, on any platform, close the
+quotes and write it in single quotes: `--name='say "hi"'` or `--name=a'"'b`.
+On Windows, `\"` no longer escapes a quote and `a\ b` is two values, so
+options saved with POSIX escapes may need to be written again. These values
+become native process arguments directly. Shell
 variables, substitutions, wildcard patterns and operators are passed literally;
 there is no shell evaluation. Clear the field and choose Save to restore the
 agent's defaults. The options use the canonical `managed_cli_options` daemon
