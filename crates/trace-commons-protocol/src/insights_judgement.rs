@@ -42,6 +42,9 @@ pub const JUDGEMENT_REQUEST_MAX_BYTES: usize = 16 * 1024;
 pub const JUDGEMENT_SEALED_REQUEST_MAX_BYTES: usize = JUDGEMENT_REQUEST_MAX_BYTES + 1 + 33 + 16;
 /// `Retry-After` on `judgement_saturated`, as `witness_pacing`.
 pub const JUDGEMENT_SATURATED_RETRY_AFTER_SECS: u32 = 30;
+/// How far the client's clock may be from the service's when it reads a
+/// budget refusal's `reset_at`; see [`JudgementRefusalBody::retry_not_before`].
+pub const JUDGEMENT_RESET_AT_SKEW_SECS: i64 = 24 * 60 * 60;
 /// `event_kind` is judged for at most this many marked events per digest, in
 /// digest order. Later marks come back `unjudged`.
 pub const JUDGEMENT_EVENT_KIND_MAX: u32 = 4;
@@ -64,6 +67,14 @@ const PROMPT_HASH_HEX_LEN: usize = 12;
 /// Mirrors [`crate::admission::AdmissionRefusal`]: a refusal reaches the
 /// client as a status and a `{"error": "<label>"}` body. The client matches
 /// the label against this set and never echoes the body.
+///
+/// A v1 refusal is plaintext and unsigned, so anything on the path can
+/// send one. The lifetimes on the variants below ("never retry this
+/// digest", "not today", "until `reset_at`") are what the service means by
+/// each refusal; a client acts on an unsigned refusal only as
+/// [`JudgementRefusal::unsigned_retry`] says, which defers for long only
+/// where a forgery gains nothing. A signed refusal, which could carry those
+/// lifetimes, is open on the design spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JudgementRefusal {
     /// The service is at capacity. Retry after `Retry-After`.
@@ -186,17 +197,81 @@ impl JudgementRefusal {
         Self::ALL.into_iter().find(|r| r.label() == label)
     }
 
-    /// Recognise a refusal from a response, requiring the status and the
-    /// label to agree. A label on a status it is never sent with is not this
-    /// refusal, so a body cannot pick how a status is handled.
-    pub fn from_response(status: u16, label: &str) -> Option<Self> {
-        Self::from_label(label).filter(|r| r.status() == status)
+    /// Whether the service sends this refusal on `route`. The attestation
+    /// route sends only `judgement_request_malformed` (a bad quote nonce)
+    /// and `judgement_quote_unavailable`; the judgement route sends every
+    /// refusal but the latter.
+    pub const fn sent_on(self, route: JudgementRoute) -> bool {
+        match route {
+            JudgementRoute::Attestation => {
+                matches!(self, Self::RequestMalformed | Self::QuoteUnavailable)
+            }
+            JudgementRoute::Judgement => !matches!(self, Self::QuoteUnavailable),
+        }
+    }
+
+    /// Recognise a refusal from a response, requiring the status, the label
+    /// and the route to agree. A label on a status or a route it is never
+    /// sent with is not this refusal, so a body cannot pick how a status is
+    /// handled.
+    pub fn from_response(route: JudgementRoute, status: u16, label: &str) -> Option<Self> {
+        Self::from_label(label).filter(|r| r.status() == status && r.sent_on(route))
+    }
+
+    /// What a client does with this refusal as v1 sends it: plaintext and
+    /// unsigned. Every refusal is a short retry except the three a forgery
+    /// gains nothing from: `judgement_saturated` and
+    /// `judgement_quote_unavailable` already ask for only a short wait, a
+    /// stale seal sends the client back for a fresh quote it verifies
+    /// itself, and the client can see for itself that a digest is over its
+    /// cap.
+    pub const fn unsigned_retry(self) -> JudgementRetry {
+        match self {
+            Self::Saturated | Self::QuoteUnavailable => JudgementRetry::AfterRetryAfter,
+            Self::SealStale => JudgementRetry::FreshQuote,
+            Self::DigestTooLarge => JudgementRetry::DropDigest,
+            Self::AccountBudgetExhausted
+            | Self::OperatorBudgetExhausted
+            | Self::RequestMalformed
+            | Self::WireVersionUnsupported
+            | Self::CredentialRefused
+            | Self::AccountIneligible
+            | Self::ModelUnattested
+            | Self::Timeout
+            | Self::RequestReplayed
+            | Self::ServiceFault => JudgementRetry::Soon,
+        }
     }
 }
 
-/// True only for a `503` carrying one of the three capacity labels.
+/// The two routes a refusal can arrive on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JudgementRoute {
+    /// `GET /v1/attestation`.
+    Attestation,
+    /// `POST /v1/judgement`.
+    Judgement,
+}
+
+/// What a client does after an unsigned refusal; see
+/// [`JudgementRefusal::unsigned_retry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JudgementRetry {
+    /// Wait for `Retry-After`, [`JUDGEMENT_SATURATED_RETRY_AFTER_SECS`].
+    AfterRetryAfter,
+    /// Fetch and verify a fresh quote, then retry once.
+    FreshQuote,
+    /// Do not send this digest again.
+    DropDigest,
+    /// Retry after the client's short backoff, a bounded number of times.
+    Soon,
+}
+
+/// True only for a `503` on the judgement route carrying one of the three
+/// capacity labels.
 pub fn is_judgement_capacity(status: u16, error: &str) -> bool {
-    JudgementRefusal::from_response(status, error).is_some_and(JudgementRefusal::is_capacity)
+    JudgementRefusal::from_response(JudgementRoute::Judgement, status, error)
+        .is_some_and(JudgementRefusal::is_capacity)
 }
 
 /// A refusal body: the label, plus `reset_at` (unix seconds) for exactly
@@ -218,12 +293,9 @@ struct RawRefusalBody {
 impl JudgementRefusalBody {
     /// `reset_at` must be present exactly when the refusal carries one, and
     /// must be the first instant of a UTC month, as
-    /// [`judgement_budget_reset_at`] computes it.
-    ///
-    /// Refusal bodies are not signed, and the client does not retry before
-    /// `reset_at`. Without this rule a forged or broken value such as
-    /// `i64::MAX` would block an account's judgements for good, and `-1`
-    /// would have the client retry straight away against an exhausted cap.
+    /// [`judgement_budget_reset_at`] computes it. Which month is checked
+    /// against the client's clock, by [`Self::retry_not_before`]: this
+    /// constructor has no clock.
     pub fn new(
         refusal: JudgementRefusal,
         reset_at: Option<i64>,
@@ -247,8 +319,34 @@ impl JudgementRefusalBody {
         self.refusal
     }
 
+    /// `reset_at` as sent. Read [`Self::retry_not_before`] to act on it.
     pub fn reset_at(&self) -> Option<i64> {
         self.reset_at
+    }
+
+    /// The `reset_at` a client may act on at `now_unix`: the one sent when
+    /// it is the next month start as seen within
+    /// [`JUDGEMENT_RESET_AT_SKEW_SECS`] of `now_unix`, and otherwise the
+    /// next month start by the client's own clock. `None` for a refusal
+    /// without `reset_at`.
+    ///
+    /// Refusal bodies are not signed. Without this a forged or broken month
+    /// start such as 2099-01-01 would turn an account's judgements off for
+    /// good, and 1970-01-01 would have the client retry straight away
+    /// against an exhausted cap.
+    pub fn retry_not_before(&self, now_unix: i64) -> Option<i64> {
+        let sent = self.reset_at?;
+        let next = |at: i64| judgement_budget_reset_at(at);
+        let earliest = now_unix
+            .checked_sub(JUDGEMENT_RESET_AT_SKEW_SECS)
+            .and_then(next);
+        let latest = now_unix
+            .checked_add(JUDGEMENT_RESET_AT_SKEW_SECS)
+            .and_then(next);
+        if earliest == Some(sent) || latest == Some(sent) {
+            return Some(sent);
+        }
+        next(now_unix)
     }
 
     pub fn to_json(&self) -> String {
@@ -260,12 +358,17 @@ impl JudgementRefusalBody {
     }
 }
 
-/// Parse a refusal body against the status it arrived with. `None` for
-/// anything outside the closed set: an unknown label, a label on the wrong
-/// status, an unknown field, or `reset_at` where the rule says otherwise.
-pub fn parse_judgement_refusal(status: u16, body: &[u8]) -> Option<JudgementRefusalBody> {
-    let raw: RawRefusalBody = serde_json::from_slice(body).ok()?;
-    let refusal = JudgementRefusal::from_response(status, &raw.error)?;
+/// Parse a refusal body against the route and status it arrived with.
+/// `None` for anything outside the closed set: an unknown label, a label on
+/// the wrong status or route, an unknown field, a body that is not a JSON
+/// object, or `reset_at` where the rule says otherwise.
+pub fn parse_judgement_refusal(
+    route: JudgementRoute,
+    status: u16,
+    body: &[u8],
+) -> Option<JudgementRefusalBody> {
+    let raw: RawRefusalBody = parse_closed(body, &[]).ok()?;
+    let refusal = JudgementRefusal::from_response(route, status, &raw.error)?;
     JudgementRefusalBody::new(refusal, raw.reset_at).ok()
 }
 
@@ -289,6 +392,37 @@ pub enum JudgementWireError {
     Malformed(&'static str),
     #[error("unsupported judgement wire version")]
     WireVersionUnsupported,
+}
+
+/// Deserialize a wire struct from a JSON object only. serde's derived
+/// structs also accept a JSON array of their fields in order, which
+/// `deny_unknown_fields` does not stop, so every parse here first requires
+/// objects throughout: an array only as the value of a field named in
+/// `array_fields`, and never an array inside an array.
+fn parse_closed<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    array_fields: &[&str],
+) -> Result<T, ()> {
+    fn objects_only(value: &serde_json::Value, array_fields: &[&str]) -> bool {
+        match value {
+            serde_json::Value::Object(map) => map.iter().all(|(name, field)| match field {
+                serde_json::Value::Array(items) => {
+                    array_fields.contains(&name.as_str())
+                        && items
+                            .iter()
+                            .all(|item| !item.is_array() && objects_only(item, array_fields))
+                }
+                other => objects_only(other, array_fields),
+            }),
+            serde_json::Value::Array(_) => false,
+            _ => true,
+        }
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ())?;
+    if !value.is_object() || !objects_only(&value, array_fields) {
+        return Err(());
+    }
+    serde_json::from_value(value).map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,7 +1136,7 @@ pub fn parse_judgement_attestation(
     body: &[u8],
 ) -> Result<JudgementAttestationResponse, JudgementWireError> {
     let raw: RawAttestationResponse =
-        serde_json::from_slice(body).map_err(|_| JudgementWireError::Malformed("attestation"))?;
+        parse_closed(body, &[]).map_err(|_| JudgementWireError::Malformed("attestation"))?;
     JudgementAttestationResponse::new(raw.quote_hex, raw.seal_public_key, raw.signing_address)
 }
 
@@ -1050,7 +1184,8 @@ impl std::fmt::Debug for JudgementRequest {
 impl JudgementRequest {
     /// The digest must be non-empty and at most
     /// [`JUDGEMENT_DIGEST_MAX_BYTES`] bytes; the claim non-empty; the
-    /// judgements non-empty and distinct, with `stuck` only alone; and the
+    /// judgements non-empty and distinct, with `stuck` only alone and
+    /// exactly when the digest is a valid [`TurnDigest`]; and the
     /// encoded plaintext at most
     /// [`JUDGEMENT_REQUEST_MAX_BYTES`], so a request is never built that the
     /// service would refuse for size. The claim is opaque here; the service
@@ -1072,8 +1207,15 @@ impl JudgementRequest {
             return Err(JudgementRefusal::RequestMalformed);
         }
         // `stuck` judges a turn digest, the others a session digest: one
-        // request carries one kind of digest.
-        if judgements.contains(&JudgementKind::Stuck) && judgements.len() > 1 {
+        // request carries one kind of digest, and the digest must be that
+        // kind. A turn digest carries no contributor text, so a session
+        // digest sent for `stuck` would send text the contract says this
+        // judgement never sees; both ends refuse it.
+        let stuck = judgements.contains(&JudgementKind::Stuck);
+        if stuck && judgements.len() > 1 {
+            return Err(JudgementRefusal::RequestMalformed);
+        }
+        if stuck != TurnDigest::parse(&digest).is_ok() {
             return Err(JudgementRefusal::RequestMalformed);
         }
         let request = Self {
@@ -1144,7 +1286,7 @@ pub fn parse_judgement_request(plaintext: &[u8]) -> Result<JudgementRequest, Jud
         return Err(JudgementRefusal::WireVersionUnsupported);
     }
     let raw: RawRequest =
-        serde_json::from_slice(plaintext).map_err(|_| JudgementRefusal::RequestMalformed)?;
+        parse_closed(plaintext, &["judgements"]).map_err(|_| JudgementRefusal::RequestMalformed)?;
     let digest = base64_decode(&raw.digest_b64).ok_or(JudgementRefusal::RequestMalformed)?;
     let request_nonce = JudgementRequestNonce::from_hex(&raw.request_nonce)
         .map_err(|_| JudgementRefusal::RequestMalformed)?;
@@ -1270,9 +1412,9 @@ impl JudgementResponse {
         if !is_lower_hex(&digest_sha256, SHA256_HEX_LEN) {
             return Err(JudgementWireError::Malformed("digest_sha256"));
         }
-        if results.is_empty() {
-            return Err(JudgementWireError::Malformed("results"));
-        }
+        // Empty is allowed: an `event_kind`-only request on a digest with no
+        // marks is answered with no results. `check_binding` refuses an empty
+        // response to any request that needed one.
         let keys: BTreeSet<_> = results
             .iter()
             .map(|r| (r.judgement, r.event_index))
@@ -1447,7 +1589,7 @@ pub fn parse_judgement_response(body: &[u8]) -> Result<JudgementResponse, Judgem
         return Err(JudgementWireError::WireVersionUnsupported);
     }
     let raw: RawResponse =
-        serde_json::from_slice(body).map_err(|_| JudgementWireError::Malformed("response"))?;
+        parse_closed(body, &["results"]).map_err(|_| JudgementWireError::Malformed("response"))?;
     let request_nonce = JudgementRequestNonce::from_hex(&raw.request_nonce)?;
     JudgementResponse::new(
         request_nonce,
@@ -1479,7 +1621,7 @@ fn append_length_prefixed(out: &mut Vec<u8>, field: &[u8]) {
 /// - the request nonce, 32 raw bytes;
 /// - `digest_sha256` as length-prefixed ASCII;
 /// - the result count, u64 LE, then per result:
-///   - judgement tag (1 task, 2 event_kind, 3 finished);
+///   - judgement tag (1 task, 2 event_kind, 3 finished, 4 stuck);
 ///   - event index: 0 absent, or 1 then u32 LE;
 ///   - label as length-prefixed wire string;
 ///   - 0 unjudged, or 1 then: bucket tag (1 high, 2 medium, 3 low), basis
@@ -1790,11 +1932,18 @@ pub struct TurnDigest {
 }
 
 impl TurnDigest {
-    /// Whether the counts hang together: no count above the calls, the
-    /// per-file and repeat counts within their totals, and at most
-    /// [`TURN_DIGEST_RECENT_MAX`] recent calls, no more than the turn made.
+    /// Whether the counts hang together: no count above the calls; the
+    /// per-file and repeat counts within their totals; a failed last check
+    /// only after a check; the first failure never a repeat; the busiest
+    /// file holding at least its share of the edits; a learned usual count
+    /// above zero; and at most [`TURN_DIGEST_RECENT_MAX`] recent calls, no
+    /// more than the turn made, whose per-kind, failed and repeated counts
+    /// fit within the totals.
     fn check(&self) -> Result<(), JudgementWireError> {
         let within = |part: u32, whole: u32| part <= whole;
+        let recent = |keep: fn(&TurnCall) -> bool| {
+            u32::try_from(self.recent.iter().filter(|call| keep(call)).count()).unwrap_or(u32::MAX)
+        };
         if self.digest_version != TURN_DIGEST_VERSION {
             return Err(JudgementWireError::WireVersionUnsupported);
         }
@@ -1805,6 +1954,15 @@ impl TurnDigest {
             && within(self.most_edits_to_one_file, self.edits)
             && within(self.files_edited, self.edits)
             && (self.edits == 0) == (self.files_edited == 0)
+            && (self.files_edited == 0
+                || self.most_edits_to_one_file >= self.edits.div_ceil(self.files_edited))
+            && (self.failures == 0 || self.repeated_failures < self.failures)
+            && (self.checks > 0 || !self.last_check_failed)
+            && self.usual_calls != Some(0)
+            && within(recent(|call| call.kind == TurnCallKind::Edit), self.edits)
+            && within(recent(|call| call.kind == TurnCallKind::Check), self.checks)
+            && within(recent(|call| call.failed), self.failures)
+            && within(recent(|call| call.repeated), self.repeated_failures)
             && self.recent.len() <= TURN_DIGEST_RECENT_MAX
             && self.recent.len() as u64 <= u64::from(self.calls)
             && self.recent.iter().all(|call| call.failed || !call.repeated))
@@ -1832,7 +1990,7 @@ impl TurnDigest {
         if version.digest_version != TURN_DIGEST_VERSION {
             return Err(JudgementWireError::WireVersionUnsupported);
         }
-        let digest: Self = serde_json::from_slice(bytes)
+        let digest: Self = parse_closed(bytes, &["recent"])
             .map_err(|_| JudgementWireError::Malformed("turn_digest"))?;
         digest.check()?;
         Ok(digest)
@@ -1873,7 +2031,10 @@ mod turn_digest_tests {
     #[test]
     fn a_turn_digest_round_trips_and_stays_small() {
         let mut full = digest();
-        full.calls = 30;
+        full.calls = 40;
+        full.checks = 24;
+        full.failures = 25;
+        full.repeated_failures = 24;
         full.recent = vec![full.recent[1]; TURN_DIGEST_RECENT_MAX];
         let bytes = full.to_bytes().unwrap();
         assert_eq!(TurnDigest::parse(&bytes).unwrap(), full);
@@ -1940,6 +2101,66 @@ mod turn_digest_tests {
                 calls: 40,
                 ..digest()
             },
+            // A failed last check with no check run.
+            TurnDigest {
+                checks: 0,
+                recent: vec![digest().recent[0]],
+                ..digest()
+            },
+            // The first failure cannot repeat an earlier one.
+            TurnDigest {
+                failures: 1,
+                repeated_failures: 1,
+                recent: vec![],
+                ..digest()
+            },
+            // Two edits over one file put both in that file.
+            TurnDigest {
+                edits: 2,
+                files_edited: 1,
+                most_edits_to_one_file: 1,
+                ..digest()
+            },
+            // An edit puts at least one edit in some file.
+            TurnDigest {
+                most_edits_to_one_file: 0,
+                ..digest()
+            },
+            // More failed checks among the recent calls than in the turn.
+            TurnDigest {
+                failures: 1,
+                repeated_failures: 0,
+                checks: 0,
+                last_check_failed: false,
+                recent: vec![
+                    TurnCall {
+                        kind: TurnCallKind::Check,
+                        failed: true,
+                        repeated: false,
+                    };
+                    3
+                ],
+                ..digest()
+            },
+            // More recent edits than edits.
+            TurnDigest {
+                edits: 1,
+                files_edited: 1,
+                most_edits_to_one_file: 1,
+                recent: vec![digest().recent[0]; 2],
+                ..digest()
+            },
+            // More recent repeats than repeated failures.
+            TurnDigest {
+                repeated_failures: 1,
+                recent: vec![digest().recent[1]; 2],
+                ..digest()
+            },
+            // A learned usual count is never zero.
+            TurnDigest {
+                usual_calls: Some(0),
+                ..digest()
+            },
         ] {
             assert_eq!(
                 broken.to_bytes(),
@@ -1979,6 +2200,48 @@ mod turn_digest_tests {
             .map(|label| label.as_wire())
             .collect();
         assert_eq!(wire, ["stuck", "productive", "unclear"]);
+    }
+
+    /// `stuck` takes a turn digest and nothing else, and a turn digest goes
+    /// to `stuck` and nowhere else, on both ends of the wire.
+    #[test]
+    fn stuck_and_the_turn_digest_go_together() {
+        let nonce = JudgementRequestNonce::from_bytes([7; 32]);
+        let turn = digest().to_bytes().unwrap();
+        let session = br#"{"prompt":"fix the bug in src/main.rs"}"#.to_vec();
+        let mut inconsistent: serde_json::Value = serde_json::from_slice(&turn).unwrap();
+        inconsistent["usual_calls"] = serde_json::json!(0);
+        let inconsistent = serde_json::to_vec(&inconsistent).unwrap();
+        let wire = |digest: &[u8], judgements: &[&str]| {
+            serde_json::json!({
+                "wire_version": JUDGEMENT_WIRE_VERSION,
+                "request_nonce": nonce.to_hex(),
+                "claim": "claim",
+                "digest_b64": base64_encode(digest),
+                "judgements": judgements,
+            })
+            .to_string()
+        };
+        for (digest, kind, label) in [
+            (&session, JudgementKind::Stuck, "stuck"),
+            (&inconsistent, JudgementKind::Stuck, "stuck"),
+            (&turn, JudgementKind::Task, "task"),
+            (&turn, JudgementKind::EventKind, "event_kind"),
+            (&turn, JudgementKind::Finished, "finished"),
+        ] {
+            assert_eq!(
+                JudgementRequest::new(nonce, "claim".into(), digest.clone(), vec![kind]).err(),
+                Some(JudgementRefusal::RequestMalformed),
+                "{label}"
+            );
+            assert_eq!(
+                parse_judgement_request(wire(digest, &[label]).as_bytes()).err(),
+                Some(JudgementRefusal::RequestMalformed),
+                "{label}"
+            );
+        }
+        assert!(parse_judgement_request(wire(&turn, &["stuck"]).as_bytes()).is_ok());
+        assert!(parse_judgement_request(wire(&session, &["task"]).as_bytes()).is_ok());
     }
 }
 
@@ -2182,18 +2445,206 @@ mod tests {
     #[test]
     fn a_refusal_is_recognised_only_when_status_and_label_agree() {
         for refusal in JudgementRefusal::ALL {
-            assert_eq!(
-                JudgementRefusal::from_response(refusal.status(), refusal.label()),
-                Some(refusal)
-            );
+            for route in [JudgementRoute::Attestation, JudgementRoute::Judgement] {
+                assert_eq!(
+                    JudgementRefusal::from_response(route, refusal.status(), refusal.label()),
+                    refusal.sent_on(route).then_some(refusal),
+                    "{refusal:?} {route:?}"
+                );
+            }
             assert_eq!(JudgementRefusal::from_label(refusal.label()), Some(refusal));
         }
         assert_eq!(
-            JudgementRefusal::from_response(400, "judgement_saturated"),
+            JudgementRefusal::from_response(JudgementRoute::Judgement, 400, "judgement_saturated"),
             None
         );
-        assert_eq!(JudgementRefusal::from_response(503, "unknown"), None);
+        assert_eq!(
+            JudgementRefusal::from_response(JudgementRoute::Judgement, 503, "unknown"),
+            None
+        );
         assert_eq!(JudgementRefusal::from_label("witness_saturated"), None);
+    }
+
+    /// Literal labels, so the table is not derived from the code it checks.
+    #[test]
+    fn each_route_recognises_only_its_own_refusals() {
+        let on = |route| -> Vec<&str> {
+            JudgementRefusal::ALL
+                .into_iter()
+                .filter(|r| r.sent_on(route))
+                .map(JudgementRefusal::label)
+                .collect()
+        };
+        assert_eq!(
+            on(JudgementRoute::Attestation),
+            ["judgement_request_malformed", "judgement_quote_unavailable"]
+        );
+        let judgement = on(JudgementRoute::Judgement);
+        assert_eq!(judgement.len(), 13);
+        assert!(!judgement.contains(&"judgement_quote_unavailable"));
+        let body = br#"{"error":"judgement_quote_unavailable"}"#;
+        assert_eq!(
+            parse_judgement_refusal(JudgementRoute::Judgement, 503, body),
+            None
+        );
+        assert!(parse_judgement_refusal(JudgementRoute::Attestation, 503, body).is_some());
+        let body = br#"{"error":"judgement_request_replayed"}"#;
+        assert_eq!(
+            parse_judgement_refusal(JudgementRoute::Attestation, 409, body),
+            None
+        );
+        assert!(parse_judgement_refusal(JudgementRoute::Judgement, 409, body).is_some());
+    }
+
+    /// An unsigned refusal defers for long only where a forgery gains
+    /// nothing. Literal labels, so the table is not derived from the code.
+    #[test]
+    fn unsigned_refusals_retry_soon_but_for_three() {
+        let table: Vec<_> = JudgementRefusal::ALL
+            .into_iter()
+            .map(|r| (r.label(), r.unsigned_retry()))
+            .collect();
+        use JudgementRetry::*;
+        assert_eq!(
+            table,
+            [
+                ("judgement_saturated", AfterRetryAfter),
+                ("judgement_account_budget_exhausted", Soon),
+                ("judgement_operator_budget_exhausted", Soon),
+                ("judgement_request_malformed", Soon),
+                ("judgement_digest_too_large", DropDigest),
+                ("judgement_wire_version_unsupported", Soon),
+                ("judgement_credential_refused", Soon),
+                ("judgement_account_ineligible", Soon),
+                ("judgement_model_unattested", Soon),
+                ("judgement_timeout", Soon),
+                ("judgement_seal_stale", FreshQuote),
+                ("judgement_request_replayed", Soon),
+                ("judgement_quote_unavailable", AfterRetryAfter),
+                ("judgement_service_fault", Soon),
+            ]
+        );
+    }
+
+    /// `reset_at` is acted on only as the next month start by the client's
+    /// clock, give or take the skew; anything else is clamped to it.
+    #[test]
+    fn reset_at_is_checked_against_the_clients_clock() {
+        let now = 1_792_497_600; // 2026-10-20T12:00:00Z
+        let next = 1_793_491_200; // 2026-11-01T00:00:00Z
+        let at = |reset_at: i64, now: i64| {
+            JudgementRefusalBody::new(JudgementRefusal::AccountBudgetExhausted, Some(reset_at))
+                .unwrap()
+                .retry_not_before(now)
+        };
+        assert_eq!(at(next, now), Some(next));
+        // 1970-01-01, 2099-01-01, and a month start one month too late.
+        for forged in [0, 4_070_908_800, 1_796_083_200] {
+            assert_eq!(at(forged, now), Some(next), "{forged}");
+        }
+        // On Dec 31 the next month start is Jan 1, and a service clock a few
+        // hours ahead that already reads January is believed.
+        let dec_31 = 1_798_740_000; // 2026-12-31T18:00:00Z
+        assert_eq!(at(1_798_761_600, dec_31), Some(1_798_761_600));
+        assert_eq!(at(1_801_440_000, dec_31), Some(1_801_440_000));
+        assert_eq!(at(1_803_859_200, dec_31), Some(1_798_761_600));
+        assert_eq!(
+            JudgementRefusalBody::new(JudgementRefusal::Timeout, None)
+                .unwrap()
+                .retry_not_before(now),
+            None
+        );
+    }
+
+    /// serde's derived structs also read a JSON array of their fields; no
+    /// parse here does.
+    #[test]
+    fn no_wire_struct_parses_from_an_array() {
+        assert_eq!(
+            parse_judgement_refusal(
+                JudgementRoute::Judgement,
+                503,
+                br#"["judgement_saturated"]"#
+            ),
+            None
+        );
+        let mut value: serde_json::Value = serde_json::from_str(&response().to_json()).unwrap();
+        value["spend"] = serde_json::json!(["over_half"]);
+        assert_eq!(
+            parse_judgement_response(value.to_string().as_bytes()).err(),
+            Some(JudgementWireError::Malformed("response"))
+        );
+        let mut value: serde_json::Value = serde_json::from_str(&response().to_json()).unwrap();
+        let first = value["results"][0].clone();
+        let as_array: Vec<_> = first.as_object().unwrap().values().cloned().collect();
+        value["results"][0] = serde_json::Value::Array(as_array);
+        assert_eq!(
+            parse_judgement_response(value.to_string().as_bytes()).err(),
+            Some(JudgementWireError::Malformed("response"))
+        );
+        let attestation = JudgementAttestationResponse::new(
+            "00".repeat(8),
+            format!("02{}", "11".repeat(32)),
+            format!("0x{}", "22".repeat(20)),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&attestation.to_json()).unwrap();
+        let fields: Vec<_> = value.as_object().unwrap().values().cloned().collect();
+        assert!(parse_judgement_attestation(attestation.to_json().as_bytes()).is_ok());
+        assert_eq!(
+            parse_judgement_attestation(serde_json::Value::Array(fields).to_string().as_bytes())
+                .err(),
+            Some(JudgementWireError::Malformed("attestation"))
+        );
+        let request = JudgementRequest::new(
+            nonce(),
+            "claim".into(),
+            b"d".to_vec(),
+            vec![JudgementKind::Task],
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&request.to_json()).unwrap();
+        let fields: Vec<_> = value.as_object().unwrap().values().cloned().collect();
+        assert!(parse_judgement_request(request.to_json().as_bytes()).is_ok());
+        assert_eq!(
+            parse_judgement_request(serde_json::Value::Array(fields).to_string().as_bytes()).err(),
+            Some(JudgementRefusal::RequestMalformed)
+        );
+    }
+
+    /// An `event_kind`-only request on a digest with no marks has a valid
+    /// answer: no results. An empty answer to anything else is refused.
+    #[test]
+    fn an_event_kind_only_request_without_marks_is_answered_empty() {
+        let sent = |kinds| JudgementRequest::new(nonce(), "claim".into(), b"ab".to_vec(), kinds);
+        let request = sent(vec![JudgementKind::EventKind]).unwrap();
+        let empty_for = |request: &JudgementRequest| {
+            let empty = JudgementResponse::new(
+                *request.request_nonce(),
+                request.digest_sha256(),
+                vec![],
+                JudgementSpend {
+                    account_month_remaining_bucket: SpendBucket::OverHalf,
+                },
+                1_792_540_800,
+                format!("0x{}", "ef".repeat(65)),
+            )
+            .unwrap();
+            parse_judgement_response(empty.to_json().as_bytes()).unwrap()
+        };
+        assert_eq!(empty_for(&request).check_binding(&request, 0), Ok(()));
+        assert_eq!(
+            empty_for(&request).check_binding(&request, 1),
+            Err(JudgementBindingError::EventMarkMissing)
+        );
+        for kind in [JudgementKind::Task, JudgementKind::Finished] {
+            let request = sent(vec![kind, JudgementKind::EventKind]).unwrap();
+            assert_eq!(
+                empty_for(&request).check_binding(&request, 0),
+                Err(JudgementBindingError::JudgementMissing),
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]
@@ -2220,7 +2671,7 @@ mod tests {
             r#"{"error":"judgement_account_budget_exhausted","reset_at":1793491200}"#
         );
         assert_eq!(
-            parse_judgement_refusal(503, json.as_bytes()),
+            parse_judgement_refusal(JudgementRoute::Judgement, 503, json.as_bytes()),
             Some(body.clone())
         );
         assert_eq!(body.refusal(), JudgementRefusal::AccountBudgetExhausted);
@@ -2245,7 +2696,7 @@ mod tests {
         let plain = JudgementRefusalBody::new(JudgementRefusal::Timeout, None).unwrap();
         assert_eq!(plain.to_json(), r#"{"error":"judgement_timeout"}"#);
         assert_eq!(
-            parse_judgement_refusal(504, plain.to_json().as_bytes()),
+            parse_judgement_refusal(JudgementRoute::Judgement, 504, plain.to_json().as_bytes()),
             Some(plain)
         );
     }
@@ -2289,7 +2740,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                parse_judgement_refusal(status, body.as_bytes()),
+                parse_judgement_refusal(JudgementRoute::Judgement, status, body.as_bytes()),
                 None,
                 "{body}"
             );
@@ -2973,10 +3424,6 @@ mod tests {
                 Box::new(|v| v["signature"] = "ef".repeat(65).into()),
             ),
             (
-                "no results",
-                Box::new(|v| v["results"] = serde_json::json!([])),
-            ),
-            (
                 "verified false",
                 Box::new(|v| v["results"][0]["receipt"]["verified"] = false.into()),
             ),
@@ -3268,6 +3715,65 @@ mod tests {
             spend(spend_bucket),
             signed_at,
         )
+    }
+
+    /// A `stuck` response, pinning tag 4 and the `stuck` label for a
+    /// service not written in Rust.
+    const FROZEN_STUCK_VECTOR: &str = concat!(
+        // domain "trace_commons.insights_judgement.v1\n"
+        "74726163655f636f6d6d6f6e732e696e7369676874735f6a756467656d656e742e76310a",
+        // wire_version 1, u32 LE
+        "01000000",
+        // request_nonce 00..1f, 32 raw bytes
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        // digest_sha256, length-prefixed hex
+        "4000000000000000",
+        "6162616261626162616261626162616261626162616261626162616261626162",
+        "6162616261626162616261626162616261626162616261626162616261626162",
+        // one result
+        "0100000000000000",
+        // stuck, no index, "stuck", judged, medium, self_reported
+        "0400",
+        "0500000000000000",
+        "737475636b",
+        "010202",
+        "1c00000000000000",
+        "737475636b2d76312b7368613235363a336363326639303537326265",
+        "0100000000000000",
+        "6d",
+        // no receipt
+        "00",
+        // spend bucket under_tenth
+        "03",
+        // signed_at 1792540800, i64 LE
+        "8000d86a00000000",
+    );
+
+    #[test]
+    fn signing_bytes_frozen_stuck_vector() {
+        let stuck = JudgementResult::judged(
+            JudgementKind::Stuck,
+            None,
+            JudgementLabel::Stuck,
+            JudgementConfidence {
+                bucket: ConfidenceBucket::Medium,
+                basis: ConfidenceBasis::SelfReported,
+            },
+            version("stuck-v1+sha256:3cc2f90572be"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            hex::encode(sign(
+                1,
+                &nonce(),
+                &"ab".repeat(32),
+                &[stuck],
+                SpendBucket::UnderTenth,
+                1_792_540_800
+            )),
+            FROZEN_STUCK_VECTOR
+        );
     }
 
     #[test]
