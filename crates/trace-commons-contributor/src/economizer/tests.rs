@@ -1131,3 +1131,47 @@ fn update_repo_writes_only_when_asked_and_serializes_writers() {
     });
     assert_eq!(store.repo(&key).sessions, 8);
 }
+
+#[test]
+fn folders_with_the_same_name_are_told_apart_by_their_parent() {
+    use super::summary::summarize;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    let work = dir.path().join("work").join("api");
+    let oss = dir.path().join("oss").join("api");
+    for folder in [&work, &oss] {
+        std::fs::create_dir_all(folder).unwrap();
+        let state = RepoState {
+            sessions: 2,
+            ..RepoState::default()
+        };
+        store
+            .save_repo(&repo_key(folder, Harness::Claude), &state)
+            .unwrap();
+    }
+    let labels = |summary: super::summary::Summary| -> Vec<String> {
+        summary.folders.into_iter().map(|row| row.folder).collect()
+    };
+    let first = labels(summarize(
+        &store,
+        [
+            (Harness::Claude, work.clone()),
+            (Harness::Claude, oss.clone()),
+        ],
+    ));
+    assert_eq!(first, ["oss/api", "work/api"]);
+    // The same order whatever order the folders were named in.
+    let again = labels(summarize(
+        &store,
+        [
+            (Harness::Claude, oss.clone()),
+            (Harness::Claude, work.clone()),
+        ],
+    ));
+    assert_eq!(again, first);
+    // A lone folder keeps its own name.
+    assert_eq!(
+        labels(summarize(&store, [(Harness::Claude, work)])),
+        ["api"]
+    );
+}

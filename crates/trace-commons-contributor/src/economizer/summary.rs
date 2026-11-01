@@ -96,9 +96,16 @@ pub struct Summary {
 
 /// What the economizer learned about each of `folders`, as (tool, path)
 /// pairs. A folder named twice for one tool appears once; one with
-/// nothing learned does not appear. Sorted by sessions, most first, then
-/// by label and tool.
+/// nothing learned does not appear. Two folders whose last components
+/// match for one tool are labelled with their parent too (`work/api`,
+/// `oss/api`), never the full path. Sorted by sessions, most first, then
+/// by label, tool and key, so the order is the same on every read.
 pub fn summarize(store: &Store, folders: impl IntoIterator<Item = (Harness, PathBuf)>) -> Summary {
+    fn component(path: Option<&std::path::Path>) -> String {
+        path.and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
     let mut seen = BTreeSet::new();
     let mut rows = Vec::new();
     for (harness, path) in folders {
@@ -106,20 +113,37 @@ pub fn summarize(store: &Store, folders: impl IntoIterator<Item = (Harness, Path
         if !seen.insert(key.clone()) {
             continue;
         }
-        let label = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let row = FolderSummary::of(label, harness, key.clone(), &store.repo(&key));
+        let row = FolderSummary::of(
+            component(Some(&path)),
+            harness,
+            key.clone(),
+            &store.repo(&key),
+        );
         if row.learned_anything() {
-            rows.push(row);
+            rows.push((row, component(path.parent())));
         }
     }
+    let mut counts = std::collections::BTreeMap::new();
+    for (row, _) in &rows {
+        *counts
+            .entry((row.folder.clone(), row.harness.as_str()))
+            .or_insert(0u32) += 1;
+    }
+    let mut rows: Vec<FolderSummary> = rows
+        .into_iter()
+        .map(|(mut row, parent)| {
+            if counts[&(row.folder.clone(), row.harness.as_str())] > 1 && !parent.is_empty() {
+                row.folder = format!("{parent}/{}", row.folder);
+            }
+            row
+        })
+        .collect();
     rows.sort_by(|a, b| {
         b.sessions
             .cmp(&a.sessions)
             .then_with(|| a.folder.cmp(&b.folder))
             .then_with(|| a.harness.as_str().cmp(b.harness.as_str()))
+            .then_with(|| a.key.cmp(&b.key))
     });
     let truncated = rows.len().saturating_sub(MAX_FOLDERS) as u32;
     rows.truncate(MAX_FOLDERS);
