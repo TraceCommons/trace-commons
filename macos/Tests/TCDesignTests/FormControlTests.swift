@@ -103,11 +103,29 @@ final class FormControlTests: XCTestCase {
                 XCTAssertEqual(drawn, expected, "\(status) \(name.rawValue)")
             }
         }
+        // One image per status, made once: the same object every render
+        // (#1798 review).
+        XCTAssertTrue(GlassPickerDot.image(.on) === GlassPickerDot.image(.on))
+        XCTAssertFalse(GlassPickerDot.image(.on) === GlassPickerDot.image(.ask))
         let headless = GlassPickerOption("m", value: 1, dot: .on, detail: "Heading")
         let grouped = GlassPickerOption("m", value: 2, dot: .on, section: "Heading", detail: "Heading")
-        XCTAssertEqual(GlassPicker<Int>.menuDetail(headless), "Heading")
-        XCTAssertNil(GlassPicker<Int>.menuDetail(grouped))
-        XCTAssertNil(GlassPicker<Int>.menuDetail(GlassPickerOption("m", value: 3)))
+        XCTAssertEqual(GlassPicker<Int>.menuDetail(headless, subtitles: true), "Heading")
+        XCTAssertNil(GlassPicker<Int>.menuDetail(grouped, subtitles: true))
+        XCTAssertNil(GlassPicker<Int>.menuDetail(GlassPickerOption("m", value: 3), subtitles: true))
+        // Before macOS 14.4 a menu item has no subtitle, so none is drawn;
+        // the item's one accessibility label still says the tier.
+        XCTAssertNil(GlassPicker<Int>.menuDetail(headless, subtitles: false))
+        XCTAssertEqual(GlassPicker<Int>.spoken(headless), "m, Heading")
+    }
+
+    /// #1798 review: menu dots are opt-in, so a picker that passes a dot
+    /// for its closed pill draws nothing new in its open menu.
+    func test_menuDotsAreOptIn() {
+        let options = [GlassPickerOption("A", value: 1, dot: .on)]
+        let plain = GlassPicker("Pick", selection: .constant(1), options: options, placeholder: "None")
+        XCTAssertFalse(plain.menuDots)
+        let dotted = GlassPicker("Pick", selection: .constant(1), options: options, placeholder: "None", menuDots: true)
+        XCTAssertTrue(dotted.menuDots)
     }
 
     /// The centre pixel of `draw` in `appearance`, as RGBA bytes.

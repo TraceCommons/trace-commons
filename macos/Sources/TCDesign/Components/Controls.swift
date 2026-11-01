@@ -660,8 +660,16 @@ public struct GlassPickerOption<Value: Hashable>: Identifiable {
 /// An option's dot as a menu item's image. A menu draws a template image in
 /// its own monochrome, so this one is not a template: it keeps the status
 /// colour, resolved for the menu's light or dark appearance when drawn.
+///
+/// One image per status, made once (#1798 review): a picker rebuilds its
+/// options on every render, and a new closure-backed image each time is an
+/// allocation per option and an image SwiftUI cannot see is unchanged.
+@MainActor
 enum GlassPickerDot {
+    private static var images: [GlassStatus: NSImage] = [:]
+
     static func image(_ status: GlassStatus) -> NSImage {
+        if let image = images[status] { return image }
         let side = GlassTokens.Size.dot
         let color = status.rgba.dynamicNSColor
         let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
@@ -670,6 +678,7 @@ enum GlassPickerDot {
             return true
         }
         image.isTemplate = false
+        images[status] = image
         return image
     }
 }
@@ -702,13 +711,18 @@ public struct GlassPicker<Value: Hashable>: View {
     @Binding private var selection: Value?
     private let options: [GlassPickerOption<Value>]
     private let placeholder: String
+    /// Whether the open menu draws each option's dot and detail. Off by
+    /// default, so only a picker that asks for them changes (#1798 review).
+    let menuDots: Bool
 
     /// `placeholder` is shown while nothing is chosen, from the core's copy.
-    public init(_ label: String, selection: Binding<Value?>, options: [GlassPickerOption<Value>], placeholder: String) {
+    public init(_ label: String, selection: Binding<Value?>, options: [GlassPickerOption<Value>], placeholder: String,
+                menuDots: Bool = false) {
         self.label = label
         self._selection = selection
         self.options = options
         self.placeholder = placeholder
+        self.menuDots = menuDots
     }
 
     private var current: GlassPickerOption<Value>? {
@@ -721,32 +735,46 @@ public struct GlassPicker<Value: Hashable>: View {
     }
 
     /// The subtitle of an option's menu item: its detail, unless a heading
-    /// above it in the menu already says the same.
-    static func menuDetail(_ option: GlassPickerOption<Value>) -> String? {
-        option.section == nil ? option.detail : nil
+    /// above it in the menu already says the same. None where a menu item
+    /// has no subtitle (`subtitles` false: before macOS 14.4, where
+    /// `NSMenuItem.subtitle` arrived), so nothing is joined onto the title.
+    static func menuDetail(_ option: GlassPickerOption<Value>, subtitles: Bool) -> String? {
+        subtitles && option.section == nil ? option.detail : nil
     }
 
-    /// Each item draws its dot as the closed pill does, and an option with
-    /// no heading above it carries its detail as the item's subtitle, so the
-    /// open menu says what the dot means too.
+    /// Whether this Mac draws a menu item's subtitle.
+    static var menuSubtitles: Bool {
+        if #available(macOS 14.4, *) { return true }
+        return false
+    }
+
+    /// With `menuDots`, each item draws its dot as the closed pill does, and
+    /// an option with no heading above it carries its detail as the item's
+    /// subtitle where the system draws one. Each item has one accessibility
+    /// label, its title and detail, so the detail is read once whether or
+    /// not a subtitle is drawn.
     private func buttons(_ options: [GlassPickerOption<Value>]) -> some View {
         ForEach(options) { option in
-            Button {
-                selection = option.value
-            } label: {
-                Label {
-                    Text(option.title)
-                    if let detail = Self.menuDetail(option) {
-                        Text(detail)
-                    }
-                } icon: {
-                    if let dot = option.dot {
-                        Image(nsImage: GlassPickerDot.image(dot))
-                            .renderingMode(.original)
+            if menuDots {
+                Button {
+                    selection = option.value
+                } label: {
+                    Label {
+                        Text(option.title)
+                        if let detail = Self.menuDetail(option, subtitles: Self.menuSubtitles) {
+                            Text(detail)
+                        }
+                    } icon: {
+                        if let dot = option.dot {
+                            Image(nsImage: GlassPickerDot.image(dot))
+                                .renderingMode(.original)
+                        }
                     }
                 }
+                .accessibilityLabel(Self.spoken(option))
+            } else {
+                Button(option.title) { selection = option.value }
             }
-            .accessibilityValue(option.detail ?? "")
         }
     }
 

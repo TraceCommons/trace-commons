@@ -73,10 +73,14 @@ final class ManagedModelPickerTierTests: XCTestCase {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
         {"models":[{"id":"n/main","tier":"near_ai"},{"id":"n/small","tier":"near_ai"},{"id":"i/one","tier":"incognito"}],
         "tier_order":["near_ai","external","incognito"],"default":"n/main","favorites":["n/small"],
-        "background_defaults":{"n/main":"n/small","i/one":"i/one"}}
+        "background_sets":[["n/main","n/small"],["n/main","n/small","i/one"]],
+        "background":{"n/main":{"default":"n/small","set":0},"n/small":{"default":"n/small","set":0},
+          "i/one":{"default":"i/one","set":1}}}
         """#.utf8))
         let options = ManagedFolderOptions.backgroundPickerOptions(
             catalogue, main: nil, chosen: nil, copy: { Self.copy[$0] ?? "" })
+        // Only these two pickers draw their dots in the open menu.
+        XCTAssertTrue(ManagedFolderOptions.modelMenuDots)
         XCTAssertEqual(options.map(\.value), ["", "n/small", "n/main"])
         XCTAssertEqual(options.map(\.title), ["Default: n/small", "n/small", "n/main"])
         XCTAssertEqual(options.map(\.dot), [.on, .on, .on])

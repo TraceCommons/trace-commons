@@ -49,6 +49,20 @@ public struct ManagedFolderDraft: Equatable, Sendable {
     public private(set) var backgroundModel: String?
     public var collectTraces = false
     public var cliOptions = ""
+    /// The core's reading of `cliOptions` (`managed_cli_model`): the text
+    /// it read and the model it found there.
+    private var cliAnswer: CLIAnswer?
+    private struct CLIAnswer: Equatable, Sendable {
+        let options: String
+        let model: String?
+    }
+
+    /// The model the CLI options name, when the core's reading is of the
+    /// options the draft holds now; none otherwise.
+    public var cliModel: String? {
+        guard let cliAnswer, cliAnswer.options == cliOptions else { return nil }
+        return cliAnswer.model
+    }
 
     public init() {}
 
@@ -91,6 +105,21 @@ public struct ManagedFolderDraft: Equatable, Sendable {
         keepsSavedModel = true
     }
 
+    /// `fallBackToDefault`, then weigh the background choice against the
+    /// default that now runs (#1798 review).
+    public mutating func fallBackToDefault(in catalogue: ManagedModelCatalogue?) {
+        fallBackToDefault()
+        reconcileBackground(in: catalogue)
+    }
+
+    /// The core's reading of `options`, kept only while the draft still
+    /// holds those options; the background choice is weighed again.
+    public mutating func setCLIModel(_ model: String?, for options: String, in catalogue: ManagedModelCatalogue?) {
+        guard options == cliOptions else { return }
+        cliAnswer = CLIAnswer(options: options, model: model)
+        reconcileBackground(in: catalogue)
+    }
+
     /// A model the person picked (nil for the default), which the launch
     /// remembers.
     public mutating func choose(_ model: String?) {
@@ -111,9 +140,17 @@ public struct ManagedFolderDraft: Equatable, Sendable {
         backgroundModel = model
     }
 
-    /// Clear a background choice the current main model does not allow.
+    /// The main model the background choice is weighed against: the one
+    /// the launcher will run (`ManagedSurface.backgroundMain`).
+    public func backgroundMain(in catalogue: ManagedModelCatalogue?) -> String? {
+        guard let catalogue else { return model }
+        return ManagedSurface.backgroundMain(picked: model, cliModel: cliModel, in: catalogue)
+    }
+
+    /// Clear a background choice the core does not allow for that model.
     public mutating func reconcileBackground(in catalogue: ManagedModelCatalogue?) {
-        backgroundModel = ManagedSurface.reconciledBackground(backgroundModel, main: model, in: catalogue)
+        backgroundModel = ManagedSurface.reconciledBackground(
+            backgroundModel, main: backgroundMain(in: catalogue), in: catalogue)
     }
 
     public mutating func useDefaults(tool: String, cwd: String?, cliOptions: String) {

@@ -59,7 +59,8 @@ struct ManagedFolderOptions: View {
                     GlassPicker(model.managedText("model_choice"), selection: Binding(
                         get: { draft.model ?? ManagedSurface.defaultModel },
                         set: { draft.choose($0.flatMap { $0.isEmpty ? nil : $0 }, in: catalogue); favoriteError = nil }),
-                        options: modelOptions, placeholder: model.managedText("model_default_unknown"))
+                        options: modelOptions, placeholder: model.managedText("model_default_unknown"),
+                        menuDots: Self.modelMenuDots)
                     if let chosen = draft.model, ManagedSurface.offersFavorite(chosen, in: catalogue) {
                         favoriteStar(chosen)
                     }
@@ -126,7 +127,7 @@ struct ManagedFolderOptions: View {
     /// is not removed.
     private func reconcileModel() {
         guard ManagedSurface.reconciledModel(draft.model, in: catalogue).fellBack else { return }
-        draft.fallBackToDefault()
+        draft.fallBackToDefault(in: catalogue)
     }
 
     /// Whether Launch may go as far as the model is concerned. A pending
@@ -221,22 +222,38 @@ struct ManagedFolderOptions: View {
             GlassPicker(model.managedText("background_model_choice"), selection: Binding(
                 get: { draft.backgroundModel ?? ManagedSurface.defaultModel },
                 set: { draft.chooseBackground($0.flatMap { $0.isEmpty ? nil : $0 }) }),
-                options: Self.backgroundPickerOptions(catalogue, main: draft.model, chosen: draft.backgroundModel,
-                                                      copy: model.managedText),
-                placeholder: model.managedText("model_default_unknown"))
+                options: Self.backgroundPickerOptions(catalogue, main: draft.backgroundMain(in: catalogue),
+                                                      chosen: draft.backgroundModel, copy: model.managedText),
+                placeholder: model.managedText("model_default_unknown"),
+                menuDots: Self.modelMenuDots)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // A saved choice the folder's main model no longer allows goes back
         // to the default once the catalogue says so.
         .onChange(of: catalogue, initial: true) { _, _ in draft.reconcileBackground(in: catalogue) }
+        // The model the CLI options name runs instead of the picked one, so
+        // the core reads them and the choice is weighed against that model.
+        .task(id: draft.cliOptions) {
+            let options = draft.cliOptions
+            model.cliModel(tool: tool, options: options) { named in
+                draft.setCLIModel(named, for: options, in: catalogue)
+            }
+        }
     }
+
+    /// The model and background pickers draw each option's tier dot in the
+    /// open menu too; other pickers keep their plain menus (#1798 review).
+    static let modelMenuDots = true
 
     /// The background picker's options, with tiers shown as the model
     /// picker shows them (`pickerOptions`). A chosen model with no
     /// catalogue to weigh it against is kept, with no tier.
     static func backgroundPickerOptions(_ catalogue: ManagedModelCatalogue?, main: String?, chosen: String?,
                                         copy: (String) -> String) -> [GlassPickerOption<String>] {
-        glassOptions(ManagedSurface.backgroundOptions(catalogue, main: main, copy: copy), chosen: chosen)
+        // A chosen model is listed only when there is no catalogue to weigh
+        // it against; with one, the core's list is the whole list.
+        glassOptions(ManagedSurface.backgroundOptions(catalogue, main: main, copy: copy),
+                     chosen: catalogue == nil ? chosen : nil)
     }
 
     /// The dot a model's privacy takes (owner, 2026-10-31): NEAR AI private
