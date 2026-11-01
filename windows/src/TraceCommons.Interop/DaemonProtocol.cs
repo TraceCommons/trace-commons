@@ -924,8 +924,24 @@ public sealed class DaemonEvent
     public int ContributedCount => IntField("contributed");
 
     /// <summary>
-    /// Pending credit carried by those contributions. Pending, never earned:
-    /// settlement is off on every deployment shipped so far.
+    /// The contribution sentence exactly as the core composed it, credit
+    /// wording and rounding included ("2 traces contributed from api. 4.3
+    /// credit earned."), or null from a daemon that predates the field. The
+    /// shell posts it unchanged: only the core words credit.
+    /// </summary>
+    public string? Contribution =>
+        Data is { } data
+        && data.ValueKind == JsonValueKind.Object
+        && data.TryGetProperty("contribution", out JsonElement text)
+        && text.ValueKind == JsonValueKind.String
+        && text.GetString() is { Length: > 0 } sentence
+            ? sentence
+            : null;
+
+    /// <summary>
+    /// Pending credit carried by those contributions, for the fallback
+    /// sentence a daemon that sent no <see cref="Contribution"/> gets.
+    /// Pending, never earned.
     /// </summary>
     public double CreditPending =>
         Data is { } data

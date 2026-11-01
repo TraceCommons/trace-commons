@@ -536,10 +536,13 @@ public sealed partial class MainWindow : Window
 
         // The contributed labels come off the frame, not off ViewModel.Pending:
         // an armed project's traces were never in that list.
-        if (DigestText.ContributionLine(
+        // The core's own sentence when the daemon sent one (its credit wording
+        // and rounding are the core's alone); a daemon that predates the
+        // field gets the older pending-only sentence built here.
+        if ((facts.Contribution ?? DigestText.ContributionLine(
                 facts.ContributedCount,
                 facts.ContributedProjects,
-                facts.CreditPending) is { } contributed)
+                facts.CreditPending)) is { } contributed)
         {
             lines.Add(contributed);
         }

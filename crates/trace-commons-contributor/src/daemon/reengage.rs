@@ -47,6 +47,10 @@ pub(crate) struct TickResult {
     pub digest_posts: bool,
     /// The sentence folded into it, and the kind it announces.
     pub fold: Option<(Kind, String)>,
+    /// The submissions whose newly final credit the folded sentence states,
+    /// from the same snapshot as the sentence. Empty without a verdicts fold,
+    /// and when the fold states no credit (its finals add to under 0.05).
+    pub fold_covers: std::collections::BTreeSet<String>,
     /// The standalone notification published this tick, if any.
     pub standalone: Option<Kind>,
 }
@@ -63,6 +67,9 @@ struct Prepared {
     candidates: Vec<Candidate>,
     idle: Option<IdleAnnouncement>,
     verdicts: Option<Verdicts>,
+    /// The submissions behind the final credit `verdicts` states: empty when
+    /// it states none. Taken from the same snapshot as `verdicts`.
+    verdicts_final_ids: std::collections::BTreeSet<String>,
     /// The settlement estimate an announcement would carry, and whether its
     /// wording is the pricing one.
     settlement: Option<(SettlementShown, bool)>,
@@ -210,6 +217,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
         candidates: Vec::new(),
         idle: None,
         verdicts: None,
+        verdicts_final_ids: Default::default(),
         settlement: None,
         settlement_seed: None,
         settlement_adopt_pricing: None,
@@ -288,6 +296,14 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
             .iter()
             .any(|e| e.kind == Kind::VerdictsLanded && e.at >= news.newest_at);
         if !covered {
+            if news.credit_final_tenths().is_some() {
+                prepared.verdicts_final_ids = news
+                    .submissions
+                    .iter()
+                    .filter(|(_, v)| v.final_credit)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+            }
             prepared.verdicts = Some(ipc::render_verdicts(
                 news.newly_accepted,
                 news.newly_held,
@@ -505,9 +521,14 @@ fn apply(
     if changed {
         let _ = state.save(&shared.store);
     }
+    let fold_covers = match &fold {
+        Some((Kind::VerdictsLanded, _)) => prepared.verdicts_final_ids.clone(),
+        _ => Default::default(),
+    };
     TickResult {
         digest_posts,
         fold,
+        fold_covers,
         standalone,
     }
 }
@@ -1364,5 +1385,165 @@ mod tests {
             tick(&s, much_later, &Utc, digest(false, 0)).standalone,
             Some(Kind::SettlementEstimate)
         );
+    }
+    // ---- the digest's credit sentences with a verdicts fold, end to end ----
+
+    fn history_record(
+        n: u8,
+        label: &str,
+        final_credit: Option<f32>,
+    ) -> super::super::history::HistoryRecord {
+        serde_json::from_value(serde_json::json!({
+            "submission_id": uuid::Uuid::from_bytes([n; 16]),
+            "submitted_at": noon() - Duration::hours(2),
+            "project_id": "p",
+            "project_label": label,
+            "source": "claude-code",
+            "session_hash": format!("sha256:{n}"),
+            "status": "accepted",
+            "consent_scopes": [],
+            "credit_points_pending": 0.0,
+            "credit_points_final": final_credit,
+            "explanations": [],
+            "last_refreshed_at": noon(),
+        }))
+        .unwrap()
+    }
+
+    fn folded_final(n: u8, credit: f32) -> (String, super::super::nudge::PendingVerdict) {
+        (
+            uuid::Uuid::from_bytes([n; 16]).to_string(),
+            super::super::nudge::PendingVerdict {
+                accepted: true,
+                held: false,
+                final_credit: true,
+                credit_final: credit,
+                since: noon() - Duration::hours(1),
+                newest_at: noon() - Duration::hours(1),
+            },
+        )
+    }
+
+    /// Runs `expire_and_digest` with a verdicts fold over `news` and the
+    /// history cache `records`, and returns the one published `digest_due`.
+    fn digest_with_fold(
+        records: &[super::super::history::HistoryRecord],
+        news: Vec<(String, super::super::nudge::PendingVerdict)>,
+    ) -> serde_json::Value {
+        let s = std::sync::Arc::new(live());
+        s.settings.lock().unwrap().local_notifications = false;
+        super::super::history::HistoryCache::save(&s.store, records).unwrap();
+        let submissions: std::collections::BTreeMap<_, _> = news.into_iter().collect();
+        s.state.lock().unwrap().verdicts_pending =
+            super::super::nudge::VerdictDelta::from_submissions(submissions);
+        let mut rx = s.events.subscribe();
+        super::super::expire_and_digest(&s, noon());
+        let due: Vec<_> = drain(&mut rx)
+            .into_iter()
+            .filter(|e| e.event == ipc::EVENT_DIGEST_DUE)
+            .collect();
+        assert_eq!(due.len(), 1, "one digest posts");
+        due[0].data.clone()
+    }
+
+    /// The traces the fold states are left out of `text`'s contribution
+    /// sentence; the rest are not. `contribution` and `credit_final` carry
+    /// everything, for shells that do not show the fold.
+    #[test]
+    fn the_text_leaves_out_only_the_credit_the_fold_states() {
+        let data = digest_with_fold(
+            &[
+                history_record(1, "api", Some(2.0)),
+                history_record(2, "api", Some(1.5)),
+            ],
+            vec![folded_final(1, 2.0)],
+        );
+        assert_eq!(
+            data["contribution"],
+            "2 traces contributed from api. 3.5 credit earned."
+        );
+        assert_eq!(data["credit_final"], 3.5);
+        let text = data["text"].as_str().unwrap();
+        assert!(
+            text.contains("2 traces contributed from api. 1.5 credit earned."),
+            "{text}"
+        );
+        assert_eq!(
+            data["fold"]["text"],
+            "1 trace accepted. 2.0 credit is now final."
+        );
+        assert!(text.ends_with("2.0 credit is now final."), "{text}");
+    }
+
+    /// A fold whose finals add to under 0.05 states no credit, so it owns
+    /// none: the text must still state the earned credit.
+    #[test]
+    fn a_fold_that_states_no_credit_owns_none() {
+        let data = digest_with_fold(
+            &[
+                history_record(1, "api", Some(0.04)),
+                history_record(2, "api", Some(0.03)),
+            ],
+            vec![folded_final(1, 0.04)],
+        );
+        let text = data["text"].as_str().unwrap();
+        assert!(text.contains("0.1 credit earned."), "{text}");
+        assert!(!text.contains("credit is now final"), "{text}");
+        assert_eq!(
+            data["contribution"],
+            "2 traces contributed from api. 0.1 credit earned."
+        );
+    }
+
+    /// Each part rounds on its own: two 0.25 finals, one folded and one
+    /// not, read "0.3 credit is now final" in the fold and "0.3 credit
+    /// earned" in the text (0.6 together), while the shells that show no
+    /// fold say "0.5 credit earned". Pinned so the difference is a known,
+    /// tested one. The fold states a folded trace's figure from when it
+    /// went final; a later revision of it is not stated again.
+    #[test]
+    fn each_part_rounds_on_its_own() {
+        let data = digest_with_fold(
+            &[
+                history_record(1, "api", Some(0.25)),
+                history_record(2, "api", Some(0.25)),
+            ],
+            vec![folded_final(1, 0.25)],
+        );
+        let text = data["text"].as_str().unwrap();
+        assert!(text.contains("0.3 credit earned."), "{text}");
+        assert!(
+            data["fold"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("0.3 credit is now final")
+        );
+        assert_eq!(
+            data["contribution"],
+            "2 traces contributed from api. 0.5 credit earned."
+        );
+    }
+
+    /// The set of traces a fold covers comes from the same snapshot as its
+    /// sentence, so it is on the tick's result.
+    #[test]
+    fn the_tick_reports_the_traces_its_fold_covers() {
+        let s = live();
+        let _r = renderer(&s);
+        let landed = noon() - Duration::hours(1);
+        let (id, pending) = folded_final(7, 2.0);
+        s.state.lock().unwrap().verdicts_pending =
+            super::super::nudge::VerdictDelta::from_submissions([(id.clone(), pending)].into());
+        let got = tick(&s, noon(), &Utc, digest(true, 0));
+        assert_eq!(got.fold.as_ref().map(|f| f.0), Some(Kind::VerdictsLanded));
+        assert_eq!(got.fold_covers, [id].into());
+        let _ = landed;
+        // No credit stated, none covered.
+        let s = live();
+        let (id, pending) = folded_final(8, 0.04);
+        s.state.lock().unwrap().verdicts_pending =
+            super::super::nudge::VerdictDelta::from_submissions([(id, pending)].into());
+        let got = tick(&s, noon(), &Utc, digest(true, 0));
+        assert!(got.fold_covers.is_empty());
     }
 }

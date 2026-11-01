@@ -1464,6 +1464,7 @@ impl App {
         let contributed = crate::notify::contribution_body(
             facts.contributed,
             &facts.contributed_projects,
+            facts.credit_final,
             facts.credit_pending,
         );
         // Two sentences, either of which may be absent: what is waiting for
