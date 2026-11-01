@@ -1215,8 +1215,14 @@ impl JudgementRequest {
         if stuck && judgements.len() > 1 {
             return Err(JudgementRefusal::RequestMalformed);
         }
-        if stuck != TurnDigest::parse(&digest).is_ok() {
-            return Err(JudgementRefusal::RequestMalformed);
+        match (stuck, TurnDigest::parse(&digest)) {
+            (true, Ok(_)) | (false, Err(_)) => {}
+            // A newer turn digest is a version the service does not speak
+            // yet, so the client can step down rather than drop the turn.
+            (true, Err(JudgementWireError::WireVersionUnsupported)) => {
+                return Err(JudgementRefusal::WireVersionUnsupported);
+            }
+            (true, Err(_)) | (false, Ok(_)) => return Err(JudgementRefusal::RequestMalformed),
         }
         let request = Self {
             request_nonce,
@@ -2241,6 +2247,25 @@ mod turn_digest_tests {
             );
         }
         assert!(parse_judgement_request(wire(&turn, &["stuck"]).as_bytes()).is_ok());
+        // A newer turn digest is refused as a version, not as malformed.
+        let mut newer: serde_json::Value = serde_json::from_slice(&turn).unwrap();
+        newer["digest_version"] = serde_json::json!(TURN_DIGEST_VERSION + 1);
+        newer["new_field"] = serde_json::json!(1);
+        let newer = serde_json::to_vec(&newer).unwrap();
+        assert_eq!(
+            JudgementRequest::new(
+                nonce,
+                "claim".into(),
+                newer.clone(),
+                vec![JudgementKind::Stuck]
+            )
+            .err(),
+            Some(JudgementRefusal::WireVersionUnsupported)
+        );
+        assert_eq!(
+            parse_judgement_request(wire(&newer, &["stuck"]).as_bytes()).err(),
+            Some(JudgementRefusal::WireVersionUnsupported)
+        );
         assert!(parse_judgement_request(wire(&session, &["task"]).as_bytes()).is_ok());
     }
 }

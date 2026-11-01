@@ -197,6 +197,22 @@ public class DigestContributionTests
         Assert.Equal(0, evt.CreditPending);
     }
 
+    /// <summary>
+    /// The core's contribution sentence rides on the frame and is read as
+    /// sent; a daemon without it leaves it null, which selects the fallback.
+    /// </summary>
+    [Fact]
+    public void TheCoresContributionSentenceIsReadAsSent()
+    {
+        DaemonEvent? evt = DaemonEvent.Parse(
+            "{\"event\":\"digest_due\",\"data\":{\"pending\":0,\"contributed\":2,"
+            + "\"contribution\":\"2 traces contributed. 4.3 credit earned.\",\"text\":\"x\"}}");
+        Assert.Equal("2 traces contributed. 4.3 credit earned.", evt!.Contribution);
+        DaemonEvent? older = DaemonEvent.Parse(
+            "{\"event\":\"digest_due\",\"data\":{\"pending\":3,\"text\":\"x\"}}");
+        Assert.Null(older!.Contribution);
+    }
+
     [Fact]
     public void AFullFrameDecodesEveryField()
     {

@@ -14,12 +14,14 @@
 //! 1. parse the plaintext: the wire version, the closed shape, the digest
 //!    cap;
 //! 2. verify the claim offline; derive the keyed account digest;
-//! 3. count the digest's marked events (a digest that is not a version-1
-//!    digest, or a request that would judge nothing, is refused here);
+//! 3. count the digest's marked events (a session digest that is not a
+//!    version-1 digest is refused here), or, for `stuck`, re-encode the turn
+//!    digest;
 //! 4. record the request nonce in the replay set, refusing a repeat with
-//!    `judgement_request_replayed`, or `judgement_saturated` when the set is
-//!    full. Only a request whose claim verified gets this far, so an
-//!    unauthenticated caller cannot fill the set;
+//!    `judgement_request_replayed`, or `judgement_saturated` when the set or
+//!    the account's share of it is full. Only a request whose claim
+//!    verified gets this far, so an unauthenticated caller cannot fill the
+//!    set, and one account cannot fill more than its share;
 //! 5. take a judgement permit from the caller's `acquire_permit`, held until
 //!    the last model call returns. A caller cannot hold one before step 4;
 //! 6. run each requested judgement in request order: `task` and `finished`
@@ -32,7 +34,7 @@
 //! `digest_sha256` (`none` when the plaintext did not parse), the model id,
 //! `ok` or the refusal label, and a latency bucket. Nothing else.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -43,7 +45,7 @@ use trace_commons_protocol::insights_judgement::{
 
 use super::claim::{IssuerKeys, verify_judgement_claim};
 use super::digest::marked_event_count;
-use super::limiter::{ClaimTime, LimiterKeys};
+use super::limiter::{AccountKey, ClaimTime, LimiterKeys};
 use super::receipt_check::JudgementCaller;
 
 /// The tracing target of the request log line.
@@ -55,6 +57,12 @@ pub const REPLAY_WINDOW_SECS: i64 = 20 * 60;
 /// The most request nonces remembered at once. A full set refuses with
 /// `judgement_saturated` rather than forgetting a nonce early.
 pub const REPLAY_SET_MAX: usize = 65_536;
+/// The most request nonces one account may hold in the set at once. The
+/// nonce is recorded before any spend, so without this one account, its
+/// budget spent, could fill the whole set with fresh nonces on one valid
+/// claim and lock every other account out until the window passes. 256 in
+/// 20 minutes is far above what an honest daemon sends, `stuck` included.
+pub const REPLAY_ACCOUNT_MAX: usize = 256;
 
 /// The unsigned outcome of one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,16 +77,35 @@ pub struct JudgedDigest {
 /// The request nonces accepted in the last [`REPLAY_WINDOW_SECS`], in
 /// memory only. A restart empties it, and also changes the per-boot sealing
 /// key, so a request sealed before the restart no longer opens.
+///
+/// A nonce is forgotten only once both the wall clock and the service's
+/// monotonic clock say it is older than the window. Ageing by wall time
+/// alone let a forward clock step evict a captured nonce early, and the
+/// same request then replayed after the clock stepped back would be sealed
+/// again under the same response key. A clock that steps either way now
+/// only keeps entries longer, which the capacity bounds and refuses
+/// closed.
 pub struct ReplaySet {
     capacity: usize,
+    account_capacity: usize,
+    started: Instant,
     inner: Mutex<ReplayInner>,
 }
 
 #[derive(Default)]
 struct ReplayInner {
     seen: HashSet<[u8; 32]>,
-    /// Insertion order with the time of each insertion, oldest first.
-    order: VecDeque<(i64, [u8; 32])>,
+    /// Nonces held per account key.
+    per_account: HashMap<[u8; 32], usize>,
+    /// Insertion order, oldest first.
+    order: VecDeque<ReplayEntry>,
+}
+
+struct ReplayEntry {
+    wall: i64,
+    monotonic: u64,
+    account: [u8; 32],
+    nonce: [u8; 32],
 }
 
 impl std::fmt::Debug for ReplaySet {
@@ -91,41 +118,77 @@ impl std::fmt::Debug for ReplaySet {
 
 impl Default for ReplaySet {
     fn default() -> Self {
-        Self::with_capacity(REPLAY_SET_MAX)
+        Self::with_capacity(REPLAY_SET_MAX, REPLAY_ACCOUNT_MAX)
     }
 }
 
 impl ReplaySet {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize, account_capacity: usize) -> Self {
         Self {
             capacity,
+            account_capacity,
+            started: Instant::now(),
             inner: Mutex::new(ReplayInner::default()),
         }
     }
 
-    /// Record `nonce` as accepted at `now`.
+    /// Record `nonce`, sent by `account`, as accepted at wall time `now`.
     ///
     /// [`JudgementRefusal::RequestReplayed`] if it was accepted within the
-    /// window; [`JudgementRefusal::Saturated`] if the set is full of
-    /// unexpired nonces. A clock that steps back only keeps entries longer.
-    pub fn record(&self, nonce: &JudgementRequestNonce, now: i64) -> Result<(), JudgementRefusal> {
+    /// window; [`JudgementRefusal::Saturated`] if the set, or this
+    /// account's share of it, is full of unexpired nonces.
+    pub fn record(
+        &self,
+        nonce: &JudgementRequestNonce,
+        account: &AccountKey,
+        now: i64,
+    ) -> Result<(), JudgementRefusal> {
+        self.record_at(nonce, account, now, self.started.elapsed().as_secs())
+    }
+
+    /// [`Self::record`] with the monotonic seconds since the set was made
+    /// given, for tests.
+    fn record_at(
+        &self,
+        nonce: &JudgementRequestNonce,
+        account: &AccountKey,
+        now: i64,
+        monotonic: u64,
+    ) -> Result<(), JudgementRefusal> {
+        let window = REPLAY_WINDOW_SECS.unsigned_abs();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        while let Some(&(at, oldest)) = inner.order.front() {
-            if now.saturating_sub(at) < REPLAY_WINDOW_SECS {
+        while let Some(oldest) = inner.order.front() {
+            let wall_old = now.saturating_sub(oldest.wall) >= REPLAY_WINDOW_SECS;
+            let monotonic_old = monotonic.saturating_sub(oldest.monotonic) >= window;
+            if !(wall_old && monotonic_old) {
                 break;
             }
-            inner.order.pop_front();
-            inner.seen.remove(&oldest);
+            let oldest = inner.order.pop_front().expect("front exists");
+            inner.seen.remove(&oldest.nonce);
+            if let Some(held) = inner.per_account.get_mut(&oldest.account) {
+                *held -= 1;
+                if *held == 0 {
+                    inner.per_account.remove(&oldest.account);
+                }
+            }
         }
         let nonce = *nonce.as_bytes();
+        let account = *account.as_bytes();
         if inner.seen.contains(&nonce) {
             return Err(JudgementRefusal::RequestReplayed);
         }
-        if inner.seen.len() >= self.capacity {
+        let held = inner.per_account.get(&account).copied().unwrap_or(0);
+        if inner.seen.len() >= self.capacity || held >= self.account_capacity {
             return Err(JudgementRefusal::Saturated);
         }
         inner.seen.insert(nonce);
-        inner.order.push_back((now, nonce));
+        *inner.per_account.entry(account).or_default() += 1;
+        inner.order.push_back(ReplayEntry {
+            wall: now,
+            monotonic,
+            account,
+            nonce,
+        });
         Ok(())
     }
 
@@ -221,7 +284,11 @@ impl JudgementService {
         digest_sha256: &mut Option<String>,
     ) -> Result<JudgedDigest, JudgementRefusal> {
         let request = parse_judgement_request(plaintext)?;
-        *digest_sha256 = Some(request.digest_sha256());
+        // A turn digest is small integers and flags in a fixed layout, so
+        // its hash could be reversed by enumerating turn shapes. Log none.
+        if request.judgements() != [JudgementKind::Stuck] {
+            *digest_sha256 = Some(request.digest_sha256());
+        }
         let account = verify_judgement_claim(&self.issuer, request.claim(), now)?;
         let account_key = self.limiter_keys.account_key(account.account_ref());
         let time = ClaimTime {
@@ -230,29 +297,32 @@ impl JudgementService {
         };
         // The raw account reference is not needed past this point.
         drop(account);
-        // The digest goes to the model as text, so it must be UTF-8.
-        let digest = std::str::from_utf8(request.digest())
-            .map_err(|_| JudgementRefusal::RequestMalformed)?;
-        // `stuck` comes alone with a turn digest, which parses closed: it
-        // must carry no contributor text. The others read a session digest.
+        // `stuck` comes alone with a turn digest, which the protocol already
+        // required to parse closed: it carries no contributor text. The
+        // model sees the digest re-encoded, not the bytes sent, so padding
+        // cannot inflate the input reservation and the field order is the
+        // one the prompt describes. The others read a session digest, as
+        // UTF-8 text.
         let stuck = request.judgements() == [JudgementKind::Stuck];
-        let events = if stuck {
-            TurnDigest::parse(request.digest()).map_err(|_| JudgementRefusal::RequestMalformed)?;
-            0
+        let (digest, events) = if stuck {
+            let turn = TurnDigest::parse(request.digest())
+                .and_then(|turn| turn.to_bytes())
+                .map_err(|_| JudgementRefusal::RequestMalformed)?;
+            let turn = String::from_utf8(turn).map_err(|_| JudgementRefusal::RequestMalformed)?;
+            (std::borrow::Cow::Owned(turn), 0)
         } else {
-            marked_event_count(digest)?
+            let digest = std::str::from_utf8(request.digest())
+                .map_err(|_| JudgementRefusal::RequestMalformed)?;
+            (
+                std::borrow::Cow::Borrowed(digest),
+                marked_event_count(digest)?,
+            )
         };
-        if events == 0
-            && request
-                .judgements()
-                .iter()
-                .all(|kind| *kind == JudgementKind::EventKind)
-        {
-            // Only `event_kind` was asked for, over a digest with no marks:
-            // there is nothing to judge and nothing to sign.
-            return Err(JudgementRefusal::RequestMalformed);
-        }
-        self.replay.record(request.request_nonce(), now)?;
+        let digest: &str = &digest;
+        // Only `event_kind` over a digest with no marks judges nothing: the
+        // answer is a signed response with no results and no model call.
+        self.replay
+            .record(request.request_nonce(), &account_key, now)?;
         let _permit = acquire_permit()?;
 
         let mut results = Vec::new();
@@ -593,8 +663,10 @@ pub(crate) mod tests {
         assert_eq!(h.model.calls(), 0);
     }
 
+    /// Only `event_kind`, over a digest with no marks: nothing to judge, so
+    /// no model call, and an answer with no results that still binds.
     #[tokio::test]
-    async fn a_request_that_would_judge_nothing_is_malformed() {
+    async fn a_request_that_judges_nothing_is_answered_empty() {
         let _serial = LOG_LINE.lock().await;
         let h = harness();
         let request = request(
@@ -602,14 +674,14 @@ pub(crate) mod tests {
             digest(0),
             vec![JudgementKind::EventKind],
         );
-        assert_eq!(
-            h.service
-                .judge(&plaintext(&request), NOW, no_permit)
-                .await
-                .unwrap_err(),
-            JudgementRefusal::RequestMalformed
-        );
+        let judged = h
+            .service
+            .judge(&plaintext(&request), NOW, no_permit)
+            .await
+            .expect("answered");
+        assert!(judged.results.is_empty());
         assert_eq!(h.model.calls(), 0);
+        assert_eq!(h.service.replay.len(), 1, "the nonce is still spent");
     }
 
     #[tokio::test]
@@ -684,33 +756,92 @@ pub(crate) mod tests {
         assert_eq!(h.service.replay.len(), 1);
     }
 
+    fn account(byte: u8) -> AccountKey {
+        LimiterKeys::from_root(&[byte; 32]).account_key("account")
+    }
+
     #[test]
     fn the_replay_set_forgets_after_twenty_minutes_and_refuses_when_full() {
         assert_eq!(ReplaySet::default().capacity, 65_536);
-        let set = ReplaySet::with_capacity(2);
+        assert_eq!(ReplaySet::default().account_capacity, 256);
+        let window = REPLAY_WINDOW_SECS.unsigned_abs();
+        let set = ReplaySet::with_capacity(2, 2);
+        let who = account(1);
         let a = fresh_nonce();
         let b = fresh_nonce();
         let c = fresh_nonce();
-        set.record(&a, NOW).expect("first");
+        set.record_at(&a, &who, NOW, 0).expect("first");
         assert_eq!(
-            set.record(&a, NOW + REPLAY_WINDOW_SECS - 1).unwrap_err(),
+            set.record_at(&a, &who, NOW + REPLAY_WINDOW_SECS - 1, window - 1)
+                .unwrap_err(),
             JudgementRefusal::RequestReplayed
         );
-        set.record(&b, NOW + 1).expect("second");
+        set.record_at(&b, &who, NOW + 1, 1).expect("second");
         // Full of unexpired nonces: refused, not forgotten early.
         assert_eq!(
-            set.record(&c, NOW + 2).unwrap_err(),
+            set.record_at(&c, &who, NOW + 2, 2).unwrap_err(),
             JudgementRefusal::Saturated
         );
-        // `a` expires at the window, which frees one slot.
-        set.record(&c, NOW + REPLAY_WINDOW_SECS).expect("a expired");
+        // `a` expires at the window on both clocks, which frees one slot.
+        set.record_at(&c, &who, NOW + REPLAY_WINDOW_SECS, window)
+            .expect("a expired");
         assert_eq!(set.len(), 2);
-        set.record(&a, NOW + REPLAY_WINDOW_SECS).unwrap_err();
-        // A clock that steps back keeps every entry.
+        set.record_at(&a, &who, NOW + REPLAY_WINDOW_SECS, window)
+            .unwrap_err();
+        // A wall clock that steps back keeps every entry.
         assert_eq!(
-            set.record(&b, NOW - 3600).unwrap_err(),
+            set.record_at(&b, &who, NOW - 3600, window + 1).unwrap_err(),
             JudgementRefusal::RequestReplayed
         );
+    }
+
+    /// A forward wall-clock step does not evict a nonce the monotonic clock
+    /// says is fresh, so a replay after the clock steps back is still
+    /// refused.
+    #[test]
+    fn a_wall_clock_step_does_not_forget_a_nonce() {
+        let set = ReplaySet::with_capacity(8, 8);
+        let who = account(1);
+        let captured = fresh_nonce();
+        set.record_at(&captured, &who, NOW, 0).expect("first");
+        // The wall clock jumps an hour ahead; one second has really passed.
+        set.record_at(&fresh_nonce(), &who, NOW + 3600, 1)
+            .expect("honest request after the step");
+        // The clock steps back and the captured request is replayed.
+        assert_eq!(
+            set.record_at(&captured, &who, NOW + 2, 2).unwrap_err(),
+            JudgementRefusal::RequestReplayed
+        );
+        // Twenty minutes later by the monotonic clock, but the wall clock
+        // was set back by as much: still refused.
+        let window = REPLAY_WINDOW_SECS.unsigned_abs();
+        assert_eq!(
+            set.record_at(&captured, &who, NOW, window + 5).unwrap_err(),
+            JudgementRefusal::RequestReplayed
+        );
+    }
+
+    /// One account cannot fill the set: past its share it is refused as
+    /// saturated, and every other account still gets through.
+    #[test]
+    fn one_account_cannot_fill_the_replay_set() {
+        let set = ReplaySet::with_capacity(8, 3);
+        let greedy = account(1);
+        let honest = account(2);
+        for second in 0..3 {
+            set.record_at(&fresh_nonce(), &greedy, NOW, second)
+                .expect("within the share");
+        }
+        assert_eq!(
+            set.record_at(&fresh_nonce(), &greedy, NOW, 3).unwrap_err(),
+            JudgementRefusal::Saturated
+        );
+        set.record_at(&fresh_nonce(), &honest, NOW, 3)
+            .expect("another account is not locked out");
+        // The share frees as the account's nonces expire.
+        let window = REPLAY_WINDOW_SECS.unsigned_abs();
+        set.record_at(&fresh_nonce(), &greedy, NOW + REPLAY_WINDOW_SECS, window)
+            .expect("one expired");
     }
 
     #[test]
