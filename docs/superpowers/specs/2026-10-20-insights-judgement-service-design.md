@@ -1,7 +1,8 @@
 # The Insights judgement service -- design
 
 Date: 2026-10-20, revised 2026-10-21 for the #1501 review (poldsam) and the
-slice reviews on #1529, #1530 and #1531. Owner: Zaki. Status: draft.
+slice reviews on #1529, #1530 and #1531, and 2026-11-01 for the `stuck`
+judgement (section 14). Owner: Zaki. Status: draft.
 
 This is the service spec that delivery step 3 of
 [`2026-10-20-insights-private-judgements-addendum.md`](2026-10-20-insights-private-judgements-addendum.md)
@@ -1217,6 +1218,9 @@ and 5 stand as recorded there.
 - **The addendum's O1 to O4:** what leaves the machine, the folder rule, the
   consent wording, and how existing Insights users are told. O1 blocks the
   digest builder (#1525) and slice 7.
+- **K1 to K3, the `stuck` judgement** (section 14): its consent, whether
+  `usual_calls` leaves the machine, and its ask cap. They block the
+  economizer's `stuck` client, not slices 1 to 6.
 - **S1. Updating NEAR AI pins without a daemon release.** Today a NEAR AI
   key rotation latches the model (section 5) and needs a redeploy plus a
   daemon release, because the pins sit in the measured compose. Options:
@@ -1443,3 +1447,59 @@ The slice fixers work from it. Paths are relative to the repository root.
   in-memory build with no digest on disk (addendum).
 - **Slice 8 (the drill and runbook)** adds `judgement_model_latched` and the
   read-back-versus-quote check to the drill.
+
+## 14. The `stuck` judgement (added 2026-11-01)
+
+The contributor economizer (#1818) watches a managed session's turn and can
+tell the agent when it is going round in circles. Its rules catch the plain
+cases locally. For the unclear middle it asks this service one question:
+is this turn stuck? That is the fourth judgement, `stuck`.
+
+### What changes on the wire (slice 1, #1527)
+
+- `JudgementKind::Stuck`, wire `stuck`, signing tag 4, with labels `stuck`,
+  `productive` and `unclear`. A `stuck` request carries `stuck` alone.
+- Its digest is a `TurnDigest`, not a session digest: counts for the running
+  turn (calls, edits, files edited, most edits to one file, failures,
+  repeated failures, checks, whether the latest check since the last edit
+  failed, optionally `usual_calls`) and the kind, failed and repeated flags
+  of the last 24 calls. It holds no prompts, paths, commands, file contents
+  or output. It parses closed, its counts must be consistent, and it must be
+  sent in its canonical encoding, so nothing can be padded onto it.
+- Both ends refuse a `stuck` request whose digest is not a valid canonical
+  turn digest, and refuse any other judgement whose digest names a turn
+  digest version. A newer turn digest is `wire_version_unsupported`.
+- Wire v1 is not frozen: no daemon client has shipped and the production
+  allowlist is empty. After a client ships, a wire change bumps the version.
+
+### What changes in the service (slice 3, #1529)
+
+- Pinned prompt `stuck-v1`, written for a decision model; under the
+  development chat adapters it also asks for a confidence bucket.
+- The model sees the turn digest re-encoded, never the bytes sent.
+- A `stuck` request logs no digest hash: a turn digest is small integers in
+  a fixed layout, so its hash could be reversed by enumeration.
+- It is charged to the same account month as the other judgements, under
+  the same limiter. K3 bounds how much of that it may use.
+
+### Owner decisions it needs (open)
+
+- **K1. Consent.** A turn digest leaves the machine while the turn runs,
+  possibly more than once per turn, under the judgement claim, so the
+  service learns the account's working cadence. Recommendation: it rides the
+  Insights judgement consent (addendum step 5), whose copy gains one
+  sentence saying a running turn's counts may be checked. The wording goes
+  to the owner under the copy guide's rule 9.
+- **K2. `usual_calls`.** It is the 90th percentile of this folder's past good
+  turns, so it is cross-session history. Recommendation: do not send it.
+  The daemon keeps it local and the judge decides from the turn alone; the
+  field stays optional on the wire so this can be revisited.
+- **K3. Ask cap.** Each ask is a paid call from the $5 account month.
+  Recommendation: the daemon asks at most 2 times per turn and 30 times per
+  UTC day, and the service enforces the same daily count per account key in
+  the limiter, refusing past it with `judgement_saturated` so it never eats
+  the budget the session judgements need.
+
+Until K1 to K3 are decided, the economizer's `stuck` client does not send,
+and the production allowlist stays empty under owner decision 1 in any case.
+
