@@ -147,11 +147,13 @@ final class TracesStore {
         let tone: PrivateInferenceTone
     }
 
-    /// One read, made ready to draw: the tree, each row's tags and lines.
+    /// One read, made ready to draw: the tree, each row's tags and lines,
+    /// and each folder's Submit all offer.
     struct Derived: Sendable {
         let tree: TracesTree
         let tags: [String: NudgeEntryTags]
         let lines: [String: RowLines]
+        let offers: [OfferInput: GroupSubmitOffer]
     }
 
     /// Everything a read is turned into before it is drawn. Off the main
@@ -164,10 +166,13 @@ final class TracesStore {
         for entry in read.entries {
             lines[entry.entryId] = rowLines(entry, copy: copy)
         }
-        return Derived(
-            tree: build(read, showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly),
-            tags: rowTags(read.entries),
-            lines: lines)
+        let tree = build(read, showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly)
+        var offers: [OfferInput: GroupSubmitOffer] = [:]
+        for folder in tree.folders {
+            let input = offerInput(folder, idleOnly: idleOnly)
+            if offers[input] == nil { offers[input] = offer(input) }
+        }
+        return Derived(tree: tree, tags: rowTags(read.entries), lines: lines, offers: offers)
     }
 
     nonisolated static func rowLines(_ entry: DaemonData.QueueEntry, copy: PrivateInferenceCopy?) -> RowLines {
@@ -398,6 +403,7 @@ final class TracesStore {
         if client != nil { idleRequested = false }
         rowTags = [:]
         rowLines = [:]
+        offers = [:]
         nudgeBusy = false
         nudgeError = nil
         // A new client is a new daemon: no undo, toast or refusal from the
@@ -645,6 +651,7 @@ final class TracesStore {
                 : Self.build(read, showsIgnored: showsIgnored, keepsOrder: keepsOrder, idleOnly: idleOnly)
             rowTags = derived.tags
             rowLines = derived.lines
+            offers = derived.offers
             lastRead = read
             self.status = statusRead
             self.destinations = routes
@@ -700,6 +707,29 @@ final class TracesStore {
     ) -> Bool {
         consent != nil && ReadGate.canContribute(hasPinnedPreview: enrolled == true)
             && EligibilitySurface.offersContribute(eligibility, calls: calls)
+    }
+
+    /// Whether a session's row Submit sends it (owner, 2026-10-22: a row's
+    /// Submit sends the trace at once, without its preview, as a folder's
+    /// Submit sends its traces). The review card's gate without the
+    /// preview: a core that answers, the consent words read, the daemon
+    /// holding an enrollment, the trace eligible by the shared table, and
+    /// its folder not ignored. A trace held as worth a second look is not
+    /// sent from its row: its look comes first, in its review.
+    func maySubmitSession(_ entry: DaemonData.QueueEntry, folderIgnored: Bool) -> Bool {
+        guard client != nil, consent != nil, status?.loggedIn == true, !folderIgnored, !entry.heldForReview
+        else { return false }
+        if case .failed = phase { return false }
+        return EligibilitySurface.offersContribute(Self.eligibility(entry), calls: Self.eligibilityCalls)
+    }
+
+    /// A row's Submit: the session sent with no verdict, as a folder's
+    /// Submit sends its traces, asked again at the press.
+    func submitSession(_ entry: DaemonData.QueueEntry, folderIgnored: Bool) async {
+        guard let live = tree.allSessions.first(where: { $0.entryId == entry.entryId }),
+              maySubmitSession(live, folderIgnored: folderIgnored)
+        else { return }
+        await perform(.contribute, on: live.entryId)
     }
 
     /// What the tab says for a refused action: a skipped approve in the
@@ -793,6 +823,14 @@ final class TracesStore {
         /// The core's severity for a label line; budget, witness and
         /// gate-held lines are `.waiting`.
         let severity: HealthCopy.Severity
+        let condition: String?
+
+        init(title: String, body: String?, severity: HealthCopy.Severity, condition: String? = nil) {
+            self.title = title
+            self.body = body
+            self.severity = severity
+            self.condition = condition
+        }
     }
 
     /// What the queue's safeguards say right now: a spent daily budget, a
@@ -815,25 +853,22 @@ final class TracesStore {
         guard let status else { return [] }
         var out: [Safeguard] = []
         var said: Set<String> = []
-        if let budget = status.dailyBudget, budget.blocked == true {
-            out.append(Safeguard(
-                title: DailyBudgetCopy.title,
-                body: DailyBudgetCopy.detail(blockedEntries: budget.blockedEntries ?? 0, resetsAt: budget.resetsAt),
-                severity: .waiting))
-            said.insert("daily-cap-reached")
-        }
+        // The health slot may retain an earlier watcher failure after the
+        // queue has room. Only the authoritative capacity read clears it.
+        if status.queueAtCapacity == false { said.insert("queue-full") }
         if let capacity = status.witnessCapacity {
             // Reported but not readable (no count, a negative one, or one
             // the core could not word) is never "none waiting" (Ron's
             // `QueueStatusPanel`): sessions may be held, so it is said.
             let waiting = capacity.waitingSessions
             if let waiting, waiting == 0 {
-                // None waiting.
+                // An explicit clear outranks a stale single-slot health label.
+                said.insert("witness-saturated")
             } else if let waiting, waiting > 0, let wire = Self.wire(capacity),
                 let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire)
                     .flatMap(WitnessCapacityNotice.decode(fromJSON:))
             {
-                out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
+                out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting, condition: "witness-saturated"))
                 said.insert("witness-saturated")
             } else {
                 if let unreadable = capacityUnreadable {
@@ -850,16 +885,17 @@ final class TracesStore {
                 said.insert("witness-saturated")
             }
         }
+        if status.automaticContributionHeld?.heldSessions == 0 { said.insert(GateHeld.label) }
         if let held = status.automaticContributionHeld, (held.heldSessions ?? 0) > 0,
             let wire = Self.wire(held),
             let notice = TCConsentCopy.gateHeldNoticeJSON(forHeld: wire).flatMap(GateHeldNotice.decode(fromJSON:))
         {
-            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
+            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting, condition: GateHeld.label))
             said.insert(GateHeld.label)
         }
         if let label = status.health?.lastErrorLabel, !said.contains(label) {
             let health = HealthCopy.core(label: label, maxQueueEntries: maxQueueEntries)
-            out.insert(Safeguard(title: health.title, body: health.detail, severity: health.severity), at: 0)
+            out.insert(Safeguard(title: health.title, body: health.detail, severity: health.severity, condition: label), at: 0)
         }
         return out
     }
@@ -869,19 +905,6 @@ final class TracesStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
-    }
-
-    /// Whether something waiting is worth a second look (nothing matched, or
-    /// trimmed to fit), as the main window's queue shield reads it. The
-    /// badge pairs with it, so it never says only a count.
-    var shield: QueueShieldState { Self.shield(tree.allSessions) }
-
-    static func shield(_ sessions: [DaemonData.QueueEntry]) -> QueueShieldState {
-        let reasons = sessions.map { Set($0.secondLook ?? []) }
-        return QueueShieldState.state(
-            waiting: sessions.count,
-            nothingMatched: reasons.filter { $0.contains("nothing-matched") }.count,
-            trimmed: reasons.filter { $0.contains("trimmed-to-fit") }.count)
     }
 
     /// A tool's source declaration, from its switch after the core's
@@ -908,6 +931,12 @@ final class TracesStore {
     /// confirmation the view showed (arming, or ignoring a folder with
     /// sessions waiting). `promised` is the waiting count that confirmation
     /// named; the core's `purged` is the authority, and a difference is said.
+    /// A line for the tab's folder notice that no write produced: why a
+    /// switch did not move.
+    func say(_ line: String) {
+        folderNotice = line
+    }
+
     func setFolderMode(_ folder: TracesTree.FolderNode, _ mode: ProjectMode, promised: Int) async {
         guard !writing.contains(folder.id) else { return }
         let mine = attachment
@@ -941,20 +970,44 @@ final class TracesStore {
     /// instead -- less any held for a person, which no group sends -- and
     /// Submit sends only those (`approveFolder(filter:)`); what the daemon
     /// then leaves out as ineligible is said after, in its own line.
+    ///
+    /// Worked out off the main thread with the read (`derive`), by what it
+    /// is asked of the table, so a redraw makes no call into the core; a
+    /// folder that read did not hold is asked now.
     func groupOffer(_ folder: TracesTree.FolderNode) -> GroupSubmitOffer {
+        let input = Self.offerInput(folder, idleOnly: idleOnly)
+        return offers[input] ?? Self.offer(input)
+    }
+
+    /// What a folder's offer asks of the shared table: everything the
+    /// answer depends on, so two folders that ask the same share it.
+    struct OfferInput: Hashable, Sendable {
+        let pending: Int?
+        let contributable: Int?
+        let fallback: Int
+    }
+
+    nonisolated static func offerInput(_ folder: TracesTree.FolderNode, idleOnly: Bool) -> OfferInput {
         if idleOnly {
-            return EligibilitySurface.groupSubmit(
-                pendingCount: folder.sessions.filter { !$0.heldForReview }.count,
-                contributableCount: nil,
-                fallbackPending: folder.sessions.count,
-                calls: Self.eligibilityCalls)
+            return OfferInput(
+                pending: folder.sessions.filter { !$0.heldForReview }.count,
+                contributable: nil,
+                fallback: folder.sessions.count)
         }
-        return EligibilitySurface.groupSubmit(
-            pendingCount: folder.pendingCount,
-            contributableCount: folder.contributableCount,
-            fallbackPending: folder.sessions.count,
+        return OfferInput(
+            pending: folder.pendingCount, contributable: folder.contributableCount, fallback: folder.sessions.count)
+    }
+
+    nonisolated static func offer(_ input: OfferInput) -> GroupSubmitOffer {
+        EligibilitySurface.groupSubmit(
+            pendingCount: input.pending,
+            contributableCount: input.contributable,
+            fallbackPending: input.fallback,
             calls: Self.eligibilityCalls)
     }
+
+    /// The offers the last read worked out, by what each asked.
+    @ObservationIgnored private(set) var offers: [OfferInput: GroupSubmitOffer] = [:]
 
     /// Whether Submit all may be drawn at all, besides the table's answer:
     /// the core is attached, and the folder is not one that is never sent.

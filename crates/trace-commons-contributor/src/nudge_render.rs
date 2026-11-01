@@ -188,6 +188,19 @@ pub fn settlement_total_line(total: &SettlementTotal) -> String {
     fill_owned(template, &values)
 }
 
+/// Home's Not contributed line for the same estimate: what sharing the
+/// traces on this Mac could make, as a band.
+#[must_use]
+pub fn settlement_share_line(total: &SettlementTotal) -> String {
+    let (values, up_to) = settlement_band(total.low_usd_micros, total.high_usd_micros);
+    let template = if up_to {
+        copy::ESTIMATE_SHARE_LINE_UP_TO
+    } else {
+        copy::ESTIMATE_SHARE_LINE
+    };
+    fill_owned(template, &values)
+}
+
 /// The settlement notification. `pricing_changed` picks the pricing body.
 #[must_use]
 pub fn settlement_notification(total: &SettlementTotal, pricing_changed: bool) -> NotificationText {
@@ -204,6 +217,21 @@ pub fn settlement_notification(total: &SettlementTotal, pricing_changed: bool) -
         actions: vec![
             action(ACTION_REVIEW, copy::NOTIFY_SETTLEMENT_ACTION_REVIEW),
             action(ACTION_NOT_NOW, copy::NOTIFY_SETTLEMENT_ACTION_NOT_NOW),
+        ],
+    }
+}
+
+/// The notification for NEAR AI credit received: `received_nanos` is the
+/// credit since the last such notification (all of it, the first time).
+#[must_use]
+pub fn near_ai_credit_notification(received_nanos: i64) -> NotificationText {
+    let amount = crate::private_inference_copy::format_amount(received_nanos, 9);
+    NotificationText {
+        title: copy::NOTIFY_NEAR_AI_CREDIT_TITLE.to_string(),
+        body: copy::NOTIFY_NEAR_AI_CREDIT_BODY.replace("{amount}", &amount),
+        actions: vec![
+            action(ACTION_REVIEW, copy::NOTIFY_NEAR_AI_CREDIT_ACTION_VIEW),
+            action(ACTION_NOT_NOW, copy::NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW),
         ],
     }
 }
@@ -717,6 +745,18 @@ mod tests {
     }
 
     #[test]
+    fn the_share_line_is_a_band_or_up_to() {
+        assert_eq!(
+            settlement_share_line(&total(3_500_000, 9_000_000)),
+            "You could make about $3.50 to $9 of inference if you share these"
+        );
+        assert_eq!(
+            settlement_share_line(&total(0, 500_000)),
+            "You could make up to $0.50 of inference if you share these, as an estimate"
+        );
+    }
+
+    #[test]
     fn the_settlement_notification_has_core_words_and_two_actions() {
         let t = total(3_500_000, 9_000_000);
         let n = settlement_notification(&t, false);
@@ -745,6 +785,15 @@ mod tests {
         assert!(p.body.starts_with("Pricing changed."), "{}", p.body);
         assert!(p.body.contains("up to $1.50"), "{}", p.body);
         assert!(!p.body.contains("$0 to"), "{}", p.body);
+    }
+
+    #[test]
+    fn the_credit_notification_names_the_amount_with_core_words() {
+        let n = near_ai_credit_notification(3_209_000_000);
+        assert_eq!(n.title, copy::NOTIFY_NEAR_AI_CREDIT_TITLE);
+        assert_eq!(n.body, "$3.20 of NEAR AI credit arrived in your account.");
+        let ids: Vec<_> = n.actions.iter().map(|a| a.id).collect();
+        assert_eq!(ids, vec![ACTION_REVIEW, ACTION_NOT_NOW]);
     }
 
     #[test]

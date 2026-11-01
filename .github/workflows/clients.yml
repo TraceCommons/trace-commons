@@ -30,8 +30,6 @@ on:
       - "scripts/make-appinstaller.ps1"
       - "scripts/ci/verify-macos-entitlements.sh"
       - "scripts/ci/test-verify-macos-entitlements.sh"
-      - "scripts/ci/native-passkey-entitlements.py"
-      - "scripts/ci/tests/test_native_passkey_entitlements.py"
       # The fixture test also reads the Tauri app's entitlements.
       - "tauri-desktop/src-tauri/entitlements.plist"
       - "crates/trace-commons-client-server-tests/**"
@@ -126,7 +124,7 @@ jobs:
         run: python3 scripts/design-tokens/generate.py --check
       - name: swift test
         working-directory: macos
-        run: swift test
+        run: swift test -Xswiftc -warnings-as-errors
       # `swift test` builds Debug only, so a DEBUG-only symbol (sample
       # clients, monitor windows behind `#if DEBUG`) reachable from a Release
       # path compiled here and failed first in the release workflow. This
@@ -135,7 +133,7 @@ jobs:
       # the Swift Release configuration, not the dylib's profile.
       - name: swift build (Release)
         working-directory: macos
-        run: swift build -c release
+        run: swift build -c release -Xswiftc -warnings-as-errors
 
   # The glass design system's pre-Liquid Glass fallback. Every other macOS
   # job runs on macos-26, where `GlassMaterial.current` always answers
@@ -170,7 +168,7 @@ jobs:
         run: cargo build -p trace-commons-contributor-ffi
       - name: swift test (TCDesign and the glass shell's source scans)
         working-directory: macos
-        run: swift test --filter 'TCDesignTests|GlassSurfaceRulesTests|MonitorNavigationTests|LegacyShellRetiredTests|TracesParityTests|HistoryParityTests|InferenceParityTests'
+        run: swift test -Xswiftc -warnings-as-errors --filter 'TCDesignTests|GlassSurfaceRulesTests|MonitorNavigationTests|LegacyShellRetiredTests|TracesParityTests|HistoryParityTests|InferenceParityTests'
 
   windows-pipe-acl:
     name: windows named-pipe ACL
@@ -251,35 +249,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # Proven on a real Windows host (the tc-win-dev GCE box) on 2026-08-17:
       # this compiles every #[cfg(windows)] body under -D warnings. It is the
-      # load-bearing step of this job. It uses --bins and needs no OpenSSL,
-      # because nothing here pulls the dev-dependency graph.
+      # load-bearing step of this job.
       - name: Build trace-commons-contributor for Windows
         env:
           RUSTFLAGS: -D warnings
         run: cargo check -p trace-commons-contributor --bins
-      # The test steps below DO pull dev-dependencies, and that graph reaches
-      # OpenSSL: trace-commons-contributor dev-depends on trace-commons-server,
-      # which depends on webauthn-rs -> webauthn-rs-core ->
-      # webauthn-attestation-ca -> openssl -> openssl-sys. On the real Windows
-      # box that build script fails with "Could not find directory of OpenSSL
-      # installation", so the tests cannot run without pointing it at one.
-      # windows-latest ships OpenSSL; this locates it rather than assuming a
-      # hardcoded path, and fails loudly if the image ever stops shipping it.
-      - name: Point openssl-sys at the runner's OpenSSL
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $candidates = @(
-            "C:\Program Files\OpenSSL",
-            "C:\Program Files\OpenSSL-Win64",
-            "C:\Strawberry\c"
-          ) | Where-Object { Test-Path (Join-Path $_ "include\openssl\ssl.h") }
-          if (-not $candidates) {
-            throw "No OpenSSL installation found on this runner. openssl-sys cannot build, so the update tests cannot run. Install one or adjust this step."
-          }
-          $dir = $candidates[0]
-          Write-Host "using OPENSSL_DIR=$dir"
-          "OPENSSL_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Run the update unit tests
         run: cargo test -p trace-commons-contributor --lib "update::"
       # Includes the_platform_verifier_refuses_the_unsigned_fixture, the only
@@ -615,9 +589,11 @@ jobs:
           Write-Host "manifest publisher, logo assets and unpackaged default all check out"
 
       - uses: dtolnay/rust-toolchain@stable
+      # An exact patch makes the installer use the public SDK feeds instead
+      # of aka.ms channel redirects, which can target non-public origin storage.
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '8.0.427'
 
       # The WinUI shell is C# over the same C ABI the macOS app uses, so the
       # cdylib has to exist before anything managed builds. The app project

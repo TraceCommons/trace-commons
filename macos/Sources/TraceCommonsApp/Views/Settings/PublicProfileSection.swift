@@ -1,5 +1,6 @@
 import SwiftUI
 import TCDesign
+import TCBridge
 
 /// The go-public acknowledgement gate: the primary does nothing until there
 /// is a handle to consent to, a consent to it, and no call in flight.
@@ -41,6 +42,13 @@ struct PublicProfileSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            ForEach(model.consentScopes.filter { !$0.alwaysOn && !$0.grantsDataUse }) { scope in
+                GlassCard { ConsentScopeToggle(scope: scope) }
+            }
+            if model.consentWriteRefused {
+                GlassAlert(ConsentScopeRows.refusalLine(
+                    settings: TCSourceChecks.settingsCopy()?.consentSaveFailed, screens: ConsentScopeRows.screens))
+            }
             if let profile = model.publicProfile, let handle = profile.handle {
                 profilePanel(profile, handle: handle)
             } else if model.publicProfileRead != .answered {

@@ -42,10 +42,11 @@ pub const CLINE_DATA_DIR_ENV: &str = "CLINE_DATA_DIR";
 /// Overrides the session directory itself.
 pub const CLINE_SESSION_DATA_DIR_ENV: &str = "CLINE_SESSION_DATA_DIR";
 
-/// The largest session document this adapter will load, shared with every
-/// other adapter's budget: they all bound how much of one conversation may
-/// become resident on its way to being discarded.
-pub(crate) const CLINE_SESSION_BUDGET: u64 = super::claude_code::GROUP_RAW_BYTE_BUDGET;
+/// The largest session document this adapter will load: the budget shared
+/// by the adapters that parse one whole JSON document, which stayed at
+/// 64 MB when the streaming adapters' cap was raised. See
+/// [`super::DOCUMENT_SESSION_BYTE_BUDGET`].
+pub(crate) const CLINE_SESSION_BUDGET: u64 = super::DOCUMENT_SESSION_BYTE_BUDGET;
 
 const MESSAGES_SUFFIX: &str = ".messages.json";
 const MANIFEST_SUFFIX: &str = ".json";

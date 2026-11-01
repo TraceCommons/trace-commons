@@ -1,13 +1,16 @@
 //! The map and the Inference tab (K8 of #1118): where each tool's sessions
 //! and model calls go, and the model calls this machine's proxy recorded.
 //!
-//! Two methods, both local and synchronous, both read from state this daemon
+//! Three methods, all local and synchronous, all read from state this daemon
 //! already holds:
 //!
 //! - `tool_destinations` -- per tool, the parties its sessions go to and the
 //!   party that answers its model calls.
 //! - `inference_calls` -- one page of the calls in the local routing ledger,
 //!   newest first, with the route, the priced cost and IronWire's proof label.
+//! - `inference_activity` -- the same calls counted in four-hour steps across
+//!   the window, with how many of each step's carry a `verified` label, for
+//!   the menu-bar item's graph.
 //!
 //! # The proof is IronWire's, read verbatim
 //!
@@ -48,7 +51,7 @@
 
 use std::collections::BTreeSet;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 
 use super::harness::{ACTIVITY_WINDOW_HOURS, HarnessRow};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
@@ -83,6 +86,10 @@ pub const BASIS_OBSERVED: &str = "observed";
 pub const BASIS_CONFIGURED: &str = "configured";
 pub const BASIS_TOOL_DEFAULT: &str = "tool_default";
 pub const BASIS_ANSWERED_ELSEWHERE: &str = "answered_elsewhere";
+
+/// The hours one `inference_activity` step covers: six steps across the
+/// 24-hour window, one bar each in the menu-bar item.
+pub const ACTIVITY_STEP_HOURS: i64 = 4;
 
 pub const ERR_LIMIT_INVALID: &str = "limit-invalid";
 pub const ERR_CURSOR_INVALID: &str = "cursor-invalid";
@@ -1022,6 +1029,69 @@ pub fn handle_calls(shared: &DaemonShared, req: &Request) -> Response {
     )
 }
 
+/// The window's listed calls, and the `verified` ones among them, in steps
+/// of [`ACTIVITY_STEP_HOURS`], oldest first, the last ending at `now`.
+///
+/// Counts exactly the rows [`calls_page`] lists (rows with a ledger id), so
+/// the steps add up to the Inference tab's call count. A row from just before
+/// the first step (the ledger takes its own cutoff a moment earlier) counts
+/// in the first step, and one after `now` (a proxy clock ahead of this one)
+/// in the last, so no listed row is dropped. The steps start on whole
+/// seconds, so each `start` is written without a fraction.
+#[must_use]
+pub fn activity_steps(rows: &[RoutedExchange], now: DateTime<Utc>) -> Vec<serde_json::Value> {
+    let now = now.trunc_subsecs(0);
+    let count = (ACTIVITY_WINDOW_HOURS / ACTIVITY_STEP_HOURS) as usize;
+    let step = chrono::Duration::hours(ACTIVITY_STEP_HOURS);
+    let start = now - chrono::Duration::hours(ACTIVITY_WINDOW_HOURS);
+    let mut calls = vec![0_u64; count];
+    let mut verified = vec![0_u64; count];
+    for row in rows.iter().filter(|row| row.id.is_some()) {
+        let offset = (row.started_at - start).num_milliseconds();
+        let index = offset
+            .div_euclid(step.num_milliseconds())
+            .clamp(0, count as i64 - 1) as usize;
+        calls[index] += 1;
+        if row.proof == Some(ProofStatus::Verified) {
+            verified[index] += 1;
+        }
+    }
+    (0..count)
+        .map(|i| {
+            serde_json::json!({
+                "start": (start + step * i as i32).to_rfc3339(),
+                "calls": calls[i],
+                "verified": verified[i],
+            })
+        })
+        .collect()
+}
+
+/// `inference_activity`.
+pub fn handle_activity(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(rows) = ledger_rows(shared) else {
+        // No ledger answered: not evidence of no calls, and said so.
+        return Response::ok(
+            req.id,
+            serde_json::json!({
+                "readable": false,
+                "window_hours": ACTIVITY_WINDOW_HOURS,
+                "step_hours": ACTIVITY_STEP_HOURS,
+                "steps": [],
+            }),
+        );
+    };
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "readable": true,
+            "window_hours": ACTIVITY_WINDOW_HOURS,
+            "step_hours": ACTIVITY_STEP_HOURS,
+            "steps": activity_steps(&rows, Utc::now()),
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1608,6 +1678,7 @@ mod tests {
             consent_scopes: vec![],
             credit_points_pending: 0.0,
             credit_points_final: None,
+            credit_outcome_reason: None,
             explanations: vec![],
             last_refreshed_at: None,
             withdrawn_at: None,
@@ -1768,6 +1839,7 @@ mod tests {
             let _ = axum::serve(listener, router).await;
         });
         let (_dir, s) = shared();
+        let s = std::sync::Arc::new(s);
         s.install_routing_ledger_for_test(crate::routing::ironwire::IronWireLedger::new(
             port,
             "t".to_string(),
@@ -1870,6 +1942,116 @@ mod tests {
         let r =
             super::super::ipc::handle_request(&s, &call("inference_calls", serde_json::json!({})));
         assert_eq!(r.result.expect("calls")["readable"], false);
+        assert!(super::super::ipc::METHODS.contains(&"inference_activity"));
+        let r = super::super::ipc::handle_request(
+            &s,
+            &call("inference_activity", serde_json::json!({})),
+        );
+        assert_eq!(
+            r.result.expect("activity"),
+            serde_json::json!({
+                "readable": false,
+                "window_hours": 24,
+                "step_hours": 4,
+                "steps": [],
+            }),
+            "no ledger answered: unknown, never six empty steps"
+        );
+    }
+
+    /// Six four-hour steps, oldest first, the last ending now. Each counts
+    /// the rows `inference_calls` lists and the `verified` ones among them;
+    /// an edge row lands in the first or last step rather than vanishing.
+    #[test]
+    fn activity_counts_listed_calls_and_verified_calls_per_four_hour_step() {
+        let now = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let at = |hours_ago: i64, minutes: i64, id: Option<i64>, proof: Option<ProofStatus>| {
+            let mut r = row(id.unwrap_or(0), 0, proof);
+            r.id = id;
+            r.started_at =
+                now - chrono::Duration::hours(hours_ago) + chrono::Duration::minutes(minutes);
+            r
+        };
+        let rows = vec![
+            // The newest step: two calls, one verified.
+            at(1, 0, Some(1), Some(ProofStatus::Verified)),
+            at(1, 30, Some(2), Some(ProofStatus::GatewayOnly)),
+            // The step before the newest (4-8 hours ago).
+            at(7, 0, Some(3), Some(ProofStatus::Verified)),
+            // Outside and unlabelled calls are calls, never verified.
+            at(7, 10, Some(4), Some(ProofStatus::Outside)),
+            at(7, 20, Some(5), None),
+            // Not listed (no id), so not counted.
+            at(7, 30, None, Some(ProofStatus::Verified)),
+            // Just before the window and just after now: the end steps.
+            at(24, -1, Some(6), Some(ProofStatus::Verified)),
+            at(0, 1, Some(7), Some(ProofStatus::Pending)),
+        ];
+        let steps = activity_steps(&rows, now);
+        assert_eq!(steps.len(), 6);
+        assert_eq!(
+            steps[0]["start"],
+            (now - chrono::Duration::hours(24)).to_rfc3339()
+        );
+        assert_eq!(
+            steps[5]["start"],
+            (now - chrono::Duration::hours(4)).to_rfc3339()
+        );
+        let calls: Vec<u64> = steps.iter().map(|s| s["calls"].as_u64().unwrap()).collect();
+        let verified: Vec<u64> = steps
+            .iter()
+            .map(|s| s["verified"].as_u64().unwrap())
+            .collect();
+        assert_eq!(calls, vec![1, 0, 0, 0, 3, 3]);
+        assert_eq!(verified, vec![1, 0, 0, 0, 1, 1]);
+        let (listed, _) = calls_page(&rows, &[], None, MAX_CALLS_LIMIT);
+        assert_eq!(
+            calls.iter().sum::<u64>() as usize,
+            listed.len(),
+            "the steps add up to the calls inference_calls lists"
+        );
+    }
+
+    #[test]
+    fn inference_activity_counts_the_held_ledger() {
+        let (_dir, s) = shared();
+        s.install_routing_ledger_for_test(
+            crate::routing::ironwire::IronWireLedger::with_rows_for_test(
+                (1..=5).map(recent).collect(),
+            ),
+        );
+        let value = super::super::ipc::handle_request(
+            &s,
+            &call("inference_activity", serde_json::json!({})),
+        )
+        .result
+        .expect("activity");
+        assert_eq!(value["readable"], true);
+        assert_eq!(value["window_hours"], 24);
+        assert_eq!(value["step_hours"], 4);
+        let steps = value["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 6);
+        let calls: u64 = steps.iter().map(|s| s["calls"].as_u64().unwrap()).sum();
+        let verified: u64 = steps.iter().map(|s| s["verified"].as_u64().unwrap()).sum();
+        assert_eq!((calls, verified), (5, 5));
+        for step in steps {
+            let mut keys: Vec<&str> = step
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                ["calls", "start", "verified"],
+                "counts and a time only"
+            );
+            assert!(
+                !step["start"].as_str().unwrap().contains('.'),
+                "a step starts on a whole second, read now with a fraction"
+            );
+        }
     }
 
     /// Sessions come from the queue and the history cache, inside the

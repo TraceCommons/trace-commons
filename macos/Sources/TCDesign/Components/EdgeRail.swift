@@ -26,7 +26,7 @@ public enum EdgeRailGeometry {
 /// One tile on the edge rail: a glyph button on the control tiers, as the
 /// segmented tabs draw a segment. No fill at rest, `controlHover` under the
 /// pointer, and, selected, `controlSelected` with its edge and the label in
-/// `textOnSelected` (the brand purple and white in the flat theme). The
+/// `textOnSelected` (the NEAR AI accent and its ink in the flat theme). The
 /// press darkens the fill, never the glyph.
 public struct GlassRailTile<Label: View>: View {
     private let selected: Bool

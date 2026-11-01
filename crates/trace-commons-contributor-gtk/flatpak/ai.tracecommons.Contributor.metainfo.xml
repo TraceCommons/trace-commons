@@ -62,6 +62,31 @@
   </provides>
 
   <releases>
+    <release version="0.21.1" date="2026-11-01">
+      <description>
+        <p>Keeps a NEAR AI session's models inside its privacy tier when a project's Claude Code settings choose a model, keeps uploads retrying for at least six hours during an outage, and reports final credit as earned in the daily digest.</p>
+      </description>
+    </release>
+    <release version="0.21.0" date="2026-11-01">
+      <description>
+        <p>Removes the daily upload limit, reads sessions up to 512 MiB, offers Codex's compressed sessions, and spreads out retries when the commons is busy.</p>
+      </description>
+    </release>
+    <release version="0.20.6" date="2026-10-20">
+      <description>
+        <p>Trusts an updated set of root certificates: the emSign roots that are no longer trusted are removed.</p>
+      </description>
+    </release>
+    <release version="0.20.5" date="2026-10-20">
+      <description>
+        <p>Maintenance release for Linux: the version number follows the macOS app.</p>
+      </description>
+    </release>
+    <release version="0.20.4" date="2026-10-20">
+      <description>
+        <p>Insights counts long sessions, and counting runs in the background so the queue no longer waits for it.</p>
+      </description>
+    </release>
     <release version="0.20.3" date="2026-10-20">
       <description>
         <p>Maintenance release for Linux: the version number follows the macOS app.</p>

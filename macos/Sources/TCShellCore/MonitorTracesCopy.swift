@@ -163,6 +163,7 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let submitCount: String
     public let submitting: String
     public let submitTip: String
+    public let submitTraceTip: String
     public let eligibleCount: String
     public let reviewing: String
     public let reviewTip: String
@@ -172,6 +173,15 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let folderMenu: String
     public let watchFolder: String
     public let watchTool: String
+    /// The Automatic switches: a folder row's (`{label}`), the tab's for
+    /// every folder, and the line under the tab's.
+    public let automaticFolder: String?
+    public let automaticAll: String?
+    public let automaticCount: String?
+    /// The titles over the tree's columns while the Automatic switches show.
+    public let columnFolders: String?
+    public let columnSubmit: String?
+    public let columnAutomatic: String?
     public let dismissSession: String
     public let dismissSessionTitle: String
     public let dismissSessionBody: String
@@ -199,6 +209,7 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case submitCount = "submit_count"
         case submitting
         case submitTip = "submit_tip"
+        case submitTraceTip = "submit_trace_tip"
         case eligibleCount = "eligible_count"
         case reviewing
         case reviewTip = "review_tip"
@@ -207,6 +218,12 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case folderMenu = "folder_menu"
         case watchFolder = "watch_folder"
         case watchTool = "watch_tool"
+        case automaticFolder = "automatic_folder"
+        case automaticAll = "automatic_all"
+        case automaticCount = "automatic_count"
+        case columnFolders = "column_folders"
+        case columnSubmit = "column_submit"
+        case columnAutomatic = "column_automatic"
         case dismissSession = "dismiss_session"
         case dismissSessionTitle = "dismiss_session_title"
         case dismissSessionBody = "dismiss_session_body"
@@ -292,7 +309,6 @@ public struct MonitorSummaryCopy: MonitorWordTable {
     public let toolsWatched: String
     public let waitingForYou: String
     public let worthASecondLook: String
-    public let uploadsToday: String
     public let statistics: String
     public let topProjects: String
     public let topTools: String
@@ -303,7 +319,6 @@ public struct MonitorSummaryCopy: MonitorWordTable {
         case toolsWatched = "tools_watched"
         case waitingForYou = "waiting_for_you"
         case worthASecondLook = "worth_a_second_look"
-        case uploadsToday = "uploads_today"
         case statistics
         case topProjects = "top_projects"
         case topTools = "top_tools"
@@ -472,18 +487,14 @@ public struct MonitorUndoCopy: MonitorWordTable {
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
 }
 
-/// The queue's safeguards panel labels that `HealthCopy`, `DailyBudgetCopy` and the routing copy do not already hold.
+/// The queue's safeguards panel labels that `HealthCopy` and the routing copy do not already hold.
 public struct MonitorSafeguardsCopy: MonitorWordTable {
     public let eyebrow: String
     public let heading: String
-    public let dailyLimit: String
     public let inferenceRouting: String
     public let daemonOwned: String
     public let rowsUnavailableOne: String
     public let rowsUnavailable: String
-    public let remaining: String
-    public let heldByLimitOne: String
-    public let heldByLimit: String
     public let capacityUnreadable: String
     public let routingNotDeclared: String
     public let routingAwaitingRows: String
@@ -494,14 +505,10 @@ public struct MonitorSafeguardsCopy: MonitorWordTable {
     enum CodingKeys: String, CodingKey, CaseIterable {
         case eyebrow
         case heading
-        case dailyLimit = "daily_limit"
         case inferenceRouting = "inference_routing"
         case daemonOwned = "daemon_owned"
         case rowsUnavailableOne = "rows_unavailable_one"
         case rowsUnavailable = "rows_unavailable"
-        case remaining
-        case heldByLimitOne = "held_by_limit_one"
-        case heldByLimit = "held_by_limit"
         case capacityUnreadable = "capacity_unreadable"
         case routingNotDeclared = "routing_not_declared"
         case routingAwaitingRows = "routing_awaiting_rows"
@@ -683,14 +690,11 @@ public struct MonitorShellCopy: MonitorWordTable {
         tools == 1 ? watchingToolsOne : watchingTools.replacingOccurrences(of: "{count}", with: String(tools))
     }
 
-    /// Home's second status line: sessions waiting, then how many of them
-    /// are worth a second look, or nothing waiting.
-    public func waiting(_ waiting: Int, secondLook: Int) -> String {
+    /// Home's second status line: sessions waiting, or nothing waiting.
+    public func waiting(_ waiting: Int) -> String {
         guard waiting > 0 else { return nothingWaiting }
-        let head = waiting == 1
+        return waiting == 1
             ? waitingForYouOne : waitingForYou.replacingOccurrences(of: "{count}", with: String(waiting))
-        guard secondLook > 0 else { return head }
-        return head + " \u{00B7} " + worthASecondLook.replacingOccurrences(of: "{count}", with: String(secondLook))
     }
 
     /// The focus button's tip: select first, back to the whole map, or
@@ -721,6 +725,25 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let uncontributed: String
     public let uncontributedSize: String
     public let uncontributedEstimate: String
+    /// Home's section titles, and the Private AI section's line while
+    /// NEAR AI is signed out (owner, 2026-10-20).
+    public let sectionPrivateAI: String
+    public let sectionTraces: String
+    public let sectionAccount: String
+    public let privateAISignIn: String
+    /// Home's Traces hero: its title, line and way into Traces (owner,
+    /// 2026-10-28).
+    public let tracesHeroTitle: String
+    public let tracesHeroBody: String
+    public let tracesHeroAction: String
+    /// The hero's three steps, each a title over one line (owner,
+    /// 2026-10-29).
+    public let tracesHeroStepContribute: String
+    public let tracesHeroStepContributeDetail: String
+    public let tracesHeroStepEarn: String
+    public let tracesHeroStepEarnDetail: String
+    public let tracesHeroStepUse: String
+    public let tracesHeroStepUseDetail: String
     public let creditDelta: String
     public let insightsToday: String
     public let insightsTeaser: String
@@ -730,6 +753,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let campaignAction: String
     public let missionsAction: String
     public let insightsAction: String
+    public let promotionsTitle: String
+    public let promotionsToggle: String
+    public let promotionsCaption: String
     public let submissions: String
     public let contributionHistory: String
     public let readingHistory: String
@@ -739,6 +765,8 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let records: String
     public let statusLine: String
     public let rowCredit: String
+    /// A decided row that earned no credit, around the reason's words.
+    public let rowNoCredit: String
     public let heldCountOne: String
     public let heldCount: String
     public let publicStanding: String
@@ -765,6 +793,19 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case uncontributed
         case uncontributedSize = "uncontributed_size"
         case uncontributedEstimate = "uncontributed_estimate"
+        case sectionPrivateAI = "section_private_ai"
+        case sectionTraces = "section_traces"
+        case sectionAccount = "section_account"
+        case privateAISignIn = "private_ai_sign_in"
+        case tracesHeroTitle = "traces_hero_title"
+        case tracesHeroBody = "traces_hero_body"
+        case tracesHeroAction = "traces_hero_action"
+        case tracesHeroStepContribute = "traces_hero_step_contribute"
+        case tracesHeroStepContributeDetail = "traces_hero_step_contribute_detail"
+        case tracesHeroStepEarn = "traces_hero_step_earn"
+        case tracesHeroStepEarnDetail = "traces_hero_step_earn_detail"
+        case tracesHeroStepUse = "traces_hero_step_use"
+        case tracesHeroStepUseDetail = "traces_hero_step_use_detail"
         case creditDelta = "credit_delta"
         case insightsToday = "insights_today"
         case insightsTeaser = "insights_teaser"
@@ -774,6 +815,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case campaignAction = "campaign_action"
         case missionsAction = "missions_action"
         case insightsAction = "insights_action"
+        case promotionsTitle = "promotions_title"
+        case promotionsToggle = "promotions_toggle"
+        case promotionsCaption = "promotions_caption"
         case submissions
         case contributionHistory = "contribution_history"
         case readingHistory = "reading_history"
@@ -783,6 +827,7 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case records
         case statusLine = "status_line"
         case rowCredit = "row_credit"
+        case rowNoCredit = "row_no_credit"
         case heldCountOne = "held_count_one"
         case heldCount = "held_count"
         case publicStanding = "public_standing"
@@ -822,6 +867,11 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     /// A row's settled credit, around its figure.
     public func credit(_ amount: String) -> String {
         rowCredit.replacingOccurrences(of: "{amount}", with: amount)
+    }
+
+    /// A decided row's no-credit line, around the reason's words.
+    public func noCredit(_ reason: String) -> String {
+        rowNoCredit.replacingOccurrences(of: "{label}", with: reason)
     }
 
     /// The community panel's accepted cell, around the commons' window.

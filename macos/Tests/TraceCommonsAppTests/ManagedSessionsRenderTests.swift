@@ -95,8 +95,10 @@ final class ManagedSessionsRenderTests: XCTestCase {
         let model = AppModel()
         model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json")))
         XCTAssertEqual(model.managedSnapshot?.explainsFolderChoice, true)
-        XCTAssertEqual(ManagedFolderExplainerSheet.line(tool: "codex", model: model),
-                       "Choose a folder for Codex to work in. It opens in Terminal.")
+        XCTAssertEqual(model.managedText("folder_choice"), "")
+        XCTAssertEqual(model.managedText("home_folder"), "Home folder")
+        XCTAssertEqual(model.managedText("clear_folder"), "Use home")
+        XCTAssertEqual(model.managedText("pick_folder"), "Pick a folder as context")
         XCTAssertEqual(ManagedFolderExplainerSheet.openLabel(tool: "claude", model: model), "Open Claude Code")
         XCTAssertEqual(ManagedFolderExplainerSheet.openLabel(tool: "codex", model: model), "Open Codex")
         XCTAssertTrue(ManagedFolderHandoff.startsAtRest(reduceMotion: true))
@@ -111,7 +113,7 @@ final class ManagedSessionsRenderTests: XCTestCase {
     }
 
     /// #1407: a running row the daemon can show and stop, a running row it
-    /// cannot, an ended row that can start again, and the stop
+    /// cannot, an ended row that can resume and start again, and the stop
     /// confirmation, rendered off screen.
     @MainActor
     func testSessionRowActionsAndStopConfirmationRender() throws {
@@ -130,17 +132,122 @@ final class ManagedSessionsRenderTests: XCTestCase {
         ended["state"] = "exited"
         ended["exit_code"] = 0
         ended["can_start_again"] = true
+        ended["can_resume"] = true
+        ended["resumed_from"] = "2026-10-14T09:30:00.123456789Z"
+        var capabilities = try XCTUnwrap(value["capabilities"] as? [String: Any])
+        capabilities["resume"] = true
+        value["capabilities"] = capabilities
         sessions = [owned, cli, ended]
         value["sessions"] = sessions
         let model = AppModel()
         model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
         let rows = try XCTUnwrap(model.managedSnapshot?.sessions)
-        XCTAssertEqual(rows.map { ManagedSurface.sessionActions($0, terminalLaunch: true) }, [[.show, .stop], [], [.startAgain, .dismiss]])
+        let resumeCapable = model.managedSnapshot?.capabilities.resume == true
+        XCTAssertEqual(rows.map { ManagedSurface.rowButtons($0, terminalLaunch: true, resumeCapable: resumeCapable) }, [[], [], [.resume]])
+        XCTAssertEqual(rows.map { ManagedSurface.rowMenuItems($0, terminalLaunch: true, resumeCapable: resumeCapable) }, [[.show, .stop], [], [.startAgain, .dismiss]])
+        XCTAssertEqual(ManagedSurface.rowButtons(rows[2], terminalLaunch: true, resumeCapable: true), [.resume])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(rows[2], terminalLaunch: true, resumeCapable: true), [.startAgain, .dismiss])
+        XCTAssertNotNil(rows[2].resumedFrom)
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
         try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 640), to: directory.appendingPathComponent("managed-session-actions.png"))
         try render(ManagedStopSheet(session: rows[0], onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-stop.png"))
+    }
+
+    /// Every row state: what each row draws (one visible action at most,
+    /// the rest in the menu), then a render at a wide and a narrow width to
+    /// PNG for review (TRACE_COMMONS_SCREENSHOT_DIR), off screen.
+    @MainActor
+    func testSessionRowStatesDrawOneActionAndRenderWideAndNarrow() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let fixture = try Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json"))
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+        let base = try XCTUnwrap((value["sessions"] as? [[String: Any]])?.first)
+        func row(_ id: Int, _ state: String, _ edit: (inout [String: Any]) -> Void = { _ in }) -> [String: Any] {
+            var r = base
+            r["id"] = "00000000-0000-0000-0000-00000000010\(id)"
+            r["state"] = state
+            r["model"] = "z-ai/glm-5.3-flash-with-a-long-id"
+            r["project_label"] = "VolumeFi Invoice data"
+            r["can_focus"] = false; r["can_stop"] = false; r["can_start_again"] = false; r["can_resume"] = false
+            edit(&r)
+            return r
+        }
+        value["capabilities"] = (value["capabilities"] as? [String: Any] ?? [:]).merging(["resume": true, "terminal_launch": true]) { $1 }
+        value["sessions"] = [
+            row(1, "running") { $0["can_focus"] = true; $0["can_stop"] = true },
+            row(2, "starting"),
+            row(3, "exited") { $0["can_resume"] = true; $0["can_start_again"] = true; $0["exit_code"] = 0 },
+            row(4, "failed") { $0["can_resume"] = true; $0["exit_code"] = 1 },
+            row(5, "exited") { $0["can_start_again"] = true },
+            row(6, "failed"),
+            row(7, "something-new"),
+        ]
+        let model = AppModel()
+        model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
+        let rows = try XCTUnwrap(model.managedSnapshot?.sessions)
+        XCTAssertEqual(rows.count, 7)
+        // What the row view draws for each state, from the same inputs it
+        // passes (`ManagedSessionActions.drawn`): one visible action at
+        // most, the rest in the menu. With the config directory unknown the
+        // menu has no Copy resume command; known, it has one exactly where a
+        // resumable ended row is.
+        let expected: [(buttons: [ManagedSessionAction], menu: [ManagedSessionAction], menuKnown: [ManagedSessionAction])] = [
+            ([], [.show, .stop], [.show, .stop]),
+            ([], [], []),
+            ([.resume], [.startAgain, .dismiss], [.startAgain, .copyResumeCommand, .dismiss]),
+            ([.resume], [.dismiss], [.copyResumeCommand, .dismiss]),
+            ([.startAgain], [.dismiss], [.dismiss]),
+            ([.dismiss], [], []),
+            ([], [], []),
+        ]
+        for (index, session) in rows.enumerated() {
+            let unknown = ManagedSessionActions.drawn(session, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: false)
+            let known = ManagedSessionActions.drawn(session, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true)
+            XCTAssertLessThanOrEqual(known.0.count, 1, "row \(index + 1) draws more than one visible action")
+            XCTAssertEqual(unknown.0, expected[index].buttons, "row \(index + 1) buttons")
+            XCTAssertEqual(unknown.1, expected[index].menu, "row \(index + 1) menu")
+            XCTAssertEqual(known.1, expected[index].menuKnown, "row \(index + 1) menu with the config directory known")
+        }
+        // A resumable row without a terminal keeps Dismiss as its link and
+        // Copy resume command in the menu.
+        let noTerminal = ManagedSessionActions.drawn(rows[2], terminalLaunch: false, resumeCapable: true, configDirectoryKnown: true)
+        XCTAssertEqual(noTerminal.0, [.dismiss])
+        XCTAssertEqual(noTerminal.1, [.copyResumeCommand])
+        let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
+        try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 900, height: 900), to: directory.appendingPathComponent("rows-wide.png"))
+        try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 420, height: 1200), to: directory.appendingPathComponent("rows-narrow.png"))
+    }
+
+    /// The row layout itself: one line when everything fits (900 pt), two
+    /// when it does not (420 pt) with the text wrapped, never cut, and the
+    /// trailing views no wider than the row.
+    @MainActor
+    func testSessionRowLayoutWrapsToTwoLinesInsteadOfCutting() throws {
+        func height(_ width: CGFloat, trailing: CGFloat = 200) -> CGFloat {
+            let view = SessionRowLayout(spacing: 8, lineSpacing: 6) {
+                Color.clear.frame(width: 40, height: 40)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("VolumeFi Invoice data").font(.system(size: 13, weight: .semibold))
+                    Text("Claude Code \u{00B7} Personal \u{00B7} Subscription \u{00B7} z-ai/glm-5.3-flash-with-a-long-id \u{00B7} Exit code 0 \u{00B7} Resumed \u{00B7} Continues 2:14 PM \u{00B7} 3 min ago")
+                        .font(.system(size: 11))
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                Color.clear.frame(width: trailing, height: 28)
+            }
+            let controller = NSHostingController(rootView: view)
+            return controller.sizeThatFits(in: CGSize(width: width, height: 10_000)).height
+        }
+        let wide = height(1_000)
+        let narrow = height(420)
+        XCTAssertEqual(wide, 40, accuracy: 1, "one line: the tile's height")
+        // Two lines: the wrapped text beside the tile, then the trailing row.
+        XCTAssertGreaterThan(narrow, wide + 28, "the trailing views sit on a line of their own")
+        // The caption wraps in full: a narrower row is taller, never shorter.
+        XCTAssertGreaterThanOrEqual(height(300), narrow)
     }
 
     @MainActor

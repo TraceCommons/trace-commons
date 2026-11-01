@@ -34,6 +34,14 @@ pub const TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF: f32 = -8.0;
 pub const TRACE_COMMONS_NEAR_AI_BASE_URL: &str = "TRACE_COMMONS_NEAR_AI_BASE_URL";
 pub const TRACE_COMMONS_NEAR_AI_MODEL: &str = "TRACE_COMMONS_NEAR_AI_MODEL";
 pub const TRACE_COMMONS_NEAR_AI_API_KEY: &str = "TRACE_COMMONS_NEAR_AI_API_KEY";
+/// The scorer's own NEAR AI key. Set, it is the key for every call to the
+/// scorer's host, [`TRACE_COMMONS_NEAR_AI_BASE_URL`]: scoring, and the
+/// attestation drill's report, completion and receipt there. It is never sent
+/// to any other NEAR AI host: the attestation registry, the privacy filter,
+/// login and payout keep their own keys. Unset, the scorer uses
+/// [`TRACE_COMMONS_NEAR_AI_API_KEY`] as before. A staging ingest scoring
+/// against a production host requires it (staging design 3.9).
+pub const TRACE_COMMONS_NEAR_AI_SCORER_API_KEY: &str = "TRACE_COMMONS_NEAR_AI_SCORER_API_KEY";
 pub const TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS: &str = "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS";
 pub const TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 // Chunked scoring sends one bounded request per chunk; perplexity needs
@@ -122,6 +130,16 @@ fn lookup_trimmed(lookup: &dyn Fn(&str) -> Option<String>, var: &str) -> Option<
     lookup(var)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// The key the scorer sends to [`TRACE_COMMONS_NEAR_AI_BASE_URL`]:
+/// [`TRACE_COMMONS_NEAR_AI_SCORER_API_KEY`] when set and not blank, else
+/// [`TRACE_COMMONS_NEAR_AI_API_KEY`] exactly as it was always read.
+pub fn near_ai_scorer_api_key_from_lookup(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    lookup_trimmed(lookup, TRACE_COMMONS_NEAR_AI_SCORER_API_KEY)
+        .or_else(|| lookup(TRACE_COMMONS_NEAR_AI_API_KEY))
 }
 
 /// The process environment as a `lookup`.
@@ -313,7 +331,9 @@ mod near_ai {
                     "{TRACE_COMMONS_NEAR_AI_MODEL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
                 )
             })?;
-            let api_key = lookup(TRACE_COMMONS_NEAR_AI_API_KEY).with_context(|| {
+            // The scorer's own key when set (staging design 3.9), else the
+            // shared key, as before.
+            let api_key = near_ai_scorer_api_key_from_lookup(lookup).with_context(|| {
                 format!(
                     "{TRACE_COMMONS_NEAR_AI_API_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
                 )
@@ -574,5 +594,51 @@ mod near_ai {
             });
             Ok((Arc::new(components), shared))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lookup_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect::<BTreeMap<_, _>>();
+        move |key: &str| map.get(key).cloned()
+    }
+
+    /// The scorer's own key wins when set; unset or blank, the scorer uses
+    /// the shared NEAR AI key as it always has.
+    #[test]
+    fn the_scorer_key_is_the_scorers_own_when_set_and_the_shared_key_otherwise() {
+        let both = lookup_of(&[
+            (TRACE_COMMONS_NEAR_AI_API_KEY, "sk-shared"),
+            (TRACE_COMMONS_NEAR_AI_SCORER_API_KEY, " sk-scorer "),
+        ]);
+        assert_eq!(
+            near_ai_scorer_api_key_from_lookup(&both).as_deref(),
+            Some("sk-scorer")
+        );
+        let shared_only = lookup_of(&[(TRACE_COMMONS_NEAR_AI_API_KEY, "sk-shared")]);
+        assert_eq!(
+            near_ai_scorer_api_key_from_lookup(&shared_only).as_deref(),
+            Some("sk-shared")
+        );
+        let blank_scorer = lookup_of(&[
+            (TRACE_COMMONS_NEAR_AI_API_KEY, "sk-shared"),
+            (TRACE_COMMONS_NEAR_AI_SCORER_API_KEY, "  "),
+        ]);
+        assert_eq!(
+            near_ai_scorer_api_key_from_lookup(&blank_scorer).as_deref(),
+            Some("sk-shared")
+        );
+        let scorer_only = lookup_of(&[(TRACE_COMMONS_NEAR_AI_SCORER_API_KEY, "sk-scorer")]);
+        assert_eq!(
+            near_ai_scorer_api_key_from_lookup(&scorer_only).as_deref(),
+            Some("sk-scorer")
+        );
+        assert_eq!(near_ai_scorer_api_key_from_lookup(&lookup_of(&[])), None);
     }
 }

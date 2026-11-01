@@ -1506,6 +1506,7 @@ pub(crate) async fn pipeline_legacy_drain_handler(
             &tenant.tenant_id,
             gate_driver_max_attempts(state.as_ref()),
             &held_retention_policy_ids,
+            state.novelty_utility_settle_from,
         )
         .await
         .map_err(activation_error)?;

@@ -1,7 +1,7 @@
 import Foundation
 import TCShellCore
 
-/// The host-side rules for Ron's first run (#1030): where a host starts it,
+/// The host-side rules for the animated first run: where a host starts it,
 /// when a window shows it, and what an invite link does to it. The rules
 /// between its steps are `FirstRunNavigation`'s; the daemon calls are
 /// `FirstRunPlan`'s, run by `FirstRunRunner`.
@@ -9,8 +9,7 @@ enum OnboardingNavigation {
     /// The first run's steps, under the name the hosts use.
     typealias Step = FirstRunStep
 
-    /// The state a host starts the first run in: at `startAt`, in the tier
-    /// that step belongs to (Tools and Rules are Custom's).
+    /// The state a host starts the first run in: at `startAt`.
     ///
     /// A daemon already running (a returning person whose first run did not
     /// finish) is recorded as started, so it is not started again; what it
@@ -18,8 +17,7 @@ enum OnboardingNavigation {
     /// whole declaration is re-sent. A daemon already enrolled is recorded
     /// too (`recordEnrolment`).
     static func initialState(startAt: Step, daemonRunning: Bool, enrolled: Bool) -> FirstRunState {
-        let tier: FirstRunTier = (startAt == .tools || startAt == .rules) ? .custom : .quick
-        let state = FirstRunState(tier: tier, step: startAt, daemonStarted: daemonRunning)
+        let state = FirstRunState(step: startAt, daemonStarted: daemonRunning)
         return enrolled ? recordEnrolment(state) : state
     }
 
@@ -78,14 +76,15 @@ enum OnboardingNavigation {
     }
 
     /// An invite link received while the first run is up: Join's Look up
-    /// applied to it, and Join brought up, every other answer kept. It
-    /// fills the field and goes no further; joining stays the person's
-    /// decision, made when Folders or Tools commits.
+    /// applied to it, every other answer kept, and the step left where it
+    /// is. Join is the last step and the daemon starts on Tools, so jumping
+    /// to Join would skip the tools it needs. The invite waits on Join's
+    /// card; joining stays the person's decision, made when they sign in.
     ///
     /// Left parked while a commit runs (the runner moves the step on from
     /// wherever the state is when its calls end), and by a host that does
     /// not take links at all (`hostTakesInvites` false: Private AI's
-    /// Folders step, whose runner is thrown away when the person leaves
+    /// Tools step, whose runner is thrown away when the person leaves
     /// that section, so a link it took would never reach the first run).
     /// Discarded once the daemon enrolled an invite (Join's field is then
     /// read-only), and when it is not an invite.
@@ -97,8 +96,6 @@ enum OnboardingNavigation {
         guard JoinScreenLayout.inviteIsEditable(state) else { return .discard }
         let looked = JoinScreenLayout.lookUp(invite, in: state, failure: failure, host: host)
         guard looked.outcome == .found else { return .discard }
-        var received = looked.state
-        received.step = .join
-        return .apply(received, looked.failure)
+        return .apply(looked.state, looked.failure)
     }
 }

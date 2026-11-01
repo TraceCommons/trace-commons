@@ -1,5 +1,6 @@
 @testable import TCShellCore
 import XCTest
+import AppKit
 
 @testable import TraceCommonsApp
 
@@ -168,11 +169,11 @@ final class MonitorNavigationTests: XCTestCase {
     }
 
     func test_theInferenceStoreDropsAReadTheOldClientAnswersAfterAttach() async {
-        // Four of its five reads reach the daemon (harnesses, calls,
-        // destinations, and the Private AI switch, a live `get_settings`
-        // read); the summary is provisional.
+        // Five reads reach the daemon: harnesses, calls, destinations,
+        // the Private AI switch (`get_settings`), and the real inference
+        // summary. Only the retained legacy per-model summary is provisional.
         let entered = expectation(description: "every read reached the old daemon")
-        entered.expectedFulfillmentCount = 4
+        entered.expectedFulfillmentCount = 5
         let gate = GatedTransport(.normalDay, entered: entered)
         let store = InferenceStore(client: LiveDaemonClient(transport: gate))
         let loading = Task { await store.load() }
@@ -183,6 +184,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertNil(store.calls, "the old daemon's calls are drawn after a restart")
         XCTAssertNil(store.harnesses)
         XCTAssertNil(store.destinations)
+        XCTAssertNil(store.networkSummary, "the old daemon's inference summary is drawn after a restart")
         XCTAssertNil(store.privateAI, "the old daemon's Private AI switch is drawn after a restart")
         XCTAssertTrue(store.failures.isEmpty, "an old read's outcome is recorded against the new client")
     }
@@ -325,6 +327,67 @@ final class MonitorNavigationTests: XCTestCase {
         OpenMonitor.handler = { destination, _ in opened.append(destination) }
         XCTAssertEqual(opened.count, 1)
         XCTAssertEqual(opened.first, .some(nil))
+    }
+
+    /// A foreground launch must open its window without a second Dock click.
+    /// The delegate can beat the SwiftUI launcher; the request stays queued.
+    func test_theFirstActivationOpensTheWindowOnceEvenBeforeTheLauncherExists() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        let delegate: NSApplicationDelegate = AppDelegate()
+        let notification = Notification(name: NSApplication.didBecomeActiveNotification)
+        delegate.applicationDidBecomeActive?(notification)
+        delegate.applicationDidBecomeActive?(notification)
+        var activations: [Bool] = []
+        OpenMonitor.handler = { _, activate in activations.append(activate) }
+        XCTAssertEqual(activations, [true], "a foreground launch opens and activates the window")
+        delegate.applicationDidBecomeActive?(notification)
+        XCTAssertEqual(activations, [true], "switching back after closing the window must not reopen it")
+    }
+
+    func test_initialActivationPreservesAndActivatesAPendingDestination() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        let delegate: NSApplicationDelegate = AppDelegate()
+        OpenMonitor.request(.traces(entryId: "entry-7"), activate: false)
+        delegate.applicationDidBecomeActive?(Notification(name: NSApplication.didBecomeActiveNotification))
+        var opened: [MonitorDestination?] = []
+        var activations: [Bool] = []
+        OpenMonitor.handler = { destination, activate in
+            opened.append(destination)
+            activations.append(activate)
+        }
+        XCTAssertEqual(opened, [.traces(entryId: "entry-7")])
+        XCTAssertEqual(activations, [true], "a queued quiet request becomes a foreground one")
+    }
+
+    /// An explicit opener already raised its requested place. In particular,
+    /// Settings must not acquire an unrelated Monitor window on activation.
+    func test_anExplicitOpeningSatisfiesTheInitialActivation() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        let delegate: NSApplicationDelegate = AppDelegate()
+        var opened: [MonitorDestination?] = []
+        OpenMonitor.handler = { destination, activate in
+            opened.append(destination)
+            if activate {
+                // Activation can reenter the delegate before the opener returns.
+                delegate.applicationDidBecomeActive?(Notification(name: NSApplication.didBecomeActiveNotification))
+            }
+        }
+        OpenMonitor.request(.settings(.compute))
+        XCTAssertEqual(opened, [.settings(.compute)])
+    }
+
+    func test_aBackgroundLaunchOpensNothingUntilTheFirstActivation() {
+        OpenMonitor.reset()
+        addTeardownBlock { @MainActor in OpenMonitor.reset() }
+        let delegate: NSApplicationDelegate = AppDelegate()
+        var activations: [Bool] = []
+        OpenMonitor.handler = { _, activate in activations.append(activate) }
+        XCTAssertTrue(activations.isEmpty)
+        delegate.applicationDidBecomeActive?(Notification(name: NSApplication.didBecomeActiveNotification))
+        XCTAssertEqual(activations, [true])
     }
 
     /// A held request keeps whether it activates: the launch's own request
@@ -705,7 +768,8 @@ final class MonitorNavigationTests: XCTestCase {
                                     selection: Binding(
                                         get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
                                         set: { tab = $0 }),
-                                    segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
+                                    segments: MonitorWindowView.Tab.shown(
+                                        requiresOnboarding: model.requiresOnboarding, order: tabOrder).map { item in
         """), "the strip must show the onboarding-filtered tabs, under the notices")
         XCTAssertTrue(window.contains("""
                         if gate == .awaiting {
@@ -727,7 +791,7 @@ final class MonitorNavigationTests: XCTestCase {
         // Inference is shown, and its inspector stays closed.
         XCTAssertTrue(window.contains("if !model.onboardingKnown || !inspectorAvailable {\n            Color.clear\n"),
                       "the inspector must draw nothing until onboarding is known")
-        XCTAssertTrue(window.contains("Self.inspectorAvailable(shownTab, homePage: homePage)"))
+        XCTAssertTrue(window.contains("Self.inspectorAvailable(shownTab, homePage: homePage, insightsDetail:"))
     }
 
     /// Finishing first run closes it and opens the Monitor on Home.
@@ -744,16 +808,16 @@ final class MonitorNavigationTests: XCTestCase {
         """), "the hand-off must follow requiresOnboarding turning false, on the always-present container")
     }
 
-    /// A tall step (Uses with many scopes) scrolls inside the first-run
-    /// window: the pane takes the window's height rather than its step's,
-    /// so the step's own ScrollView has a bound to scroll within.
-    func test_aTallFirstRunStepScrollsInsideTheWindow() throws {
+    /// The first run is bounded by the window: the stage takes the
+    /// window's size rather than its step's, scaled down to fit a smaller
+    /// one (`FirstRunStageFit`), and the window keeps a floor it lays out
+    /// in.
+    func test_aTallFirstRunStepStaysInsideTheWindow() throws {
         let firstRun = try Self.text("Views/Monitor/FirstRunViews.swift")
-        XCTAssertFalse(firstRun.contains("fixedSize("), "a vertical fixedSize grows the pane past the window")
-        XCTAssertTrue(firstRun.contains("""
-                        .frame(width: FirstRunProgress.paneWidth)
-                        .padding(.vertical, GlassTokens.Space.paneGap * 3)
-        """), "the pane is bounded by the window, less the scene's margin")
+        XCTAssertFalse(firstRun.contains("fixedSize("), "a vertical fixedSize grows the stage past the window")
+        XCTAssertTrue(firstRun.contains(
+            ".frame(minWidth: FirstRunProgress.minimumSize.width, minHeight: FirstRunProgress.minimumSize.height)"))
+        XCTAssertTrue(try Self.text("Views/OnboardingCoordinatorView.swift").contains("FirstRunStageFit {"))
     }
 
     /// Whether onboarding is required is known only once the core has said
@@ -858,7 +922,8 @@ final class MonitorNavigationTests: XCTestCase {
     func test_homeReadsTheInsightsCopyOnce() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertEqual(home.components(separatedBy: "TCInsights.copy()").count - 1, 1)
-        XCTAssertTrue(home.contains("private static let insightsCopy = TCInsights.copy()"))
+        XCTAssertNotNil(home.range(of: #"\bstatic\s+(?:nonisolated\s+)?let\s+insightsCopy\s*=\s*TCInsights\.copy\(\)"#,
+                                  options: .regularExpression))
     }
 
     /// First run, the Monitor and Settings draw a refused daemon with one

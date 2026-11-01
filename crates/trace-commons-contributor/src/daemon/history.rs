@@ -142,6 +142,14 @@ pub struct HistoryRecord {
     pub consent_scopes: Vec<String>,
     pub credit_points_pending: f32,
     pub credit_points_final: Option<f32>,
+    /// Why `credit_points_final` is 0: the server's label from
+    /// `trace_commons_protocol::credit_outcome`, present only on a trace
+    /// decided without an award. A row with any final figure is decided,
+    /// not pending. Absent on the wire when there is none, and
+    /// `#[serde(default)]` so a cache line written before this field
+    /// existed still parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit_outcome_reason: Option<String>,
     /// The server's own prose about this submission, e.g. why it was held.
     pub explanations: Vec<String>,
     pub last_refreshed_at: Option<DateTime<Utc>>,
@@ -336,6 +344,7 @@ pub fn join(
                 consent_scopes: update.map(|u| scope_names(u)).unwrap_or_default(),
                 credit_points_pending: update.map(|u| u.credit_points_pending).unwrap_or(0.0),
                 credit_points_final: update.and_then(|u| u.credit_points_final),
+                credit_outcome_reason: update.and_then(|u| u.credit_outcome_reason.clone()),
                 explanations: update
                     .map(|u| {
                         u.explanation
@@ -454,6 +463,7 @@ pub fn merge_new_receipts(
             consent_scopes: Vec::new(),
             credit_points_pending: 0.0,
             credit_points_final: None,
+            credit_outcome_reason: None,
             explanations: Vec::new(),
             last_refreshed_at: None,
             withdrawn_at: None,
@@ -519,9 +529,11 @@ pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
         if is_taken_back(rec) {
             r.taken_back += 1;
         }
-        r.credit_pending += rec.credit_points_pending;
-        if let Some(f) = rec.credit_points_final {
-            r.credit_final += f;
+        // A final figure, 0 included, means the trace is decided: whatever
+        // pending figure the server still reports beside it is not pending.
+        match rec.credit_points_final {
+            Some(f) => r.credit_final += f,
+            None => r.credit_pending += rec.credit_points_pending,
         }
         if rec.last_refreshed_at > r.last_refreshed_at {
             r.last_refreshed_at = rec.last_refreshed_at;
@@ -543,7 +555,41 @@ pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
 pub struct ContributedSince {
     pub count: usize,
     pub project_labels: BTreeSet<String>,
-    pub credit_pending: f32,
+    /// Credit still being scored, summed the same way.
+    pub credit_pending: f64,
+    /// Each decided trace's credit (a final figure, 0 included) by submission
+    /// id, as written ([`super::nudge::decimal_credit`]). The one store of
+    /// decided credit: [`Self::credit_final`] sums it, so a repeated id is
+    /// counted once. Opaque ids, never on the wire; a digest uses them to
+    /// leave out the traces its verdicts fold states.
+    pub credit_final_by_submission: BTreeMap<String, f64>,
+}
+
+impl ContributedSince {
+    /// All decided credit, summed from [`Self::credit_final_by_submission`].
+    pub fn credit_final(&self) -> f64 {
+        self.credit_final_by_submission.values().sum()
+    }
+
+    /// Decided credit of the traces NOT in `folded`: what is left to state
+    /// when a verdicts fold already states those traces' credit.
+    pub fn credit_final_not_in(&self, folded: &BTreeSet<String>) -> f64 {
+        self.credit_final_by_submission
+            .iter()
+            .filter(|(id, _)| !folded.contains(*id))
+            .map(|(_, f)| f)
+            .sum()
+    }
+
+    /// Decided credit in tenths, rounded once; `None` when it rounds to zero.
+    pub fn credit_final_tenths(&self) -> Option<u64> {
+        super::nudge::tenths_of(self.credit_final())
+    }
+
+    /// Pending credit in tenths, rounded once; `None` when it rounds to zero.
+    pub fn credit_pending_tenths(&self) -> Option<u64> {
+        super::nudge::tenths_of(self.credit_pending)
+    }
 }
 
 pub fn contributed_since(
@@ -567,7 +613,14 @@ pub fn contributed_since(
         if !rec.project_label.is_empty() {
             out.project_labels.insert(rec.project_label.clone());
         }
-        out.credit_pending += rec.credit_points_pending;
+        match rec.credit_points_final {
+            Some(f) => {
+                let f = super::nudge::decimal_credit(f);
+                out.credit_final_by_submission
+                    .insert(rec.submission_id.to_string(), f);
+            }
+            None => out.credit_pending += super::nudge::decimal_credit(rec.credit_points_pending),
+        }
     }
     out
 }
@@ -657,6 +710,7 @@ mod tests {
             explanation: vec!["held for privacy review".into()],
             delayed_credit_explanations: vec![],
             consent_scopes: vec![ConsentScope::DebuggingEvaluation],
+            credit_outcome_reason: None,
             pipeline: None,
         }
     }
@@ -689,6 +743,7 @@ mod tests {
             consent_scopes: vec!["debugging_evaluation".into()],
             credit_points_pending: 0.0,
             credit_points_final: None,
+            credit_outcome_reason: None,
             explanations: vec![],
             last_refreshed_at: Some(at("2026-08-08T12:00:00Z")),
             withdrawn_at: None,
@@ -697,6 +752,21 @@ mod tests {
             approved_verdict: None,
             uploaded_bytes: None,
         }
+    }
+
+    /// One figure per submission: a submission id that appears twice in the
+    /// cache is counted once, and the total is derived from the same map.
+    #[test]
+    fn a_duplicate_submission_id_is_counted_once() {
+        let mut a = record("accepted", "2026-08-08T13:00:00Z");
+        a.credit_points_final = Some(2.0);
+        let b = a.clone();
+        let out = contributed_since(&[a, b], None);
+        assert_eq!(out.credit_final(), 2.0);
+        assert_eq!(
+            out.credit_final_not_in(&BTreeSet::new()),
+            out.credit_final()
+        );
     }
 
     #[test]
@@ -762,7 +832,7 @@ mod tests {
         let mut fresh = record(STATUS_ACCEPTED, "2026-08-08T13:00:00Z");
         fresh.credit_points_pending = 1.5;
         let out = contributed_since(&[old, fresh], Some(at("2026-08-08T12:00:00Z")));
-        assert!((out.credit_pending - 1.5).abs() < f32::EPSILON, "{:?}", out);
+        assert_eq!(out.credit_pending_tenths(), Some(15), "{:?}", out);
     }
 
     fn labels(id: Uuid) -> ProjectAttribution {
@@ -989,6 +1059,9 @@ mod tests {
         assert_eq!(r.all_time.accepted, 3);
     }
 
+    /// A row with a final figure is decided, so whatever pending figure
+    /// the server still reports beside it is not pending credit: only the
+    /// undecided row's pending figure counts.
     #[test]
     fn rollup_sums_pending_and_final_credit_separately() {
         let mut a = record("accepted", "2026-08-08T10:00:00Z");
@@ -998,8 +1071,88 @@ mod tests {
         b.credit_points_pending = 0.5;
         b.credit_points_final = None;
         let r = rollup(&[a, b], at("2026-08-08T12:00:00Z"));
-        assert_eq!(r.credit_pending, 2.0);
+        assert_eq!(r.credit_pending, 0.5);
         assert_eq!(r.credit_final, 2.0);
+    }
+
+    /// Staging, 2026-10-28: a trace decided with no award (final 0 and a
+    /// reason) still showed its gate figure as pending. It is decided: it
+    /// adds 0 to the final total and nothing to pending.
+    #[test]
+    fn a_no_credit_outcome_is_not_pending() {
+        let mut decided = record("accepted", "2026-08-08T10:00:00Z");
+        decided.credit_points_pending = 3.0;
+        decided.credit_points_final = Some(0.0);
+        decided.credit_outcome_reason = Some("policy_mismatch".into());
+        let r = rollup(std::slice::from_ref(&decided), at("2026-08-08T12:00:00Z"));
+        assert_eq!(r.credit_pending, 0.0);
+        assert_eq!(r.credit_final, 0.0);
+        let since = contributed_since(&[decided], None);
+        assert_eq!(since.credit_pending_tenths(), None);
+        assert_eq!(since.credit_final_tenths(), None);
+    }
+
+    /// A decided trace's credit is earned: it counts toward the digest's
+    /// final figure, and its leftover pending figure counts toward nothing.
+    #[test]
+    fn contributed_since_sums_final_credit_apart_from_pending() {
+        let mut decided = record("accepted", "2026-08-08T13:00:00Z");
+        decided.credit_points_pending = 9.0;
+        decided.credit_points_final = Some(2.5);
+        let mut scoring = record("submitted", "2026-08-08T13:00:00Z");
+        scoring.credit_points_pending = 1.5;
+        scoring.credit_points_final = None;
+        let out = contributed_since(&[decided, scoring], None);
+        assert_eq!(out.credit_final_tenths(), Some(25));
+        assert_eq!(out.credit_pending_tenths(), Some(15));
+    }
+
+    /// Summed from each figure as written, so three 0.35s give 1.05 -> 1.1
+    /// and a lone 0.35 gives 0.4, not 0.3; a sum under 0.05 is absent.
+    #[test]
+    fn contributed_since_credit_rounds_once_from_the_decimal() {
+        let mut a = record("accepted", "2026-08-08T13:00:00Z");
+        a.credit_points_final = Some(0.35);
+        let out = contributed_since(&[a], None);
+        assert_eq!(out.credit_final_tenths(), Some(4));
+        let mut tiny = record("accepted", "2026-08-08T13:00:00Z");
+        tiny.credit_points_final = Some(0.04);
+        assert_eq!(contributed_since(&[tiny], None).credit_final_tenths(), None);
+    }
+
+    /// The server's reason label rides from the status read-back onto the
+    /// history row, and is absent on the wire while there is none.
+    #[test]
+    fn join_carries_the_credit_outcome_reason() {
+        let id = Uuid::new_v4();
+        let receipts = vec![receipt(
+            id,
+            "sha256:aa",
+            "submitted",
+            "2026-08-08T10:00:00Z",
+        )];
+        let mut withheld = update(id, "accepted", 3.0, Some(0.0));
+        withheld.credit_outcome_reason = Some("duplicate".into());
+        let recs = join(
+            &receipts,
+            &[withheld],
+            &labels(id),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert_eq!(recs[0].credit_points_final, Some(0.0));
+        assert_eq!(recs[0].credit_outcome_reason.as_deref(), Some("duplicate"));
+
+        let pending = join(
+            &receipts,
+            &[update(id, "accepted", 3.0, None)],
+            &labels(id),
+            &[],
+            at("2026-08-08T12:00:00Z"),
+        );
+        assert_eq!(pending[0].credit_outcome_reason, None);
+        let json = serde_json::to_value(&pending[0]).unwrap();
+        assert!(json.get("credit_outcome_reason").is_none(), "{json}");
     }
 
     #[test]
@@ -1099,6 +1252,7 @@ mod tests {
             consent_scopes: vec![],
             credit_points_pending: 0.0,
             credit_points_final: None,
+            credit_outcome_reason: None,
             explanations: vec![],
             last_refreshed_at: None,
             withdrawn_at: None,

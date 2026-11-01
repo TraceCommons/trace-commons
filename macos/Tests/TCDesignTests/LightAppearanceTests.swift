@@ -61,6 +61,7 @@ final class LightAppearanceTests: XCTestCase {
 
     /// Every switch knob clears 3:1 against its on track in the light
     /// appearance too.
+    @MainActor
     func test_switchKnobsKeepTheirFloorInLight() {
         for kind in [GlassSwitchKind.standard, .settings, .watch] {
             let track = GlassToggleStyle.onColor(kind).light

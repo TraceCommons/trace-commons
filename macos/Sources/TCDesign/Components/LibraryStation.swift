@@ -12,8 +12,9 @@ import SwiftUI
 /// flat-shaded from one light. One turn takes `turnSeconds`; under Reduce
 /// Motion it is drawn once and holds still.
 ///
-/// `lit` is false while nothing has been contributed: the station is drawn
-/// dimmer, as the old library disc was drawn off.
+/// `lit` is false while nothing has been contributed. The station itself is
+/// drawn as bright either way (owner, 2026-10-19: dimmed, it read too dark
+/// beside the launch pad); only its glow is softer.
 ///
 /// `date`, when given, is the moment to draw: a caller that already runs a
 /// timeline (the flow map) passes its own, so one timeline drives the
@@ -47,9 +48,13 @@ public struct GlassLibraryStation: View {
                 }
             }
         }
-        .shadow(color: Self.brandBlue.opacity(lit ? 0.35 : 0.12), radius: 6)
+        .shadow(color: Self.brandBlue.opacity(Self.glow(lit: lit)), radius: 6)
         .accessibilityHidden(true)
     }
+
+    /// The glow's strength: full once something has been contributed, a
+    /// little softer before.
+    static func glow(lit: Bool) -> Double { lit ? 0.35 : 0.25 }
 
     /// The station's angle at `seconds` past the reference date.
     static func angle(at seconds: Double, reduceMotion: Bool) -> Double {
@@ -60,9 +65,8 @@ public struct GlassLibraryStation: View {
 
     private func frame(at date: Date) -> some View {
         let angle = Self.angle(at: date.timeIntervalSinceReferenceDate, reduceMotion: reduceMotion)
-        let lit = lit
         return Canvas { context, size in
-            Self.draw(in: &context, size: size, angle: angle, lit: lit)
+            Self.draw(in: &context, size: size, angle: angle)
         }
     }
 
@@ -242,7 +246,7 @@ public struct GlassLibraryStation: View {
         return SIMD3(x * cz - y2 * sz, x * sz + y2 * cz, z2)
     }
 
-    static func draw(in context: inout GraphicsContext, size: CGSize, angle: Double, lit: Bool) {
+    static func draw(in context: inout GraphicsContext, size: CGSize, angle: Double) {
         let scale = min(Double(size.width) / 140, Double(size.height) / 120)
         func project(_ q: SIMD3<Double>) -> CGPoint {
             let s = scale * cameraDistance / (cameraDistance - q.z)
@@ -287,7 +291,6 @@ public struct GlassLibraryStation: View {
         }
         drawn.sort { $0.depth < $1.depth }
 
-        let dim = lit ? 1.0 : 0.55
         for face in drawn {
             var path = Path()
             for (index, point) in face.points.enumerated() {
@@ -296,7 +299,7 @@ public struct GlassLibraryStation: View {
             }
             path.closeSubpath()
             let shaded: SIMD3<Double> = face.color * face.shade + SIMD3<Double>(repeating: face.spec)
-            let c: SIMD3<Double> = shaded * dim
+            let c: SIMD3<Double> = shaded
             let color = Color(red: min(1, c.x), green: min(1, c.y), blue: min(1, c.z))
             context.fill(path, with: .color(color))
             // The same colour round the edge closes the seams between faces.

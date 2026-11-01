@@ -8,6 +8,7 @@ import XCTest
 final class ButtonSizeTests: XCTestCase {
     private let barKinds: [GlassButtonKind] = [.secondary, .glass, .destructive, .link]
 
+    @MainActor
     func test_aBarButtonOfEveryKindIsTheCTAsSize() {
         let cta = GlassButtonStyle.metrics(.primary, size: .inline)
         XCTAssertEqual(cta.minHeight, GlassTokens.Size.cta)
@@ -22,6 +23,7 @@ final class ButtonSizeTests: XCTestCase {
         XCTAssertEqual(GlassButtonStyle.metrics(.primary, size: .bar), cta)
     }
 
+    @MainActor
     func test_inlineGlassAndDestructiveAreControlLarge() {
         for kind in [GlassButtonKind.glass, .destructive] {
             let inline = GlassButtonStyle.metrics(kind, size: .inline)
@@ -33,6 +35,7 @@ final class ButtonSizeTests: XCTestCase {
     }
 
     /// A bar beside the small CTA (a modal's) matches the small CTA.
+    @MainActor
     func test_aSmallBarMatchesTheSmallCTA() {
         let small = GlassButtonStyle.metrics(.primary, size: .inline, small: true)
         for kind in barKinds {
@@ -45,10 +48,25 @@ final class ButtonSizeTests: XCTestCase {
 
     /// Bar keeps each kind's own weight: the glass pill is not bolded into
     /// a second CTA.
+    @MainActor
     func test_aBarButtonKeepsItsKindsWeight() {
         XCTAssertEqual(GlassButtonStyle.metrics(.glass, size: .bar).type.weight, .semibold)
         XCTAssertEqual(GlassButtonStyle.metrics(.secondary, size: .bar).type.weight, .bold)
         XCTAssertEqual(GlassButtonStyle.metrics(.primary, size: .bar).type.weight, .bold)
+    }
+
+    /// The first run's bar (Ron, 2026-10-22): every kind as tall as the
+    /// CTA, at semibold, so Continue is not the app's bold.
+    @MainActor
+    func test_theStageBarIsTheCanvasButtons() {
+        for kind in [GlassButtonKind.primary] + barKinds {
+            let stage = GlassButtonStyle.metrics(kind, size: .stage)
+            XCTAssertEqual(stage.minHeight, GlassTokens.Size.cta, "\(kind)")
+            XCTAssertEqual(stage.type.size, GlassTokens.TypeScale.bodyStrong.size, "\(kind)")
+            XCTAssertEqual(stage.type.weight, .semibold, "\(kind)")
+        }
+        XCTAssertEqual(GlassButtonStyle.metrics(.primary, size: .stage).horizontalPadding, 20)
+        XCTAssertEqual(GlassButtonStyle.metrics(.link, size: .stage).horizontalPadding, 14)
     }
 
     /// The modal's action bar sizes every action against its small CTA.

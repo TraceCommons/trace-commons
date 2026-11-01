@@ -15,7 +15,7 @@
 
 [package]
 name = "trace-commons-contributor-gtk"
-version = "0.20.3"
+version = "0.21.1"
 edition = "2024"
 # Tracks the root workspace's floor by hand -- this crate is deliberately not
 # a member of it, so `rust-version.workspace = true` is unavailable. Raised
@@ -59,9 +59,11 @@ trace-commons-build-info = { path = "../trace-commons-build-info" }
 # Dependency-free by construction, so it costs this build nothing.
 trace-commons-mark = { path = "../trace-commons-mark" }
 
-adw = { package = "libadwaita", version = "0.5", features = ["v1_2"] }
-gtk = { package = "gtk4", version = "0.7" }
-glib = "0.18"
+# Keep these on the same gtk-rs generation: glib >=0.20 fixes
+# RUSTSEC-2024-0429 (VariantStrIter out-argument mutability).
+adw = { package = "libadwaita", version = "0.7", features = ["v1_2"] }
+gtk = { package = "gtk4", version = "0.9" }
+glib = "0.20"
 
 anyhow = "1"
 async-channel = "2"

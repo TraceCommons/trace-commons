@@ -31,11 +31,7 @@ final class InferenceDuringOnboardingTests: XCTestCase {
                 .environmentObject(model)
                 .environment(\.colorScheme, .light)))
         // The foot card is the way there: the whole card opens the section.
-        // Its title or its sentence: since the managed cards moved to the
-        // tab's top (owner, 2026-10-12) the card sits beside its gear high
-        // in the render, where Vision can misread the short title.
-        let sentence = copy.panelSettingsBody.trimmingCharacters(in: .punctuationCharacters)
-        XCTAssertTrue(tab.contains(copy.panelSettingsTitle) || tab.contains(sentence),
+        XCTAssertTrue(tab.contains(copy.panelSettingsTitle),
                       "the Private AI tab must lead to sign-in before Commons enrollment")
         let settings = try recognizedWords(render(
             PrivateAISettingsPanels(store: InferenceStore(client: nil))

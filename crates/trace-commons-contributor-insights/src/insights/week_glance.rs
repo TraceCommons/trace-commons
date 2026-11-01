@@ -168,6 +168,10 @@ pub struct CardSession {
     pub cache_share: Option<ShareFigure>,
     pub state: CoverageState,
     pub reasons: Vec<CoverageReason>,
+    /// Claude only: tokens on each day of the week, Monday first, summing to
+    /// the week's `by_day`. `None` when the session is not split by day.
+    #[serde(default)]
+    pub by_day: Option<Vec<u64>>,
 }
 
 /// "What makes up this number".
@@ -313,6 +317,7 @@ pub fn saved_sessions(reports: &[LocalInsight]) -> Vec<SessionInput> {
                 },
                 SourceFormat::Codex => SessionBody::Codex {
                     observed: codex_observed(insight),
+                    series: None,
                 },
                 SourceFormat::Trajectory => SessionBody::Unknown {
                     source: None,
@@ -331,6 +336,8 @@ pub fn saved_sessions(reports: &[LocalInsight]) -> Vec<SessionInput> {
                 import_seq: seq as u64,
                 placed_at,
                 harness_session,
+                automated: false,
+                facts: None,
                 body,
             }
         })
@@ -353,6 +360,7 @@ pub fn dated_weeks(sessions: &[SessionInput], tz: &FixedOffset) -> Vec<NaiveDate
                 .for_each(&mut add),
             SessionBody::Codex {
                 observed: Some(observed),
+                ..
             } => {
                 add(&observed.first_at);
                 add(&observed.last_at);
@@ -591,6 +599,7 @@ pub fn counter_overview(
         sources: Vec::new(),
         by_day: None,
         codex_interval_tokens: None,
+        codex_by_day: None,
         by_model: Vec::new(),
         sessions: Vec::new(),
     };
@@ -656,6 +665,7 @@ pub fn card_inputs(glance: &WeekGlance, card: OverviewCard) -> CardInputs {
                 cache_share: row.cache_share.map(ShareFigure::from),
                 state: row.state,
                 reasons: row.reasons.clone(),
+                by_day: row.by_day.clone(),
             })
             .collect(),
     }
@@ -826,6 +836,43 @@ mod tests {
         assert_eq!((share.numerator, share.denominator), (20, 50));
         assert_eq!(share.permille, 400);
         assert_eq!(inputs.sources[0].cache_share, Some(share));
+    }
+
+    #[test]
+    fn saved_session_rows_split_by_day_and_sum_to_the_chart() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
+        let codex = root.path().join("codex.jsonl");
+        codex_source(&codex, 150);
+        store.import(SourceFormat::Codex, &codex).unwrap();
+        // The same Claude session saved twice: its turns count once.
+        for name in ["one.jsonl", "two.jsonl"] {
+            let path = root.path().join(name);
+            fs::write(&path, CLAUDE_FIXTURE).unwrap();
+            store.import(SourceFormat::ClaudeCode, &path).unwrap();
+        }
+        let reports = store.list().unwrap();
+        let glance = compute(&reports, date(2026, 9, 14), utc());
+        let days = overview(&glance).by_day.unwrap();
+        let inputs = card_inputs(&glance, OverviewCard::Sessions);
+        let split: Vec<&Vec<u64>> = inputs
+            .sessions
+            .iter()
+            .filter_map(|row| row.by_day.as_ref())
+            .collect();
+        assert_eq!(split.len(), 1);
+        for (offset, day) in days.iter().enumerate() {
+            let sessions: u64 = split.iter().map(|by_day| by_day[offset]).sum();
+            assert_eq!(
+                sessions,
+                day.uncached + day.cache_read + day.cache_write + day.output
+            );
+        }
+        let codex_week = card_inputs(
+            &compute(&reports, date(2026, 9, 7), utc()),
+            OverviewCard::Sessions,
+        );
+        assert_eq!(codex_week.sessions[0].by_day, None);
     }
 
     #[test]
@@ -1002,6 +1049,7 @@ mod tests {
             }],
             by_day: None,
             codex_interval_tokens: Some(tokens),
+            codex_by_day: None,
             by_model: Vec::new(),
             sessions: vec![super::super::week_rollup::SessionWeek {
                 session_ref: String::new(),
@@ -1010,6 +1058,7 @@ mod tests {
                 state: CoverageState::Known,
                 reasons: Vec::new(),
                 cache_share: None,
+                by_day: None,
             }],
         }
     }

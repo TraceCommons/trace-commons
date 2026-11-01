@@ -261,6 +261,7 @@ final class FixedPointTypeTests: XCTestCase {
 /// where a 0.5pt fill blends into the glass and drops out. No source draws
 /// a 0.5pt rule by hand.
 final class HairlineTests: XCTestCase {
+    @MainActor
     func test_aHairlineIsOneDevicePixel() {
         XCTAssertEqual(GlassHairline.thickness(displayScale: 1), 1)
         XCTAssertEqual(GlassHairline.thickness(displayScale: 2), 0.5)

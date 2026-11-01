@@ -91,6 +91,10 @@ public struct InsightsCardSession: Decodable, Sendable, Equatable, Identifiable 
     public let cache_share: InsightsShareFigure?
     public let state: String
     public let reasons: [String]
+    /// Claude Code only: tokens on each day of the week, Monday first,
+    /// summing to the week's `by_day`. `nil` for Codex, for an unknown
+    /// figure, and from a core that predates it.
+    public let by_day: [UInt64]?
     public var id: String { session_ref }
 }
 
@@ -121,6 +125,10 @@ public struct InsightsPatternCard: Decodable, Sendable, Equatable, Identifiable 
     /// The headline; `nil` is unknown, never zero.
     public let tokens: UInt64?
     public let count: UInt32?
+    /// What the card leads with: `tokens`, or `count` when the estimate
+    /// rounds to 0 while the card found something. `nil` from a core that
+    /// predates it, read as `tokens`.
+    public let headline: String?
     /// Repeated reads only: how many files were read again.
     public let files: UInt32?
     public let sessions: UInt32
@@ -179,61 +187,7 @@ public struct InsightsPatternSessions: Decodable, Sendable, Equatable {
     public let sessions: [InsightsPatternSession]
 }
 
-// Sessions (drill-in) over one saved snapshot (feed S), as `session_drill`
-// returns it. Decode only.
-
-/// One turn. Every counter is `nil` when any of the turn's counters is
-/// unknown: no bar is drawn for it, never a zero bar.
-public struct InsightsDrillTurn: Decodable, Sendable, Equatable, Identifiable {
-    public let ordinal: UInt32
-    public let uncached: UInt32?
-    public let cache_read: UInt32?
-    public let cache_write: UInt64?
-    public let output: UInt32?
-    public let context: UInt64?
-    public var id: UInt32 { ordinal }
-}
-
-/// One lettered marker. Only its kind's fields are present.
-public struct InsightsDrillMarker: Decodable, Sendable, Equatable, Identifiable {
-    public let letter: String
-    public let turn_ordinal: UInt32
-    /// `cache_written_again`, `context_shrank`, `crossed_long_context` or
-    /// `re_read`.
-    public let kind: String
-    /// `inferred_from_counters`, `from_counters` or `from_tool_calls`.
-    public let basis: String
-    public let pause_minutes: UInt32?
-    public let cache_write: UInt64?
-    public let context_from: UInt64?
-    public let context: UInt64?
-    /// A re-read file's position letter and its extension, never a name.
-    public let file_letter: String?
-    public let file_ext: String?
-    public var id: String { letter }
-}
-
-public struct InsightsSessionDrill: Decodable, Sendable, Equatable {
-    public let feed: String
-    public let session_ref: String
-    public let source: String?
-    /// Local date of the first recorded event (`yyyy-MM-dd`).
-    public let date: String?
-    public let tz: Int32
-    public let turns: UInt32?
-    public let tokens: UInt64?
-    /// Between the first and last recorded event; not active time.
-    public let span_secs: UInt64?
-    public let state: String
-    public let reasons: [String]
-    public let long_context_threshold: UInt64
-    /// `nil` with `series_unavailable` saying why (`not_recorded` for Codex).
-    public let series: [InsightsDrillTurn]?
-    public let series_unavailable: String?
-    public let markers: [InsightsDrillMarker]
-}
-
-// Goals, the lever of the week and the weekly summary card (feed T), as
+// The lever of the week and the weekly summary card (feed T), as
 // `comparisons` returns them, and the daemon's weekly figures it is given.
 
 /// One of the daemon's kept weeks (`insights_week` `history`), passed to
@@ -255,44 +209,6 @@ public struct InsightsWeekFigures: Codable, Sendable, Equatable {
 public struct InsightsThresholdCount: Codable, Sendable, Equatable {
     public let threshold: UInt64
     public let sessions: UInt32
-}
-
-/// A goal: its kind and the user's threshold. `source` names the harness for
-/// the per-source kinds; Claude and Codex are never combined.
-public struct InsightsGoal: Codable, Sendable, Equatable, Hashable {
-    /// `cache_share_at_least`, `repeated_reads_under`, `long_context_under`
-    /// or `weekly_tokens_under`.
-    public let kind: String
-    public let source: String?
-    public let permille: UInt64?
-    public let tokens: UInt64?
-    public init(kind: String, source: String? = nil, permille: UInt64? = nil, tokens: UInt64? = nil) {
-        self.kind = kind; self.source = source; self.permille = permille; self.tokens = tokens
-    }
-}
-
-/// "Down from {x} last week." / "Up from {x} last week."
-public struct InsightsGoalChange: Decodable, Sendable, Equatable {
-    /// `down`, `up` or `same`.
-    public let direction: String
-    public let from: UInt64
-}
-
-/// Six weekly marks, oldest first, and the change from last week. No run of
-/// weeks is counted.
-public struct InsightsGoalMarks: Decodable, Sendable, Equatable {
-    /// `met`, `not_met` or `no_figure` (never read as not met).
-    public let marks: [String]
-    public let change: InsightsGoalChange?
-}
-
-public struct InsightsGoalView: Decodable, Sendable, Equatable, Identifiable {
-    public let id: String
-    public let goal: InsightsGoal
-    /// The figure in the week on screen; `nil` when unknown or not compared.
-    public let figure: UInt64?
-    public let marks: InsightsGoalMarks?
-    public let unavailable: String?
 }
 
 /// The lever's kind and the figures its line names.
@@ -325,14 +241,11 @@ public struct InsightsRecapSource: Decodable, Sendable, Equatable, Identifiable 
 
 /// One item on the summary card. Only its kind's fields are present.
 public struct InsightsRecapItem: Decodable, Sendable, Equatable {
-    /// `best_cache_week`, `goal` or `pattern_up`.
+    /// `best_cache_week` or `pattern_up`.
     public let kind: String
     public let source: String?
     public let permille: UInt64?
     public let previous_best_permille: UInt64?
-    public let id: String?
-    public let goal: InsightsGoal?
-    public let met: Bool?
     public let pattern: String?
     public let up_permille: UInt64?
 }
@@ -350,18 +263,12 @@ public struct InsightsRecap: Decodable, Sendable, Equatable {
 public struct InsightsComparisons: Decodable, Sendable, Equatable {
     public let feed: String
     public let week_start: String
-    public let goals: [InsightsGoalView]
     public let lever: InsightsLeverState
     public let recap: InsightsRecap?
 }
 
-/// What a goal or lever write left in the store.
+/// What a lever or summary-card write left in the store.
 public struct InsightsGoalState: Decodable, Sendable, Equatable {
-    public struct Stored: Decodable, Sendable, Equatable {
-        public let id: String
-        public let goal: InsightsGoal
-    }
-    public let goals: [Stored]
     /// The lever card's Settings switch is off. `nil` from a core that
     /// does not send it: unknown, never read as on.
     public let lever_card_off: Bool?

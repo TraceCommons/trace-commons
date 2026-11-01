@@ -5,9 +5,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::*;
-use crate::config::{
-    ACCOUNT_SESSION_FILE, DAEMON_SETTINGS_FILE, INVITE_SUBJECT_FILE, REMEMBERED_PASSKEYS_FILE,
-};
+use crate::config::{ACCOUNT_SESSION_FILE, DAEMON_SETTINGS_FILE, INVITE_SUBJECT_FILE};
 use crate::daemon::ipc::{ERR_BUSY, ERR_UNAVAILABLE, handle_request, handle_request_async};
 use crate::daemon::queue::{QueueEntry, QueueState};
 
@@ -123,21 +121,25 @@ async fn unenroll_removes_config_credentials_and_session_and_reads_not_logged_in
 async fn unenroll_keeps_what_is_not_the_enrollment() {
     let s = shared();
     enroll_fixture(&s);
-    s.store
-        .write_daemon_file(REMEMBERED_PASSKEYS_FILE, b"{\"passkeys\":[]}")
-        .unwrap();
-    s.store
-        .write_daemon_file(DAEMON_SETTINGS_FILE, b"{}")
-        .unwrap();
+    // A real preferences document: unenroll must now persist permission
+    // revocation, so an unreadable placeholder is a separate failure case.
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.suggestions_enabled = false;
+        settings.save(&s.store).unwrap();
+    }
     let waiting = seed(&s, QueueState::Pending);
     s.queue.lock().unwrap().save(&s.store).unwrap();
 
     assert!(call(&s).await.error.is_none());
 
-    // A passkey is not an enrollment, and the person's choices about this
-    // Mac are not an account's.
-    assert!(s.store.daemon_path(REMEMBERED_PASSKEYS_FILE).exists());
+    // The person's choices about this Mac are not an account's.
     assert!(s.store.daemon_path(DAEMON_SETTINGS_FILE).exists());
+    assert!(
+        !crate::daemon::settings::DaemonSettings::load(&s.store)
+            .unwrap()
+            .suggestions_enabled
+    );
     assert_eq!(
         s.queue.lock().unwrap().get(waiting).unwrap().state,
         QueueState::Pending
@@ -422,7 +424,7 @@ async fn the_credentials_are_gone_even_when_a_later_file_cannot_be_removed() {
 }
 
 #[tokio::test]
-async fn admission_answers_and_passkey_ceremonies_do_not_outlive_the_enrollment() {
+async fn admission_answers_do_not_outlive_the_enrollment() {
     let s = shared();
     let cfg = enroll_fixture(&s);
     s.account_admission.record_for_test(&cfg, "bounded", true);
@@ -438,7 +440,6 @@ async fn admission_answers_and_passkey_ceremonies_do_not_outlive_the_enrollment(
         s.account_admission.current(Some(&cfg)),
         crate::daemon::automatic_gate::AccountAdmission::NotAdvertised
     );
-    assert!(s.native_identity.lock().unwrap().is_empty());
 }
 
 /// Start a real `/v1/onboard` responder on an ephemeral `127.0.0.1` port.
@@ -525,6 +526,7 @@ fn counted(s: &DaemonShared) {
         modified_at: written,
         started_at: Some(written),
         group_member_count: 0,
+        role: crate::daemon::insights_week::CandidateRole::Watched,
     };
     let summary = s
         .insights_counter
@@ -578,12 +580,53 @@ async fn unenroll_clears_the_insights_counter_store() {
     assert!(s.insights_counter.key_is_absent_for_test());
 }
 
+/// The person's own labels on their sessions live beside the counter store
+/// and go with it on unenroll: counted again afterwards, the session has none.
+#[tokio::test]
+async fn unenroll_clears_the_persons_session_labels() {
+    let s = shared();
+    enroll_fixture(&s);
+    s.settings.lock().unwrap().insights_counter_pass = true;
+    counted(&s);
+    let listed = |s: &DaemonShared| {
+        handle_request(s, &req("insights_sessions", json!({})))
+            .result
+            .unwrap()["sessions"][0]
+            .clone()
+    };
+    let reference = listed(&s)["session_ref"].as_str().unwrap().to_string();
+    let labelled = handle_request(
+        &s,
+        &req(
+            "insights_session_label",
+            json!({"session_ref": reference, "task": "bug_fix", "outcome": "kept"}),
+        ),
+    )
+    .result
+    .unwrap();
+    assert_eq!(labelled["session"]["user_task"], "bug_fix");
+    let labels_file = s
+        .store
+        .daemon_path(crate::daemon::insights_week::SESSION_LABELS_FILE);
+    assert!(labels_file.exists());
+
+    assert!(call(&s).await.error.is_none());
+    assert!(!rows_file(&s).exists());
+    assert!(!labels_file.exists());
+
+    s.settings.lock().unwrap().insights_counter_pass = true;
+    counted(&s);
+    let row = listed(&s);
+    assert!(row["user_task"].is_null(), "{row}");
+    assert!(row["user_outcome"].is_null(), "{row}");
+}
+
 /// Owner question Q3, default taken: the route tallies live in the counter
 /// store and go with it on unenroll, and a fold after it, with the ledger
 /// feed still on, does not write them back.
 #[tokio::test]
 async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
-    let s = shared();
+    let s = std::sync::Arc::new(shared());
     enroll_fixture(&s);
     {
         let mut settings = s.settings.lock().unwrap();
@@ -601,7 +644,7 @@ async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
         ..Default::default()
     };
     let ledger = crate::routing::FixedLedger::new(vec![call_at(1)]);
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &ledger);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&ledger));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
 
     assert!(call(&s).await.error.is_none());
@@ -610,9 +653,70 @@ async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
     assert!(s.settings.lock().unwrap().insights_ledger_feed);
 
     let later = crate::routing::FixedLedger::new(vec![call_at(1), call_at(2)]);
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &later);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&later));
     assert!(!rows_file(&s).exists());
     assert!(s.insights_counter.key_is_absent_for_test());
+}
+
+/// The fold runs on the counter pass's worker, off the async tick that
+/// refreshed the ledger, as the pass runs off the watcher tick.
+#[tokio::test]
+async fn the_ledger_fold_runs_off_the_refresh_tick() {
+    let s = std::sync::Arc::new(shared());
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.insights_ledger_feed = true;
+    }
+    counted(&s);
+    let ledger = crate::routing::FixedLedger::new(vec![crate::routing::RoutedExchange {
+        id: Some(1),
+        started_at: Utc::now() - chrono::Duration::minutes(5),
+        client_session_id: Some("SESSION-SECRET".to_string()),
+        facade: "anthropic".to_string(),
+        path: Some("/v1/messages".to_string()),
+        proof: Some(crate::routing::ProofStatus::Verified),
+        ..Default::default()
+    }]);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&ledger));
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
+    assert_ne!(
+        s.insights_counter.fold_thread_for_test(),
+        Some(std::thread::current().id())
+    );
+}
+
+/// With no shared proxy, the managed routes' ledgers (Private AI sessions
+/// started from the app) are still folded into the route tallies, and
+/// their presence shows routing on `insights_week`.
+#[tokio::test]
+async fn managed_route_ledgers_fold_without_a_shared_proxy() {
+    let s = std::sync::Arc::new(shared());
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.insights_ledger_feed = true;
+    }
+    counted(&s);
+    assert!(!crate::daemon::insights_week::any_ledger(&s));
+    let call = crate::routing::RoutedExchange {
+        id: Some(1),
+        started_at: Utc::now() - chrono::Duration::hours(30),
+        client_session_id: Some("SESSION-SECRET".to_string()),
+        facade: "anthropic".to_string(),
+        path: Some("/v1/messages".to_string()),
+        proof: Some(crate::routing::ProofStatus::Verified),
+        cost_usd: Some(0.25),
+        ..Default::default()
+    };
+    let history = crate::routing::managed_history::ManagedHistory::from_entries(vec![(
+        std::path::PathBuf::from("/managed-routes/route-a"),
+        call,
+    )]);
+    *s.managed_history.write().unwrap() = Ok(Some(std::sync::Arc::new(history)));
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, None);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
+    assert!(crate::daemon::insights_week::any_ledger(&s));
 }
 
 /// The fold is gated on the counter pass as well as the ledger feed: with
@@ -620,7 +724,7 @@ async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
 /// folded.
 #[test]
 fn no_fold_while_the_counter_pass_is_off_even_with_the_feed_on() {
-    let s = shared();
+    let s = std::sync::Arc::new(shared());
     {
         let mut settings = s.settings.lock().unwrap();
         settings.insights_counter_pass = true;
@@ -637,19 +741,19 @@ fn no_fold_while_the_counter_pass_is_off_even_with_the_feed_on() {
         ..Default::default()
     };
     let first = crate::routing::FixedLedger::new(vec![call_at(1)]);
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &first);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&first));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
     let before = std::fs::read(rows_file(&s)).unwrap();
 
     s.settings.lock().unwrap().insights_counter_pass = false;
     let second = crate::routing::FixedLedger::new(vec![call_at(1), call_at(2)]);
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &second);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&second));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
     assert_eq!(std::fs::read(rows_file(&s)).unwrap(), before);
 
     // And on again, the call made meanwhile is folded once.
     s.settings.lock().unwrap().insights_counter_pass = true;
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &second);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&second));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 2);
 }
 
@@ -658,7 +762,7 @@ fn no_fold_while_the_counter_pass_is_off_even_with_the_feed_on() {
 /// there, the daemon's fold reads no ledger row and writes nothing.
 #[test]
 fn no_fold_while_the_ledger_feed_is_off_even_with_the_pass_on() {
-    let s = shared();
+    let s = std::sync::Arc::new(shared());
     {
         let mut settings = s.settings.lock().unwrap();
         settings.insights_counter_pass = true;
@@ -672,7 +776,7 @@ fn no_fold_while_the_ledger_feed_is_off_even_with_the_pass_on() {
             panic!("the ledger is not read while the feed is off");
         }
     }
-    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &Unread);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, Some(&Unread));
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 0);
     assert_eq!(std::fs::read(rows_file(&s)).unwrap(), before);
 }
@@ -695,4 +799,94 @@ async fn unenroll_turns_the_insights_counter_pass_off() {
     let persisted = crate::daemon::settings::DaemonSettings::load(&s.store).unwrap();
     assert!(!persisted.insights_counter_pass);
     assert!(!rows_file(&s).exists());
+}
+
+#[tokio::test]
+async fn unenroll_turns_off_subscription_usage_in_memory_and_on_disk() {
+    for enrolled in [false, true] {
+        let s = shared();
+        if enrolled {
+            enroll_fixture(&s);
+        }
+        {
+            let mut settings = s.settings.lock().unwrap();
+            settings.subscription_usage_codex_enabled = true;
+            settings.subscription_usage_claude_enabled = true;
+            settings.save(&s.store).unwrap();
+        }
+        assert!(call(&s).await.error.is_none());
+        let settings = s.settings.lock().unwrap();
+        assert!(!settings.subscription_usage_codex_enabled);
+        assert!(!settings.subscription_usage_claude_enabled);
+        drop(settings);
+        let persisted = crate::daemon::settings::DaemonSettings::load(&s.store).unwrap();
+        assert!(!persisted.subscription_usage_codex_enabled);
+        assert!(!persisted.subscription_usage_claude_enabled);
+        let snapshot =
+            crate::daemon::subscription_usage::handle(&s, &req("subscription_usage", json!({})))
+                .result
+                .unwrap();
+        for provider in snapshot["providers"].as_array().unwrap() {
+            if provider["provider"] == "codex" {
+                assert_eq!(provider["enabled"], false);
+                assert_eq!(provider["logins"], json!([]));
+            } else {
+                // Claude remains available without opt-in, but a new manual
+                // action is needed to acquire any reading after unenroll.
+                for login in provider["logins"].as_array().unwrap() {
+                    assert_eq!(login["windows"], json!([]));
+                    assert!(login["updated_at"].is_null());
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn unenroll_reports_unpersisted_subscription_revocation_and_can_retry() {
+    let s = shared();
+    enroll_fixture(&s);
+    let approved = seed_previewed_approval(&s);
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.subscription_usage_codex_enabled = true;
+        settings.subscription_usage_claude_enabled = true;
+        settings.save(&s.store).unwrap();
+    }
+    let saved = s
+        .store
+        .read_daemon_file(DAEMON_SETTINGS_FILE)
+        .unwrap()
+        .unwrap();
+    s.store
+        .write_daemon_file(DAEMON_SETTINGS_FILE, b"{")
+        .unwrap();
+    let response = call(&s).await;
+    assert!(
+        response.error.is_some(),
+        "unenroll must not claim persisted revocation"
+    );
+    assert!(s.store.load_config().unwrap().is_none());
+    assert!(!s.settings.lock().unwrap().subscription_usage_codex_enabled);
+    assert!(!s.settings.lock().unwrap().subscription_usage_claude_enabled);
+    assert_eq!(
+        s.queue.lock().unwrap().get(approved).unwrap().state,
+        QueueState::Pending
+    );
+    assert_eq!(
+        s.store
+            .read_daemon_file(DAEMON_SETTINGS_FILE)
+            .unwrap()
+            .unwrap(),
+        b"{"
+    );
+    // Repair the unreadable settings; a second unenroll must finish even
+    // though the enrollment itself has already been removed.
+    s.store
+        .write_daemon_file(DAEMON_SETTINGS_FILE, &saved)
+        .unwrap();
+    assert!(call(&s).await.error.is_none());
+    let persisted = crate::daemon::settings::DaemonSettings::load(&s.store).unwrap();
+    assert!(!persisted.subscription_usage_codex_enabled);
+    assert!(!persisted.subscription_usage_claude_enabled);
 }

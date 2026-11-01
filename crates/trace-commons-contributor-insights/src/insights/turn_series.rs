@@ -21,6 +21,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use trace_commons_contributor_platform::os_secret_store::KeychainIdentity;
 use trace_commons_protocol::insights_usage_series::{
     CacheWrite, DigestKey, DigestKeyError, DigestKeyStore, InMemoryDigestKeyStore, KeyedDigest,
     MAX_SERIES_TOOL_CALLS, MAX_SERIES_TURNS, ToolCallRecord, ToolKind, TurnRecord, UsageSeries,
@@ -95,6 +96,16 @@ impl ClaudeTurnSeriesEvidence {
     }
 }
 
+/// What a [`ClaudeTurnSeriesScan`] holds.
+#[cfg(test)]
+#[derive(Debug)]
+struct Held {
+    drafts: usize,
+    calls: usize,
+    messages: usize,
+    tool_uses: usize,
+}
+
 /// One message's counters while its records are read.
 struct TurnDraft {
     at: Option<DateTime<Utc>>,
@@ -115,14 +126,87 @@ pub fn extract_claude_turn_series(
         return Err(invalid());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
-    let mut drafts: Vec<TurnDraft> = Vec::new();
-    let mut calls: Vec<ToolCallRecord> = Vec::new();
-    // Local only: message ID -> draft, tool-use ID -> call. Dropped at return.
-    let mut turn_by_message: BTreeMap<String, usize> = BTreeMap::new();
-    let mut call_by_tool_use: BTreeMap<String, usize> = BTreeMap::new();
-
+    let mut scan = ClaudeTurnSeriesScan::new(key);
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let row: Value = serde_json::from_str(line).map_err(|_| invalid())?;
+        scan.observe(&row)?;
+    }
+    scan.finish(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// [`extract_claude_turn_series`] one parsed record at a time, for a reader
+/// that streams a transcript instead of holding it. The caller skips blank
+/// lines, fails the scan on a line that is not UTF-8 JSON, and passes the
+/// SHA-256 of every byte read to [`Self::finish`]. No size bound: that is the
+/// caller's.
+///
+/// Memory is bounded by the series caps, not the transcript: at most
+/// [`MAX_SERIES_TURNS`] turns and message IDs, [`MAX_SERIES_TOOL_CALLS`]
+/// calls, and the tool-use IDs of the turns kept. Past a cap the scan keeps
+/// what the series would keep and drops the rest as it reads, so the result
+/// is the one the series' own caps make of every record, with two
+/// exceptions no harness writes: a message past the turn cap whose records
+/// declare different models contributes each to the model labels, not only
+/// its first; and a tool-use ID first seen past the turn cap and repeated in
+/// a turn kept is counted there.
+pub struct ClaudeTurnSeriesScan<'k> {
+    key: &'k DigestKey,
+    drafts: Vec<TurnDraft>,
+    /// The calls kept, by turn ordinal, each turn's in the order read. At
+    /// most `MAX_SERIES_TOOL_CALLS` across all turns: the first that many in
+    /// turn order, as the series keeps them.
+    calls: Vec<Vec<HeldCall>>,
+    held_calls: usize,
+    /// The highest turn holding a call: whose last call is the first to go.
+    last_turn_with_calls: usize,
+    /// Models declared by messages past the turn cap, in the order read,
+    /// distinct and at most `MAX_DECLARED_MODELS`: the series keeps no turn
+    /// of theirs, but their models are still labels.
+    late_models: Vec<String>,
+    /// A turn or call was dropped for a cap.
+    truncated: bool,
+    // Local only: message ID -> draft, tool-use ID -> call (`None` once the
+    // call is dropped). Dropped at finish.
+    turn_by_message: BTreeMap<String, usize>,
+    call_by_tool_use: BTreeMap<String, Option<(usize, usize)>>,
+}
+
+/// A call kept while the records are read, with the tool-use ID it is found
+/// by, so dropping it can be remembered.
+struct HeldCall {
+    id: Option<String>,
+    call: ToolCallRecord,
+}
+
+impl<'k> ClaudeTurnSeriesScan<'k> {
+    pub fn new(key: &'k DigestKey) -> Self {
+        Self {
+            key,
+            drafts: Vec::new(),
+            calls: Vec::new(),
+            held_calls: 0,
+            last_turn_with_calls: 0,
+            late_models: Vec::new(),
+            truncated: false,
+            turn_by_message: BTreeMap::new(),
+            call_by_tool_use: BTreeMap::new(),
+        }
+    }
+
+    /// What the scan holds, for the tests that bound it.
+    #[cfg(test)]
+    fn held(&self) -> Held {
+        Held {
+            drafts: self.drafts.len(),
+            calls: self.held_calls,
+            messages: self.turn_by_message.len(),
+            tool_uses: self.call_by_tool_use.len(),
+        }
+    }
+
+    /// One record. Fails with a fixed label on a record that is not an
+    /// object with a string `type`.
+    pub fn observe(&mut self, row: &Value) -> Result<()> {
         let kind = row
             .as_object()
             .and_then(|object| object.get("type"))
@@ -130,40 +214,46 @@ pub fn extract_claude_turn_series(
             .ok_or_else(invalid)?;
         match kind {
             "assistant" => {
-                let ordinal = assistant_turn(&row, key, &mut drafts, &mut turn_by_message)?;
+                let ordinal = self.assistant_turn(row);
                 if let Some(Value::Array(blocks)) = row.pointer("/message/content") {
                     for block in blocks {
                         if block.get("type").and_then(Value::as_str) != Some("tool_use") {
                             continue;
                         }
+                        // Past the turn cap no call of the turn is kept.
+                        let Some(ordinal) = ordinal else {
+                            self.truncated = true;
+                            continue;
+                        };
                         let id = block.get("id").and_then(Value::as_str);
-                        if id.is_some_and(|id| call_by_tool_use.contains_key(id)) {
+                        if id.is_some_and(|id| self.call_by_tool_use.contains_key(id)) {
                             continue;
                         }
-                        let call = tool_call(ordinal, block, key)?;
-                        if let Some(id) = id {
-                            call_by_tool_use.insert(id.to_owned(), calls.len());
-                        }
-                        calls.push(call);
+                        let call = tool_call(
+                            u32::try_from(ordinal).map_err(|_| invalid())?,
+                            block,
+                            self.key,
+                        )?;
+                        self.hold_call(ordinal, id, call);
                     }
                 }
             }
             "user" => {
                 let Some(Value::Array(blocks)) = row.pointer("/message/content") else {
-                    continue;
+                    return Ok(());
                 };
                 for block in blocks {
                     if block.get("type").and_then(Value::as_str) != Some("tool_result") {
                         continue;
                     }
-                    let Some(&index) = block
+                    let Some(&Some((turn, index))) = block
                         .get("tool_use_id")
                         .and_then(Value::as_str)
-                        .and_then(|id| call_by_tool_use.get(id))
+                        .and_then(|id| self.call_by_tool_use.get(id))
                     else {
                         continue;
                     };
-                    let call = &mut calls[index];
+                    let call = &mut self.calls[turn][index].call;
                     if call.paired {
                         continue;
                     }
@@ -174,105 +264,83 @@ pub fn extract_claude_turn_series(
             }
             _ => {}
         }
+        Ok(())
     }
 
-    let mut model_labels: Vec<String> = Vec::new();
-    let mut series = UsageSeries::default();
-    let mut previous_at = None;
-    for (ordinal, draft) in drafts.into_iter().enumerate() {
-        let ordinal = u32::try_from(ordinal).map_err(|_| invalid())?;
-        let model_label_ix = draft.model.and_then(|model| {
-            let ix = match model_labels.iter().position(|label| *label == model) {
-                Some(ix) => ix,
-                None if model_labels.len() < MAX_DECLARED_MODELS => {
-                    model_labels.push(model);
-                    model_labels.len() - 1
+    /// Keep a call of turn `turn`, unless the calls kept are at the cap and
+    /// it would come after all of them in turn order. A call that comes
+    /// before the last one kept takes its place.
+    fn hold_call(&mut self, turn: usize, id: Option<&str>, call: ToolCallRecord) {
+        if self.held_calls >= MAX_SERIES_TOOL_CALLS {
+            self.truncated = true;
+            let last = self.last_turn_with_calls;
+            if turn >= last {
+                if let Some(id) = id {
+                    self.call_by_tool_use.insert(id.to_owned(), None);
                 }
-                None => return None,
-            };
-            u16::try_from(ix).ok()
-        });
-        let counters = draft.counters.filter(|_| !draft.unknown);
-        series.push_turn(TurnRecord {
-            ordinal,
-            at: draft.at,
-            uncached_input: counters.map(|c| c[0]),
-            cache_read: counters.map(|c| c[1]),
-            cache_write: counters.map(|c| CacheWrite::Split { m5: c[3], h1: c[4] }),
-            output: counters.map(|c| c[2]),
-            model_label_ix,
-            gap_secs: if ordinal == 0 {
-                None
-            } else {
-                gap_between(previous_at, draft.at)
-            },
-            msg_key: draft.msg_key,
-        });
-        previous_at = draft.at;
-    }
-    // A later record of an earlier message can add a call after a later
-    // turn's calls; rows are kept in turn order. The sort is stable.
-    calls.sort_by_key(|call| call.turn_ordinal);
-    let kept_turns = series.turns.len();
-    for call in calls {
-        if usize::try_from(call.turn_ordinal).map_err(|_| invalid())? < kept_turns {
-            series.push_tool_call(call);
-        } else {
-            series.truncated = true;
+                return;
+            }
+            if let Some(dropped) = self.calls[last].pop() {
+                self.held_calls -= 1;
+                if let Some(id) = dropped.id {
+                    self.call_by_tool_use.insert(id, None);
+                }
+            }
+            if self.calls[last].is_empty() {
+                // Only moves down while at the cap, so the search is paid
+                // once over the transcript.
+                self.last_turn_with_calls = self.calls[..last]
+                    .iter()
+                    .rposition(|calls| !calls.is_empty())
+                    .unwrap_or(0);
+            }
         }
-    }
-    debug_assert!(series.turns.len() <= MAX_SERIES_TURNS);
-    debug_assert!(series.tool_calls.len() <= MAX_SERIES_TOOL_CALLS);
-
-    let evidence = ClaudeTurnSeriesEvidence {
-        schema_version: TURN_SERIES_SCHEMA_VERSION,
-        source_digest: format!("{:x}", Sha256::digest(bytes)),
-        key_fingerprint: key_fingerprint(key),
-        model_labels,
-        series,
-    };
-    evidence.validate()?;
-    Ok(evidence)
-}
-
-/// Fold one assistant record into its message's turn, returning the turn's
-/// ordinal. A record with no usable message ID is a turn of its own whose
-/// counters are unknown: without the ID it cannot be told from a replay.
-fn assistant_turn(
-    row: &Value,
-    key: &DigestKey,
-    drafts: &mut Vec<TurnDraft>,
-    turn_by_message: &mut BTreeMap<String, usize>,
-) -> Result<u32> {
-    let at = row
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc));
-    let model = row
-        .pointer("/message/model")
-        .and_then(Value::as_str)
-        .filter(|model| safe_model(model))
-        .map(str::to_owned);
-    let counters = row
-        .pointer("/message/usage")
-        .and_then(claude_stated_usage)
-        .map(|stated| {
-            [
-                stated.input,
-                stated.cache_read,
-                stated.output,
-                stated.cache_write_5m,
-                stated.cache_write_1h,
-            ]
+        self.last_turn_with_calls = self.last_turn_with_calls.max(turn);
+        let calls = &mut self.calls[turn];
+        if let Some(id) = id {
+            self.call_by_tool_use
+                .insert(id.to_owned(), Some((turn, calls.len())));
+        }
+        calls.push(HeldCall {
+            id: id.map(str::to_owned),
+            call,
         });
-    let id = row
-        .pointer("/message/id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty() && id.len() <= 256);
-    let index = match id.and_then(|id| turn_by_message.get(id).copied()) {
-        Some(index) => {
-            let draft = &mut drafts[index];
+        self.held_calls += 1;
+    }
+
+    /// Fold one assistant record into its message's turn, returning the
+    /// turn's ordinal, or `None` past the turn cap. A record with no usable
+    /// message ID is a turn of its own whose counters are unknown: without
+    /// the ID it cannot be told from a replay.
+    fn assistant_turn(&mut self, row: &Value) -> Option<usize> {
+        let at = row
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc));
+        let model = row
+            .pointer("/message/model")
+            .and_then(Value::as_str)
+            .filter(|model| safe_model(model))
+            .map(str::to_owned);
+        let counters = row
+            .pointer("/message/usage")
+            .and_then(claude_stated_usage)
+            .map(|stated| {
+                [
+                    stated.input,
+                    stated.cache_read,
+                    stated.output,
+                    stated.cache_write_5m,
+                    stated.cache_write_1h,
+                ]
+            });
+        let id = row
+            .pointer("/message/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 256);
+        if let Some(index) = id.and_then(|id| self.turn_by_message.get(id).copied()) {
+            let draft = &mut self.drafts[index];
             match (draft.counters, counters) {
                 (Some(previous), Some(current))
                     if current
@@ -285,26 +353,105 @@ fn assistant_turn(
                 }
                 _ => draft.unknown = true,
             }
-            index
+            return Some(index);
         }
-        None => {
-            let index = drafts.len();
-            drafts.push(TurnDraft {
-                at,
-                model,
-                counters,
-                unknown: id.is_none() || counters.is_none(),
-                msg_key: id
-                    .filter(|_| DEDUPE_TURNS_BY_MSG_KEY)
-                    .map(|id| msg_key(key, id)),
-            });
-            if let Some(id) = id {
-                turn_by_message.insert(id.to_owned(), index);
+        if self.drafts.len() >= MAX_SERIES_TURNS {
+            // Past the turn cap: no turn is kept, but its model is a label.
+            self.truncated = true;
+            if let Some(model) = model {
+                if self.late_models.len() < MAX_DECLARED_MODELS
+                    && !self.late_models.contains(&model)
+                {
+                    self.late_models.push(model);
+                }
             }
-            index
+            return None;
         }
-    };
-    u32::try_from(index).map_err(|_| invalid())
+        let index = self.drafts.len();
+        self.drafts.push(TurnDraft {
+            at,
+            model,
+            counters,
+            unknown: id.is_none() || counters.is_none(),
+            msg_key: id
+                .filter(|_| DEDUPE_TURNS_BY_MSG_KEY)
+                .map(|id| msg_key(self.key, id)),
+        });
+        self.calls.push(Vec::new());
+        if let Some(id) = id {
+            self.turn_by_message.insert(id.to_owned(), index);
+        }
+        Some(index)
+    }
+
+    /// The rows, bound to `source_digest`, the lowercase hex SHA-256 of
+    /// every byte the records were read from.
+    pub fn finish(self, source_digest: String) -> Result<ClaudeTurnSeriesEvidence> {
+        let Self {
+            key,
+            drafts,
+            calls,
+            late_models,
+            truncated,
+            ..
+        } = self;
+        let mut model_labels: Vec<String> = Vec::new();
+        let mut intern = |model: String| -> Option<u16> {
+            let ix = match model_labels.iter().position(|label| *label == model) {
+                Some(ix) => ix,
+                None if model_labels.len() < MAX_DECLARED_MODELS => {
+                    model_labels.push(model);
+                    model_labels.len() - 1
+                }
+                None => return None,
+            };
+            u16::try_from(ix).ok()
+        };
+        let mut series = UsageSeries::default();
+        let mut previous_at = None;
+        for (ordinal, draft) in drafts.into_iter().enumerate() {
+            let ordinal = u32::try_from(ordinal).map_err(|_| invalid())?;
+            let model_label_ix = draft.model.and_then(&mut intern);
+            let counters = draft.counters.filter(|_| !draft.unknown);
+            series.push_turn(TurnRecord {
+                ordinal,
+                at: draft.at,
+                uncached_input: counters.map(|c| c[0]),
+                cache_read: counters.map(|c| c[1]),
+                cache_write: counters.map(|c| CacheWrite::Split { m5: c[3], h1: c[4] }),
+                output: counters.map(|c| c[2]),
+                model_label_ix,
+                gap_secs: if ordinal == 0 {
+                    None
+                } else {
+                    gap_between(previous_at, draft.at)
+                },
+                msg_key: draft.msg_key,
+            });
+            previous_at = draft.at;
+        }
+        for model in late_models {
+            intern(model);
+        }
+        // A later record of an earlier message can add a call after a later
+        // turn's calls; rows are kept in turn order.
+        for held in calls.into_iter().flatten() {
+            series.push_tool_call(held.call);
+        }
+        series.truncated |= truncated;
+        debug_assert!(series.turns.len() <= MAX_SERIES_TURNS);
+        debug_assert!(series.tool_calls.len() <= MAX_SERIES_TOOL_CALLS);
+
+        let evidence = ClaudeTurnSeriesEvidence {
+            schema_version: TURN_SERIES_SCHEMA_VERSION,
+            source_digest,
+            key_fingerprint: key_fingerprint(key),
+            model_labels,
+            series,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
 }
 
 fn tool_call(turn_ordinal: u32, block: &Value, key: &DigestKey) -> Result<ToolCallRecord> {
@@ -369,12 +516,19 @@ pub fn saved_turn_series(
 
 /// The key store an Insights store uses outside tests, chosen by
 /// [`DIGEST_KEY_CUSTODY`] (owner decision D16, open).
-pub fn default_digest_key_store(store_dir: PathBuf) -> Box<dyn DigestKeyStore + Send + Sync> {
+///
+/// `keychain` is the channel's keychain namespace. With none, the OS custody
+/// refuses every load: there is no production default here to fall back to,
+/// so a host that names no channel can never read another channel's key.
+pub fn default_digest_key_store(
+    store_dir: PathBuf,
+    keychain: Option<KeychainIdentity>,
+) -> Box<dyn DigestKeyStore + Send + Sync> {
     if cfg!(test) {
         return Box::new(InMemoryDigestKeyStore::with_seed([0x5a; 32]));
     }
     let custody: Box<dyn DigestKeyStore + Send + Sync> = match DIGEST_KEY_CUSTODY {
-        DigestKeyCustody::OsKeychain => Box::new(OsDigestKeyStore),
+        DigestKeyCustody::OsKeychain => Box::new(OsDigestKeyStore { keychain }),
         DigestKeyCustody::KeyFileInStore => Box::new(FileDigestKeyStore::new(store_dir.clone())),
     };
     Box::new(CreationLocked::new(custody, store_dir))
@@ -417,24 +571,33 @@ pub fn decode_key(stored: &[u8]) -> Result<DigestKey, DigestKeyError> {
 }
 
 /// The digest key in the OS keychain: macOS Keychain, Windows Credential
-/// Manager, Secret Service on Linux. One fixed entry per OS user.
+/// Manager, Secret Service on Linux. One fixed entry per OS user and channel.
 #[derive(Debug, Clone, Copy)]
-pub struct OsDigestKeyStore;
+pub struct OsDigestKeyStore {
+    /// The channel's keychain namespace; `None` refuses every operation.
+    pub keychain: Option<KeychainIdentity>,
+}
 
 impl OsDigestKeyStore {
-    fn backend()
-    -> Result<trace_commons_contributor_platform::os_secret_store::OsSecretBackend, DigestKeyError>
+    fn backend(
+        &self,
+    ) -> Result<trace_commons_contributor_platform::os_secret_store::OsSecretBackend, DigestKeyError>
     {
         refuse_in_test_build()?;
-        trace_commons_contributor_platform::os_secret_store::OsSecretBackend::insights_digest_key()
-            .map_err(|_| DigestKeyError::Unavailable("insights_digest_key_keychain"))
+        let keychain = self.keychain.ok_or(DigestKeyError::Unavailable(
+            "insights_digest_key_no_channel",
+        ))?;
+        trace_commons_contributor_platform::os_secret_store::OsSecretBackend::insights_digest_key(
+            &keychain,
+        )
+        .map_err(|_| DigestKeyError::Unavailable("insights_digest_key_keychain"))
     }
 }
 
 impl DigestKeyStore for OsDigestKeyStore {
     fn load(&self) -> Result<Option<DigestKey>, DigestKeyError> {
         use trace_commons_contributor_platform::credential_store::CredentialError;
-        match Self::backend()?.read_insights_digest_key() {
+        match self.backend()?.read_insights_digest_key() {
             Ok(stored) => decode_key(&stored).map(Some),
             Err(CredentialError::NoEntry) => Ok(None),
             Err(_) => Err(DigestKeyError::Unavailable("insights_digest_key_keychain")),
@@ -446,7 +609,7 @@ impl DigestKeyStore for OsDigestKeyStore {
             return Ok(key);
         }
         let bytes = new_key_bytes()?;
-        Self::backend()?
+        self.backend()?
             .write_insights_digest_key(hex::encode(bytes).as_bytes())
             .map_err(|_| DigestKeyError::Unavailable("insights_digest_key_keychain"))?;
         // Read back: a concurrent creator may have written its key last, and
@@ -457,7 +620,7 @@ impl DigestKeyStore for OsDigestKeyStore {
 
     fn clear(&self) -> Result<(), DigestKeyError> {
         use trace_commons_contributor_platform::credential_store::CredentialError;
-        match Self::backend()?.delete_insights_digest_key() {
+        match self.backend()?.delete_insights_digest_key() {
             Ok(()) | Err(CredentialError::NoEntry) => Ok(()),
             Err(_) => Err(DigestKeyError::Unavailable("insights_digest_key_keychain")),
         }
@@ -810,6 +973,153 @@ mod tests {
         evidence.validate().unwrap();
     }
 
+    /// A transcript past both series caps, with every record shape whose
+    /// handling past a cap could change the result: a model first declared
+    /// past the turn cap, a late record of an early message that adds a call
+    /// and raises its counters, one that regresses, repeated tool-use IDs,
+    /// results for calls that are dropped, and a record with no message ID
+    /// past the turn cap.
+    fn past_the_caps() -> Vec<Value> {
+        const CALLS_PER_TURN: usize = 5;
+        const _: () = assert!(MAX_SERIES_TURNS * CALLS_PER_TURN > MAX_SERIES_TOOL_CALLS);
+        let usage = |output: u64| {
+            json!({"input_tokens":1,"output_tokens":output,"cache_read_input_tokens":2,
+                "cache_creation_input_tokens":0})
+        };
+        let tool_use = |id: String, n: usize| {
+            json!({"type":"tool_use","id":id,"name":"Read",
+                "input":{"file_path":format!("src/f{}.rs", n % 7)}})
+        };
+        let assistant = |id: Option<String>, model: &str, output: u64, content: Vec<Value>| {
+            let mut message = json!({"model":model,"content":content,"usage":usage(output)});
+            if let Some(id) = id {
+                message["id"] = json!(id);
+            }
+            json!({"type":"assistant","timestamp":"2026-09-15T10:00:00Z","message":message})
+        };
+        let result = |id: String, error: bool| {
+            json!({"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":id,"is_error":error,"content":"ok"}]}})
+        };
+        let total = MAX_SERIES_TURNS + 40;
+        let mut rows = Vec::new();
+        for i in 0..total {
+            let model = match i {
+                _ if i >= MAX_SERIES_TURNS + 10 => "claude-late",
+                _ if i % 1000 == 999 => "claude-b",
+                _ => "claude-a",
+            };
+            let calls: Vec<Value> = (0..CALLS_PER_TURN)
+                .map(|j| tool_use(format!("t{i}-{j}"), i + j))
+                .collect();
+            // Every third message comes as two records: the counters, then
+            // the calls with higher counters.
+            if i % 3 == 0 {
+                rows.push(assistant(Some(format!("m{i}")), model, 1, Vec::new()));
+                rows.push(assistant(Some(format!("m{i}")), model, 2, calls));
+            } else {
+                rows.push(assistant(Some(format!("m{i}")), model, 1, calls));
+            }
+            if i % 5 == 0 {
+                rows.push(result(format!("t{i}-0"), i % 10 == 0));
+            }
+            if i % 400 == 7 {
+                // A call repeated in a later record of the same message.
+                rows.push(assistant(
+                    Some(format!("m{i}")),
+                    model,
+                    2,
+                    vec![tool_use(format!("t{i}-1"), i)],
+                ));
+            }
+            if i == MAX_SERIES_TURNS + 5 {
+                rows.push(assistant(
+                    None,
+                    "claude-none",
+                    1,
+                    vec![tool_use("t-none".into(), 1)],
+                ));
+                rows.push(result("t-none".into(), false));
+            }
+        }
+        // Late records of early messages: one adds a call and raises the
+        // counters, one regresses, one repeats an early call ID under another
+        // message.
+        rows.push(assistant(
+            Some("m3".into()),
+            "claude-a",
+            9,
+            vec![tool_use("t-late-3".into(), 3)],
+        ));
+        rows.push(result("t-late-3".into(), false));
+        rows.push(assistant(Some("m4".into()), "claude-a", 0, Vec::new()));
+        rows.push(assistant(
+            Some(format!("m{}", total - 1)),
+            "claude-late",
+            3,
+            vec![tool_use("t1-2".into(), 1)],
+        ));
+        // Results for calls past the tool-call cap and past the turn cap.
+        rows.push(result(format!("t{}-4", MAX_SERIES_TURNS - 1), true));
+        rows.push(result(format!("t{}-0", MAX_SERIES_TURNS + 1), false));
+        rows
+    }
+
+    fn scan_rows(rows: &[Value]) -> ClaudeTurnSeriesScan<'static> {
+        static KEY: std::sync::OnceLock<DigestKey> = std::sync::OnceLock::new();
+        let mut scan = ClaudeTurnSeriesScan::new(KEY.get_or_init(key));
+        for row in rows {
+            scan.observe(row).unwrap();
+        }
+        scan
+    }
+
+    /// The result past both caps, pinned by its SHA-256 as the unbounded scan
+    /// produced it, so bounding the scan's memory changes nothing it yields.
+    #[test]
+    fn the_result_past_the_caps_is_unchanged() {
+        let evidence = scan_rows(&past_the_caps()).finish("0".repeat(64)).unwrap();
+        assert!(evidence.series.truncated);
+        assert_eq!(evidence.series.turns.len(), MAX_SERIES_TURNS);
+        assert_eq!(evidence.series.tool_calls.len(), MAX_SERIES_TOOL_CALLS);
+        // The cases the pin covers are reached, not passed over.
+        assert_eq!(
+            evidence.model_labels,
+            ["claude-a", "claude-b", "claude-none", "claude-late"]
+        );
+        assert_eq!(evidence.series.turns[3].output, Some(9));
+        assert!(evidence.series.turns[4].usage_unknown());
+        let calls_of = |turn: u32| {
+            evidence
+                .series
+                .tool_calls
+                .iter()
+                .filter(|call| call.turn_ordinal == turn)
+                .count()
+        };
+        assert_eq!(calls_of(3), 6, "the late call is kept");
+        assert_eq!(calls_of(1), 5, "a repeated ID is not a second call");
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            "75bcff295882d101d934245d3ac08aca8d3d32febb3a7219274fa970cd4dcd03"
+        );
+    }
+
+    /// Past the caps the scan holds no more drafts, calls or message IDs than
+    /// the series keeps, however long the transcript.
+    #[test]
+    fn the_scan_holds_no_more_than_the_caps() {
+        let rows = past_the_caps();
+        let scan = scan_rows(&rows);
+        let held = scan.held();
+        assert!(held.drafts <= MAX_SERIES_TURNS, "{held:?}");
+        assert!(held.calls <= MAX_SERIES_TOOL_CALLS, "{held:?}");
+        assert!(held.messages <= MAX_SERIES_TURNS, "{held:?}");
+        // Tool-use IDs only for turns the series can keep.
+        assert!(held.tool_uses <= MAX_SERIES_TURNS * 5 + 2, "{held:?}");
+    }
+
     #[test]
     fn validation_rejects_rows_a_reader_cannot_trust() {
         let valid = extract_claude_turn_series(&fixture(), &key()).unwrap();
@@ -920,11 +1230,11 @@ mod tests {
     #[test]
     fn the_os_key_store_refuses_under_test() {
         assert!(matches!(
-            OsDigestKeyStore.load_or_create(),
+            OsDigestKeyStore { keychain: None }.load_or_create(),
             Err(DigestKeyError::Unavailable(_))
         ));
         assert!(matches!(
-            OsDigestKeyStore.load(),
+            OsDigestKeyStore { keychain: None }.load(),
             Err(DigestKeyError::Unavailable(_))
         ));
     }

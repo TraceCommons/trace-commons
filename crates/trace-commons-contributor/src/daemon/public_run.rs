@@ -49,17 +49,37 @@ fn account_session(
     super::run_blocking(|| crate::account_auth::try_load_session_with_snapshot(&shared.store))
 }
 
+type AccountContext = (
+    crate::config::ContributorConfig,
+    crate::account_auth::LoadedAccountSession,
+);
+
+/// The config and stored session, as they are. For a local fact about the
+/// account (whose records these are), never for a call that presents it.
 fn account_context(
     shared: &DaemonShared,
     request_id: u64,
-) -> Result<
-    (
-        crate::config::ContributorConfig,
-        crate::account_auth::LoadedAccountSession,
-    ),
-    Box<Response>,
-> {
-    let session = match account_session(shared) {
+) -> Result<AccountContext, Box<Response>> {
+    account_context_from(shared, request_id, account_session(shared))
+}
+
+/// The config and the session a call presents: an expired session on a
+/// NEAR AI-provisioned account is renewed first
+/// ([`super::account_session_renewal`]).
+async fn presented_account_context(
+    shared: &DaemonShared,
+    request_id: u64,
+) -> Result<AccountContext, Box<Response>> {
+    let loaded = super::account_session_renewal::account_session_live(shared).await;
+    account_context_from(shared, request_id, loaded)
+}
+
+fn account_context_from(
+    shared: &DaemonShared,
+    request_id: u64,
+    loaded: anyhow::Result<Option<crate::account_auth::LoadedAccountSession>>,
+) -> Result<AccountContext, Box<Response>> {
+    let session = match loaded {
         Ok(Some(session)) => session,
         Ok(None) => {
             return Err(Box::new(Response::err(
@@ -120,7 +140,7 @@ pub(super) fn current_account_binding(
 pub(super) fn persist_rotated_token(
     shared: &DaemonShared,
     session: &crate::account_auth::LoadedAccountSession,
-    rotated_token: Option<String>,
+    rotated_token: Option<crate::account_auth::RotatedToken>,
 ) -> Result<(), ()> {
     let Some(rotated_token) = rotated_token else {
         return Ok(());
@@ -225,7 +245,7 @@ pub(super) async fn load_detail_with_binding(
     request_id: u64,
     submission_id: Uuid,
 ) -> Result<(crate::public_run::SessionDetail, String), Box<Response>> {
-    let (config, session) = match account_context(shared, request_id) {
+    let (config, session) = match presented_account_context(shared, request_id).await {
         Ok(context) => context,
         Err(response) => return Err(response),
     };
@@ -269,7 +289,7 @@ pub(super) async fn handle_publish(shared: &DaemonShared, req: &Request) -> Resp
     if request.validate().is_err() {
         return Response::err(req.id, ERR_BAD_PARAMS, "public-run-invalid");
     }
-    let (config, session) = match account_context(shared, req.id) {
+    let (config, session) = match presented_account_context(shared, req.id).await {
         Ok(context) => context,
         Err(response) => return *response,
     };
@@ -302,7 +322,7 @@ pub(super) async fn handle_unpublish(shared: &DaemonShared, req: &Request) -> Re
         Ok(submission_id) => submission_id,
         Err(message) => return Response::err(req.id, ERR_BAD_PARAMS, message),
     };
-    let (config, session) = match account_context(shared, req.id) {
+    let (config, session) = match presented_account_context(shared, req.id).await {
         Ok(context) => context,
         Err(response) => return *response,
     };

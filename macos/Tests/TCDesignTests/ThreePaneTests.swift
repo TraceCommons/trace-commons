@@ -23,6 +23,7 @@ final class ThreePaneTests: XCTestCase {
         V(map: false, inspector: true), V(map: true, inspector: true),
     ]
 
+    @MainActor
     func test_theDefaultWidthsAreTheTokens() {
         XCTAssertEqual(main, 440)
         XCTAssertEqual(main, GlassTokens.Size.paneLeftWidth + 40)
@@ -188,21 +189,21 @@ final class ThreePaneTests: XCTestCase {
         XCTAssertEqual(GlassPaneLayout(windowWidth: 2000, showsMap: true, showsInspector: false).main, main)
     }
 
-    /// The window grows on its right with its top and leading edge fixed;
-    /// near the screen's edge it moves left only as far as it must; wider
-    /// than the screen it is held to the screen.
-    func test_theWindowGrowsRightAndStaysOnScreen() {
+    /// The on-screen rule: the window grows on its right with its top and
+    /// leading edge fixed; near the screen's edge it moves left only as far
+    /// as it must; wider than the screen it is held to the screen.
+    func test_theOnScreenRuleGrowsRightAndStaysOnScreen() {
         let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let frame = CGRect(x: 100, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(frame, width: 1280, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: frame, width: 1280, visible: screen),
                        CGRect(x: 100, y: 200, width: 1280, height: 760))
         let nearEdge = CGRect(x: 1000, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 1280, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: nearEdge, width: 1280, visible: screen),
                        CGRect(x: 640, y: 200, width: 1280, height: 760))
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 2400, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: nearEdge, width: 2400, visible: screen),
                        CGRect(x: 0, y: 200, width: 1920, height: 760))
         // Shrinking keeps the leading edge.
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 380, visible: screen),
+        XCTAssertEqual(GlassPaneLayout.windowFrame(onScreen: nearEdge, width: 380, visible: screen),
                        CGRect(x: 1000, y: 200, width: 380, height: 760))
     }
 
@@ -284,5 +285,83 @@ final class ThreePaneTests: XCTestCase {
                 XCTAssertTrue(limits.contains(end), "\(old) -> \(new)")
             }
         }
+    }
+
+    /// The divider beside the map (owner, 2026-10-20) moves room between
+    /// the main pane and the map: dragged right the main pane widens and
+    /// the map narrows, never under its minimum; dragged left the main pane
+    /// stops at its default. The window keeps its width.
+    func test_theDividerMovesRoomBetweenTheMainPaneAndTheMap() {
+        for inspector in [false, true] {
+            let window = GlassPaneLayout.windowWidth(showsMap: true, showsInspector: inspector) + 200
+            let wider = GlassPaneLayout.draggedMain(from: main, by: 120, windowWidth: window, showsInspector: inspector)
+            XCTAssertEqual(wider, main + 120)
+            let layout = GlassPaneLayout(windowWidth: window, showsMap: true, showsInspector: inspector, main: wider)
+            XCTAssertEqual(layout.main + (layout.map ?? 0), main + mapWidth + 200, "the window keeps its width")
+            let widest = GlassPaneLayout.draggedMain(from: main, by: 10_000, windowWidth: window, showsInspector: inspector)
+            let squeezed = GlassPaneLayout(windowWidth: window, showsMap: true, showsInspector: inspector, main: widest)
+            XCTAssertEqual(squeezed.map, GlassTokens.Size.mapMinWidth)
+            XCTAssertEqual(GlassPaneLayout.draggedMain(from: main, by: -500, windowWidth: window, showsInspector: inspector), main)
+        }
+    }
+
+    /// A drag on the divider resizes the panes and never moves the window
+    /// (Kristi, 2026-10-21): the window is movable by its background, so
+    /// the handle under the gap must refuse to move it. It reports the drag
+    /// from where it began, and takes the pointer a little into each pane.
+    @MainActor
+    func test_theDividerHandleNeverMovesTheWindow() throws {
+        let handle = GlassDividerHandleView(frame: CGRect(x: 0, y: 0, width: 18, height: 400))
+        XCTAssertFalse(handle.mouseDownCanMoveWindow)
+        XCTAssertTrue(handle.acceptsFirstMouse(for: nil))
+        XCTAssertGreaterThan(GlassPaneLayout.dividerReach, 0)
+        XCTAssertLessThan(GlassPaneLayout.dividerReach, gap)
+
+        var dragged: [CGFloat] = []
+        var ended: CGFloat?
+        handle.onDrag = { dragged.append($0) }
+        handle.onEnd = { ended = $0 }
+        func event(_ type: NSEvent.EventType, x: CGFloat) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(
+                with: type, location: CGPoint(x: x, y: 10), modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        handle.mouseDown(with: try event(.leftMouseDown, x: 400))
+        handle.mouseDragged(with: try event(.leftMouseDragged, x: 430))
+        handle.mouseDragged(with: try event(.leftMouseDragged, x: 380))
+        handle.mouseUp(with: try event(.leftMouseUp, x: 460))
+        XCTAssertEqual(dragged, [30, -20])
+        XCTAssertEqual(ended, 60)
+
+        // A bare click, the one that activates the window included, ends
+        // no drag, so it never writes the width the layout happens to show.
+        ended = nil
+        handle.mouseDown(with: try event(.leftMouseDown, x: 400))
+        handle.mouseUp(with: try event(.leftMouseUp, x: 400))
+        XCTAssertNil(ended)
+        handle.mouseDown(with: try event(.leftMouseDown, x: 400))
+        handle.mouseUp(with: try event(.leftMouseUp, x: 402))
+        XCTAssertNil(ended, "only a drag that moved ends one")
+    }
+
+    /// The handle reaches into the map only, never over the main pane's
+    /// scroller beside the gap, and the pane ends a drag only when one
+    /// began.
+    @MainActor
+    func test_theDividerLeavesTheMainPanesEdgeAlone() throws {
+        let source = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TCDesign/Components/ThreePane.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains(".padding(.trailing, -GlassPaneLayout.dividerReach)"))
+        XCTAssertFalse(source.contains(".padding(.horizontal, -GlassPaneLayout.dividerReach)"))
+        XCTAssertTrue(source.contains("guard let start = dragStart else { return }"))
+    }
+
+    /// A window that opens with a main pane the divider widened is that
+    /// much wider, so the map keeps its kept width.
+    func test_theKeptMainWidthWidensTheOpeningWindow() {
+        let base = GlassPaneLayout.windowWidth(showsMap: true, showsInspector: true)
+        XCTAssertEqual(GlassPaneLayout.windowWidth(showsMap: true, showsInspector: true, main: main + 80), base + 80)
+        XCTAssertEqual(GlassPaneLayout.windowWidth(showsMap: true, showsInspector: true, main: main - 80), base)
     }
 }

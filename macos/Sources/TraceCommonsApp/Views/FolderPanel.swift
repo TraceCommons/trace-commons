@@ -2,9 +2,9 @@ import AppKit
 import TCBridge
 import TCShellCore
 
-/// The one folder picker every screen opens (Settings' tool rows, the first
-/// run's Folders rows and its "add your tool" tile): one directory, never a
-/// file, and no folder created from it.
+/// The one open panel every screen opens: the folder picker (Settings' tool
+/// rows, the first run's Folders rows and its "add your tool" tile), one
+/// directory, never a file, and no folder created from it.
 @MainActor
 enum FolderPanel {
     /// The chosen folder's path, or nil when the panel is dismissed.

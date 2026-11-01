@@ -16,7 +16,7 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
         for section in SettingsSection.allCases {
             XCTAssertEqual(section.availableBeforeOnboarding, available.contains(section), section.rawValue)
         }
-        for write: SettingsSection in [.consent, .publicProfile, .watchedFolders, .tools, .witness, .projects] {
+        for write: SettingsSection in [.consent, .publicProfile, .watchedFolders, .tools, .referrals, .witness, .projects] {
             XCTAssertFalse(write.availableBeforeOnboarding, "\(write.rawValue) writes what first run asks")
         }
     }

@@ -7,7 +7,8 @@
 //! running Rust first, not because anyone may edit them.
 //!
 //! Most of what this writes is SVG, which each platform's packaging turns into
-//! an `.icns` or a `hicolor` entry with its own toolchain.
+//! what it needs with its own toolchain. The macOS app icon is not among them;
+//! it is an Icon Composer document under `macos/icons/`.
 //!
 //! The Windows tiles are the exception and are written here as PNG. They have
 //! to be raster, they have to live where `Package.appxmanifest` names them, and

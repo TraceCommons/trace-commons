@@ -1,6 +1,6 @@
 [package]
 name = "trace-commons-contributor"
-version = "0.20.3"
+version = "0.21.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,8 +13,12 @@ repository.workspace = true
 # without `cfg(test)`, so without it every test that generated a device
 # identity wrote a real login-keychain item and left it there. It also
 # exposes `ManagedRoute::start_against`, which starts a managed route against
-# a local fixture instead of NEAR AI, for `tests/managed_statusline.rs`, and
-# the native-auth wire primitives for the separate client/server contract suite.
+# a local fixture instead of NEAR AI, for `tests/managed_statusline.rs`, the
+# native-auth wire primitives for the separate client/server contract suite,
+# and `ConfigStore::lower_envelope_limit_for_tests` with
+# `envelope::TEST_ENVELOPE_LIMIT_BYTES`, which lower one test state
+# directory's envelope limit so `tests/daemon_ipc_contract.rs` need not build
+# a 256 MiB session.
 #
 # Enabled ONLY by test dev-dependencies: the self dependency below and the
 # unpublished trace-commons-client-server-tests package. Never enable it for
@@ -29,6 +33,14 @@ repository.workspace = true
 # One line, so scripts/ci/check-release-credential-store.sh can permit this
 # exact definition.
 test-credential-store = ["trace-commons-contributor-insights/test-credential-store", "trace-commons-contributor-platform/test-credential-store"]
+
+# The staging channel (`src/channel.rs`): NEAR AI staging, the staging
+# server, staging identity values, and NEAR AI measurement pins taken only
+# from the signed staging pin set, whose verifier the attestation crate's
+# feature compiles. Never enabled in a release workflow or a shipped
+# manifest: scripts/ci/check-release-staging-feature.sh refuses one that
+# does. One line, so that script can permit this exact definition.
+near-ai-staging = ["trace-commons-attestation/near-ai-staging"]
 
 [dependencies]
 trace-commons-protocol = { path = "../trace-commons-protocol", features = ["near-ai-privacy-filter"] }
@@ -693,7 +705,159 @@ keyring-core = "=1.0.0"
 # short-hash lines (`flatpak-cargo/git/ironwire-9a4c231` -> `-bfb5e07`).
 # `grep -c 9a4c231` on the file is 0. The lock's package set is unchanged,
 # which is what makes editing equivalent to regenerating.
-ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "bfb5e0718716bd61998491ca2d83e1313bf7388d" }
+#
+# ADVANCE TO a2ae5d97. One commit in the range, verified with the GitHub
+# compare API (`bfb5e071...a2ae5d97`, ahead_by 1, behind_by 0):
+# nearai/ironwire#64, "Support isolated subscription logins and bounded
+# large-account routing", which superseded the unmerged #59 that
+# TraceCommons#1513 vendored. WHY: the multi-subscription routing #1513
+# wanted -- a contributor with a second Claude Code or Codex login (its own
+# `CLAUDE_CONFIG_DIR` or `CODEX_HOME`) declares it as a backend and it is
+# routed as itself -- now arrives through this pin instead of 103k vendored
+# lines. What #64 changes, from its squashed commit list and the diff:
+#   * isolated subscription logins: each declared `config_dir` is a backend
+#     of its own whose credential is read only from that directory (Claude
+#     Code's per-directory Keychain item is named by a sha256 over the NFC
+#     form of the directory, which is what the new crates below are for);
+#     login directories are compared on disk, not by spelling;
+#   * account-bound facade URLs, `/anthropic/account/<id>` and
+#     `/openai/account/<id>/v1`; the plain facade belongs to the unmoved
+#     default login, and a plain URL never replaces an account-bound one;
+#   * per-login consent recorded with a binding to that login, never granted
+#     by an embedded start;
+#   * replay origins: encrypted reasoning is replayed only to the account that
+#     minted it, inferred after a restart only when one account could have,
+#     and refused on every route when that is ambiguous;
+#   * a failed forced route is dialled once, not once per backend;
+#   * config shapes main accepted warn instead of being refused;
+#   * `OpenAI-Organization` and `OpenAI-Project` are stripped with the
+#     client's credential;
+#   * cross-account fallback, off by default (`[subscriptions]
+#     cross_account_fallback`).
+#
+# COST. Measured with `cargo tree -p trace-commons-contributor -e normal
+# --prefix none | sort -u`: 439 packages before, 442 after (+3:
+# unicode-normalization 0.1.25, tinyvec 1.11.0, tinyvec_macros 0.1.1);
+# `-e normal,build` 455 -> 458. Upstream added `sha2` and
+# `unicode-normalization` to `ironwire_creds`, and `sha2` and `url` to
+# `ironwire_upstream`; `sha2` and `url` were already in this graph. Lock
+# entries: root 979 -> 979 (all three were already locked for other crates),
+# GTK 562 -> 563 and Tauri 738 -> 739 (unicode-normalization; tinyvec was
+# already in both). GTK and Tauri are held at unicode-normalization 0.1.25,
+# the root's version, not 0.1.26: 0.1.26 relicensed to `(MIT OR Apache-2.0)
+# AND Unicode-3.0`, and one version keeps one license expression across the
+# three locks. LICENSES: unicode-normalization 0.1.25 MIT OR Apache-2.0;
+# tinyvec Zlib OR Apache-2.0 OR MIT; tinyvec_macros MIT OR Apache-2.0 OR
+# Zlib. No license is new to any lock.
+#
+# `cargo update -p ironwire_proxy` also wanted to move IronClaw (6dccbfbc ->
+# b0b999d9, adding `ironclaw_host_api` and moving rig-core 0.33 -> 0.36).
+# That was declined: the locks were re-resolved through `cargo metadata`
+# instead, and all three still name IronClaw
+# 6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9, which is also what upstream's own
+# lock pins at a2ae5d97.
+#
+# MSRV. Unmoved: every IronWire crate still declares rust-version = 1.96.
+#
+# SURFACE. `ironwire_agents` gains `pub mod endpoint` (`anthropic_url`,
+# `openai_url`, `parse_anthropic`, `parse_openai`, `Endpoint`),
+# `claude_settings::{path_in, default_dir, base_url, account, connect_as}` and
+# `codex_config::{path_in, base_url, account}`. Additive. The behaviour change
+# this crate sees is `tools`' Claude Code entry: it now plans and lists against
+# the default login's `~/.claude/settings.json` whatever this process's
+# `CLAUDE_CONFIG_DIR` says, where before it followed the variable. Upstream
+# made that change on purpose -- following the variable pointed another
+# login's Claude Code at the default login's token -- and `daemon::harness`
+# keeps it. The harness now locates that file itself, through
+# `claude_settings::default_dir` in a build and an override in tests, so no
+# test reaches a real profile on any platform (`dirs::home_dir` ignores
+# `USERPROFILE` on Windows). `ironwire_proxy` gains status fields (`binding`,
+# `awaiting_consent`, `cross_account_fallback`, ...) and `embed` options;
+# nothing this crate names was renamed or removed.
+#
+# FLATPAK. `cargo-sources.json` was regenerated, not edited, because the GTK
+# lock's package set changed this time: `flatpak-cargo-generator.py` from
+# flatpak/flatpak-builder-tools at 74697c75, run with `python3 -I` from a
+# temporary venv, as #1520 did. The diff is the ironwire revision, the two
+# manifests that changed upstream, and the unicode-normalization 0.1.25
+# vendor entry, whose sha256 matches the lock's checksum. `grep -c bfb5e07`
+# on the file is 0.
+# IronWire #66: opt-in NEAR Responses-to-Chat tool compatibility, preserving
+# namespaces, tool-result replay and complete Responses streaming lifecycles.
+# The native replay fix from #65 remains; no packages or dependencies are added.
+# IronWire #67 (7ac9251): the Anthropic emitter streams a translated tool
+# call's arguments as `input_json_delta` instead of in
+# `content_block_start.input`, which Claude Code discards; without it every
+# tool call in a Private AI Claude Code session reached the tool empty.
+#
+# ADVANCE TO c9201c93 (2026-10-31). Three commits in the range, verified with
+# `git log --oneline 7ac9251b..c9201c93`:
+#   * nearai/ironwire#70 (5189d70) sizes a NEAR AI request by the model's own
+#     context window, read from the `/v1/models` answer the startup probe
+#     already fetches (128K for an unlisted model), where routing used a fixed
+#     128K and so refused GLM 5.3 (1,048,576 tokens) above it. Each facade
+#     gets an explicit 32 MiB body limit, answered with a 413 in the facade's
+#     JSON error envelope.
+#   * nearai/ironwire#68 (f42fd96) answers a panicking facade handler with a
+#     500 in that envelope instead of dropping the socket, never sending or
+#     logging the panic text. With #1786's panic-location log, this is for a
+#     Private AI opencode session that stalled on ECONNRESET.
+#   * nearai/ironwire#71 (c9201c9) records every failed facade request in the
+#     ledger: a nullable `failure` column on `exchanges` that older readers
+#     ignore, failure rows left out of IronWire's own summaries, and failure
+#     rows still listed on `/log`. This crate already skips those rows when it
+#     reads `/log` (#1787).
+#
+# COST. Zero new packages. No manifest or lock changed upstream in the range;
+# it touches source, tests, `docs/PROTOCOL.md` and the `ironwire` binary's
+# `src/render.rs`. All three locks were re-resolved through `cargo metadata`;
+# each diff is exactly 22 changed lines, all of them the eleven `ironwire_*`
+# source strings. Lock entries are 968 root, 546 GTK and 735 Tauri before and
+# after.
+#
+# MSRV. Unmoved: upstream's root `rust-version` reads `1.96` at both revs.
+#
+# SURFACE. None for this crate. `git diff 7ac9251b c9201c93 --
+# crates/ironwire_proxy/src/embed.rs crates/ironwire_agents
+# crates/ironwire_catalog crates/ironwire_pointer` is empty, and so is the
+# same diff on `ironwire_proxy`'s `proof` and `statusline`. The new public
+# items are `ironwire_proxy::facade::MAX_REQUEST_BODY_BYTES`,
+# `ironwire_core::policy::Candidate::context_windows`, a defaulted
+# `ironwire_upstream::Backend::context_windows` and
+# `ironwire_ledger::Exchange::failure`; this crate names none of them (it
+# reads the ledger over `/log`, not through `ironwire_ledger`). All three
+# changes are behaviour inside the embedded proxy.
+#
+# FLATPAK. `cargo-sources.json` was regenerated with
+# `flatpak-cargo-generator.py` from flatpak/flatpak-builder-tools at
+# 74697c75, run with `python3 -I` from a temporary venv. It moves 14 lines,
+# all of them the ironwire revision (2 full, 12 short-hash vendor lines).
+# `grep -c 7ac9251` on the file is 0.
+#
+# ADVANCE TO 1b2f65f9 (2026-10-31). One commit: nearai/ironwire#72 starts
+# `ironwire_privacy`'s email and IPv6 scans past a whole character, not one
+# byte. Before it, a conversation containing e.g. `→:` or `é:` panicked the
+# detector (`detect.rs:240:26`, seen in `daemon-errors.log` on staging
+# 0.24.28) and every request in it failed. Only `ironwire_privacy/src/detect.rs`
+# changed; no manifest, lock or public API. Each lock (root, GTK, Tauri)
+# moves only the eleven `ironwire_*` source strings, no package added;
+# `cargo-sources.json` was regenerated the same way as above (14 lines, all
+# the revision; `grep -c c9201c9` is 0).
+# ADVANCE TO be236673 (2026-11-01). Four commits in the range, all additive:
+#   * nearai/ironwire#73 records a mid-upload client disconnect in the ledger
+#     as `client_disconnected`.
+#   * nearai/ironwire#74 keeps panic text out of logs.
+#   * nearai/ironwire#75 redacts emails whose local part has non-ASCII
+#     characters.
+#   * nearai/ironwire#76 reserves the answer's room on provider-stated
+#     context windows.
+# New public items: `ironwire_proxy::panic_hook`, `RequestRequirements.
+# output_tokens: Option<u32>` (has Default) and `Capabilities.
+# context_from_provider: bool` (serde-skipped). This crate does not call
+# `panic_hook::install_location_only`; its own diagnostics_log hook stays in
+# charge. Each lock (root, GTK, Tauri) moves only the eleven `ironwire_*`
+# source strings; `cargo-sources.json` was regenerated the same way as above.
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "be236673dcd71d6f3237b965aa3aeedf13be004a" }
 # The same IronWire revision, two more of its crates, promoted from
 # transitive to direct. `ironwire_agents` is the crate whose entire purpose is
 # "which coding tools does this machine have, are they pointed at us, and how
@@ -707,8 +871,8 @@ ironwire_proxy ={ git = "https://github.com/nearai/ironwire", rev = "bfb5e071871
 # crate does not reimplement, in a second place, the three config-editing
 # rules (never rewrite a file we cannot parse; fill an empty slot but report a
 # full one; remove only what we put there) that crate exists to hold.
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "bfb5e0718716bd61998491ca2d83e1313bf7388d" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "bfb5e0718716bd61998491ca2d83e1313bf7388d" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "be236673dcd71d6f3237b965aa3aeedf13be004a" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "be236673dcd71d6f3237b965aa3aeedf13be004a" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
@@ -763,6 +927,10 @@ zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = fal
 [dev-dependencies]
 # Itself, for the test-only feature: see `test-credential-store` above.
 trace-commons-contributor = { path = ".", features = ["test-credential-store"] }
+# Test-only: compresses fixture rollouts the way Codex does. Production
+# decoding lives in trace-commons-contributor-sources; same version, no new
+# package.
+zstd = "0.14.3"
 axum = "0.8"
 # Test-only: `daemon::notify`'s evening digest schedule is generic over
 # `chrono::TimeZone` so production can pass `chrono::Local` (the real system
@@ -778,7 +946,7 @@ chrono-tz = "0.10"
 k256 = "0.13"
 sha3 = "0.10"
 tower = { version = "0.5", features = ["util"] }
-tokio = { version = "1", features = ["net"] }
+tokio = { version = "1", features = ["net", "test-util"] }
 
 # Cross-contract tests live in trace-commons-client-server-tests. Keep the
 # server out of this crate's dev-dependencies too: otherwise even a filtered

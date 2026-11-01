@@ -162,123 +162,134 @@ pub fn extract_recorded_time_evidence(
     }
     let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
     let is_array = source == SourceFormat::Trajectory && text.trim_start().starts_with('[');
-    let coordinates = if is_array {
-        TimeRecordCoordinates::TrajectoryArrayIndexesZeroBased
-    } else {
-        TimeRecordCoordinates::JsonlPhysicalLinesOneBased
-    };
-    let mut result = RecordedTimeEvidence {
-        schema_version: 1,
-        scope: TimeEvidenceScope::RecordedEventTimestampsOnly,
-        source_format: source,
-        source_digest: format!("{:x}", Sha256::digest(bytes)),
-        coordinates,
-        total_eligible_records: 0,
-        valid_timestamps: 0,
-        missing_timestamps: 0,
-        invalid_timestamps: 0,
-        earliest: None,
-        latest: None,
-    };
-
     if is_array {
+        let mut scan = RecordedTimeScan::with_coordinates(
+            source,
+            TimeRecordCoordinates::TrajectoryArrayIndexesZeroBased,
+        );
         let records: Vec<Value> = serde_json::from_str(text).map_err(|_| invalid())?;
-        observe_trajectory_records(
-            &mut result,
-            records.iter().enumerate().map(|(i, v)| (i as u64, v)),
-        )?;
-    } else {
-        let mut records = Vec::new();
-        for (index, line) in text.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let record = serde_json::from_str(line).map_err(|_| invalid())?;
-            records.push((index as u64 + 1, record));
+        for (index, record) in records.iter().enumerate() {
+            scan.observe(index as u64, record)?;
         }
-        match source {
+        return scan.finish(format!("{:x}", Sha256::digest(bytes)));
+    }
+    let mut scan = RecordedTimeScan::new(source);
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: Value = serde_json::from_str(line).map_err(|_| invalid())?;
+        scan.observe(index as u64 + 1, &record)?;
+    }
+    scan.finish(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// [`extract_recorded_time_evidence`] over JSONL one parsed record at a
+/// time, for a reader that streams a transcript instead of holding it. The
+/// caller skips blank lines, gives each record its one-based physical line
+/// number (blank lines counted), fails the scan on a line that is not UTF-8
+/// JSON, and passes the SHA-256 of every byte read to [`Self::finish`]. No
+/// size bound: that is the caller's.
+pub struct RecordedTimeScan {
+    result: RecordedTimeEvidence,
+    /// Codex: whether its one `session_meta` record was seen. Trajectory:
+    /// whether its leading `meta` record was seen.
+    saw_meta: bool,
+}
+
+impl RecordedTimeScan {
+    pub fn new(source: SourceFormat) -> Self {
+        Self::with_coordinates(source, TimeRecordCoordinates::JsonlPhysicalLinesOneBased)
+    }
+
+    fn with_coordinates(source: SourceFormat, coordinates: TimeRecordCoordinates) -> Self {
+        Self {
+            result: RecordedTimeEvidence {
+                schema_version: 1,
+                scope: TimeEvidenceScope::RecordedEventTimestampsOnly,
+                source_format: source,
+                source_digest: String::new(),
+                coordinates,
+                total_eligible_records: 0,
+                valid_timestamps: 0,
+                missing_timestamps: 0,
+                invalid_timestamps: 0,
+                earliest: None,
+                latest: None,
+            },
+            saw_meta: false,
+        }
+    }
+
+    /// The record at `index`. Fails with a fixed label on a record envelope
+    /// the source's adapter would refuse.
+    pub fn observe(&mut self, index: u64, record: &Value) -> Result<()> {
+        let result = &mut self.result;
+        match result.source_format {
             SourceFormat::ClaudeCode => {
-                observe_claude_records(&mut result, records.iter().map(|(i, v)| (*i, v)))?
+                let object = record.as_object().ok_or_else(invalid)?;
+                let kind = object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid)?;
+                // Eligibility is the adapter's rule, never a second copy here.
+                if claude_code::is_event_record_kind(kind) {
+                    observe_timestamp(result, index, object.get("timestamp"));
+                }
             }
             SourceFormat::Codex => {
-                observe_codex_records(&mut result, records.iter().map(|(i, v)| (*i, v)))?
+                let object = record.as_object().ok_or_else(invalid)?;
+                let kind = object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid)?;
+                if kind == "session_meta" {
+                    if self.saw_meta {
+                        return Err(invalid());
+                    }
+                    self.saw_meta = true;
+                } else if codex::is_event_record_kind(kind) {
+                    // Eligibility is the adapter's rule, never a second copy here.
+                    observe_timestamp(result, index, object.get("timestamp"));
+                }
             }
             SourceFormat::Trajectory => {
-                observe_trajectory_records(&mut result, records.iter().map(|(i, v)| (*i, v)))?
+                if !self.saw_meta {
+                    if record.get("role").and_then(Value::as_str) != Some("meta") {
+                        return Err(invalid());
+                    }
+                    self.saw_meta = true;
+                    return Ok(());
+                }
+                let role = record
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .ok_or_else(invalid)?;
+                // Eligibility is the adapter's rule, never a second copy here.
+                if !trajectory::is_event_record_role(role) {
+                    return Err(invalid());
+                }
+                observe_timestamp(result, index, record.get("timestamp"));
             }
         }
+        Ok(())
     }
-    result.validate()?;
-    Ok(result)
-}
 
-fn observe_codex_records<'a>(
-    result: &mut RecordedTimeEvidence,
-    records: impl Iterator<Item = (u64, &'a Value)>,
-) -> Result<()> {
-    let mut saw_session_meta = false;
-    for (index, record) in records {
-        let object = record.as_object().ok_or_else(invalid)?;
-        let kind = object
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(invalid)?;
-        if kind == "session_meta" {
-            if saw_session_meta {
-                return Err(invalid());
-            }
-            saw_session_meta = true;
-        } else if codex::is_event_record_kind(kind) {
-            // Eligibility is the adapter's rule, never a second copy here.
-            observe_timestamp(result, index, object.get("timestamp"));
-        }
-    }
-    if !saw_session_meta {
-        return Err(invalid());
-    }
-    Ok(())
-}
-
-fn observe_claude_records<'a>(
-    result: &mut RecordedTimeEvidence,
-    records: impl Iterator<Item = (u64, &'a Value)>,
-) -> Result<()> {
-    for (index, record) in records {
-        let object = record.as_object().ok_or_else(invalid)?;
-        let kind = object
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(invalid)?;
-        // Eligibility is the adapter's rule, never a second copy here.
-        if claude_code::is_event_record_kind(kind) {
-            observe_timestamp(result, index, object.get("timestamp"));
-        }
-    }
-    Ok(())
-}
-
-fn observe_trajectory_records<'a>(
-    result: &mut RecordedTimeEvidence,
-    mut records: impl Iterator<Item = (u64, &'a Value)>,
-) -> Result<()> {
-    let Some((_, meta)) = records.next() else {
-        return Err(invalid());
-    };
-    if meta.get("role").and_then(Value::as_str) != Some("meta") {
-        return Err(invalid());
-    }
-    for (index, record) in records {
-        let role = record
-            .get("role")
-            .and_then(Value::as_str)
-            .ok_or_else(invalid)?;
-        // Eligibility is the adapter's rule, never a second copy here.
-        if !trajectory::is_event_record_role(role) {
+    /// The evidence, bound to `source_digest`, the lowercase hex SHA-256 of
+    /// every byte the records were read from.
+    pub fn finish(self, source_digest: String) -> Result<RecordedTimeEvidence> {
+        let Self {
+            mut result,
+            saw_meta,
+        } = self;
+        // Claude Code has no metadata record; Codex and trajectories need one.
+        if result.source_format != SourceFormat::ClaudeCode && !saw_meta {
             return Err(invalid());
         }
-        observe_timestamp(result, index, record.get("timestamp"));
+        result.source_digest = source_digest;
+        result.validate()?;
+        Ok(result)
     }
-    Ok(())
 }
 
 fn observe_timestamp(result: &mut RecordedTimeEvidence, index: u64, value: Option<&Value>) {

@@ -42,7 +42,9 @@
 //!
 //! The words a nudge must never use are pinned by this module's tests:
 //! nothing that calls pending credit money ("earned", "paid", "settled",
-//! "worth", "$"), no "private inference", no pressure ("unlock", "reward",
+//! "worth", "$"; the digest's contribution line, in `daemon::notify`, says
+//! "earned" of credit the server has decided, owner 2026-11-01, and never
+//! of pending credit), no "private inference", no pressure ("unlock", "reward",
 //! "missing out", "last chance", "streak", "in a row", "don't miss",
 //! "hurry"), nothing about expiry ("expire", "dropped", "days left"), and no
 //! exclamation marks. A folder mode is named only by its
@@ -172,8 +174,10 @@ pub const TOOL_LIST_MANY: &str = "{k} tools";
 /// The History card's title. A zero clause is dropped. DRAFT, NEEDS
 /// APPROVAL.
 pub const NUDGE_VERDICTS_TITLE: &str = "Since {date}: {a} accepted, {h} held for privacy review";
-/// Omitted when the credit is zero. "final", never "earned", "paid" or
-/// "settled"; owner decision 12 asks whether "final" itself reads as
+/// Omitted when the credit is zero. "final", never "paid" or "settled"
+/// (the digest's contribution line says "earned" of decided credit, owner
+/// 2026-11-01; a digest that folds this clause in leaves that sentence out,
+/// so the two never share a body); owner decision 12 asks whether "final" itself reads as
 /// settled. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_VERDICTS_FINAL_CLAUSE: &str = "{x} credit is now final.";
 /// The History card's title when the only news is credit becoming final:
@@ -408,6 +412,15 @@ pub const ESTIMATE_TOTAL_LINE: &str = "About {low} to {high} of inference in tra
 /// [`ESTIMATE_TOTAL_LINE`] when the rounded low end is $0.
 pub const ESTIMATE_TOTAL_LINE_UP_TO: &str =
     "Up to {high} of inference in traces on this Mac, as an estimate";
+/// Home's Not contributed card: the same estimate as a call to share
+/// (owner, 2026-10-20: "You could make $x.xx amount if shared..."). Still a
+/// band, never one figure. DRAFT, NEEDS APPROVAL.
+pub const ESTIMATE_SHARE_LINE: &str =
+    "You could make about {low} to {high} of inference if you share these";
+/// [`ESTIMATE_SHARE_LINE`] when the rounded low end is $0. DRAFT, NEEDS
+/// APPROVAL.
+pub const ESTIMATE_SHARE_LINE_UP_TO: &str =
+    "You could make up to {high} of inference if you share these, as an estimate";
 /// The line's small label.
 pub const ESTIMATE_TOTAL_LABEL: &str = "Estimate";
 /// The line's action.
@@ -437,6 +450,24 @@ pub const MARK_TOOLTIP_SETTLEMENT: &str = "Estimate ready";
 /// The estimate's info popover, in plain words (owner, 2026-10-19: the
 /// first wording read as too technical). DRAFT, NEEDS APPROVAL.
 pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "This is a guess worked out on your Mac from how big your traces are and what's in them. Nothing was sent to make it, and the price comes from Trace Commons' published rates. The real amount is set once a trace is scored, and a guess for one trace is rougher than the total.";
+// ---------------------------------------------------------------------
+// NEAR AI credit received. `{amount}` is a dollar figure from
+// `private_inference_copy::format_amount`. DRAFT, awaiting owner review
+// (the notification itself was asked for on 2026-10-23; its words were not
+// yet approved).
+// ---------------------------------------------------------------------
+
+/// The notification's title. DRAFT.
+pub const NOTIFY_NEAR_AI_CREDIT_TITLE: &str = "NEAR AI credit received";
+/// The notification's body. DRAFT.
+pub const NOTIFY_NEAR_AI_CREDIT_BODY: &str = "{amount} of NEAR AI credit arrived in your account.";
+/// The notification's action: opens Private AI, where the balance is. DRAFT.
+pub const NOTIFY_NEAR_AI_CREDIT_ACTION_VIEW: &str = "View balance";
+/// The notification's dismissal; it sends nothing. DRAFT.
+pub const NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW: &str = "Not now";
+/// The Settings switch for it. DRAFT.
+pub const SETTING_NOTIFY_NEAR_AI_CREDIT: &str = "When NEAR AI credit arrives";
+
 /// The Settings switch.
 pub const SETTING_SETTLEMENT_ESTIMATE: &str = "Estimate what traces on this Mac are worth";
 /// The Settings switch's help.
@@ -662,6 +693,8 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("ENTRY_ESTIMATE_BAND_UP_TO", ENTRY_ESTIMATE_BAND_UP_TO),
     ("ESTIMATE_TOTAL_LINE", ESTIMATE_TOTAL_LINE),
     ("ESTIMATE_TOTAL_LINE_UP_TO", ESTIMATE_TOTAL_LINE_UP_TO),
+    ("ESTIMATE_SHARE_LINE", ESTIMATE_SHARE_LINE),
+    ("ESTIMATE_SHARE_LINE_UP_TO", ESTIMATE_SHARE_LINE_UP_TO),
     ("ESTIMATE_TOTAL_LABEL", ESTIMATE_TOTAL_LABEL),
     ("ESTIMATE_TOTAL_ACTION", ESTIMATE_TOTAL_ACTION),
     ("NOTIFY_SETTLEMENT_TITLE", NOTIFY_SETTLEMENT_TITLE),
@@ -690,6 +723,20 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
         SETTLEMENT_ESTIMATE_EXPLAINER,
     ),
     ("SETTING_SETTLEMENT_ESTIMATE", SETTING_SETTLEMENT_ESTIMATE),
+    ("NOTIFY_NEAR_AI_CREDIT_TITLE", NOTIFY_NEAR_AI_CREDIT_TITLE),
+    ("NOTIFY_NEAR_AI_CREDIT_BODY", NOTIFY_NEAR_AI_CREDIT_BODY),
+    (
+        "NOTIFY_NEAR_AI_CREDIT_ACTION_VIEW",
+        NOTIFY_NEAR_AI_CREDIT_ACTION_VIEW,
+    ),
+    (
+        "NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW",
+        NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW,
+    ),
+    (
+        "SETTING_NOTIFY_NEAR_AI_CREDIT",
+        SETTING_NOTIFY_NEAR_AI_CREDIT,
+    ),
     (
         "SETTING_SETTLEMENT_ESTIMATE_HELP",
         SETTING_SETTLEMENT_ESTIMATE_HELP,
@@ -1331,7 +1378,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(figures, 10);
+        assert_eq!(figures, 12);
     }
 
     /// Ron's #1303 design review, item 8: the backlog title names the

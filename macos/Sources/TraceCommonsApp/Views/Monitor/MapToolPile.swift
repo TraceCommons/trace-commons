@@ -23,8 +23,6 @@ struct MapToolPile: View {
     let t: Double
     /// The pointer on the map, in the map's own coordinates; nil off it.
     var pointer: CGPoint? = nil
-    /// Whether the transfer is a contribution, for its colours.
-    var contributing: Bool { run?.action != .keep }
 
     @State private var tall = false
     @State private var wide = false
@@ -100,7 +98,7 @@ struct MapToolPile: View {
         }
         let tint = tool.tint.color
         let side = Stack.coin * s
-        let runGlow: Color = contributing ? GlassTokens.Color.statusOn.color : GlassTokens.Color.purpleSoft.color
+        let runGlow = MapTransferDrawing.glow(run?.action)
         let glow: Color = grown ? runGlow.opacity(0.45) : .clear
         return ZStack {
             // The coin's edge below it, then an opaque face and its rim.
@@ -222,13 +220,24 @@ enum MapTransferDrawing {
     static let orbFrame: CGFloat = 104
     static var orbRadius: CGFloat { orbFrame / 2 * (1 - GlassLibraryOrb.inset) }
 
+    /// A run's colour (owner, 2026-10-20): blue for traces being shared,
+    /// orange for traces kept on this Mac, on the orbs, the coin's light,
+    /// the pile's glow and the pad's charge. A dismissed trace is not
+    /// shared, so it takes the kept colour, as it took the non-shared one
+    /// before.
+    static func glowToken(_ action: MapTransfer.Action?) -> GlassRGBA {
+        action == .contribute ? GlassTokens.Color.mapOrbShared : GlassTokens.Color.mapOrbKept
+    }
+
+    static func glow(_ action: MapTransfer.Action?) -> Color { glowToken(action).color }
+
     static func draw(
         in context: inout GraphicsContext, scene: FlowMapScene, run: MapTransferRun, t: Double, fit: FlowMapGeometry
     ) {
         guard let stack = scene.stack else { return }
         let s = fit.scale
         let contributing = run.action == .contribute
-        let glow = contributing ? GlassTokens.Color.statusOn.color : GlassTokens.Color.purpleSoft.color
+        let glow = glow(run.action)
         let hub = scene.nodes.first { $0.id == "hub" }?.at ?? FlowMapScene.hubPoint
         let library = scene.nodes.first { $0.id == "library" }?.at ?? FlowMapScene.libraryPoint
         let outArc = scene.arcs.last { $0.from == stack.portRight }
@@ -278,7 +287,7 @@ enum MapTransferDrawing {
         fit: FlowMapGeometry
     ) {
         let s = fit.scale
-        let glow = run.action == .contribute ? GlassTokens.Color.statusOn.color : GlassTokens.Color.purpleSoft.color
+        let glow = glow(run.action)
         let order = run.order(stack.tools, at: t)
         for (id, p) in run.orbits(at: t) {
             guard let index = order.firstIndex(of: id) else { continue }
@@ -394,7 +403,7 @@ enum MapTransferDrawing {
             centre.x += CGFloat(sin(t * 90)) * 0.7 * s
         }
         let charge = min(run.arrived(at: t), 4)
-        let glow: Color = flight != nil ? flameOuter : (charge > 0 ? GlassTokens.Color.statusOn.color : flameOuter.opacity(0.5))
+        let glow: Color = flight != nil ? flameOuter : (charge > 0 ? GlassTokens.Color.mapOrbShared.color : flameOuter.opacity(0.5))
         let glowRadius = flight != nil ? 8 * s : (5 + CGFloat(charge) * 4) * s
 
         if flight != nil, progress < 0.6 {
@@ -443,10 +452,18 @@ enum MapTransferDrawing {
                     flame.fill(flameCore, with: .color(flameInner))
                 }
             }
-            layer.fill(finsPath, with: .color(GlassTokens.Color.purpleSoft.color))
+            let outline = GlassTokens.Color.statusOff.color
+            let accent = GlassTokens.Color.purpleSoft.color
+            layer.fill(nozzlePath, with: .color(outline))
+            layer.stroke(nozzlePath, with: .color(outline), lineWidth: 0.9)
+            layer.fill(finsPath, with: .color(accent))
+            layer.stroke(finsPath, with: .color(outline), lineWidth: 0.9)
             layer.fill(bodyPath, with: .color(Color(white: 0.95)))
-            layer.stroke(bodyPath, with: .color(GlassTokens.Color.statusOff.color), lineWidth: 0.9)
-            layer.fill(Path(ellipseIn: CGRect(x: 18, y: 7, width: 4, height: 4)), with: .color(GlassTokens.Color.blue.color))
+            layer.fill(nosePath, with: .color(accent))
+            layer.stroke(bodyPath, with: .color(outline), lineWidth: 0.9)
+            let window = Path(ellipseIn: porthole)
+            layer.fill(window, with: .color(GlassTokens.Color.blue.color))
+            layer.stroke(window, with: .color(outline), lineWidth: 0.9)
         }
     }
 
@@ -507,27 +524,61 @@ enum MapTransferDrawing {
 
     // MARK: The rocket's shape, in its own 30 by 18 units, nose to the right
 
+    // Drawn like the rocket emoji, side-on (Kristi, 2026-10-21: the old
+    // lens read as a drop of water): a straight body from the tail at x 10,
+    // an ogive nose to the point at x 29.5, a porthole, swept fins top and
+    // bottom, and a short nozzle the flame (x 0 to 9) leaves from.
+
+    /// The body and its nose, one outline.
     static let bodyPath: Path = {
         var p = Path()
-        p.move(to: CGPoint(x: 8.5, y: 9))
-        p.addCurve(to: CGPoint(x: 29, y: 9), control1: CGPoint(x: 11, y: 4), control2: CGPoint(x: 19, y: 3.5))
-        p.addCurve(to: CGPoint(x: 8.5, y: 9), control1: CGPoint(x: 19, y: 14.5), control2: CGPoint(x: 11, y: 14))
+        p.move(to: CGPoint(x: 10, y: 5.6))
+        p.addLine(to: CGPoint(x: 20, y: 5.6))
+        p.addCurve(to: CGPoint(x: 29.5, y: 9), control1: CGPoint(x: 24.5, y: 5.6), control2: CGPoint(x: 28, y: 7))
+        p.addCurve(to: CGPoint(x: 20, y: 12.4), control1: CGPoint(x: 28, y: 11), control2: CGPoint(x: 24.5, y: 12.4))
+        p.addLine(to: CGPoint(x: 10, y: 12.4))
         p.closeSubpath()
         return p
     }()
 
-    static let finsPath: Path = {
+    /// The nose cone's colour, inside the body's outline.
+    static let nosePath: Path = {
         var p = Path()
-        p.move(to: CGPoint(x: 11, y: 5.2))
-        p.addLine(to: CGPoint(x: 9, y: 1.5))
-        p.addLine(to: CGPoint(x: 15, y: 4.4))
-        p.closeSubpath()
-        p.move(to: CGPoint(x: 11, y: 12.8))
-        p.addLine(to: CGPoint(x: 9, y: 16.5))
-        p.addLine(to: CGPoint(x: 15, y: 13.6))
+        p.move(to: CGPoint(x: 23.5, y: 6.1))
+        p.addCurve(to: CGPoint(x: 29.5, y: 9), control1: CGPoint(x: 26, y: 6.6), control2: CGPoint(x: 28.3, y: 7.6))
+        p.addCurve(to: CGPoint(x: 23.5, y: 11.9), control1: CGPoint(x: 28.3, y: 10.4), control2: CGPoint(x: 26, y: 11.4))
+        p.addQuadCurve(to: CGPoint(x: 23.5, y: 6.1), control: CGPoint(x: 24.4, y: 9))
         p.closeSubpath()
         return p
     }()
+
+    /// Two fins swept back from the body to tips by the tail.
+    static let finsPath: Path = {
+        var p = Path()
+        p.move(to: CGPoint(x: 17, y: 5.6))
+        p.addCurve(to: CGPoint(x: 10.5, y: 0.8), control1: CGPoint(x: 15, y: 3.2), control2: CGPoint(x: 12.5, y: 1.2))
+        p.addCurve(to: CGPoint(x: 10, y: 5.6), control1: CGPoint(x: 9.4, y: 0.6), control2: CGPoint(x: 9.6, y: 3.5))
+        p.closeSubpath()
+        p.move(to: CGPoint(x: 17, y: 12.4))
+        p.addCurve(to: CGPoint(x: 10.5, y: 17.2), control1: CGPoint(x: 15, y: 14.8), control2: CGPoint(x: 12.5, y: 16.8))
+        p.addCurve(to: CGPoint(x: 10, y: 12.4), control1: CGPoint(x: 9.4, y: 17.4), control2: CGPoint(x: 9.6, y: 14.5))
+        p.closeSubpath()
+        return p
+    }()
+
+    /// The nozzle, flaring from the tail towards the flame.
+    static let nozzlePath: Path = {
+        var p = Path()
+        p.move(to: CGPoint(x: 10.4, y: 7.2))
+        p.addLine(to: CGPoint(x: 8, y: 6.4))
+        p.addLine(to: CGPoint(x: 8, y: 11.6))
+        p.addLine(to: CGPoint(x: 10.4, y: 10.8))
+        p.closeSubpath()
+        return p
+    }()
+
+    /// The round window, on the body behind the nose.
+    static let porthole = CGRect(x: 16.6, y: 7, width: 4, height: 4)
 
     static let flamePath: Path = {
         var p = Path()

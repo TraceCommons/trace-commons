@@ -1,13 +1,17 @@
 //! The token analytics words: tabs, the Overview, Patterns and Sessions
 //! cards, the glance card and tip, the weekly summary card and Settings.
 //!
-//! Every entry is approved: Ron approved the words in his 2026-10-11 owner
-//! review of #1287 (owner decision D17), and the owner adopted that review.
-//! User-facing words say "trace", not "session", except the Sessions tab
-//! (with its card title and drill-down column header) and the context tip's
-//! "current session". No shell authors any of these sentences; each reads
-//! this table through `ui_copy()` (`tc_insights_copy_json`, or the `copy`
-//! operation of `tc_insights_call`).
+//! The subscription-limit entries and Models card (section 24) were added
+//! after the original copy review. The other entries are approved: Ron
+//! approved the words in his 2026-10-11 owner review of #1287 (owner decision
+//! D17), and the owner adopted that review.
+//! Trace-related words say "trace", not "session", except the Sessions tab
+//! (with its card title, drill-down column header and Analyze's lines that
+//! name it) and the context tip's "current session". A subscription provider's
+//! Session quota window is a separate concept, not a name for a trace.
+//! No shell authors any of these sentences; each reads this table through
+//! `ui_copy()` (`tc_insights_copy_json`, or the `copy` operation of
+//! `tc_insights_call`).
 //!
 //! Every number or name a sentence carries is a `{name}` hole from
 //! [`ANALYTICS_PLACEHOLDERS`]; the shell fills it and adds nothing else.
@@ -15,8 +19,10 @@
 //! Held, and so absent, until owner decision D2: every advice sentence, the
 //! what-if sentences and anything that recommends an action (held again in
 //! Ron's 2026-10-11 review). No run of weeks is counted anywhere (owner
-//! decision D1: six weekly marks, no streaks). No money appears here (owner
-//! decision D5).
+//! decision D1: six weekly marks, no streaks). No amount or currency sign
+//! appears here: the Models card's money (owner decision D5, settled
+//! 2026-10-20) is a `{x}` hole the shell fills, inside a sentence that
+//! says which price it is.
 //!
 //! The glance, tip and news-mark words (`analytics_glance_*`,
 //! `analytics_tip_*`, `analytics_mark_a11y_tip`) stay in this table: the
@@ -42,13 +48,13 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "threshold",
     "letter",
     "ext",
-    "goal",
     "pattern",
     "ctx",
     "source",
     "date",
     "time",
     "harness",
+    "login",
     "span",
     "label",
     "tokens",
@@ -58,6 +64,13 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "o",
     // A watched trace's folder label (`list_projects`' label).
     "folder",
+    // The weekday picked on "Tokens by day".
+    "day",
+    // Overview and Benchmarks (product owner, 2026-10-29): a limit
+    // window's name, and the two models a tip compares.
+    "window",
+    "first",
+    "second",
 ];
 
 /// Key, words. Approved in Ron's 2026-10-11 owner review (D17).
@@ -66,7 +79,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_unavailable", "—"),
     // 1. Tabs and headings.
     ("analytics_tab_overview", "Overview"),
-    ("analytics_tab_patterns", "Patterns"),
+    // Was "Details" (product owner, 2026-10-29).
+    ("analytics_tab_patterns", "Breakdown"),
     ("analytics_tab_sessions", "Sessions"),
     ("analytics_tab_analyze", "Analyze"),
     ("analytics_this_week", "This week"),
@@ -78,10 +92,218 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_input_each_turn", "Input sent each turn"),
     ("analytics_your_week", "Your week · {range}"),
     ("analytics_sample_data", "Sample data"),
-    // 2. Coverage.
+    // Current native subscription limits; separate from historical analytics.
+    ("analytics_subscriptions_title", "Subscription limits"),
+    ("analytics_subscriptions_provider_codex", "Codex"),
+    ("analytics_subscriptions_provider_claude", "Claude"),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
     (
-        "analytics_coverage_line",
-        "Counts known for {k} of {n} traces · {p} partial · {u} unknown, not counted as zero",
+        "analytics_subscriptions_claude_detail",
+        "Reads your Claude sign-in only when you press Refresh. macOS may ask to allow access.",
+    ),
+    (
+        "analytics_subscriptions_refresh_hint",
+        "Refresh to see your latest limits.",
+    ),
+    (
+        "analytics_subscriptions_refresh_login_accessibility",
+        "Refresh {harness} usage for {login}",
+    ),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
+    (
+        "analytics_subscriptions_claude_expired",
+        "The saved Claude usage token expired. Open Claude, then choose Refresh.",
+    ),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
+    (
+        "analytics_subscriptions_claude_auth_missing",
+        "Claude usage credentials aren't available. Open Claude, then choose Refresh.",
+    ),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
+    (
+        "analytics_subscriptions_claude_scope",
+        "This Claude sign-in cannot read usage. Check usage in Claude.",
+    ),
+    (
+        "analytics_subscriptions_claude_keychain_denied",
+        "Keychain access wasn't granted. Choose Refresh to try again.",
+    ),
+    (
+        "analytics_subscriptions_claude_keychain_pending",
+        "Keychain access hasn't finished. Check for a macOS prompt before choosing Refresh again.",
+    ),
+    (
+        "analytics_subscriptions_claude_auth_changed",
+        "Claude credentials changed while usage was read. Choose Refresh again.",
+    ),
+    (
+        "analytics_subscriptions_request_timeout",
+        "The usage request timed out. Choose Refresh to try again.",
+    ),
+    (
+        "analytics_subscriptions_rate_limited",
+        "Usage checks are temporarily limited. Try Refresh later.",
+    ),
+    ("analytics_subscriptions_read", "Read usage"),
+    ("analytics_subscriptions_stop", "Stop reading"),
+    (
+        "analytics_subscriptions_refresh_accessibility",
+        "Refresh subscription limits",
+    ),
+    (
+        "analytics_subscriptions_read_accessibility",
+        "Read {harness} subscription usage",
+    ),
+    (
+        "analytics_subscriptions_stop_accessibility",
+        "Stop reading {harness} subscription usage",
+    ),
+    (
+        "analytics_subscriptions_read_detail",
+        "Enable usage reading in Settings; only Refresh asks the native app for usage.",
+    ),
+    // Switch labels follow CodexBar's "Show ... usage" (2026-10-27).
+    ("analytics_subscriptions_setting_codex", "Show Codex usage"),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
+    (
+        "analytics_subscriptions_setting_claude",
+        "Show Claude usage",
+    ),
+    (
+        "analytics_subscriptions_codex_detail",
+        "Reads your Codex sign-in only when you press Refresh.",
+    ),
+    (
+        "analytics_subscriptions_not_checked",
+        "Refresh to read current usage.",
+    ),
+    (
+        "analytics_subscriptions_native_tool_running",
+        "Codex needs to renew its sign-in. Close Codex, then Refresh.",
+    ),
+    (
+        "analytics_subscriptions_base_url_refused",
+        "This Codex configuration uses an unsupported server address.",
+    ),
+    (
+        "analytics_subscriptions_invalid_response",
+        "{harness} returned usage this app cannot read.",
+    ),
+    (
+        "analytics_subscriptions_no_logins",
+        "No saved {harness} sign-in was found.",
+    ),
+    ("analytics_subscriptions_window_hours", "{n} hours"),
+    ("analytics_subscriptions_window_hour", "1 hour"),
+    ("analytics_subscriptions_window_minutes", "{n} minutes"),
+    ("analytics_subscriptions_window_minute", "1 minute"),
+    ("analytics_subscriptions_window_days", "{n} days"),
+    ("analytics_subscriptions_window_day", "1 day"),
+    (
+        "analytics_subscriptions_window_unknown",
+        "Duration not reported",
+    ),
+    (
+        "analytics_subscriptions_native_storage_unsupported",
+        "Usage is unavailable for this Codex sign-in storage. Check limits in Codex.",
+    ),
+    // AI usage this week (product owner, 2026-10-28): one card per Claude
+    // or Codex login, with these four rows (approved 2026-10-28). Pace
+    // reads the weekly window, else the session window.
+    ("analytics_limits_session_left", "Session left"),
+    ("analytics_limits_weekly_left", "Weekly left"),
+    ("analytics_limits_pace", "Pace"),
+    ("analytics_limits_on_pace", "On pace"),
+    ("analytics_limits_runs_out", "Runs out in {time}"),
+    // A login found with no measured window keeps its card, its rows the
+    // dash, over this line and its Refresh (approved by the owner,
+    // 2026-10-28).
+    ("analytics_limits_refresh_to_see", "Refresh to see limits"),
+    // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): the usage cards
+    // that lead Overview. The NEAR AI card shows this week, today and the
+    // last 31 days of NEAR AI calls from this Mac, and the last 7 days as
+    // bars. Each card ends with a link to Details' By project view.
+    ("analytics_usage_title", "AI usage this week"),
+    // Each window's reset on its own row (owner, 2026-10-28: Claude shows
+    // both); a window the provider does not report has no rows.
+    ("analytics_usage_session_resets", "Session resets"),
+    ("analytics_usage_weekly_resets", "Weekly resets"),
+    // NEAR AI tokens beside its spend, and under its spend on By project.
+    ("analytics_usage_tokens", "{t} tokens"),
+    ("analytics_usage_near_ai", "NEAR AI"),
+    ("analytics_usage_last_31_days", "Last 31 days"),
+    ("analytics_usage_last_7_days", "Last 7 days"),
+    (
+        "analytics_credit_scope_near_ai",
+        "Charged for NEAR AI calls from this Mac.",
+    ),
+    ("analytics_usage_by_project", "By project"),
+    ("analytics_usage_by_project_a11y", "{label} by project"),
+    // DRAFT, NEEDS APPROVAL (product owner, 2026-10-28): Details'
+    // drill-down, by project (Claude Code and Codex tokens beside NEAR AI
+    // spend) or by model. By task and By tool were removed (owner,
+    // 2026-10-29). By project reuses the breakdown card's words.
+    ("analytics_credit_title", "Where usage went"),
+    // DRAFT, NEEDS APPROVAL (owner, 2026-10-29): the views it named are gone.
+    ("analytics_credit_scope", "This week, from this Mac."),
+    ("analytics_projects_project", "Project"),
+    ("analytics_projects_traces", "{n} traces"),
+    ("analytics_projects_traces_one", "{n} trace"),
+    // "Claude" everywhere, never "Claude Code" (owner, 2026-10-28).
+    ("analytics_credit_tool_claude_code", "Claude"),
+    ("analytics_credit_tool_codex", "Codex"),
+    ("analytics_subscriptions_default_login", "Default login"),
+    ("analytics_subscriptions_session", "Session"),
+    ("analytics_subscriptions_weekly", "Weekly"),
+    ("analytics_subscriptions_model", "Model limit"),
+    ("analytics_subscriptions_banked", "Banked resets"),
+    ("analytics_subscriptions_banked_count", "{n} available"),
+    ("analytics_subscriptions_remaining", "{n} remaining"),
+    ("analytics_subscriptions_resets", "Resets {time}"),
+    ("analytics_subscriptions_checked", "Checked {time}"),
+    (
+        "analytics_subscriptions_stale",
+        "Last reading; refresh to check current usage.",
+    ),
+    (
+        "analytics_subscriptions_sign_in",
+        "Sign in with {harness} to read usage.",
+    ),
+    (
+        "analytics_subscriptions_native_tool",
+        "Install or sign in with {harness} to read usage.",
+    ),
+    (
+        "analytics_subscriptions_keychain",
+        "Refresh to allow Keychain access for {harness} usage.",
+    ),
+    ("analytics_subscriptions_cached", "Last reading."),
+    (
+        "analytics_subscriptions_not_reported",
+        "Limits aren't reported for this account.",
+    ),
+    (
+        "analytics_subscriptions_unavailable",
+        "Usage couldn't be read.",
+    ),
+    (
+        "analytics_subscriptions_change_failed",
+        "The usage setting couldn't be saved.",
+    ),
+    // 2. Coverage.
+    // The line is the trace count alone (owner, 2026-10-29); what is known
+    // of them is behind its "i", one sentence per count that is not 0.
+    ("analytics_coverage_line", "{n} traces"),
+    ("analytics_coverage_info_known", "Full details for {k}."),
+    ("analytics_coverage_info_partial", "Some missing for {p}."),
+    (
+        "analytics_coverage_info_unknown",
+        "None for {u}; these aren't counted as zero.",
     ),
     (
         "analytics_coverage_undated",
@@ -175,10 +397,9 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_series_cache_read", "Cache read"),
     ("analytics_series_cache_write", "Cache write"),
     ("analytics_series_output", "Output"),
-    (
-        "analytics_source_claude_code",
-        "Claude Code · counted per turn",
-    ),
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
+    ("analytics_source_claude_code", "Claude · counted per turn"),
     (
         "analytics_source_codex",
         "Codex · total from first to last reading",
@@ -202,6 +423,17 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_drill_tokens", "Tokens"),
     ("analytics_drill_coverage", "Coverage"),
     ("analytics_drill_reason", "Reason"),
+    ("analytics_drill_show_all", "Show all {n}"),
+    ("analytics_drill_show_fewer", "Show fewer"),
+    // 7b. The breakdown for one day picked on "Tokens by day": Claude Code
+    // sessions by their tokens that day. Codex counts intervals, not days.
+    ("analytics_drill_title_day", "Breakdown · {day}"),
+    ("analytics_drill_day_week", "Show week"),
+    ("analytics_drill_day_none", "No tokens counted on this day."),
+    (
+        "analytics_drill_day_codex",
+        "Codex traces can't be split by day yet.",
+    ),
     // 7a. Where a feed T session's calls went (design part B), from the
     // proxy's own record. Its tokens are the proxy's per-call count, never
     // summed with or reconciled to the transcript's. Only verified proof
@@ -260,6 +492,21 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_pattern_repeated_reads_count",
         "{r} reads of {f} files that weren't edited in between",
     ),
+    // A card whose estimate rounds to 0 leads with its count (owner
+    // decision 2026-10-20), and the line beneath it drops the count.
+    ("analytics_pattern_repeated_reads_headline_one", "{r} read"),
+    (
+        "analytics_pattern_repeated_reads_headline_other",
+        "{r} reads",
+    ),
+    (
+        "analytics_pattern_repeated_reads_count_under_count_one",
+        "In {f} file not edited in between",
+    ),
+    (
+        "analytics_pattern_repeated_reads_count_under_count_other",
+        "In {f} files not edited in between",
+    ),
     (
         "analytics_estimate_from_result_size",
         "estimated from result size",
@@ -270,6 +517,15 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_pattern_retried_calls_count",
         "{c} calls repeated with the same tool and input, with only reads in between",
     ),
+    ("analytics_pattern_retried_calls_headline_one", "{c} call"),
+    (
+        "analytics_pattern_retried_calls_headline_other",
+        "{c} calls",
+    ),
+    (
+        "analytics_pattern_retried_calls_count_under_count",
+        "Same tool and input, with only reads in between",
+    ),
     // 12. Edit, failed command, edit (owner decision D9: kept, labelled inferred).
     (
         "analytics_pattern_edit_fail_edit",
@@ -278,6 +534,15 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     (
         "analytics_pattern_edit_fail_edit_count",
         "{l} times a file was edited, a command failed, and the same file was edited again.",
+    ),
+    ("analytics_pattern_edit_fail_edit_headline_one", "{l} time"),
+    (
+        "analytics_pattern_edit_fail_edit_headline_other",
+        "{l} times",
+    ),
+    (
+        "analytics_pattern_edit_fail_edit_count_under_count",
+        "File edited, command failed, same file edited again",
     ),
     (
         "analytics_inferred_from_order",
@@ -289,11 +554,15 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_pattern_long_context_line",
         "Input sent after context passed {threshold}",
     ),
+    ("analytics_pattern_long_context_headline_one", "{n} turn"),
+    ("analytics_pattern_long_context_headline_other", "{n} turns"),
     ("analytics_from_counters", "from token counts"),
     // 14.
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
     (
         "analytics_claude_sessions_only",
-        "Claude Code traces only: {k} of {n}.",
+        "Claude traces only: {k} of {n}.",
     ),
     ("analytics_see_sessions", "Show {n} traces"),
     // 15. Re-read table (owner decision D8: letters plus extension, never a name).
@@ -306,21 +575,21 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_reread_tokens", "Tokens"),
     ("analytics_file_label", "File {letter} · {ext}"),
     ("analytics_file_label_no_ext", "File {letter}"),
-    // 16. Goals.
-    ("analytics_goal_add", "Add goal"),
-    ("analytics_goal_cache_share", "Cache share at least {p}%"),
-    ("analytics_goal_repeated_reads", "Repeated reads under {t}"),
-    ("analytics_goal_long_context", "Long context under {t}"),
-    ("analytics_goal_weekly_tokens", "Weekly tokens under {t}"),
+    // 16. Goals: the goals set with /goal in Claude and Codex (product
+    // owner, 2026-10-29). Never the goal's text. One set of status words
+    // for both tools ("normalize the language between claude and codex"):
+    // Met is Codex `complete` or Claude's latest check met; In progress is
+    // Codex `active`, or a Claude goal not checked yet or last checked not
+    // met; Limit reached is Codex `usage_limited` or `budget_limited`.
+    ("analytics_goals_met_of", "Goals met {n} of {m}"),
+    ("analytics_goals_note", "Set with /goal in Claude or Codex."),
     ("analytics_goal_met", "Met"),
-    ("analytics_goal_not_met", "Not met"),
-    ("analytics_goal_down_from", "Down from {x} last week."),
-    ("analytics_goal_up_from", "Up from {x} last week."),
-    (
-        "analytics_goals_note",
-        "Goals are compared only with your own past weeks.",
-    ),
-    ("analytics_goal_delete", "Delete"),
+    ("analytics_goal_in_progress", "In progress"),
+    ("analytics_goal_paused", "Paused"),
+    ("analytics_goal_blocked", "Blocked"),
+    ("analytics_goal_limit_reached", "Limit reached"),
+    ("analytics_goal_status_unknown", "Status unavailable"),
+    ("analytics_goal_line", "{t} tokens · {span}"),
     // 17. Lever (an observation only; its advice sentence is held, D2).
     (
         "analytics_lever_line",
@@ -373,6 +642,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_session_label",
         "{date} {time} · {harness} · {t} tokens",
     ),
+    // Counter breakdown time span, ending at the latest recorded activity.
+    (
+        "analytics_session_label_range",
+        "{span} · {harness} · {t} tokens",
+    ),
     // The same label for a session with no recorded event time.
     (
         "analytics_session_label_undated",
@@ -397,6 +671,116 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     // `{folder}` when no folder the daemon knows matches the trace's.
     ("analytics_folder_unknown", "Unknown folder"),
+    // A Sessions feed row under feed T (owner request 2026-10-20): its
+    // tokens beside its sparkline. A row with no counts reads
+    // `analytics_reason_no_usage_counters` once instead, with no sparkline.
+    ("analytics_session_row_tokens", "{t} tokens"),
+    // The sparkline in words, for VoiceOver: its largest turn.
+    ("analytics_sparkline_peak", "Peak {t} tokens at turn {n}"),
+    // The row at the foot of the feed while the next page is read.
+    // "Claude", not "Claude Code", in Insights and usage (owner, approved
+    // 2026-10-28).
+    (
+        "analytics_sessions_explainer_watched",
+        "Your Claude and Codex traces, newest first. Open one to see where its tokens went, label it, or analyze it.",
+    ),
+    (
+        "analytics_sessions_explainer_saved",
+        "Traces you analyzed and saved. Pick one to see where its tokens went, turn by turn.",
+    ),
+    ("analytics_sessions_loading_more", "Loading more\u{2026}"),
+    // The feed foot's button after a page could not be read; same wording as
+    // the startup retry in `health_copy`.
+    ("analytics_sessions_retry", "Try again"),
+    (
+        "analytics_sessions_page_failed",
+        "More traces couldn't be loaded.",
+    ),
+    // A Sessions feed row's own labels (Insights PM request, 2026-10-21):
+    // the task, pre-filled from the inferred one, and what became of the
+    // work. Kept on this Mac only. `analytics_task_<wire>` and
+    // `analytics_outcome_<wire>` name each closed value
+    // (`session_labels::LabelledTask`, `SessionOutcome`).
+    ("analytics_label_task", "Task"),
+    ("analytics_label_outcome", "Outcome"),
+    ("analytics_task_bug_fix", "Bug fix"),
+    ("analytics_task_refactor", "Refactor"),
+    ("analytics_task_tests", "Tests"),
+    ("analytics_task_docs", "Docs"),
+    ("analytics_task_other", "Other"),
+    // The task the rules inferred, until the person sets one.
+    ("analytics_task_inferred", "{label} · inferred"),
+    // Takes the inferred task as the person's own, in one click.
+    ("analytics_task_confirm", "Confirm"),
+    // Clears the person's task, so the inferred one shows again.
+    ("analytics_task_use_inferred", "Use inferred"),
+    ("analytics_outcome_kept", "Kept"),
+    ("analytics_outcome_partly_kept", "Partly kept"),
+    ("analytics_outcome_thrown_away", "Thrown away"),
+    ("analytics_outcome_clear", "Clear"),
+    // Each row's controls for VoiceOver, so the rows' repeated controls
+    // are told apart: `{label}` is the row's own label.
+    ("analytics_label_task_a11y", "Task, {label}"),
+    ("analytics_label_outcome_a11y", "Outcome, {label}"),
+    ("analytics_task_confirm_a11y", "Confirm task, {label}"),
+    // Under a row whose label could not be saved; the row shows its label
+    // as it was.
+    (
+        "analytics_label_save_failed",
+        "The label couldn't be saved.",
+    ),
+    // Analyze reads a watched trace by its Sessions row, never a file the
+    // person picks (Insights PM, 2026-10-21: terminal users never see their
+    // trace files). The open row's one action analyzes it and saves the
+    // snapshot, which then opens in Analyze.
+    ("analytics_analyze_save", "Analyze & save"),
+    ("analytics_analyze_save_a11y", "Analyze and save, {label}"),
+    // Under the open row when the daemon could not analyze it.
+    (
+        "analytics_analyze_failed",
+        "This trace couldn't be analyzed.",
+    ),
+    // Its file was moved or deleted since it was counted.
+    (
+        "analytics_analyze_file_gone",
+        "This trace's file is no longer where it was found.",
+    ),
+    // The row was listed again under a new reference (its file grew) or
+    // its folder became Never.
+    (
+        "analytics_analyze_unknown",
+        "This trace has changed since it was listed. Try again once the list refreshes.",
+    ),
+    // Analyze's head while nothing is saved, and once something is.
+    (
+        "analytics_analyze_empty",
+        "No saved insights yet. Open a trace in Sessions and choose Analyze & save.",
+    ),
+    (
+        "analytics_analyze_how",
+        "To add a trace, open it in Sessions and choose Analyze & save.",
+    ),
+    // Behind Analyze's "i".
+    (
+        "analytics_analyze_intro",
+        "Analyze & save reads a watched trace on this device and keeps a dated snapshot of what it found. Nothing is uploaded. Analyze it again to refresh it.",
+    ),
+    // In place of Analyze & save on a row the daemon says it can't analyze
+    // (`analyzable: false`), and under the row when the daemon refuses it
+    // for that reason: the core's whole-file analysis takes files up to
+    // its size limit, and a Codex file with exactly one trace in it.
+    (
+        "analytics_analyze_not_analyzable",
+        "This trace can't be analyzed: its file is too large or doesn't hold exactly one trace.",
+    ),
+    (
+        "analytics_analyze_too_large",
+        "This trace's file is too large to analyze.",
+    ),
+    (
+        "analytics_analyze_codex_not_one",
+        "This Codex file doesn't hold exactly one trace, so it can't be analyzed.",
+    ),
     ("analytics_turn", "Turn {n}"),
     (
         "analytics_codex_not_recorded",
@@ -431,8 +815,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_recap_best_cache",
         "Best cache week yet: {p}%. Previous best {q}%.",
     ),
-    ("analytics_recap_goal_met", "Goal met: {goal}."),
-    ("analytics_recap_goal_not_met", "Goal not met: {goal}."),
     (
         "analytics_recap_pattern_up",
         "{pattern} up {p}% on your usual week.",
@@ -454,8 +836,9 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_setting_not_set", "Not set"),
     ("analytics_setting_recap_card", "Weekly summary"),
     ("analytics_setting_lever", "Higher-than-usual card"),
-    // The `insights_counter_pass` switch (owner decision D4: off by
-    // default; Ron's #1287 review).
+    // The `insights_counter_pass` switch (Ron's #1287 review). Counting is
+    // on by default and always on since 2026-10-29 (product owner), so the
+    // macOS Settings card no longer draws it.
     (
         "analytics_setting_counter_pass",
         "Count tokens in watched folders",
@@ -463,4 +846,134 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // The `insights_ledger_feed` switch (owner decision D3, settled
     // 2026-10-09: on by default, the switch turns it off).
     ("analytics_setting_ledger_feed", "Count Private AI tokens"),
+    // 24. The Models card left Insights (product owner, 2026-10-28) with
+    // its words; `insights_model_answers` still answers over the socket.
+    // 25. DRAFT, NEEDS APPROVAL: Overview, Breakdown and Benchmarks
+    // (mockups approved by the product owner, 2026-10-29). Money is a
+    // `{x}` hole, always at API list prices for Claude and Codex.
+    ("analytics_tab_benchmarks", "Benchmarks"),
+    ("analytics_tile_spend", "AI spend"),
+    ("analytics_tile_top_model", "Top model"),
+    ("analytics_tile_credits", "Credits earned"),
+    (
+        "analytics_tile_api_prices",
+        "Claude and Codex at API prices",
+    ),
+    ("analytics_tile_share_of_spend", "{p}% of spend"),
+    ("analytics_tile_credits_note", "From traces you shared"),
+    (
+        "analytics_limits_headline_runs_out",
+        "{window} limit runs out in {time}, before it resets",
+    ),
+    (
+        "analytics_limits_headline_on_pace",
+        "On pace: lasts until reset",
+    ),
+    ("analytics_by_model_title", "Spend by model"),
+    ("analytics_trends_title", "Trends"),
+    ("analytics_trends_spend_per_day", "Spend per day"),
+    ("analytics_trends_week_before", "Week before"),
+    ("analytics_cache_savings", "Cache savings"),
+    ("analytics_cache_savings_value", "about {x} saved"),
+    ("analytics_column_spend", "Spend"),
+    ("analytics_bench_intro", "Compared on {n} of your traces"),
+    ("analytics_bench_quality", "Quality"),
+    ("analytics_bench_value", "Value"),
+    ("analytics_bench_speed", "Speed"),
+    // Behind the "i" beside each metric's label on a card.
+    ("analytics_bench_quality_detail", "Share of edits you kept"),
+    (
+        "analytics_bench_value_detail",
+        "Cost per trace at API prices",
+    ),
+    ("analytics_bench_speed_detail", "Time per trace"),
+    ("analytics_bench_weeks", "Last {n} weeks"),
+    ("analytics_bench_traces", "{n} traces"),
+    ("analytics_bench_kept", "{p}% kept"),
+    ("analytics_bench_per_trace", "{x} per trace"),
+    ("analytics_bench_next", "Next: {label}, {x}"),
+    ("analytics_bench_cat_bug_fix", "Fix a bug"),
+    ("analytics_bench_cat_feature", "Build a feature"),
+    ("analytics_bench_cat_refactor", "Refactor"),
+    ("analytics_bench_cat_tests", "Write tests"),
+    ("analytics_bench_cat_docs", "Docs & writing"),
+    ("analytics_bench_cat_understand", "Understand code"),
+    ("analytics_bench_cat_review", "Code review"),
+    ("analytics_bench_cat_setup", "Setup & dependencies"),
+    (
+        "analytics_bench_tip_test_first",
+        "Fixes where a failing test ran first finished {p}% faster. {k} of your {n} fixes did not start that way.",
+    ),
+    (
+        "analytics_bench_tip_cheaper",
+        "{first} kept about as many edits as {second} at {p}% of the cost.",
+    ),
+    (
+        "analytics_bench_tip_fewer_undos",
+        "{first} had {x}× fewer edits undone than {second}.",
+    ),
+    // Benchmarks' population picker (product owner, 2026-10-29): the
+    // person's own traces, or Claude's sub-agent transcripts as their own
+    // population. Pending the owner's approval of these words.
+    ("analytics_bench_population", "Traces"),
+    ("analytics_bench_population_own", "Your traces"),
+    ("analytics_bench_population_spawned", "Sub-agents"),
+    (
+        "analytics_bench_intro_spawned",
+        "Compared on {n} Claude sub-agent traces",
+    ),
+    // DRAFT, NEEDS APPROVAL (product owner, 2026-10-29: Benchmarks shows
+    // your own figures from the first trace, one model or many).
+    ("analytics_bench_not_enough", "Waiting for more data"),
+    ("analytics_bench_yours", "Your models on this work"),
+    ("analytics_bench_mix_title", "What each model worked on"),
+    ("analytics_bench_col_kept", "Edits kept"),
+    ("analytics_bench_col_cost", "Cost per trace"),
+    ("analytics_bench_col_time", "Time per trace"),
+    ("analytics_bench_mix_share", "{p}% · {n}"),
+    (
+        "analytics_bench_compare_later",
+        "Best-model picks appear once a second model has {n} traces here.",
+    ),
+    // 26. Approved by the product owner in these words (2026-10-29): the
+    // get-started card and the sample data under it, on Overview, Breakdown
+    // and Benchmarks while Insights has no trace of the person's own. The
+    // steps name the app's own screens: Traces' folder list and its rules
+    // (Ask / Automatic, `project_copy`); the one action, "Choose what to
+    // share", is a text link with an arrow to that list. "Sessions" in the
+    // steps is the owner's word for what Claude Code and Codex record on
+    // this Mac. "30 minutes" is the daemon's default quiet time before a
+    // finished trace is sent.
+    (
+        "analytics_start_title",
+        "Your Insights grow with your traces",
+    ),
+    (
+        "analytics_start_why",
+        "Keep using AI as you normally do. As your traces come in, you'll see how much you spend, which models you use most, and which work best for your tasks.",
+    ),
+    ("analytics_start_step_use", "Keep using Claude or Codex"),
+    (
+        "analytics_start_step_use_detail",
+        "Trace Commons automatically detects sessions from Claude Code and Codex on your Mac.",
+    ),
+    ("analytics_start_step_share", "Choose what to share"),
+    (
+        "analytics_start_step_share_detail",
+        "Go to Traces to select a folder. Choose Automatic to share eligible traces without reviewing each one, or Ask to approve them first.",
+    ),
+    ("analytics_start_choose", "Choose what to share"),
+    ("analytics_start_step_fill", "See your Insights take shape"),
+    (
+        "analytics_start_step_fill_detail",
+        "As traces are collected, your Insights update automatically. In Automatic mode, completed sessions are shared after about 30 minutes of inactivity.",
+    ),
+    // The API-price note when only one tool was used this week.
+    ("analytics_tile_api_prices_claude", "Claude at API prices"),
+    ("analytics_tile_api_prices_codex", "Codex at API prices"),
+    ("analytics_sample_banner", "Sample data — not yours"),
+    (
+        "analytics_sample_banner_detail",
+        "This is what Insights shows once your traces come in.",
+    ),
 ];

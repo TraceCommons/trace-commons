@@ -46,12 +46,59 @@ public enum DaemonDataDecoding {
     }
 
     static func parseDate(_ text: String) -> Date? {
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFraction.date(from: text) { return date }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: text)
+        DaemonTimestamp.parse(text)
+    }
+}
+
+/// The one parser for the daemon's RFC 3339 timestamps, with or without
+/// fractional seconds, `Z` or an offset. Its two formatters are built once:
+/// building one or two per timestamp cost about 0.33 ms each, so a
+/// `list_pending` of 180 entries spent about 180 ms on formatters alone
+/// (`TracesScalePerfTests`). A lock guards them, since the formatter is not
+/// `Sendable` and replies are decoded on a concurrent queue.
+public enum DaemonTimestamp {
+    public static func parse(_ text: String) -> Date? {
+        formatters.parse(text)
+    }
+
+    /// Only the fractional form, for `SourceCandidate.Wire.parseTimestamp`'s
+    /// truncated retry, which has never tried the plain one.
+    static func parseFractionalOnly(_ text: String) -> Date? {
+        formatters.parseFractionalOnly(text)
+    }
+
+    private static let formatters = Formatters()
+
+    private final class Formatters: @unchecked Sendable {
+        private let lock = NSLock()
+        private let withFraction: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }()
+        private let plain: ISO8601DateFormatter = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter
+        }()
+
+        func parseFractionalOnly(_ text: String) -> Date? {
+            lock.lock()
+            defer { lock.unlock() }
+            return withFraction.date(from: text)
+        }
+
+        /// The same answer as trying the fractional form, then the plain
+        /// one; a timestamp with no `.` cannot be the fractional form, so it
+        /// is tried as the plain one first, rather than parsed twice.
+        func parse(_ text: String) -> Date? {
+            lock.lock()
+            defer { lock.unlock() }
+            if text.utf8.contains(UInt8(ascii: ".")) {
+                return withFraction.date(from: text) ?? plain.date(from: text)
+            }
+            return plain.date(from: text) ?? withFraction.date(from: text)
+        }
     }
 }
 
@@ -300,6 +347,9 @@ extension DaemonData {
         public let pricingVersion: String?
         public let estimatedAt: String
         public let text: String
+        /// The same band as a call to share, for Home's Not contributed
+        /// card (owner, 2026-10-20). Absent from an older core.
+        public let shareText: String?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case lowUsdMicros = "low_usd_micros"
@@ -310,6 +360,7 @@ extension DaemonData {
             case pricingVersion = "pricing_version"
             case estimatedAt = "estimated_at"
             case text
+            case shareText = "share_text"
         }
     }
 
@@ -392,6 +443,9 @@ extension DaemonData {
         public let schemaVersion: String?
         public let loggedIn: Bool?
         public let tenantId: String?
+        /// Explicit CLI setup completion for the current enrollment. Absent
+        /// on older daemons, which retain shell-local completion behavior.
+        public let setupComplete: Bool?
         /// Opaque account binding; present whenever the daemon can derive a
         /// scope from its store, signed in or not. Not proof of sign-in: read
         /// `loggedIn` for that.
@@ -403,6 +457,10 @@ extension DaemonData {
         /// never shown as text.
         public let consentHold: String?
         public let paused: Bool?
+        /// Authoritative admission capacity, including eligible Approved entries.
+        /// Missing on older daemons; unknown must never establish recovery.
+        public let queueAtCapacity: Bool?
+        public let queueCapacityUsed: Int?
         /// Every `Pending` entry. NOT the badge: never draw a count from it.
         public let queueDepth: Int?
         /// the badge's exact count. `nil` is unknown (an older daemon, or
@@ -426,7 +484,6 @@ extension DaemonData {
         public let settlementEstimate: SettlementEstimate?
         public let nextDigestAt: Date?
         public let health: Health?
-        public let dailyBudget: DailyBudget?
         public let routing: Routing?
         public let privateInferenceState: PrivateInferenceState?
         public let witnessCapacity: WitnessCapacity?
@@ -459,10 +516,13 @@ extension DaemonData {
             case schemaVersion = "schema_version"
             case loggedIn = "logged_in"
             case tenantId = "tenant_id"
+            case setupComplete = "setup_complete"
             case accountScope = "account_scope"
             case consentScopes = "consent_scopes"
             case consentHold = "consent_hold"
             case paused
+            case queueAtCapacity = "queue_at_capacity"
+            case queueCapacityUsed = "queue_capacity_used"
             case queueDepth = "queue_depth"
             case decisionsOwed = "decisions_owed"
             case unpurposedTraces = "unpurposed_traces"
@@ -471,7 +531,6 @@ extension DaemonData {
             case settlementEstimate = "settlement_estimate"
             case nextDigestAt = "next_digest_at"
             case health
-            case dailyBudget = "daily_budget"
             case routing
             case privateInferenceState = "private_inference_state"
             case witnessCapacity = "witness_capacity"
@@ -636,32 +695,6 @@ extension DaemonData {
         public enum CodingKeys: String, CodingKey {
             case lastErrorLabel = "last_error_label"
             case since
-        }
-    }
-
-    public struct DailyBudget: Codable, Equatable, Sendable {
-        public let bytesToday: Int?
-        public let maxBytesPerDay: Int?
-        public let bytesRemaining: Int?
-        public let uploadsToday: Int?
-        public let maxUploadsPerDay: Int?
-        public let uploadsRemaining: Int?
-        public let resetsAt: Date?
-        public let blocked: Bool?
-        public let blockedEntries: Int?
-        public let blockedBytes: Int?
-
-        public enum CodingKeys: String, CodingKey {
-            case bytesToday = "bytes_today"
-            case maxBytesPerDay = "max_bytes_per_day"
-            case bytesRemaining = "bytes_remaining"
-            case uploadsToday = "uploads_today"
-            case maxUploadsPerDay = "max_uploads_per_day"
-            case uploadsRemaining = "uploads_remaining"
-            case resetsAt = "resets_at"
-            case blocked
-            case blockedEntries = "blocked_entries"
-            case blockedBytes = "blocked_bytes"
         }
     }
 
@@ -859,6 +892,11 @@ extension DaemonData {
     /// in `DaemonDataKeyCoverageTests.notModeled`, so a key the daemon adds
     /// fails that test until someone decides.
     public struct Settings: Codable, Equatable, Sendable {
+        /// Canonical saved arguments, also projected by managed_snapshot.
+        public let managedCLIOptions: [String: String]?
+        public let managedFolderSettings: [ManagedFolderProfile]?
+        /// Only returned by a write that changed managed-session options.
+        public let managedRevision: UInt64?
         public let quiescenceSecs: Int?
         public let approvalHoldSecs: Int?
         // digest and notifications.
@@ -875,8 +913,6 @@ extension DaemonData {
         public let scrubCheckReturnedToWaiting: Int?
         /// Whether attested model-call bodies are sent with a session.
         public let ironwireAttestedBodies: Bool?
-        public let maxUploadsPerDay: Int?
-        public let maxBytesPerDay: Int?
         public let privateInference: Bool?
         /// Whether the first-run Private AI question has been answered.
         public let privateInferenceOfferSeen: Bool?
@@ -912,10 +948,20 @@ extension DaemonData {
         /// Decode-only until the Insights settings draw it: the user's own
         /// context-tip threshold in tokens; `nil` is unset, never a default.
         public let insightsContextThreshold: Int?
-        /// Decode-only until the Insights settings draw it: whether the
-        /// daemon runs the counter pass for `insights_week` (owner decision
-        /// D4, open; off by default).
+        /// Decode-only (Settings draws no switch for it): whether the
+        /// daemon runs the counter pass for `insights_week` (on by default
+        /// and always on; product owner, 2026-10-29).
         public let insightsCounterPass: Bool?
+        /// Decode-only: whether the 2026-10-29 default change turned the
+        /// counter pass on; `nil` from a daemon that predates it.
+        public let insightsCounterPassDefaultedOn: Bool?
+        /// Native subscription readers, on by default since 2026-10-27; nil
+        /// means an older daemon. The Overview usage snapshot remains
+        /// authoritative for its controls. `subscriptionUsageClaudeEnabled` is
+        /// the legacy cleanup flag; `subscriptionUsageClaudeOn` is Claude's switch.
+        public let subscriptionUsageCodexEnabled: Bool?
+        public let subscriptionUsageClaudeEnabled: Bool?
+        public let subscriptionUsageClaudeOn: Bool?
         /// The weekly summary card's only switch (owner decisions D1 and D4,
         /// open; on by default). The Insights window passes it to the core's
         /// `comparisons`; `nil` from a daemon that predates it.
@@ -931,6 +977,9 @@ extension DaemonData {
         public let missionsEnabled: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
+            case managedCLIOptions = "managed_cli_options"
+            case managedFolderSettings = "managed_folder_settings"
+            case managedRevision = "managed_revision"
             case quiescenceSecs = "quiescence_secs"
             case approvalHoldSecs = "approval_hold_secs"
             case digestIntervalSecs = "digest_interval_secs"
@@ -940,8 +989,6 @@ extension DaemonData {
             case scrubCheckDefaultedOnUpgrade = "scrub_check_defaulted_on_upgrade"
             case scrubCheckReturnedToWaiting = "scrub_check_returned_to_waiting"
             case ironwireAttestedBodies = "ironwire_attested_bodies"
-            case maxUploadsPerDay = "max_uploads_per_day"
-            case maxBytesPerDay = "max_bytes_per_day"
             case privateInference = "private_inference"
             case privateInferenceOfferSeen = "private_inference_offer_seen"
             case suggestionsEnabled = "suggestions_enabled"
@@ -960,6 +1007,10 @@ extension DaemonData {
             case insightsLedgerFeed = "insights_ledger_feed"
             case insightsContextThreshold = "insights_context_threshold"
             case insightsCounterPass = "insights_counter_pass"
+            case insightsCounterPassDefaultedOn = "insights_counter_pass_defaulted_on"
+            case subscriptionUsageCodexEnabled = "subscription_usage_codex_enabled"
+            case subscriptionUsageClaudeEnabled = "subscription_usage_claude_enabled"
+            case subscriptionUsageClaudeOn = "subscription_usage_claude_on"
             case insightsRecapCardEnabled = "insights_recap_card_enabled"
             case settlementEstimateEnabled = "settlement_estimate_enabled"
             case missionsEnabled = "missions_enabled"
@@ -977,6 +1028,7 @@ extension DaemonData {
         public let weeklyRecap: Bool?
         public let insightsTip: Bool?
         public let settlementEstimate: Bool?
+        public let nearAiCredit: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case digest
@@ -985,6 +1037,7 @@ extension DaemonData {
             case weeklyRecap = "weekly_recap"
             case insightsTip = "insights_tip"
             case settlementEstimate = "settlement_estimate"
+            case nearAiCredit = "near_ai_credit"
         }
     }
 
@@ -1143,8 +1196,17 @@ extension DaemonData {
         public let contributed: Int?
         /// The folders they went from, as labels, never keys.
         public let contributedProjects: [String]?
-        /// Pending credit for them; pending, never earned.
+        /// Credit the server has decided for them: earned.
+        public let creditFinal: Double?
+        /// Credit for them still being scored: pending, never earned.
         public let creditPending: Double?
+        /// The contribution sentence as the core worded it, with every earned
+        /// figure in it; null when nothing was contributed, and absent from
+        /// an older daemon. This shell does not read it (it posts `text`,
+        /// whose copy leaves out credit the folded verdicts sentence already
+        /// states); it is declared so the contract lists every key the
+        /// daemon sends, and Windows posts it.
+        public let contribution: String?
         /// The core's notification body, posted unchanged. When the
         /// attention arbiter folded a re-engagement sentence in, it already
         /// ends with `fold.text`.
@@ -1155,19 +1217,23 @@ extension DaemonData {
 
         public init(
             pending: Int?, contributed: Int? = nil, contributedProjects: [String]? = nil,
-            creditPending: Double? = nil, text: String?, fold: DigestFold? = nil
+            creditFinal: Double? = nil, creditPending: Double? = nil, contribution: String? = nil, text: String?,
+            fold: DigestFold? = nil
         ) {
             self.pending = pending
             self.contributed = contributed
             self.contributedProjects = contributedProjects
+            self.creditFinal = creditFinal
             self.creditPending = creditPending
+            self.contribution = contribution
             self.text = text
             self.fold = fold
         }
 
         public enum CodingKeys: String, CodingKey {
-            case pending, contributed, text, fold
+            case pending, contributed, contribution, text, fold
             case contributedProjects = "contributed_projects"
+            case creditFinal = "credit_final"
             case creditPending = "credit_pending"
         }
     }
@@ -1210,6 +1276,11 @@ extension DaemonData {
         public let consentScopes: [String]?
         public let creditPointsPending: Double?
         public let creditPointsFinal: Double?
+        /// Why a final figure of 0 earned no credit: the server's reason
+        /// label (`trace_commons_protocol::credit_outcome`), shown through
+        /// the core's words (`PublicRunCopy.creditOutcomeLabel(for:)`), never
+        /// raw. `nil` while pending and on a credited row.
+        public let creditOutcomeReason: String?
         public let explanations: [String]?
         public let lastRefreshedAt: Date?
         public let withdrawnAt: Date?
@@ -1234,6 +1305,7 @@ extension DaemonData {
             case consentScopes = "consent_scopes"
             case creditPointsPending = "credit_points_pending"
             case creditPointsFinal = "credit_points_final"
+            case creditOutcomeReason = "credit_outcome_reason"
             case lastRefreshedAt = "last_refreshed_at"
             case withdrawnAt = "withdrawn_at"
             case revokedAt = "revoked_at"
@@ -1325,6 +1397,9 @@ extension DaemonData {
         public let commonsSettlementExplanation: String?
         public let commonsGraded: Bool?
         public let pointsState: String
+        /// Why the points are unknown, when the person can act on it:
+        /// `account-session-required`. Absent from an older core.
+        public let pointsUnknownReason: String?
         public let commonsPointsEarnedThisPeriod: Int?
         public let commonsPointsLifetimeEarned: Int?
         public let commonsPendingReview: Int?
@@ -1341,6 +1416,7 @@ extension DaemonData {
             case commonsSettlementExplanation = "commons_settlement_explanation"
             case commonsGraded = "commons_graded"
             case pointsState = "points_state"
+            case pointsUnknownReason = "points_unknown_reason"
             case commonsPointsEarnedThisPeriod = "commons_points_earned_this_period"
             case commonsPointsLifetimeEarned = "commons_points_lifetime_earned"
             case commonsPendingReview = "commons_pending_review"
@@ -1354,6 +1430,11 @@ extension DaemonData {
 
         public var postureKnown: Bool { postureState == "known" }
         public var pointsKnown: Bool { pointsState == "known" }
+        /// The points are unknown because no account session could be used
+        /// or renewed on this Mac.
+        public var accountSessionRequired: Bool {
+            !pointsKnown && pointsUnknownReason == "account-session-required"
+        }
     }
 }
 
@@ -1510,6 +1591,32 @@ extension DaemonData {
         }
     }
 
+    /// `inference_activity`: the window's listed calls, and the `verified`
+    /// ones among them, in `stepHours` steps, oldest first, the last ending
+    /// at the read. The menu-bar item's Private AI bars.
+    public struct InferenceActivity: Codable, Equatable, Sendable {
+        /// `false`: no ledger answered, with no steps. Not evidence of no
+        /// calls; never empty bars.
+        public let readable: Bool
+        public let windowHours: Int?
+        public let stepHours: Int?
+        public let steps: [InferenceActivityStep]
+
+        public enum CodingKeys: String, CodingKey {
+            case readable, steps
+            case windowHours = "window_hours"
+            case stepHours = "step_hours"
+        }
+    }
+
+    /// One step: when it begins, the calls `inference_calls` lists in it,
+    /// and how many of those carry the `verified` label.
+    public struct InferenceActivityStep: Codable, Equatable, Sendable {
+        public let start: Date
+        public let calls: Int
+        public let verified: Int
+    }
+
     public struct InferenceCall: Codable, Equatable, Sendable, Identifiable {
         public let id: Int64
         public let at: Date
@@ -1634,9 +1741,10 @@ extension DaemonData {
         /// No classification source exists today; this remains nil.
         public let workKind: String?
         public let calls: UInt64
-        public let pricedCalls: UInt64
+        /// Missing on older replies: unknown pricing coverage, never zero.
+        public let pricedCalls: UInt64?
         /// Registry-priced USD over priced calls only, never billed spend.
-        public let costUSD: Double
+        public let costUSD: Double?
         public let proof: InferenceProofCounts
 
         public enum GroupID: Hashable, Sendable {
@@ -1662,8 +1770,8 @@ extension DaemonData {
             route = try values.decode(String.self, forKey: .route)
             workKind = try values.decodeIfPresent(String.self, forKey: .workKind)
             calls = try values.decode(UInt64.self, forKey: .calls)
-            pricedCalls = try values.decode(UInt64.self, forKey: .pricedCalls)
-            costUSD = try values.decode(Double.self, forKey: .costUSD)
+            pricedCalls = try values.decodeIfPresent(UInt64.self, forKey: .pricedCalls)
+            costUSD = try values.decodeIfPresent(Double.self, forKey: .costUSD)
             proof = try values.decode(InferenceProofCounts.self, forKey: .proof)
         }
 
@@ -1678,9 +1786,10 @@ extension DaemonData {
 
     public struct InferenceRouteTotal: Codable, Equatable, Sendable {
         public let calls: UInt64
-        public let pricedCalls: UInt64
+        /// Missing on older replies: unknown pricing coverage, never zero.
+        public let pricedCalls: UInt64?
         /// Registry-priced, not billed. `pricedCalls < calls` is incomplete pricing.
-        public let costUSD: Double
+        public let costUSD: Double?
         public let proof: InferenceProofCounts
 
         public enum CodingKeys: String, CodingKey {
@@ -1865,6 +1974,24 @@ extension DaemonData {
         }
     }
 
+    /// Mirrors protocol `first_run_estimate::FirstRunEstimate`: the
+    /// daemon's `first_run_estimate` answer, the commons' dollar estimate
+    /// per accepted trace for the first run's Traces step. No range when the
+    /// commons publishes none; the first run then words its estimate in
+    /// points. Passed back to the core to word, never formatted here.
+    public struct FirstRunEstimate: Codable, Equatable, Sendable {
+        public let usdMicrosPerAcceptedTrace: UsdMicrosRange?
+
+        public struct UsdMicrosRange: Codable, Equatable, Sendable {
+            public let min: UInt64
+            public let max: UInt64
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case usdMicrosPerAcceptedTrace = "usd_micros_per_accepted_trace"
+        }
+    }
+
     /// Mirrors protocol `InviteLookupResponse`.
     public struct InviteLookup: Codable, Equatable, Sendable {
         public let valid: Bool
@@ -1877,29 +2004,6 @@ extension DaemonData {
             case issuerDisplayName = "issuer_display_name"
             case creditRange = "credit_range"
             case reasonLabel = "reason_label"
-        }
-    }
-
-    public struct PasskeyState: Codable, Equatable, Sendable {
-        /// `none`, `unknown`, or binding labels `unbound|bound|closed|legacy`.
-        public let state: String
-        /// The passkeys this Mac remembers, not the account's on the server;
-        /// null when the daemon cannot read its list. Connection is never
-        /// inferred from a missing binding row.
-        public let passkeyCount: Int?
-        /// The most recently used remembered passkey's name, if it has one.
-        public let rememberedName: String?
-        /// The name remembered for the signed-in account's own record, never
-        /// the most recent record's; nil when signed out or unnamed.
-        public let signedInName: String?
-        public let nearAiConnected: Bool?
-
-        public enum CodingKeys: String, CodingKey {
-            case state
-            case passkeyCount = "passkey_count"
-            case rememberedName = "remembered_name"
-            case signedInName = "signed_in_name"
-            case nearAiConnected = "near_ai_connected"
         }
     }
 
@@ -2027,7 +2131,7 @@ extension DaemonData {
     }
 
     /// Mirrors `trace_commons_protocol::invite_lookup::CreditRange`: an
-    /// invite operator's estimated credit per accepted trace, not yet settled.
+    /// invite operator's estimated credit per accepted trace.
     public struct CreditRange: Codable, Equatable, Sendable {
         public let min: Int
         public let max: Int
@@ -2037,7 +2141,7 @@ extension DaemonData {
     // MARK: Insights feed T
 
     /// `insights_week`: one local ISO week from the daemon's counter pass
-    /// (owner decision D4, open; off by default). Use it only when
+    /// (on by default; product owner, 2026-10-29). Use it only when
     /// `showsCounterPass`; anything else is drawn as the saved-imports feed.
     /// Labels and counts only: no path, digest or session id crosses.
     public struct InsightsWeek: Codable, Equatable, Sendable {
@@ -2071,6 +2175,22 @@ extension DaemonData {
         /// Why not, while `routingAvailable` is false: `ledger_feed_off`
         /// (the contributor turned the ledger feed off) or `no_ledger`.
         public let routingUnavailable: String?
+        /// Where NEAR AI credit went (product owner, 2026-10-28): `nil`
+        /// while routing is unavailable and from a daemon that predates it,
+        /// which is no figure, never zero.
+        public let nearAiCredit: InsightsNearAiCredit?
+        /// Claude and Codex tokens on each of the last 7 local days, oldest
+        /// first (product owner, 2026-10-28); `nil` from a daemon that
+        /// predates it.
+        public let usageByDay: [InsightsUsageDay]?
+        /// Claude and Codex spend at API list prices, lines, edits and
+        /// cache savings (product owner, 2026-10-29); `nil` from a daemon
+        /// that predates it.
+        public var work: InsightsWork? = nil
+        /// The goals set with `/goal` in Claude and Codex whose last update
+        /// falls in the week (product owner, 2026-10-29); `nil` from a
+        /// daemon that predates them. Never a goal's text.
+        public var goals: InsightsWeekGoals? = nil
 
         /// Enabled, readable, from the counter pass, and carrying a rollup and
         /// the core's Overview for it.
@@ -2089,71 +2209,448 @@ extension DaemonData {
             case changeVsLastWeek = "change_vs_last_week"
             case routingAvailable = "routing_available"
             case routingUnavailable = "routing_unavailable"
+            case nearAiCredit = "near_ai_credit"
+            case usageByDay = "usage_by_day"
+            case work, goals
         }
     }
 
-    /// `insights_sessions`: the Sessions tab's list over the daemon's counter
-    /// pass (feed T), newest first. Use it only when `showsCounterPass`;
-    /// otherwise the tab shows saved snapshots. Each row is known by an
-    /// opaque `sessionRef`; no path, digest or session id crosses.
-    public struct InsightsSessions: Codable, Equatable, Sendable {
+    /// `insights_week`'s `goals`: each goal, newest update first, and how
+    /// many were met. `met` is Codex's `complete` or Claude's latest check
+    /// met; every other status is not met.
+    public struct InsightsWeekGoals: Codable, Equatable, Sendable {
+        public let goals: [InsightsWeekGoal]
+        public let met: Int
+        public let total: Int
+        /// Per tool with a goal this week (`claude_code`, `codex`).
+        public let byTool: [String: InsightsGoalCount]?
+
+        public init(goals: [InsightsWeekGoal], met: Int, total: Int, byTool: [String: InsightsGoalCount]? = nil) {
+            self.goals = goals; self.met = met; self.total = total; self.byTool = byTool
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case goals, met, total
+            case byTool = "by_tool"
+        }
+    }
+
+    /// Met and total, for one tool.
+    public struct InsightsGoalCount: Codable, Equatable, Sendable {
+        public let met: Int
+        public let total: Int
+    }
+
+    /// One `/goal` goal: its tool, the tool's own status and what it took.
+    /// Status and counts only, keyed to its trace.
+    public struct InsightsWeekGoal: Codable, Equatable, Sendable {
+        /// `claude_code` or `codex`.
+        public let tool: String
+        /// Codex's `active`, `paused`, `blocked`, `usage_limited`,
+        /// `budget_limited` or `complete`; Claude's `met`, `not_met` or
+        /// `open`; `unknown` for a status the daemon does not know.
+        public let status: String
+        public let met: Bool
+        public let tokens: Int64?
+        public let timeSecs: Int64?
+        public let iterations: Int64?
+        public let folder: String?
+        /// The trace's Sessions reference.
+        public let sessionRef: String
+        public let updatedAt: String
+
+        public init(tool: String, status: String, met: Bool, tokens: Int64?, timeSecs: Int64?,
+                    iterations: Int64? = nil, folder: String?, sessionRef: String, updatedAt: String) {
+            self.tool = tool; self.status = status; self.met = met; self.tokens = tokens
+            self.timeSecs = timeSecs; self.iterations = iterations; self.folder = folder
+            self.sessionRef = sessionRef; self.updatedAt = updatedAt
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case tool, status, met, tokens, iterations, folder
+            case timeSecs = "time_secs"
+            case sessionRef = "session_ref"
+            case updatedAt = "updated_at"
+        }
+    }
+
+    /// One local day's tokens for the usage cards' bars. `nil` is unknown,
+    /// never zero; a day with no session of that tool is a true 0.
+    public struct InsightsUsageDay: Codable, Equatable, Sendable {
+        public let date: String
+        public let claudeCode: Int64?
+        public let codex: Int64?
+
+        public init(date: String, claudeCode: Int64?, codex: Int64?) {
+            self.date = date; self.claudeCode = claudeCode; self.codex = codex
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case date, codex
+            case claudeCode = "claude_code"
+        }
+    }
+
+    /// `insights_week`'s `near_ai_credit`: the NEAR AI ledger's own charge
+    /// (`basis` `near_ai_ledger`), never a list price. `week` is the week
+    /// on screen; `today` and `last31Days` do not move with it.
+    public struct InsightsNearAiCredit: Codable, Equatable, Sendable {
+        public let basis: String
+        public let week: InsightsCreditWindow
+        public let today: InsightsCreditWindow
+        /// The last 7 local days, oldest first, today last, each with its
+        /// `date`; `nil` from a daemon that predates it.
+        public let byDay: [InsightsCreditWindow]?
+        public let last31Days: InsightsCreditWindow
+
+        public init(basis: String = "near_ai_ledger", week: InsightsCreditWindow,
+                    today: InsightsCreditWindow, byDay: [InsightsCreditWindow]? = nil,
+                    last31Days: InsightsCreditWindow) {
+            self.basis = basis; self.week = week; self.today = today; self.byDay = byDay
+            self.last31Days = last31Days
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case basis, week, today
+            case byDay = "by_day"
+            case last31Days = "last_31_days"
+        }
+    }
+
+    /// One window's NEAR AI charge: the calls through the NEAR AI route
+    /// that started in it. `usdMicros` is `nil` when any call had no
+    /// charge, never zero; a window with no call is a true 0. Only `week`
+    /// carries the groups.
+    public struct InsightsCreditWindow: Codable, Equatable, Sendable {
+        public let from: String
+        public let to: String
+        /// `YYYY-MM-DD`, on a `byDay` window only.
+        public let date: String?
+        public let usdMicros: Int64?
+        public let sessions: Int
+        public let calls: Int
+        public let callsWithoutCharge: Int
+        /// The calls' tokens; `nil` when any call's are unknown, and from a
+        /// daemon that predates them.
+        public let tokens: Int64?
+        /// The charge and tokens as far as they are known (product owner,
+        /// 2026-10-28): a minimum while the matching `*Partial` is true;
+        /// `nil` when nothing is known, and from a daemon that predates them.
+        public var usdMicrosKnown: Int64? = nil
+        public var usdPartial: Bool? = nil
+        public var tokensKnown: Int64? = nil
+        public var tokensPartial: Bool? = nil
+        public let byFolder: [InsightsCreditGroup]?
+        /// By the model that served each call, lowercased as the ledger
+        /// names it; a trace that used two models is in both. `nil` from a
+        /// daemon that predates it.
+        public let byModel: [InsightsCreditGroup]?
+
+        public init(from: String = "", to: String = "", date: String? = nil, usdMicros: Int64?, sessions: Int,
+                    calls: Int, callsWithoutCharge: Int, tokens: Int64? = nil,
+                    byFolder: [InsightsCreditGroup]? = nil, byModel: [InsightsCreditGroup]? = nil) {
+            self.from = from; self.to = to; self.date = date; self.usdMicros = usdMicros; self.sessions = sessions
+            self.calls = calls; self.callsWithoutCharge = callsWithoutCharge; self.tokens = tokens
+            self.byFolder = byFolder; self.byModel = byModel
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case from, to, date, sessions, calls, tokens
+            case usdMicros = "usd_micros"
+            case usdMicrosKnown = "usd_micros_known"
+            case usdPartial = "usd_partial"
+            case tokensKnown = "tokens_known"
+            case tokensPartial = "tokens_partial"
+            case callsWithoutCharge = "calls_without_charge"
+            case byFolder = "by_folder"
+            case byModel = "by_model"
+        }
+    }
+
+    /// One group of a week's charge. `key` is the folder's local label or
+    /// the served model; `nil` is the unknown group. Largest known charge
+    /// first, unknown ones after.
+    public struct InsightsCreditGroup: Codable, Equatable, Sendable {
+        public let key: String?
+        public let usdMicros: Int64?
+        public let sessions: Int
+        public let calls: Int
+        public let callsWithoutCharge: Int
+        /// The group's tokens; `nil` when unknown.
+        public let tokens: Int64?
+        /// As far as known, as on a window.
+        public var usdMicrosKnown: Int64? = nil
+        public var usdPartial: Bool? = nil
+        public var tokensKnown: Int64? = nil
+        public var tokensPartial: Bool? = nil
+
+        public init(key: String?, usdMicros: Int64?, sessions: Int = 1, calls: Int = 1, callsWithoutCharge: Int = 0,
+                    tokens: Int64? = nil) {
+            self.key = key; self.usdMicros = usdMicros; self.sessions = sessions
+            self.calls = calls; self.callsWithoutCharge = callsWithoutCharge; self.tokens = tokens
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case key, sessions, calls, tokens
+            case usdMicros = "usd_micros"
+            case usdMicrosKnown = "usd_micros_known"
+            case usdPartial = "usd_partial"
+            case tokensKnown = "tokens_known"
+            case tokensPartial = "tokens_partial"
+            case callsWithoutCharge = "calls_without_charge"
+        }
+    }
+
+    /// `insights_model_answers`: the Models card's six answers over the
+    /// daemon's counter pass (feed T), gated as `insights_week` is. Use it
+    /// only when `showsCounterPass`; otherwise no card is drawn, never an
+    /// empty one. Declared model labels, counts and fixed snake_case words:
+    /// no session reference, path or backend crosses. Money crosses only on
+    /// the `docs_cost` row, as integer USD micros, either at API list
+    /// prices (`figure`) or as what NEAR AI charged (`nearAiCharge`), never
+    /// summed.
+    public struct InsightsModelAnswers: Codable, Equatable, Sendable {
         public let enabled: Bool
         public let feed: String
         /// `nil` while disabled; `false` when the store, key or folder rules
-        /// could not be read, which is never drawn as an empty list.
+        /// could not be read, which is never drawn as rows short of traces.
         public let readable: Bool?
         public let reason: String?
         public let updatedAt: String?
-        public let sessionsStored: Int?
-        /// More stored than listed.
-        public let truncated: Bool?
-        public let sessions: [InsightsWatchedSession]?
+        /// The 13 weeks ending when the answer was built, RFC 3339; the
+        /// week on screen does not move it.
+        public let windowStart: String?
+        public let windowEnd: String?
+        public let pricing: InsightsModelPricing?
+        /// Six, in the daemon's order: `bug_fix_rejected`,
+        /// `refactor_rejected`, `tests_rejected`, `docs_cost`,
+        /// `rejected_across_tasks`, `finish_time`.
+        public let rows: [InsightsModelAnswerRow]?
 
-        /// Enabled, readable, from the counter pass, and carrying a list.
+        /// Enabled, readable, from the counter pass, and carrying rows.
         public var showsCounterPass: Bool {
-            enabled && readable == true && feed == "counter_pass" && sessions != nil
+            enabled && readable == true && feed == "counter_pass" && rows != nil
         }
 
         public enum CodingKeys: String, CodingKey {
-            case enabled, feed, readable, reason, truncated, sessions
+            case enabled, feed, readable, reason, pricing, rows
             case updatedAt = "updated_at"
-            case sessionsStored = "sessions_stored"
+            case windowStart = "window_start"
+            case windowEnd = "window_end"
         }
     }
 
-    /// One watched trace in `insights_sessions`.
-    public struct InsightsWatchedSession: Codable, Equatable, Sendable, Identifiable {
-        /// Opaque; made again when the trace's file grows, so it is listed
-        /// again rather than kept.
-        public let sessionRef: String
-        public let source: String
-        /// The earliest recorded event, RFC 3339.
-        public let startedAt: String?
-        /// Claude Code only; `nil` for Codex, which records no turns.
-        public let turns: Int?
-        /// The folder's label, the one `list_projects` shows; `nil` when no
-        /// folder the daemon knows matches, drawn with the core's word.
-        public let folder: String?
+    /// How the answer's money is priced: `basis` is `api_list` (published
+    /// API list prices, applied when the answer is built), and `tables`
+    /// names each shipped price table used. No table carries a date.
+    public struct InsightsModelPricing: Codable, Equatable, Sendable {
+        public let basis: String
+        public let tables: [InsightsPricingTable]
+    }
 
-        public var id: String { sessionRef }
+    public struct InsightsPricingTable: Codable, Equatable, Sendable {
+        /// The table's content digest, the one digest on this wire.
+        public let tableId: String
+        public let version: Int
 
         public enum CodingKeys: String, CodingKey {
-            case source, turns, folder
-            case sessionRef = "session_ref"
-            case startedAt = "started_at"
+            case version
+            case tableId = "table_id"
         }
     }
 
-    /// `insights_session_drill`: one watched trace turn by turn, in the
-    /// core's own `session_drill` shape (`session`), kept as the JSON it
-    /// came as so the app decodes it with the same `TCBridge` type the
-    /// saved drill uses.
-    public struct InsightsSessionDrillAnswer: Codable, Equatable, Sendable {
-        public let enabled: Bool
-        public let feed: String
-        public let readable: Bool?
-        public let reason: String?
-        public let session: CoreJSON?
+    /// One of the six answers. `state` is `not_enough_sessions`,
+    /// `not_priced`, `no_clear_difference` or `answered`; with
+    /// `no_clear_difference` both figures are present and neither leads.
+    public struct InsightsModelAnswerRow: Codable, Equatable, Sendable, Identifiable {
+        public let question: String
+        public let state: String
+        /// `rejected` or `undone` on a rejection row comparing two models,
+        /// else `nil`.
+        public let basis: String?
+        /// `prompting` or `not_prompting` on `finish_time`, else `nil`.
+        public let editMode: String?
+        public let leader: InsightsModelFigure?
+        public let next: InsightsModelFigure?
+        /// Each model's traces in the question, in the daemon's order.
+        public let sessionsByModel: [InsightsModelCount]
+        public let leftOut: InsightsModelLeftOut
+        /// On `docs_cost` only, and only when a Docs trace in the window
+        /// went through NEAR AI.
+        public let nearAiCharge: InsightsNearAiCharge?
+        /// On the rejection rows: each model whose traces in the row the
+        /// person gave an outcome, by label, whatever the row's state.
+        /// Empty elsewhere; absent from a daemon before the labels.
+        public let keptByModel: [InsightsModelKept]?
+
+        public var id: String { question }
+
+        public enum CodingKeys: String, CodingKey {
+            case question, state, basis, leader, next
+            case editMode = "edit_mode"
+            case sessionsByModel = "sessions_by_model"
+            case leftOut = "left_out"
+            case nearAiCharge = "near_ai_charge"
+            case keptByModel = "kept_by_model"
+        }
+    }
+
+    /// The outcomes the person gave one model's traces in a row (their
+    /// Outcome labels): beside the rejection figure, never folded into it.
+    /// The three counts sum to `labelled`; `keptPermille` is `kept /
+    /// labelled`, partly kept not counted as kept.
+    public struct InsightsKeptFigure: Codable, Equatable, Sendable {
+        public let labelled: Int
+        public let kept: Int
+        public let partlyKept: Int
+        public let thrownAway: Int
+        public let keptPermille: Int
+
+        public enum CodingKeys: String, CodingKey {
+            case labelled, kept
+            case partlyKept = "partly_kept"
+            case thrownAway = "thrown_away"
+            case keptPermille = "kept_permille"
+        }
+    }
+
+    /// `[label, kept figure]`, as the daemon sends a pair.
+    public struct InsightsModelKept: Codable, Equatable, Sendable {
+        public let label: String
+        public let figure: InsightsKeptFigure
+
+        public init(label: String, figure: InsightsKeptFigure) {
+            self.label = label; self.figure = figure
+        }
+
+        public init(from decoder: Decoder) throws {
+            var pair = try decoder.unkeyedContainer()
+            label = try pair.decode(String.self)
+            figure = try pair.decode(InsightsKeptFigure.self)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var pair = encoder.unkeyedContainer()
+            try pair.encode(label)
+            try pair.encode(figure)
+        }
+    }
+
+    /// One model's figure on a row. `label` is the label the trace
+    /// declared, not a verified serving identity. `sessions` is the
+    /// figure's sample: priced traces for a cost, finished ones for a time.
+    public struct InsightsModelFigure: Codable, Equatable, Sendable {
+        public let label: String
+        public let sessions: Int
+        public let edits: Int?
+        public let figure: InsightsModelFigureValue
+        /// Shown beside a rejection figure, never added to it.
+        public let interruptsPerSessionPermille: Int?
+        /// On a `docs_cost` figure only: this model's traces through NEAR AI.
+        public let nearAiCharge: InsightsNearAiCharge?
+        /// On a rejection figure only, and only when the person gave one of
+        /// this model's traces in the row an outcome; the same figure as
+        /// the row's `keptByModel` entry for this label.
+        public let kept: InsightsKeptFigure?
+
+        public enum CodingKeys: String, CodingKey {
+            case label, sessions, edits, figure, kept
+            case interruptsPerSessionPermille = "interrupts_per_session_permille"
+            case nearAiCharge = "near_ai_charge"
+        }
+    }
+
+    /// `{kind: "rate_permille", value}`, `{kind: "usd_micros", value}` or
+    /// `{kind: "finish_time", median_active_secs, median_user_turns}`. A
+    /// kind this build does not know is drawn as the dash.
+    public struct InsightsModelFigureValue: Codable, Equatable, Sendable {
+        public let kind: String
+        public let value: UInt64?
+        public let medianActiveSecs: UInt64?
+        public let medianUserTurns: UInt64?
+
+        public init(kind: String, value: UInt64? = nil, medianActiveSecs: UInt64? = nil,
+                    medianUserTurns: UInt64? = nil) {
+            self.kind = kind; self.value = value
+            self.medianActiveSecs = medianActiveSecs; self.medianUserTurns = medianUserTurns
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case kind, value
+            case medianActiveSecs = "median_active_secs"
+            case medianUserTurns = "median_user_turns"
+        }
+    }
+
+    /// What NEAR AI charged, from the proxy ledger (`basis:
+    /// near_ai_ledger`): the median per trace over the traces with a known
+    /// charge, `nil` when none is known, never zero.
+    public struct InsightsNearAiCharge: Codable, Equatable, Sendable {
+        public let basis: String
+        public let median: InsightsModelFigureValue?
+        public let routedSessions: Int
+        public let chargeUnknown: Int
+
+        public enum CodingKeys: String, CodingKey {
+            case basis, median
+            case routedSessions = "routed_sessions"
+            case chargeUnknown = "charge_unknown"
+        }
+    }
+
+    /// `[label, sessions]`, as the daemon sends a pair.
+    public struct InsightsModelCount: Codable, Equatable, Sendable {
+        public let label: String
+        public let sessions: Int
+
+        public init(label: String, sessions: Int) {
+            self.label = label; self.sessions = sessions
+        }
+
+        public init(from decoder: Decoder) throws {
+            var pair = try decoder.unkeyedContainer()
+            label = try pair.decode(String.self)
+            sessions = try pair.decode(Int.self)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var pair = encoder.unkeyedContainer()
+            try pair.encode(label)
+            try pair.encode(sessions)
+        }
+    }
+
+    /// The traces left out of one answer, per reason.
+    public struct InsightsModelLeftOut: Codable, Equatable, Sendable {
+        public let unknownFacts: Int
+        public let automated: Int
+        public let delegated: Int
+        public let capped: Int
+        public let routed: Int
+        public let reviewer: Int
+        public let noMajority: Int
+        public let unpriced: Int
+        /// Absent from a daemon before the shared-type comparison: read as 0.
+        public let tooFewSessions: Int?
+        public let tooFewEdits: Int
+        public let mixTooDifferent: Int
+
+        /// Every reason by its wire name, in the daemon's order.
+        public var reasons: [(reason: String, sessions: Int)] {
+            [("unknown_facts", unknownFacts), ("automated", automated), ("delegated", delegated),
+             ("capped", capped), ("routed", routed), ("reviewer", reviewer), ("no_majority", noMajority),
+             ("unpriced", unpriced), ("too_few_sessions", tooFewSessions ?? 0), ("too_few_edits", tooFewEdits),
+             ("mix_too_different", mixTooDifferent)]
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case automated, delegated, capped, routed, reviewer, unpriced
+            case unknownFacts = "unknown_facts"
+            case noMajority = "no_majority"
+            case tooFewSessions = "too_few_sessions"
+            case tooFewEdits = "too_few_edits"
+            case mixTooDifferent = "mix_too_different"
+        }
     }
 
     /// `insights_glance`: today's routed calls per tool from the proxy ledger
@@ -2330,10 +2827,12 @@ extension DaemonData {
         public let tokens: Int64
     }
 
-    /// One counted session. No reference to it crosses: no id, digest or
-    /// path.
+    /// One counted session, with optional local display metadata. The
+    /// reference is the same opaque counter reference used by Sessions.
     public struct InsightsWeekSession: Codable, Equatable, Sendable {
         public let source: String?
+        public let folder: String?
+        public let sessionRef: String?
         /// The transcript's count; `nil` is unknown, never zero.
         public let tokens: Int64?
         public let state: String
@@ -2341,13 +2840,22 @@ extension DaemonData {
         /// The transcript's first recorded event, RFC 3339; `nil` when it
         /// has none, or from a daemon that predates it.
         public let startedAt: String?
+        /// Latest recorded activity, not proof that the session has ended.
+        public let lastEventAt: String?
         /// Where its calls went, from the proxy's record; `nil` while
         /// `routingAvailable` is not true.
         public let routing: InsightsWeekRouting?
+        /// Claude Code only: the session's tokens on each day of the week,
+        /// Monday first, summing to the week's `byDay`. `nil` for Codex, for
+        /// an unknown figure, and from a daemon that predates it.
+        public let byDay: [Int64]?
 
         public enum CodingKeys: String, CodingKey {
-            case source, tokens, state, reasons, routing
+            case source, tokens, state, reasons, routing, folder
+            case sessionRef = "session_ref"
             case startedAt = "started_at"
+            case lastEventAt = "last_event_at"
+            case byDay = "by_day"
         }
     }
 

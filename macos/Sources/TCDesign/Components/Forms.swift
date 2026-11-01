@@ -32,13 +32,7 @@ public struct GlassSelect<Value: Hashable>: View {
     public var body: some View {
         let current = Self.current(selection, in: options)
         Menu {
-            Picker(label, selection: $selection) {
-                ForEach(options) { option in
-                    Text(option.title).tag(option.value)
-                }
-            }
-            .pickerStyle(.inline)
-            .labelsHidden()
+            GlassMenuChoices(options, chosen: selection) { selection = $0 }
         } label: {
             GlassPickerPill(title: current?.title ?? "", dot: current?.dot, invalid: invalid, trailing: 10)
         }
@@ -48,6 +42,33 @@ public struct GlassSelect<Value: Hashable>: View {
         .fixedSize()
         .accessibilityLabel(label)
         .accessibilityValue(current?.title ?? "")
+    }
+}
+
+/// A menu's choices, with one check mark beside the chosen one (owner,
+/// 2026-10-20: an inline `Picker` in a `Menu` drew two). Each is a toggle
+/// that can only be turned on, so choosing the chosen one again keeps it.
+struct GlassMenuChoices<Value: Hashable>: View {
+    let options: [GlassPickerOption<Value>]
+    let chosen: Value?
+    let choose: (Value) -> Void
+
+    init(_ options: [GlassPickerOption<Value>], chosen: Value?, choose: @escaping (Value) -> Void) {
+        self.options = options
+        self.chosen = chosen
+        self.choose = choose
+    }
+
+    /// The toggle's binding for one option: on when it is chosen; turning
+    /// it on chooses it, turning it off does nothing.
+    static func isOn(_ value: Value, chosen: Value?, choose: @escaping (Value) -> Void) -> Binding<Bool> {
+        Binding(get: { chosen == value }, set: { if $0 { choose(value) } })
+    }
+
+    var body: some View {
+        ForEach(options) { option in
+            Toggle(option.title, isOn: Self.isOn(option.value, chosen: chosen, choose: choose))
+        }
     }
 }
 

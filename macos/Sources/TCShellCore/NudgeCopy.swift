@@ -50,6 +50,11 @@ public struct NudgeCopy: Equatable, Sendable {
         case settlementEstimateExplainer = "SETTLEMENT_ESTIMATE_EXPLAINER"
         case settingSettlementEstimate = "SETTING_SETTLEMENT_ESTIMATE"
         case settingSettlementEstimateHelp = "SETTING_SETTLEMENT_ESTIMATE_HELP"
+        case notifyNearAiCreditTitle = "NOTIFY_NEAR_AI_CREDIT_TITLE"
+        case notifyNearAiCreditBody = "NOTIFY_NEAR_AI_CREDIT_BODY"
+        case notifyNearAiCreditActionView = "NOTIFY_NEAR_AI_CREDIT_ACTION_VIEW"
+        case notifyNearAiCreditActionNotNow = "NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW"
+        case settingNotifyNearAiCredit = "SETTING_NOTIFY_NEAR_AI_CREDIT"
     }
 
     public let table: [String: String]
@@ -183,7 +188,7 @@ public enum NudgeSettings {
 
     /// The `notify` kinds drawn, in order. `weekly_recap` and
     /// `insights_tip` are held and left out.
-    public static let shownKinds = ["digest", "verdicts_landed", "idle_sessions"]
+    public static let shownKinds = ["digest", "verdicts_landed", "idle_sessions", "near_ai_credit"]
 
     /// The `set_settings` key that clears a kind's offer marker; nil for a
     /// kind with no offer.
@@ -226,6 +231,9 @@ public enum NudgeSettings {
             case "idle_sessions":
                 add(.notify(kind), .settingNotifyIdle, help: copy[.settingNotifyIdleHelp],
                     value: settings.notify?.idleSessions, enabled: master)
+            case "near_ai_credit":
+                add(.notify(kind), .settingNotifyNearAiCredit, help: nil,
+                    value: settings.notify?.nearAiCredit, enabled: master)
             default:
                 break
             }

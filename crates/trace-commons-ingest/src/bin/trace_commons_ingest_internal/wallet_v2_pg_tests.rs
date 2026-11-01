@@ -423,17 +423,17 @@ async fn wallet_v2_signed_completion_and_refusal_boundaries() {
         capabilities["inference_connection_selection_required"],
         true
     );
-    for absent in [
-        "witness",
-        "issuer_url",
-        "audience",
-        "inference_receipt_endpoint",
-    ] {
+    // No witness material, ever. The issuer and audience are published once
+    // a v2 ceremony is ready (#1574 review, H1); the receipt endpoint only
+    // when one is configured, and this fixture configures none.
+    for absent in ["witness", "inference_receipt_endpoint"] {
         assert!(
             capabilities.get(absent).is_none(),
             "capabilities leaked {absent}"
         );
     }
+    assert!(capabilities["issuer_url"].is_string());
+    assert!(capabilities["audience"].is_string());
 
     let (status, _) = request(
         &state,

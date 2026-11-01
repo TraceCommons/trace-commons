@@ -239,7 +239,9 @@ mod tests {
             let snapshot = gtk::Snapshot::new();
             paintable.snapshot(&snapshot, window.width() as f64, window.height() as f64);
             let node = snapshot.to_node().expect("render node");
-            let renderer = gtk::gsk::Renderer::for_surface(&window.surface()).expect("renderer");
+            let renderer =
+                gtk::gsk::Renderer::for_surface(&window.surface().expect("window surface"))
+                    .expect("renderer");
             renderer
                 .render_texture(&node, None)
                 .save_to_png(path)

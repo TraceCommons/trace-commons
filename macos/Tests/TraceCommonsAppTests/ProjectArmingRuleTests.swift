@@ -33,6 +33,7 @@ final class ProjectArmingRuleTests: XCTestCase {
 
     /// Never with sessions waiting asks in the core's words; with none
     /// waiting, or the same mode, it is a direct call or nothing.
+    @MainActor
     func test_neverAsksOnlyWhenSessionsWait() throws {
         XCTAssertFalse(Self.source.contains("ProjectCopy.modeChoiceLabel"))
         let waiting = ProjectRow(projectId: "p", projectLabel: "api", projectPath: "/x", mode: .ask, pendingCount: 2)

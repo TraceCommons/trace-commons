@@ -18,12 +18,10 @@ use std::path::Path;
 use trace_commons_contributor::config::ConfigStore;
 use trace_commons_contributor::identity::DeviceIdentity;
 
-/// Production service names. A test build must never create an item under
-/// either.
-const PRODUCTION_SERVICES: [&str; 2] = [
-    "trace-commons.account.credentials",
-    "trace-commons.near-ai.credentials",
-];
+/// The service names of this build's channel (production's in a default
+/// build, staging's in a `near-ai-staging` build). A test build must never
+/// create an item under any of them.
+const CHANNEL_SERVICES: [&str; 4] = trace_commons_contributor::channel::KEYCHAIN.services();
 
 /// The storage key the device-key record points at (`cloud-v1-<simple uuid>`),
 /// read from the record file the credential store leaves in the config dir.
@@ -56,14 +54,14 @@ fn in_login_keychain(service: &str, account: &str) -> bool {
 
 fn assert_not_in_os_store(_account: &str) {
     #[cfg(target_os = "macos")]
-    for service in PRODUCTION_SERVICES {
+    for service in CHANNEL_SERVICES {
         assert!(
             !in_login_keychain(service, _account),
             "a test wrote the real login keychain: service {service}, account {_account}"
         );
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = PRODUCTION_SERVICES;
+    let _ = CHANNEL_SERVICES;
 }
 
 fn assert_in_test_store(dir: &Path, account: &str) {

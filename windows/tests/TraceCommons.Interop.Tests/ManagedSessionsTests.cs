@@ -161,10 +161,10 @@ public sealed class ManagedSessionsTests
     [Fact]
     public void SignInSurfacePicksCoreKeys()
     {
-        const string line = "Uses your NEAR AI sign-in. Runs in {destination}, in the folder you choose.";
-        Assert.Equal("Uses your NEAR AI sign-in. Runs in Windows Terminal, in the folder you choose.",
+        const string line = "Uses your NEAR AI sign-in.";
+        Assert.Equal("Uses your NEAR AI sign-in.",
             ManagedSignIn.Scope(line, "Windows Terminal", "your terminal"));
-        Assert.Equal("Uses your NEAR AI sign-in. Runs in your terminal, in the folder you choose.",
+        Assert.Equal("Uses your NEAR AI sign-in.",
             ManagedSignIn.Scope(line, null, "your terminal"));
         Assert.Equal("start_claude", ManagedSignIn.StartKey("claude"));
         Assert.Equal("start_codex", ManagedSignIn.StartKey("codex"));
@@ -172,6 +172,8 @@ public sealed class ManagedSessionsTests
         Assert.Equal(["subscription", "api_key"], ManagedSignIn.ConnectionOptions(true));
         Assert.Equal(["subscription", "api_key", "near_ai"], ManagedSignIn.ConnectionOptions(false));
         Assert.Equal("sign_in_needed", ManagedSignIn.ErrorKey("managed-near-ai-sign-in-required"));
+        Assert.Equal("balance_too_low", ManagedSignIn.ErrorKey("managed-near-ai-balance-too-low"));
+        Assert.Equal("project_chooses_model", ManagedSignIn.ErrorKey("managed-project-chooses-model"));
         Assert.Equal("action_failed", ManagedSignIn.ErrorKey("managed-conflict"));
         Assert.Equal("action_failed", ManagedSignIn.ErrorKey(null));
         Assert.Equal("terminal_not_found", ManagedSignIn.ErrorKey("managed-terminal-not-found"));

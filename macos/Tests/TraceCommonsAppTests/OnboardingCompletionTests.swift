@@ -125,4 +125,87 @@ final class OnboardingCompletionTests: XCTestCase {
         model.setStartupForTesting(.needsRoots)
         XCTAssertTrue(model.requiresOnboarding)
     }
+
+    private func decodedStatus(tenantID: String?, loggedIn: Bool = true, setupComplete: Any? = nil) throws -> DaemonStatus {
+        var object: [String: Any] = ["logged_in": loggedIn]
+        object["tenant_id"] = tenantID.map { $0 as Any } ?? NSNull()
+        if let setupComplete { object["setup_complete"] = setupComplete }
+        return try JSONDecoder().decode(DaemonStatus.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+
+    @MainActor
+    func testCLICompletionOpensTheMainWindowWithoutWritingALegacyMarker() throws {
+        let model = AppModel()
+        model.setStartupForTesting(.running)
+        model.setStatusForTesting(try decodedStatus(tenantID: tenant, setupComplete: true))
+
+        XCTAssertTrue(model.isOnboardingComplete)
+        XCTAssertFalse(model.requiresOnboarding)
+        XCTAssertFalse(OnboardingNavigation.hostsFirstRun(startup: .running, requiresOnboarding: model.requiresOnboarding, entered: true))
+        XCTAssertEqual(LaunchRouting.window(for: .home(.overview), startup: .running, requiresOnboarding: model.requiresOnboarding, onboardingKnown: true), .monitor)
+        XCTAssertNil(UserDefaults.standard.object(forKey: "trace_commons.onboarding_complete.\(tenant)"))
+    }
+
+    @MainActor
+    func testACompletionStatusUpdatePublishesAndReleasesFirstRun() throws {
+        let model = AppModel()
+        model.setStartupForTesting(.running)
+        model.setStatusForTesting(try decodedStatus(tenantID: tenant, setupComplete: false))
+        XCTAssertTrue(model.requiresOnboarding)
+        var notifications = 0
+        model.objectWillChange.sink { _ in notifications += 1 }.store(in: &cancellables)
+
+        model.setStatusForTesting(try decodedStatus(tenantID: tenant, setupComplete: true))
+
+        XCTAssertGreaterThan(notifications, 0)
+        XCTAssertFalse(model.requiresOnboarding)
+        XCTAssertFalse(OnboardingNavigation.hostsFirstRun(startup: .running, requiresOnboarding: model.requiresOnboarding, entered: true))
+    }
+
+    @MainActor
+    func testCLICompletionIsNotCachedAcrossAccountsOrLaterStatus() throws {
+        let model = AppModel()
+        model.setStartupForTesting(.running)
+        model.setStatusForTesting(try decodedStatus(tenantID: tenant, setupComplete: true))
+        XCTAssertFalse(model.requiresOnboarding)
+
+        model.setStatusForTesting(try decodedStatus(tenantID: tenant, setupComplete: false))
+        XCTAssertTrue(model.requiresOnboarding, "a shared completion must not be copied into UserDefaults")
+        model.setStatusForTesting(try decodedStatus(tenantID: "another-\(tenant)"))
+        XCTAssertTrue(model.requiresOnboarding)
+    }
+
+    @MainActor
+    func testSharedCompletionCannotBypassSignInMissingTenantOrRoots() throws {
+        let model = AppModel()
+        model.setStartupForTesting(.running)
+        model.setStatusForTesting(try decodedStatus(tenantID: nil, setupComplete: true))
+        XCTAssertFalse(model.isOnboardingComplete)
+        XCTAssertTrue(model.requiresOnboarding)
+
+        model.setStatusForTesting(try decodedStatus(tenantID: "", setupComplete: true))
+        XCTAssertFalse(model.isOnboardingComplete)
+        XCTAssertTrue(model.requiresOnboarding)
+
+        model.setStatusForTesting(try decodedStatus(tenantID: tenant, loggedIn: false, setupComplete: true))
+        XCTAssertTrue(model.requiresOnboarding, "completion does not prove an active enrollment")
+        model.setStatusForTesting(try decodedStatus(tenantID: tenant, setupComplete: true))
+        model.setStartupForTesting(.needsRoots)
+        XCTAssertTrue(model.requiresOnboarding)
+    }
+
+    @MainActor
+    func testOlderDaemonAndSharedFalsePreserveTheGUICompletionMarker() throws {
+        let model = enrolledModel(tenantID: tenant)
+        model.setStartupForTesting(.running)
+        XCTAssertTrue(model.requiresOnboarding)
+        model.markOnboardingComplete()
+        let flags: [Any?] = [nil, NSNull(), false]
+        for flag in flags {
+            model.setStatusForTesting(try decodedStatus(tenantID: tenant, setupComplete: flag))
+            XCTAssertTrue(model.isOnboardingComplete)
+            XCTAssertFalse(model.requiresOnboarding)
+        }
+    }
+
 }

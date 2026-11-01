@@ -98,6 +98,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueueTimer _visibilityDebounceTimer;
 
     private OnboardingWindow? _onboarding;
+    private OnboardingWindow? _automaticOnboarding;
     private readonly PendingInviteActivation _redirectedInvite = new();
     private bool _activationDaemonAvailable;
     private bool _activationReady;
@@ -474,6 +475,18 @@ public sealed partial class MainWindow : Window
 
     private async void OnTrayWorthyChange()
     {
+        // CLI setup may finish while the first-run window is already open.
+        // Explicit health/invite flows remain under the contributor's control.
+        if (_automaticOnboarding is { } onboarding)
+        {
+            var response = await _host.CallAsync(DaemonProtocol.Methods.Status).ConfigureAwait(true);
+            if (ReferenceEquals(_automaticOnboarding, onboarding)
+                && OnboardingState.HasSharedCompletion(response.ResultAs<DaemonStatus>()))
+            {
+                _automaticOnboarding = null;
+                onboarding.Close();
+            }
+        }
         await RefreshTrayAsync();
     }
 
@@ -523,10 +536,13 @@ public sealed partial class MainWindow : Window
 
         // The contributed labels come off the frame, not off ViewModel.Pending:
         // an armed project's traces were never in that list.
-        if (DigestText.ContributionLine(
+        // The core's own sentence when the daemon sent one (its credit wording
+        // and rounding are the core's alone); a daemon that predates the
+        // field gets the older pending-only sentence built here.
+        if ((facts.Contribution ?? DigestText.ContributionLine(
                 facts.ContributedCount,
                 facts.ContributedProjects,
-                facts.CreditPending) is { } contributed)
+                facts.CreditPending)) is { } contributed)
         {
             lines.Add(contributed);
         }
@@ -621,15 +637,21 @@ public sealed partial class MainWindow : Window
         onboarding.Activate();
     }
 
-    private OnboardingWindow OpenOnboarding(OnboardingState state)
+    private OnboardingWindow OpenOnboarding(OnboardingState state, bool automatic = false)
     {
-        if (_onboarding is not null) return _onboarding;
+        if (_onboarding is not null)
+        {
+            if (!automatic) _automaticOnboarding = null;
+            return _onboarding;
+        }
         var onboarding = new OnboardingWindow(_host, state);
         _onboarding = onboarding;
+        _automaticOnboarding = automatic ? onboarding : null;
         onboarding.Closed += async (_, _) =>
         {
             await onboarding.CloseCompletion;
             if (ReferenceEquals(_onboarding, onboarding)) _onboarding = null;
+            if (ReferenceEquals(_automaticOnboarding, onboarding)) _automaticOnboarding = null;
             DispatcherQueue.TryEnqueue(OfferNextRedirectedInvite);
         };
         return onboarding;
@@ -654,7 +676,8 @@ public sealed partial class MainWindow : Window
     /// quit mid flow into this window carrying enroll's floor only scope
     /// default: silently narrower consent than the one they were in the
     /// middle of choosing. OnboardingState records the end of the flow, per
-    /// tenant, and that is what is asked here.
+    /// tenant. The daemon can also attest that CLI setup finished for the
+    /// current enrollment; that proof is used without persisting a GUI marker.
     ///
     /// Both halves of the question are the daemon's to answer, so this runs
     /// after the first status read rather than in the constructor.
@@ -689,26 +712,12 @@ public sealed partial class MainWindow : Window
 
         _activationReady = true;
         _activationDaemonAvailable = true;
-        string? tenantId = null;
-        bool loggedIn = false;
-        if (status.Result is JsonElement element)
-        {
-            if (element.TryGetProperty("tenant_id", out JsonElement tenant)
-                && tenant.ValueKind == JsonValueKind.String)
-            {
-                tenantId = tenant.GetString();
-            }
-
-            loggedIn = element.TryGetProperty("logged_in", out JsonElement flag)
-                       && flag.ValueKind == JsonValueKind.True;
-        }
-
-        if (loggedIn && state.IsComplete(tenantId))
+        if (state.IsSetupComplete(status.ResultAs<DaemonStatus>()))
         {
             return;
         }
 
-        var onboarding = OpenOnboarding(state);
+        var onboarding = OpenOnboarding(state, automatic: App.PendingInvite is null);
         if (App.PendingInvite is string invite)
         {
             onboarding.OfferInvite(invite);

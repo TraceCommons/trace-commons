@@ -2,14 +2,16 @@ import SwiftUI
 import TCBridge
 import TCDesign
 import TCShellCore
+import TCUpdates
 
 /// The menu-bar popover (R13 of #1173), from the "Menu bar item and
-/// popover" handoff, as the owner reshaped it on 2026-10-19: a top row with
-/// the traces worth a second look on the left and Watching, Settings and
-/// Quit as icon buttons on the right; the suggestion and the estimate; the
-/// NEAR AI tools, one button each, for a quick Private AI session; the
-/// shared/kept legend and day graph; and the way into the app. It is the
-/// app's only menu-bar item, in every build.
+/// popover" handoff, as the owner reshaped it on 2026-10-19 and
+/// 2026-10-22: a top row with the NEAR AI wordmark on the left and
+/// Watching, Settings and Quit as icon buttons on the right; Private AI,
+/// with the NEAR AI tools, one button each, for a quick Private AI session;
+/// the suggestion and the estimate; the
+/// shared/kept legend and the app's bar graph; and the way into the app.
+/// It is the app's only menu-bar item, in every build.
 ///
 /// The handoff's rules hold here:
 /// - Nothing is sent from the popover. Its one write is pausing and
@@ -21,22 +23,27 @@ import TCShellCore
 struct MenuBarGlassPanel: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    /// Whether the popover offers a manual update check, and whether it can
+    /// run now.
+    @ObservedObject private var updates = UpdateController.shared
     let navigation: MainWindowNavigation
     let store: MenuPanelStore
     /// Whether the panel draws its own glass. Inside `MenuBarExtra` the
     /// system window already carries its material, and a second layer of
     /// glass on it is glass on glass (R14); the preview window has none.
     var ownsSurface = false
+    /// The graph's bar under the pointer, whose day the legend counts.
+    @State private var hovered: String?
 
-    static let width: CGFloat = 380
+    /// A quarter narrower than the handoff's 380 (owner, 2026-10-21).
+    static let width: CGFloat = 285
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             topRow
+            privateAI
             nudgeRow
             settlementRow
-            tools
-            legend
             graph
             glance
             menuItems
@@ -56,25 +63,17 @@ struct MenuBarGlassPanel: View {
 
     // MARK: Top row
 
-    /// The traces worth a second look, first (owner, 2026-10-19: moved to
-    /// the top; the core's approved heading is kept), then Watching,
+    /// The NEAR AI wordmark in the top left corner (owner, 2026-10-22),
+    /// its "near" starting where the rows' words do, then Watching,
     /// Settings and Quit as icon buttons in the top right corner. Watching
     /// is a dropdown menu of its pause choices, or Resume.
     private var topRow: some View {
-        HStack(spacing: GlassTokens.Space.s3) {
-            Button { open(.traces(entryId: nil)) } label: {
-                HStack {
-                    Text("\(MenuWords.flagged) · \(MenuPanelData.countWord(store.flaggedCount, unknown: MonitorWords.unknown))")
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
-                }
-            }
-            .buttonStyle(GlassMenuRowStyle())
-            .padding(.vertical, -GlassTokens.Space.s2)
-            GlassRoundMenu(MonitorWords.watching, systemImage: paused ? "eye.slash" : "eye") { watchItems }
-                .accessibilityValue(watchValue)
-                .disabled(watchState == .coreDown || watchState == .loading)
+        HStack(spacing: GlassTokens.Space.s2) {
+            GlassNearWordmark()
+                .frame(height: Self.wordmarkHeight)
+                .padding(.leading, GlassTokens.Space.s4)
+            Spacer(minLength: GlassTokens.Space.s4)
+            WatchingMenuButton()
             GlassRoundButton(MonitorWords.table?.settingsTitle ?? MenuWords.settings, icon: .glyph(.gear)) {
                 NSApp.activate(ignoringOtherApps: true)
                 navigation.requestSettings()
@@ -84,93 +83,69 @@ struct MenuBarGlassPanel: View {
         }
     }
 
-    private var paused: Bool { watchState == .paused }
+    /// The wordmark's height: about 85pt wide, past the brand kit's 72px
+    /// floor for the wordmark, and shorter than the icon buttons beside it.
+    static let wordmarkHeight: CGFloat = 16
 
-    /// Watching's state (the stack-wide ScreenState rule): a core that is
-    /// not running is core down, and never reads as On.
-    private var watchState: ScreenState {
-        switch model.startup {
-        case .running:
-            return ScreenState.resolve(failure: nil, loaded: true, paused: model.status.paused, known: true)
-        case .starting:
-            return .loading
-        default:
-            return .coreDown
-        }
-    }
+    // MARK: Private AI
 
-    private var watchValue: String {
-        switch watchState {
-        case .ready: MenuWords.on
-        case .paused: MonitorWords.paused
-        case .coreDown, .loading, .unknown: "—"
-        }
-    }
-
-    /// Watching's dropdown (owner, 2026-10-19: a traditional menu, not a
-    /// list sliding open in the panel): under its name, the pause choices
-    /// (`MenuBarWords`) while watching, or Resume while paused.
+    /// Private AI, just under the top row (owner, 2026-10-22): its name
+    /// with On or Off beside it, over the NEAR AI tools, one button each,
+    /// for a quick Private AI session (owner, 2026-10-19). Drawn only while
+    /// signed in to NEAR AI, and only with the core's words for its name.
+    /// The buttons are drawn only while a tool can be started
+    /// (`ManagedSessionsSection.toolArea`); a button opens the Private AI
+    /// tab at that tool's launch dialog.
     @ViewBuilder
-    private var watchItems: some View {
-        Section(MonitorWords.watching) {
-            if paused {
-                Button(MenuBarWords.resume) { model.resume() }
-            } else {
-                ForEach(Array([MenuBarWords.pauseHour, MenuBarWords.pauseMorning,
-                               MenuBarWords.pauseIndefinite].enumerated()), id: \.offset) { index, label in
-                    Button(label) { model.pause(until: MenuBarWords.pauseUntil(index)) }
-                }
-            }
-        }
-    }
-
-    // MARK: Tools
-
-    /// The NEAR AI tools, one button each, above the graph (owner,
-    /// 2026-10-19: quick Private AI sessions). Drawn only while signed in
-    /// to NEAR AI with a terminal to start in. A button opens the Private
-    /// AI tab at that tool's launch dialog.
-    @ViewBuilder
-    private var tools: some View {
-        if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn, snapshot.capabilities.terminalLaunch,
-           !snapshot.signInStartTools.isEmpty
+    private var privateAI: some View {
+        if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn,
+           let name = model.privateInferenceCopy?.destination
         {
-            HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
-                ForEach(snapshot.signInStartTools, id: \.self) { tool in
-                    ManagedToolButton(tool: tool) {
-                        model.pendingManagedLaunch = tool
-                        open(.inference)
+            GlassEyebrowCard(name, accessory: {
+                PrivateAIStatusLabel { open(.settings(.privateAI)) }
+            }, content: {
+                if MenuPanelStatus.showsToolButtons(snapshot) {
+                    HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
+                        ForEach(snapshot.signInStartTools, id: \.self) { tool in
+                            ManagedToolButton(tool: tool) {
+                                model.pendingManagedLaunch = tool
+                                open(.inference)
+                            }
+                        }
                     }
+                    .disabled(model.managedBusy)
                 }
-            }
-            .disabled(model.managedBusy)
+            })
         }
     }
 
     // MARK: Legend and graph
 
-    /// Shared and kept, each from its own read (`store.sharedCount`,
-    /// `store.keptCount`). A count that is not current is the core's
-    /// unknown word, never the last count and never a bare dash.
-    private var sharedValue: String { MenuPanelData.countWord(store.sharedCount, unknown: MonitorWords.unknown) }
-    private var keptValue: String { MenuPanelData.countWord(store.keptCount, unknown: MonitorWords.unknown) }
-
-    private var legend: some View {
-        HStack(spacing: GlassTokens.Space.s3) {
-            GlassLegendCell(MenuWords.shared, value: sharedValue, status: .shared)
-            GlassLegendCell(MenuWords.kept, value: keptValue, status: .kept)
-        }
-    }
-
+    /// The shared and kept legend over the app's bar graph (owner,
+    /// 2026-10-22: the popover's graph matches the app's), as the edge
+    /// rail's Traces peek draws them: the Traces graph's days, counted as
+    /// it counts them, in its compact form for the narrower panel. The
+    /// legend counts the graph's days, or the day under the pointer. Each
+    /// count comes from its own read (`store.sharedCount`,
+    /// `store.keptCount`); one that is not current is the core's unknown
+    /// word, never the last count and never a bare dash.
     private var graph: some View {
-        let start = Calendar.current.date(byAdding: .day, value: -(MenuPanelData.days - 1), to: Date()) ?? Date()
-        return GlassDayGraph(
-            columns: store.columns, paused: paused || !store.columnsCurrent,
-            summary: "\(MenuWords.shared) \(sharedValue) · \(MenuWords.kept) \(keptValue)",
-            sharedChip: sharedValue,
-            keptChip: keptValue,
-            leading: start.formatted(.dateTime.month(.abbreviated).day()),
-            trailing: Date().formatted(.dateTime.month(.abbreviated).day()))
+        let buckets = store.buckets
+        let shown = buckets.first { $0.start.formatted(.iso8601) == hovered }
+        let shared = store.sharedCount.map { shown?.shared ?? $0 }
+        let kept = store.keptCount.map { shown?.kept ?? $0 }
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassLegendCell(MenuWords.shared, value: MenuPanelData.countWord(shared, unknown: MonitorWords.unknown),
+                                status: .shared)
+                GlassLegendCell(MenuWords.kept, value: MenuPanelData.countWord(kept, unknown: MonitorWords.unknown),
+                                status: .kept)
+            }
+            GlassBarGraph(
+                MenuPanelData.bars(buckets, words: MonitorShellWords.graphWords),
+                scaleFloor: 5, compact: true, hovered: $hovered)
+                .frame(height: EdgeRailGraph.height)
+        }
     }
 
     // MARK: Glance
@@ -260,6 +235,16 @@ struct MenuBarGlassPanel: View {
             // Settings and Quit are icon buttons in the top row, and
             // Manage rules is gone (owner, 2026-10-19).
             Button(MenuWords.openApp) { open(nil) }
+            // Only where Sparkle runs; Homebrew-managed and other modes have
+            // no updater (owner, 2026-10-29). Sparkle's window belongs to a
+            // menu-bar app that is not frontmost, so raise the app first.
+            if updates.mode == .selfUpdating, let title = MenuWords.checkForUpdates {
+                Button(title) {
+                    NSApp.activate(ignoringOtherApps: true)
+                    updates.checkNow()
+                }
+                .disabled(!updates.canCheckNow)
+            }
         }
         .buttonStyle(GlassMenuRowStyle())
         .padding(.vertical, -GlassTokens.Space.s2)
@@ -277,20 +262,104 @@ struct MenuBarGlassPanel: View {
     }
 }
 
+/// Watching as a round dropdown (owner, 2026-10-19: a traditional menu,
+/// not a list sliding open in the panel): under its name, the pause
+/// choices (`MenuBarWords`) while watching, or Resume while paused. The
+/// menu-bar popover's top row has it, and the edge rail's Traces peek
+/// (owner, 2026-10-22).
+struct WatchingMenuButton: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        GlassRoundMenu(MonitorWords.watching, systemImage: paused ? "eye.slash" : "eye") { watchItems }
+            .accessibilityValue(watchValue)
+            .disabled(watchState == .coreDown || watchState == .loading)
+    }
+
+    private var paused: Bool { watchState == .paused }
+
+    /// Watching's state (the stack-wide ScreenState rule): a core that is
+    /// not running is core down, and never reads as On.
+    private var watchState: ScreenState {
+        switch model.startup {
+        case .running:
+            return ScreenState.resolve(failure: nil, loaded: true, paused: model.status.paused, known: true)
+        case .starting:
+            return .loading
+        default:
+            return .coreDown
+        }
+    }
+
+    private var watchValue: String {
+        switch watchState {
+        case .ready: MenuWords.on
+        case .paused: MonitorWords.paused
+        case .coreDown, .loading, .unknown: "—"
+        }
+    }
+
+    @ViewBuilder
+    private var watchItems: some View {
+        Section(MonitorWords.watching) {
+            if paused {
+                Button(MenuBarWords.resume) { model.resume() }
+            } else {
+                ForEach(Array([MenuBarWords.pauseHour, MenuBarWords.pauseMorning,
+                               MenuBarWords.pauseIndefinite].enumerated()), id: \.offset) { index, label in
+                    Button(label) { model.pause(until: MenuBarWords.pauseUntil(index)) }
+                }
+            }
+        }
+    }
+}
+
+/// Private AI's one word, with its dot (owner, 2026-10-22, 2026-10-28): the
+/// menu-bar popover's Private AI section has it, and the edge rail's
+/// Private AI peek beside its title.
+struct PrivateAIStatusLabel: View {
+    @EnvironmentObject private var model: AppModel
+    /// Where a click goes; nil draws the label alone.
+    var action: (() -> Void)?
+
+    var body: some View {
+        let state = MenuPanelStatus.privateAI(model)
+        let label = GlassStatusLabel(MenuPanelStatus.privateAIValue(state, model: model), status: MenuPanelStatus.privateAIDot(state))
+            .lineLimit(1)
+        let sentence = MenuPanelStatus.privateAISentence(model) ?? ""
+        if let action {
+            Button(action: action) { label }
+                .buttonStyle(.plain)
+                .help(sentence)
+                .accessibilityHint(sentence)
+        } else {
+            label.help(sentence).accessibilityHint(sentence)
+        }
+    }
+}
+
 /// The popover's surface. Inside `MenuBarExtra` it is the app's own pane,
 /// the same glass, veil and gradient as the main window's and the edge
 /// rail's panes (owner, 2026-10-12: one glass spec), with the system
 /// window's own material hidden under it (`MenuBarMaterialMask`), so there
-/// is never glass on glass; and the window's top edge is pinned. The debug
-/// preview window, which has no material, draws the popover tier.
+/// is never glass on glass; and the window is sized and its top edge
+/// pinned by `MenuBarTopEdgePin`, from the content's size measured at its
+/// ideal height (so the window's own size never feeds back into it).
+/// The debug preview window, which has no material, draws the popover tier.
 private struct PanelSurface: ViewModifier {
     let owns: Bool
+    /// The content's size at its ideal height, for the window's frame.
+    @State private var contentSize: CGSize = .zero
 
     func body(content: Content) -> some View {
         if owns {
             content.glassSurface(.popover, radius: GlassTokens.Radius.menuPanel, floating: true)
         } else {
             content
+                // Its ideal height whatever the window's height is: the
+                // window is sized from this, never the other way round.
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGSize.self, of: \.size) { contentSize = $0 }
                 .background {
                     // Full bleed, rounded as the window is.
                     Color.clear
@@ -298,7 +367,9 @@ private struct PanelSurface: ViewModifier {
                         .ignoresSafeArea()
                 }
                 .background(MenuBarMaterialMask().frame(width: 0, height: 0))
-                .background(MenuBarTopEdgePin().frame(width: 0, height: 0))
+                .background(MenuBarTopEdgePin(content: contentSize).frame(width: 0, height: 0))
+                // Names this window in the log when it resizes.
+                .windowBreadcrumb(.menuBarPanel)
         }
     }
 }
@@ -395,25 +466,56 @@ struct MenuBarMaterialMask: NSViewRepresentable {
     }
 }
 
-/// Holds the `MenuBarExtra` window's top edge under the menu bar. An
-/// `NSWindow` that is resized keeps its bottom edge, so opening a pill's
-/// sub-list grew the window upward into the menu bar, where AppKit pushed
-/// it back down, and a panel that shrank (its first read landing, a notice
-/// going) dropped its top edge away from the menu bar. Remembering the top
-/// the window had when it became key was not enough: a shrink before that
-/// left the panel hanging far below the bar (owner, 2026-10-11). The top is
-/// now the menu bar's bottom edge on the window's screen, whenever the
-/// window opens, moves or resizes.
+/// Sizes the `MenuBarExtra` window and holds its top edge under the menu
+/// bar: the one writer of the panel's size.
+///
+/// SwiftUI used to size this window to its content itself, from inside
+/// the window's layout pass (`NSHostingView.updateAnimatedWindowSize`), and
+/// AppKit aborted the app when that kept asking for another pass: the
+/// crash reported from 0.16 to 0.20.4, every report through a borderless
+/// window's frame (`NSNextStepFrame`). The edge rail had the same signature
+/// until #1402 took its sizing away from its hosting view; this does the
+/// same for the panel. The hosting view takes no sizing options or
+/// safe-area insets, and the window is set here, on the next turn, to the
+/// content's measured size (`PanelSurface` measures it with the content at
+/// its ideal height, so it never depends on the window), with its top at
+/// the menu bar's bottom edge. The sizing is taken over on the next turn
+/// too, after SwiftUI has placed and first sized the window. Empty sizing
+/// options do not stop the hosting view's animated resize of its window;
+/// the window drops that (`MenuBarPanelFrame`).
+///
+/// The top: an `NSWindow` that is resized keeps its bottom edge, so a panel
+/// that grew used to rise into the menu bar and one that shrank dropped
+/// away from it (owner, 2026-10-11). The top is the menu bar's bottom edge
+/// on the window's screen, whenever the window opens, moves or resizes.
 struct MenuBarTopEdgePin: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { Pin() }
+    /// The panel content's size, as last measured.
+    let content: CGSize
 
-    func updateNSView(_ view: NSView, context: Context) {}
+    func makeNSView(context: Context) -> NSView {
+        let pin = Pin()
+        pin.content = content
+        return pin
+    }
 
-    /// The origin that puts `frame`'s top edge at `top`, or nil when it is
-    /// already there. Pure, so tested.
-    static func pinnedOrigin(_ frame: CGRect, top: CGFloat?) -> CGPoint? {
-        guard let top, abs(frame.maxY - top) > 0.5 else { return nil }
-        return CGPoint(x: frame.minX, y: top - frame.height)
+    func updateNSView(_ view: NSView, context: Context) {
+        (view as? Pin)?.content = content
+    }
+
+    /// The panel's frame for content of size `content`: that size, the
+    /// leading edge it has, the top at `top` (the top it has while none is
+    /// known), extending downward. Nil when the window is already there, or
+    /// nothing has been measured yet. Computed from the content and the
+    /// menu bar alone, never from the window's own size, so a resize this
+    /// causes settles in one step. Pure, so tested.
+    static func frame(current: CGRect, content: CGSize, top: CGFloat?) -> CGRect? {
+        guard content.width > 0, content.height > 0 else { return nil }
+        let maxY = top ?? current.maxY
+        let target = CGRect(
+            x: current.minX, y: maxY - content.height, width: content.width, height: content.height)
+        if abs(target.width - current.width) < 0.5, abs(target.height - current.height) < 0.5,
+           abs(target.maxY - current.maxY) < 0.5 { return nil }
+        return target
     }
 
     /// The menu bar's bottom edge on a screen: the top of its visible
@@ -424,50 +526,98 @@ struct MenuBarTopEdgePin: NSViewRepresentable {
         visible.maxY < screen.maxY - 0.5 ? visible.maxY : screen.maxY - thickness
     }
 
+    /// Takes the window's sizing away from SwiftUI: the hosting view at
+    /// the root of `view`'s window no longer sizes the window to its
+    /// content, and takes no safe-area insets (#1402's two settings).
+    static func takeOverSizing(from view: NSView) {
+        var current: NSView? = view.superview
+        var outermost: NSView?
+        while let candidate = current {
+            if candidate is HostingWindowSizing { outermost = candidate }
+            current = candidate.superview
+        }
+        guard let sizing = outermost as? HostingWindowSizing else { return }
+        if !sizing.sizingOptions.isEmpty { sizing.sizingOptions = [] }
+        if !sizing.safeAreaRegions.isEmpty { sizing.safeAreaRegions = [] }
+    }
+
     private final class Pin: NSView {
-        private var observers: [NSObjectProtocol] = []
+        private var observers: WindowNotificationObservers?
+        /// A placement already asked for on the next turn.
+        private var scheduled = false
+
+        var content: CGSize = .zero {
+            didSet {
+                if abs(content.width - oldValue.width) >= 0.5 || abs(content.height - oldValue.height) >= 0.5 {
+                    schedule()
+                }
+            }
+        }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            observers.forEach(NotificationCenter.default.removeObserver)
-            observers = []
+            observers = nil
             guard let window else { return }
-            pin(window)
+            schedule()
             let center = NotificationCenter.default
-            for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResizeNotification,
-                         NSWindow.didMoveNotification, NSWindow.didChangeOcclusionStateNotification] {
-                // On the next turn: a resize arrives inside SwiftUI's own
-                // resize of the panel, and moving the window there
+            let tokens = [NSWindow.didBecomeKeyNotification, NSWindow.didResizeNotification,
+                          NSWindow.didMoveNotification, NSWindow.didChangeOcclusionStateNotification].map { name in
+                // On the next turn: a notification can arrive inside a
+                // resize of the window, and setting its frame there
                 // re-enters that layout pass.
-                observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self, weak window] _ in
-                    MainActor.assumeIsolated {
-                        GlassWindowFrame.onNextTurn { [weak self, weak window] in
-                            guard let self, let window, window.isVisible else { return }
-                            self.pin(window)
-                        }
-                    }
-                })
+                center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.schedule() }
+                }
+            }
+            observers = WindowNotificationObservers(center: center, tokens: tokens)
+        }
+
+        /// Places the window on the next turn of the run loop, once however
+        /// many changes ask for it in this one, taking its sizing over from
+        /// SwiftUI first: by then SwiftUI has placed and first sized the
+        /// window, which it does after the content lands in it. From then
+        /// on the window keeps only the sizes placed here.
+        private func schedule() {
+            guard !scheduled else { return }
+            scheduled = true
+            GlassWindowFrame.onNextTurn { [weak self] in
+                guard let self else { return }
+                self.scheduled = false
+                guard let window = self.window else { return }
+                MenuBarTopEdgePin.takeOverSizing(from: self)
+                MenuBarPanelFrame.hold(window)
+                self.place(window)
             }
         }
 
-        private func pin(_ window: NSWindow) {
+        private func place(_ window: NSWindow) {
             guard let screen = window.screen ?? NSScreen.main else { return }
             let top = MenuBarTopEdgePin.menuBarBottom(
                 screen: screen.frame, visible: screen.visibleFrame, thickness: NSStatusBar.system.thickness)
-            if let origin = MenuBarTopEdgePin.pinnedOrigin(window.frame, top: top) {
-                window.setFrameOrigin(origin)
+            if let frame = MenuBarTopEdgePin.frame(current: window.frame, content: content, top: top) {
+                MenuBarPanelFrame.place(frame, in: window)
             }
         }
 
-        deinit {
-            observers.forEach(NotificationCenter.default.removeObserver)
-        }
     }
 }
 
+/// The two settings #1402 turned off on the edge rail's hosting view, on
+/// a hosting view of any content type: the `MenuBarExtra`'s hosting view
+/// is generic over a type SwiftUI does not expose, and this conformance
+/// reaches its settings through a plain `NSView`.
+@MainActor
+protocol HostingWindowSizing: AnyObject {
+    var sizingOptions: NSHostingSizingOptions { get set }
+    var safeAreaRegions: SafeAreaRegions { get set }
+}
 
-/// The menu-bar item in the glass system: the last seven days as a strip,
-/// with the decisions-owed badge. Grey while paused.
+extension NSHostingView: HostingWindowSizing {}
+
+
+/// The menu-bar item in the glass system: the NEAR AI mark and the last 24
+/// hours as paired up-and-down bars (`GlassMenuBarStrip`), with the
+/// decisions-owed badge. Trace bars grey while paused.
 struct MenuBarStripLabel: View {
     @ObservedObject var model: AppModel
     let store: MenuPanelStore
@@ -509,25 +659,57 @@ struct MenuBarStripLabel: View {
     /// The strip as a bitmap. A `MenuBarExtra` label keeps only an `Image`
     /// and a `Text` out of whatever view it is given, so the strip drawn as
     /// a view lost its bars and kept the badge as a bare number. Drawn as a
-    /// non-template image it reaches the menu bar in its own colours.
-    /// Padded past the badge's offset so the badge is not clipped.
+    /// non-template image it reaches the menu bar in its own colours, once
+    /// for a dark bar and once for a light one (`MenuBarItemImage`).
+    /// Exactly the item's height, so the menu bar centres the mark and the
+    /// bars in it, and padded past the badge's halo so it is not clipped.
     /// The condition, badge and nudge mark are the ones `body` speaks, so
     /// the drawn mark and its words never disagree.
     @MainActor
     private func rendered(
         condition: GlassMenuBarStrip.Condition, badge: Int?, mark: GlassMenuBarStrip.Mark
     ) -> NSImage {
-        let renderer = ImageRenderer(content: GlassMenuBarStrip(
-            columns: store.columns,
-            condition: condition,
-            badge: badge,
-            mark: mark)
-            .padding(.trailing, 6)
-            .padding(.bottom, 2))
-        renderer.scale = displayScale
-        let image = renderer.nsImage ?? NSImage()
+        let traces = store.stripTraces
+        let privateAI = store.stripPrivateAI
+        func render(_ scheme: ColorScheme) -> NSImage {
+            let renderer = ImageRenderer(content: GlassMenuBarStrip(
+                traces: traces,
+                privateAI: privateAI,
+                condition: condition,
+                badge: badge,
+                mark: mark)
+                .padding(.trailing, GlassMenuBarStrip.haloReach)
+                .environment(\.colorScheme, scheme))
+            renderer.scale = displayScale
+            return renderer.nsImage ?? NSImage()
+        }
+        return MenuBarItemImage.adaptive(dark: render(.dark), light: render(.light))
+    }
+}
+
+/// The menu-bar item's image, drawn in the menu bar's own appearance.
+enum MenuBarItemImage {
+    /// One image that draws `dark` on a dark menu bar and `light` on a light
+    /// one. Its drawing handler runs each time the item draws, in the
+    /// appearance of the bar it sits on, which is not always the app's: the
+    /// bar follows the wallpaper behind it, so a Mac in Light Mode can show
+    /// a dark bar. Not a template, so the bars keep their colours.
+    static func adaptive(dark: NSImage, light: NSImage) -> NSImage {
+        let image = NSImage(size: dark.size, flipped: false) { rect in
+            (isDark(NSAppearance.currentDrawing()) ? dark : light).draw(in: rect)
+            return true
+        }
         image.isTemplate = false
         return image
+    }
+
+    /// Whether an appearance is a dark one, its vibrant and high-contrast
+    /// forms included.
+    static func isDark(_ appearance: NSAppearance) -> Bool {
+        switch appearance.bestMatch(from: [.aqua, .darkAqua, .vibrantLight, .vibrantDark]) {
+        case .darkAqua?, .vibrantDark?: true
+        default: false
+        }
     }
 }
 
@@ -610,24 +792,76 @@ enum MenuPanelStatus {
         return SettlementLine(text: estimate.text, label: label, action: action)
     }
 
-    /// The Private AI pill's state.
+    /// The Private AI row's state.
     enum PrivateAI: Equatable {
-        /// The core has not said whether the switch is on.
+        /// The core has not said whether the switch is on, or has no word
+        /// for the listener's state.
         case unknown
         case off
-        /// The switch is on and the listener reports clear.
-        case on
-        /// The switch is on but the listener refused, crashed, is stopping
-        /// or reports anything else: never drawn On.
-        case notWorking
+        /// The switch is on: the core's one word for the listener's state
+        /// and the tone of its dot. Only a clear tone is drawn green.
+        case listener(word: String, tone: PrivateInferenceTone)
     }
 
-    /// On only while the switch is on AND the listener's tone is clear
-    /// (`PrivateInferenceIndicator.status`); fail closed otherwise.
-    static func privateAI(on: Bool?, tone: PrivateInferenceTone) -> PrivateAI {
+    /// Off while the switch is off; otherwise the core's word and tone for
+    /// the listener's state, so a switch left on over a dead listener never
+    /// reads On and an On that is not answering is not drawn green.
+    static func privateAI(on: Bool?, menu: (word: String, tone: PrivateInferenceTone)?) -> PrivateAI {
         guard let on else { return .unknown }
         guard on else { return .off }
-        return PrivateInferenceIndicator.status(tone) == .on ? .on : .notWorking
+        guard let menu else { return .unknown }
+        return .listener(word: menu.word, tone: menu.tone)
+    }
+
+    /// Private AI's state: the listener's reported state, never the switch
+    /// alone. A switch the core did not report is unknown, never Off.
+    @MainActor
+    static func privateAI(_ model: AppModel) -> PrivateAI {
+        privateAI(
+            on: model.daemonSettings?.privateInference,
+            menu: PrivateInferenceSurface.menuState(model.privateInferenceState, calls: model.privateInferenceCalls))
+    }
+
+    /// One word, in the core's words (owner, 2026-10-28): the full state
+    /// sentence truncated here and read as an error, so it stays on the
+    /// Private AI page and the dot carries the difference. Unknown is a
+    /// dash, never Off.
+    @MainActor
+    static func privateAIValue(_ state: PrivateAI, model: AppModel) -> String {
+        switch state {
+        case .listener(let word, _): word
+        case .off: MonitorWords.off
+        case .unknown: "—"
+        }
+    }
+
+    /// The dot beside Private AI's word: green only for a clear tone, amber
+    /// for On with something to look at, red for a listener that is not
+    /// working, grey otherwise.
+    static func privateAIDot(_ state: PrivateAI) -> GlassStatus {
+        switch state {
+        case .listener(_, let tone): privateAIDot(tone)
+        case .off, .unknown: .off
+        }
+    }
+
+    static func privateAIDot(_ tone: PrivateInferenceTone) -> GlassStatus {
+        PrivateInferenceIndicator.status(tone)
+    }
+
+    /// The row's full sentence for a tooltip and the accessibility hint:
+    /// the same sentence the Private AI page shows.
+    @MainActor
+    static func privateAISentence(_ model: AppModel) -> String? {
+        guard let copy = model.privateInferenceCopy else { return nil }
+        return PrivateInferenceSurface.stateLine(model.privateInferenceState, copy: copy, calls: model.privateInferenceCalls)
+    }
+
+    /// Whether Private AI's section draws the tool buttons: only while a
+    /// tool can be started, the Private AI tab's own rule
+    /// (`ManagedSessionsSection.toolArea`), and there is one to start.
+    static func showsToolButtons(_ snapshot: ManagedSnapshot) -> Bool {
+        ManagedSessionsSection.toolArea(snapshot) == .buttons && !snapshot.signInStartTools.isEmpty
     }
 }
 
@@ -640,8 +874,8 @@ enum MenuWords {
     static var shared: String { MonitorWords.table?.shared ?? "" }
     static var kept: String { MonitorWords.table?.kept ?? "" }
     static var recentActivity: String { MonitorWords.table?.recentActivity ?? "" }
-    static var flagged: String { MonitorWords.table?.flagged ?? "" }
     static var openApp: String { MonitorWords.table?.openApp ?? "" }
+    static var checkForUpdates: String? { MonitorWords.table?.checkForUpdates }
     static var manageRules: String { MonitorWords.table?.manageRules ?? "" }
     static var settings: String { MonitorWords.table?.settings ?? "" }
     static var quit: String { MonitorWords.table?.quit ?? "" }

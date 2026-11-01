@@ -2,60 +2,94 @@ import SwiftUI
 import TCDesign
 import TCBridge
 import TCShellCore
-import UniformTypeIdentifiers
 
 struct InsightsView: View {
     @State private var model: InsightsModel
-    @State private var comparisonModel: ComparisonTasksModel
-    @State private var specificationModel: ComparisonSpecificationsModel
     @State private var overviewModel: InsightsOverviewModel
     @State private var patternsModel: InsightsPatternsModel
-    @State private var sessionsModel: InsightsSessionsModel
     @State private var comparisonsModel: InsightsComparisonsModel
+    @State private var benchmarksModel: InsightsBenchmarksModel
+    /// Home's figures, for Overview's credit tile; `nil` hides the tile.
+    private let home: HomeStore?
+    @State private var fallbackSubscriptionModel: SubscriptionUsageModel
+    private let sharedSubscriptionModel: SubscriptionUsageModel?
+    private var subscriptionModel: SubscriptionUsageModel { sharedSubscriptionModel ?? fallbackSubscriptionModel }
     @State private var tab: InsightsTab
     /// "Turn off" on the weekly summary card: the daemon's setting, its only
     /// switch. `nil` without a daemon.
     private let turnOffRecapCard: (@Sendable () async throws -> Void)?
     private let storeSelection: InsightsStoreSelection
     private let storeCopy: [String: String]
-    @State private var choosingFile = false
-    @State private var source = "codex"
+    /// Details' drill-down view; a usage card's "By project" opens it on
+    /// By project (product owner, 2026-10-28).
+    @State private var detailsView: InsightsCreditWords.Dimension = .folder
+    /// The NEAR AI payout rail's streams, for the NEAR AI card's own-traces
+    /// and referrals rows (referral spec section 6); `nil` without a daemon.
+    private let payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)?
+    @State private var earnings: [NearAiEarningsSplit.Row] = []
+    /// The Monitor window's inspector, which shows Breakdown's details
+    /// while Breakdown is on screen (owner, 2026-10-29).
+    private let inspector: InsightsBreakdownInspector
+    /// The get-started card's one action: Traces, on its folder list.
+    /// `nil` draws no link.
+    private let openTraces: (() -> Void)?
+    /// The sample under the get-started card, built the first time it is
+    /// drawn (`InsightsSampleModels`); never the person's own models.
+    @State private var sample: InsightsSampleModels?
 
     /// `daemon` is the app's live client, for the week from the daemon's
     /// counter pass (feed T); without one the window shows saved imports.
     @MainActor init(storeSelection: InsightsStoreSelection = .standard,
                     storeCopy: [String: String]? = TCInsights.copy(),
-                    daemon: (any DaemonDataClient)? = nil) {
+                    daemon: (any DaemonDataClient)? = nil,
+                    subscriptions: SubscriptionUsageModel? = nil,
+                    inspector: InsightsBreakdownInspector? = nil,
+                    home: HomeStore? = nil,
+                    payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
+                    openTraces: (() -> Void)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
+        var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
+            { @Sendable refresh, interactive, provider, login in
+                try await client.subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider, login: login)
+            }
+        }
+        var subscriptionWriter: SubscriptionUsageModel.Writer? = daemon.map { client in
+            { @Sendable provider, on in try await client.setSubscriptionUsage(provider: provider, on: on) }
+        }
+        var subscriptions = subscriptions
         var service: InsightsModel.Service = { request in try await router.call(request) }
         var weekReader: InsightsModel.WeekReader? = daemon.map { client in
-            { isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
-        }
-        var watchedReader: InsightsSessionsModel.WatchedReader? = daemon.map { client in
-            { try await client.insightsSessions() }
-        }
-        let watchedDrill: InsightsSessionsModel.WatchedDrillReader? = daemon.map { client in
-            { reference in try await client.insightsSessionDrill(sessionRef: reference) }
+            { @Sendable isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
         }
         #if DEBUG
         // A design review's sample week, in place of the daemon's week and
-        // the store's analytics answers (`InsightsSampleWeek`).
+        // the store's answers (`InsightsSampleWeek`).
         if InsightsSampleWeek.enabled {
             service = InsightsSampleWeek.service(fallback: service)
             weekReader = nil
-            watchedReader = nil
+            subscriptionReader = nil
+            subscriptionWriter = nil
+            subscriptions = nil
         }
         #endif
+        var benchmarks: InsightsBenchmarksModel.Reader? = daemon.map { client in
+            { @Sendable weeks, population in try await client.insightsBenchmarks(weeks: weeks, population: population) }
+        }
+        #if DEBUG
+        if InsightsSampleWeek.enabled { benchmarks = nil }
+        #endif
         let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
-            { _ = try await client.setInsightsRecapCard(false) }
+            { @Sendable in _ = try await client.setInsightsRecapCard(false) }
         }
         self.init(storeSelection: storeSelection, storeCopy: storeCopy,
                   model: InsightsModel(service: service, weekReader: weekReader),
-                  comparisonModel: ComparisonTasksModel(service: service),
-                  specificationModel: ComparisonSpecificationsModel(service: service),
-                  sessionsModel: InsightsSessionsModel(service: service, watchedReader: watchedReader,
-                                                       watchedDrill: watchedDrill),
-                  turnOffRecapCard: turnOff)
+                  turnOffRecapCard: turnOff,
+                  subscriptionModel: subscriptions,
+                  subscriptionFallback: SubscriptionUsageModel(reader: subscriptionReader, writer: subscriptionWriter),
+                  benchmarks: InsightsBenchmarksModel(reader: benchmarks),
+                  inspector: inspector,
+                  home: home,
+                  payoutStreams: payoutStreams, openTraces: openTraces)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -64,31 +98,83 @@ struct InsightsView: View {
     @MainActor init(storeSelection: InsightsStoreSelection,
                     storeCopy: [String: String]?,
                     model: InsightsModel,
-                    comparisonModel: ComparisonTasksModel,
-                    specificationModel: ComparisonSpecificationsModel,
                     overviewModel: InsightsOverviewModel? = nil,
-                    sessionsModel: InsightsSessionsModel? = nil,
                     initialTab: InsightsTab = .overview,
-                    turnOffRecapCard: (@Sendable () async throws -> Void)? = nil) {
+                    turnOffRecapCard: (@Sendable () async throws -> Void)? = nil,
+                    subscriptionModel: SubscriptionUsageModel? = nil,
+                    subscriptionFallback: SubscriptionUsageModel? = nil,
+                    benchmarks: InsightsBenchmarksModel? = nil,
+                    inspector: InsightsBreakdownInspector? = nil,
+                    home: HomeStore? = nil,
+                    payoutStreams: (@Sendable () async -> [PayoutStreamStatus]?)? = nil,
+                    openTraces: (() -> Void)? = nil) {
+        self.inspector = inspector ?? InsightsBreakdownInspector()
+        self.openTraces = openTraces
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
-        _comparisonModel = State(initialValue: comparisonModel)
-        _specificationModel = State(initialValue: specificationModel)
         _overviewModel = State(initialValue: overviewModel ?? InsightsOverviewModel(service: model.service))
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
-        _sessionsModel = State(initialValue: sessionsModel ?? InsightsSessionsModel(service: model.service))
         _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
+        _benchmarksModel = State(initialValue: benchmarks ?? InsightsBenchmarksModel(reader: nil))
+        self.home = home
+        self.sharedSubscriptionModel = subscriptionModel
+        _fallbackSubscriptionModel = State(initialValue: subscriptionFallback ?? SubscriptionUsageModel())
         _tab = State(initialValue: initialTab)
         self.turnOffRecapCard = turnOffRecapCard
+        self.payoutStreams = payoutStreams
     }
 
-    /// The line naming a custom store, exactly as the view renders it; `nil`
-    /// for the standard store, which shows no location line.
-    static func storeLocationLine(_ selection: InsightsStoreSelection,
-                                  copy: [String: String]) -> String? {
-        guard case .custom(let path) = selection else { return nil }
-        return (copy["insights_store_title"] ?? "") + ": " + path
+    /// The NEAR AI card's split, read each time Overview opens. A failed or
+    /// absent read draws no rows: the split adds to the card and is never
+    /// in place of it.
+    private func loadEarnings() async {
+        guard let payoutStreams,
+              let copy = TCConsentCopy.referralCopyJSON().flatMap(ReferralCopy.decode(fromJSON:))
+        else { return }
+        let streams = await payoutStreams()
+        earnings = NearAiEarningsSplit.rows(streams, copy: copy, money: ReferralMoney.format)
+    }
+
+    /// The tabs on the bar, in order: Overview, Breakdown, Benchmarks
+    /// (product owner, 2026-10-29).
+    nonisolated static let shownTabs: [InsightsTab] = [.overview, .patterns, .benchmarks]
+
+    /// Home's credit tile, the same figure and word as Home's.
+    private var creditTile: (value: String, detail: String)? {
+        guard let home, home.rollup != nil || home.credit != nil else { return nil }
+        return HomeFormat.creditTile(final: home.rollup?.creditFinal, pending: home.rollup?.creditPending,
+                                     accepted: home.rollup?.allTime?.accepted, credit: home.credit)
+    }
+
+    /// Whether the week's first answers are in: the daemon's week (or no
+    /// daemon to ask) and the store's week.
+    private var weekSettled: Bool {
+        model.weekSettled && !overviewModel.busy && (overviewModel.shown != nil || overviewModel.failed)
+    }
+
+    /// Overview and Breakdown have no trace of the person's own to show
+    /// (product owner, 2026-10-29): the week on screen and every kept week
+    /// are empty.
+    private var weekEmpty: Bool {
+        weekSettled && !InsightsEmptyState.weekHasData(overviewModel.shown, history: model.counterWeek?.coreHistory)
+    }
+
+    /// Benchmarks has no kind of work with a trace in it.
+    private var benchmarksEmpty: Bool {
+        benchmarksModel.settled && !InsightsEmptyState.benchmarksHaveData(benchmarksModel.answer)
+    }
+
+    /// Whether the tab on screen draws the get-started card and the sample.
+    private var showsSample: Bool {
+        switch tab {
+        case .overview, .patterns: weekEmpty
+        case .benchmarks: benchmarksEmpty
+        }
+    }
+
+    private var getStarted: InsightsGetStarted {
+        InsightsGetStarted(copy: model.copy, openTraces: openTraces)
     }
 
     @ViewBuilder
@@ -105,82 +191,138 @@ struct InsightsView: View {
     }
 
     /// The tab container. No Spend tab: a tab that cannot be used is
-    /// hidden, not drawn greyed, and Insights shows no money (owner
-    /// decision D5). The models open and close with the container, not with
-    /// a tab.
+    /// hidden, not drawn greyed. Insights may show money (product owner,
+    /// 2026-10-28, over owner decision D5): NEAR AI spend on Overview and
+    /// Details, from the NEAR AI ledger's own charge. The NEAR AI balance
+    /// stays on the Private AI tab. The models open and
+    /// close with the container, not with a tab.
     private var tabs: some View {
         // The page is in the main pane, whose insets it shares: no inset of
         // its own across, so its cards get the pane's whole 408pt.
         VStack(alignment: .leading, spacing: 0) {
-            GlassSegmentedTabs(model.text("title"), selection: $tab, segments: [
-                GlassSegment(model.text("analytics_tab_overview"), value: InsightsTab.overview),
-                GlassSegment(model.text("analytics_tab_patterns"), value: InsightsTab.patterns),
-                GlassSegment(model.text("analytics_tab_sessions"), value: InsightsTab.sessions),
-                GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
-            ])
+            // Overview, Breakdown and Benchmarks (product owner,
+            // 2026-10-29). Breakdown's details are the inspector's.
+            GlassSegmentedTabs(model.text("title"), selection: $tab, segments: Self.shownTabs.map {
+                GlassSegment(model.text($0.copyKey), value: $0)
+            })
+            // A failed copy or snapshot read, on every tab.
+            if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
             // No top inset of its own: the main pane's `contentTop` is the
             // gap under the tab bar on every tab (owner, 2026-10-19).
             switch tab {
+            case .overview where showsSample:
+                if let sample {
+                    InsightsOverviewTab(
+                        model: sample.overview, comparisons: sample.comparisons, copy: model.copy, snapshots: [],
+                        subscriptions: sample.subscriptions, usageByDay: sample.week?.usageByDay,
+                        work: sample.week?.work, weekChanges: sample.week?.changeVsLastWeek,
+                        getStarted: getStarted)
+                    .task { await sample.load() }
+                }
+            case .patterns where showsSample:
+                if let sample {
+                    InsightsPatternsTab(model: sample.patterns, comparisons: sample.comparisons, copy: model.copy,
+                                        week: sample.week, overview: sample.overview, inspector: inspector,
+                                        getStarted: getStarted)
+                }
+            case .benchmarks where showsSample:
+                if let sample {
+                    InsightsBenchmarksTab(model: sample.benchmarks, copy: model.copy, getStarted: getStarted)
+                }
             case .overview:
                 InsightsOverviewTab(
                     model: overviewModel, comparisons: comparisonsModel, copy: model.copy,
                     snapshots: model.snapshots,
                     notice: model.counterPassNoticeKey.map(model.text),
-                    patterns: patternsModel.shown,
+                    subscriptions: subscriptionModel,
+                    nearAiCredit: model.counterWeek?.nearAiCredit,
+                    usageByDay: model.counterWeek?.usageByDay,
+                    earnings: earnings,
+                    showProjects: { detailsView = .folder; tab = .patterns },
+                    work: model.counterWeek?.work,
+                    weekChanges: model.counterWeek?.changeVsLastWeek,
+                    creditTile: creditTile,
+                    showBenchmarks: { tab = .benchmarks },
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
                     turnOffRecap: turnOffRecapCard.map { turnOff in
                         { Task { try? await turnOff(); await model.loadWeek() } }
-                    },
-                    showReads: { tab = .patterns },
-                    showPatterns: { tab = .patterns })
+                    })
+                .task(id: ObjectIdentifier(subscriptionModel)) { await subscriptionModel.observe(readOnOpen: true) }
+                .task { await loadEarnings() }
             case .patterns:
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
-                                    selectWeek: selectWeek)
-            case .sessions:
-                InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy,
-                                    notice: (model.counterPassNoticeKey ?? sessionsModel.noticeKey).map(model.text))
-            case .analyze: content
+                                    selectWeek: selectWeek,
+                                    week: model.counterWeek, detailsView: $detailsView,
+                                    overview: overviewModel, inspector: inspector)
+            case .benchmarks:
+                InsightsBenchmarksTab(model: benchmarksModel, copy: model.copy)
             }
         }
         .onAppear { model.open() }
-        .onAppear { comparisonModel.open() }
-        .onAppear { specificationModel.open() }
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
-        .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
         .onAppear { showSampleWeekIfAsked() }
-        .onChange(of: comparisonTaskVersions) { _, _ in
-            specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
+        // Breakdown's details are the inspector's while Breakdown is shown.
+        .onChange(of: tab, initial: true) { _, shown in showBreakdownDetail(shown) }
+        // The sample is built only when it is first needed, and while it
+        // shows, Insights asks again each minute, so the card and the
+        // sample go as soon as the first trace is counted.
+        .onChange(of: showsSample, initial: true) { _, shows in
+            if shows, sample == nil { sample = InsightsSampleModels() }
+            // The inspector reads the sample's days while the sample shows.
+            showBreakdownDetail(tab)
+        }
+        .task(id: showsSample) {
+            guard showsSample else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled else { return }
+                await model.loadWeek()
+                overviewModel.reload()
+                await benchmarksModel.load()
+            }
         }
         .onChange(of: model.snapshots.map(\.id)) { _, _ in
-            updateSpecificationSources()
             overviewModel.reload()
             patternsModel.reload()
-            sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id))
         }
         .onChange(of: model.counterWeek) { _, week in showCounterWeek(week) }
-        .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
-            comparisonModel.upstreamEvidenceChanged()
-            specificationModel.upstreamEvidenceChanged()
+        // Snapshots saved while the app was in the background; a changed
+        // list reloads Overview and Breakdown through the onChange above.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.reloadSnapshots()
         }
         .onDisappear {
-            model.close(); comparisonModel.close(); specificationModel.close(); overviewModel.close()
-            patternsModel.close(); sessionsModel.close(); comparisonsModel.clear()
+            model.close(); overviewModel.close(); patternsModel.close(); comparisonsModel.clear()
+            inspector.clear()
         }
     }
 
-    /// Debug builds: the sample week as the daemon's week (feed T) and one
-    /// sample trace for Sessions, when `TRACE_COMMONS_INSIGHTS_SAMPLE=1`.
+    /// Hands the inspector Breakdown's details while Breakdown is `shown`,
+    /// and takes them back on any other tab.
+    private func showBreakdownDetail(_ shown: InsightsTab) {
+        guard shown == .patterns else { inspector.clear(); return }
+        // The sample's Breakdown picks its own days, read from its own
+        // Overview model, never the person's.
+        let sampled = showsSample ? sample : nil
+        inspector.show { [inspector, overviewModel, model] in
+            InsightsBreakdownDetail(inspector: inspector, overview: sampled?.overview ?? overviewModel,
+                                    copy: model.copy, snapshots: sampled == nil ? model.snapshots : [])
+        }
+    }
+
+    /// Debug builds: the sample week as the daemon's week (feed T), when
+    /// `TRACE_COMMONS_INSIGHTS_SAMPLE=1`, with its counted sessions behind
+    /// Overview's Sessions breakdown.
     private func showSampleWeekIfAsked() {
         #if DEBUG
         guard InsightsSampleWeek.enabled,
               let overview = try? InsightsSampleWeek.weekOverview,
               let patterns = try? InsightsSampleWeek.weekPatterns else { return }
-        overviewModel.showCounter(overview)
+        overviewModel.showCounter(overview, sessions: try? InsightsSampleWeek.counterSessions)
         patternsModel.showCounter(patterns)
         comparisonsModel.load(counterWeeks: [], weekStart: InsightsSampleWeek.weekStart, recapCardEnabled: true)
-        if model.snapshots.isEmpty { sessionsModel.sync(snapshotIDs: ["sample"]) }
         #endif
     }
 
@@ -195,172 +337,14 @@ struct InsightsView: View {
     }
 
     /// Feed T's week replaces the saved week in both tabs, its counted
-    /// sessions back the Sessions card's drill-down, the Sessions tab lists
-    /// watched traces, and its weekly figures go to the core for goals, the
-    /// lever and the summary card; `nil` (feed S) takes all of it away.
+    /// sessions back the Sessions card's drill-down, and its weekly figures
+    /// go to the core for the lever and the summary card; `nil` (feed S)
+    /// takes all of it away.
     private func showCounterWeek(_ week: DaemonData.InsightsWeek?) {
-        sessionsModel.showWatched(week != nil)
         overviewModel.showCounter(week?.coreOverview, sessions: week.flatMap(InsightsCounterSessions.init(week:)))
         patternsModel.showCounter(week?.corePatterns)
         comparisonsModel.load(counterWeeks: week?.coreHistory, weekStart: week?.weekStart,
                               recapCardEnabled: week?.recapCardEnabled ?? false)
-    }
-
-    /// The Analyze tab: choosing and saving traces, and the saved-history
-    /// tools, each section on its own card under its title (owner,
-    /// 2026-10-15: between hairlines they ran together). What a section is
-    /// and what it keeps is behind its title's "i"; failures, a custom
-    /// store and what an action needs first stay on the page.
-    private var content: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: InsightsLayout.sectionGap) {
-                    analyzeSection
-                    summarySection
-                    if let insight = model.selected {
-                        detailSection(insight)
-                            .id("insight-detail")
-                    }
-                    InsightsEpisodesView(model: model)
-                        .insightsSection()
-                    ComparisonTasksView(model: comparisonModel, episodes: model.episodes, copy: model.copy,
-                                        openEpisode: model.openEpisode, openSnapshot: model.explain)
-                        .insightsSection()
-                    ComparisonSpecificationsView(model: specificationModel, copy: model.copy,
-                                                 openTask: comparisonModel.select)
-                        .insightsSection()
-                    InsightCardsView(model: model)
-                        .insightsSection()
-                    savedSection
-                }.padding(.vertical, GlassTokens.Space.s7).frame(maxWidth: .infinity, alignment: .leading)
-                .insightsSurface()
-            }
-            .onChange(of: model.selected?.id) { _, id in
-                if id != nil { proxy.scrollTo("insight-detail", anchor: .top) }
-            }
-        }
-        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.data]) { result in
-            if case .success(let file) = result { model.analyze(file: file, source: source) }
-        }
-    }
-
-    /// Choose a trace file to analyze. What analysis is and keeps, and that
-    /// closing discards late results, are behind the title's "i".
-    private var analyzeSection: some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-            InsightsSectionTitle(model.text("analytics_tab_analyze"), info: [
-                model.text("intro"), model.text("snapshot_notice"), model.text("cancellation_notice"),
-            ])
-            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-                if let location = Self.storeLocationLine(storeSelection, copy: storeCopy) {
-                    Text(location)
-                        .glassType(GlassTokens.TypeScale.caption).textSelection(.enabled)
-                }
-                HStack(spacing: GlassTokens.Space.s4) {
-                    GlassSelect(model.text("source"), selection: $source, options: [
-                        GlassPickerOption(model.text("codex"), value: "codex"),
-                        GlassPickerOption(model.text("claude_code"), value: "claude_code"),
-                        GlassPickerOption(model.text("trajectory"), value: "trajectory"),
-                    ])
-                    .fixedSize()
-                    Button(model.text("choose_file")) { choosingFile = true }
-                    // Short labels repeat on this screen; each is named in full
-                    // for VoiceOver, in the core's words.
-                    Button(model.text("refresh")) { model.refresh() }
-                        .accessibilityLabel(model.text("refresh_accessibility"))
-                    if model.busy { GlassSpinner() }
-                }.disabled(model.busy)
-                if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
-                if !model.invalidatedEpisodeIDs.isEmpty {
-                    VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                        Text(model.text("episode_invalidated_notice"))
-                        ForEach(model.invalidatedEpisodeIDs, id: \.self) { id in
-                            Text(id).insightsMono()
-                        }
-                    }.textSelection(.enabled)
-                }
-            }
-            .insightsCardBody()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
-    }
-
-    /// The saved-history summary, its loading line, or its failure.
-    @ViewBuilder
-    private var summarySection: some View {
-        if model.loadingSummary {
-            HStack(spacing: GlassTokens.Space.s4) {
-                GlassSpinner()
-                Text(model.text("summary_title")).insightsNote()
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .insightsSection()
-        } else if let summaryError = model.summaryError {
-            Text(summaryError).foregroundStyle(GlassStatus.outside.textColor)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .insightsSection()
-        } else if let summary = model.summary {
-            InsightsSummaryView(summary: summary, copy: model.copy, openSnapshot: model.explain)
-                .disabled(model.busy)
-                .insightsSection()
-        }
-    }
-
-    /// The trace on screen: its result, then saving or deleting it, its
-    /// assessment and its linked evidence.
-    private func detailSection(_ insight: LocalInsight) -> some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-            InsightDetail(insight: insight, copy: model.copy)
-            HStack(spacing: GlassTokens.Space.s4) {
-                if model.selectedIsSaved {
-                    Button(model.text("delete"), role: .destructive) { model.delete() }
-                        .accessibilityLabel(model.text("delete_accessibility"))
-                        .buttonStyle(GlassButtonStyle(.destructive, small: true))
-                } else {
-                    Button(model.text("save")) { model.save() }
-                        .accessibilityLabel(model.text("save_accessibility"))
-                    // What saving keeps, beside the action.
-                    InsightsInfo(model.text("save"), [model.text("save_notice")])
-                }
-            }.disabled(model.busy)
-            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-                if model.selectedIsSaved {
-                    assessment
-                    InsightEvidenceControls(model: model, insight: insight)
-                        .id(insight.id)
-                } else {
-                    Text(model.text("link_saved_required")).insightsCaption()
-                }
-            }
-            .insightsCardBody()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
-    }
-
-    /// Every saved trace, newest first; one opens its detail.
-    private var savedSection: some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-            InsightsSectionTitle(model.text("saved"))
-            VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                if model.snapshots.isEmpty { Text(model.text("empty")).insightsNote() }
-                ForEach(model.snapshots) { insight in
-                    Button { model.explain(insight.id) } label: {
-                        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                            Text(model.text(insight.source_format))
-                            Text(InsightsDate.label(insight.analyzed_at)).insightsCaption()
-                            Text(insight.id).insightsMono().lineLimit(1)
-                        }.frame(maxWidth: .infinity, alignment: .leading).insightsRowCard()
-                    }
-                    .buttonStyle(GlassPressStyle())
-                    .disabled(model.busy)
-                }
-            }
-            .insightsCardBody()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
     }
 
     private func refusalMessage(_ refusal: InsightsStoreSelection.Refusal) -> String {
@@ -372,103 +356,19 @@ struct InsightsView: View {
         case .notADirectory: return storeCopy["insights_store_not_directory"] ?? ""
         }
     }
-    private func updateSpecificationSources() {
-        specificationModel.updateSources(tasks: comparisonModel.tasks, snapshots: model.snapshots)
-    }
-    private var comparisonTaskVersions: [String] {
-        comparisonModel.tasks.map { detail in
-            let context = detail.task.context
-            return [detail.id, String(detail.task.revision), detail.task.material_digest,
-                    context?.configuration_fingerprint ?? "", context?.task_date ?? "",
-                    detail.task.outcome?.recorded_at ?? "", detail.task.independence_confirmation?.confirmed_at ?? "",
-                    detail.stale_reasons.map(\.rawValue).joined(separator: ",")].joined(separator: ":")
+}
+
+/// The Insights window's tabs: Overview, Breakdown (`patterns`) and
+/// Benchmarks.
+enum InsightsTab: Hashable {
+    case overview, patterns, benchmarks
+
+    /// The copy key of the tab's name.
+    var copyKey: String {
+        switch self {
+        case .overview: "analytics_tab_overview"
+        case .patterns: "analytics_tab_patterns"
+        case .benchmarks: "analytics_tab_benchmarks"
         }
-    }
-    /// The user's own category and outcome; what they are, and that they
-    /// are not verified, behind the heading's "i".
-    private var assessment: some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-            InsightsGroupHeading(model.text("assessment"), info: [model.text("assessment_notice")])
-            HStack(spacing: GlassTokens.Space.s4) {
-                GlassSelect(model.text("category"), selection: $model.assessmentCategory,
-                            options: InsightsChoices.categories.map { GlassPickerOption(model.text("category_" + $0), value: $0) })
-                GlassSelect(model.text("outcome"), selection: $model.assessmentOutcome,
-                            options: InsightsChoices.outcomes.map { GlassPickerOption(model.text("outcome_" + $0), value: $0) })
-            }
-            HStack(spacing: GlassTokens.Space.s4) {
-                Button(model.text("save_assessment")) { model.annotate(category: model.assessmentCategory, outcome: model.assessmentOutcome) }
-                Button(model.text("clear_assessment")) { model.clearAnnotation() }
-            }
-        }.disabled(model.busy)
-    }
-}
-
-struct InsightDetail: View {
-    let insight: LocalInsight
-    let copy: [String: String]
-    private func text(_ key: String) -> String { copy[key] ?? "" }
-    var body: some View {
-        VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-            // What a result can and cannot say, behind the title's "i".
-            InsightsSectionTitle(text("result"), info: [
-                text("boundary_notice"), text("unknown_notice"), text("coverage_notice"),
-            ])
-            VStack(alignment: .leading, spacing: InsightsLayout.groupGap) {
-                VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                    Text(InsightsDate.label(insight.analyzed_at)).insightsCaption()
-                    Text("\(text("provider")): \(insight.report.provider.id) · \(insight.report.provider.version)").insightsCaption()
-                    Text("\(text("rubric")): \(insight.report.provider.rubric_version) · \(insight.report.provider.execution_mode)")
-                        .insightsCaption()
-                }
-                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                    InsightsGroupHeading(text("summary_metrics"))
-                    ForEach(insight.report.metrics) { metric in
-                        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                            Text("\(text("metric_" + metric.id)): \(metric.value.map { $0.formatted() } ?? text("unknown"))")
-                            Text("\(text("coverage")): \(metric.coverage.observed.formatted()) / \(metric.coverage.total.formatted())")
-                                .insightsCaption()
-                        }
-                    }
-                    Text("\(text("cost")): \(text("unknown"))")
-                }
-                InsightModelSection(observations: insight.model_observations, copy: copy)
-                if let assessment = insight.manual_annotation {
-                    VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                        InsightsGroupHeading(text("assessment"), info: [text("assessment_notice")])
-                        Text("\(text("category_" + assessment.category)) / \(text("outcome_" + assessment.outcome))")
-                        Text(InsightsDate.label(assessment.recorded_at)).insightsCaption()
-                    }
-                }
-                VStack(alignment: .leading, spacing: InsightsLayout.headingGap) {
-                    InsightsGroupHeading(text("evidence"), info: [text("evidence_notice")])
-                    ForEach(insight.report.evidence) { evidence in
-                        VStack(alignment: .leading, spacing: InsightsLayout.lineGap) {
-                            Text("\(text("evidence")): \(evidence.id)").insightsMono()
-                            Text("\(text("source_digest")): \(evidence.source_digest)").insightsMono().textSelection(.enabled)
-                        }
-                    }
-                }
-            }
-            .insightsCardBody()
-        }.textSelection(.enabled)
-    }
-}
-
-/// The Insights window's tabs that have landed.
-enum InsightsTab: Hashable { case overview, patterns, sessions, analyze }
-
-/// The assessment choices, by their wire values; their words are the
-/// copy table's `category_` and `outcome_` entries.
-enum InsightsChoices {
-    static let categories = ["unknown", "refactor", "tests", "docs", "debugging", "other"]
-    static let outcomes = ["unknown", "accepted", "partial", "rejected"]
-}
-
-enum InsightsDate {
-    static func label(_ raw: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let date = formatter.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
-        return date?.formatted(date: .abbreviated, time: .standard) ?? raw
     }
 }

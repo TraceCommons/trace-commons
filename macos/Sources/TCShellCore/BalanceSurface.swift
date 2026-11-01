@@ -32,6 +32,20 @@ public struct BalanceStatus: Equatable, Sendable {
     /// service's own `updated_at`. The only true thing a shell can say with
     /// it is how long ago the question was put.
     public let observedAt: Date?
+    /// What is left now minus what was left about a day ago, signed, or
+    /// `nil` with no reading from about a day ago. NEVER drawn as zero.
+    public let change24hNanos: Int64?
+    /// The core's finished line for a known change, including zero.
+    public let change24hText: String?
+    /// Core-selected direction at displayed precision: -1, 0, or 1.
+    /// Older daemon payloads omit it; zero keeps subcent movement neutral.
+    public let change24hDirection: Int?
+    /// The core's explanation when no comparable balance history exists.
+    public let change24hUnavailableText: String?
+    /// All NEAR AI credit the daemon has counted arriving in the spending
+    /// organization, or `nil` until it has read the whole ledger. Only ever
+    /// compared with an earlier value of itself, to see that credit arrived.
+    public let receivedTotalNanos: Int64?
 
     public init(
         state: String,
@@ -39,7 +53,12 @@ public struct BalanceStatus: Equatable, Sendable {
         spendLimitNanos: Int64? = nil,
         totalSpentNanos: Int64? = nil,
         scale: UInt8 = BalanceStatus.unreadableScale,
-        observedAt: Date? = nil
+        observedAt: Date? = nil,
+        change24hNanos: Int64? = nil,
+        change24hText: String? = nil,
+        receivedTotalNanos: Int64? = nil,
+        change24hUnavailableText: String? = nil,
+        change24hDirection: Int? = nil
     ) {
         self.state = state
         self.remainingNanos = remainingNanos
@@ -47,6 +66,11 @@ public struct BalanceStatus: Equatable, Sendable {
         self.totalSpentNanos = totalSpentNanos
         self.scale = scale
         self.observedAt = observedAt
+        self.change24hNanos = change24hNanos
+        self.change24hText = change24hText
+        self.receivedTotalNanos = receivedTotalNanos
+        self.change24hUnavailableText = change24hUnavailableText
+        self.change24hDirection = change24hDirection.flatMap { (-1...1).contains($0) ? $0 : nil }
     }
 
     /// The scale used when the wire carried none.
@@ -57,8 +81,7 @@ public struct BalanceStatus: Equatable, Sendable {
     /// would be doing exactly what the field exists to prevent. This value is
     /// larger than any power of ten the Rust formatter can raise, so every
     /// figure formatted with it comes back as the empty string, and the row
-    /// falls to the sentence that says the answer arrived in a form this app
-    /// cannot read. A wrong figure is worse than no figure when the figure is
+    /// stays unavailable. A wrong figure is worse than no figure when it is
     /// somebody's money.
     public static let unreadableScale: UInt8 = .max
 
@@ -88,7 +111,12 @@ public struct BalanceStatus: Equatable, Sendable {
             spendLimitNanos: object["spend_limit_nanos"] as? Int64,
             totalSpentNanos: object["total_spent_nanos"] as? Int64,
             scale: (object["scale"] as? Int).flatMap { UInt8(exactly: $0) } ?? unreadableScale,
-            observedAt: (object["observed_at"] as? String).flatMap(Self.timestamp))
+            observedAt: (object["observed_at"] as? String).flatMap(Self.timestamp),
+            change24hNanos: object["change_24h_nanos"] as? Int64,
+            change24hText: (object["change_24h_text"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            receivedTotalNanos: object["received_total_nanos"] as? Int64,
+            change24hUnavailableText: (object["change_24h_unavailable_text"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            change24hDirection: object["change_24h_direction"] as? Int)
     }
 
     /// RFC 3339, the shape `chrono`'s `DateTime<Utc>` serializes to.
@@ -98,12 +126,7 @@ public struct BalanceStatus: Equatable, Sendable {
     /// neither is no timestamp, which draws no age line rather than an
     /// invented one.
     private static func timestamp(_ text: String) -> Date? {
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFraction.date(from: text) { return date }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: text)
+        DaemonTimestamp.parse(text)
     }
 }
 
@@ -178,16 +201,14 @@ public enum BalanceSurface {
     /// What the remaining figure renders as: money, or the Rust's sentence
     /// for there being no money to render.
     ///
-    /// Two cases rather than an optional string, so a caller cannot treat
-    /// "no figure" as "nothing to draw" and leave the row silent. There is
-    /// ALWAYS something to say about what is left; sometimes it is a
-    /// sentence rather than a number.
+    /// An unavailable reading is a placeholder, never a zero amount or an
+    /// account explanation inferred from missing data.
     public enum Remaining: Equatable, Sendable {
+        case unavailable
         /// A real amount, including `$0.00` and including a debt.
         case figure(String)
         /// No figure exists. The string is the Rust's own explanation --
-        /// the uncapped-account sentence for a null, the unreadable-answer
-        /// sentence for a scale this build cannot honour.
+        /// for example, the uncapped-account sentence for a null.
         case sentence(String)
     }
 
@@ -212,14 +233,17 @@ public enum BalanceSurface {
     /// row is figures, and a sentence above them announcing that the read
     /// succeeded is this app narrating itself.
     ///
-    /// A caught panic in the Rust falls back to the payload's unreported
-    /// sentence -- the one that says the question was not answered, never one
-    /// that claims something about what is kept here or what the service did.
+    /// Expired sign-in needs no extra notice beside the recovery controls.
+    /// Unreported and unsupported readings stay quiet rather than showing
+    /// compatibility warnings during loading. Figure availability still
+    /// comes from the original shared state line.
     public static func stateLine(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
     ) -> String? {
-        guard let line = calls.stateLine(status.state) else { return copy.balanceUnreported }
-        return line.isEmpty ? nil : line
+        guard status.state != "session_expired" else { return nil }
+        guard let line = calls.stateLine(status.state), !line.isEmpty,
+              line != copy.balanceUnreported, line != copy.balanceUnknown else { return nil }
+        return line
     }
 
     /// Whether the figures are the row, or the sentence is.
@@ -304,7 +328,8 @@ public enum BalanceSurface {
         }
         guard let sentence = calls.remainingLine(present, nanos, status.scale),
             !sentence.isEmpty
-        else { return .sentence(copy.balanceUnknown) }
+        else { return .unavailable }
+        guard sentence != copy.balanceUnknown, sentence != copy.balanceUnreported else { return .unavailable }
         return .sentence(sentence)
     }
 

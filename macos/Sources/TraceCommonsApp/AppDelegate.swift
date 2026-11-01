@@ -13,9 +13,10 @@ import TCShellCore
 /// once, and each is a path into behaviour that previously had exactly one
 /// entrance.
 ///
-/// Three of those paths need answering, and they are the reason this type
-/// exists rather than three separate accommodations:
+/// These paths need answering here rather than in individual views:
 ///
+/// - **Initial activation** opens the window on a foreground launch, while
+///   background launches stay quiet until the person activates the app.
 /// - **Quit** now arrives from the App menu, Cmd-Q and the Dock icon's
 ///   context menu, none of which SwiftUI routes through the menu-bar item's
 ///   "Quit…" command. `applicationShouldTerminate` is the one funnel every
@@ -38,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// and this line deliberately is not.
     var model: AppModel?
     private let quitCoordinator = QuitCoordinator()
+    private var openedForInitialActivation = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Explicit rather than inherited. Removing LSUIElement already makes
         // this the default, but the default is invisible in the source: a
@@ -47,28 +49,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The person's Light, Dark or System choice (Settings > General).
         GlassAppearance.applyStored()
 
-        // No window is opened here, and no attempt is made to detect a login
-        // launch.
-        //
-        // The obvious heuristic does not work. A login item is started by
-        // launchd, so `getppid() == 1` looks like it identifies one -- but
-        // every GUI launch is reparented to launchd, including a Finder
-        // double-click and `open`. Measured: launching this bundle with
-        // `open` gives ppid 1 and is indistinguishable from a login start.
-        // An earlier draft of this file used that test and hid the app on
-        // every launch.
-        //
-        // SMAppService.mainApp offers no launch-hidden flag and no "you were
-        // started at login" signal, so rather than guess, launch behaviour is
-        // uniform: come up quietly, exactly as this app always has. That is
-        // the correct answer at login -- the contributor agreed to "Start
-        // Trace Commons when you log in?", which is a promise to be running,
-        // not a request to be greeted -- and a recoverable one everywhere
-        // else, because there is now a Dock icon, and clicking it opens the
-        // window through applicationShouldHandleReopen below.
-        //
-        // Which is the point of the whole slice: what was missing was not a
-        // window on launch, it was any reliable way to reach the app at all.
+        // AppKit can activate the app before didFinishLaunching, or send
+        // didBecomeActive afterwards. Both paths open once. A background
+        // launch (including open -g) waits until the person activates it.
+        if NSApp.isActive { openForInitialActivation() }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        openForInitialActivation()
+    }
+
+    private func openForInitialActivation() {
+        guard !openedForInitialActivation else { return }
+        openedForInitialActivation = true
+        OpenMonitor.requestForInitialActivation()
     }
 
     /// Every quit path, funnelled through the one confirmation.
@@ -130,7 +124,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Connect screen picks the invite up.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
-            guard let invite = DeepLink.inviteURL(from: url) else { continue }
+            guard let invite = DeepLink.inviteURL(
+                from: url, scheme: BuildChannelGate.agreedChannel?.urlScheme)
+            else { continue }
             PendingInvite.shared.set(invite)
             NSApp.activate(ignoringOtherApps: true)
             OpenMonitor.request()

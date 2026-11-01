@@ -10,26 +10,42 @@ struct ManagedFolderChoice: Identifiable, Equatable {
 
 /// A tool's launch dialog (owner, 2026-10-19; #1408's explainer before
 /// it): the Start button's own label as the title, a folder sliding into a
-/// terminal, the line that says why a folder is asked for, the folder row
-/// with its Choose folder button, then Cancel and Open {tool}, which is
-/// enabled once a folder is chosen and opens the tool there in the
-/// terminal. Every word is the core's (`managed/copy.rs`).
+/// terminal, the line that says where the tool opens, the folder row with
+/// its "Pick a folder as context" button, then Cancel and Open {tool}.
+/// The folder is optional (owner, 2026-10-29): Open is enabled from the
+/// start and, with none picked, the daemon opens the tool in the person's
+/// home folder. A picked folder can be cleared back to that default. Every
+/// word is the core's (`managed/copy.rs`).
 struct ManagedFolderExplainerSheet: View {
     let tool: String
     let onCancel: () -> Void
-    /// Open, with the chosen folder's path.
-    let onOpen: (String) -> Void
+    /// Open, with the chosen folder's path, or nil for the home folder.
+    let onOpen: (String?) -> Void
+    let onOpenWithSettings: ((String?, ManagedFolderDraft) -> Void)?
+    /// The terminal picked in the dialog while it asks for one
+    /// (`ManagedSnapshot.asksForTerminal`); nil otherwise.
+    @Binding var terminal: String?
     @EnvironmentObject private var model: AppModel
     @State private var path: String?
+    @State private var draft = ManagedFolderDraft()
+    /// The catalogue read; a failed one does not hold Open (#1754 review).
+    @State private var catalogueReads = ManagedCatalogueReads()
+    private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
+    private var canOpen: Bool {
+        guard !model.managedBusy else { return false }
+        return !supportsFolderSettings || (draft.matches(tool: tool, cwd: path)
+            && ManagedFolderOptions.launchModelReady(draft, tool: tool, connection: "near_ai_signin",
+                                                     catalogue: catalogueReads.catalogue, catalogueFailed: catalogueReads.failed))
+    }
 
-    /// The line, with the tool's name and the terminal the daemon reports.
-    @MainActor
-    static func line(tool: String, model: AppModel) -> String {
-        ManagedSurface.folderChoiceLine(
-            model.managedText("folder_choice"),
-            tool: ManagedWords.tool(tool, model: model) ?? "",
-            destination: model.managedSnapshot?.capabilities.terminalDestination,
-            fallback: model.managedText("terminal"))
+    init(tool: String, onCancel: @escaping () -> Void, onOpen: @escaping (String?) -> Void,
+         onOpenWithSettings: ((String?, ManagedFolderDraft) -> Void)? = nil,
+         terminal: Binding<String?> = .constant(nil)) {
+        self.tool = tool
+        self.onCancel = onCancel
+        self.onOpen = onOpen
+        self.onOpenWithSettings = onOpenWithSettings
+        _terminal = terminal
     }
 
     /// The dialog's Open button: "Open Claude Code".
@@ -43,19 +59,16 @@ struct ManagedFolderExplainerSheet: View {
             title: ManagedSurface.startKey(tool).map(model.managedText) ?? "", width: .narrow,
             actions: [
                 .cancel(model.managedText("cancel"), action: onCancel),
-                GlassModalAction(Self.openLabel(tool: tool, model: model), isDefault: true, isEnabled: path != nil,
-                                 id: "open") { if let path { onOpen(path) } },
+                GlassModalAction(Self.openLabel(tool: tool, model: model), isDefault: true, isEnabled: canOpen,
+                                 id: "open", action: open),
             ],
             onCancel: onCancel
         ) {
             GlassModalBody {
                 ManagedFolderHandoff(tool: ManagedWords.glassTool(tool))
                     .frame(maxWidth: .infinity)
-                Text(Self.line(tool: tool, model: model))
-                    .glassType(GlassTokens.TypeScale.label)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                // The folder, once chosen, and the button that chooses it.
+                // The folder, once picked (else the home default), the button
+                // that picks it and, once picked, the one that clears it.
                 HStack(spacing: GlassTokens.Space.s4) {
                     GlassToolTile(.folder)
                     if let path {
@@ -65,15 +78,63 @@ struct ManagedFolderExplainerSheet: View {
                             .lineLimit(1)
                             .truncationMode(.head)
                             .help(path)
+                    } else {
+                        Text(model.managedText("home_folder"))
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .lineLimit(1)
                     }
                     Spacer(minLength: GlassTokens.Space.s4)
-                    Button(model.managedText("choose_folder")) {
+                    if path != nil {
+                        Button(model.managedText("clear_folder")) { path = nil }
+                            .buttonStyle(GlassButtonStyle(.glass, small: true))
+                            .fixedSize()
+                    }
+                    Button(model.managedText("pick_folder")) {
                         if let chosen = FolderPanel.choose() { path = chosen }
                     }
                     .buttonStyle(GlassButtonStyle(.glass, small: true))
                     .fixedSize()
                 }
+                // The first launch asks which terminal to open in.
+                if let snapshot = model.managedSnapshot, snapshot.asksForTerminal {
+                    ManagedLaunchTerminalRow(snapshot: snapshot, selection: $terminal)
+                }
+                if supportsFolderSettings {
+                    ManagedFolderOptions(tool: tool, connection: "near_ai_signin", draft: $draft,
+                        catalogue: $catalogueReads.catalogue, refreshCatalogue: refreshCatalogue,
+                        supportsFolderSettings: true,
+                        retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
+                }
             }
+        }
+        .onAppear {
+            loadFolderSettings()
+            if supportsFolderSettings, let token = catalogueReads.begin(tool: tool) {
+                model.managedModelCatalogue(tool: tool) { catalogueReads.complete($0, token: token) }
+            }
+        }
+        .onChange(of: path) { _, _ in loadFolderSettings() }
+    }
+
+    private func open() {
+        guard canOpen else { return }
+        if supportsFolderSettings, let onOpenWithSettings { onOpenWithSettings(path, draft) }
+        else { onOpen(path) }
+    }
+
+    /// The read again after a star or removal.
+    private func refreshCatalogue() {
+        guard let read = catalogueReads.refresh() else { return }
+        model.managedModelCatalogue(tool: read.tool) { catalogueReads.complete($0, token: read.token) }
+    }
+
+    private func loadFolderSettings(reset: Bool = false) {
+        guard supportsFolderSettings else { return }
+        let token = draft.begin(tool: tool, cwd: path)
+        model.managedFolderSettings(tool: tool, cwd: path, reset: reset) { settings in
+            if let settings { draft.complete(settings, token: token) }
+            else { draft.fail(token: token) }
         }
     }
 }

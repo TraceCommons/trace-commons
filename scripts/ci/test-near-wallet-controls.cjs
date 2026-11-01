@@ -58,6 +58,8 @@ async function run(browser, item, script) {
       const asset = url.pathname.split("/").pop();
       const body = asset === "connector.js" ? fs.readFileSync(base + "/near_connect/near-connect-0.11.4.js", "utf8")
         : asset === "browser.js" ? fs.readFileSync(base + "/near_wallet_browser.js", "utf8")
+          // Filled in by the daemon before serving (near_wallet_page.rs).
+          .replace(/__NEAR_AI_WALLET_RECIPIENT__/g, "cloud.near.ai")
         : asset === item.id + ".js" ? script : null;
       if (body !== null) return route.fulfill({ contentType: "text/javascript", body });
       assert.equal(url.pathname, "/near-ai/near-wallet/callback", "unexpected local request");

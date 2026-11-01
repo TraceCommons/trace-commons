@@ -23,9 +23,11 @@ final class MenuPanelStore {
     /// override is in force, and whether Auto contribute is partial (#1208).
     private(set) var status: DaemonData.Status?
     private(set) var pending: [DaemonData.QueueEntry] = []
-    private(set) var kept: [DaemonData.QueueEntry] = []
     private(set) var history: [DaemonData.HistoryRow] = []
     private(set) var calls: [DaemonData.InferenceCall] = []
+    /// `inference_activity`: Private AI calls and verified calls per
+    /// four-hour step, for the menu-bar item's bars. Nil until read.
+    private(set) var activity: DaemonData.InferenceActivity?
     /// True until a load has read `status`, and again whenever that read
     /// fails, there is no client, or the client's event stream ends: the
     /// panel cannot vouch for anything it holds. Every value is gated on it.
@@ -41,6 +43,16 @@ final class MenuPanelStore {
     /// no answer here ever stales the popover, since the glance is off by
     /// default and an older daemon does not serve it.
     private(set) var glance: MenuPanelData.GlanceState = .notRead
+    /// How often `run` re-reads `inference_activity` with no event: its steps
+    /// end at the moment of the read, so an idle daemon's would otherwise
+    /// stay where the last event left them.
+    var activityRefresh: Duration = .seconds(60)
+    /// The clock the menu-bar item's span is read from; a test sets its own.
+    var clock: () -> Date = { Date() }
+    /// When the item's span was last read from `clock`: on each load and
+    /// each `activityRefresh`, so the label is redrawn as time passes even
+    /// when no read changes anything.
+    private(set) var stripNow = Date()
     /// How often an open popover re-reads the glance: the ledger can stop
     /// refreshing with no event, and only a re-read sees it go stale.
     static let glanceRefresh: Duration = .seconds(60)
@@ -167,7 +179,7 @@ final class MenuPanelStore {
             return
         }
         guard let mode = ProjectMode(rawValue: copy.mode) else { return }
-        await writeOverride { try await $0.setContributionOverride(mode: mode, confirm: mode == .autoUpload) }
+        await writeOverride { _ = try await $0.setContributionOverride(mode: mode, confirm: mode == .autoUpload) }
     }
 
     /// The core's clear action, unconfirmed: every folder back on its own
@@ -208,12 +220,45 @@ final class MenuPanelStore {
         while !Task.isCancelled {
             await load()
             guard let client else { return }
-            await follow(client)
+            await followWhileRefreshingActivity(client)
             if Task.isCancelled { return }
             // The stream ended: the daemon went away, or the stream could
             // not be opened. Stale until a read says otherwise.
             stale = true
             do { try await Task.sleep(for: resubscribeDelay) } catch { return }
+        }
+    }
+
+    /// Follows the events and, beside them, re-reads `inference_activity`
+    /// every `activityRefresh`, until the stream ends; the timer stops with
+    /// it.
+    private func followWhileRefreshingActivity(_ client: any DaemonDataClient) async {
+        let refreshing = Task { await self.followActivity() }
+        await follow(client)
+        refreshing.cancel()
+    }
+
+    /// Re-reads the activity every `activityRefresh` until cancelled.
+    private func followActivity() async {
+        while !Task.isCancelled {
+            do { try await Task.sleep(for: activityRefresh) } catch { return }
+            await loadActivity()
+        }
+    }
+
+    /// Reads `inference_activity` alone, as `load` reads it: a failure marks
+    /// it unknown, a method the daemon does not have yet is not a failure.
+    /// Moves `stripNow` on whatever the read answers.
+    func loadActivity() async {
+        defer { stripNow = clock() }
+        guard let client else { return }
+        do {
+            activity = try await client.inferenceActivity()
+            unreadable.remove(.activity)
+        } catch DaemonDataError.notAvailableYet {
+            return
+        } catch {
+            unreadable.insert(.activity)
         }
     }
 
@@ -253,16 +298,22 @@ final class MenuPanelStore {
         }
         if let value = await read(.status, { try await client.status() }) { status = value }
         if let value = await read(.projects, { try await client.listProjects() }) { projects = value.projects }
-        if let value = await read(.pending, { try await client.listPending(projectId: nil) }) { pending = value }
-        if let value = await read(.kept, { try await client.listKept() }) { kept = value }
+        if let value = await read(.pending, { try await client.listPending(projectId: nil) }) {
+            pending = value
+        } else {
+            // Even an unsupported read is unknown, never a fresh empty queue.
+            failed.insert(.pending)
+        }
         if let value = await read(.history, { try await client.listHistory(limit: HomeStore.historyLimit) }) {
             history = value
         }
         if let value = await read(.calls, { try await client.inferenceCalls(limit: 20, cursor: nil) }) {
             calls = value.readable ? value.calls : []
         }
+        if let value = await read(.activity, { try await client.inferenceActivity() }) { activity = value }
         unreadable = failed
         stale = failed.contains(.status)
+        stripNow = clock()
         await loadGlance()
     }
 
@@ -309,29 +360,56 @@ final class MenuPanelStore {
 
     /// Shared in the graph's days, from `list_history`; nil when unknown.
     var sharedCount: Int? {
-        current(.history) ? columns.reduce(0) { $0 + $1.up } : nil
+        current(.history) ? buckets.reduce(0) { $0 + $1.shared } : nil
     }
 
-    /// Kept in the graph's days, from `list_kept`; nil when unknown.
+    /// Sessions still waiting here in the graph's days, from `list_pending`,
+    /// as Traces counts them. Explicit Keep decisions are a separate list.
+    /// Nil when the pending read did not answer.
     var keptCount: Int? {
-        current(.kept) ? columns.reduce(0) { $0 + $1.down } : nil
+        current(.pending) ? buckets.reduce(0) { $0 + $1.kept } : nil
     }
 
-    /// "Worth a second look", from `list_pending`; nil when unknown.
-    var flaggedCount: Int? {
-        current(.pending) ? MenuPanelData.flagged(pending) : nil
+    /// Whether the trace bars are current: both of the reads they are
+    /// drawn from answered. Otherwise the menu-bar item draws them as
+    /// unavailable.
+    var columnsCurrent: Bool { current(.history) && current(.pending) }
+
+    /// The graph's buckets: shared and kept per day over the Traces graph's
+    /// default days, counted as that graph counts them (`TracesGraphModel`,
+    /// owner, 2026-10-22: the popover's graph matches the app's). A read
+    /// that is not current draws no bars, never its last ones.
+    var buckets: [TracesGraphModel.Bucket] {
+        TracesGraphModel.buckets(
+            shared: current(.history) ? TracesGraphModel.sharedTimes(history, tool: nil) : [],
+            kept: current(.pending) ? TracesGraphModel.keptTimes(pending, tool: nil) : [],
+            offset: 0, now: clock(), range: .days)
     }
 
-    /// Whether the graph's bars are current: both of the reads they are
-    /// drawn from answered. Otherwise they are drawn grey, as when paused.
-    var columnsCurrent: Bool { current(.history) && current(.kept) }
+    /// The menu-bar item's Private AI segments: verified calls (up) over
+    /// all calls (down) per step. Nil while unknown -- unread, failed,
+    /// refused by an older daemon, or no ledger answered -- which draws
+    /// none, never empty ones.
+    var stripPrivateAI: [GlassDayColumn]? {
+        guard current(.activity), let activity else { return nil }
+        return MenuPanelData.privateAISteps(activity)
+    }
 
-    /// The graph's columns: contributed (shared) and kept, per day.
-    var columns: [GlassDayColumn] {
-        MenuPanelData.days(
+    /// The menu-bar item's trace segments: shared (up) and kept (down) per
+    /// step, on the Private AI steps' own clock while they are drawn, so
+    /// all four share one span; else the same span ending now.
+    var stripTraces: [GlassDayColumn] {
+        MenuPanelData.steps(
             shared: history.compactMap(\.submittedAt),
-            kept: kept.compactMap { $0.discoveredAt ?? $0.startedAt },
-            ending: Date())
+            kept: current(.pending) ? TracesGraphModel.keptTimes(pending, tool: nil) : [],
+            span: stripSpan)
+    }
+
+    /// The item's span: the Private AI steps' own while they are drawn,
+    /// else the same span ending at `stripNow`.
+    var stripSpan: MenuPanelData.Span {
+        let span = stripPrivateAI == nil ? nil : activity.flatMap(MenuPanelData.span)
+        return span ?? MenuPanelData.Span(end: stripNow)
     }
 }
 
@@ -379,7 +457,7 @@ enum MenuPanelData {
     /// The daemon reads the panel makes on each load, each gating only the
     /// values drawn from it (`MenuPanelStore.current(_:)`).
     enum Read: Hashable, Sendable {
-        case status, projects, pending, kept, history, calls
+        case status, projects, pending, history, calls, activity
     }
 
     /// The roll-up of every listed folder's mode, for the mode pill.
@@ -468,36 +546,68 @@ enum MenuPanelData {
         return copy.autoPartial
     }
 
-    /// The graph's span in days, and so its number of columns.
-    static let days = 36
-
-    /// One column per day, oldest first, ending today: how many sessions
-    /// were contributed (up) and kept (down) that day. Counts per day, from
-    /// the history and the kept list; the daemon reports no byte rates.
-    static func days(
-        shared: [Date], kept: [Date], ending now: Date, count: Int = days, calendar: Calendar = .current
-    ) -> [GlassDayColumn] {
-        let today = calendar.startOfDay(for: now)
-        func index(_ date: Date) -> Int? {
-            let day = calendar.startOfDay(for: date)
-            guard let back = calendar.dateComponents([.day], from: day, to: today).day,
-                  back >= 0, back < count else { return nil }
-            return count - 1 - back
+    /// The popover graph's bars: the Traces graph's (`TracesGraphFooter.bar`),
+    /// with every other day's label left out, counting back from today's,
+    /// so the weekdays fit under the popover's narrower columns.
+    static func bars(_ buckets: [TracesGraphModel.Bucket], words: MonitorTracesGraphCopy?) -> [GlassBarBucket] {
+        buckets.enumerated().map { index, bucket in
+            var bucket = bucket
+            if (buckets.count - 1 - index) % 2 != 0 { bucket.label = "" }
+            return TracesGraphFooter.bar(bucket, words: words)
         }
-        var up = Array(repeating: 0, count: count)
-        var down = Array(repeating: 0, count: count)
-        for date in shared { if let i = index(date) { up[i] += 1 } }
-        for date in kept { if let i = index(date) { down[i] += 1 } }
-        return (0 ..< count).map { GlassDayColumn(id: String($0), up: up[$0], down: down[$0]) }
     }
 
-    /// Sessions worth a second look: nothing matched in them, or they were
-    /// trimmed to fit (`QueueShieldState`'s attention, counted).
-    static func flagged(_ pending: [DaemonData.QueueEntry]) -> Int {
-        pending.filter { entry in
-            let reasons = entry.secondLook ?? []
-            return reasons.contains("nothing-matched") || reasons.contains("trimmed-to-fit")
-        }.count
+    /// The menu-bar item's span: `count` steps of `stepHours`, the last
+    /// ending at `end`. Six steps of four hours by default, the window
+    /// `inference_activity` counts.
+    struct Span: Equatable {
+        static let steps = 6
+        static let stepHours = 4
+        var end: Date
+        var count = Span.steps
+        var stepHours = Span.stepHours
+    }
+
+    /// The Private AI steps' own span: the last step's end, and their count
+    /// and step. Nil while no ledger answered, no steps came, or the step
+    /// is not a length of time.
+    static func span(_ activity: DaemonData.InferenceActivity) -> Span? {
+        let stepHours = activity.stepHours ?? Span.stepHours
+        guard activity.readable, let last = activity.steps.last, stepHours > 0 else { return nil }
+        return Span(
+            end: last.start.addingTimeInterval(TimeInterval(stepHours * 3600)),
+            count: activity.steps.count, stepHours: stepHours)
+    }
+
+    /// The Private AI steps as the strip's columns: verified (up) over all
+    /// calls (down). Nil while no ledger answered: unknown, never zero.
+    /// Nil too when the steps have no span (`span(_:)`), so they are never
+    /// drawn beside trace steps counted on another clock.
+    static func privateAISteps(_ activity: DaemonData.InferenceActivity) -> [GlassDayColumn]? {
+        guard span(activity) != nil else { return nil }
+        return activity.steps.enumerated().map { index, step in
+            GlassDayColumn(id: String(index), up: step.verified, down: step.calls)
+        }
+    }
+
+    /// One column per step of `span`, oldest first: how many sessions were
+    /// contributed (up) and kept (down) in it. A date after the span's end
+    /// counts in the last step, as `inference_activity` counts a call
+    /// stamped after its read; one before the first step is outside it.
+    static func steps(shared: [Date], kept: [Date], span: Span) -> [GlassDayColumn] {
+        guard span.count > 0, span.stepHours > 0 else { return [] }
+        let step = TimeInterval(span.stepHours * 3600)
+        let start = span.end.addingTimeInterval(-step * Double(span.count))
+        func index(_ date: Date) -> Int? {
+            let offset = date.timeIntervalSince(start)
+            guard offset >= 0 else { return nil }
+            return min(Int(offset / step), span.count - 1)
+        }
+        var up = Array(repeating: 0, count: span.count)
+        var down = Array(repeating: 0, count: span.count)
+        for date in shared { if let i = index(date) { up[i] += 1 } }
+        for date in kept { if let i = index(date) { down[i] += 1 } }
+        return (0 ..< span.count).map { GlassDayColumn(id: String($0), up: up[$0], down: down[$0]) }
     }
 
     /// One recent-activity row.

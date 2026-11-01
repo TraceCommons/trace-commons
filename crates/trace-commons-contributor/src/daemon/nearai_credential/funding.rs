@@ -17,11 +17,10 @@ use sha2::{Digest, Sha256};
 
 use crate::daemon::ipc::DaemonShared;
 use crate::daemon::nearai_credential::api::CloudApi;
-use crate::daemon::nearai_credential::loopback::SessionTokens;
 use crate::daemon::nearai_credential::session;
 use crate::daemon::settings::{NearAiInferenceCredential, NearAiSession};
 
-const CLOUD_ORIGIN: &str = "https://cloud.near.ai";
+const CLOUD_ORIGIN: &str = crate::channel::NEAR_AI_DASHBOARD_ORIGIN;
 const MAX_ORGANIZATION_ID_BYTES: usize = 128;
 const MAX_ORGANIZATION_NAME_BYTES: usize = 256;
 
@@ -137,13 +136,15 @@ fn snapshot(
 /// Verify the selected inference-key organization using the retained session.
 /// The optional expected context binds a click to the destination already
 /// displayed. Refresh rotation is persisted by the shared lifecycle before
-/// its access token is used, and no commit lock spans either HTTP request.
+/// its access token is used. The shared management coordinator covers the
+/// exchange and organization request, so another read cannot rotate the
+/// session in between. No credential commit lock spans either HTTP request.
 pub async fn read(
     shared: &DaemonShared,
     api: &CloudApi,
     expected: Option<&ExpectedFunding>,
 ) -> FundingReport {
-    let (key, retained) = match snapshot(shared) {
+    let (key, _) = match snapshot(shared) {
         Ok(connection) => connection,
         Err(report) => return report,
     };
@@ -157,50 +158,59 @@ pub async fn read(
     {
         return FundingReport::Changed;
     }
-    let access = match session::exchange(shared, api, &retained).await {
-        Ok(access) => access,
-        Err(error) => return report_for(&error),
-    };
-    let tokens = SessionTokens {
-        access_token: access.access_token,
-        // The management endpoint receives only the exchanged access token.
-        refresh_token: String::new(),
-    };
-    let organization = match api
-        .funding_organization(&tokens, &key.organization_id)
-        .await
+    match super::balance::with_fresh_management_session(shared, api, |tokens, retained| {
+        let key = key.clone();
+        let connection_revision = connection_revision.clone();
+        let browser_url = browser_url.clone();
+        async move {
+            // Bind to the session paired with this access token after waiting
+            // for earlier management reads and their normal token rotations.
+            // A different key or a replacement since the exchange is refused.
+            let (current_key, current_session) = match snapshot(shared) {
+                Ok(connection) => connection,
+                Err(report) => return Ok(report),
+            };
+            if current_key != key || current_session != retained {
+                return Ok(FundingReport::Changed);
+            }
+            let organization = api
+                .funding_organization(&tokens, &key.organization_id)
+                .await?;
+            let (current_key, current_session) = match snapshot(shared) {
+                Ok(connection) => connection,
+                Err(report) => return Ok(report),
+            };
+            if current_key != key || current_session != retained {
+                return Ok(FundingReport::Changed);
+            }
+            if organization.id != key.organization_id
+                || organization.name.trim().is_empty()
+                || organization.name.len() > MAX_ORGANIZATION_NAME_BYTES
+                || organization.name.chars().any(char::is_control)
+            {
+                return Ok(FundingReport::Unavailable);
+            }
+            if !organization.is_active {
+                return Ok(FundingReport::NoOrganization);
+            }
+            // A bound click is the one that hands the browser its destination:
+            // from here a payment may land, so an earlier balance is stale.
+            if expected.is_some() {
+                super::balance::note_billing_opened(shared.store.dir());
+            }
+            Ok(FundingReport::Ready {
+                organization_id: organization.id,
+                organization_name: organization.name,
+                observed_at: Utc::now(),
+                connection_revision,
+                browser_url,
+            })
+        }
+    })
+    .await
     {
-        Ok(organization) => organization,
-        Err(error) => return report_for(&error),
-    };
-    let (current_key, current_session) = match snapshot(shared) {
-        Ok(connection) => connection,
-        Err(report) => return report,
-    };
-    if current_key != key || current_session != access.retained {
-        return FundingReport::Changed;
-    }
-    if organization.id != key.organization_id
-        || organization.name.trim().is_empty()
-        || organization.name.len() > MAX_ORGANIZATION_NAME_BYTES
-        || organization.name.chars().any(char::is_control)
-    {
-        return FundingReport::Unavailable;
-    }
-    if !organization.is_active {
-        return FundingReport::NoOrganization;
-    }
-    // A bound click is the one that hands the browser its destination: from
-    // here a payment may land, and the balance must not answer from before it.
-    if expected.is_some() {
-        super::balance::note_billing_opened(shared.store.dir());
-    }
-    FundingReport::Ready {
-        organization_id: organization.id,
-        organization_name: organization.name,
-        observed_at: Utc::now(),
-        connection_revision,
-        browser_url,
+        Ok(report) => report,
+        Err(error) => report_for(&error),
     }
 }
 
@@ -346,7 +356,10 @@ mod tests {
     fn credits_urls_have_one_fixed_origin_and_one_bounded_path_segment() {
         for id in ["org-1_A".to_owned(), "a".repeat(MAX_ORGANIZATION_ID_BYTES)] {
             let url = url::Url::parse(&credits_url(&id).unwrap()).unwrap();
-            assert_eq!(url.origin().ascii_serialization(), "https://cloud.near.ai");
+            assert_eq!(
+                url.origin().ascii_serialization(),
+                crate::channel::NEAR_AI_DASHBOARD_ORIGIN
+            );
             assert_eq!(url.path(), format!("/dashboard/organizations/{id}/credits"));
             assert!(url.query().is_none() && url.fragment().is_none());
             assert!(url.username().is_empty() && url.password().is_none());
@@ -456,6 +469,7 @@ mod tests {
         response: Value,
         organization_status: StatusCode,
         gate: Mutex<Option<Gate>>,
+        balance_gate: Mutex<Option<Gate>>,
     }
 
     struct Cloud {
@@ -480,10 +494,12 @@ mod tests {
                 response,
                 organization_status,
                 gate: Mutex::new(gate),
+                balance_gate: Mutex::new(None),
             });
             let router = Router::new()
                 .route("/v1/users/me/access-tokens", post(refresh))
                 .route("/v1/organizations/{id}", get(organization))
+                .route("/v1/organizations/{id}/usage/balance", get(balance_read))
                 .with_state(Arc::clone(&state));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let api =
@@ -591,6 +607,116 @@ mod tests {
             let _ = gate.release.await;
         }
         (state.organization_status, Json(state.response.clone()))
+    }
+
+    async fn balance_read(
+        State(state): State<Arc<CloudState>>,
+        Path(id): Path<String>,
+        headers: HeaderMap,
+    ) -> Json<Value> {
+        state.requests.lock().unwrap().push(format!("balance:{id}"));
+        let rotations = *state.rotations.lock().unwrap();
+        assert!(bearer(&headers) == format!("synthetic-access-{rotations}"));
+        let gate = state.balance_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            let _ = gate.release.await;
+        }
+        Json(json!({
+            "remaining": 8_500_000_000i64,
+            "total_spent": 1_500_000_000i64,
+            "total_requests": 12,
+            "total_tokens": 3456,
+        }))
+    }
+
+    /// Funding must hold the management-session coordinator through its
+    /// organization request, so an ordinary balance read cannot rotate the
+    /// session and make a still-valid billing destination look replaced.
+    #[tokio::test]
+    async fn funding_lookup_keeps_a_concurrent_balance_read_from_rotating_its_session() {
+        use crate::daemon::nearai_credential::balance::{BalanceReport, read_via};
+
+        let fixture = Fixture::new();
+        fixture.install(Some(key()), true);
+        let (entered, arrived) = oneshot::channel();
+        let (release, wait) = oneshot::channel();
+        let cloud = Cloud::start(
+            &fixture,
+            json!({"id":ORGANIZATION,"name":"Synthetic","is_active":true}),
+            StatusCode::OK,
+            StatusCode::OK,
+            Some(Gate {
+                entered,
+                release: wait,
+            }),
+        )
+        .await;
+        let funding = read(&fixture.shared, &cloud.api, None);
+        tokio::pin!(funding);
+        tokio::select! {
+            result = timeout(DEADLINE, arrived) => result.unwrap().unwrap(),
+            _ = &mut funding => panic!("funding returned before the organization response gate"),
+        }
+        let balance = read_via(&fixture.shared, &cloud.api);
+        tokio::pin!(balance);
+        let early_balance = timeout(Duration::from_millis(100), &mut balance).await;
+        let completed_early = early_balance.is_ok();
+        let rotations_while_funding_pending = *cloud.state.rotations.lock().unwrap();
+        release.send(()).unwrap();
+        let funding = timeout(DEADLINE, funding).await.unwrap();
+        let balance = match early_balance {
+            Ok(report) => report,
+            Err(_) => timeout(DEADLINE, balance).await.unwrap(),
+        };
+        assert!(
+            !completed_early,
+            "the balance must wait for billing verification"
+        );
+        assert_eq!(rotations_while_funding_pending, 1);
+        assert!(matches!(funding, FundingReport::Ready { .. }));
+        assert!(matches!(balance, BalanceReport::Known(_)));
+    }
+
+    /// Queued funding must snapshot after the preceding management read's
+    /// rotation, rather than reject that normal refresh as an account change.
+    #[tokio::test]
+    async fn funding_waits_for_a_pending_balance_before_capturing_its_session() {
+        use crate::daemon::nearai_credential::balance::{BalanceReport, read_via};
+
+        let fixture = Fixture::new();
+        fixture.install(Some(key()), true);
+        let cloud = Cloud::normal(&fixture).await;
+        let (entered, arrived) = oneshot::channel();
+        let (release, wait) = oneshot::channel();
+        *cloud.state.balance_gate.lock().unwrap() = Some(Gate {
+            entered,
+            release: wait,
+        });
+        let balance = read_via(&fixture.shared, &cloud.api);
+        tokio::pin!(balance);
+        tokio::select! {
+            result = timeout(DEADLINE, arrived) => result.unwrap().unwrap(),
+            _ = &mut balance => panic!("balance returned before its response gate"),
+        }
+        let funding = read(&fixture.shared, &cloud.api, None);
+        tokio::pin!(funding);
+        let early_funding = timeout(Duration::from_millis(100), &mut funding).await;
+        let completed_early = early_funding.is_ok();
+        let rotations_while_balance_pending = *cloud.state.rotations.lock().unwrap();
+        release.send(()).unwrap();
+        let balance = timeout(DEADLINE, balance).await.unwrap();
+        let funding = match early_funding {
+            Ok(report) => report,
+            Err(_) => timeout(DEADLINE, funding).await.unwrap(),
+        };
+        assert!(
+            !completed_early,
+            "billing must wait for the preceding balance read"
+        );
+        assert_eq!(rotations_while_balance_pending, 1);
+        assert!(matches!(balance, BalanceReport::Known(_)));
+        assert!(matches!(funding, FundingReport::Ready { .. }));
     }
 
     #[tokio::test]

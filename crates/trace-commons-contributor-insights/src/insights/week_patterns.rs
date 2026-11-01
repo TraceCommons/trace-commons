@@ -53,6 +53,31 @@ pub enum PatternBasis {
     FromCounters,
 }
 
+/// What a card leads with (owner decision 2026-10-20). The token figure,
+/// unless its estimate rounds to 0 while the card found something: then the
+/// count, and the token figure is not shown until it reaches one rounding
+/// step ([`super::analytics_constants::TOKEN_ESTIMATE_ROUNDING`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternHeadline {
+    /// The token figure, or the dash when it is unknown. An answer made
+    /// before this field reads as this.
+    #[default]
+    Tokens,
+    /// The count with its unit ("2 reads"), in place of a bare 0.
+    Count,
+}
+
+impl PatternHeadline {
+    /// The headline for a card's (rounded) token figure and its count.
+    pub fn for_figures(tokens: Option<u64>, count: Option<u32>) -> Self {
+        match (tokens, count) {
+            (Some(0), Some(found)) if found > 0 => Self::Count,
+            _ => Self::Tokens,
+        }
+    }
+}
+
 /// One week's bar. `tokens: None` is a gap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatternWeek {
@@ -70,6 +95,9 @@ pub struct PatternCard {
     /// Occurrences: repeated reads, retried calls, cycles, or long-context
     /// turns. `None` when no Claude Code session is counted this week.
     pub count: Option<u32>,
+    /// Whether the card leads with `tokens` or with `count`.
+    #[serde(default)]
+    pub headline: PatternHeadline,
     /// Repeated reads only: how many files were read again.
     pub files: Option<u32>,
     /// Counted sessions with at least one occurrence ("See {n} sessions").
@@ -292,10 +320,13 @@ pub fn week_patterns(
                 Ok(permille) => (Some(permille), None),
                 Err(reason) => (None, Some(reason)),
             };
+            let tokens = week.as_ref().and_then(|found| found.figure(kind));
+            let count = week.as_ref().and_then(|found| occurrences(found, kind));
             PatternCard {
                 kind,
-                tokens: week.as_ref().and_then(|found| found.figure(kind)),
-                count: week.as_ref().and_then(|found| occurrences(found, kind)),
+                tokens,
+                count,
+                headline: PatternHeadline::for_figures(tokens, count),
                 files: (kind == PatternKind::RepeatedReads)
                     .then(|| week.as_ref().map(|found| found.reread_files.len() as u32))
                     .flatten(),
@@ -526,6 +557,8 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Claude {
                 series: UsageSeries {
                     turns,
@@ -543,6 +576,8 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Codex {
                 observed: Some(crate::insights::week_rollup::CodexObserved {
                     first_at: at(day),
@@ -553,6 +588,7 @@ mod tests {
                     total: 110,
                     baseline_excluded: false,
                 }),
+                series: None,
             },
         }
     }
@@ -619,6 +655,62 @@ mod tests {
         assert_eq!(week.long_context_threshold, LONG_CONTEXT_TOKENS);
         assert_eq!(week.claude_sessions, 1);
         assert!(!week.claude_only);
+    }
+
+    /// Owner decision 2026-10-20: a card whose token estimate rounds to 0
+    /// while it found something leads with the count; the token figure is
+    /// the headline only from one rounding step up, and when nothing was
+    /// found or nothing is known.
+    #[test]
+    fn a_card_whose_estimate_rounds_to_zero_leads_with_its_count() {
+        // One repeated read of an 8-byte result: about 2 tokens, rounded to 0.
+        let small = claude(
+            "s",
+            0,
+            vec![turn(0, 15, 1_000), turn(1, 15, 1_000)],
+            vec![read(0, 1, 8), read(1, 1, 8)],
+        );
+        let week = week_patterns(Feed::Saved, &[small], date(2026, 9, 16), utc(), 6);
+        let reads = card(&week, PatternKind::RepeatedReads);
+        assert_eq!((reads.tokens, reads.count), (Some(0), Some(1)));
+        assert_eq!(reads.headline, PatternHeadline::Count);
+        // Nothing found: the zero stays the headline.
+        let cycles = card(&week, PatternKind::EditFailEdit);
+        assert_eq!((cycles.tokens, cycles.count), (Some(0), Some(0)));
+        assert_eq!(cycles.headline, PatternHeadline::Tokens);
+
+        // An estimate of one rounding step or more keeps the token figure.
+        let large = week_patterns(
+            Feed::Saved,
+            &[rereading("a", 0, 15)],
+            date(2026, 9, 16),
+            utc(),
+            6,
+        );
+        let reads = card(&large, PatternKind::RepeatedReads);
+        assert_eq!(reads.tokens, Some(20_000));
+        assert_eq!(reads.headline, PatternHeadline::Tokens);
+
+        // Unknown figures keep today's dash.
+        let unknown = week_patterns(
+            Feed::Saved,
+            &[codex("c", 0, 15)],
+            date(2026, 9, 14),
+            utc(),
+            6,
+        );
+        for card in &unknown.cards {
+            assert_eq!(card.headline, PatternHeadline::Tokens, "{:?}", card.kind);
+        }
+
+        // On the wire as a word; an answer from before the field reads as
+        // the token headline.
+        let wire = serde_json::to_value(card(&week, PatternKind::RepeatedReads)).unwrap();
+        assert_eq!(wire["headline"], "count");
+        let mut older = wire.clone();
+        older.as_object_mut().unwrap().remove("headline");
+        let read: PatternCard = serde_json::from_value(older).unwrap();
+        assert_eq!(read.headline, PatternHeadline::Tokens);
     }
 
     #[test]

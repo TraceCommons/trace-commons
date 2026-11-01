@@ -253,6 +253,9 @@ struct DaemonStatus: Decodable, Equatable {
     let schemaVersion: String
     let loggedIn: Bool
     let tenantID: String?
+    /// CLI setup completion for this daemon's current enrollment. An older
+    /// daemon omits it; the existing tenant-keyed GUI marker still applies.
+    let setupComplete: Bool?
     var accountScope: String?
     var consentScopes: [String]
     let paused: Bool
@@ -262,12 +265,6 @@ struct DaemonStatus: Decodable, Equatable {
     let decisionsOwed: Int?
     let nextDigestAt: Date?
     let health: DaemonHealth
-    /// The daily volume caps and what they are holding back.
-    ///
-    /// Decoded with a fallback rather than as an optional: a daemon that
-    /// predates the field reports an unspent budget blocking nothing, which
-    /// is the only safe reading of silence here.
-    let dailyBudget: DailyBudget
     /// What the daemon is seeing from the declared local proxy, in three
     /// states. Not part of `health`: none of the three is a fault.
     let routing: RoutingStatus
@@ -292,6 +289,7 @@ struct DaemonStatus: Decodable, Equatable {
         case schemaVersion = "schema_version"
         case loggedIn = "logged_in"
         case tenantID = "tenant_id"
+        case setupComplete = "setup_complete"
         case accountScope = "account_scope"
         case consentScopes = "consent_scopes"
         case paused
@@ -299,7 +297,6 @@ struct DaemonStatus: Decodable, Equatable {
         case decisionsOwed = "decisions_owed"
         case nextDigestAt = "next_digest_at"
         case health
-        case dailyBudget = "daily_budget"
         case routing
         case grantVoids = "grant_voids"
         case witnessCapacity = "witness_capacity"
@@ -312,6 +309,7 @@ struct DaemonStatus: Decodable, Equatable {
         schemaVersion: String,
         loggedIn: Bool,
         tenantID: String?,
+        setupComplete: Bool? = nil,
         accountScope: String? = nil,
         consentScopes: [String],
         paused: Bool,
@@ -319,7 +317,6 @@ struct DaemonStatus: Decodable, Equatable {
         decisionsOwed: Int? = nil,
         nextDigestAt: Date?,
         health: DaemonHealth,
-        dailyBudget: DailyBudget = .unknown,
         routing: RoutingStatus = .notDeclared,
         grantVoids: [GrantVoidWire] = [],
         witnessCapacity: WitnessCapacity = .none,
@@ -330,6 +327,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
         self.tenantID = tenantID
+        self.setupComplete = setupComplete
         self.accountScope = accountScope
         self.consentScopes = consentScopes
         self.paused = paused
@@ -337,7 +335,6 @@ struct DaemonStatus: Decodable, Equatable {
         self.decisionsOwed = decisionsOwed
         self.nextDigestAt = nextDigestAt
         self.health = health
-        self.dailyBudget = dailyBudget
         self.routing = routing
         self.grantVoids = grantVoids
         self.witnessCapacity = witnessCapacity
@@ -351,6 +348,7 @@ struct DaemonStatus: Decodable, Equatable {
         schemaVersion = try c.decodeIfPresent(String.self, forKey: .schemaVersion) ?? ""
         loggedIn = try c.decodeIfPresent(Bool.self, forKey: .loggedIn) ?? false
         tenantID = try c.decodeIfPresent(String.self, forKey: .tenantID)
+        setupComplete = try c.decodeIfPresent(Bool.self, forKey: .setupComplete)
         accountScope = try c.decodeIfPresent(String.self, forKey: .accountScope)
         consentScopes = try c.decodeIfPresent([String].self, forKey: .consentScopes) ?? []
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
@@ -359,7 +357,6 @@ struct DaemonStatus: Decodable, Equatable {
         nextDigestAt = try c.decodeIfPresent(Date.self, forKey: .nextDigestAt)
         health = try c.decodeIfPresent(DaemonHealth.self, forKey: .health)
             ?? DaemonHealth(lastErrorLabel: nil, since: nil)
-        dailyBudget = try c.decodeIfPresent(DailyBudget.self, forKey: .dailyBudget) ?? .unknown
         // A daemon that predates this field has declared no proxy, which is
         // exactly what the fallback says.
         routing = try c.decodeIfPresent(RoutingStatus.self, forKey: .routing) ?? .notDeclared
@@ -689,7 +686,6 @@ struct DaemonSettingsView: Decodable, Equatable {
     let localNotifications: Bool
     let queueTtlDays: Int
     let maxQueueEntries: Int
-    let maxUploadsPerDay: Int
     let nearAIConfigured: Bool
     let claudeRootConfigured: Bool
     let codexRootConfigured: Bool
@@ -742,9 +738,13 @@ struct DaemonSettingsView: Decodable, Equatable {
     /// that predates the key, which draws no switch rather than an "off"
     /// nobody set.
     var insightsLedgerFeed: Bool? = nil
+    /// The stored favorite model ids (`managed_favorite_models`), for
+    /// Settings' favorites list while NEAR AI's catalogue cannot be read.
+    /// Absent from an older daemon.
+    var managedFavoriteModels: [String]? = nil
     /// Whether the daemon counts tokens in the watched folders for
-    /// Insights (`insights_counter_pass`; owner decision D4, off by
-    /// default). Absent from an older daemon: no switch, never an "off".
+    /// Insights (`insights_counter_pass`; on by default, product owner,
+    /// 2026-10-29). Absent from an older daemon: no switch, never an "off".
     var insightsCounterPass: Bool? = nil
     /// The weekly summary card's switch (`insights_recap_card_enabled`, on
     /// by default); "Hide" on the card turns it off. Absent from an older
@@ -775,7 +775,6 @@ struct DaemonSettingsView: Decodable, Equatable {
         case localNotifications = "local_notifications"
         case queueTtlDays = "queue_ttl_days"
         case maxQueueEntries = "max_queue_entries"
-        case maxUploadsPerDay = "max_uploads_per_day"
         case nearAIConfigured = "near_ai_configured"
         case claudeRootConfigured = "claude_root_configured"
         case codexRootConfigured = "codex_root_configured"
@@ -794,6 +793,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case privateInferenceOfferSeen = "private_inference_offer_seen"
         case privateInferenceState = "private_inference_state"
         case insightsLedgerFeed = "insights_ledger_feed"
+        case managedFavoriteModels = "managed_favorite_models"
         case missionsEnabled = "missions_enabled"
         case insightsCounterPass = "insights_counter_pass"
         case insightsRecapCardEnabled = "insights_recap_card_enabled"
@@ -882,6 +882,9 @@ enum DaemonEvent: Equatable {
     /// cache -- see the contract's note that a cache hit "no event
     /// follows".
     case previewReady(PreviewRequestResult)
+    /// `near_ai_balance_changed`: NEAR AI credit arrived; read the balance
+    /// again.
+    case nearAiBalanceChanged
     case unknown(String)
 }
 
@@ -892,14 +895,9 @@ enum DaemonDecoding {
     /// seconds; `.iso8601` alone rejects those, so both spellings are tried.
     static func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
         decoder.dateDecodingStrategy = .custom { decoder in
             let text = try decoder.singleValueContainer().decode(String.self)
-            if let d = withFraction.date(from: text) { return d }
-            if let d = plain.date(from: text) { return d }
+            if let d = DaemonTimestamp.parse(text) { return d }
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "unparseable timestamp")
             )
@@ -982,12 +980,34 @@ struct NearAiEnrollment: Decodable, Sendable, Equatable {
     let tenantID: String
     let accountID: String
     let deviceKeyID: String
+    /// `applied` or `not_applied`, only when a referral code was sent. Not
+    /// shown at sign-up: Settings > Referrals says whether one is applied.
+    var referral: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case enrolled
         case tenantID = "tenant_id"
         case accountID = "account_id"
         case deviceKeyID = "device_key_id"
+        case referral
+    }
+
+    init(enrolled: Bool, tenantID: String, accountID: String, deviceKeyID: String, referral: String? = nil) {
+        self.enrolled = enrolled
+        self.tenantID = tenantID
+        self.accountID = accountID
+        self.deviceKeyID = deviceKeyID
+        self.referral = referral
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enrolled = try c.decode(Bool.self, forKey: .enrolled)
+        tenantID = try c.decode(String.self, forKey: .tenantID)
+        accountID = try c.decode(String.self, forKey: .accountID)
+        deviceKeyID = try c.decode(String.self, forKey: .deviceKeyID)
+        // Never fails the enrolment it rides on.
+        referral = try? c.decodeIfPresent(String.self, forKey: .referral)
     }
 }
 

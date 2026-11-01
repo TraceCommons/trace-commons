@@ -377,9 +377,7 @@ impl VerdictDelta {
     /// reads 0.34999999999999998 still gives 4 tenths, not 3.
     #[must_use]
     pub fn credit_final_tenths(&self) -> Option<u64> {
-        let millionths = (self.credit_final_delta * 1e6).round() as i64;
-        let tenths = millionths.saturating_add(50_000).div_euclid(100_000);
-        u64::try_from(tenths).ok().filter(|t| *t >= 1)
+        tenths_of(self.credit_final_delta)
     }
 
     /// The summary of `submissions`, or `None` when no submission carries
@@ -408,8 +406,23 @@ impl VerdictDelta {
 /// A final credit figure as the decimal the server wrote: the f32's
 /// shortest round-trip form, read back as an f64. Widening the f32 itself
 /// turns 0.35 into 0.3499999940..., which rounds to 3 tenths.
-fn decimal_credit(credit: f32) -> f64 {
+pub(crate) fn decimal_credit(credit: f32) -> f64 {
     credit.to_string().parse().unwrap_or(f64::from(credit))
+}
+
+/// A credit figure in tenths, rounded half away from zero, or `None` when
+/// it rounds to zero. Rounded in whole millionths first, so a sum that
+/// should be 0.35 but reads 0.34999999999999998 still gives 4 tenths.
+/// The one rounding every credit sentence goes through.
+pub(crate) fn tenths_of(credit: f64) -> Option<u64> {
+    // Not a number, or not finite, is no credit: the casts below saturate
+    // and would print an enormous figure.
+    if !credit.is_finite() {
+        return None;
+    }
+    let millionths = (credit * 1e6).round() as i64;
+    let tenths = millionths.saturating_add(50_000).div_euclid(100_000);
+    u64::try_from(tenths).ok().filter(|t| *t >= 1)
 }
 
 /// Whether a final credit figure is above zero in whole millionths, the
@@ -609,8 +622,8 @@ pub struct LeadInputs {
     pub consent_hold: bool,
     /// An enrollment is live (`status.logged_in`): config and device key.
     pub enrolled: bool,
-    /// No health label is set and the daily budget is not blocking uploads:
-    /// the same health that turns the menu-bar strip to attention.
+    /// No health label is set: the same health that turns the menu-bar
+    /// strip to attention.
     pub healthy: bool,
     /// The `suggestions_enabled` setting.
     pub suggestions_enabled: bool,
@@ -966,6 +979,16 @@ pub(crate) fn shared_cooldown_until(
 
 #[cfg(test)]
 mod tests {
+    /// A figure that is not a number is no credit: a sentence for it would
+    /// print a saturated, enormous figure.
+    #[test]
+    fn a_non_finite_credit_figure_has_no_tenths() {
+        assert_eq!(tenths_of(f64::INFINITY), None);
+        assert_eq!(tenths_of(f64::NEG_INFINITY), None);
+        assert_eq!(tenths_of(f64::NAN), None);
+        assert_eq!(tenths_of(0.35), Some(4));
+    }
+
     use super::*;
 
     fn now() -> DateTime<Utc> {
@@ -1261,6 +1284,7 @@ mod tests {
             consent_scopes: vec![],
             credit_points_pending: 1.0,
             credit_points_final: None,
+            credit_outcome_reason: None,
             explanations: vec![],
             last_refreshed_at: Some(now()),
             withdrawn_at: None,

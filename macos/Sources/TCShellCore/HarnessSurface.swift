@@ -305,6 +305,8 @@ public enum HarnessPlanOutcome: Equatable, Sendable {
     case notInstalled
     case entryUnusable
     case noConfigPath
+    case unsupportedVersion
+    case modelsUnavailable
 
     public static func fromABI(_ value: Int32) -> HarnessPlanOutcome {
         switch value {
@@ -314,6 +316,8 @@ public enum HarnessPlanOutcome: Equatable, Sendable {
         case 44: return .notInstalled
         case 45: return .entryUnusable
         case 46: return .noConfigPath
+        case 47: return .unsupportedVersion
+        case 48: return .modelsUnavailable
         default: return .unknown
         }
     }
@@ -398,15 +402,7 @@ public enum HarnessSurface {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let text = try decoder.singleValueContainer().decode(String.self)
-            // Built inside the closure rather than captured: the formatter is
-            // not `Sendable`, and this is called once per timestamp on a list
-            // of two.
-            let withFraction = ISO8601DateFormatter()
-            withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let date = withFraction.date(from: text) { return date }
-            let plain = ISO8601DateFormatter()
-            plain.formatOptions = [.withInternetDateTime]
-            if let date = plain.date(from: text) { return date }
+            if let date = DaemonTimestamp.parse(text) { return date }
             throw DecodingError.dataCorrupted(
                 .init(codingPath: decoder.codingPath, debugDescription: "unparseable timestamp"))
         }

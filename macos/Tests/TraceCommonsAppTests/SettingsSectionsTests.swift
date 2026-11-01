@@ -11,7 +11,7 @@ final class SettingsSectionsTests: XCTestCase {
     func test_theSectionsAreTheSpecsInItsOrder() {
         XCTAssertEqual(SettingsSection.allCases, [
             .general, .connection, .startup, .notifications, .updates, .watching, .consent, .publicProfile,
-            .watchedFolders, .tools, .privateAI, .witness, .projects, .changes, .compute,
+            .watchedFolders, .tools, .privateAI, .referrals, .witness, .projects, .changes, .compute,
         ])
         XCTAssertEqual(Set(SettingsSection.allCases.map(\.symbol)).count, SettingsSection.allCases.count)
     }
@@ -22,12 +22,12 @@ final class SettingsSectionsTests: XCTestCase {
     func test_theListIsRonsTwelveInTheCoresWords() throws {
         XCTAssertEqual(SettingsSection.listed, [
             .general, .connection, .startup, .watching, .consent, .publicProfile, .watchedFolders, .tools,
-            .privateAI, .witness, .projects, .changes, .compute,
+            .privateAI, .referrals, .witness, .projects, .changes, .compute,
         ])
         let nav = try XCTUnwrap(MonitorWords.table?.settingsNav)
         XCTAssertEqual(SettingsSection.listed.map { $0.listRow(nav).text }, [
             "General", "Connection", "Startup & notifications", "Watching", "Data uses", "Public profile",
-            "Watched folders", "Tools", "Private AI", "Redaction witness", "Projects",
+            "Watched folders", "Tools", "Private AI", "Referrals", "Redaction witness", "Projects",
             "Change log", "Compute",
         ])
         XCTAssertNil(SettingsSection.notifications.navName(nav))
@@ -107,26 +107,27 @@ final class SettingsSectionsTests: XCTestCase {
 
     /// Each section's heading is the one the list names it by: the same
     /// source, read in the section's own file. Startup, Watching and Uses
-    /// take #1146's two-level card heads instead (an eyebrow over an h2);
-    /// the modal's section rule still names each by the list's word.
+    /// use their specific card titles; the section rule still names each
+    /// by the list's word.
     func test_eachSectionIsHeadedByTheListsTitleSource() throws {
         let headings: [SettingsSection: (file: String, source: String)] = [
             .general: ("GeneralSection", "GlassEyebrowCard(SettingsWords.appearance)"),
-            .connection: ("ConnectionSection", "GlassEyebrowCard(SettingsWords.connection, title: connectionTitle)"),
+            .connection: ("ConnectionSection", "GlassEyebrowCard(SettingsWords.connection, title: connectionTitle, accessory: {"),
             .startup: ("StartupSection",
-                       "GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle)"),
+                       "GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle, accessory: {"),
             .notifications: ("StartupSection", "if let heading = Notifier.copy?.notificationHeading"),
             .updates: ("StartupSection", "GlassEyebrowCard(SettingsWords.updates)"),
             .watching: ("WatchingSection",
-                        "GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle)"),
+                        "GlassEyebrowCard(SettingsLegacyWords.discoveryEyebrow, title: SettingsLegacyWords.discoveryTitle, accessory: {"),
             .consent: ("ConsentSection",
-                       "GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading)"),
+                       "GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading, accessory: {"),
             .publicProfile: ("PublicProfileSection", "GlassEyebrowCard(PublicProfileCopy.heading)"),
             .watchedFolders: ("WatchedFoldersSection", "GlassEyebrowCard(copy.heading)"),
             .tools: ("ToolsSection", "GlassEyebrowCard(copy.toolsHeading)"),
             // The section's own panels, headed by the standard-settings rule
             // (owner, 2026-10-10); the modal's rule names it by the list's word.
             .privateAI: ("PrivateAISection", "PrivateAISettingsPanels(store: store)"),
+            .referrals: ("ReferralsSection", "GlassEyebrowCard(surface.copy.title)"),
             .witness: ("WitnessSection", "GlassEyebrowCard(copy.heading)"),
             .projects: ("ProjectsSection", "GlassEyebrowCard(SettingsWords.projects)"),
             .changes: ("ChangesSection", "GlassEyebrowCard(SettingsLegacyWords.auditHeading)"),
@@ -148,7 +149,7 @@ final class SettingsSectionsTests: XCTestCase {
     func test_watchingHasRonsWatcherCard() throws {
         let source = try SettingsParityTests.text("Views/Settings/WatchingSection.swift")
         for needle in ["if model.statusRead == .answered {\n            watcher(paused: model.status.paused, armed: Self.controlsArmed(",
-                       "GlassEyebrowCard(SettingsLegacyWords.watcherEyebrow, title: SettingsLegacyWords.watcherTitle)",
+                       "GlassEyebrowCard(SettingsLegacyWords.watcherEyebrow, title: SettingsLegacyWords.watcherTitle, accessory: {",
                        "GlassChip(glass: paused ? SettingsLegacyWords.watcherPaused : SettingsLegacyWords.watcherWatching,",
                        "Button(SettingsLegacyWords.pauseWatcher) { model.pause(until: nil) }",
                        ".disabled(paused || !armed)", "Button(SettingsLegacyWords.resumeWatcher) { model.resume() }",
@@ -170,10 +171,11 @@ final class SettingsSectionsTests: XCTestCase {
             XCTAssertFalse(word.isEmpty)
         }
         XCTAssertNotEqual(shell.watcherWatching, shell.watcherPaused)
-        // Every card with a re-read link uses the core's word for it.
+        // Every card that re-reads has the refresh icon button, named in
+        // the core's word (owner, 2026-10-20: it was a "Refresh" link).
         for file in ["WatchingSection", "ConsentSection", "StartupSection"] {
             let text = try SettingsParityTests.text("Views/Settings/\(file).swift")
-            XCTAssertTrue(text.contains("Button(SettingsLegacyWords.refresh"), "\(file) has no Refresh")
+            XCTAssertTrue(text.contains("GlassRefreshButton(SettingsLegacyWords.refresh"), "\(file) has no refresh")
         }
     }
 

@@ -25,8 +25,6 @@ permissions = [
   "allow-set-quiescence-minutes",
   "allow-set-approval-hold-seconds",
   "allow-set-digest-hours",
-  "allow-set-max-uploads-per-day",
-  "allow-set-max-bytes-per-day-mb",
   "allow-witness-status",
   "allow-configure-witness",
   "allow-clear-witness",

@@ -21,6 +21,18 @@ public struct GlassStatCard: View {
     /// A figure beside the value, quieter than it (the size of what waits);
     /// nil draws none.
     private let valueAccessory: String?
+    /// Where the symbol is drawn: beside the words, or as the card's
+    /// watermark (`GlassCardWatermark`).
+    private let iconPlacement: IconPlacement
+
+    /// Where a stat card draws its symbol.
+    public enum IconPlacement: Sendable {
+        /// On the leading side, beside the label and value.
+        case leading
+        /// Large on the trailing side, tilted and cut off by the card's
+        /// edges, behind the words (owner, 2026-10-20, Home's cards).
+        case watermark
+    }
 
     /// The icon's size: near the label and value's two lines together
     /// (14 + 22pt), so the symbol fills the tile's height.
@@ -32,9 +44,11 @@ public struct GlassStatCard: View {
 
     public init(
         _ label: String, value: String, detail: String? = nil, detailInk: GlassRGBA? = nil,
-        systemImage: String? = nil, valueAccessory: String? = nil, interactive: Bool = false
+        systemImage: String? = nil, valueAccessory: String? = nil, interactive: Bool = false,
+        iconPlacement: IconPlacement = .leading
     ) {
         self.systemImage = systemImage
+        self.iconPlacement = iconPlacement
         self.valueAccessory = valueAccessory
         self.label = label
         self.value = value
@@ -52,7 +66,7 @@ public struct GlassStatCard: View {
     /// label and value.
     public var body: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
-            if let systemImage {
+            if let systemImage, iconPlacement == .leading {
                 Image(systemName: systemImage)
                     .glassGlyph(Self.iconGlyph, weight: .regular)
                     .foregroundStyle(GlassTokens.Color.purpleSoft.color)
@@ -64,6 +78,7 @@ public struct GlassStatCard: View {
         .padding(.vertical, 10)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .glassCardWatermark(iconPlacement == .watermark ? systemImage : nil)
         .glassTier(.card, hover: GlassCard<EmptyView>.hoverFill(interactive: interactive))
         .accessibilityElement(children: .combine)
     }
@@ -100,6 +115,54 @@ public struct GlassStatCard: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A card's symbol as a watermark (owner, 2026-10-20: "like in the larger
+/// promo cards"): large on the trailing side, tilted as the promotions'
+/// graphics are, running off the card's trailing and bottom edges, in the
+/// accent a little faded. It sits behind the card's words and over its
+/// fill: give it with `glassCardWatermark` before the card's tier.
+public struct GlassCardWatermark: View {
+    private let systemImage: String
+
+    public init(_ systemImage: String) {
+        self.systemImage = systemImage
+    }
+
+    /// The symbol's size, past a stat card's height.
+    public static let size: CGFloat = 58
+    /// The promotions' tilt (`GlassHeroSymbol`).
+    public static let angle: Double = -12
+    /// A little under full strength, so the words over it stay first.
+    public static let opacity: Double = 0.55
+    /// How far the symbol is pushed past the trailing and bottom edges.
+    public static let bleed = CGSize(width: 12, height: 14)
+
+    public var body: some View {
+        Image(systemName: systemImage)
+            .glassGlyph(Self.size, weight: .regular)
+            .foregroundStyle(GlassTokens.Color.purpleSoft.color)
+            .rotationEffect(.degrees(Self.angle))
+            .opacity(Self.opacity)
+            .fixedSize()
+            .offset(Self.bleed)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            .accessibilityHidden(true)
+    }
+}
+
+public extension View {
+    /// Draws `systemImage` as the card's watermark (`GlassCardWatermark`),
+    /// clipped to the card's shape, behind this view. Apply it before the
+    /// card's tier, so the tier's fill stays under it. Nil draws nothing.
+    func glassCardWatermark(_ systemImage: String?, radius: CGFloat = GlassTier.card.radius) -> some View {
+        background {
+            if let systemImage {
+                GlassCardWatermark(systemImage)
+                    .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            }
+        }
     }
 }
 

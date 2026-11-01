@@ -166,7 +166,7 @@ impl Fixture {
         let settings = DaemonSettings {
             near_ai_inference: key.then_some(inference),
             near_ai_session: session.then_some(retained),
-            max_uploads_per_day: 7,
+            max_reuploads: 7,
             private_inference: true,
             ..DaemonSettings::default()
         };
@@ -269,7 +269,7 @@ fn migration_round_trips_each_credential_shape_without_plaintext_settings() {
         let runtime = fixture.lifecycle().migrate(legacy.clone()).unwrap();
         assert_eq!(runtime.near_ai_inference, legacy.near_ai_inference);
         assert_eq!(runtime.near_ai_session, legacy.near_ai_session);
-        assert_eq!(runtime.max_uploads_per_day, 7);
+        assert_eq!(runtime.max_reuploads, 7);
         assert!(runtime.private_inference);
         let disk = fixture.disk();
         assert!(disk.near_ai_inference.is_none() && disk.near_ai_session.is_none());
@@ -411,7 +411,7 @@ fn forgetting_removes_authority_before_retrying_a_failed_os_delete() {
     let forgotten = fixture.disk();
     assert!(forgotten.cloud_credentials.is_none());
     assert!(forgotten.near_ai_inference.is_none() && forgotten.near_ai_session.is_none());
-    assert_eq!(forgotten.max_uploads_per_day, 7);
+    assert_eq!(forgotten.max_reuploads, 7);
     assert_eq!(
         fixture.lifecycle().resolve(forgotten.clone()).unwrap(),
         forgotten
@@ -550,14 +550,14 @@ fn preferences_changed_during_os_preparation_survive_verified_publication() {
             let locks = coordination(fixture.store.dir()).unwrap();
             let _commit = locks.commit.lock().unwrap();
             let mut disk = fixture.disk();
-            disk.max_uploads_per_day = 19;
+            disk.max_reuploads = 19;
             disk.private_inference = false;
             disk.save_locked(&fixture.store).unwrap();
         }
         release.send(()).unwrap();
         worker.join().unwrap().unwrap()
     });
-    assert_eq!(current.max_uploads_per_day, 19);
+    assert_eq!(current.max_reuploads, 19);
     assert!(!current.private_inference);
     assert_eq!(
         fixture.lifecycle().resolve(fixture.disk()).unwrap(),
@@ -815,10 +815,10 @@ fn stale_preferences_cannot_restore_a_forgotten_cloud_connection() {
         .migrate(fixture.legacy(true, true))
         .unwrap();
     assert!(fixture.forget());
-    stale.max_uploads_per_day = 23;
+    stale.max_reuploads = 23;
     assert!(stale.save(&fixture.store).is_err());
     assert!(fixture.disk().cloud_credentials.is_none());
-    assert_eq!(fixture.disk().max_uploads_per_day, 7);
+    assert_eq!(fixture.disk().max_reuploads, 7);
 }
 
 #[test]

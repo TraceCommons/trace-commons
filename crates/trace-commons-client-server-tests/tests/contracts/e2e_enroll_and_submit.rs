@@ -28,9 +28,10 @@ use trace_commons_server::trace_corpus_storage::*;
 
 /// In-memory `Database` stub used only by the real issuer router in this
 /// test. The issuer's `/v1/enroll` and `/v1/trace-upload-claim` handlers only
-/// call `reserve_instance_enrollment`, `enroll_instance_user`, and
-/// `get_device_key`; every other `TraceCorpusStore` / `Database` method is
-/// unreachable and panics via `todo!` if hit.
+/// call `reserve_instance_enrollment`, `enroll_instance_user`,
+/// `get_device_key`, and `bind_device_upload_principal`; every other
+/// `TraceCorpusStore` / `Database` method is unreachable and panics via `todo!`
+/// if hit.
 struct InMemoryEnrollDb {
     device_keys: RwLock<HashMap<(String, String), DeviceKeyRecord>>,
     /// Grants captured at `enroll_instance_user` time, keyed by
@@ -697,6 +698,19 @@ impl TraceCorpusStore for InMemoryEnrollDb {
 
 #[async_trait::async_trait]
 impl Database for InMemoryEnrollDb {
+    async fn bind_device_upload_principal(
+        &self,
+        tenant_id: &str,
+        device_key_id: &str,
+        _actor_ref: &str,
+    ) -> Result<(), DatabaseError> {
+        self.get_device_key(tenant_id, device_key_id)
+            .await?
+            .filter(|key| key.revoked_at.is_none())
+            .ok_or_else(|| DatabaseError::Pool("unknown or revoked fixture device".into()))?;
+        Ok(())
+    }
+
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -856,6 +870,7 @@ async fn enroll_mint_submit_round_trip() {
         invite_admin_backend: None,
         invite_admin_registry: None,
         invite_registry_authoritative: false,
+        near_ai_signup_policy_template: None,
         workload_public_key_pem: keys.public_key_pem.clone(),
         workload_issuer: None,
         workload_audience: None,
@@ -907,6 +922,7 @@ async fn enroll_mint_submit_round_trip() {
         None,
         None,
         Some("debugging_evaluation,model_training"),
+        false,
         false,
     )
     .await

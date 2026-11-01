@@ -4,7 +4,8 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// What discovery has given the Folders screen so far.
+/// What discovery has given the Tools step so far. The file keeps the name
+/// of Ron's #1030 Folders screen, whose rules Tools now follows.
 enum DiscoveredRows: Equatable {
     /// Discovery has not answered yet.
     case loading
@@ -25,7 +26,8 @@ enum DiscoveredRows: Equatable {
     }
 }
 
-/// The Folders screen's decisions, apart from the view so they can be tested.
+/// The decisions Ron's Folders screen and Tools shared, which Tools keeps,
+/// apart from the view so they can be tested.
 enum FoldersScreenLayout {
     /// Discovery's rows, read without a daemon. A refresh that fails keeps
     /// the rows already shown; answers live in the run's state, keyed by
@@ -45,8 +47,8 @@ enum FoldersScreenLayout {
         !isCommitting
     }
 
-    /// The core's sentence for a failure this step can show. A failed start
-    /// reads `watcher_start_failed` and the step stays; a changed
+    /// The core's sentence for a failure Tools or Join can show. A failed
+    /// start reads `watcher_start_failed` and the step stays; a changed
     /// declaration the running daemon refused reads `settings_failed`. A failed enroll reads
     /// `enroll_refused`: lookup has already accepted the invite, so Join's
     /// `invite_error` ("not an invite link") would be false, and the daemon
@@ -71,92 +73,12 @@ enum FoldersScreenLayout {
         }
     }
 
-    /// Cancel beside the spinning Continue, only while the near.ai browser
+    /// Cancel beside the spinning sign-in, only while the near.ai browser
     /// sign-in runs (`FirstRunRunner.signInWaiting`), in the core's
-    /// first-run Cancel. Tools offers the same.
+    /// first-run Cancel.
     static func signInCancel(
         waiting: Bool, copy: FirstRunCopy, action: @escaping () -> Void
     ) -> FirstRunFooter.Cancel? {
-        waiting ? FirstRunFooter.Cancel(title: copy.passkey.cancel, action: action) : nil
-    }
-}
-
-/// Ron's Folders screen (#1030 `tool-screens.tsx` W-2), Quick setup's tool
-/// list: the same tool cards and pinned "add your tool" tile as Custom's
-/// Tools (owner, 2026-10-08), under Quick's title and body. Continue once
-/// every row is answered (a missing tool is not asked) and no added folder
-/// waits on a question. Continue commits `.leaveRoots`, which starts the
-/// daemon.
-struct FoldersScreen: View {
-    let copy: FirstRunCopy
-    @ObservedObject var runner: FirstRunRunner
-    /// Where each tool's "Get {tool}" leads: the core's install pages
-    /// (`FirstRunCopy.Folders.installURL(for:)`), passed by the host.
-    var installURL: (SourceKind) -> URL? = { _ in nil }
-
-    @State private var discovery: DiscoveredRows = .loading
-    @State private var onboarding = TCOnboardingCopy.load()
-    @StateObject private var adding = AddToolModel()
-
-    var body: some View {
-        FirstRunFrame(
-            copy: copy,
-            state: $runner.state,
-            isCommitting: runner.isCommitting,
-            notice: FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: onboarding),
-            footer: FirstRunFooter(
-                title: copy.frame.continueButton,
-                isEnabled: canContinue,
-                busy: runner.isCommitting,
-                cancel: FoldersScreenLayout.signInCancel(waiting: runner.signInWaiting, copy: copy) {
-                    Task { await runner.cancelSignIn() }
-                },
-                action: { Task { await runner.commit(.leaveRoots) } }
-            )
-        ) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                title
-                Text(copy.folders.body)
-                    .glassType(GlassTokens.TypeScale.body)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        } content: {
-            ToolList(
-                copy: copy, runner: runner, adding: adding, discovery: discovery, installURL: installURL,
-                retry: refreshDiscovery)
-        } pinned: {
-            if discovery.rows != nil {
-                AddToolTile(copy: copy, runner: runner, adding: adding)
-            }
-        }
-        .task {
-            if discovery == .loading { refreshDiscovery() }
-        }
-        // A tool installed while the app was in the background is asked
-        // about when the person comes back.
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            refreshDiscovery()
-        }
-    }
-
-    /// Discovery's rows, and what they say is not on this Mac: such a tool
-    /// is not asked (`FirstRunState.recordDiscovery`). Not recorded while a
-    /// commit holds the state it started from.
-    private func refreshDiscovery() {
-        discovery = FoldersScreenLayout.discovered(TCDiscovery.sourcesJSON(), keeping: discovery)
-        if let rows = discovery.rows, !runner.isCommitting { runner.state.recordDiscovery(rows) }
-    }
-
-    /// The Tools rule: every row answered, added folders included, and no
-    /// question open.
-    private var canContinue: Bool {
-        ToolsScreenLayout.canContinue(
-            discovered: discovery.rows, state: runner.state, pending: adding.pending != nil,
-            isCommitting: runner.isCommitting)
-    }
-
-    private var title: some View {
-        FirstRunTitle(light: copy.folders.titleLight, bold: copy.folders.titleBold)
+        waiting ? FirstRunFooter.Cancel(title: copy.frame.cancel, action: action) : nil
     }
 }

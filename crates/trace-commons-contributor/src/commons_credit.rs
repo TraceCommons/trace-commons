@@ -26,6 +26,19 @@
 //! `commons_*` so a caller preserves provenance rather than converting points
 //! into a near.ai dollar balance. See `daemon::commons_credit` for the IPC half.
 //!
+//! # The one exception: the first run's labelled dollar estimate
+//!
+//! The rule that the app never shows a dollar figure it cannot verify holds
+//! for every figure this module relays, and everywhere else, with one
+//! narrow exception (owner, 2026-10-23): the first run's Traces step may
+//! show "an estimated $X–$Y in NEAR AI credit" for the traces it found,
+//! from the range per accepted trace the commons publishes at
+//! `GET /v1/public/first-run-estimate`
+//! (`crate::first_run_copy::traces_estimate_line`). It is the operator's
+//! published estimate, worded as one, shown on no other screen, and never
+//! read as a balance, an earning or a settled amount. Nothing here relays
+//! it, and nothing here may.
+//!
 //! Never logs or returns a path, a token, or trace content: errors here are
 //! a bare "did this work" (only an exactly-200 response counts), matching
 //! every other boundary in this crate.
@@ -37,7 +50,9 @@ use reqwest::Method;
 use serde::Deserialize;
 
 use trace_commons_operator_client::Client;
-use trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
+use trace_commons_protocol::{
+    ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
+};
 
 use crate::config::{ConfigStore, ContributorConfig, allowlist_for, config_allowlist};
 use crate::identity::DeviceIdentity;
@@ -137,7 +152,7 @@ pub struct CommonsCreditSummary {
 /// server handed back, if it rotated one.
 pub struct CreditSummaryCall {
     pub result: Option<CommonsCreditSummary>,
-    pub rotated_token: Option<String>,
+    pub rotated_token: Option<crate::account_auth::RotatedToken>,
 }
 
 /// Read the commons' own credit figures and settlement posture for the
@@ -171,12 +186,13 @@ pub async fn call_credit_summary(
         };
     };
     let response = client
-        .call_json_with_response_header::<(), CreditSummaryBody>(
+        .call_json_with_response_headers::<(), CreditSummaryBody>(
             Method::GET,
             "/v1/account/credit-summary",
             &[],
             None,
             ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+            ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
         )
         .await;
     let result = match response.status {
@@ -199,7 +215,10 @@ pub async fn call_credit_summary(
     };
     CreditSummaryCall {
         result,
-        rotated_token: response.response_header,
+        rotated_token: crate::account_auth::RotatedToken::from_headers(
+            response.response_header,
+            response.companion_header,
+        ),
     }
 }
 
@@ -411,7 +430,10 @@ pub(crate) mod tests {
         let base = spawn(stub_credit_summary_with_rotation("tcn1_rotated.secret")).await;
         let call = call_credit_summary(&base, None, "acct-session-token").await;
         assert!(call.result.is_some());
-        assert_eq!(call.rotated_token.as_deref(), Some("tcn1_rotated.secret"));
+        assert_eq!(
+            call.rotated_token.as_ref().map(|r| r.token.as_str()),
+            Some("tcn1_rotated.secret")
+        );
     }
 
     /// Only exactly 200 counts. A 401 must not be read as "no credit",

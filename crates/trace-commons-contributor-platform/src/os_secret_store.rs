@@ -9,16 +9,46 @@ use crate::credential_store::{
     CredentialError, CredentialReference, MAX_SECRET_BYTES, SecretBackend,
 };
 
-// Stable namespace: neither account names nor config-directory paths belong in
-// OS credential metadata. The validated reference supplies the unique entry ID.
-const SERVICE: &str = "trace-commons.near-ai.credentials";
+/// Which keychain namespace a build reads and writes: the access group its
+/// entitlement grants and the service names of its entries. A plain value,
+/// supplied by the contributor's channel module (`channel::KEYCHAIN`), so a
+/// staging build and a production build never share an entry. This crate
+/// holds no channel's values itself.
+///
+/// The service names are a stable namespace: neither account names nor
+/// config-directory paths belong in OS credential metadata. A validated
+/// reference supplies each entry's unique ID.
+///
+/// The access group is the team group the app's entitlement and provisioning
+/// profile both name. Access is granted by this group rather than by a
+/// per-binary ACL, which is what stops an upgrade prompting: any build signed
+/// by the same team with this group reads the item, and there is no ACL to
+/// invalidate. It is used on macOS only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeychainIdentity {
+    pub access_group: &'static str,
+    /// The Cloud (NEAR AI) credential store.
+    pub cloud_service: &'static str,
+    /// The account and device store.
+    pub account_service: &'static str,
+    /// The Insights digest and counter keys.
+    pub insights_digest_key_service: &'static str,
+    /// The daemon's own copy of a Claude Code usage access token, so a
+    /// Refresh does not reopen Claude Code's Keychain item every time.
+    pub claude_usage_service: &'static str,
+}
 
-// The team access group the app's entitlement and provisioning profile both
-// name. Access is granted by this group rather than by a per-binary ACL,
-// which is what stops an upgrade prompting: any build signed by the same team
-// with this group reads the item, and there is no ACL to invalidate.
-#[cfg(target_os = "macos")]
-const ACCESS_GROUP: &str = "KXSWJN7WY8.ai.tracecommons.shell";
+impl KeychainIdentity {
+    /// Every service name, for checks that they share one namespace.
+    pub const fn services(&self) -> [&'static str; 4] {
+        [
+            self.cloud_service,
+            self.account_service,
+            self.insights_digest_key_service,
+            self.claude_usage_service,
+        ]
+    }
+}
 
 /// Synchronous OS operations may prompt the user or block on the session bus.
 /// Async callers must use `spawn_blocking`, including for construction, and
@@ -33,35 +63,54 @@ pub struct OsSecretBackend {
 // The Insights digest key: one fixed entry per OS user, so every process that
 // reads the same Insights store derives the same keyed digests. The account is
 // a constant label, never a path, account name or identifier.
-const INSIGHTS_DIGEST_KEY_SERVICE: &str = "trace-commons.insights.digest-key";
 const INSIGHTS_DIGEST_KEY_ACCOUNT: &str = "insights-digest-key-v1";
 // The daemon's own key for the Insights counter pass (feed T). A separate
 // entry from the in-process store's key: the daemon's digests never leave
 // it, and clearing its store on unenroll forgets only this key.
 const INSIGHTS_COUNTER_KEY_ACCOUNT: &str = "insights-counter-key-v1";
+// The Claude usage token cache: one fixed entry per OS user holding every
+// cached login, so unenroll and the Claude switch can clear it in one delete
+// without enumerating logins that have since gone away.
+const CLAUDE_USAGE_CACHE_ACCOUNT: &str = "claude-usage-token-cache-v1";
 
 impl OsSecretBackend {
-    pub fn new() -> Result<Self, CredentialError> {
-        Self::protected(SERVICE)
+    pub fn new(identity: &KeychainIdentity) -> Result<Self, CredentialError> {
+        Self::protected(identity, identity.cloud_service)
     }
 
     /// The store holding the Insights digest key (owner decision D16, open:
     /// OS keychain custody). On macOS this is the same data-protection store
     /// and access group as the Cloud credential, so an unentitled process
     /// (the CLI, a test runner) is refused rather than prompted.
-    pub fn insights_digest_key() -> Result<Self, CredentialError> {
-        Self::protected(INSIGHTS_DIGEST_KEY_SERVICE)
+    pub fn insights_digest_key(identity: &KeychainIdentity) -> Result<Self, CredentialError> {
+        Self::protected(identity, identity.insights_digest_key_service)
     }
 
-    fn protected(service: &'static str) -> Result<Self, CredentialError> {
+    /// The store holding the daemon's Claude usage token cache. The same
+    /// data-protection store and access group as the Cloud credential, so the
+    /// signed app reads its own item without a dialog and an unentitled
+    /// process is refused rather than prompted.
+    pub fn claude_usage_cache(identity: &KeychainIdentity) -> Result<Self, CredentialError> {
+        Self::protected(identity, identity.claude_usage_service)
+    }
+
+    fn protected(
+        identity: &KeychainIdentity,
+        service: &'static str,
+    ) -> Result<Self, CredentialError> {
         refuse_under_test_credential_store()?;
+        // The access group is a macOS keychain attribute; elsewhere the
+        // service names alone keep the channels apart.
+        #[cfg(not(target_os = "macos"))]
+        let _ = identity.access_group;
         #[cfg(target_os = "macos")]
         let store: Arc<NativeStore> = {
             // `cloud-sync` is left at its default of false, selecting the
             // device-local store. Stated rather than inherited: the retained
             // refresh token is device authority and must not synchronise to
             // iCloud.
-            let configuration = std::collections::HashMap::from([("access-group", ACCESS_GROUP)]);
+            let configuration =
+                std::collections::HashMap::from([("access-group", identity.access_group)]);
             apple_native_keyring_store::protected::Store::new_with_configuration(&configuration)
                 .map_err(storage_error)?
         };
@@ -92,7 +141,7 @@ impl OsSecretBackend {
     /// store to match the Cloud one would lock the CLI out of its own device
     /// identity. The upgrade prompt is worth removing; `submit` is not worth
     /// breaking to remove it.
-    pub fn commons() -> Result<Self, CredentialError> {
+    pub fn commons(identity: &KeychainIdentity) -> Result<Self, CredentialError> {
         refuse_under_test_credential_store()?;
         #[cfg(target_os = "macos")]
         let store: Arc<NativeStore> =
@@ -108,11 +157,12 @@ impl OsSecretBackend {
         {
             Ok(Self {
                 store,
-                service: "trace-commons.account.credentials",
+                service: identity.account_service,
             })
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
+            let _ = identity;
             Err(CredentialError::Unavailable)
         }
     }
@@ -126,13 +176,13 @@ impl OsSecretBackend {
     /// In `cfg(test)` those paths use the injected legacy registry instead;
     /// the only test that opens this is the `#[ignore]`d manual round trip.
     #[cfg(target_os = "macos")]
-    pub fn legacy_cloud() -> Result<Self, CredentialError> {
+    pub fn legacy_cloud(identity: &KeychainIdentity) -> Result<Self, CredentialError> {
         refuse_under_test_credential_store()?;
         let store: Arc<NativeStore> =
             apple_native_keyring_store::keychain::Store::new().map_err(storage_error)?;
         Ok(Self {
             store,
-            service: SERVICE,
+            service: identity.cloud_service,
         })
     }
 
@@ -167,6 +217,20 @@ impl OsSecretBackend {
 
     pub fn delete_insights_counter_key(&self) -> Result<(), CredentialError> {
         self.delete_fixed(INSIGHTS_COUNTER_KEY_ACCOUNT)
+    }
+
+    /// Read the Claude usage token cache entry. Only meaningful on the store
+    /// from [`OsSecretBackend::claude_usage_cache`].
+    pub fn read_claude_usage_cache(&self) -> Result<Vec<u8>, CredentialError> {
+        self.read_fixed(CLAUDE_USAGE_CACHE_ACCOUNT)
+    }
+
+    pub fn write_claude_usage_cache(&self, bytes: &[u8]) -> Result<(), CredentialError> {
+        self.write_fixed(CLAUDE_USAGE_CACHE_ACCOUNT, bytes)
+    }
+
+    pub fn delete_claude_usage_cache(&self) -> Result<(), CredentialError> {
+        self.delete_fixed(CLAUDE_USAGE_CACHE_ACCOUNT)
     }
 
     fn read_fixed(&self, account: &str) -> Result<Vec<u8>, CredentialError> {
@@ -301,9 +365,20 @@ mod tests {
     use crate::credential_store::{
         CredentialError, CredentialReference, MAX_SECRET_BYTES, SecretBackend,
     };
-    #[cfg(target_os = "macos")]
-    use crate::os_secret_store::ACCESS_GROUP;
-    use crate::os_secret_store::{OsSecretBackend, storage_error, validate_bytes};
+    use crate::os_secret_store::{
+        KeychainIdentity, OsSecretBackend, storage_error, validate_bytes,
+    };
+
+    /// A namespace for these tests. Real OS stores are only reached by the
+    /// `#[ignore]`d manual round trips; every other test refuses before any
+    /// store is opened.
+    const IDENTITY: KeychainIdentity = KeychainIdentity {
+        access_group: "KXSWJN7WY8.ai.tracecommons.shell",
+        cloud_service: "trace-commons.near-ai.credentials",
+        account_service: "trace-commons.account.credentials",
+        insights_digest_key_service: "trace-commons.insights.digest-key",
+        claude_usage_service: "trace-commons.claude-usage.token-cache",
+    };
     use keyring_core::Error as KeyringError;
 
     #[test]
@@ -373,7 +448,7 @@ mod tests {
     #[test]
     #[ignore = "manual real Commons OS credential round trip; may prompt"]
     fn real_commons_os_round_trip_removes_only_its_synthetic_entry() {
-        let backend = OsSecretBackend::commons().expect("OS store unavailable");
+        let backend = OsSecretBackend::commons(&IDENTITY).expect("OS store unavailable");
         let reference = CredentialReference::allocate();
         assert!(matches!(
             backend.read(&reference),
@@ -389,14 +464,14 @@ mod tests {
         let bytes = br#"{"version":1,"binding":"synthetic","payload":"c3ludGhldGlj"}"#;
         backend.write(&reference, bytes).unwrap();
         assert_eq!(
-            OsSecretBackend::commons()
+            OsSecretBackend::commons(&IDENTITY)
                 .unwrap()
                 .read(&reference)
                 .unwrap(),
             bytes
         );
         assert!(matches!(
-            OsSecretBackend::new().unwrap().read(&reference),
+            OsSecretBackend::new(&IDENTITY).unwrap().read(&reference),
             Err(CredentialError::NoEntry)
         ));
         backend.delete(&reference).unwrap();
@@ -420,9 +495,9 @@ mod tests {
     #[ignore = "manual real OS credential-store round trip; may prompt for access"]
     fn real_os_round_trip_removes_only_its_synthetic_entry() {
         #[cfg(target_os = "macos")]
-        let backend = OsSecretBackend::legacy_cloud().expect("OS store unavailable");
+        let backend = OsSecretBackend::legacy_cloud(&IDENTITY).expect("OS store unavailable");
         #[cfg(not(target_os = "macos"))]
-        let backend = OsSecretBackend::new().expect("OS store unavailable");
+        let backend = OsSecretBackend::new(&IDENTITY).expect("OS store unavailable");
         let reference: CredentialReference = serde_json::from_value(serde_json::json!({
             "version": 1,
             "id": uuid::Uuid::new_v4(),
@@ -466,7 +541,10 @@ mod tests {
             "OS credential round trip changed the payload"
         );
         assert_eq!(
-            OsSecretBackend::new().unwrap().read(&reference).unwrap(),
+            OsSecretBackend::new(&IDENTITY)
+                .unwrap()
+                .read(&reference)
+                .unwrap(),
             bytes
         );
         backend.delete(&reference).expect("OS deletion failed");
@@ -486,7 +564,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn an_unentitled_process_is_reported_as_unentitled() {
-        let backend = OsSecretBackend::new().expect("store handle constructs");
+        let backend = OsSecretBackend::new(&IDENTITY).expect("store handle constructs");
         let reference = CredentialReference::allocate();
         match backend.read(&reference) {
             Err(CredentialError::Unentitled) => {}
@@ -505,47 +583,14 @@ mod tests {
     fn the_account_store_is_not_moved_with_the_cloud_store() {
         let reference = CredentialReference::allocate();
         assert!(matches!(
-            OsSecretBackend::new().unwrap().read(&reference),
+            OsSecretBackend::new(&IDENTITY).unwrap().read(&reference),
             Err(CredentialError::Unentitled)
         ));
         assert!(matches!(
-            OsSecretBackend::commons().unwrap().read(&reference),
+            OsSecretBackend::commons(&IDENTITY)
+                .unwrap()
+                .read(&reference),
             Err(CredentialError::NoEntry)
         ));
-    }
-
-    /// `ACCESS_GROUP` and the `keychain-access-groups` entry in
-    /// `macos/entitlements.plist` are the same string written twice, edited
-    /// independently, with nothing between them. If either drifts the
-    /// signature is still valid, every check in
-    /// `scripts/ci/verify-macos-entitlements.sh` still passes -- each one
-    /// reads the plist, not this constant -- and the first thing that notices
-    /// is a launch, because the store the binary asks for is not the one the
-    /// entitlement grants. This makes drift fail a test instead.
-    ///
-    /// It asserts the group inside the array specifically. The same string is
-    /// also the `com.apple.application-identifier` value, so a whole-file
-    /// search would pass with `keychain-access-groups` deleted outright.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_entitlements_file_names_the_access_group_this_binary_asks_for() {
-        const ENTITLEMENTS: &str = include_str!("../../../macos/entitlements.plist");
-
-        let after_key = ENTITLEMENTS
-            .split_once("<key>keychain-access-groups</key>")
-            .expect("macos/entitlements.plist declares keychain-access-groups")
-            .1;
-        let array = after_key
-            .split_once("<array>")
-            .expect("keychain-access-groups is an array")
-            .1
-            .split_once("</array>")
-            .expect("the array is closed")
-            .0;
-        assert!(
-            array.contains(&format!("<string>{ACCESS_GROUP}</string>")),
-            "macos/entitlements.plist must grant {ACCESS_GROUP}; its \
-             keychain-access-groups array is {array:?}"
-        );
     }
 }

@@ -73,7 +73,8 @@ impl MissionDraftInbox {
             Some(dir) => dir.to_path_buf(),
             None => dirs::data_local_dir()
                 .ok_or_else(|| anyhow!("mission-draft-store-unavailable"))?
-                .join("trace-commons/mission-drafts"),
+                .join(crate::channel::STATE_DIR_NAME)
+                .join("mission-drafts"),
         };
         Ok(Self::at(&dir))
     }
@@ -362,6 +363,21 @@ fn require_private_dir(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default inbox is under the channel's directory name, so the
+    /// staging app and the production app on one machine keep separate
+    /// inboxes. Resolving it reads no state and creates none.
+    #[test]
+    fn the_default_inbox_is_the_channel_s() {
+        let inbox = MissionDraftInbox::resolve(None).expect("a per-user data directory");
+        assert!(
+            inbox
+                .dir
+                .ends_with(Path::new(crate::channel::STATE_DIR_NAME).join("mission-drafts")),
+            "{}",
+            inbox.dir.display()
+        );
+    }
 
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))

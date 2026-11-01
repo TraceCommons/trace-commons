@@ -25,4 +25,35 @@ under `--nocapture`. That test also compares its answer to this file, so a
 wire change fails there until the file is re-recorded. One session has no
 proxy record (`unobserved`); the other's calls went both through the route
 and outside it (`mixed`), with one call whose counters are unknown, so its
-`outside` tokens are `null`. The macOS decode and Overview tests read it.
+`outside` tokens are `null`. Its one charged NEAR AI call names the model
+that served it, so `near_ai_credit.week.by_model` has one group. Neither
+session set a `/goal`, so `goals` is empty; the daemon's own goal tests
+cover a week with goals. The macOS decode and Overview tests read it.
+
+`insights_model_answers.json` is the daemon's `insights_model_answers`
+answer, as the contributor crate's
+`daemon::insights_model_answers::tests::a_model_answers_answer_for_shell_fixtures`
+prints it between its `BEGIN insights_model_answers` and
+`END insights_model_answers` lines under `--nocapture`, and that test
+compares its answer to this file in the same way. Ten generated Docs
+sessions on two priced models answer the Docs cost row at API prices, seven
+more sent through NEAR AI and verified (six served by the model they
+declare, one of them with a call the ledger did not charge, and one served
+by another model) give it a charge beside that figure, and the
+synthetic Claude Code session joins them on the other rows, which are short
+of sessions or edits. The one digest is the price table's `table_id`. The
+macOS decode and Models card tests read it.
+
+`insights_submitted.json` is the daemon's `insights_submitted` answer over
+13 weeks, as the contributor crate's
+`daemon::insights_submitted::tests::a_submitted_answer_for_shell_fixtures`
+prints it between its `BEGIN insights_submitted` and `END insights_submitted`
+lines under `--nocapture`, and that test compares its answer to this file in
+the same way. Three generated Claude Code sessions (Rust source on Opus,
+Markdown and a test file on Sonnet) are joined to their submissions, one by
+`submission_id` and one by session hash; four more submissions are
+unmatched, one for each reason (no queue entry twice, an adapter the pass
+does not read, a file the pass never stored). The statuses cover accepted,
+pending, quarantined, rejected and withdrawn, with two credit outcome
+reasons. Submission ids are fixed test UUIDs. The macOS decode tests read
+it.

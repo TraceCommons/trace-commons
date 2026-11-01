@@ -20,6 +20,9 @@
 use chrono::{DateTime, Duration, Utc};
 use reqwest::{StatusCode, Url};
 use trace_commons_operator_client::host_allowlist::HostAllowlist;
+use trace_commons_protocol::first_run_estimate::{
+    FIRST_RUN_ESTIMATE_MAX_BYTES, FIRST_RUN_ESTIMATE_PATH, FirstRunEstimate, UsdMicrosRange,
+};
 use trace_commons_protocol::local_credit_estimate::LocalEstimateTable;
 use trace_commons_protocol::settlement_estimate::{
     SETTLEMENT_TABLE_MAX_BYTES, SETTLEMENT_TABLE_PATH, SettlementEstimateTable,
@@ -274,6 +277,31 @@ impl EstimateTableClient {
         SettlementEstimateTable::from_slice(&body).map_err(|_| EstimateTableClientError::Refused)
     }
 
+    /// Fetch the first run's dollar estimate per accepted trace
+    /// (`GET /v1/public/first-run-estimate`): `None` when the commons
+    /// publishes none. A range [`UsdMicrosRange::is_valid`] would not accept,
+    /// or a body that is not the document, is refused. Called on demand by
+    /// the first run, not on this client's schedule.
+    pub async fn fetch_first_run_estimate(
+        &self,
+    ) -> Result<Option<UsdMicrosRange>, EstimateTableClientError> {
+        let body = self
+            .get_bounded(FIRST_RUN_ESTIMATE_PATH, FIRST_RUN_ESTIMATE_MAX_BYTES)
+            .await?;
+        // An object only: serde would also read a struct from an array.
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|_| EstimateTableClientError::Refused)?;
+        if !value.is_object() {
+            return Err(EstimateTableClientError::Refused);
+        }
+        let doc: FirstRunEstimate =
+            serde_json::from_value(value).map_err(|_| EstimateTableClientError::Refused)?;
+        match doc.usd_micros_per_accepted_trace {
+            Some(range) if !range.is_valid() => Err(EstimateTableClientError::Refused),
+            other => Ok(other),
+        }
+    }
+
     /// One unauthenticated GET of `path` on the configured origin, read up
     /// to `max_bytes` and refused past it.
     async fn get_bounded(
@@ -390,6 +418,69 @@ mod tests {
         assert_eq!(table.tier_count(), 3);
         assert_eq!(table.calibration_label(), "lef1.t2/cq3");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    /// The first run's dollar estimate: the same anonymous, bounded GET.
+    /// A range this build would show comes back; an empty document is no
+    /// range; a range it would not show, or a body that is not one, is
+    /// refused. Synthetic values only.
+    #[tokio::test]
+    async fn the_first_run_estimate_is_fetched_anonymously_and_checked() {
+        use trace_commons_protocol::first_run_estimate::{
+            FIRST_RUN_ESTIMATE_MAX_BYTES, FIRST_RUN_ESTIMATE_PATH, UsdMicrosRange,
+        };
+        let serve_body = |body: String| {
+            Router::new().route(
+                FIRST_RUN_ESTIMATE_PATH,
+                get(move |headers: HeaderMap| {
+                    let body = body.clone();
+                    async move {
+                        for header in ["authorization", "cookie", "x-api-key", "x-tenant-id"] {
+                            assert!(!headers.contains_key(header), "{header} was sent");
+                        }
+                        ([("content-type", "application/json")], body)
+                    }
+                }),
+            )
+        };
+        let fetch = |body: String| async move {
+            let (base, server) = serve(serve_body(body)).await;
+            let client = EstimateTableClient::new(&base, Some("127.0.0.1")).unwrap();
+            let got = client.fetch_first_run_estimate().await;
+            server.abort();
+            got
+        };
+        let range = json!({"usd_micros_per_accepted_trace": {"min": 120_000, "max": 340_000}});
+        assert_eq!(
+            fetch(range.to_string()).await,
+            Ok(Some(UsdMicrosRange {
+                min: 120_000,
+                max: 340_000
+            }))
+        );
+        assert_eq!(fetch("{}".into()).await, Ok(None));
+        let sub_cent = json!({"usd_micros_per_accepted_trace": {"min": 120_001, "max": 340_000}});
+        assert_eq!(
+            fetch(sub_cent.to_string()).await,
+            Err(EstimateTableClientError::Refused)
+        );
+        assert_eq!(
+            fetch("[]".into()).await,
+            Err(EstimateTableClientError::Refused)
+        );
+        let padded = format!("{{}}{}", " ".repeat(FIRST_RUN_ESTIMATE_MAX_BYTES));
+        assert_eq!(
+            fetch(padded).await,
+            Err(EstimateTableClientError::ResponseTooLarge)
+        );
+        // A server without the route.
+        let (base, server) = serve(Router::new()).await;
+        let client = EstimateTableClient::new(&base, Some("127.0.0.1")).unwrap();
+        assert_eq!(
+            client.fetch_first_run_estimate().await,
+            Err(EstimateTableClientError::NotFound)
+        );
         server.abort();
     }
 

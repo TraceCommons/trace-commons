@@ -68,14 +68,12 @@
 //! Approved 2026-10-06, every sentence in both. The spec's Open list left
 //! the switch-on notice wording open; that question is now closed.
 //!
-//! # The submit toast and the per-session notification (K9, #1118)
+//! # The per-session notification (K9, #1118)
 //!
-//! Two more WYSIWYG design sentences, matched here so no shell writes its
-//! own: [`toast_sent_text`] (`tc_toast_sent_text`), "Sent. N left to decide
-//! (middle dot) upload limit X of Y"; and [`session_notification_copy`]
-//! (`tc_session_notification_copy`), the per-session notification whose body
-//! is [`GATE_STATEMENT`] and whose one action is "Look, then decide". Both
-//! approved 2026-10-06.
+//! One more WYSIWYG design sentence, matched here so no shell writes its
+//! own: [`session_notification_copy`] (`tc_session_notification_copy`), the
+//! per-session notification whose body is [`GATE_STATEMENT`] and whose one
+//! action is "Look, then decide". Approved 2026-10-06.
 
 /// Approved 2026-10-06.
 /// Core-owned disclosure for configured activity missions with rewards disabled.
@@ -186,7 +184,7 @@ pub const AUTO_SCRUB_LIMIT: &str = "The patterns are reliable for the formats th
 /// that must not be. It is the whole difference between contributing
 /// automatically and reviewing each session. Do not shorten it for layout;
 /// change the layout.
-pub const AUTO_NO_REVIEW: &str = "No one looks at a trace before it is sent, including you.";
+pub const AUTO_NO_REVIEW: &str = "Submissions are automatically queued and sent without review. You can withdraw them from future use; distributed copies cannot be recalled.";
 
 /// The one sentence the Contribution rule card says under Automatic when
 /// no privacy model is confirmed to have run (`Disclosure::PatternsOnly`).
@@ -378,7 +376,9 @@ pub fn void_reason_line(label: &str) -> &'static str {
         "identity-changed" => {
             "Your traces would now be sent under a different account, identity or device."
         }
-        "scopes-widened" => "You now allow your contributions to be used in more ways.",
+        "scopes-widened" => {
+            "The ways contributions can be used have expanded since you turned this on."
+        }
         "privacy-filter-changed" => {
             "The privacy filter that reads your traces before they are sent was added, removed or changed."
         }
@@ -599,22 +599,18 @@ pub fn void_notice_for_wire_with_regrant(
 /// What the fixed patterns remove, for an armed folder where no certified
 /// full pipeline ran -- the spec's "deterministic-only arming disclosure".
 ///
-/// Approved 2026-10-06. The spec's Open list says this wording is not
-/// yet written. The first two sentences are [`AUTO_SCRUB_SCOPE`]'s, word for
-/// word, so `the_scrub_sentences_match_what_the_redactor_does` holds them to
-/// the redactor too. The last replaces the model clause: it does not say no
-/// model runs (a configured filter or witness may run one), only that nothing
-/// confirms one did, which is what `automatic_gate::disclosure` answering
-/// `PatternsOnly` means. "Trust relaxes what may be sent, never what may be
-/// said."
-pub const AUTO_PATTERNS_ONLY_SCOPE: &str = "Fixed patterns remove API keys and tokens in the formats we know, and many file paths and email addresses that name you. A bearer token in any other format is removed when it is long, looks random and follows \"Bearer\" after a space or colon, unless it is shaped like a UUID or another known kind of ID; one that is short, or run straight onto \"Bearer\", can get through. Nothing confirms that a model checked these traces, so treat names, people, addresses, account numbers and a password typed into a sentence as sent.";
+/// Describes the deterministic patterns without promising a model pass.
+/// Detailed token-format heuristics belong in redactor documentation, while
+/// the adjacent limit keeps missed secrets and personal information visible.
+pub const AUTO_PATTERNS_ONLY_SCOPE: &str =
+    "Recognized secrets and some file paths and email addresses are removed automatically.";
 
 /// The limit of the patterns, for the same route as
 /// [`AUTO_PATTERNS_ONLY_SCOPE`].
 ///
-/// Approved 2026-10-06. [`AUTO_SCRUB_LIMIT`] without its model
-/// sentence, since on this route no model's result is relied on.
-pub const AUTO_PATTERNS_ONLY_LIMIT: &str = "The patterns are reliable for the formats they cover. Beyond those, in text they catch only a long, random-looking value right after a word like \"password\" or \"token\", and are blind to everything else. Nothing here checks whether they were right.";
+/// No model's result is relied on for this route.
+pub const AUTO_PATTERNS_ONLY_LIMIT: &str =
+    "Redaction can miss other secrets and personal information.";
 
 /// The raw send, and both enclaves: the spec's first "further sentence".
 /// Shown only where a pinned witness is configured, since only then does a
@@ -695,9 +691,26 @@ pub const AUTO_PATH_ASK_FIRST_TITLE: &str = "Review each trace yourself.";
 pub const AUTO_PATH_ASK_FIRST_DETAIL: &str = "Nothing is contributed until you approve it.";
 
 /// The short tag beside the floor scope (`consent_options`' `always_on`).
-/// One spelling, read by `consent_options` and the first-run Uses screen
-/// (`first_run_copy`'s `uses.required`).
-pub const SCOPE_TAG_REQUIRED: &str = "required";
+/// One spelling, read by `consent_options`, Settings and the first-run copy
+/// (`first_run_copy`'s `uses.required`). "always on" matches the first
+/// run's "Always on: ..." line (owner, 2026-10-28, replacing "required to
+/// share", which read as confusing).
+pub const SCOPE_TAG_REQUIRED: &str = "always on";
+
+/// Distinguish trace-scoring eligibility from other optional reward uses.
+/// Scope choice grants permission; acceptance and scoring still decide credit.
+/// Read by the first-run Uses screen and Settings' data uses. Owner,
+/// 2026-10-27; approved in these words in Zaki's review of #1690
+/// (2026-10-28).
+pub const DATA_USE_REWARD_OPPORTUNITIES: &str = "To earn credit for your traces, allow Train coding models. Create benchmarks and Train evaluators are extra uses that may earn more. Credit depends on acceptance and scoring.";
+
+/// The scope [`DATA_USE_REWARD_OPPORTUNITIES`] names as the one that earns
+/// credit (`model_training`, "Train coding models").
+pub const DATA_USE_CREDIT_SCOPE: &str = "model_training";
+
+/// The line under [`DATA_USE_CREDIT_SCOPE`]'s description. Owner,
+/// 2026-10-27; approved as written in Zaki's review of #1690 (2026-10-28).
+pub const DATA_USE_CREDIT_REQUIRED: &str = "Required to earn credit.";
 
 /// The tag beside a scope that permits a use of the traces
 /// (`grants_data_use`). Tauri's wording, moved into the core so every shell
@@ -947,10 +960,10 @@ pub fn witness_capacity_notice_for_wire(value: &serde_json::Value) -> Option<Wit
 /// `status.legacy_invite_migration.offered` is true.
 pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
 
-/// Reworded 2026-10-11 around the passkey step (owner direction); the new
-/// wording is not yet approved. The offer. Says it is optional and that
+/// Reworded 2026-10-11 (owner direction), and its passkey clause deleted
+/// 2026-10-31 when passkeys were removed; not yet approved. The offer. Says it is optional and that
 /// declining changes nothing, because coexistence is the default.
-pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead, by creating or using your passkey in your browser. Nothing changes unless you choose to, and your invite keeps working if you don't.";
+pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
 
 /// Approved 2026-10-06. The button that starts the move. Approved 2026-10-08 (button rule).
 pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move";
@@ -964,10 +977,11 @@ pub const LEGACY_MIGRATION_OFFER_DISMISS: &str = "Dismiss";
 /// card away is not taken for declining the move for good.
 pub const LEGACY_MIGRATION_OFFER_LATER: &str = "You can move later from Settings.";
 
-/// Not yet approved. Shown while the shell waits on the passkey step in the
-/// browser, which it starts itself when the move needs it
-/// (`legacy_migration_no_near_ai_session`), before it retries the move.
-pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your passkey in your browser...";
+/// Not yet approved. Shown while the shell waits on the NEAR AI sign-in in
+/// the browser, which it starts itself when the move needs it
+/// (`legacy_migration_no_near_ai_session`), before it retries the move. The
+/// key keeps its old `passkey_` name.
+pub const LEGACY_MIGRATION_PASSKEY_WAITING: &str = "Waiting for your browser...";
 
 /// Not yet approved. The passkey step ended without finishing (it failed,
 /// or ran out of time). Nothing ran.
@@ -1068,9 +1082,9 @@ pub fn legacy_migration_refusal_line(label: &str) -> &'static str {
         "legacy_migration_admission_not_ready" => {
             "This commons isn't accepting contributions by account yet. Your invite keeps working; try again later."
         }
-        // Reworded 2026-10-11 around the passkey step; not yet approved.
+        // Approved 2026-10-31, when passkeys were removed.
         "legacy_migration_no_near_ai_session" => {
-            "Finish the passkey step in your browser first, then try again. Your invite keeps working."
+            "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
         }
         "legacy_migration_invite_needed" => {
             "We couldn't tell which invite you joined with. Paste your invite link to continue."
@@ -1512,10 +1526,10 @@ pub const DISCLOSURE_ROUTE_WITNESS_REFUSING: &str =
 
 /// The route line with no witness configured.
 ///
-/// Approved 2026-10-06. With no witness the redactor runs in this
-/// process (`envelope::build_redactor`), and only the redacted envelope is
-/// uploaded. What an attached filter receives is the next sentence's job.
-pub const DISCLOSURE_ROUTE_LOCAL: &str = "No witness is set up. Traces are redacted on this computer, and the unredacted trace does not leave it.";
+/// The local redactor runs before upload; the hosted service applies its
+/// own privacy-filter pass at ingest. This does not promise complete PII
+/// removal. What an attached local filter receives is the next sentence's job.
+pub const DISCLOSURE_ROUTE_LOCAL: &str = "Traces are redacted on this computer. Trace Commons' servers apply an additional personal information (PII) removal pass.";
 
 /// The route line for a device that is not enrolled.
 ///
@@ -1530,11 +1544,8 @@ pub const DISCLOSURE_ROUTE_NOT_ENROLLED: &str =
 pub const DISCLOSURE_ROUTE_SETTINGS_UNREADABLE: &str =
     "This app could not read its settings, so nothing is sent.";
 
-/// Local route, no filter attached.
-///
-/// Approved 2026-10-06.
-pub const DISCLOSURE_LOCAL_FILTER_NONE: &str =
-    "No privacy filter is attached, so only the fixed patterns run.";
+/// Local route, no model privacy filter attached.
+pub const DISCLOSURE_LOCAL_FILTER_NONE: &str = "Local redaction uses fixed patterns.";
 
 /// Local route, NEAR AI's hosted privacy filter attached.
 ///
@@ -2392,39 +2403,6 @@ pub(crate) fn unlabelled_envelope_keys(
 }
 
 // ---------------------------------------------------------------------------
-// The submit toast (K9, #1118): "Sent. N left to decide - upload limit X of Y"
-// ---------------------------------------------------------------------------
-//
-// Not the same sentence as the GTK/macOS/Windows "one-click submit" toast
-// (`crate::daemon::queue`'s redaction-count toast, e.g. "Approved. 4
-// redactions applied. 1 flagged."). This is a second, later line from the
-// WYSIWYG design's Flow 2 and Flow 3: after a submit, how many decisions are
-// still owed and where today's upload cap stands. It lives here, not in a
-// shell, for the reason the module doc gives -- one Rust sentence rather
-// than three native copies of the same arithmetic.
-
-/// Approved 2026-10-06. The toast after a submit, matching the design's
-/// worked example exactly: "Sent. 1 left to decide - upload limit 7 of 20".
-///
-/// `uploads_today` and `max_uploads_per_day` are `status.daily_budget`'s
-/// fields of the same names. `decisions_owed` is `status.decisions_owed`
-/// (K6, a separate branch): this function only formats the count it is
-/// given and never reads the queue itself, so it has nothing to say about
-/// what counts as "owed" -- that is K6's decision, not this one's.
-#[must_use]
-pub fn toast_sent_text(
-    uploads_today: u64,
-    max_uploads_per_day: u64,
-    decisions_owed: u64,
-) -> String {
-    // `\u{b7}` is the design's middle dot (·), written as an escape so the
-    // source stays plain ASCII like the rest of this file's comments.
-    format!(
-        "Sent. {decisions_owed} left to decide \u{b7} upload limit {uploads_today} of {max_uploads_per_day}"
-    )
-}
-
-// ---------------------------------------------------------------------------
 // The per-session notification (K9, #1118)
 // ---------------------------------------------------------------------------
 
@@ -2460,6 +2438,335 @@ pub fn session_notification_copy() -> SessionNotificationCopy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Payout link (docs/superpowers/specs/2026-10-21-nearai-credit-payout-design.md,
+// section 5, "Consent copy")
+//
+// The words for choosing the NEAR AI organization the commons sends payout
+// credit to. Every sentence here is DRAFT, NEEDS APPROVAL: none is approved
+// until the owner signs it off. The passkey lines of the spec's draft are
+// gone (D5 superseded 2026-10-23: the signed-in session confirms, and
+// nothing asks for a passkey). Templates carry `{org_name}`, which a shell
+// fills with the name the daemon's `payout_link_orgs` returned
+// ([`render_org_name`]); the name never leaves the device.
+
+/// The one placeholder the payout-link templates carry.
+pub const PAYOUT_COPY_PLACEHOLDERS: &[&str] = &["org_name"];
+
+/// DRAFT, NEEDS APPROVAL. The section's title.
+pub const PAYOUT_LINK_TITLE: &str = "Get paid in NEAR AI credit";
+/// DRAFT, NEEDS APPROVAL. The consent, shown for the org chosen before the
+/// person confirms. Says the credit is extra, stays in the org, can be spent
+/// by its other members (D7), and pays the org's past NEAR AI use first.
+pub const PAYOUT_LINK_BODY: &str = "The commons will send NEAR AI credit to {org_name} for traces you contribute, as soon as their credit settles. This is on top of your Trace Credit, which you keep. Credit sent to {org_name} stays there and can't be moved. Other members of {org_name} can spend it too. If {org_name} owes NEAR AI for past use, new credit pays that first.";
+/// DRAFT, NEEDS APPROVAL. Beside the confirm button.
+pub const PAYOUT_LINK_SCOPE: &str = "Sends credit to {org_name} only.";
+/// DRAFT, NEEDS APPROVAL. The confirm button: chooses the org shown. The
+/// spec left this to be drafted after the passkey label was dropped.
+pub const PAYOUT_LINK_BUTTON: &str = "Choose";
+/// DRAFT, NEEDS APPROVAL. Leaves without choosing.
+pub const PAYOUT_LINK_SECONDARY: &str = "Not now";
+/// DRAFT, NEEDS APPROVAL. The confirm button's accessibility name.
+pub const PAYOUT_LINK_ACCESSIBILITY_NAME: &str = "Choose {org_name} for NEAR AI credit";
+/// DRAFT, NEEDS APPROVAL. The unlink button. Three words, the spec's draft;
+/// "Stop" alone would not say what stops.
+pub const PAYOUT_LINK_UNLINK_BUTTON: &str = "Stop sending credit";
+/// DRAFT, NEEDS APPROVAL. The unlink button's accessibility name.
+pub const PAYOUT_LINK_UNLINK_ACCESSIBILITY_NAME: &str = "Stop sending credit to {org_name}";
+/// DRAFT, NEEDS APPROVAL. Changes the org while a link is active, without
+/// stopping it first: shows the org list, then the same consent and Choose.
+pub const PAYOUT_LINK_CHANGE_BUTTON: &str = "Change";
+/// DRAFT, NEEDS APPROVAL. The change button's accessibility name.
+pub const PAYOUT_LINK_CHANGE_ACCESSIBILITY_NAME: &str =
+    "Change the organization that receives NEAR AI credit";
+/// DRAFT, NEEDS APPROVAL. Beside the unlink button.
+pub const PAYOUT_LINK_UNLINK_BODY: &str =
+    "Credit you earn is kept and sent when you choose an organization again.";
+/// DRAFT, NEEDS APPROVAL. Status: an active link this device made.
+pub const PAYOUT_LINK_STATUS_LINKED: &str = "Credit goes to {org_name}";
+/// DRAFT, NEEDS APPROVAL. Status: no link.
+pub const PAYOUT_LINK_STATUS_NONE: &str = "No organization chosen";
+/// DRAFT, NEEDS APPROVAL. Status: a confirmed link the rail has not made
+/// active yet (it replaces the spec's "Waiting for passkey confirmation").
+pub const PAYOUT_LINK_STATUS_WAITING: &str = "Credit goes to {org_name} from the next payout";
+/// DRAFT, NEEDS APPROVAL. Status: NEAR AI answered that the org is gone.
+pub const PAYOUT_LINK_STATUS_UNAVAILABLE: &str = "Organization unavailable. Choose another.";
+/// DRAFT, NEEDS APPROVAL. Status: the commons holds another org than the one
+/// chosen on this device (`recipient_ref_check: "mismatch"`).
+pub const PAYOUT_LINK_STATUS_MISMATCH: &str =
+    "Credit may be going to an organization you didn't choose. Choose again.";
+/// DRAFT, NEEDS APPROVAL. No NEAR AI session on this device.
+pub const PAYOUT_LINK_SIGN_IN: &str = "Sign in with NEAR AI to choose an organization.";
+/// DRAFT, NEEDS APPROVAL. Shown in place of the section when this device
+/// holds no usable Trace Commons account session and could not renew one
+/// (`account-session-required` from `payout_rails_status`). Before this the
+/// section hid itself, so a contributor could not tell it existed. Wording
+/// set by the owner, 2026-10-24: "It should just say Sign In again".
+pub const PAYOUT_LINK_SESSION_ENDED: &str = "Sign in again";
+/// DRAFT, NEEDS APPROVAL. The NEAR AI user owns no active organization.
+pub const PAYOUT_LINK_NO_ORGANIZATION: &str = "You don't own an active NEAR AI organization.";
+/// DRAFT, NEEDS APPROVAL. The org list changed after it was shown
+/// (`payout-link-orgs-changed`, `payout-link-changed`).
+pub const PAYOUT_LINK_CHANGED: &str = "Your organizations changed. Choose again.";
+/// DRAFT, NEEDS APPROVAL. Any other refusal of a start or confirm.
+pub const PAYOUT_LINK_FAILED: &str = "Nothing changed. Try again.";
+
+/// Every payout-link string, in one payload, for the shells
+/// (`tc_payout_link_copy_json`).
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct PayoutLinkCopy {
+    pub title: &'static str,
+    pub body: &'static str,
+    pub scope: &'static str,
+    pub button: &'static str,
+    pub secondary: &'static str,
+    pub accessibility_name: &'static str,
+    pub unlink_button: &'static str,
+    pub unlink_accessibility_name: &'static str,
+    pub unlink_body: &'static str,
+    pub change_button: &'static str,
+    pub change_accessibility_name: &'static str,
+    pub status_linked: &'static str,
+    pub status_none: &'static str,
+    pub status_waiting: &'static str,
+    pub status_unavailable: &'static str,
+    pub status_mismatch: &'static str,
+    pub sign_in: &'static str,
+    pub session_ended: &'static str,
+    pub no_organization: &'static str,
+    pub changed: &'static str,
+    pub failed: &'static str,
+}
+
+/// The payout-link words.
+#[must_use]
+pub fn payout_link_copy() -> PayoutLinkCopy {
+    PayoutLinkCopy {
+        title: PAYOUT_LINK_TITLE,
+        body: PAYOUT_LINK_BODY,
+        scope: PAYOUT_LINK_SCOPE,
+        button: PAYOUT_LINK_BUTTON,
+        secondary: PAYOUT_LINK_SECONDARY,
+        accessibility_name: PAYOUT_LINK_ACCESSIBILITY_NAME,
+        unlink_button: PAYOUT_LINK_UNLINK_BUTTON,
+        unlink_accessibility_name: PAYOUT_LINK_UNLINK_ACCESSIBILITY_NAME,
+        unlink_body: PAYOUT_LINK_UNLINK_BODY,
+        change_button: PAYOUT_LINK_CHANGE_BUTTON,
+        change_accessibility_name: PAYOUT_LINK_CHANGE_ACCESSIBILITY_NAME,
+        status_linked: PAYOUT_LINK_STATUS_LINKED,
+        status_none: PAYOUT_LINK_STATUS_NONE,
+        status_waiting: PAYOUT_LINK_STATUS_WAITING,
+        status_unavailable: PAYOUT_LINK_STATUS_UNAVAILABLE,
+        status_mismatch: PAYOUT_LINK_STATUS_MISMATCH,
+        sign_in: PAYOUT_LINK_SIGN_IN,
+        session_ended: PAYOUT_LINK_SESSION_ENDED,
+        no_organization: PAYOUT_LINK_NO_ORGANIZATION,
+        changed: PAYOUT_LINK_CHANGED,
+        failed: PAYOUT_LINK_FAILED,
+    }
+}
+
+/// The Devices section (owner decision 2026-10-27: a laptop mints a
+/// one-time code, the server redeems it with `login --code`). Every string
+/// is a DRAFT, NEEDS APPROVAL. Templates carry one placeholder each:
+/// `{device}`, `{code}` or `{when}` (already formatted by the shell).
+pub const ACCOUNT_DEVICES_TITLE: &str = "Devices";
+pub const ACCOUNT_DEVICES_BODY: &str =
+    "Computers and servers signed in to your account. Each one uploads with its own key.";
+pub const ACCOUNT_DEVICES_THIS_DEVICE: &str = "This device";
+pub const ACCOUNT_DEVICES_UNNAMED: &str = "Unnamed device";
+pub const ACCOUNT_DEVICES_LAST_SEEN: &str = "Last seen {when}";
+pub const ACCOUNT_DEVICES_LINK_BUTTON: &str = "Link a server";
+pub const ACCOUNT_DEVICES_LINK_ACCESSIBILITY_NAME: &str =
+    "Link a server or another computer to your account with a one-time code";
+pub const ACCOUNT_DEVICES_LINK_BODY: &str = "On the server, run this command. The code works once, within 10 minutes. Anyone who has it can join your account.";
+pub const ACCOUNT_DEVICES_CODE_COMMAND: &str = "trace-commons-contributor login --code {code}";
+pub const ACCOUNT_DEVICES_COPY_BUTTON: &str = "Copy command";
+pub const ACCOUNT_DEVICES_COPIED: &str = "Copied";
+pub const ACCOUNT_DEVICES_WAITING: &str = "Waiting for the server to use the code";
+pub const ACCOUNT_DEVICES_LINKED: &str = "Server linked.";
+pub const ACCOUNT_DEVICES_EXPIRED: &str = "The code expired before it was used.";
+pub const ACCOUNT_DEVICES_DONE_BUTTON: &str = "Done";
+pub const ACCOUNT_DEVICES_UNLINK_BUTTON: &str = "Unlink";
+pub const ACCOUNT_DEVICES_UNLINK_ACCESSIBILITY_NAME: &str = "Unlink {device}";
+pub const ACCOUNT_DEVICES_UNLINK_CONFIRM: &str =
+    "Unlink {device}? It is signed out and can't upload or renew its sign-in.";
+pub const ACCOUNT_DEVICES_UNLINK_CONFIRM_BUTTON: &str = "Unlink";
+pub const ACCOUNT_DEVICES_CANCEL_BUTTON: &str = "Cancel";
+pub const ACCOUNT_DEVICES_SESSION_ENDED: &str = PAYOUT_LINK_SESSION_ENDED;
+pub const ACCOUNT_DEVICES_TOO_MANY: &str = "Too many codes at once. Try again in a few minutes.";
+pub const ACCOUNT_DEVICES_FAILED: &str = PAYOUT_LINK_FAILED;
+
+/// Every Devices string, in one payload, for the shells
+/// (`tc_account_devices_copy_json`).
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct AccountDevicesCopy {
+    pub title: &'static str,
+    pub body: &'static str,
+    pub this_device: &'static str,
+    pub unnamed: &'static str,
+    pub last_seen: &'static str,
+    pub link_button: &'static str,
+    pub link_accessibility_name: &'static str,
+    pub link_body: &'static str,
+    pub code_command: &'static str,
+    pub copy_button: &'static str,
+    pub copied: &'static str,
+    pub waiting: &'static str,
+    pub linked: &'static str,
+    pub expired: &'static str,
+    pub done_button: &'static str,
+    pub unlink_button: &'static str,
+    pub unlink_accessibility_name: &'static str,
+    pub unlink_confirm: &'static str,
+    pub unlink_confirm_button: &'static str,
+    pub cancel_button: &'static str,
+    pub session_ended: &'static str,
+    pub too_many: &'static str,
+    pub failed: &'static str,
+}
+
+/// The Devices words.
+#[must_use]
+pub fn account_devices_copy() -> AccountDevicesCopy {
+    AccountDevicesCopy {
+        title: ACCOUNT_DEVICES_TITLE,
+        body: ACCOUNT_DEVICES_BODY,
+        this_device: ACCOUNT_DEVICES_THIS_DEVICE,
+        unnamed: ACCOUNT_DEVICES_UNNAMED,
+        last_seen: ACCOUNT_DEVICES_LAST_SEEN,
+        link_button: ACCOUNT_DEVICES_LINK_BUTTON,
+        link_accessibility_name: ACCOUNT_DEVICES_LINK_ACCESSIBILITY_NAME,
+        link_body: ACCOUNT_DEVICES_LINK_BODY,
+        code_command: ACCOUNT_DEVICES_CODE_COMMAND,
+        copy_button: ACCOUNT_DEVICES_COPY_BUTTON,
+        copied: ACCOUNT_DEVICES_COPIED,
+        waiting: ACCOUNT_DEVICES_WAITING,
+        linked: ACCOUNT_DEVICES_LINKED,
+        expired: ACCOUNT_DEVICES_EXPIRED,
+        done_button: ACCOUNT_DEVICES_DONE_BUTTON,
+        unlink_button: ACCOUNT_DEVICES_UNLINK_BUTTON,
+        unlink_accessibility_name: ACCOUNT_DEVICES_UNLINK_ACCESSIBILITY_NAME,
+        unlink_confirm: ACCOUNT_DEVICES_UNLINK_CONFIRM,
+        unlink_confirm_button: ACCOUNT_DEVICES_UNLINK_CONFIRM_BUTTON,
+        cancel_button: ACCOUNT_DEVICES_CANCEL_BUTTON,
+        session_ended: ACCOUNT_DEVICES_SESSION_ENDED,
+        too_many: ACCOUNT_DEVICES_TOO_MANY,
+        failed: ACCOUNT_DEVICES_FAILED,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adding Train coding models to traces already sent (owner decisions
+// 2026-10-28). A trace sent without it earned no scoring award; the person
+// may add the use afterwards, to all of those traces or to one.
+//
+// Every string here was approved by the owner on 2026-10-28. Templates carry `{count}`, the number of traces,
+// which a shell fills ([`render_count`]). The sheet's two buttons carry
+// equal weight and neither is preselected.
+
+/// Owner-approved 2026-10-28. The sheet's title.
+pub const SENT_TRACES_TRAINING_TITLE: &str = "Earn credit on sent traces?";
+/// Owner-approved 2026-10-28. The sheet's body, for one trace.
+pub const SENT_TRACES_TRAINING_BODY_ONE: &str = "1 sent trace doesn't have Train consent.";
+/// Owner-approved 2026-10-28. The sheet's body, for `{count}` traces.
+pub const SENT_TRACES_TRAINING_BODY_OTHER: &str = "{count} sent traces don't have Train consent.";
+/// Owner-approved 2026-10-28. Beside the buttons: what allowing changes, and
+/// from when.
+pub const SENT_TRACES_TRAINING_SCOPE: &str = "This adds only Train consent, from today.";
+/// Owner-approved 2026-10-28. Adds the use to every trace the body counts.
+pub const SENT_TRACES_TRAINING_ALLOW_BUTTON: &str = "Allow";
+/// Owner-approved 2026-10-28. The allow button's accessibility name.
+pub const SENT_TRACES_TRAINING_ALLOW_ACCESSIBILITY_NAME: &str =
+    "Allow Train consent for {count} sent traces";
+/// Owner-approved 2026-10-28. Closes the sheet and changes nothing.
+pub const SENT_TRACES_TRAINING_NOT_NOW_BUTTON: &str = "Not now";
+/// Owner-approved 2026-10-28. The not-now button's accessibility name.
+pub const SENT_TRACES_TRAINING_NOT_NOW_ACCESSIBILITY_NAME: &str =
+    "Not now, and keep sent traces as they are";
+/// Owner-approved 2026-10-28. The quiet line on the Insights card while such
+/// traces exist, for one trace.
+pub const SENT_TRACES_TRAINING_LINE_ONE: &str = "1 trace needs Train consent";
+/// Owner-approved 2026-10-28. The same line for `{count}` traces.
+pub const SENT_TRACES_TRAINING_LINE_OTHER: &str = "{count} traces need Train consent";
+/// Owner-approved 2026-10-28. Beside the line: opens the sheet.
+pub const SENT_TRACES_TRAINING_REVIEW_BUTTON: &str = "Review";
+/// Owner-approved 2026-10-28. The review button's accessibility name.
+pub const SENT_TRACES_TRAINING_REVIEW_ACCESSIBILITY_NAME: &str =
+    "Review traces that need Train consent";
+/// Owner-approved 2026-10-28. In the trace inspector, for one such trace.
+pub const SENT_TRACES_TRAINING_TRACE_LINE: &str = "Needs Train consent";
+/// Owner-approved 2026-10-28. In the trace inspector: adds the use to this
+/// trace only.
+pub const SENT_TRACES_TRAINING_TRACE_BUTTON: &str = "Allow";
+/// Owner-approved 2026-10-28. The inspector button's accessibility name.
+pub const SENT_TRACES_TRAINING_TRACE_ACCESSIBILITY_NAME: &str =
+    "Allow Train consent for this trace";
+/// Owner-approved 2026-10-28. A trace given the use whose credit has not
+/// landed yet.
+pub const SENT_TRACES_TRAINING_PENDING: &str = "Credit pending";
+/// Owner-approved 2026-10-28. The grant did not go through.
+pub const SENT_TRACES_TRAINING_FAILED: &str = "Consent fails. Nothing changed.";
+
+/// Every string for adding Train coding models to sent traces, in one
+/// payload, for the shells (`tc_sent_traces_training_copy_json`).
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct SentTracesTrainingCopy {
+    pub title: &'static str,
+    pub body_one: &'static str,
+    pub body_other: &'static str,
+    pub scope: &'static str,
+    pub allow_button: &'static str,
+    pub allow_accessibility_name: &'static str,
+    pub not_now_button: &'static str,
+    pub not_now_accessibility_name: &'static str,
+    pub line_one: &'static str,
+    pub line_other: &'static str,
+    pub review_button: &'static str,
+    pub review_accessibility_name: &'static str,
+    pub trace_line: &'static str,
+    pub trace_button: &'static str,
+    pub trace_accessibility_name: &'static str,
+    pub pending: &'static str,
+    pub failed: &'static str,
+}
+
+/// The words for adding Train coding models to sent traces.
+#[must_use]
+pub fn sent_traces_training_copy() -> SentTracesTrainingCopy {
+    SentTracesTrainingCopy {
+        title: SENT_TRACES_TRAINING_TITLE,
+        body_one: SENT_TRACES_TRAINING_BODY_ONE,
+        body_other: SENT_TRACES_TRAINING_BODY_OTHER,
+        scope: SENT_TRACES_TRAINING_SCOPE,
+        allow_button: SENT_TRACES_TRAINING_ALLOW_BUTTON,
+        allow_accessibility_name: SENT_TRACES_TRAINING_ALLOW_ACCESSIBILITY_NAME,
+        not_now_button: SENT_TRACES_TRAINING_NOT_NOW_BUTTON,
+        not_now_accessibility_name: SENT_TRACES_TRAINING_NOT_NOW_ACCESSIBILITY_NAME,
+        line_one: SENT_TRACES_TRAINING_LINE_ONE,
+        line_other: SENT_TRACES_TRAINING_LINE_OTHER,
+        review_button: SENT_TRACES_TRAINING_REVIEW_BUTTON,
+        review_accessibility_name: SENT_TRACES_TRAINING_REVIEW_ACCESSIBILITY_NAME,
+        trace_line: SENT_TRACES_TRAINING_TRACE_LINE,
+        trace_button: SENT_TRACES_TRAINING_TRACE_BUTTON,
+        trace_accessibility_name: SENT_TRACES_TRAINING_TRACE_ACCESSIBILITY_NAME,
+        pending: SENT_TRACES_TRAINING_PENDING,
+        failed: SENT_TRACES_TRAINING_FAILED,
+    }
+}
+
+/// `template` with `{count}` filled in.
+#[must_use]
+pub fn render_count(template: &str, count: u64) -> String {
+    template.replace("{count}", &count.to_string())
+}
+
+/// `template` with `{org_name}` filled in.
+#[must_use]
+pub fn render_org_name(template: &str, org_name: &str) -> String {
+    template.replace("{org_name}", org_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2480,6 +2787,89 @@ mod tests {
         );
         let all = [copy.title, copy.matching, copy.nothing_sent, copy.credit].join(" ");
         assert!(!all.to_lowercase().contains("earn"), "{all}");
+    }
+
+    /// The command the Devices card shows is the one the CLI parses, and
+    /// every template carries its placeholder.
+    /// Short, plain and draft-marked: one sentence each, no "go back", the
+    /// two sheet choices the same length class, and every count template
+    /// carries its placeholder.
+    #[test]
+    fn the_sent_traces_training_copy_is_short_and_counted() {
+        let copy = sent_traces_training_copy();
+        for template in [
+            copy.body_other,
+            copy.line_other,
+            copy.allow_accessibility_name,
+        ] {
+            assert!(template.contains("{count}"), "{template}");
+        }
+        for one in [copy.body_one, copy.line_one] {
+            assert!(!one.contains("{count}") && one.starts_with("1 "), "{one}");
+        }
+        let value = serde_json::to_value(copy).unwrap();
+        for text in value.as_object().unwrap().values() {
+            let text = text.as_str().unwrap();
+            assert!(!text.trim().is_empty());
+            assert!(!text.to_lowercase().contains("go back"), "{text}");
+            // The failure line is two short sentences (owner, 2026-10-28).
+            if text != SENT_TRACES_TRAINING_FAILED {
+                assert!(text.matches(". ").count() == 0, "one sentence: {text}");
+            }
+        }
+        // Each accessible name includes its visible label (copy guide 5).
+        for (label, name) in [
+            (copy.allow_button, copy.allow_accessibility_name),
+            (copy.not_now_button, copy.not_now_accessibility_name),
+            (copy.review_button, copy.review_accessibility_name),
+            (copy.trace_button, copy.trace_accessibility_name),
+        ] {
+            assert!(name.starts_with(label), "{name} must include {label}");
+        }
+        assert!(copy.allow_button.split_whitespace().count() <= 2);
+        assert!(copy.not_now_button.split_whitespace().count() <= 2);
+        assert!(copy.trace_button.split_whitespace().count() <= 2);
+        assert_eq!(
+            render_count(copy.body_other, 22),
+            "22 sent traces don't have Train consent."
+        );
+        // Every constant in the block is marked approved in its doc comment.
+        let source = include_str!("consent_copy.rs");
+        let lines = source.lines().collect::<Vec<_>>();
+        let mut declared = 0;
+        for (index, line) in lines.iter().enumerate() {
+            if !line.starts_with("pub const SENT_TRACES_TRAINING_") {
+                continue;
+            }
+            declared += 1;
+            let doc = lines[..index]
+                .iter()
+                .rev()
+                .take_while(|line| line.starts_with("///"))
+                .any(|line| line.contains("Owner-approved 2026-10-28"));
+            assert!(doc, "not marked approved: {line}");
+        }
+        assert_eq!(declared, 17);
+    }
+
+    #[test]
+    fn the_devices_copy_names_the_real_command() {
+        let copy = account_devices_copy();
+        assert_eq!(
+            copy.code_command,
+            "trace-commons-contributor login --code {code}"
+        );
+        assert!(copy.unlink_confirm.contains("{device}"));
+        assert!(copy.unlink_accessibility_name.contains("{device}"));
+        assert!(copy.last_seen.contains("{when}"));
+        let value = serde_json::to_value(copy).unwrap();
+        assert!(
+            value
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|v| { v.as_str().is_some_and(|s| !s.trim().is_empty()) })
+        );
     }
 
     #[test]
@@ -2914,13 +3304,6 @@ mod tests {
         }
         assert!(!wire.contains("when a model recognises it"));
         assert!(!wire.contains("The model is not reliable"));
-        // The pattern half is the agreed sentence's, so the redactor test
-        // holds it.
-        let pattern_half = AUTO_SCRUB_SCOPE
-            .split(" Everything else")
-            .next()
-            .expect("the agreed scope sentence");
-        assert!(AUTO_PATTERNS_ONLY_SCOPE.starts_with(pattern_half));
     }
 
     /// The model-scrub route gets the agreed sentences and nothing of the
@@ -3093,7 +3476,7 @@ mod tests {
         );
         assert_eq!(
             AUTO_NO_REVIEW,
-            "No one looks at a trace before it is sent, including you."
+            "Submissions are automatically queued and sent without review. You can withdraw them from future use; distributed copies cannot be recalled."
         );
         // Approved 2026-10-12 (owner), word for word.
         assert_eq!(
@@ -3238,8 +3621,12 @@ mod tests {
     /// grant a different act from the one described.
     #[test]
     fn no_review_is_stated_without_qualification() {
-        assert!(AUTO_NO_REVIEW.starts_with("No one looks at a trace before it is sent"));
-        assert!(AUTO_NO_REVIEW.contains("including you"));
+        assert!(
+            AUTO_NO_REVIEW
+                .starts_with("Submissions are automatically queued and sent without review.")
+        );
+        assert!(AUTO_NO_REVIEW.contains("withdraw them from future use"));
+        assert!(AUTO_NO_REVIEW.contains("distributed copies cannot be recalled"));
         for hedge in ["usually", "may ", "might", "generally", "typically"] {
             assert!(!AUTO_NO_REVIEW.contains(hedge), "hedged with {hedge:?}");
         }
@@ -3605,29 +3992,30 @@ mod tests {
         }
     }
 
-    /// The move leads with the passkey step (owner, 2026-10-11): with no
-    /// session the shell runs the browser step itself, and the offer, the
-    /// wait and the refusal speak of the passkey, never of signing in to
-    /// NEAR AI. The step's own words are separate keys, and its button is
-    /// short.
+    /// The move leads with the browser step (owner, 2026-10-11): with no
+    /// session the shell runs the browser step itself. The offer and the
+    /// wait offer no passkey (removed 2026-10-31), and none of the step's
+    /// lines speaks of signing in. The step's own words are separate keys,
+    /// and its button is short.
     #[test]
-    fn the_migration_leads_with_the_passkey_step() {
+    fn the_migration_leads_with_the_browser_step() {
         let offer = legacy_migration_offer();
         assert_eq!(offer.passkey_waiting, LEGACY_MIGRATION_PASSKEY_WAITING);
         assert_eq!(offer.passkey_failed, LEGACY_MIGRATION_PASSKEY_FAILED);
         assert_eq!(offer.passkey_cancel, LEGACY_MIGRATION_PASSKEY_CANCEL);
         let no_session = legacy_migration_refusal_line("legacy_migration_no_near_ai_session");
         for line in [offer.body, offer.passkey_waiting, no_session] {
-            assert!(line.contains("passkey"), "{line}");
+            assert!(!line.to_lowercase().contains("passkey"), "{line}");
         }
-        for line in [
-            offer.body,
-            offer.passkey_waiting,
-            offer.passkey_failed,
-            no_session,
-        ] {
+        for line in [offer.body, offer.passkey_waiting, offer.passkey_failed] {
             assert!(!line.to_lowercase().contains("sign in"), "{line}");
         }
+        // The refusal names the step it sends the contributor to (owner,
+        // 2026-10-31).
+        assert_eq!(
+            no_session,
+            "Sign in to NEAR AI in your browser first, then try again. Your invite keeps working."
+        );
         assert!(offer.passkey_failed.contains("nothing was moved"));
         assert!(offer.passkey_failed.contains("keeps working"));
         assert!(offer.passkey_cancel.split_whitespace().count() <= 2);
@@ -3795,23 +4183,6 @@ mod tests {
         );
     }
 
-    /// The design's own worked example (Flow 2), verbatim.
-    #[test]
-    fn toast_sent_text_matches_the_design_example() {
-        assert_eq!(
-            toast_sent_text(7, 20, 1),
-            "Sent. 1 left to decide \u{b7} upload limit 7 of 20"
-        );
-    }
-
-    #[test]
-    fn toast_sent_text_states_both_counts_whatever_they_are() {
-        let text = toast_sent_text(0, 50, 0);
-        assert!(text.starts_with("Sent."), "{text}");
-        assert!(text.contains("0 left to decide"), "{text}");
-        assert!(text.contains("upload limit 0 of 50"), "{text}");
-    }
-
     /// The per-session notification's body is the consent sentence itself,
     /// not a paraphrase -- the same string a shell shows above Submit.
     #[test]
@@ -3822,5 +4193,155 @@ mod tests {
         let value = serde_json::to_value(copy).expect("serialises");
         assert_eq!(value["body"], GATE_STATEMENT);
         assert_eq!(value["action"], "Look, then decide");
+    }
+}
+
+#[cfg(test)]
+mod payout_link_copy_tests {
+    use super::*;
+
+    /// The `PAYOUT_LINK_*` constants as declared in this file, each with
+    /// the doc comment above it.
+    fn declared() -> Vec<(String, String)> {
+        let source = include_str!("consent_copy.rs");
+        let mut out = Vec::new();
+        let mut docs = String::new();
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if let Some(doc) = trimmed.strip_prefix("///") {
+                docs.push_str(doc);
+                docs.push('\n');
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("pub const PAYOUT_LINK_")
+                && let Some(name) = rest.split(':').next()
+            {
+                out.push((format!("PAYOUT_LINK_{name}"), docs.clone()));
+            }
+            docs.clear();
+        }
+        out
+    }
+
+    fn every_string(copy: &PayoutLinkCopy) -> Vec<String> {
+        serde_json::to_value(copy)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|value| value.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn every_payout_copy_key_is_marked_draft_and_follows_the_copy_guide() {
+        let declared = declared();
+        let copy = payout_link_copy();
+        let fields = serde_json::to_value(copy).unwrap();
+        let fields = fields.as_object().unwrap();
+        assert_eq!(
+            declared.len(),
+            fields.len(),
+            "every constant is in the payload, and only they are: {declared:?}"
+        );
+        for (name, docs) in &declared {
+            assert!(
+                docs.contains("DRAFT, NEEDS APPROVAL"),
+                "{name} is not marked for owner review"
+            );
+        }
+        for text in every_string(&copy) {
+            assert!(!text.trim().is_empty());
+            assert_eq!(text, text.trim(), "{text:?}");
+            // No passkey anywhere: D5 was superseded on 2026-10-23.
+            assert!(!text.to_lowercase().contains("passkey"), "{text}");
+            // Only the one placeholder.
+            for (index, _) in text.match_indices('{') {
+                assert!(text[index..].starts_with("{org_name}"), "{text}");
+            }
+        }
+        // Rule 1: buttons name an action in one or two words, most of the
+        // time; the unlink button is the spec's draft and is flagged long.
+        for button in [copy.button, copy.secondary] {
+            assert!(button.split_whitespace().count() <= 2, "{button}");
+            assert!(!button.contains("{org_name}"), "{button}");
+        }
+        // The direct change while a link is active: one word, named for
+        // assistive tech by the whole action, with no org to fill.
+        assert_eq!(copy.change_button, "Change");
+        assert_eq!(
+            copy.change_accessibility_name,
+            "Change the organization that receives NEAR AI credit"
+        );
+        assert!(
+            copy.change_accessibility_name
+                .starts_with(copy.change_button)
+        );
+        assert!(!copy.change_accessibility_name.contains("{org_name}"));
+        // Rule 4: titles and buttons are separate keys and separate words.
+        assert_ne!(copy.title, copy.button);
+        // Rule 5: the accessibility name includes the visible action and
+        // names the target.
+        assert!(copy.accessibility_name.starts_with(copy.button));
+        assert!(copy.accessibility_name.contains("{org_name}"));
+        assert!(
+            copy.unlink_accessibility_name
+                .starts_with(copy.unlink_button)
+        );
+        // Rule 3: the scope stays beside the action.
+        assert!(copy.scope.contains("{org_name}"));
+        // The status lines are distinct.
+        let statuses = [
+            copy.status_linked,
+            copy.status_none,
+            copy.status_waiting,
+            copy.status_unavailable,
+        ];
+        let distinct: std::collections::BTreeSet<_> = statuses.iter().collect();
+        assert_eq!(distinct.len(), statuses.len());
+        assert_eq!(PAYOUT_COPY_PLACEHOLDERS, &["org_name"]);
+        // The section's line when the account session is gone, instead of
+        // hiding: a sentence on its own, naming no org, distinct from the
+        // NEAR AI sign-in line.
+        assert_eq!(copy.session_ended, "Sign in again");
+        assert_ne!(copy.session_ended, copy.sign_in);
+        assert!(!copy.session_ended.contains("{org_name}"));
+    }
+
+    /// D7 and the recipient's debt: the consent says other members can
+    /// spend the credit, and that past NEAR AI use is paid first.
+    #[test]
+    fn copy_says_other_members_can_spend_and_overage_is_paid_first() {
+        let body = payout_link_copy().body;
+        assert!(body.contains("Other members of {org_name} can spend it too."));
+        assert!(
+            body.contains("If {org_name} owes NEAR AI for past use, new credit pays that first.")
+        );
+        assert!(body.contains("can't be moved"));
+        assert!(body.contains("which you keep"));
+        assert_eq!(
+            render_org_name("Credit goes to {org_name}", "Synthetic Org"),
+            "Credit goes to Synthetic Org"
+        );
+    }
+
+    /// The scope that earns credit is an optional data use, and the
+    /// sentence above the uses names it by its title (owner, 2026-10-27).
+    #[test]
+    fn the_credit_scope_is_the_optional_use_the_reward_line_names() {
+        let options = crate::daemon::enroll::consent_options();
+        let scope = options["scopes"]
+            .as_array()
+            .expect("scopes")
+            .iter()
+            .find(|scope| scope["name"] == DATA_USE_CREDIT_SCOPE)
+            .expect("the credit scope is offered");
+        assert_eq!(scope["always_on"], false);
+        assert_eq!(scope["grants_data_use"], true);
+        let title = scope["title"].as_str().expect("title");
+        assert!(DATA_USE_REWARD_OPPORTUNITIES.contains(&format!("allow {title}.")));
+        assert!(DATA_USE_REWARD_OPPORTUNITIES.contains("are extra uses that may earn more."));
+        assert!(!DATA_USE_REWARD_OPPORTUNITIES.contains("earn nothing"));
+        assert_eq!(DATA_USE_CREDIT_REQUIRED, "Required to earn credit.");
     }
 }

@@ -1,18 +1,24 @@
 import Foundation
+import os
 import TCBridge
 import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
 
 private final class ContributionDaemon: DaemonCalling {
-    private let lock = NSLock()
-    private var recorded: [(String, String)] = []
-    private var refuse: Bool
+    private struct State: Sendable {
+        var recorded: [(String, String)] = []
+        var refuse: Bool
+    }
+    private let state: OSAllocatedUnfairLock<State>
     private let blockReady: Bool
     private let started = DispatchSemaphore(value: 0)
     let resume = DispatchSemaphore(value: 0)
-    init(refuseFirst: Bool = true, blockReady: Bool = false) { refuse = refuseFirst; self.blockReady = blockReady }
-    var calls: [(String, String)] { lock.lock(); defer { lock.unlock() }; return recorded }
+    init(refuseFirst: Bool = true, blockReady: Bool = false) {
+        state = OSAllocatedUnfairLock(initialState: State(refuse: refuseFirst))
+        self.blockReady = blockReady
+    }
+    var calls: [(String, String)] { state.withLock { $0.recorded } }
     func waitUntilStarted() async -> DispatchTimeoutResult {
         let signal = started
         return await withCheckedContinuation { continuation in
@@ -22,9 +28,13 @@ private final class ContributionDaemon: DaemonCalling {
         }
     }
     func call(_ method: String, params: String) -> String {
-        lock.lock(); defer { lock.unlock() }
-        recorded.append((method, params))
-        if refuse { refuse = false; return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"# }
+        let refused = state.withLock { state in
+            state.recorded.append((method, params))
+            let refused = state.refuse
+            state.refuse = false
+            return refused
+        }
+        if refused { return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"# }
         if blockReady { started.signal(); resume.wait() }
         let body = (try? JSONSerialization.jsonObject(with: Data(params.utf8))) as? [String: String]
         return "{\"id\":1,\"result\":{\"account_scope\":\"\(body?["account_scope"] ?? "scope-a")\",\"status\":{\"authority\":\"bounded\",\"ready\":true,\"policy_version\":\"v1\"},\"line\":\"Ready to contribute. Accepted contributions may earn pending credit.\"}}"
@@ -91,6 +101,8 @@ final class ContributionAccountTests: XCTestCase {
         let request = Task { await model.updateContributionAccount() }
         let started = await daemon.waitUntilStarted()
         XCTAssertEqual(started, .success)
+        XCTAssertEqual(daemon.calls.map { $0.0 }, ["account_contribution_status"],
+                       "The recorded call must remain readable while its reply is parked")
         status.accountScope = "scope-b"; model.setStatusForTesting(status)
         daemon.resume.signal()
         let accepted = await request.value

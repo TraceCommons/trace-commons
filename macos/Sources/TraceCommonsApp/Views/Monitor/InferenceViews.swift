@@ -26,16 +26,16 @@ struct InferenceTabView: View {
     private static let insightsCopy = TCInsights.copy() ?? [:]
 
     var body: some View {
-        // The Folders step scrolls itself, so the switch sits outside the
+        // The Tools step lays itself out, so the switch sits outside the
         // ledger's scroll; the refresh sits on the stack, which is always
         // drawn.
         VStack(alignment: .leading, spacing: 0) {
             switch model.startup {
             case .needsRoots:
-                // Ron's 450pt first-run pane, centred, not the window's width.
-                OnboardingCoordinatorView(startAt: .folders, takesInvites: false, onComplete: {})
-                    .frame(width: FirstRunProgress.paneWidth)
-                    .frame(maxWidth: .infinity)
+                // The first run's Tools step on its own stage, scaled down to
+                // fit the tab (`FirstRunStageFit`).
+                OnboardingCoordinatorView(startAt: .tools, takesInvites: false, onComplete: {})
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .starting:
                 SettingsAwaiting().frame(maxWidth: .infinity)
             case .refused(let sentence):
@@ -53,6 +53,9 @@ struct InferenceTabView: View {
         // Keyed on the switch: Settings is its own window, so this tab can
         // stay in view while the feed is turned off there.
         .task(id: model.daemonSettings?.insightsLedgerFeed) { await store.appeared() }
+        // Lazily, with the tab and never on the sign-in: whether to ask the
+        // contributor to choose a spending organization.
+        .task { model.refreshSpendOrganizations() }
     }
 
     private var ledger: some View {
@@ -60,18 +63,24 @@ struct InferenceTabView: View {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The owner's order (2026-10-09, 2026-10-10, 2026-10-19),
                 // with the inspector closed on this tab: the Private AI
-                // status leads (a static dot and the core's sentence; the
-                // owner set aside a switch here on 2026-10-19), then the
-                // NEAR AI balance with billing under it, then the managed
-                // cards (owner ruling O3: in the main pane), then the
-                // calls, and last the card that opens Settings, where the
-                // switch, the tools and the connection are. The offer and
-                // the NEAR AI sign-in are popover notices over the tab
+                // step-by-step card leads until it is closed (product
+                // owner, 2026-10-28), then the status (a static dot and the
+                // core's sentence; the owner set aside a switch here on
+                // 2026-10-19), then the managed cards, whose tool buttons
+                // are how Private AI runs, then the calls, then the NEAR AI
+                // balance with billing under it (product owner, 2026-10-28:
+                // further down), and last the card that opens Settings,
+                // where the switch, the tools and the connection are. The offer and the NEAR AI
+                // sign-in are popover notices over the tab
                 // (`MonitorNotices`).
+                PrivateAIGuideCard()
                 PrivateAIInspectorView(store: store)
-                InferenceBalanceSection()
+                // Only with several NEAR AI organizations and no choice made
+                // (owner request, 2026-10-23); otherwise draws nothing.
+                SpendOrganizationPrompt(onOpenSettings: onOpenSettings)
                 ManagedSessionsSection()
                 ledgerSections
+                InferenceBalanceSection()
                 InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)
             }
         }
@@ -88,9 +97,14 @@ struct InferenceTabView: View {
                 if let failure = store.failures["inference_calls"] {
                     GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                 }
+                if let network = store.networkSummary {
+                    networkTotals(network)
+                }
                 if let page = store.calls {
                     if page.readable {
-                        totals(page, summary: store.summary, destinations: store.destinations)
+                        if store.networkSummary == nil {
+                            totals(page, summary: store.summary, destinations: store.destinations)
+                        }
                         if let summary = store.summary, summary.readable, !summary.models.isEmpty {
                             models(summary)
                         }
@@ -114,7 +128,8 @@ struct InferenceTabView: View {
         _ page: DaemonData.InferenceCallPage, summary: DaemonData.InferenceSummary?,
         destinations: DaemonData.ToolDestinations?
     ) -> some View {
-        let totals = Self.totals(page, summary: summary, destinations: destinations)
+        let pageTotals = Self.totals(page, summary: summary, destinations: destinations)
+        let totals = (calls: Optional<Int>.none, verified: Optional<Int>.none, priced: pageTotals.priced)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             // What window the counts cover, as the core reported it.
             Text(Self.windowLine(page, destinations: destinations))
@@ -126,6 +141,42 @@ struct InferenceTabView: View {
                 GlassLegendCell(MonitorWords.priced, value: totals.priced, status: .kept)
             }
         }
+    }
+
+    private func networkTotals(_ network: DaemonData.NetworkInferenceSummary) -> some View {
+        let totals = Self.networkHeaderTotals(network)
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            Text(MonitorWords.table?.windowLine(hours: network.windowHours) ?? "—")
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassLegendCell(MonitorWords.calls, value: totals.calls.map(String.init) ?? "—", status: .shared)
+                GlassLegendCell(InferenceWords.proof(.verified), value: totals.verified.map(String.init) ?? "—", status: .on)
+                GlassLegendCell(MonitorWords.priced, value: totals.priced, status: .kept)
+            }
+        }
+    }
+
+    /// Every figure in the header covers the same shared and managed window.
+    /// A partial registry price cannot stand for the cost of all displayed calls.
+    static func networkHeaderTotals(
+        _ network: DaemonData.NetworkInferenceSummary?
+    ) -> (calls: Int?, verified: Int?, priced: String) {
+        let totals = HomePrivateAI.networkTotals(network)
+        guard totals.calls != nil, let network, network.readable,
+              let summary = network.summary, summary.enabled else {
+            return (totals.calls, totals.verified, "—")
+        }
+        var usd = 0.0
+        for route in [summary.routed, summary.outside, summary.unknown] {
+            guard let pricedCalls = route.pricedCalls, pricedCalls == route.calls,
+                  let cost = route.costUSD, cost.isFinite, cost >= 0 else {
+                return (totals.calls, totals.verified, "—")
+            }
+            usd += cost
+            guard usd.isFinite else { return (totals.calls, totals.verified, "—") }
+        }
+        return (totals.calls, totals.verified, formattedUSD(usd))
     }
 
     /// The hours the tab's counts cover: the calls page's `window_hours`,
@@ -219,8 +270,11 @@ struct InferenceTabView: View {
 
     private func calls(_ page: DaemonData.InferenceCallPage) -> some View {
         GlassEyebrowCard(MonitorWords.calls) {
-            VStack(spacing: 0) {
+            LazyVStack(spacing: 0) {
                 ForEach(Array(page.calls.enumerated()), id: \.element.id) { index, call in
+                    #if DEBUG
+                    let _ = OtherCollectionRowBodies.record("supplementalCalls", String(call.id))
+                    #endif
                     GlassTableRow(first: index == 0) { callRow(call) }
                 }
             }
@@ -270,7 +324,7 @@ struct InferenceTabView: View {
 
     /// The tool's name when the shell knows the adapter, the raw id when
     /// it does not, and a dash for a call IronWire could not attribute.
-    static func toolName(_ id: String) -> String {
+    nonisolated static func toolName(_ id: String) -> String {
         if let kind = SourceKind(rawValue: id) { return kind.displayName }
         return id == "unknown" ? "—" : id
     }
@@ -287,7 +341,11 @@ struct InferenceTabView: View {
     }
 
     static func money(_ micros: Int64) -> String {
-        (Double(micros) / 1_000_000).formatted(.currency(code: "USD").precision(.fractionLength(2 ... 4)))
+        formattedUSD(Double(micros) / 1_000_000)
+    }
+
+    private static func formattedUSD(_ usd: Double) -> String {
+        usd.formatted(.currency(code: "USD").precision(.fractionLength(2 ... 4)))
     }
 
     static func tone(_ label: DaemonData.ProofLabel) -> GlassTag.Tone {
@@ -320,8 +378,46 @@ struct InferenceTabView: View {
 /// (owner, 2026-10-09; it was the tab's inspector, as #1146's
 /// `inference-inspector.tsx` draws it, and the inspector now stays closed
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
-/// One row: the listener's state in the core's sentence (never the
-/// switch: what was asked for is not what happened). The credential and
+/// How Private AI works, step by step (product owner, 2026-10-28): first on
+/// the tab, in the managed copy's words, until it is closed with its X.
+/// Closed, it stays closed on this Mac.
+struct PrivateAIGuideCard: View {
+    static let closedKey = "privateAI.guideClosed"
+    @AppStorage(Self.closedKey) private var closed = false
+    @EnvironmentObject private var model: AppModel
+
+    static let stepKeys = ["guide_step_earn", "guide_step_start", "guide_step_use"]
+
+    var body: some View {
+        if !closed {
+            // The card explains; it has no action, so it is not a button.
+            GlassHeroCard(
+                gradient: GlassTokens.Gradient.heroCampaign,
+                title: model.managedText("guide_title"), subtitle: model.managedText("guide_body"),
+                closeLabel: MonitorWords.close, onClose: { closed = true }
+            ) {
+                GlassHeroSymbol("lock.shield")
+            } content: {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(Array(Self.stepKeys.enumerated()), id: \.offset) { index, key in
+                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
+                            Text(verbatim: "\(index + 1).")
+                                .glassType(GlassTokens.TypeScale.bodyStrong)
+                            Text(model.managedText(key))
+                                .glassType(GlassTokens.TypeScale.body)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .foregroundStyle(GlassTokens.Color.heroInk.color)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The Status row, then the core's subtitle (owner, 2026-10-27; the main
+/// pane still has none). The row is the listener's state in the core's
+/// sentence (never the switch: what was asked for is not what happened). The credential and
 /// Connected tools rows and the connected / not connected pair are gone
 /// (owner, 2026-10-12): sign-in and the tools are in Settings. The balance
 /// card is the main pane's, further down.
@@ -351,27 +447,51 @@ struct PrivateAIInspectorView: View {
     }
 
     private func summary(_ copy: PrivateInferenceCopy) -> some View {
-        let state = PrivateAISwitchCard.stateLabel(
-            state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
-            calls: model.privateInferenceCalls)
+        let status = Self.statusRow(store.privateAI?.state, copy: copy, calls: model.privateInferenceCalls)
         // The tab's heading row, in the one style every tab's heading
         // takes (owner, 2026-10-19, `GlassTabHeading`), with the state on
-        // the right. #1146: the Status dot is on while working, outside
-        // otherwise, always beside the core's sentence.
-        return GlassTabHeading(copy.inspectorStatus) {
-            Spacer(minLength: GlassTokens.Space.s4)
-            GlassStatusLabel(state.line, status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
-                .multilineTextAlignment(.trailing)
+        // the right: the menu bar's one word and dot, the core's full
+        // sentence as the row's help and accessibility hint.
+        // The state right after the title (owner, 2026-10-20), not at the
+        // row's far end.
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            GlassTabHeading(copy.inspectorStatus) {
+                GlassStatusLabel(status.word, status: status.dot)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            .help(status.sentence)
+            .accessibilityHint(status.sentence)
+            // What the destination is for, in the core's words, at the
+            // title size (product owner, 2026-10-28: make it bigger).
+            Text(Self.subtitle(copy, state: store.privateAI?.state))
+                .glassType(GlassTokens.TypeScale.title)
+                .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .accessibilityElement(children: .combine)
     }
 
-    /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the
-    /// listener is working, outside otherwise.
-    static func statusDot(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus {
-        PrivateInferenceIndicator.dotStatus(
-            PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls))
+    /// The subtitle, with the credit sentence only while NEAR AI answers
+    /// calls (`running`): otherwise calls use the tools' own accounts.
+    static func subtitle(_ copy: PrivateInferenceCopy, state: DaemonData.PrivateInferenceState?) -> String {
+        state?.state == "running" ? copy.subtitle + " " + copy.subtitleCredit : copy.subtitle
+    }
+
+    /// The Status row: the menu bar's one word and dot for the listener's
+    /// state (`PrivateInferenceSurface.menuState`, `MenuPanelStatus.privateAIDot`:
+    /// clear green, attention amber, refused red, otherwise grey), and the
+    /// core's full sentence for the row's help and hint. A core that gave
+    /// no word draws the sentence, on grey.
+    static func statusRow(
+        _ state: DaemonData.PrivateInferenceState?, copy: PrivateInferenceCopy, calls: PrivateInferenceCalls
+    ) -> (word: String, dot: GlassStatus, sentence: String) {
+        let surface = InferenceAccountSection.surfaceState(state)
+        let sentence = PrivateInferenceSurface.stateLine(surface, copy: copy, calls: calls)
+        guard let menu = PrivateInferenceSurface.menuState(surface, calls: calls) else {
+            return (sentence, .off, sentence)
+        }
+        return (menu.word, MenuPanelStatus.privateAIDot(menu.tone), sentence)
     }
 }
 

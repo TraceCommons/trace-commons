@@ -27,8 +27,17 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::time::Duration;
 
-/// The one service this credential is minted against.
-pub const CLOUD_API_ORIGIN: &str = "https://cloud-api.near.ai";
+/// The one service this credential is minted against: the channel's NEAR AI
+/// API (`crate::channel`). In a `near-ai-staging` build it is NEAR AI
+/// staging; the server's `near-ai-staging` feature switches its own NEAR AI
+/// base to the same host, so the org a staging daemon lists is the org a
+/// staging server verifies and pays.
+pub const CLOUD_API_ORIGIN: &str = crate::channel::NEAR_AI_API_ORIGIN;
+
+/// Whether this build talks to NEAR AI staging (`near-ai-staging`).
+pub const fn near_ai_staging() -> bool {
+    crate::channel::near_ai_staging()
+}
 /// The sign-in providers the service exposes as a browser redirect.
 pub const PROVIDERS: [&str; 2] = ["github", "google"];
 /// This client's own agent. Also the agent recorded for a NEAR wallet
@@ -45,15 +54,97 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 #[path = "near_wallet_api_tests.rs"]
 mod near_wallet_tests;
 
+#[cfg(test)]
+#[path = "spend_org_api_tests.rs"]
+mod spend_org_tests;
+
 #[derive(Deserialize)]
 struct Organization {
     id: String,
     is_active: bool,
+    /// Present on every `UserOrganizationResponse`; defaulted so a mint never
+    /// fails over a field it does not need.
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    role: String,
 }
 
 #[derive(Deserialize)]
 struct Organizations {
     organizations: Vec<Organization>,
+    /// The service's count of every organization the account belongs to,
+    /// which is how a page that did not carry all of them is recognised.
+    #[serde(default)]
+    total: Option<i64>,
+}
+
+/// How many organizations one listing asks for. An account with more than
+/// this is refused as unexpected rather than shown half a list.
+const ORGANIZATION_PAGE: usize = 100;
+
+/// The longest organization name this client will hand to a shell, in
+/// characters. Names are the account's own, but they are drawn in a picker
+/// and must not be able to push a window around.
+pub const MAX_ORGANIZATION_NAME_CHARS: usize = 80;
+
+/// One organization the signed-in account is an active member of.
+///
+/// The name is the account's own label for it, shown so a contributor can
+/// tell their organizations apart. Neither field is ever logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountOrganization {
+    pub id: String,
+    pub name: String,
+    /// `owner`, `admin` or `member`, as the service reports it.
+    pub role: String,
+}
+
+/// Which organization a mint lands in.
+#[derive(Debug, Clone, Copy)]
+pub enum OrganizationChoice<'a> {
+    /// The first active organization: what the sign-in has always done.
+    FirstActive,
+    /// This one if the account still has it, otherwise the first active.
+    /// The sign-in uses it to honour a remembered choice at no extra cost.
+    Prefer(&'a str),
+    /// This one or nothing. Choosing a spending organization uses it.
+    Exactly(&'a str),
+}
+
+/// What a revoke found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    Revoked,
+    /// The service has no such key: already revoked, which is what was asked.
+    AlreadyGone,
+}
+
+/// Whether a service id may become one path segment.
+pub(crate) fn is_path_segment(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+/// The name a shell may draw: control characters removed, whitespace
+/// trimmed, bounded, and the id when nothing is left.
+fn display_name(name: &str, id: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(MAX_ORGANIZATION_NAME_CHARS)
+        .collect();
+    if cleaned.trim().is_empty() {
+        id.to_owned()
+    } else {
+        cleaned.trim_end().to_owned()
+    }
 }
 
 /// Public organization context returned by the existing Cloud management API.
@@ -152,6 +243,35 @@ pub struct OrganizationBalance {
     pub spend_limit: Option<i64>,
     pub total_requests: i64,
     pub total_tokens: i64,
+}
+
+/// One page of `GET /v1/organizations/{org}/credit/transfers?direction=incoming`,
+/// newest first.
+///
+/// Only the fields an arrival needs are read. The recipient's view also
+/// carries the sender's organization id, a memo and metadata; none of them is
+/// read, so none of them can be kept or logged.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IncomingTransferPage {
+    pub transfers: Vec<IncomingTransfer>,
+    #[serde(default)]
+    pub next_cursor: Option<TransferCursor>,
+}
+
+/// One credit transfer into the organization.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct IncomingTransfer {
+    pub id: String,
+    /// What arrived, in nano-dollars. Never negative on this route.
+    pub amount: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The service's cursor for the next (older) page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TransferCursor {
+    pub before_time: DateTime<Utc>,
+    pub before_id: String,
 }
 
 /// Organization-wide provider usage costs, never registry price estimates.
@@ -429,17 +549,41 @@ impl CloudApi {
         session: &SessionTokens,
         key_name: &str,
     ) -> Result<MintedKey> {
+        self.mint_inference_key_in(session, key_name, OrganizationChoice::FirstActive)
+            .await
+    }
+
+    /// [`Self::mint_inference_key`], in the organization `choice` names.
+    ///
+    /// The organization is always taken from a fresh listing, never from the
+    /// caller's word alone: a target the account is not an active member of
+    /// is `near_ai_credential_no_organization`, and nothing is minted.
+    pub async fn mint_inference_key_in(
+        &self,
+        session: &SessionTokens,
+        key_name: &str,
+        choice: OrganizationChoice<'_>,
+    ) -> Result<MintedKey> {
         if key_name.trim().is_empty() || key_name.len() > 128 {
             bail!("near_ai_credential_invalid")
         }
         let organizations: Organizations = self
             .call(reqwest::Method::GET, "/v1/organizations", session, None)
             .await?;
-        let organization = organizations
+        let mut active = organizations
             .organizations
             .into_iter()
-            .find(|o| o.is_active && !o.id.is_empty())
-            .ok_or_else(|| anyhow!("near_ai_credential_no_organization"))?;
+            .filter(|o| o.is_active && is_path_segment(&o.id));
+        let organization = match choice {
+            OrganizationChoice::FirstActive => active.next(),
+            OrganizationChoice::Exactly(target) => active.find(|o| o.id == target),
+            OrganizationChoice::Prefer(preferred) => {
+                let active: Vec<Organization> = active.collect();
+                let position = active.iter().position(|o| o.id == preferred).unwrap_or(0);
+                active.into_iter().nth(position)
+            }
+        }
+        .ok_or_else(|| anyhow!("near_ai_credential_no_organization"))?;
         let workspaces: Workspaces = self
             .call(
                 reqwest::Method::GET,
@@ -554,6 +698,75 @@ impl CloudApi {
             .ok_or_else(|| anyhow!("near_ai_credential_no_organization"))
     }
 
+    /// Every organization the account is an active member of, in the
+    /// service's order.
+    ///
+    /// A page that does not carry all of them is refused rather than
+    /// returned: a count taken from half a list is the one wrong answer a
+    /// picker cannot recover from. Ids that could not be a path segment are
+    /// dropped, and names are cleaned before anything can draw them.
+    pub async fn list_organizations(
+        &self,
+        session: &SessionTokens,
+    ) -> Result<Vec<AccountOrganization>> {
+        let organizations: Organizations = self
+            .call(
+                reqwest::Method::GET,
+                &format!("/v1/organizations?limit={ORGANIZATION_PAGE}"),
+                session,
+                None,
+            )
+            .await?;
+        let carried = organizations.organizations.len();
+        if carried > ORGANIZATION_PAGE
+            || organizations
+                .total
+                .is_some_and(|total| total < 0 || total as u64 > carried as u64)
+        {
+            bail!("near_ai_credential_unexpected")
+        }
+        Ok(organizations
+            .organizations
+            .into_iter()
+            .filter(|o| o.is_active && is_path_segment(&o.id))
+            .map(|o| AccountOrganization {
+                name: display_name(&o.name, &o.id),
+                role: o.role.chars().take(16).collect(),
+                id: o.id,
+            })
+            .collect())
+    }
+
+    /// Revoke one inference key this install minted.
+    ///
+    /// `DELETE /v1/workspaces/{workspace_id}/api-keys/{key_id}`, answered 204.
+    /// A 404 is a key already gone, which is what a revoke wanted. Both ids
+    /// become path segments, so neither leaves this process unless it is one.
+    pub async fn revoke_inference_key(
+        &self,
+        session: &SessionTokens,
+        workspace_id: &str,
+        key_id: &str,
+    ) -> Result<RevokeOutcome> {
+        if !is_path_segment(workspace_id) || !is_path_segment(key_id) {
+            bail!("near_ai_credential_unexpected")
+        }
+        let response = self
+            .http
+            .delete(self.url(&format!("/v1/workspaces/{workspace_id}/api-keys/{key_id}"))?)
+            .bearer_auth(&session.access_token)
+            .send()
+            .await
+            .map_err(|_| anyhow!("near_ai_credential_unavailable"))?;
+        match response.status() {
+            status if status.is_success() => Ok(RevokeOutcome::Revoked),
+            reqwest::StatusCode::NOT_FOUND => Ok(RevokeOutcome::AlreadyGone),
+            reqwest::StatusCode::UNAUTHORIZED => bail!("near_ai_credential_session_expired"),
+            // The body is never read: label-only, as everywhere in this file.
+            _ => bail!("near_ai_credential_refused"),
+        }
+    }
+
     /// Resolve the selected inference key's organization before a credits handoff.
     pub async fn funding_organization(
         &self,
@@ -606,6 +819,55 @@ impl CloudApi {
         )
         .await
     }
+    /// One page of credit transfers INTO `organization_id`, newest first,
+    /// older than `before` when given.
+    ///
+    /// Session-authenticated. cloud-api lets an owner session read this
+    /// (`credits:read`); a member who is not an owner is refused, which
+    /// arrives here as `near_ai_credential_refused`.
+    pub async fn incoming_transfers_page(
+        &self,
+        session: &SessionTokens,
+        organization_id: &str,
+        before: Option<&TransferCursor>,
+    ) -> Result<IncomingTransferPage> {
+        if organization_id.is_empty() {
+            bail!("near_ai_credential_no_organization")
+        }
+        if !is_path_segment(organization_id) {
+            bail!("near_ai_credential_unexpected")
+        }
+        let mut path = format!(
+            "/v1/organizations/{organization_id}/credit/transfers?direction=incoming&limit=100"
+        );
+        if let Some(cursor) = before {
+            // Both values come from the service's own previous page, but they
+            // are about to become query values: refuse anything that is not
+            // a plain id, and spell the time with `Z` so no `+` needs escaping.
+            if !is_path_segment(&cursor.before_id) {
+                bail!("near_ai_credential_unexpected")
+            }
+            let time = cursor
+                .before_time
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+            path.push_str(&format!(
+                "&before_time={time}&before_id={}",
+                cursor.before_id
+            ));
+        }
+        let page: IncomingTransferPage = self
+            .call(reqwest::Method::GET, &path, session, None)
+            .await?;
+        if page
+            .transfers
+            .iter()
+            .any(|t| t.amount < 0 || !is_path_segment(&t.id))
+        {
+            bail!("near_ai_credential_unexpected")
+        }
+        Ok(page)
+    }
+
     /// Rolling 24-hour usage from the selected organization, in native nanoUSD.
     pub async fn organization_model_usage(
         &self,
@@ -647,6 +909,84 @@ impl CloudApi {
             bail!("near_ai_credential_unexpected")
         }
         Ok(usage)
+    }
+
+    /// The organizations this session's user may direct NEAR AI payout
+    /// credit to: active, and owned (`role == "owner"`), read from
+    /// `GET /v1/users/me`. The same rule the commons applies on its own
+    /// `/users/me` read before it stores a link, so an org shown here is one
+    /// the server will accept.
+    ///
+    /// The names are for the person on this device: the payout-link flow
+    /// keeps them in memory and never sends one to the commons. An org whose
+    /// id is not a UUID is left out (the commons accepts only UUIDs), and so
+    /// is one whose name could not be shown as one line.
+    pub async fn owned_organizations(
+        &self,
+        session: &SessionTokens,
+    ) -> Result<Vec<OwnedOrganization>> {
+        let me: UsersMe = self
+            .call(reqwest::Method::GET, "/v1/users/me", session, None)
+            .await?;
+        let organizations = me.organizations.unwrap_or_default();
+        if organizations.len() > MAX_USER_ORGANIZATIONS {
+            bail!("near_ai_credential_unexpected")
+        }
+        Ok(organizations
+            .into_iter()
+            .filter(|org| org.is_active && org.role == OWNER_ROLE)
+            .filter_map(|org| {
+                let id = uuid::Uuid::parse_str(&org.id)
+                    .ok()
+                    .filter(|id| !id.is_nil())?;
+                let name = org.name.trim();
+                (!name.is_empty()
+                    && name.len() <= MAX_ORGANIZATION_NAME_BYTES
+                    && !name.chars().any(char::is_control))
+                .then(|| OwnedOrganization {
+                    id,
+                    name: name.to_owned(),
+                })
+            })
+            .collect())
+    }
+}
+
+/// The NEAR AI role that may direct credit to an org.
+const OWNER_ROLE: &str = "owner";
+/// More organizations than this is not a `/users/me` this client reads.
+const MAX_USER_ORGANIZATIONS: usize = 256;
+/// The longest organization name shown.
+const MAX_ORGANIZATION_NAME_BYTES: usize = 256;
+
+/// `GET /v1/users/me`, read for its organizations and nothing else.
+#[derive(Deserialize)]
+struct UsersMe {
+    #[serde(default)]
+    organizations: Option<Vec<UsersMeOrganization>>,
+}
+
+#[derive(Deserialize)]
+struct UsersMeOrganization {
+    id: String,
+    name: String,
+    role: String,
+    is_active: bool,
+}
+
+/// An active organization the signed-in NEAR AI user owns.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OwnedOrganization {
+    pub id: uuid::Uuid,
+    /// For display on this device only.
+    pub name: String,
+}
+
+impl std::fmt::Debug for OwnedOrganization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OwnedOrganization")
+            .finish_non_exhaustive()
     }
 }
 
@@ -878,7 +1218,11 @@ mod tests {
         let api = CloudApi::live().unwrap();
         assert_eq!(api.base.scheme(), "https");
         // `api.near.ai` is retired and answers 410. The host is a constant so
-        // that no environment can point a contributor's session at another.
+        // that no environment can point a contributor's session at another;
+        // only a `near-ai-staging` build compiles a different one.
+        let pinned = reqwest::Url::parse(CLOUD_API_ORIGIN).unwrap();
+        assert_eq!(api.base.host_str(), pinned.host_str());
+        #[cfg(not(feature = "near-ai-staging"))]
         assert_eq!(api.base.host_str(), Some("cloud-api.near.ai"));
         for refused in [
             "http://cloud-api.near.ai",
@@ -895,6 +1239,9 @@ mod tests {
         let api = CloudApi::live().unwrap();
         let url = api.authorize_url("github", 49721).unwrap();
         let parsed = reqwest::Url::parse(&url).unwrap();
+        let pinned = reqwest::Url::parse(CLOUD_API_ORIGIN).unwrap();
+        assert_eq!(parsed.host_str(), pinned.host_str());
+        #[cfg(not(feature = "near-ai-staging"))]
         assert_eq!(parsed.host_str(), Some("cloud-api.near.ai"));
         assert_eq!(parsed.path(), "/v1/auth/github");
         let callback = parsed
@@ -964,5 +1311,29 @@ AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
             api.refresh_session("rt_example", USER_AGENT).await.is_err(),
             "presenting our own User-Agent must not be treated as a live session"
         );
+    }
+}
+
+#[cfg(test)]
+mod staging_origin_tests {
+    use super::*;
+
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_default_build_pins_production() {
+        assert!(!near_ai_staging());
+        assert_eq!(CLOUD_API_ORIGIN, "https://cloud-api.near.ai");
+    }
+
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_says_so() {
+        assert!(near_ai_staging());
+        assert_eq!(CLOUD_API_ORIGIN, "https://cloud-stg-api.near.ai");
+    }
+
+    #[test]
+    fn the_origin_passes_the_pinned_client_checks() {
+        assert!(CloudApi::live().is_ok());
     }
 }

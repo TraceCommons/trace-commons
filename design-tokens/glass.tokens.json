@@ -26,6 +26,7 @@
     "hairlineHighContrast": { "hex": "#ffffff", "alpha": 0.4, "note": "hairline under Increase Contrast. Light: 3:1 or more on every light ground (0.4 was 2.82).", "light": { "hex": "#000000", "alpha": 0.45 } },
     "edgeHighContrast": { "hex": "#f2f2f4", "alpha": 0.4, "note": "A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance). Light: 55%, for 3:1 or more on every light ground (40% was 2.44).", "light": { "hex": "#1d1d1f", "alpha": 0.55 } },
     "textOnAccent": { "hex": "#ffffff" },
+    "toggleKnobOff": { "hex": "#ffffff", "note": "The switch knob while off: white on every track (the flat theme's Dark draws it navy, as on). On, the knob is textOnAccent, as the NEAR AI design system's switch draws it (owner, 2026-10-20: its accent replaces the purple)." },
     "textOnStatus": { "hex": "#0c0c0e" },
     "textOnSelected": { "hex": "#f2f2f4", "note": "Text on a selected fill (controlSelected): textPrimary in classic, white in the flat theme, whose selected fill is the brand purple.", "light": { "hex": "#1d1d1f" } },
     "statusOn": { "hex": "#3ddc84", "note": "Watching, share automatically, automatic, always on. Glyph and label only.", "light": { "hex": "#1a8f4c" } },
@@ -39,16 +40,31 @@
     "heroInk": { "hex": "#ffffff", "note": "Text and graphics on a hero promotion's ground, in both appearances." },
     "heroButtonFill": { "hex": "#ffffff", "note": "A hero promotion's call to action: a white pill (owner, 2026-10-12)." },
     "heroButtonInk": { "hex": "#16161a", "note": "The label on heroButtonFill: 18:1." },
+    "heroAccent": { "hex": "#2e95ff", "note": "A bright blue on a hero's ground, in both appearances: the Traces hero's step discs (behind heroInk) and step icons (owner, 2026-10-29, from the owner's mock-up)." },
     "badgeFillSubtle": { "hex": "#ffffff", "alpha": 0.16, "note": "A count badge that is not owed a decision (a tab's count): ink at 16%. The flat Light theme draws it in the well's slate, as the legend pills are.", "light": { "hex": "#000000", "alpha": 0.16 } },
     "badgeFill": { "hex": "#ff6b6b", "note": "The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.", "light": { "hex": "#e04a42" } },
     "dataShared": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
     "dataKept": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },
     "dataInference": { "hex": "#a78bfa", "light": { "hex": "#7d5ce0" } },
+    "mapOrbShared": { "hex": "#0091fd", "note": "A shared trace on the Traces map: its orb on the lines, the light round its coin, the pile's glow and the launch pad's charge. The accent's soft blue (owner, 2026-10-20: it was the watching green).", "light": { "hex": "#0070c6" } },
+    "mapOrbKept": { "hex": "#d95926", "note": "A kept trace on the Traces map, drawn as mapOrbShared is: orange, the NEAR AI data palette's data-2 (owner, 2026-10-20).", "light": { "hex": "#cf5320" } },
+    "firstRunGlow": { "hex": "#0091fd", "note": "The animated first run's light (Ron, 2026-10-21): the corner glow on the scene, the glow behind the N, the travelled step thread and the trace orbs. Drawn at low alpha; never text.", "light": { "hex": "#0070c6" } },
+    "firstRunBeam": { "hex": "#49c2ff", "note": "The soft beam from a watched tool into the N on the first run's Tools step: its halo and body. Blurred, never text.", "light": { "hex": "#0091fd" } },
+    "firstRunBeamCore": { "hex": "#e2f6ff", "note": "The beam's core and its pulses, and the lit end of the step thread's leading stretch. Blurred, never text.", "light": { "hex": "#9fdcff" } },
+    "firstRunApprove": { "hex": "#2c9e57", "note": "The review gate on the first run's Uses step filling as a trace is approved: the fill's top (Ron, 2026-10-22: a muted green, under a white thumbs-up)." },
+    "firstRunApproveDeep": { "hex": "#1d7a42", "note": "The review gate's fill toward its rim, under firstRunApprove." },
+    "firstRunCard": { "hex": "#171c33", "alpha": 0.78, "note": "A card on the first run's scene (canvas --card): the tool list and Customize, the Uses list, the Traces estimate, the Private AI card, Join's cards and Uses' This Mac and commons nodes. Lighter than the scene so it reads as a card on it (Ron, 2026-10-22: nodeCardFill was too close to the navy).", "light": { "hex": "#ffffff", "alpha": 0.78 } },
+    "firstRunCardSolid": { "hex": "#1a2039", "note": "The review gate's disc on Uses before it fills (canvas --card-solid): the card's colour, opaque, so the line does not show through it.", "light": { "hex": "#ffffff" } },
+    "firstRunTile": { "hex": "#1b2140", "note": "A tool tile's raised face on the first run's stage (canvas --tile).", "light": { "hex": "#ffffff" } },
+    "firstRunTileShadow": { "hex": "#02030a", "alpha": 0.5, "note": "The shadow under a tool tile and the review gate (canvas --tile-shadow, 0 8 20 in dark, 0 6 16 in light).", "light": { "hex": "#1d2a4a", "alpha": 0.14 } },
+    "firstRunControl": { "hex": "#ffffff", "alpha": 0.09, "note": "A glass button in the first run's action bar, Back (canvas --control): a light glass over the scene, where the flat theme's control is a dark well.", "light": { "hex": "#ffffff", "alpha": 0.72 } },
+    "firstRunControlHover": { "hex": "#ffffff", "alpha": 0.15, "note": "firstRunControl under the pointer (canvas --control-h).", "light": { "hex": "#ffffff", "alpha": 0.92 } },
+    "firstRunRule": { "hex": "#ffffff", "alpha": 0.18, "note": "The first run's dashed lines and rules (canvas --rule): the Tools ring, the step thread still to go, the Uses path, the Traces streams, the commons and Join rings, the add-a-tool row's dashed edge. Stronger than rule so a dashed line reads on the scene (Ron, 2026-10-22).", "light": { "hex": "#000000", "alpha": 0.16 } },
     "chartSurface": { "hex": "#0d1124", "note": "The opaque ground every chart is plotted on, never straight on glass (Near AI OS surface-chart).", "light": { "hex": "#f7f8fa" } },
     "chartGrid": { "hex": "#ffffff", "alpha": 0.1, "note": "Gridlines and the axis rule on chartSurface (Near AI OS chart-grid).", "light": { "hex": "#000000", "alpha": 0.08 } },
-    "chartSeries1": { "hex": "#8a3dff", "note": "The first series of a multi-series chart (Near AI OS data-1): 3:1 or more on chartSurface. Series are used in order and never cycled.", "light": { "hex": "#7a2cf5" } },
-    "chartSeries2": { "hex": "#3a7bd5", "note": "The second series (Near AI OS data-2).", "light": { "hex": "#2f6bc4" } },
-    "chartSeries3": { "hex": "#a78bfa", "note": "The third series (Near AI OS data-3).", "light": { "hex": "#7d5ce0" } },
+    "chartSeries1": { "hex": "#0091fd", "note": "The first series of a multi-series chart (Near AI OS data-1): 3:1 or more on chartSurface. The parent's current data palette (owner, 2026-10-20: the purple it had is gone from Insights). Series are used in order and never cycled.", "light": { "hex": "#2a78d6" } },
+    "chartSeries2": { "hex": "#d95926", "note": "The second series (Near AI OS data-2).", "light": { "hex": "#cf5320" } },
+    "chartSeries3": { "hex": "#199e70", "note": "The third series (Near AI OS data-3).", "light": { "hex": "#14906a" } },
     "chartSeries4": { "hex": "#c98500", "note": "The fourth series (Near AI OS data-4).", "light": { "hex": "#a97200" } },
     "sceneBase": { "hex": "#0f1219", "light": { "hex": "#e6eaf1" } },
     "sceneWarm": { "hex": "#1d2430", "light": { "hex": "#f6f7fa" } },
@@ -59,6 +75,11 @@
     "inactiveDim": { "hex": "#000000", "alpha": 0, "note": "Painted over a pane's veil while its window is out of focus, so a background window reads darker, as the system's own windows do (owner, 2026-10-12). Classic paints nothing (alpha 0); the flat theme sets it." },
     "wellFill": { "hex": "#000000", "alpha": 0.22, "light": { "hex": "#000000", "alpha": 0.06 } },
     "controlHover": { "hex": "#ffffff", "alpha": 0.16, "note": "Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Light is the light control fill 8% darker, so a light control greys under the pointer as it did when this was drawn over the fill.", "light": { "hex": "#ebebed", "alpha": 0.84 } },
+    "controlOnMenu": { "hex": "#ffffff", "alpha": 0.1, "note": "A control's fill on a menu or popover (owner, 2026-10-22: the control fill, a dark well, all but vanished on the dark menu). A step lighter than the menu in dark, darker in light.", "light": { "hex": "#000000", "alpha": 0.08 } },
+    "controlOnMenuHover": { "hex": "#ffffff", "alpha": 0.18, "note": "controlOnMenu under the pointer, in its place.", "light": { "hex": "#000000", "alpha": 0.13 } },
+    "controlOnSelection": { "hex": "#000000", "alpha": 0.18, "note": "A control's fill on a selected list row (owner, 2026-10-22): a deeper pill on the selection, its label in textOnAccent, the selected row's own ink, which clears 4.5:1 on it.", "light": { "hex": "#000000", "alpha": 0.18 } },
+    "controlOnSelectionHover": { "hex": "#000000", "alpha": 0.28, "note": "controlOnSelection under the pointer, in its place.", "light": { "hex": "#000000", "alpha": 0.28 } },
+    "cardNested": { "hex": "#ffffff", "alpha": 0.07, "note": "A card on a card (owner, 2026-10-22: the session preview's prompt quote matched the card under it): a step lighter than the card in dark, darker in light.", "light": { "hex": "#000000", "alpha": 0.045 } },
     "cardHover": { "hex": "#ffffff", "alpha": 0.1, "note": "Hover on an interactive card: #1146's .tc-card--interactive:hover fill, which replaces the card gradient. Light is the card fill's brighter end, so the card lifts rather than greys.", "light": { "hex": "#ffffff", "alpha": 0.86 } },
     "rowHover": { "hex": "#ffffff", "alpha": 0.05, "note": "Hover on an unselected list row (#1146 .tc-list-row:hover). Never over a selected row.", "light": { "hex": "#000000", "alpha": 0.04 } },
     "toolbarExpanded": { "hex": "#55555a", "note": "A toolbar button whose menu is open (#1146 .tc-btn--icon[aria-expanded=true]). textPrimary on it clears 4.5:1 in both appearances.", "light": { "hex": "#d1d1d6" } },
@@ -84,8 +105,12 @@
     "menuModeArmed": { "hex": "#34c759", "note": "Menu-bar mode circle and Private AI on option: contribute automatically." },
     "menuModeNever": { "hex": "#ff453a", "note": "Menu-bar mode circle: never; also the menu-bar badge." },
     "menuPillOff": { "hex": "#5a5a5f", "note": "Menu-bar pill circle when paused or off.", "light": { "hex": "#aeaeb2" } },
-    "menuBarsPaused": { "hex": "#555555", "note": "Graph and strip bars while watching is paused.", "light": { "hex": "#b4b4b8" } },
-    "menuStripTint": { "hex": "#000000", "alpha": 0.32, "note": "The tinted capsule behind the menu-bar strip's bars, so they read over any wallpaper (owner, 2026-10-11).", "light": { "hex": "#ffffff", "alpha": 0.6 } },
+    "menuBarsPaused": { "hex": "#555555", "note": "The popover graph's bars while watching is paused. The menu-bar item's paused bars are menuItemMark at lower alpha.", "light": { "hex": "#b4b4b8" } },
+    "menuItemMark": { "hex": "#ffffff", "note": "The NEAR AI mark on the menu-bar item, in the logo kit's single inks: white on a dark menu bar, black on a light one (owner, 2026-10-21). The item's centre line and paused bars are this ink at lower alpha.", "light": { "hex": "#000000" } },
+    "menuStripShared": { "hex": "#b08bff", "note": "The menu-bar item's shared-traces bars, above the centre line. Drawn on the bar itself with no capsule (owner, 2026-10-21), so dark is dataShared's hue lifted to 3:1 or more on a dark bar; light is dataShared.", "light": { "hex": "#7a2cf5" } },
+    "menuStripKept": { "hex": "#6aa6ff", "note": "The menu-bar item's kept-traces bars, below the centre line. Dark is dataKept's hue lifted to 3:1 or more on a dark bar; light is dataKept.", "light": { "hex": "#2f6bc4" } },
+    "menuStripVerified": { "hex": "#30d158", "note": "The menu-bar item's verified Private AI calls, the Private AI bars above the centre line: the Verified status green, 3:1 or more on a dark or light bar.", "light": { "hex": "#1a8f4c" } },
+    "menuStripCalls": { "hex": "#ffb340", "note": "The menu-bar item's Private AI calls, the Private AI bars below the centre line: the data palette's amber (chartSeries4), lifted on a dark bar to 3:1 or more.", "light": { "hex": "#a97200" } },
     "menuChipShared": { "hex": "#c86bfa", "alpha": 0.35, "light": { "hex": "#7a2cf5", "alpha": 0.18 } },
     "menuChipKept": { "hex": "#3aa0ff", "alpha": 0.35, "light": { "hex": "#2f6bc4", "alpha": 0.18 } },
     "menuNoProof": { "hex": "#ff8a8a", "light": { "hex": "#c62828" } },
@@ -134,10 +159,10 @@
     },
     "heroMissions": {
       "angle": 120,
-      "note": "Missions: indigo to violet, the purple (owner, 2026-10-12).",
+      "note": "Missions: deep navy to the NEAR AI accent (owner, 2026-10-20: the accent replaced the purple; it was indigo to violet).",
       "stops": [
-        { "hex": "#1e1470", "at": 0 },
-        { "hex": "#5b2bd6", "at": 1 }
+        { "hex": "#06264a", "at": 0 },
+        { "hex": "#035ca3", "at": 1 }
       ]
     },
     "heroInsights": {
@@ -374,31 +399,34 @@
     "pulse": 1.6
   },
   "themes": {
-    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatDark is its dark appearance: white text on navy-tinted glass. flatLight is its light appearance: dark text on white frosted glass (owner choice, 2026-10-09, over a tinted Light). Settings > General > Appearance picks Light, Dark or System. Each names only what it changes; a colour it leaves alone keeps its classic value for that appearance. Gradients and shadows are named by both or neither. Panes sit on clear Liquid Glass, lightly tinted with the veil, for the system's refraction, with the veil painted over it; Increase Contrast deepens the veil; Reduce Transparency is left to the system (R14). The map is on the same glass under a light field. Controls, cards, tags and frames are flat: a faint rim, a soft frame shadow, no highlight, shade or glow (owner feedback, 2026-10-09). Cards, panes, wells, controls, pills, menus, popovers and node cards drop the rim and are told apart by fill (and, where they float, a soft shadow) alone; a checkbox keeps its rim, which is the unchecked box; dark cards are the pane's navy, darker than the pane, rather than white over it (owner, 2026-10-10). Selected states are the brand purple, with textOnSelected on them. Every text colour clears 4.5:1 on the pane, a card, a quiet card and a field over the worst desktop -- a near-black #333333 for Light, which light Liquid Glass frosts no darker than, and white for Dark (FlatThemeContrastTests). Light is a cool grey (owner, 2026-10-12): a #e3e6ec veil at 66%, the lightest that holds the floors, under white cards (35%), quiet cards (29%) and controls (44%) and cool slate pills (wellFill #8a93a5 at 28%, lightened from 43% by the owner on 2026-10-12, with the tab count badge and an off map node in the same light slate), each standing off the pane by the same contrast as Dark's do, with a blue accent in place of the brand purple, from the owner's reference painting (2026-10-12; purple read muddy on grey and orange was set aside): #1f7aa8 fills and tints, a #2a8fc4 tab ember, #15608a selections, toggles and buttons under white text, #0c3f5c accent text, and a #6cb6d6 far stop on the Missions promotion; dark text; Dark's is 68%, the lightest that holds the floors (owner, 2026-10-12: a little more translucent). Panes are frosted Liquid Glass (regularTint) under the veil; out of focus inactiveDim darkens a window, as the system does; and the menu-bar popover, the edge rail and the main window share the one pane spec. The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic).",
+    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatDark is its dark appearance: white text on navy-tinted glass. flatLight is its light appearance: dark text on white frosted glass (owner choice, 2026-10-09, over a tinted Light). Settings > General > Appearance picks Light, Dark or System. Each names only what it changes; a colour it leaves alone keeps its classic value for that appearance. Gradients and shadows are named by both or neither. Panes sit on clear Liquid Glass, lightly tinted with the veil, for the system's refraction, with the veil painted over it; Increase Contrast deepens the veil; Reduce Transparency is left to the system (R14). The map is on the same glass under a light field. Controls, cards, tags and frames are flat: a faint rim, a soft frame shadow, no highlight, shade or glow (owner feedback, 2026-10-09). Cards, panes, wells, controls, pills, menus, popovers and node cards drop the rim and are told apart by fill (and, where they float, a soft shadow) alone; a checkbox keeps its rim, which is the unchecked box; dark cards are the pane's navy, darker than the pane, rather than white over it (owner, 2026-10-10). Selected states are the accent, with textOnSelected on them. Every text colour clears 4.5:1 on the pane, a card, a quiet card and a field over the worst desktop -- a near-black #333333 for Light, which light Liquid Glass frosts no darker than, and white for Dark (FlatThemeContrastTests). Light is a cool grey (owner, 2026-10-12): a #e3e6ec veil at 66%, the lightest that holds the floors, under white cards (35%), quiet cards (29%) and controls (44%) and cool slate pills (wellFill #8a93a5 at 28%, lightened from 43% by the owner on 2026-10-12, with the tab count badge and an off map node in the same light slate), each standing off the pane by the same contrast as Dark's do, with a blue accent in place of the brand purple, from the owner's reference painting (2026-10-12; purple read muddy on grey and orange was set aside): #1f7aa8 fills and tints, a #2a8fc4 tab ember, #15608a selections, toggles and buttons under white text, #0c3f5c accent text, and a #6cb6d6 far stop on the Missions promotion (the blues since replaced by the NEAR AI accent, below); dark text; Dark's is 68%, the lightest that holds the floors (owner, 2026-10-12: a little more translucent). Panes are frosted Liquid Glass (regularTint) under the veil; out of focus inactiveDim darkens a window, as the system does; and the menu-bar popover, the edge rail and the main window share the one pane spec. The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic). Since 2026-10-20 (owner) the accent in both appearances is the NEAR AI design system's (near-ai-os-design-system tokens), replacing the purple in Dark and the painting's blues in Light: accent #7ebcff / #035ca3 for selections, toggles, buttons and menus under its text-on-accent ink (#071a2e / white), accent-pressed #6aa8eb / #00488f for the secondary button, accent-soft #0091fd / #0070c6 for tints, icons and the tab ember, accent-text #c6e1ff / #024175 for accent text and links, as the parent's link button. Purple stays for the data series (Shared, Kept, the charts), the Trace mark and tool colours.",
     "flatLight": {
       "color": {
-        "linkText": { "hex": "#15608a" },
+        "linkText": { "hex": "#024175" },
         "glassVeil": { "hex": "#e3e6ec", "alpha": 0.66 },
-        "purpleSoft": { "hex": "#1f7aa8" },
-        "tabEmber": { "hex": "#2a8fc4" },
-        "tabEmberHalo": { "hex": "#2a8fc4", "alpha": 0.3 },
+        "purpleSoft": { "hex": "#0070c6" },
+        "tintAccent": { "hex": "#0070c6", "alpha": 0.14 },
+        "tabEmber": { "hex": "#0070c6" },
+        "tabEmberHalo": { "hex": "#0070c6", "alpha": 0.22 },
         "promoTintEnd": { "hex": "#6cb6d6" },
         "inactiveDim": { "hex": "#000000", "alpha": 0.04 },
         "textSecondary": { "hex": "#3c3c43" },
         "textTertiary": { "hex": "#3d3d43" },
         "placeholder": { "hex": "#000000", "alpha": 0.64 },
-        "purpleText": { "hex": "#0c3f5c" },
+        "purpleText": { "hex": "#024175" },
         "statusOnText": { "hex": "#0b4628" },
         "statusAskText": { "hex": "#573403" },
         "statusOutsideText": { "hex": "#771814" },
         "destructiveText": { "hex": "#791313" },
         "textOnSelected": { "hex": "#ffffff" },
-        "controlSelected": { "hex": "#15608a" },
-        "controlSelectedFloating": { "hex": "#15608a" },
-        "toggleOn": { "hex": "#15608a" },
-        "selection": { "hex": "#15608a" },
-        "menuSelection": { "hex": "#15608a" },
-        "menuHover": { "hex": "#15608a", "alpha": 0.9 },
+        "toolbarExpanded": { "hex": "#035ca3" },
+        "controlSelected": { "hex": "#035ca3" },
+        "controlSelectedFloating": { "hex": "#035ca3" },
+        "toggleOn": { "hex": "#035ca3" },
+        "toggleOnSettings": { "hex": "#035ca3" },
+        "selection": { "hex": "#035ca3" },
+        "menuSelection": { "hex": "#035ca3" },
+        "menuHover": { "hex": "#035ca3", "alpha": 0.9 },
         "wellFill": { "hex": "#8a93a5", "alpha": 0.28 },
         "badgeFillSubtle": { "hex": "#8a93a5", "alpha": 0.28 },
         "mapNodeOff": { "hex": "#c4c9d2" },
@@ -441,8 +469,22 @@
         "ctaFill": {
           "angle": 180,
           "stops": [
-            { "hex": "#15608a", "alpha": 1, "at": 0 },
-            { "hex": "#15608a", "alpha": 1, "at": 1 }
+            { "hex": "#035ca3", "alpha": 1, "at": 0 },
+            { "hex": "#035ca3", "alpha": 1, "at": 1 }
+          ]
+        },
+        "ctaSecondaryFill": {
+          "angle": 180,
+          "stops": [
+            { "hex": "#00488f", "alpha": 1, "at": 0 },
+            { "hex": "#00488f", "alpha": 1, "at": 1 }
+          ]
+        },
+        "checkboxOnFill": {
+          "angle": 180,
+          "stops": [
+            { "hex": "#035ca3", "alpha": 1, "at": 0 },
+            { "hex": "#035ca3", "alpha": 1, "at": 1 }
           ]
         }
       },
@@ -479,7 +521,11 @@
     },
     "flatDark": {
       "color": {
-        "linkText": { "hex": "#a07cff" },
+        "linkText": { "hex": "#c6e1ff" },
+        "purpleSoft": { "hex": "#0091fd" },
+        "tintAccent": { "hex": "#0091fd", "alpha": 0.22 },
+        "tabEmber": { "hex": "#0091fd" },
+        "tabEmberHalo": { "hex": "#0091fd", "alpha": 0.31 },
         "textPrimary": { "hex": "#f2f3f8" },
         "textSecondary": { "hex": "#f2f3f8", "alpha": 0.88 },
         "textTertiary": { "hex": "#f2f3f8", "alpha": 0.84 },
@@ -498,27 +544,34 @@
         "fieldFill": { "hex": "#000000", "alpha": 0.3 },
         "consentFill": { "hex": "#000000", "alpha": 0.3 },
         "controlHover": { "hex": "#000000", "alpha": 0.44 },
+        "controlOnSelection": { "hex": "#071a2e", "alpha": 0.16 },
+        "controlOnSelectionHover": { "hex": "#071a2e", "alpha": 0.26 },
         "cardHover": { "hex": "#ffffff", "alpha": 0.08 },
         "rowHover": { "hex": "#ffffff", "alpha": 0.05 },
-        "toolbarExpanded": { "hex": "#6d14f3" },
-        "controlSelected": { "hex": "#6d14f3" },
-        "controlSelectedFloating": { "hex": "#6d14f3" },
-        "toggleOn": { "hex": "#6d14f3" },
+        "toolbarExpanded": { "hex": "#7ebcff" },
+        "controlSelected": { "hex": "#7ebcff" },
+        "controlSelectedFloating": { "hex": "#7ebcff" },
+        "toggleOn": { "hex": "#7ebcff" },
+        "toggleOnSettings": { "hex": "#7ebcff" },
+        "toggleKnobOff": { "hex": "#071a2e", "note": "Off, the knob is the same navy as on (owner, 2026-10-22), not white." },
+        "toggleOff": { "hex": "#ffffff", "alpha": 0.38, "note": "Lighter than classic's 18% so the navy off knob clears the 3:1 glyph floor on it (owner ruling, 2026-10-07: hold the WCAG floors)." },
         "hairline": { "hex": "#ffffff", "alpha": 0.08 },
         "rule": { "hex": "#ffffff", "alpha": 0.12 },
         "popoverFill": { "hex": "#0b0f22", "alpha": 0.82 },
         "menuFill": { "hex": "#0b0f22", "alpha": 0.82 },
         "nodeCardFill": { "hex": "#0b0f22", "alpha": 0.82 },
-        "menuHover": { "hex": "#6d14f3", "alpha": 0.9 },
-        "menuSelection": { "hex": "#6d14f3" },
-        "selection": { "hex": "#6d14f3" },
+        "menuHover": { "hex": "#7ebcff", "alpha": 0.9 },
+        "menuHoverText": { "hex": "#071a2e" },
+        "menuSelection": { "hex": "#7ebcff" },
+        "selection": { "hex": "#7ebcff" },
         "mapFieldInner": { "hex": "#070a1a", "alpha": 0.15 },
         "mapFieldOuter": { "hex": "#070a1a", "alpha": 0.32 },
-        "purpleText": { "hex": "#e1d5ff" },
+        "purpleText": { "hex": "#c6e1ff" },
+        "textOnAccent": { "hex": "#071a2e" },
         "statusOutsideText": { "hex": "#ffd3d3" },
         "destructiveText": { "hex": "#ffd0d0" },
         "placeholder": { "hex": "#ffffff", "alpha": 0.8 },
-        "textOnSelected": { "hex": "#ffffff" }
+        "textOnSelected": { "hex": "#071a2e" }
       },
       "gradient": {
         "paneFill": {
@@ -553,8 +606,22 @@
         "ctaFill": {
           "angle": 180,
           "stops": [
-            { "hex": "#6d14f3", "alpha": 1, "at": 0 },
-            { "hex": "#6d14f3", "alpha": 1, "at": 1 }
+            { "hex": "#7ebcff", "alpha": 1, "at": 0 },
+            { "hex": "#7ebcff", "alpha": 1, "at": 1 }
+          ]
+        },
+        "ctaSecondaryFill": {
+          "angle": 180,
+          "stops": [
+            { "hex": "#6aa8eb", "alpha": 1, "at": 0 },
+            { "hex": "#6aa8eb", "alpha": 1, "at": 1 }
+          ]
+        },
+        "checkboxOnFill": {
+          "angle": 180,
+          "stops": [
+            { "hex": "#7ebcff", "alpha": 1, "at": 0 },
+            { "hex": "#7ebcff", "alpha": 1, "at": 1 }
           ]
         }
       },

@@ -7285,6 +7285,8 @@ async fn score_shadow_credit_decision(
         chunk_count: int("chunk_count").map(|v| v as i32),
         total_chunk_count: int("total_chunk_count").map(|v| v as i32),
         chunks_capped: evidence["chunks_capped"].as_bool(),
+        perplexity_passed: None,
+        novelty_passed: None,
     }
 }
 
@@ -7414,9 +7416,15 @@ fn assert_duplicate_pair_reads_as_mains(
     for (database_reads, first_document, second_document) in documents {
         let mode = if *database_reads { "database" } else { "file" };
         let first_pending = first_document["credit_points_pending"].as_f64().unwrap();
+        // Once the trace's credit is final nothing is pending (#1707), so
+        // older daemons that add the two do not count it twice.
+        let expected_first_pending = if first_document["credit_points_final"].is_number() {
+            0.0
+        } else {
+            f64::from(credit_points_from_quality_micros(first_quality))
+        };
         assert!(
-            (first_pending - f64::from(credit_points_from_quality_micros(first_quality))).abs()
-                < 1e-4,
+            (first_pending - expected_first_pending).abs() < 1e-4,
             "{mode} reads: {first_document}"
         );
         let first_explanation = explanation_lines(first_document);
@@ -7620,17 +7628,26 @@ async fn compatibility_status_reads_as_mains_under_both_read_modes() {
         let pending = document["credit_points_pending"]
             .as_f64()
             .expect("a pending figure");
+        // The shadow credit quality is the pending figure until the credit
+        // is final; then nothing is pending (#1707).
+        let expected = if document["credit_points_final"].is_number() {
+            0.0
+        } else {
+            expected_pending
+        };
         assert!(
-            (pending - expected_pending).abs() < 1e-4,
-            "{mode} reads: the shadow credit quality is the pending figure: {document}"
+            (pending - expected).abs() < 1e-4,
+            "{mode} reads: the pending figure follows the credit's state: {document}"
         );
-        assert!(
-            document.get("credit_points_final").is_none(),
+        // The NoveltyUtility award is the trace's final credit, and the
+        // ledger figure leaves it out, so `total` is still final + ledger.
+        assert_eq!(
+            document["credit_points_final"].as_f64(),
+            Some(2.5),
             "{mode} reads: {document}"
         );
-        assert_eq!(
-            document["credit_points_ledger"].as_f64(),
-            Some(2.5),
+        assert!(
+            document.get("credit_points_ledger").is_none(),
             "{mode} reads: {document}"
         );
         assert_eq!(
@@ -8703,8 +8720,9 @@ fn credit_presentation(
     })
 }
 
-/// Brief section 3C acceptance: receipt, status, withdrawal, and credit and
-/// dedup behaviour match `main` under equivalent configuration. Tenant L
+/// Brief section 3C acceptance: under equivalent configuration, receipt,
+/// status, withdrawal, and credit and dedup behaviour match `main` except
+/// where a difference is pinned, per side, with its ruling. Tenant L
 /// takes `main`'s path; tenant P is routed to a pipeline whose compatibility
 /// bundle pins `novelty_utility_microcredits` equal to L's
 /// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` in microcredits. Both
@@ -8719,10 +8737,12 @@ fn credit_presentation(
 /// (`attempt_emit_novelty_utility_credit`). P's comes from the live worker.
 ///
 /// Differences by design are pinned per side with their ruling (T15-2,
-/// T15-3); everything else must be equal. The status document is also read
+/// T15-3, and the owner's 2026-10-23 decision that `main`'s gate scoring
+/// award settles while the pipeline's compatibility leg still does not);
+/// everything else must be equal. The status document is also read
 /// with contributor reads from files (Ruling T15-7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
+async fn legacy_and_pipeline_tenants_match_except_pinned_differences() {
     let Some(runtime) = runtime_backend(4).await else {
         return;
     };
@@ -8790,6 +8810,10 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
         "sha256:parity_gate_v1",
     ));
     state_mut.novelty_utility_credit_points_delta = LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA;
+    // A deployment that pays the scoring award has a cut-over
+    // (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`; a delta above 0 refuses
+    // to start without one). Before this test's awards, so they are owed.
+    state_mut.novelty_utility_settle_from = Some(Utc::now() - chrono::Duration::hours(1));
     state_mut.pipeline_service = Some(service.clone());
     state_mut.pipeline_activation = routing_store(&runtime);
     state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
@@ -9182,8 +9206,25 @@ async fn legacy_and_pipeline_tenants_match_under_equivalent_configuration() {
             serde_json::json!(legacy_code.as_u16()),
             serde_json::json!(pipeline_code.as_u16()),
         );
+        // Owner decision 2026-10-23: `main`'s gate scoring award
+        // (`NoveltyUtility`) is settlement-eligible, so with model training
+        // allowed `main` holds an unsettled award that the withdrawal
+        // forfeits. The pipeline's compatibility leg still never settles
+        // (Ruling S10, unchanged), so it has nothing to forfeit. Without
+        // model training no award is written on either side.
+        parity.pin(
+            &format!("{case}: withdrawal credit_retained"),
+            "scoring award settles on main only",
+            (
+                legacy_withdrawal["credit_retained"].clone(),
+                serde_json::json!(!model_training),
+            ),
+            (
+                pipeline_withdrawal["credit_retained"].clone(),
+                serde_json::json!(true),
+            ),
+        );
         for field in [
-            "credit_retained",
             "prior_status",
             "distribution_reach",
             "already_distributed",
@@ -15983,10 +16024,18 @@ async fn a_run_whose_privacy_pass_removed_pii_completes_accepted() {
     let documents = documents.as_array().expect("a document list").clone();
     assert_eq!(documents.len(), 1, "{documents:?}");
     assert_eq!(documents[0]["status"], "accepted", "{documents:?}");
+    // The run's NoveltyUtility award is the trace's final credit, as for
+    // any accepted run, and is not counted a second time in the ledger
+    // figure.
     assert_eq!(
-        documents[0]["credit_points_ledger"].as_f64(),
+        documents[0]["credit_points_final"].as_f64(),
         Some(2.5),
         "the run's NoveltyUtility credit counts like any accepted run's: {documents:?}"
+    );
+    assert!(
+        documents[0].get("credit_points_ledger").is_none()
+            && documents[0].get("credit_outcome_reason").is_none(),
+        "{documents:?}"
     );
 
     let gate_rows: i64 = owner
@@ -16479,9 +16528,13 @@ async fn accept_medium_setting_admits_a_found_and_removed_upload() {
     assert_eq!(documents.len(), 1, "{documents:?}");
     assert_eq!(documents[0]["status"], "accepted", "{documents:?}");
     assert_eq!(
-        documents[0]["credit_points_ledger"].as_f64(),
+        documents[0]["credit_points_final"].as_f64(),
         Some(2.5),
         "credit as for any admitted run: {documents:?}"
+    );
+    assert!(
+        documents[0].get("credit_points_ledger").is_none(),
+        "the award is final, not counted again in the ledger figure: {documents:?}"
     );
 }
 
@@ -17251,4 +17304,85 @@ async fn the_operator_route_resolves_a_held_run() {
         ],
         "one row per resolution the route made"
     );
+}
+
+/// Manual memory probe for the pipeline receipt path, the one a tenant routed
+/// to the pipeline takes: as `large_envelope_tests::large_envelope_submit_probe`
+/// (run it the same way, under `/usr/bin/time -l`), against this suite's
+/// pilot-shaped database.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "manual memory probe; set TC_LARGE_ENVELOPE_BYTES and a PG test URL"]
+async fn large_envelope_pipeline_receipt_probe() {
+    let backend = runtime_backend(4)
+        .await
+        .expect("this probe needs TRACE_COMMONS_PG_TEST_DATABASE_URL");
+    cleanup_pg_trace_tenant(&backend, "tenant-a").await;
+    reset_account_rate_limiter_for_db_test().await;
+    let target: u64 = std::env::var("TC_LARGE_ENVELOPE_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(200_000_000);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = dir.path().join("envelope.json");
+    let written = super::large_envelope_tests::write_synthetic_envelope(&fixture, target).await;
+    let artifacts = local_artifacts(&dir);
+    let adapters: Vec<Arc<dyn SettlementAdapter>> = vec![
+        RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_http_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>,
+        RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_http_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>,
+    ];
+    let service = assemble_test_pipeline_service(
+        backend.clone(),
+        artifacts.clone(),
+        IsolatedPipelineIndex::new(),
+        adapters,
+        None,
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(backend.clone() as Arc<dyn Database>),
+        Some(artifacts.clone()),
+        true,
+        false,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&backend);
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &["tenant-a"],
+    );
+    // `run_pipeline_app`, as `main` runs it: it activates the tenant's bundle
+    // before serving. Its worker starts too; it is stopped as soon as the
+    // receipt is answered, so the peak includes at most its first steps.
+    let (base, stop, server) = serve_pipeline_app(state).await;
+    let addr: std::net::SocketAddr = base
+        .trim_start_matches("http://")
+        .parse()
+        .expect("loopback address");
+    let started = std::time::Instant::now();
+    let (status, body) =
+        super::large_envelope_tests::post_envelope_file(addr, "token-a", &fixture).await;
+    let elapsed = started.elapsed();
+    let _ = stop.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), server).await;
+    assert_eq!(status, 200, "accepted: {body}");
+    let receipt: serde_json::Value = serde_json::from_str(&body).expect("receipt");
+    eprintln!(
+        "large-envelope-pipeline-probe bytes={} events={} submit_secs={:.1} status={}",
+        written.bytes,
+        written.events,
+        elapsed.as_secs_f64(),
+        receipt["status"].as_str().unwrap_or_default()
+    );
+    cleanup_pg_trace_tenant(&backend, "tenant-a").await;
 }

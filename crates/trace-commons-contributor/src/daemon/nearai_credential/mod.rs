@@ -32,6 +32,7 @@
 //! and [`balance`] for the rules the reading itself keeps.
 
 pub mod api;
+pub mod arrivals;
 pub mod balance;
 pub mod ceremony;
 pub mod funding;
@@ -40,6 +41,7 @@ pub(crate) mod near_wallet;
 pub(crate) mod near_wallet_loopback;
 pub(crate) mod near_wallet_page;
 pub(crate) mod session;
+pub mod spend_org;
 
 pub(super) use session::exchange;
 
@@ -187,12 +189,14 @@ pub fn credential_state(shared: &DaemonShared) -> &'static str {
 /// before it answers -- see [`ceremony::begin`] for why that ordering is not
 /// negotiable.
 ///
-/// With no `provider` the ceremony is the NEAR wallet sign-in (passkey
-/// wallets included). `github` and `google` are still accepted when named,
-/// but nothing defaults to them.
+/// With no `provider` the ceremony is the channel's default
+/// (`channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER`): in production the NEAR
+/// wallet sign-in (passkey wallets included), with `github` and `google`
+/// still accepted when named; in staging NEAR AI's Google login, the only
+/// one, with GitHub and the NEAR wallet refused.
 pub async fn handle_start(shared: &DaemonShared, req: &Request) -> Response {
     let provider = match req.params.get("provider") {
-        None => "near",
+        None => crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER,
         Some(serde_json::Value::String(provider)) => provider,
         Some(_) => {
             return Response::err(
@@ -390,6 +394,8 @@ fn forget_local(shared: &DaemonShared, req: &Request) -> Response {
             // just removed. Serving it again would put a figure from a
             // forgotten account on screen.
             balance::invalidate(shared.store.dir());
+            // The org names this process read with that session.
+            crate::daemon::payout_link::forget_listing(shared);
             Response::ok(
                 req.id,
                 serde_json::json!({ "removed": removed, "revoked": false }),
@@ -523,7 +529,65 @@ pub async fn handle_migrate(shared: &DaemonShared, req: &Request) -> Response {
 /// malformed value, is an ordinary read, because this route never errors.
 pub async fn handle_balance(shared: &DaemonShared, req: &Request) -> Response {
     let fresh = req.params.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
-    Response::ok(req.id, balance::read(shared, fresh).await.to_value())
+    let mut report = balance::read(shared, fresh).await;
+    if matches!(report, balance::BalanceReport::Known(_)) {
+        arrivals::refresh_if_due(shared, fresh).await;
+        // The selected organization or session can change during receipt
+        // I/O. Re-read through the identity-aware cache before pairing the
+        // current organization's history with its current balance.
+        report = balance::read(shared, false).await;
+    }
+    Response::ok(req.id, arrivals::balance_value(shared, report))
+}
+
+/// The signed-in account's active organizations, which one Private AI spends
+/// from, and whether the contributor chose it.
+///
+/// Always `ok`, like `near_ai_balance`: a listing that could not be made is a
+/// named `state` with no organizations, and `multiple` and `prompt` are both
+/// false in it -- an unknown count is never "several". `"fresh": true` goes
+/// back to the service instead of serving the last minute's listing.
+pub async fn handle_spend_organizations(shared: &DaemonShared, req: &Request) -> Response {
+    let fresh = req.params.get("fresh").and_then(serde_json::Value::as_bool) == Some(true);
+    Response::ok(
+        req.id,
+        spend_org::organizations(shared, fresh).await.to_value(),
+    )
+}
+
+/// Choose the organization Private AI spends from: mint a key there, move the
+/// proxy onto it, then revoke the key it replaced. See [`spend_org`] for the
+/// order and why a failure at any step leaves one working key.
+///
+/// Answers `{"switched", "revoke_pending", "organization_id"}`, or an error
+/// whose message is one of the `near_ai_spend_org_*` labels.
+pub async fn handle_spend_organization_select(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(target) = req
+        .params
+        .get("organization_id")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Response::err(req.id, ERR_BAD_PARAMS, spend_org::LABEL_SPEND_ORG_INVALID);
+    };
+    match spend_org::select(shared, target).await {
+        Ok(outcome) => Response::ok(
+            req.id,
+            serde_json::json!({
+                "switched": outcome.switched,
+                "revoke_pending": outcome.revoke_pending,
+                "organization_id": target,
+            }),
+        ),
+        Err(error) => {
+            let label = error.to_string();
+            let code = if label == spend_org::LABEL_SPEND_ORG_INVALID {
+                ERR_BAD_PARAMS
+            } else {
+                ERR_UNAVAILABLE
+            };
+            Response::err(req.id, code, &label)
+        }
+    }
 }
 
 /// Read a verified credits destination, optionally bound to a displayed context.
@@ -579,6 +643,48 @@ mod tests {
         }
     }
 
+    /// Production's sign-in, pinned as it shipped (#1380): the NEAR wallet
+    /// first and by default, then NEAR AI's GitHub and Google logins.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn production_offers_the_near_wallet_first_then_github_and_google() {
+        assert_eq!(
+            crate::channel::NEAR_AI_SIGN_IN_PROVIDERS,
+            ["near", "github", "google"]
+        );
+        assert_eq!(crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER, "near");
+    }
+
+    /// Staging signs in through NEAR AI's Google login only (owner,
+    /// 2026-10-23: "Google only for now"). Neither the NEAR wallet nor
+    /// GitHub is offered.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn staging_offers_only_the_near_ai_google_login() {
+        assert_eq!(crate::channel::NEAR_AI_SIGN_IN_PROVIDERS, ["google"]);
+        assert_eq!(crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER, "google");
+        assert!(!crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&"near"));
+        assert!(!crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&"github"));
+    }
+
+    /// Every provider a build offers has a ceremony behind it, and the
+    /// default is the first one offered.
+    #[test]
+    fn every_offered_provider_has_a_ceremony() {
+        assert!(!crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.is_empty());
+        assert_eq!(
+            crate::channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER,
+            crate::channel::NEAR_AI_SIGN_IN_PROVIDERS[0]
+        );
+        for provider in crate::channel::NEAR_AI_SIGN_IN_PROVIDERS {
+            assert!(
+                *provider == "near" || api::PROVIDERS.contains(provider),
+                "{provider}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "near-ai-staging"))]
     #[tokio::test]
     async fn start_without_a_provider_begins_the_near_wallet_ceremony() {
         let (_directory, store) = crate::config::tests_support::temp_store();
@@ -597,6 +703,60 @@ mod tests {
         assert_eq!(url.path(), near_wallet::CALLBACK_PATH);
         let id = body["attempt_id"].as_str().unwrap();
         ceremony::cancel(shared.store.dir(), Some(id)).unwrap();
+    }
+
+    /// A staging start that names no provider -- the macOS first run's, the
+    /// CLI's `login` -- opens NEAR AI's Google login on the staging API,
+    /// which hands the session back to this daemon's loopback listener. No
+    /// NEAR wallet page is served.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_staging_start_without_a_provider_opens_the_near_ai_google_login() {
+        let (_directory, store) = crate::config::tests_support::temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        let request = Request {
+            id: 22,
+            method: "near_ai_credential_start".into(),
+            params: serde_json::json!({}),
+        };
+        let response = handle_start(&shared, &request).await;
+        let body = response.result.expect("a ceremony starts");
+        let url = reqwest::Url::parse(body["browser_url"].as_str().unwrap()).unwrap();
+        let api = reqwest::Url::parse(crate::channel::NEAR_AI_API_ORIGIN).unwrap();
+        assert_eq!(url.host_str(), api.host_str());
+        assert_eq!(url.path(), "/v1/auth/google");
+        let callback = url
+            .query_pairs()
+            .find(|(name, _)| name == "frontend_callback")
+            .map(|(_, value)| reqwest::Url::parse(&value).unwrap())
+            .expect("the login returns to this daemon");
+        assert_eq!(callback.host_str(), Some("127.0.0.1"));
+        assert_ne!(callback.path(), near_wallet::CALLBACK_PATH);
+        let id = body["attempt_id"].as_str().unwrap();
+        ceremony::cancel(shared.store.dir(), Some(id)).unwrap();
+    }
+
+    /// A staging build refuses the NEAR wallet ceremony and NEAR AI's
+    /// GitHub login even when a caller names them, and leaves no attempt
+    /// behind.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_staging_start_naming_another_provider_is_refused() {
+        let (_directory, store) = crate::config::tests_support::temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        for provider in ["near", "github"] {
+            let request = Request {
+                id: 23,
+                method: "near_ai_credential_start".into(),
+                params: serde_json::json!({ "provider": provider }),
+            };
+            let response = handle_start(&shared, &request).await;
+            assert!(response.result.is_none(), "{provider}");
+            let error = response.error.expect("refused");
+            assert_eq!(error.code, ERR_UNAVAILABLE);
+            assert_eq!(error.message, "near_ai_credential_unavailable");
+            assert!(ceremony::attempt_status(shared.store.dir()).is_none());
+        }
     }
 
     #[test]
@@ -846,7 +1006,7 @@ mod tests {
             method: "near_ai_credential_cancel".into(),
             params,
         };
-        let started = ceremony::begin(&shared.store, "github").await.unwrap();
+        let started = ceremony::begin(&shared.store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
 
         let running = handle_cancel(&shared, &request(31, serde_json::json!({})));

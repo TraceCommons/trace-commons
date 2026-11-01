@@ -47,6 +47,10 @@ pub(crate) struct TickResult {
     pub digest_posts: bool,
     /// The sentence folded into it, and the kind it announces.
     pub fold: Option<(Kind, String)>,
+    /// The submissions whose newly final credit the folded sentence states,
+    /// from the same snapshot as the sentence. Empty without a verdicts fold,
+    /// and when the fold states no credit (its finals add to under 0.05).
+    pub fold_covers: std::collections::BTreeSet<String>,
     /// The standalone notification published this tick, if any.
     pub standalone: Option<Kind>,
 }
@@ -63,6 +67,9 @@ struct Prepared {
     candidates: Vec<Candidate>,
     idle: Option<IdleAnnouncement>,
     verdicts: Option<Verdicts>,
+    /// The submissions behind the final credit `verdicts` states: empty when
+    /// it states none. Taken from the same snapshot as `verdicts`.
+    verdicts_final_ids: std::collections::BTreeSet<String>,
     /// The settlement estimate an announcement would carry, and whether its
     /// wording is the pricing one.
     settlement: Option<(SettlementShown, bool)>,
@@ -72,6 +79,9 @@ struct Prepared {
     /// A pricing change too small to announce: the `pricing_version` to
     /// write onto the last announcement record.
     settlement_adopt_pricing: Option<Option<String>>,
+    /// NEAR AI credit an announcement would carry: the amount since the last
+    /// one, and the received total it brings the baseline to.
+    credit: Option<super::nearai_credential::arrivals::PendingCredit>,
     settings: NotifySettings,
     log: Vec<AttentionEntry>,
 }
@@ -87,7 +97,10 @@ impl Prepared {
                 .verdicts
                 .as_ref()
                 .map(nudge_render::digest_verdict_sentence),
-            Kind::InsightsTip | Kind::WeeklyRecap | Kind::SettlementEstimate => None,
+            Kind::InsightsTip
+            | Kind::WeeklyRecap
+            | Kind::SettlementEstimate
+            | Kind::NearAiCredit => None,
         }
     }
 
@@ -104,6 +117,10 @@ impl Prepared {
             Kind::SettlementEstimate => self.settlement.as_ref().map(|(shown, pricing)| {
                 nudge_render::settlement_notification(&shown.total, *pricing)
             }),
+            Kind::NearAiCredit => self
+                .credit
+                .as_ref()
+                .map(|credit| nudge_render::near_ai_credit_notification(credit.amount)),
             Kind::InsightsTip | Kind::WeeklyRecap => None,
         }
     }
@@ -183,7 +200,12 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
         && settings.settlement_estimate
         && suggestions_on
         && shown_estimate.is_some();
-    let closed = !(wants_idle || wants_verdicts || wants_settlement)
+    // N6: read from memory, and only while it could be announced.
+    let credit = (settings.master && settings.near_ai_credit)
+        .then(|| super::nearai_credential::arrivals::pending_notification(shared))
+        .flatten();
+    let wants_credit = credit.is_some();
+    let closed = !(wants_idle || wants_verdicts || wants_settlement || wants_credit)
         || shared.is_paused(now)
         || !shared.logged_in()
         || {
@@ -195,9 +217,11 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
         candidates: Vec::new(),
         idle: None,
         verdicts: None,
+        verdicts_final_ids: Default::default(),
         settlement: None,
         settlement_seed: None,
         settlement_adopt_pricing: None,
+        credit: None,
         settings,
         log,
     };
@@ -272,6 +296,14 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
             .iter()
             .any(|e| e.kind == Kind::VerdictsLanded && e.at >= news.newest_at);
         if !covered {
+            if news.credit_final_tenths().is_some() {
+                prepared.verdicts_final_ids = news
+                    .submissions
+                    .iter()
+                    .filter(|(_, v)| v.final_credit)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+            }
             prepared.verdicts = Some(ipc::render_verdicts(
                 news.newly_accepted,
                 news.newly_held,
@@ -297,8 +329,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
             .lock()
             .expect("health lock")
             .last_error_label
-            .is_none()
-            && !shared.daily_budget(now).blocked();
+            .is_none();
         let candidacy = settlement_candidacy(&shown, notified.as_ref());
         // Bookkeeping, not an announcement: adopted whatever the health
         // gate, so a pricing change seen while it is shut is not taken for
@@ -324,6 +355,21 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
                 SettlementCandidacy::AdoptPricing | SettlementCandidacy::Quiet => {}
             }
         }
+    }
+
+    // N6: NEAR AI credit received, past the 25%-and-$1 rule. Not held by the
+    // settlement estimate's switches or health gate: it is about money that
+    // already arrived, not an estimate.
+    if let Some(credit) = credit {
+        prepared.candidates.push(Candidate {
+            kind: Kind::NearAiCredit,
+            foldable: false,
+            resolves: Fact::CreditAnnounced,
+            since: now,
+            ttl: None,
+            caps: Kind::NearAiCredit.default_caps(Duration::zero()),
+        });
+        prepared.credit = Some(credit);
     }
     prepared
 }
@@ -412,15 +458,25 @@ fn apply(
     }
     let standalone = outcome.standalone.and_then(|kind| {
         let text = prepared.notification(kind)?;
-        shared.publish(
-            ipc::EVENT_REENGAGE_DUE,
-            serde_json::json!({
-                "kind": kind.label(),
-                "title": text.title,
-                "body": text.body,
-                "actions": text.actions,
-            }),
-        );
+        let publish = || {
+            shared.publish(
+                ipc::EVENT_REENGAGE_DUE,
+                serde_json::json!({
+                    "kind": kind.label(),
+                    "title": text.title,
+                    "body": text.body,
+                    "actions": text.actions,
+                }),
+            );
+        };
+        if kind == Kind::NearAiCredit {
+            let credit = prepared.credit.as_ref()?;
+            if !super::nearai_credential::arrivals::publish_notification(shared, credit, publish) {
+                return None;
+            }
+        } else {
+            publish();
+        }
         announced.push((kind, Route::Standalone));
         Some(kind)
     });
@@ -465,9 +521,14 @@ fn apply(
     if changed {
         let _ = state.save(&shared.store);
     }
+    let fold_covers = match &fold {
+        Some((Kind::VerdictsLanded, _)) => prepared.verdicts_final_ids.clone(),
+        _ => Default::default(),
+    };
     TickResult {
         digest_posts,
         fold,
+        fold_covers,
         standalone,
     }
 }
@@ -906,6 +967,125 @@ mod tests {
         assert_eq!(tick(&s, late, &Utc, digest(false, 1)).standalone, None);
     }
 
+    // ---- N6: NEAR AI credit received ----
+
+    const DOLLAR: i64 = 1_000_000_000;
+
+    fn with_near_ai_session(s: &DaemonShared) {
+        s.settings.lock().unwrap().near_ai_session = Some(crate::daemon::settings::NearAiSession {
+            refresh_token: "rt_synthetic".into(),
+            refresh_token_expires_at: None,
+            stored_at: noon(),
+            user_agent: "Mozilla/5.0 Test".into(),
+        });
+    }
+
+    fn received(s: &DaemonShared, total: i64, notified: Option<i64>) {
+        use super::super::nearai_credential::arrivals::{ArrivalsRecord, set_for_test};
+        set_for_test(
+            &s.store,
+            ArrivalsRecord {
+                organization_id: Some("org-1".into()),
+                scanned: true,
+                received_total_nanos: total,
+                notified_received_total_nanos: notified,
+                ..Default::default()
+            },
+        );
+    }
+
+    fn notified_total(s: &DaemonShared) -> Option<i64> {
+        super::super::nearai_credential::arrivals::snapshot(&s.store).notified_received_total_nanos
+    }
+
+    fn credit_frames(
+        rx: &mut tokio::sync::broadcast::Receiver<ipc::Event>,
+    ) -> Vec<serde_json::Value> {
+        reengage_frames(rx)
+            .into_iter()
+            .filter(|f| f["kind"] == "near_ai_credit")
+            .collect()
+    }
+
+    /// The first credit posts; more credit waits for 25% and $1 of what was
+    /// announced, then posts and moves the baseline.
+    #[test]
+    fn near_ai_credit_posts_the_first_arrival_then_only_past_25_percent_and_a_dollar() {
+        let s = live();
+        digest_off(&s);
+        with_near_ai_session(&s);
+        let _r = renderer(&s);
+        let mut rx = s.events.subscribe();
+
+        received(&s, 2 * DOLLAR, None);
+        let got = tick(&s, noon(), &Utc, digest(false, 0));
+        assert_eq!(got.standalone, Some(Kind::NearAiCredit));
+        let frames = credit_frames(&mut rx);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(
+            frames[0]["title"],
+            crate::nudge_copy::NOTIFY_NEAR_AI_CREDIT_TITLE
+        );
+        assert_eq!(
+            frames[0]["body"],
+            "$2.00 of NEAR AI credit arrived in your account."
+        );
+        assert_eq!(frames[0]["actions"][0]["id"], nudge_render::ACTION_REVIEW);
+        assert_eq!(frames[0]["actions"][1]["id"], nudge_render::ACTION_NOT_NOW);
+        assert_eq!(notified_total(&s), Some(2 * DOLLAR));
+
+        // Days later, $0.40 more: 20%, under both bars. Nothing.
+        let later = noon() + Duration::days(3);
+        s.state.lock().unwrap().last_history_poll_at = Some(later);
+        received(&s, 2 * DOLLAR + 400_000_000, Some(2 * DOLLAR));
+        assert_eq!(tick(&s, later, &Utc, digest(false, 0)).standalone, None);
+        assert!(credit_frames(&mut rx).is_empty());
+
+        // $1 more in all: 50% and a dollar. Announced, and the baseline moves.
+        let later = later + Duration::days(3);
+        s.state.lock().unwrap().last_history_poll_at = Some(later);
+        received(&s, 3 * DOLLAR, Some(2 * DOLLAR));
+        assert_eq!(
+            tick(&s, later, &Utc, digest(false, 0)).standalone,
+            Some(Kind::NearAiCredit)
+        );
+        let frames = credit_frames(&mut rx);
+        assert_eq!(
+            frames[0]["body"],
+            "$1.00 of NEAR AI credit arrived in your account."
+        );
+        assert_eq!(notified_total(&s), Some(3 * DOLLAR));
+        // And nothing again at once.
+        let later = later + Duration::days(3);
+        s.state.lock().unwrap().last_history_poll_at = Some(later);
+        assert_eq!(tick(&s, later, &Utc, digest(false, 0)).standalone, None);
+    }
+
+    /// The master switch and the kind's own switch each hold it, and the
+    /// baseline does not move while held.
+    #[test]
+    fn muted_near_ai_credit_posts_nothing_and_keeps_its_baseline() {
+        for mute in ["master", "kind"] {
+            let s = live();
+            digest_off(&s);
+            with_near_ai_session(&s);
+            let _r = renderer(&s);
+            let mut rx = s.events.subscribe();
+            match mute {
+                "master" => s.settings.lock().unwrap().notifications_enabled = false,
+                _ => s.settings.lock().unwrap().notify.near_ai_credit = false,
+            }
+            received(&s, 2 * DOLLAR, None);
+            assert_ne!(
+                tick(&s, noon(), &Utc, digest(false, 0)).standalone,
+                Some(Kind::NearAiCredit),
+                "{mute}"
+            );
+            assert!(credit_frames(&mut rx).is_empty(), "{mute}");
+            assert_eq!(notified_total(&s), None, "{mute}");
+        }
+    }
+
     // ---- N5: the settlement estimate ----
 
     fn settlement_table() -> trace_commons_protocol::settlement_estimate::SettlementEstimateTable {
@@ -1205,5 +1385,165 @@ mod tests {
             tick(&s, much_later, &Utc, digest(false, 0)).standalone,
             Some(Kind::SettlementEstimate)
         );
+    }
+    // ---- the digest's credit sentences with a verdicts fold, end to end ----
+
+    fn history_record(
+        n: u8,
+        label: &str,
+        final_credit: Option<f32>,
+    ) -> super::super::history::HistoryRecord {
+        serde_json::from_value(serde_json::json!({
+            "submission_id": uuid::Uuid::from_bytes([n; 16]),
+            "submitted_at": noon() - Duration::hours(2),
+            "project_id": "p",
+            "project_label": label,
+            "source": "claude-code",
+            "session_hash": format!("sha256:{n}"),
+            "status": "accepted",
+            "consent_scopes": [],
+            "credit_points_pending": 0.0,
+            "credit_points_final": final_credit,
+            "explanations": [],
+            "last_refreshed_at": noon(),
+        }))
+        .unwrap()
+    }
+
+    fn folded_final(n: u8, credit: f32) -> (String, super::super::nudge::PendingVerdict) {
+        (
+            uuid::Uuid::from_bytes([n; 16]).to_string(),
+            super::super::nudge::PendingVerdict {
+                accepted: true,
+                held: false,
+                final_credit: true,
+                credit_final: credit,
+                since: noon() - Duration::hours(1),
+                newest_at: noon() - Duration::hours(1),
+            },
+        )
+    }
+
+    /// Runs `expire_and_digest` with a verdicts fold over `news` and the
+    /// history cache `records`, and returns the one published `digest_due`.
+    fn digest_with_fold(
+        records: &[super::super::history::HistoryRecord],
+        news: Vec<(String, super::super::nudge::PendingVerdict)>,
+    ) -> serde_json::Value {
+        let s = std::sync::Arc::new(live());
+        s.settings.lock().unwrap().local_notifications = false;
+        super::super::history::HistoryCache::save(&s.store, records).unwrap();
+        let submissions: std::collections::BTreeMap<_, _> = news.into_iter().collect();
+        s.state.lock().unwrap().verdicts_pending =
+            super::super::nudge::VerdictDelta::from_submissions(submissions);
+        let mut rx = s.events.subscribe();
+        super::super::expire_and_digest(&s, noon());
+        let due: Vec<_> = drain(&mut rx)
+            .into_iter()
+            .filter(|e| e.event == ipc::EVENT_DIGEST_DUE)
+            .collect();
+        assert_eq!(due.len(), 1, "one digest posts");
+        due[0].data.clone()
+    }
+
+    /// The traces the fold states are left out of `text`'s contribution
+    /// sentence; the rest are not. `contribution` and `credit_final` carry
+    /// everything, for shells that do not show the fold.
+    #[test]
+    fn the_text_leaves_out_only_the_credit_the_fold_states() {
+        let data = digest_with_fold(
+            &[
+                history_record(1, "api", Some(2.0)),
+                history_record(2, "api", Some(1.5)),
+            ],
+            vec![folded_final(1, 2.0)],
+        );
+        assert_eq!(
+            data["contribution"],
+            "2 traces contributed from api. 3.5 credit earned."
+        );
+        assert_eq!(data["credit_final"], 3.5);
+        let text = data["text"].as_str().unwrap();
+        assert!(
+            text.contains("2 traces contributed from api. 1.5 credit earned."),
+            "{text}"
+        );
+        assert_eq!(
+            data["fold"]["text"],
+            "1 trace accepted. 2.0 credit is now final."
+        );
+        assert!(text.ends_with("2.0 credit is now final."), "{text}");
+    }
+
+    /// A fold whose finals add to under 0.05 states no credit, so it owns
+    /// none: the text must still state the earned credit.
+    #[test]
+    fn a_fold_that_states_no_credit_owns_none() {
+        let data = digest_with_fold(
+            &[
+                history_record(1, "api", Some(0.04)),
+                history_record(2, "api", Some(0.03)),
+            ],
+            vec![folded_final(1, 0.04)],
+        );
+        let text = data["text"].as_str().unwrap();
+        assert!(text.contains("0.1 credit earned."), "{text}");
+        assert!(!text.contains("credit is now final"), "{text}");
+        assert_eq!(
+            data["contribution"],
+            "2 traces contributed from api. 0.1 credit earned."
+        );
+    }
+
+    /// Each part rounds on its own: two 0.25 finals, one folded and one
+    /// not, read "0.3 credit is now final" in the fold and "0.3 credit
+    /// earned" in the text (0.6 together), while the shells that show no
+    /// fold say "0.5 credit earned". Pinned so the difference is a known,
+    /// tested one. The fold states a folded trace's figure from when it
+    /// went final; a later revision of it is not stated again.
+    #[test]
+    fn each_part_rounds_on_its_own() {
+        let data = digest_with_fold(
+            &[
+                history_record(1, "api", Some(0.25)),
+                history_record(2, "api", Some(0.25)),
+            ],
+            vec![folded_final(1, 0.25)],
+        );
+        let text = data["text"].as_str().unwrap();
+        assert!(text.contains("0.3 credit earned."), "{text}");
+        assert!(
+            data["fold"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("0.3 credit is now final")
+        );
+        assert_eq!(
+            data["contribution"],
+            "2 traces contributed from api. 0.5 credit earned."
+        );
+    }
+
+    /// The set of traces a fold covers comes from the same snapshot as its
+    /// sentence, so it is on the tick's result.
+    #[test]
+    fn the_tick_reports_the_traces_its_fold_covers() {
+        let s = live();
+        let _r = renderer(&s);
+        let landed = noon() - Duration::hours(1);
+        let (id, pending) = folded_final(7, 2.0);
+        s.state.lock().unwrap().verdicts_pending =
+            super::super::nudge::VerdictDelta::from_submissions([(id.clone(), pending)].into());
+        let got = tick(&s, noon(), &Utc, digest(true, 0));
+        assert_eq!(got.fold.as_ref().map(|f| f.0), Some(Kind::VerdictsLanded));
+        assert_eq!(got.fold_covers, [id].into());
+        let _ = landed;
+        // No credit stated, none covered.
+        let s = live();
+        let (id, pending) = folded_final(8, 0.04);
+        s.state.lock().unwrap().verdicts_pending =
+            super::super::nudge::VerdictDelta::from_submissions([(id, pending)].into());
+        let got = tick(&s, noon(), &Utc, digest(true, 0));
+        assert!(got.fold_covers.is_empty());
     }
 }

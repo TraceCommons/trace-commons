@@ -339,7 +339,12 @@ impl DrainFixture {
         held_retention_policy_ids: &[String],
     ) -> LegacyDrainReport {
         self.store
-            .legacy_drain_report(tenant, gate_driver_max_attempts, held_retention_policy_ids)
+            .legacy_drain_report(
+                tenant,
+                gate_driver_max_attempts,
+                held_retention_policy_ids,
+                self.state.novelty_utility_settle_from,
+            )
             .await
             .expect("the drain report reads")
     }
@@ -1335,7 +1340,7 @@ async fn a_drain_report_is_tenant_scoped() {
     for gate_driver_max_attempts in [Some(GATE_MAX_ATTEMPTS), None] {
         let unknown = fixture
             .store
-            .legacy_drain_report(&unknown_tenant, gate_driver_max_attempts, &[])
+            .legacy_drain_report(&unknown_tenant, gate_driver_max_attempts, &[], None)
             .await
             .expect("a tenant with no rows");
         assert_eq!(total(&unknown), 0);
@@ -1688,6 +1693,127 @@ async fn the_vector_and_credit_counts_select_the_workers_own_sets() {
     assert_eq!(
         fixture.report(tenant).await.pending["delayed_credit_unsettled"],
         1
+    );
+}
+
+/// The gate's scoring award (`NoveltyUtility`) is owed like the reviewed
+/// delayed types once it carries value, by the report and by the worker. A
+/// zero-valued award (the default delta), an award shaped as a pipeline
+/// run writes it, and any award written before the configured cut-over (or
+/// with none configured) are owed by neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_credit_count_and_the_worker_agree_on_the_gate_scoring_award() {
+    let Some(mut fixture) = DrainFixture::new().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let tenant = tenant.as_str();
+    let suffix = Uuid::new_v4().simple().to_string();
+    write_routing_as_operator(tenant, "legacy").await;
+
+    let envelope = clean_envelope(&format!("drain_scoring_award_{suffix}")).await;
+    let receipt = fixture.upload_ok(&fixture.contributor, &envelope).await;
+    assert_eq!(receipt["status"], "accepted", "{receipt}");
+    let submission_id = envelope.submission_id;
+    let principal = fixture
+        .owner_text(
+            tenant,
+            "SELECT auth_principal_ref FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &submission_id],
+        )
+        .await;
+    let trace_id: Uuid = fixture
+        .owner_text(
+            tenant,
+            "SELECT trace_id::text FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &submission_id],
+        )
+        .await
+        .parse()
+        .expect("trace id parses");
+    assert_eq!(fixture.settlement_would_settle().await, 0);
+
+    let award = |external_ref: String, credit_points_delta: f32| TraceCommonsCreditLedgerRecord {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant.to_string(),
+        tenant_storage_ref: tenant_storage_ref(tenant),
+        submission_id,
+        trace_id,
+        auth_principal_ref: principal.clone(),
+        event_type: TraceCreditLedgerEventType::NoveltyUtility,
+        credit_points_delta,
+        reason: Some("novelty_utility:gate-policy-v1".to_string()),
+        external_ref: Some(external_ref),
+        actor_role: TokenRole::VectorWorker,
+        actor_principal_ref: "principal:synthetic-gate-worker".to_string(),
+        created_at: Utc::now(),
+        witness_provenance_class: None,
+    };
+    let scored = award(
+        format!("{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}sha256:gate-a:{submission_id}"),
+        1.25,
+    );
+    let zero = award(
+        format!("{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}sha256:gate-b:{submission_id}"),
+        0.0,
+    );
+    let pipeline_shaped = award(
+        trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
+            tenant,
+            &format!("synthetic-idempotency-key-{suffix}"),
+        ),
+        2.0,
+    );
+    for event in [&scored, &zero, &pipeline_shaped] {
+        append_credit_event(&fixture.state.root, tenant, event).expect("credit event appends");
+        mirror_credit_event_to_db(fixture.state.as_ref(), event)
+            .await
+            .expect("credit event mirrors");
+    }
+
+    // No cut-over configured (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`
+    // unset): no scoring award is owed, by either.
+    assert_eq!(fixture.state.novelty_utility_settle_from, None);
+    assert_eq!(fixture.settlement_would_settle().await, 0);
+    assert_eq!(
+        fixture.report(tenant).await.pending["delayed_credit_unsettled"],
+        0
+    );
+    // A cut-over after the awards were written: still owed by neither.
+    Arc::make_mut(&mut fixture.state).novelty_utility_settle_from =
+        Some(Utc::now() + chrono::Duration::hours(1));
+    assert_eq!(fixture.settlement_would_settle().await, 0);
+    assert_eq!(
+        fixture.report(tenant).await.pending["delayed_credit_unsettled"],
+        0
+    );
+    // A cut-over before them: the valued gate award is owed by both.
+    Arc::make_mut(&mut fixture.state).novelty_utility_settle_from =
+        Some(Utc::now() - chrono::Duration::hours(1));
+    assert_eq!(fixture.settlement_would_settle().await, 1);
+    assert_eq!(
+        fixture.report(tenant).await.pending["delayed_credit_unsettled"],
+        1
+    );
+    let settled = fixture
+        .call_ok(
+            "POST",
+            "/v1/admin/credit-settlements",
+            &fixture.admin,
+            serde_json::json!({
+                "dry_run": false,
+                "policy_version": "trace-credit-policy-v1",
+                "reason": "drain report agreement",
+            }),
+        )
+        .await;
+    assert_eq!(settled["settled_source_event_count"], 1, "{settled}");
+    assert_eq!(fixture.settlement_would_settle().await, 0);
+    assert_eq!(
+        fixture.report(tenant).await.pending["delayed_credit_unsettled"],
+        0
     );
 }
 
@@ -3807,7 +3933,7 @@ impl RouteFixture {
             );
         }
         let oversized = serde_json::json!({
-            "reason_code": "x".repeat(MAX_INGEST_BODY_BYTES),
+            "reason_code": "x".repeat(pipeline_activation::PIPELINE_ADMIN_BODY_MAX_BYTES + 1),
         });
         let (status, refused) = self
             .call(
@@ -4088,7 +4214,7 @@ async fn the_routes_refuse_without_a_trust_store_or_a_revision() {
             "/v1/admin/pipeline/qualifications",
             Some(serde_json::json!({
                 "signed_package": fixture.signed(&fixture.a),
-                "attestations": ["x".repeat(MAX_INGEST_BODY_BYTES)],
+                "attestations": ["x".repeat(pipeline_activation::PIPELINE_ADMIN_BODY_MAX_BYTES + 1)],
             })),
         )
         .await;
@@ -4408,7 +4534,7 @@ async fn the_legacy_drain_route_returns_the_report() {
             serde_json::from_value(body).expect("the route answers a drain report");
         let expected = fixture
             .store()
-            .legacy_drain_report(tenant, ceiling, &[])
+            .legacy_drain_report(tenant, ceiling, &[], None)
             .await
             .expect("the store's report");
         assert_eq!(

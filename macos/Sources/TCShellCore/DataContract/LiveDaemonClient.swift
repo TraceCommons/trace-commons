@@ -289,6 +289,10 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("inference_calls", params: params, as: DaemonData.InferenceCallPage.self)
     }
 
+    public func inferenceActivity() async throws -> DaemonData.InferenceActivity {
+        try await call("inference_activity", as: DaemonData.InferenceActivity.self)
+    }
+
     // MARK: Insights
 
     public func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek {
@@ -297,14 +301,55 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("insights_week", params: params, as: DaemonData.InsightsWeek.self)
     }
 
-    public func insightsSessions() async throws -> DaemonData.InsightsSessions {
-        try await call("insights_sessions", params: [:], as: DaemonData.InsightsSessions.self)
+    public func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers {
+        try await call("insights_model_answers", as: DaemonData.InsightsModelAnswers.self)
     }
 
-    public func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer {
-        try await call("insights_session_drill",
-                       params: ["session_ref": sessionRef, "tz": TimeZone.current.secondsFromGMT()],
-                       as: DaemonData.InsightsSessionDrillAnswer.self)
+    public func insightsBenchmarks(weeks: Int, population: String) async throws -> DaemonData.InsightsBenchmarks {
+        // The person's own is the daemon's default, so an older daemon that
+        // knows no `population` is still asked as before.
+        var params: [String: Any] = ["weeks": weeks]
+        if population != "own" { params["population"] = population }
+        return try await call("insights_benchmarks", params: params, as: DaemonData.InsightsBenchmarks.self)
+    }
+
+    public func insightsSubmitted(weeks: Int?) async throws -> DaemonData.InsightsSubmitted {
+        var params: [String: Any] = ["tz": TimeZone.current.secondsFromGMT()]
+        if let weeks { params["weeks"] = weeks }
+        return try await call("insights_submitted", params: params, as: DaemonData.InsightsSubmitted.self)
+    }
+
+    public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?) async throws -> DaemonData.SubscriptionUsage {
+        return try await subscriptionUsage(refresh: refresh, interactive: interactive, provider: provider, login: nil)
+    }
+
+    public func subscriptionUsage(refresh: Bool, interactive: Bool, provider: String?, login: String?) async throws -> DaemonData.SubscriptionUsage {
+        guard provider == nil || provider == "codex" || provider == "claude" else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
+        }
+        if let login {
+            guard provider != nil, !login.isEmpty, login.utf8.count <= 256,
+                  !login.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+                throw DaemonDataError.daemon(code: "bad_params", message: "subscription-login-invalid")
+            }
+        }
+        guard !(refresh && provider == "claude" && login == nil) else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "subscription-login-invalid")
+        }
+        var params: [String: Any] = ["refresh": refresh, "interactive": refresh && interactive]
+        if let provider { params["provider"] = provider }
+        if let login { params["login"] = login }
+        return try await call("subscription_usage", params: params, as: DaemonData.SubscriptionUsage.self)
+    }
+
+    public func setSubscriptionUsage(provider: String, on: Bool) async throws {
+        let key: String
+        switch provider {
+        case "codex": key = "subscription_usage_codex_enabled"
+        case "claude": key = "subscription_usage_claude_on"
+        default: throw DaemonDataError.daemon(code: "bad_params", message: "subscription-provider-invalid")
+        }
+        _ = try await call("set_settings", params: [key: on], as: DaemonData.NudgeAck.self)
     }
 
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
@@ -353,10 +398,6 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func lookupInvite(code: String) async throws -> DaemonData.InviteLookup {
         try await call("invite_lookup", params: ["code": code], as: DaemonData.InviteLookup.self)
-    }
-
-    public func passkeyState() async throws -> DaemonData.PasskeyState {
-        try await call("passkey_state", as: DaemonData.PasskeyState.self)
     }
 
     public func accountState() async throws -> DaemonData.AccountState {

@@ -559,16 +559,11 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         table(json!(privacy_scan_copy::privacy_scan_copy())),
     );
     // The health banner (R6/R7, #1173): every label's words and the
-    // core-down banner. `daily-cap-reached` is left out: its title is
-    // `DAILY_BUDGET_TITLE`, which `DailyBudgetCopy.swift` holds as Swift
-    // until the budget banner has an export of its own.
+    // core-down banner.
     {
         use trace_commons_contributor::{daemon::health::ALL_LABELS, health_copy};
         let mut lines = table(json!(health_copy::core_down_copy()));
-        for label in ALL_LABELS
-            .iter()
-            .filter(|label| **label != "daily-cap-reached")
-        {
+        for label in ALL_LABELS.iter() {
             lines.extend(table(json!(health_copy::health_copy_for_label(
                 label, None
             ))));
@@ -998,8 +993,9 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "tc_arming_offer_copy_json",
     ),
     (
+        // A repo's rule under Customize on Tools, where Rules now lives.
         "first-run arming confirmation",
-        "TraceCommonsApp/Views/FirstRun/RulesScreen.swift",
+        "TraceCommonsApp/Views/FirstRun/ToolsScreen.swift",
         "TCCoreCopy.armingOfferCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_arming_offer_copy_json",
@@ -1069,12 +1065,11 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_automatic_contribution_copy_json",
     ),
-    // Insights: the tab container and the Analyze tab read the core's
-    // vocabulary; the Overview tab fills the core's analytics words with the
+    // Insights: the tab container reads the core's vocabulary; the Overview tab fills the core's analytics words with the
     // core's figures (`InsightsOverviewWords`), read through the model's
     // `tc_insights_call`.
     (
-        "Insights tabs and the Analyze tab",
+        "Insights tabs",
         "TraceCommonsApp/Views/InsightsView.swift",
         "TCInsights.copy()",
         "TCBridge/TCInsights.swift",
@@ -1151,20 +1146,21 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCInsights.swift",
         "tc_insights_call",
     ),
-    // The Sessions tab fills the core's analytics words with one saved
-    // session's figures (`InsightsSessionsWords`), read through the model's
-    // `tc_insights_call`.
+    // Overview's drill-down rows fill the core's analytics words with one
+    // saved session's figures (`InsightsSessionsWords`), read through the
+    // model's `tc_insights_call`.
     (
         "Insights Sessions words",
-        "TraceCommonsApp/Views/InsightsSessionsTab.swift",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
         "InsightsSessionsWords.",
         "TCBridge/TCInsights.swift",
         "tc_insights_call",
     ),
     // Feed T: the lever of the week and the weekly summary card on the
-    // Overview, and "Your goals" on Patterns, fill the core's words with the
-    // core's `comparisons` (`InsightsComparisonsWords`), read through the
-    // model's `tc_insights_call`.
+    // Overview fill the core's words with the core's `comparisons`
+    // (`InsightsComparisonsWords`), read through the model's
+    // `tc_insights_call`. Goals on Breakdown fill the core's words
+    // (`InsightsGoalsWords`) with the daemon's `insights_week` goals.
     (
         "Insights lever and weekly summary words",
         "TraceCommonsApp/Views/InsightsOverviewTab.swift",
@@ -1175,9 +1171,9 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
     (
         "Insights goals words",
         "TraceCommonsApp/Views/InsightsPatternsTab.swift",
-        "InsightsComparisonsWords.",
+        "InsightsGoalsWords.",
         "TCBridge/TCInsights.swift",
-        "tc_insights_call",
+        "tc_insights_copy_json",
     ),
 ];
 

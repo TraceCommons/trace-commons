@@ -44,7 +44,7 @@ enum DebugScreenshot {
             home.attach(model.daemonData)
             await home.load()
             render(
-                TracesTreeView(store: traces, selection: .constant(first))
+                TracesTreeView(store: traces, selection: .constant(first), missionsShown: model.missionsShown)
                     .environmentObject(model),
                 to: directory + "/macos-shell-traces-tree.png",
                 size: CGSize(width: 760, height: 720)
@@ -154,7 +154,7 @@ enum DebugScreenshot {
                 state.open = true
                 state.peek = peek
                 render(
-                    EdgeRailView(state: state, data: railData, onOpenChange: { _ in })
+                    EdgeRailView(state: state, data: railData, request: { _, _ in })
                         .environmentObject(model),
                     to: directory + "/macos-shell-edge-rail-\(peek).png",
                     size: CGSize(width: EdgeRailGeometry.openWidth, height: GlassTokens.Size.edgeRailOpenHeight)

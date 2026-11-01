@@ -8,7 +8,7 @@ import TCShellCore
 /// Deliberately free of pointers: `TCBridge` owns those. Deliberately free
 /// of UI: the views own that. Calls block (the ABI is synchronous), so
 /// callers run them off the main actor.
-final class DaemonClient {
+final class DaemonClient: Sendable {
     struct Failure: Error, CustomStringConvertible {
         let code: String
         let message: String
@@ -62,7 +62,7 @@ final class DaemonClient {
         }
     }
 
-    private let daemon: any DaemonCalling
+    let daemon: any DaemonCalling
 
     init(daemon: any DaemonCalling) {
         self.daemon = daemon
@@ -78,8 +78,8 @@ final class DaemonClient {
 
     /// NEAR AI's chat models and `tool`'s default, for the Launch sheet's
     /// model picker.
-    func managedModelCatalogue(tool: String) throws -> ManagedModelCatalogue {
-        try call("managed_model_catalogue", params: ["tool": tool], as: ManagedModelCatalogue.self)
+    func managedModelCatalogue(tool: String, cacheOnly: Bool = false) throws -> ManagedModelCatalogue {
+        try call("managed_model_catalogue", params: ManagedSurface.catalogueParams(tool: tool, cacheOnly: cacheOnly), as: ManagedModelCatalogue.self)
     }
 
     // MARK: - Read
@@ -104,6 +104,24 @@ final class DaemonClient {
     /// invite).
     func nearAiAccountEnroll() throws -> NearAiEnrollment {
         try call("near_ai_account_enroll", as: NearAiEnrollment.self)
+    }
+
+    /// The same, with the referral code typed beside the sign-in, if any
+    /// (`referral_code`, referral spec section 6). The daemon normalizes it
+    /// and sends only a well-formed code; one that does not apply is
+    /// answered as `referral: not_applied` and never fails the enrolment.
+    func nearAiAccountEnroll(referralCode: String?) throws -> NearAiEnrollment {
+        guard let referralCode else { return try nearAiAccountEnroll() }
+        return try call("near_ai_account_enroll", params: ["referral_code": referralCode],
+                        as: NearAiEnrollment.self)
+    }
+
+    /// Sign in again on a NEAR AI account (`near_ai_account_sign_in`): the
+    /// daemon runs the provisioning ceremony again with the NEAR AI login it
+    /// holds. Refused with `near_ai_sign_in_required` when NEAR AI no longer
+    /// accepts that login; the caller then signs in to NEAR AI first.
+    func nearAiAccountSignIn() throws -> NativeAccountSession {
+        try call("near_ai_account_sign_in", as: NativeAccountSession.self)
     }
 
     func prepareAdmissionSession(entryID: String, backend: String) throws -> AdmissionPreparation {
@@ -305,14 +323,32 @@ final class DaemonClient {
         return try call("list_audit", params: ["limit": limit], as: Wrapper.self).entries
     }
 
+    /// "Ask each time", in setup or Settings: the standing Automatic grant
+    /// is withdrawn and every folder it armed goes back to Ask. A folder's
+    /// own rule still wins: one set to Automatic sends, one set to Never
+    /// never does. It used to set a global Ask override instead, which no
+    /// screen could clear and under which a folder set to Automatic kept
+    /// asking with no error (#1753 A2). Returns whether a grant was in force.
+    @discardableResult
+    func setAskEachTime() throws -> Bool {
+        struct Withdrawal: Decodable { let withdrawn: Bool }
+        return try call("withdraw_automatic_grant", params: ["return_folders_to_ask": true],
+                        as: Withdrawal.self).withdrawn
+    }
+
     func consentOptions() throws -> [ConsentScope] {
         struct Wrapper: Decodable { let scopes: [ConsentScope] }
         return try call("consent_options", as: Wrapper.self).scopes
     }
 
-    func listProjects() throws -> [ProjectRow] {
+    /// `includeFound` also lists the repos with a session on disk that no
+    /// rule or queued trace has made known yet, which the first run's
+    /// Customize needs seconds after the daemon started. It walks the
+    /// sources, so only a screen that asks once sends it.
+    func listProjects(includeFound: Bool = false) throws -> [ProjectRow] {
         struct Wrapper: Decodable { let projects: [ProjectRow] }
-        return try call("list_projects", as: Wrapper.self).projects
+        let params: [String: Any] = includeFound ? ["include_found": true] : [:]
+        return try call("list_projects", params: params, as: Wrapper.self).projects
     }
 
     /// Sets a project's mode, naming it by the opaque id `list_projects`
@@ -541,6 +577,23 @@ final class DaemonClient {
     func nearAiBalance(fresh: Bool = false) throws -> BalanceStatus {
         BalanceStatus.parse(fromJSON: try rawResultJSON(
             BalanceSurface.statusMethod, params: fresh ? ["fresh": true] : [:]))
+    }
+
+    /// The account's active NEAR AI organizations and which one Private AI
+    /// spends from. Always ok by contract; an unreadable answer degrades to
+    /// `unreported`, which draws nothing -- an unknown count is never
+    /// "several".
+    func nearAiSpendOrganizations(fresh: Bool = false) throws -> SpendOrganizations {
+        SpendOrganizations.parse(fromJSON: try rawResultJSON(
+            "near_ai_spend_organizations", params: fresh ? ["fresh": true] : [:]))
+    }
+
+    /// Switches the organization Private AI spends from. Throws the daemon's
+    /// `near_ai_spend_org_*` label on a refusal, and every refusal changed
+    /// nothing.
+    func nearAiSelectSpendOrganization(_ organizationID: String) throws {
+        _ = try rawResultJSON(
+            "near_ai_spend_organization_select", params: ["organization_id": organizationID])
     }
 
     func nearAiFunding(expected: FundingDestination?) throws -> FundingStatus {
@@ -1124,6 +1177,8 @@ enum DaemonEventParser {
                   let due = try? DaemonDataDecoding.decoder().decode(DaemonData.ReengageDue.self, from: payloadData)
             else { return .unknown(name) }
             return .reengageDue(due)
+        case "near_ai_balance_changed":
+            return .nearAiBalanceChanged
         case "resync_required":
             return .resyncRequired
         case "lagged":

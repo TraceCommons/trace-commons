@@ -45,7 +45,7 @@ Facts at PR 4 head `cbe165ff`:
 - `pipeline.py run --corpus <pin>` sends a Hugging Face sample through the
   pipeline only. It checks each trace against a fixed expectation. It does
   not send traces through the old path.
-- The test `legacy_and_pipeline_tenants_match_under_equivalent_configuration`
+- The test `legacy_and_pipeline_tenants_match_except_pinned_differences`
   (`pipeline_http_pg_tests.rs`) compares the two paths on two synthetic
   cases. Its old path uses `InMemoryGateService`, whose floors always pass.
 - The old gate path is `EnclaveGateOrchestrator::evaluate`

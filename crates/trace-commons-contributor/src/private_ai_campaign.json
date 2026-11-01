@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "near-ai-red-cybersecurity-models",
+  "title": "NEAR AI Red: AI that helps with security work",
+  "body": "Abliterated DeepSeek V4.1 Flash and Qwen 3.8 answer security questions instead of refusing them. They run in NEAR AI's secure enclaves, so your findings stay private. NEAR AI private.",
+  "action_title": "Explore NEAR AI Red",
+  "action_url": "https://near.ai/red",
+  "symbol": "cpu",
+  "image_url": null
+}

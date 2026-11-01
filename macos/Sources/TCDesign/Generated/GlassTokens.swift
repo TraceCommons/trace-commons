@@ -19,11 +19,11 @@ public enum GlassTokens {
         /// The Trace mark's live trace: the gradient's hot-pink end, and the glow on the current step.
         public static let traceLiveEnd: GlassRGBA = GlassRGBA(0xFF0A6C, alpha: 1)
         /// Fills and the shared data series.
-        public static var purpleSoft: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1)), flat: GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x1F7AA8, alpha: 1))) }
+        public static var purpleSoft: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1)), flat: GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x0070C6, alpha: 1))) }
         /// Accent text and tertiary links.
-        public static var purpleText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xC9B3FF, alpha: 1, light: GlassRGBA(0x5B10CC, alpha: 1)), flat: GlassRGBA(0xE1D5FF, alpha: 1, light: GlassRGBA(0x0C3F5C, alpha: 1))) }
+        public static var purpleText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xC9B3FF, alpha: 1, light: GlassRGBA(0x5B10CC, alpha: 1)), flat: GlassRGBA(0xC6E1FF, alpha: 1, light: GlassRGBA(0x024175, alpha: 1))) }
         /// Every text link (GlassButtonStyle.link). Classic keeps the accent text; the flat theme matches the primary button's accent so a link reads as an action (owner, 2026-10-12: the light purple was not noticeable enough): the button's blue in Light (5.5:1 on the pane) and its violet raised to read on the dark pane (6:1 on the navy).
-        public static var linkText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xC9B3FF, alpha: 1, light: GlassRGBA(0x5B10CC, alpha: 1)), flat: GlassRGBA(0xA07CFF, alpha: 1, light: GlassRGBA(0x15608A, alpha: 1))) }
+        public static var linkText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xC9B3FF, alpha: 1, light: GlassRGBA(0x5B10CC, alpha: 1)), flat: GlassRGBA(0xC6E1FF, alpha: 1, light: GlassRGBA(0x024175, alpha: 1))) }
         /// Toggles on, the kept data series, selection.
         public static let blue: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         /// The far stop of a promotion card's tint (Home's Missions card): blue, or the light theme's amber.
@@ -42,10 +42,12 @@ public enum GlassTokens {
         public static let hairlineHighContrast: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.4, light: GlassRGBA(0x000000, alpha: 0.45))
         /// A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance). Light: 55%, for 3:1 or more on every light ground (40% was 2.44).
         public static let edgeHighContrast: GlassRGBA = GlassRGBA(0xF2F2F4, alpha: 0.4, light: GlassRGBA(0x1D1D1F, alpha: 0.55))
-        public static let textOnAccent: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1)
+        public static var textOnAccent: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 1), flat: GlassRGBA(0x071A2E, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))) }
+        /// The switch knob while off: white on every track (the flat theme's Dark draws it navy, as on). On, the knob is textOnAccent, as the NEAR AI design system's switch draws it (owner, 2026-10-20: its accent replaces the purple).
+        public static var toggleKnobOff: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 1), flat: GlassRGBA(0x071A2E, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))) }
         public static let textOnStatus: GlassRGBA = GlassRGBA(0x0C0C0E, alpha: 1)
         /// Text on a selected fill (controlSelected): textPrimary in classic, white in the flat theme, whose selected fill is the brand purple.
-        public static var textOnSelected: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF2F2F4, alpha: 1, light: GlassRGBA(0x1D1D1F, alpha: 1)), flat: GlassRGBA(0xFFFFFF, alpha: 1)) }
+        public static var textOnSelected: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF2F2F4, alpha: 1, light: GlassRGBA(0x1D1D1F, alpha: 1)), flat: GlassRGBA(0x071A2E, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))) }
         /// Watching, share automatically, automatic, always on. Glyph and label only.
         public static var statusOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1)), flat: GlassRGBA(0x30D158, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))) }
         /// Ask, worth a second look.
@@ -68,6 +70,8 @@ public enum GlassTokens {
         public static let heroButtonFill: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1)
         /// The label on heroButtonFill: 18:1.
         public static let heroButtonInk: GlassRGBA = GlassRGBA(0x16161A, alpha: 1)
+        /// A bright blue on a hero's ground, in both appearances: the Traces hero's step discs (behind heroInk) and step icons (owner, 2026-10-29, from the owner's mock-up).
+        public static let heroAccent: GlassRGBA = GlassRGBA(0x2E95FF, alpha: 1)
         /// A count badge that is not owed a decision (a tab's count): ink at 16%. The flat Light theme draws it in the well's slate, as the legend pills are.
         public static var badgeFillSubtle: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0x000000, alpha: 0.16)), flat: GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0x8A93A5, alpha: 0.28))) }
         /// The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.
@@ -75,16 +79,44 @@ public enum GlassTokens {
         public static let dataShared: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
         public static let dataKept: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         public static let dataInference: GlassRGBA = GlassRGBA(0xA78BFA, alpha: 1, light: GlassRGBA(0x7D5CE0, alpha: 1))
+        /// A shared trace on the Traces map: its orb on the lines, the light round its coin, the pile's glow and the launch pad's charge. The accent's soft blue (owner, 2026-10-20: it was the watching green).
+        public static let mapOrbShared: GlassRGBA = GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x0070C6, alpha: 1))
+        /// A kept trace on the Traces map, drawn as mapOrbShared is: orange, the NEAR AI data palette's data-2 (owner, 2026-10-20).
+        public static let mapOrbKept: GlassRGBA = GlassRGBA(0xD95926, alpha: 1, light: GlassRGBA(0xCF5320, alpha: 1))
+        /// The animated first run's light (Ron, 2026-10-21): the corner glow on the scene, the glow behind the N, the travelled step thread and the trace orbs. Drawn at low alpha; never text.
+        public static let firstRunGlow: GlassRGBA = GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x0070C6, alpha: 1))
+        /// The soft beam from a watched tool into the N on the first run's Tools step: its halo and body. Blurred, never text.
+        public static let firstRunBeam: GlassRGBA = GlassRGBA(0x49C2FF, alpha: 1, light: GlassRGBA(0x0091FD, alpha: 1))
+        /// The beam's core and its pulses, and the lit end of the step thread's leading stretch. Blurred, never text.
+        public static let firstRunBeamCore: GlassRGBA = GlassRGBA(0xE2F6FF, alpha: 1, light: GlassRGBA(0x9FDCFF, alpha: 1))
+        /// The review gate on the first run's Uses step filling as a trace is approved: the fill's top (Ron, 2026-10-22: a muted green, under a white thumbs-up).
+        public static let firstRunApprove: GlassRGBA = GlassRGBA(0x2C9E57, alpha: 1)
+        /// The review gate's fill toward its rim, under firstRunApprove.
+        public static let firstRunApproveDeep: GlassRGBA = GlassRGBA(0x1D7A42, alpha: 1)
+        /// A card on the first run's scene (canvas --card): the tool list and Customize, the Uses list, the Traces estimate, the Private AI card, Join's cards and Uses' This Mac and commons nodes. Lighter than the scene so it reads as a card on it (Ron, 2026-10-22: nodeCardFill was too close to the navy).
+        public static let firstRunCard: GlassRGBA = GlassRGBA(0x171C33, alpha: 0.78, light: GlassRGBA(0xFFFFFF, alpha: 0.78))
+        /// The review gate's disc on Uses before it fills (canvas --card-solid): the card's colour, opaque, so the line does not show through it.
+        public static let firstRunCardSolid: GlassRGBA = GlassRGBA(0x1A2039, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))
+        /// A tool tile's raised face on the first run's stage (canvas --tile).
+        public static let firstRunTile: GlassRGBA = GlassRGBA(0x1B2140, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))
+        /// The shadow under a tool tile and the review gate (canvas --tile-shadow, 0 8 20 in dark, 0 6 16 in light).
+        public static let firstRunTileShadow: GlassRGBA = GlassRGBA(0x02030A, alpha: 0.5, light: GlassRGBA(0x1D2A4A, alpha: 0.14))
+        /// A glass button in the first run's action bar, Back (canvas --control): a light glass over the scene, where the flat theme's control is a dark well.
+        public static let firstRunControl: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.09, light: GlassRGBA(0xFFFFFF, alpha: 0.72))
+        /// firstRunControl under the pointer (canvas --control-h).
+        public static let firstRunControlHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.15, light: GlassRGBA(0xFFFFFF, alpha: 0.92))
+        /// The first run's dashed lines and rules (canvas --rule): the Tools ring, the step thread still to go, the Uses path, the Traces streams, the commons and Join rings, the add-a-tool row's dashed edge. Stronger than rule so a dashed line reads on the scene (Ron, 2026-10-22).
+        public static let firstRunRule: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16))
         /// The opaque ground every chart is plotted on, never straight on glass (Near AI OS surface-chart).
         public static let chartSurface: GlassRGBA = GlassRGBA(0x0D1124, alpha: 1, light: GlassRGBA(0xF7F8FA, alpha: 1))
         /// Gridlines and the axis rule on chartSurface (Near AI OS chart-grid).
         public static let chartGrid: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.1, light: GlassRGBA(0x000000, alpha: 0.08))
-        /// The first series of a multi-series chart (Near AI OS data-1): 3:1 or more on chartSurface. Series are used in order and never cycled.
-        public static let chartSeries1: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
+        /// The first series of a multi-series chart (Near AI OS data-1): 3:1 or more on chartSurface. The parent's current data palette (owner, 2026-10-20: the purple it had is gone from Insights). Series are used in order and never cycled.
+        public static let chartSeries1: GlassRGBA = GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x2A78D6, alpha: 1))
         /// The second series (Near AI OS data-2).
-        public static let chartSeries2: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
+        public static let chartSeries2: GlassRGBA = GlassRGBA(0xD95926, alpha: 1, light: GlassRGBA(0xCF5320, alpha: 1))
         /// The third series (Near AI OS data-3).
-        public static let chartSeries3: GlassRGBA = GlassRGBA(0xA78BFA, alpha: 1, light: GlassRGBA(0x7D5CE0, alpha: 1))
+        public static let chartSeries3: GlassRGBA = GlassRGBA(0x199E70, alpha: 1, light: GlassRGBA(0x14906A, alpha: 1))
         /// The fourth series (Near AI OS data-4).
         public static let chartSeries4: GlassRGBA = GlassRGBA(0xC98500, alpha: 1, light: GlassRGBA(0xA97200, alpha: 1))
         public static var sceneBase: GlassRGBA { GlassTheme.pick(GlassRGBA(0x0F1219, alpha: 1, light: GlassRGBA(0xE6EAF1, alpha: 1)), flat: GlassRGBA(0x070A1A, alpha: 1, light: GlassRGBA(0xE6EAF1, alpha: 1))) }
@@ -102,22 +134,32 @@ public enum GlassTokens {
         public static var wellFill: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0.22, light: GlassRGBA(0x000000, alpha: 0.06)), flat: GlassRGBA(0x000000, alpha: 0.3, light: GlassRGBA(0x8A93A5, alpha: 0.28))) }
         /// Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Light is the light control fill 8% darker, so a light control greys under the pointer as it did when this was drawn over the fill.
         public static var controlHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0xEBEBED, alpha: 0.84)), flat: GlassRGBA(0x000000, alpha: 0.44, light: GlassRGBA(0xEBEBED, alpha: 0.84))) }
+        /// A control's fill on a menu or popover (owner, 2026-10-22: the control fill, a dark well, all but vanished on the dark menu). A step lighter than the menu in dark, darker in light.
+        public static let controlOnMenu: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.1, light: GlassRGBA(0x000000, alpha: 0.08))
+        /// controlOnMenu under the pointer, in its place.
+        public static let controlOnMenuHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.13))
+        /// A control's fill on a selected list row (owner, 2026-10-22): a deeper pill on the selection, its label in textOnAccent, the selected row's own ink, which clears 4.5:1 on it.
+        public static var controlOnSelection: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.18)), flat: GlassRGBA(0x071A2E, alpha: 0.16, light: GlassRGBA(0x000000, alpha: 0.18))) }
+        /// controlOnSelection under the pointer, in its place.
+        public static var controlOnSelectionHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0.28, light: GlassRGBA(0x000000, alpha: 0.28)), flat: GlassRGBA(0x071A2E, alpha: 0.26, light: GlassRGBA(0x000000, alpha: 0.28))) }
+        /// A card on a card (owner, 2026-10-22: the session preview's prompt quote matched the card under it): a step lighter than the card in dark, darker in light.
+        public static let cardNested: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.07, light: GlassRGBA(0x000000, alpha: 0.045))
         /// Hover on an interactive card: #1146's .tc-card--interactive:hover fill, which replaces the card gradient. Light is the card fill's brighter end, so the card lifts rather than greys.
         public static var cardHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.1, light: GlassRGBA(0xFFFFFF, alpha: 0.86)), flat: GlassRGBA(0xFFFFFF, alpha: 0.08, light: GlassRGBA(0xF7F8FB, alpha: 0.8))) }
         /// Hover on an unselected list row (#1146 .tc-list-row:hover). Never over a selected row.
         public static var rowHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.05, light: GlassRGBA(0x000000, alpha: 0.04)), flat: GlassRGBA(0xFFFFFF, alpha: 0.05, light: GlassRGBA(0x000000, alpha: 0.04))) }
         /// A toolbar button whose menu is open (#1146 .tc-btn--icon[aria-expanded=true]). textPrimary on it clears 4.5:1 in both appearances.
-        public static var toolbarExpanded: GlassRGBA { GlassTheme.pick(GlassRGBA(0x55555A, alpha: 1, light: GlassRGBA(0xD1D1D6, alpha: 1)), flat: GlassRGBA(0x6D14F3, alpha: 1, light: GlassRGBA(0xD1D1D6, alpha: 1))) }
+        public static var toolbarExpanded: GlassRGBA { GlassTheme.pick(GlassRGBA(0x55555A, alpha: 1, light: GlassRGBA(0xD1D1D6, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x035CA3, alpha: 1))) }
         /// A toolbar button's glyph (#1146 monitor-toolbar.tsx).
         public static let toolbarGlyph: GlassRGBA = GlassRGBA(0xE6E6EC, alpha: 1, light: GlassRGBA(0x1D1D1F, alpha: 1))
         /// A toolbar glyph whose pane is hidden (#1146 .tc-btn--icon[aria-pressed=false]). Dark is #1146's #7c7c86 lightened the least that clears the 3:1 glyph floor on both control-fill stops (3.03; #7c7c86 was 2.76), owner ruling, 2026-10-07: hold the WCAG floors. Light keeps #1146's value (3.35 or more).
         public static let toolbarGlyphHidden: GlassRGBA = GlassRGBA(0x83838C, alpha: 1, light: GlassRGBA(0x8A8A90, alpha: 1))
-        public static var controlSelected: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0xFFFFFF, alpha: 1)), flat: GlassRGBA(0x6D14F3, alpha: 1, light: GlassRGBA(0x15608A, alpha: 1))) }
+        public static var controlSelected: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0xFFFFFF, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x035CA3, alpha: 1))) }
         /// The chosen segment of a floating segmented control (the map's view tabs), drawn with no edge: #1146 .tc-segmented--floating .tc-segmented__item[aria-selected].
-        public static var controlSelectedFloating: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0xFFFFFF, alpha: 1)), flat: GlassRGBA(0x6D14F3, alpha: 1, light: GlassRGBA(0x15608A, alpha: 1))) }
-        public static var toggleOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1)), flat: GlassRGBA(0x6D14F3, alpha: 1, light: GlassRGBA(0x15608A, alpha: 1))) }
-        public static let toggleOff: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16))
-        public static let toggleOnSettings: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
+        public static var controlSelectedFloating: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0xFFFFFF, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x035CA3, alpha: 1))) }
+        public static var toggleOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x035CA3, alpha: 1))) }
+        public static var toggleOff: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16)), flat: GlassRGBA(0xFFFFFF, alpha: 0.38, light: GlassRGBA(0x000000, alpha: 0.16))) }
+        public static var toggleOnSettings: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x035CA3, alpha: 1))) }
         /// The watch switch's track when on: statusOn in both appearances, as #1146's --tc-watch-on is var(--tc-status-on). The knob is white on it, as #1146 draws it, with switchKnobEdge inside it.
         public static var watchOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1)), flat: GlassRGBA(0x30D158, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))) }
         /// A 1pt ring inside the white switch knob, drawn on the watch switch when on (owner ruling, 2026-10-07: hold the WCAG floors). #1146 draws the knob white on every track; on the bright dark-appearance watch green white is about 1.8:1, so the knob is told apart from its track by this ring, which over the white knob clears 3:1 against the track (3.9; SwitchContrastTests). Light needs no help (the knob alone clears 3:1) and keeps a faint ring.
@@ -127,17 +169,17 @@ public enum GlassTokens {
         /// The 0.5pt rule under a modal's header and over its footer, and over the Traces graph footer (#1146 rgba(255,255,255,0.12)).
         public static var rule: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.12, light: GlassRGBA(0x000000, alpha: 0.12)), flat: GlassRGBA(0xFFFFFF, alpha: 0.12, light: GlassRGBA(0x000000, alpha: 0.12))) }
         /// The main window tabs' ember (owner choice, 2026-10-10, the Ember Rule at 1.4x): a 2pt line laid on the tab rule under the selected tab, this colour at its middle fading to nothing at either end, reaching 30% past the tab each side. Light is lower, as a glow on a light pane reads stronger.
-        public static var tabEmber: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 0.84)), flat: GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x2A8FC4, alpha: 1))) }
+        public static var tabEmber: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 0.84)), flat: GlassRGBA(0x0091FD, alpha: 1, light: GlassRGBA(0x0070C6, alpha: 1))) }
         /// The faint halo rising from the tab ember behind the selected title: this colour at the rule, fading upward and outward to nothing.
-        public static var tabEmberHalo: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 0.31, light: GlassRGBA(0x7A2CF5, alpha: 0.22)), flat: GlassRGBA(0x8A3DFF, alpha: 0.31, light: GlassRGBA(0x2A8FC4, alpha: 0.3))) }
+        public static var tabEmberHalo: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 0.31, light: GlassRGBA(0x7A2CF5, alpha: 0.22)), flat: GlassRGBA(0x0091FD, alpha: 0.31, light: GlassRGBA(0x0070C6, alpha: 0.22))) }
         public static var popoverFill: GlassRGBA { GlassTheme.pick(GlassRGBA(0x22242A, alpha: 0.94, light: GlassRGBA(0xF7F7F9, alpha: 0.84)), flat: GlassRGBA(0x0B0F22, alpha: 0.82, light: GlassRGBA(0xF7F7F9, alpha: 0.84))) }
         public static var menuFill: GlassRGBA { GlassTheme.pick(GlassRGBA(0x22242A, alpha: 0.94, light: GlassRGBA(0xF7F7F9, alpha: 0.8)), flat: GlassRGBA(0x0B0F22, alpha: 0.82, light: GlassRGBA(0xF7F7F9, alpha: 0.8))) }
         /// Light: deep enough for menuHoverText at 4.5:1 (4.91).
-        public static var menuHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3A7BD5, alpha: 0.85, light: GlassRGBA(0x2A62B5, alpha: 0.9)), flat: GlassRGBA(0x6D14F3, alpha: 0.9, light: GlassRGBA(0x15608A, alpha: 0.9))) }
+        public static var menuHover: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3A7BD5, alpha: 0.85, light: GlassRGBA(0x2A62B5, alpha: 0.9)), flat: GlassRGBA(0x7EBCFF, alpha: 0.9, light: GlassRGBA(0x035CA3, alpha: 0.9))) }
         /// A menu item's text on menuHover: textPrimary in dark, white in light, as the macOS menu selection.
-        public static let menuHoverText: GlassRGBA = GlassRGBA(0xF2F2F4, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))
+        public static var menuHoverText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF2F2F4, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1)), flat: GlassRGBA(0x071A2E, alpha: 1, light: GlassRGBA(0xFFFFFF, alpha: 1))) }
         /// The menu-row hover behind white text. Dark is the selection colour, so white clears 4.5:1 (5.3; white on blue #3a7bd5 was 4.22); light is deeper so white clears 4.5:1 (5.98; blue's light value was 4.37 under it).
-        public static var menuSelection: GlassRGBA { GlassTheme.pick(GlassRGBA(0x2F6AC0, alpha: 1, light: GlassRGBA(0x2A62B5, alpha: 1)), flat: GlassRGBA(0x6D14F3, alpha: 1, light: GlassRGBA(0x15608A, alpha: 1))) }
+        public static var menuSelection: GlassRGBA { GlassTheme.pick(GlassRGBA(0x2F6AC0, alpha: 1, light: GlassRGBA(0x2A62B5, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x035CA3, alpha: 1))) }
         /// Menu-bar mode circle: ask me.
         public static let menuModeAsk: GlassRGBA = GlassRGBA(0xF0A030, alpha: 1)
         /// Menu-bar mode circle and Private AI on option: contribute automatically.
@@ -146,10 +188,18 @@ public enum GlassTokens {
         public static let menuModeNever: GlassRGBA = GlassRGBA(0xFF453A, alpha: 1)
         /// Menu-bar pill circle when paused or off.
         public static let menuPillOff: GlassRGBA = GlassRGBA(0x5A5A5F, alpha: 1, light: GlassRGBA(0xAEAEB2, alpha: 1))
-        /// Graph and strip bars while watching is paused.
+        /// The popover graph's bars while watching is paused. The menu-bar item's paused bars are menuItemMark at lower alpha.
         public static let menuBarsPaused: GlassRGBA = GlassRGBA(0x555555, alpha: 1, light: GlassRGBA(0xB4B4B8, alpha: 1))
-        /// The tinted capsule behind the menu-bar strip's bars, so they read over any wallpaper (owner, 2026-10-11).
-        public static let menuStripTint: GlassRGBA = GlassRGBA(0x000000, alpha: 0.32, light: GlassRGBA(0xFFFFFF, alpha: 0.6))
+        /// The NEAR AI mark on the menu-bar item, in the logo kit's single inks: white on a dark menu bar, black on a light one (owner, 2026-10-21). The item's centre line and paused bars are this ink at lower alpha.
+        public static let menuItemMark: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 1, light: GlassRGBA(0x000000, alpha: 1))
+        /// The menu-bar item's shared-traces bars, above the centre line. Drawn on the bar itself with no capsule (owner, 2026-10-21), so dark is dataShared's hue lifted to 3:1 or more on a dark bar; light is dataShared.
+        public static let menuStripShared: GlassRGBA = GlassRGBA(0xB08BFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
+        /// The menu-bar item's kept-traces bars, below the centre line. Dark is dataKept's hue lifted to 3:1 or more on a dark bar; light is dataKept.
+        public static let menuStripKept: GlassRGBA = GlassRGBA(0x6AA6FF, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
+        /// The menu-bar item's verified Private AI calls, the Private AI bars above the centre line: the Verified status green, 3:1 or more on a dark or light bar.
+        public static let menuStripVerified: GlassRGBA = GlassRGBA(0x30D158, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))
+        /// The menu-bar item's Private AI calls, the Private AI bars below the centre line: the data palette's amber (chartSeries4), lifted on a dark bar to 3:1 or more.
+        public static let menuStripCalls: GlassRGBA = GlassRGBA(0xFFB340, alpha: 1, light: GlassRGBA(0xA97200, alpha: 1))
         public static let menuChipShared: GlassRGBA = GlassRGBA(0xC86BFA, alpha: 0.35, light: GlassRGBA(0x7A2CF5, alpha: 0.18))
         public static let menuChipKept: GlassRGBA = GlassRGBA(0x3AA0FF, alpha: 0.35, light: GlassRGBA(0x2F6BC4, alpha: 0.18))
         public static let menuNoProof: GlassRGBA = GlassRGBA(0xFF8A8A, alpha: 1, light: GlassRGBA(0xC62828, alpha: 1))
@@ -160,7 +210,7 @@ public enum GlassTokens {
         /// Behind a GlassModal, over a within-window blur of size.modalScrimBlur (#1146 --tc-modal-scrim and --tc-modal-scrim-blur). Light is lighter so the light panes are dimmed, not blacked out.
         public static let modalScrim: GlassRGBA = GlassRGBA(0x000000, alpha: 0.4, light: GlassRGBA(0x000000, alpha: 0.25))
         /// #1146's --tc-selection, var(--tc-blue) #3a7bd5, darkened the least, at the same hue, that white row text clears 4.5:1 (4.55; #3a7bd5 was 4.22), owner ruling, 2026-10-07: hold the WCAG floors. Light keeps blue's value (5.22).
-        public static var selection: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3275D3, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1)), flat: GlassRGBA(0x6D14F3, alpha: 1, light: GlassRGBA(0x15608A, alpha: 1))) }
+        public static var selection: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3275D3, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x035CA3, alpha: 1))) }
         public static let mapIdle: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.35, light: GlassRGBA(0x000000, alpha: 0.3))
         public static var mapNodeOff: GlassRGBA { GlassTheme.pick(GlassRGBA(0x5D5D63, alpha: 1, light: GlassRGBA(0xA1A1A6, alpha: 1)), flat: GlassRGBA(0x5D5D63, alpha: 1, light: GlassRGBA(0xC4C9D2, alpha: 1))) }
         /// The map's centre node.
@@ -183,7 +233,7 @@ public enum GlassTokens {
         public static let tintOn: GlassRGBA = GlassRGBA(0x3DDC84, alpha: 0.18, light: GlassRGBA(0x1A8F4C, alpha: 0.14))
         public static let tintAsk: GlassRGBA = GlassRGBA(0xF5C142, alpha: 0.18, light: GlassRGBA(0xA8690F, alpha: 0.14))
         public static let tintOutside: GlassRGBA = GlassRGBA(0xFF6B6B, alpha: 0.18, light: GlassRGBA(0xD0342C, alpha: 0.12))
-        public static let tintAccent: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 0.22, light: GlassRGBA(0x7A2CF5, alpha: 0.14))
+        public static var tintAccent: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 0.22, light: GlassRGBA(0x7A2CF5, alpha: 0.14)), flat: GlassRGBA(0x0091FD, alpha: 0.22, light: GlassRGBA(0x0070C6, alpha: 0.14))) }
         public static let tintNeutral: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.1, light: GlassRGBA(0x000000, alpha: 0.06))
         public static let toolClaude: GlassRGBA = GlassRGBA(0xE08A6A, alpha: 1, light: GlassRGBA(0xC2603E, alpha: 1))
         public static let toolCodex: GlassRGBA = GlassRGBA(0xE6E6EC, alpha: 1, light: GlassRGBA(0x3A3A3C, alpha: 1))
@@ -215,6 +265,7 @@ public enum GlassTokens {
             "hairlineHighContrast": hairlineHighContrast,
             "edgeHighContrast": edgeHighContrast,
             "textOnAccent": textOnAccent,
+            "toggleKnobOff": toggleKnobOff,
             "textOnStatus": textOnStatus,
             "textOnSelected": textOnSelected,
             "statusOn": statusOn,
@@ -228,11 +279,26 @@ public enum GlassTokens {
             "heroInk": heroInk,
             "heroButtonFill": heroButtonFill,
             "heroButtonInk": heroButtonInk,
+            "heroAccent": heroAccent,
             "badgeFillSubtle": badgeFillSubtle,
             "badgeFill": badgeFill,
             "dataShared": dataShared,
             "dataKept": dataKept,
             "dataInference": dataInference,
+            "mapOrbShared": mapOrbShared,
+            "mapOrbKept": mapOrbKept,
+            "firstRunGlow": firstRunGlow,
+            "firstRunBeam": firstRunBeam,
+            "firstRunBeamCore": firstRunBeamCore,
+            "firstRunApprove": firstRunApprove,
+            "firstRunApproveDeep": firstRunApproveDeep,
+            "firstRunCard": firstRunCard,
+            "firstRunCardSolid": firstRunCardSolid,
+            "firstRunTile": firstRunTile,
+            "firstRunTileShadow": firstRunTileShadow,
+            "firstRunControl": firstRunControl,
+            "firstRunControlHover": firstRunControlHover,
+            "firstRunRule": firstRunRule,
             "chartSurface": chartSurface,
             "chartGrid": chartGrid,
             "chartSeries1": chartSeries1,
@@ -248,6 +314,11 @@ public enum GlassTokens {
             "inactiveDim": inactiveDim,
             "wellFill": wellFill,
             "controlHover": controlHover,
+            "controlOnMenu": controlOnMenu,
+            "controlOnMenuHover": controlOnMenuHover,
+            "controlOnSelection": controlOnSelection,
+            "controlOnSelectionHover": controlOnSelectionHover,
+            "cardNested": cardNested,
             "cardHover": cardHover,
             "rowHover": rowHover,
             "toolbarExpanded": toolbarExpanded,
@@ -274,7 +345,11 @@ public enum GlassTokens {
             "menuModeNever": menuModeNever,
             "menuPillOff": menuPillOff,
             "menuBarsPaused": menuBarsPaused,
-            "menuStripTint": menuStripTint,
+            "menuItemMark": menuItemMark,
+            "menuStripShared": menuStripShared,
+            "menuStripKept": menuStripKept,
+            "menuStripVerified": menuStripVerified,
+            "menuStripCalls": menuStripCalls,
             "menuChipShared": menuChipShared,
             "menuChipKept": menuChipKept,
             "menuNoProof": menuNoProof,
@@ -317,8 +392,8 @@ public enum GlassTokens {
     public enum Gradient {
         /// Home's hero promotions (owner, 2026-10-12): a saturated ground under white text and a graphic on the right, the same in both appearances. The darker stop sits under the text on the left and holds white at 7:1 or more; the lighter runs under the graphic. Campaign (NEAR AI's own): a deep NEAR blue to the brand blue #0091fd, which alone holds white at only 3.25:1.
         public static let heroCampaign: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x0057B0, alpha: 1, at: 0), GlassStop(0x0091FD, alpha: 1, at: 1)])
-        /// Missions: indigo to violet, the purple (owner, 2026-10-12).
-        public static let heroMissions: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x1E1470, alpha: 1, at: 0), GlassStop(0x5B2BD6, alpha: 1, at: 1)])
+        /// Missions: deep navy to the NEAR AI accent (owner, 2026-10-20: the accent replaced the purple; it was indigo to violet).
+        public static let heroMissions: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x06264A, alpha: 1, at: 0), GlassStop(0x035CA3, alpha: 1, at: 1)])
         /// Insights: deep sea blue to the accent blue.
         public static let heroInsights: GlassGradient = GlassGradient(angle: 120, stops: [GlassStop(0x073B55, alpha: 1, at: 0), GlassStop(0x1F7AA8, alpha: 1, at: 1)])
         public static var paneFill: GlassGradient { GlassTheme.pick(GlassGradient(angle: 160, stops: [GlassStop(0xFFFFFF, alpha: 0.1, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.55)), GlassStop(0xFFFFFF, alpha: 0.05, at: 0.4, light: GlassRGBA(0xFFFFFF, alpha: 0.35)), GlassStop(0xFFFFFF, alpha: 0.03, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.25))]), flat: GlassGradient(angle: 160, stops: [GlassStop(0xFFFFFF, alpha: 0.04, at: 0, light: GlassRGBA(0xF4F6F9, alpha: 0.08)), GlassStop(0xFFFFFF, alpha: 0.04, at: 0.4, light: GlassRGBA(0xF4F6F9, alpha: 0.08)), GlassStop(0xFFFFFF, alpha: 0.04, at: 1, light: GlassRGBA(0xF4F6F9, alpha: 0.08))])) }
@@ -326,11 +401,11 @@ public enum GlassTokens {
         public static var cardFillQuiet: GlassGradient { GlassTheme.pick(GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.075, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.6)), GlassStop(0xFFFFFF, alpha: 0.04, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.42))]), flat: GlassGradient(angle: 180, stops: [GlassStop(0x0D1124, alpha: 0.28, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.29)), GlassStop(0x0D1124, alpha: 0.28, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.29))])) }
         public static var controlFill: GlassGradient { GlassTheme.pick(GlassGradient(angle: 180, stops: [GlassStop(0xFFFFFF, alpha: 0.14, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.92)), GlassStop(0xFFFFFF, alpha: 0.07, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.72))]), flat: GlassGradient(angle: 180, stops: [GlassStop(0x000000, alpha: 0.3, at: 0, light: GlassRGBA(0xFFFFFF, alpha: 0.44)), GlassStop(0x000000, alpha: 0.3, at: 1, light: GlassRGBA(0xFFFFFF, alpha: 0.44))])) }
         /// Translucent in dark, as #1146. Opaque in light: a translucent purple over a light pane washes out under its white label (under 4.5:1), so the light stops are the solid brand purples.
-        public static var ctaFill: GlassGradient { GlassTheme.pick(GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.72, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x6D14F3, alpha: 0.62, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))]), flat: GlassGradient(angle: 180, stops: [GlassStop(0x6D14F3, alpha: 1, at: 0, light: GlassRGBA(0x15608A, alpha: 1)), GlassStop(0x6D14F3, alpha: 1, at: 1, light: GlassRGBA(0x15608A, alpha: 1))])) }
+        public static var ctaFill: GlassGradient { GlassTheme.pick(GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.72, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x6D14F3, alpha: 0.62, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))]), flat: GlassGradient(angle: 180, stops: [GlassStop(0x7EBCFF, alpha: 1, at: 0, light: GlassRGBA(0x035CA3, alpha: 1)), GlassStop(0x7EBCFF, alpha: 1, at: 1, light: GlassRGBA(0x035CA3, alpha: 1))])) }
         /// Opaque in light, for the same reason as ctaFill.
-        public static let ctaSecondaryFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x4A0EA6, alpha: 0.6, at: 0, light: GlassRGBA(0x5A12C9, alpha: 1)), GlassStop(0x320878, alpha: 0.55, at: 1, light: GlassRGBA(0x4A0EA6, alpha: 1))])
+        public static var ctaSecondaryFill: GlassGradient { GlassTheme.pick(GlassGradient(angle: 180, stops: [GlassStop(0x4A0EA6, alpha: 0.6, at: 0, light: GlassRGBA(0x5A12C9, alpha: 1)), GlassStop(0x320878, alpha: 0.55, at: 1, light: GlassRGBA(0x4A0EA6, alpha: 1))]), flat: GlassGradient(angle: 180, stops: [GlassStop(0x6AA8EB, alpha: 1, at: 0, light: GlassRGBA(0x00488F, alpha: 1)), GlassStop(0x6AA8EB, alpha: 1, at: 1, light: GlassRGBA(0x00488F, alpha: 1))])) }
         /// Opaque in light, so the white check clears 4.5:1 on it.
-        public static let checkboxOnFill: GlassGradient = GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.8, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x6D14F3, alpha: 0.7, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))])
+        public static var checkboxOnFill: GlassGradient { GlassTheme.pick(GlassGradient(angle: 180, stops: [GlassStop(0x8A3DFF, alpha: 0.8, at: 0, light: GlassRGBA(0x7A2CF5, alpha: 1)), GlassStop(0x6D14F3, alpha: 0.7, at: 1, light: GlassRGBA(0x6D14F3, alpha: 1))]), flat: GlassGradient(angle: 180, stops: [GlassStop(0x7EBCFF, alpha: 1, at: 0, light: GlassRGBA(0x035CA3, alpha: 1)), GlassStop(0x7EBCFF, alpha: 1, at: 1, light: GlassRGBA(0x035CA3, alpha: 1))])) }
 
         /// Every gradient token by its JSON name.
         public static var all: [String: GlassGradient] { [

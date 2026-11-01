@@ -234,26 +234,11 @@ pub struct MonitorTracesCopy {
 /// Every placeholder the monitor tables use, each written `{name}`:
 /// Ron's, and History's and Inference's (`shown`, `hours`) before them.
 /// `uploads` and `megabytes` are the daily limit's two remainders, and
-/// `section` is the part of the app an edge rail peek links into.
+/// `section` is the part of the app an edge rail peek links into. `path` is
+/// the command-line tool's link path.
 pub const MONITOR_PLACEHOLDERS: &[&str] = &[
-    "count",
-    "total",
-    "min",
-    "max",
-    "tool",
-    "label",
-    "seconds",
-    "when",
-    "size",
-    "start",
-    "end",
-    "shown",
-    "hours",
-    "uploads",
-    "megabytes",
-    "amount",
-    "days",
-    "section",
+    "count", "total", "min", "max", "tool", "label", "seconds", "when", "size", "start", "end",
+    "shown", "hours", "amount", "days", "section", "path",
 ];
 
 /// The Traces tree (`traces-tree.tsx`).
@@ -283,6 +268,9 @@ pub struct MonitorTreeCopy {
     pub submitting: &'static str,
     /// The folder Submit pill's tip.
     pub submit_tip: &'static str,
+    /// A trace's Submit pill's tip: it sends that one trace (owner,
+    /// 2026-10-22: a trace's pill is Submit, in place of Review).
+    pub submit_trace_tip: &'static str,
     /// Beside the core's withheld line under a folder.
     pub eligible_count: &'static str,
     /// A session's pill while its review is open, and the pill's tip.
@@ -299,6 +287,21 @@ pub struct MonitorTreeCopy {
     /// The folder and tool switches' accessible names.
     pub watch_folder: &'static str,
     pub watch_tool: &'static str,
+    /// The Automatic switch on each folder row, its accessible name with
+    /// `{label}`; the tab's switch for every folder, its accessible name
+    /// (owner, 2026-10-30: auto on and off on the Traces tab, beside
+    /// Submit). DRAFT, NEEDS APPROVAL.
+    pub automatic_folder: &'static str,
+    pub automatic_all: &'static str,
+    /// The line under the tab switch, with `{count}` and `{total}`: the
+    /// owner's approved Proposal A mockup, verbatim (2026-10-31).
+    pub automatic_count: &'static str,
+    /// The titles over the tree's columns while the Automatic switches
+    /// show: the folders, their Submit, and their Automatic switch (owner,
+    /// 2026-10-30, Proposal A). DRAFT, NEEDS APPROVAL.
+    pub column_folders: &'static str,
+    pub column_submit: &'static str,
+    pub column_automatic: &'static str,
     /// The session row menu's one item, and its confirmation.
     pub dismiss_session: &'static str,
     pub dismiss_session_title: &'static str,
@@ -371,7 +374,6 @@ pub struct MonitorSummaryCopy {
     pub tools_watched: &'static str,
     pub waiting_for_you: &'static str,
     pub worth_a_second_look: &'static str,
-    pub uploads_today: &'static str,
     pub statistics: &'static str,
     pub top_projects: &'static str,
     pub top_tools: &'static str,
@@ -477,22 +479,15 @@ pub struct MonitorUndoCopy {
 }
 
 /// The queue's safeguards panel (`queue-status-panel.tsx`): the labels
-/// `HealthCopy`, `DailyBudgetCopy` and `routing_copy` do not already hold.
+/// `HealthCopy` and `routing_copy` do not already hold.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct MonitorSafeguardsCopy {
     pub eyebrow: &'static str,
     pub heading: &'static str,
-    pub daily_limit: &'static str,
     pub inference_routing: &'static str,
     pub daemon_owned: &'static str,
     pub rows_unavailable_one: &'static str,
     pub rows_unavailable: &'static str,
-    /// The daily limit row: uploads and megabytes left today. The shell
-    /// fills both numbers and adds no unit.
-    pub remaining: &'static str,
-    /// Approved sessions the spent limit holds back: one, then counted.
-    pub held_by_limit_one: &'static str,
-    pub held_by_limit: &'static str,
     /// `witness_capacity` was reported but could not be read: never "none
     /// waiting".
     pub capacity_unreadable: &'static str,
@@ -560,7 +555,9 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         residual_risk: "Residual risk",
         personal_information: "Personal information",
         second_look_waiting: "some worth a second look",
-        contribute: "Contribute",
+        // "Submit", the word the Traces tree's pills say (owner,
+        // 2026-10-22: every Contribute button reads Submit).
+        contribute: "Submit",
         keep: customize.keep,
         dismiss: "Not this one",
         undo_contribute: "Undo",
@@ -582,7 +579,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             submit: "Submit",
             submit_count: "Submit \u{00b7} {count}",
             submitting: "Submitting\u{2026}",
-            submit_tip: "Sends every eligible waiting trace here.",
+            submit_tip: "Submits this folder's eligible traces.",
+            submit_trace_tip: "Sends this trace now.",
             eligible_count: "{count} eligible",
             reviewing: "Reviewing",
             review_tip: "Opens what would be sent. Nothing leaves until you contribute.",
@@ -591,6 +589,14 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             folder_menu: "Directory options",
             watch_folder: "Watch this folder",
             watch_tool: "Watch {tool}",
+            // DRAFT, NEEDS APPROVAL (2026-10-30).
+            automatic_folder: "Automatic for {label}",
+            automatic_all: "Automatic for every folder",
+            automatic_count: "Every folder sends on its own, except folders set to Ask or Never. \
+                {count} of {total} folders automatic.",
+            column_folders: "Folders on this Mac",
+            column_submit: "Submit",
+            column_automatic: "Auto",
             dismiss_session: "Dismiss trace",
             dismiss_session_title: "Dismiss this trace?",
             dismiss_session_body: "{when} \u{00b7} {size}. Dismissing removes it from the traces \
@@ -634,7 +640,6 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             tools_watched: "{count} of {total} tools watched",
             waiting_for_you: "{count} waiting for you",
             worth_a_second_look: "{count} worth a second look",
-            uploads_today: "{count} of {max} uploads today",
             statistics: "Statistics",
             top_projects: "Top projects",
             top_tools: "Top tools",
@@ -842,6 +847,10 @@ pub struct MonitorScreensCopy {
     pub flagged: &'static str,
     /// Raises the app's main window from the menu bar.
     pub open_app: &'static str,
+    /// The menu-bar popover's manual update check, the standard macOS label
+    /// with the ellipsis of a command that opens a window. Approved by the
+    /// owner on 2026-10-29.
+    pub check_for_updates: &'static str,
     /// Opens the folders' rules.
     pub manage_rules: &'static str,
     /// Opens Settings.
@@ -871,6 +880,13 @@ pub struct MonitorScreensCopy {
     /// Home's pending-credit count (shown only beside the commons'
     /// statement of what it waits on, D6).
     pub credit_pending: &'static str,
+    /// Home's tile of credit already decided (History's Final), beside
+    /// [`Self::credit_pending_title`] (product owner, 2026-10-29: Home shows
+    /// both received and pending credit). "Credit earned" approved by the
+    /// product owner, 2026-10-29.
+    pub credit_received: &'static str,
+    /// Home's tile of credit still pending, under D6. DRAFT, needs approval.
+    pub credit_pending_title: &'static str,
     /// Home's status-card link to the Traces tab.
     pub open_traces: &'static str,
     /// Quits the app. Approved 2026-10-08 (button rule).
@@ -944,6 +960,40 @@ pub struct MonitorScreensCopy {
     /// The edge rail (Claude Design "Run 1 OS-level Explorations", 1b):
     /// its switch in Settings, its icons' names and its peeks.
     pub edge_rail: MonitorEdgeRailCopy,
+    /// The command-line tool's row in Settings and its app-menu item
+    /// (owner, 2026-10-29: install the bundled CLI onto the PATH).
+    pub cli_tool: MonitorCliToolCopy,
+}
+
+/// The command-line tool's words: a row in Settings' system integrations
+/// card and an item in the app menu, which put the bundled CLI on the PATH
+/// as a symlink (`cli_tool`). `{path}` is the link path, such as
+/// `/usr/local/bin/near-ai`. DRAFT, NEEDS APPROVAL: every line.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorCliToolCopy {
+    /// The row's title.
+    pub title: &'static str,
+    /// The row's status, by state: nothing there; our link; our link to an
+    /// app that moved; and something this app did not create, which it
+    /// refuses to replace.
+    pub not_installed: &'static str,
+    pub installed: &'static str,
+    pub stale: &'static str,
+    pub foreign: &'static str,
+    /// The row's buttons, and each one's accessible name.
+    pub install: &'static str,
+    pub uninstall: &'static str,
+    pub update_link: &'static str,
+    pub install_label: &'static str,
+    pub uninstall_label: &'static str,
+    pub update_link_label: &'static str,
+    /// The app menu's item, by state. Each opens the password prompt.
+    pub menu_install: &'static str,
+    pub menu_uninstall: &'static str,
+    pub menu_update_link: &'static str,
+    /// When the change did not happen for a reason other than a cancelled
+    /// password prompt, which says nothing.
+    pub failed: &'static str,
 }
 
 /// The edge rail's words: the optional rail on the right edge of the
@@ -1276,6 +1326,31 @@ pub struct MonitorHomeHistoryCopy {
     pub uncontributed: &'static str,
     pub uncontributed_size: &'static str,
     pub uncontributed_estimate: &'static str,
+    /// Home's section titles over its groups of cards, and the Private AI
+    /// section's line while NEAR AI is signed out, beside the managed
+    /// copy's "Sign in" (owner, 2026-10-20, in the owner's words).
+    pub section_private_ai: &'static str,
+    pub section_traces: &'static str,
+    pub section_account: &'static str,
+    pub private_ai_sign_in: &'static str,
+    /// Home's Traces hero, which leads Home (owner, 2026-10-28: the macOS
+    /// MVP is "contribute traces, earn credit", so it is the first and
+    /// largest card, over Private AI): its title, one line on what
+    /// contributing is and what it earns, and the way into Traces.
+    /// Approved by the product owner 2026-10-28; the title gained ", use
+    /// Private AI" on 2026-10-29 (product owner).
+    pub traces_hero_title: &'static str,
+    pub traces_hero_body: &'static str,
+    pub traces_hero_action: &'static str,
+    /// The hero's three steps, left to right, each a title over one line
+    /// (owner, 2026-10-29, from the owner's mock-up): contribute, earn,
+    /// spend on Private AI.
+    pub traces_hero_step_contribute: &'static str,
+    pub traces_hero_step_contribute_detail: &'static str,
+    pub traces_hero_step_earn: &'static str,
+    pub traces_hero_step_earn_detail: &'static str,
+    pub traces_hero_step_use: &'static str,
+    pub traces_hero_step_use_detail: &'static str,
     /// Home's Credit tile: the change in total credit since the last day
     /// this Mac saw, `{amount}` signed. No change says nothing (owner,
     /// 2026-10-16). DRAFT, NEEDS APPROVAL.
@@ -1295,6 +1370,12 @@ pub struct MonitorHomeHistoryCopy {
     /// (owner, 2026-10-12). DRAFT, NEEDS APPROVAL.
     pub missions_action: &'static str,
     pub insights_action: &'static str,
+    /// Settings' switch for Home's promotion card (owner, 2026-10-27):
+    /// off, the campaign card never shows. Its card heading, the switch
+    /// and the line under it. DRAFT, NEEDS APPROVAL.
+    pub promotions_title: &'static str,
+    pub promotions_toggle: &'static str,
+    pub promotions_caption: &'static str,
     /// The contribution list card's eyebrow and heading.
     pub submissions: &'static str,
     pub contribution_history: &'static str,
@@ -1310,6 +1391,10 @@ pub struct MonitorHomeHistoryCopy {
     pub status_line: &'static str,
     /// A row's settled credit; `{amount}` is the figure.
     pub row_credit: &'static str,
+    /// A decided row that earned no credit, in place of `row_credit`;
+    /// `{label}` is the reason's words (`history_copy::CREDIT_OUTCOME_LABELS`).
+    /// DRAFT, NEEDS APPROVAL.
+    pub row_no_credit: &'static str,
     /// The privacy review card's heading, by count.
     pub held_count_one: &'static str,
     pub held_count: &'static str,
@@ -1383,6 +1468,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         recent_activity: "Recent activity",
         flagged: SECOND_LOOK_HEADING,
         open_app: concat!("Open ", crate::app_name!()),
+        check_for_updates: "Check for Updates\u{2026}",
         manage_rules: "Manage rules…",
         // #1146 tray word (`tray.rs`), with the ellipsis of a command that
         // opens a window; the modal it opens is titled bare "Settings".
@@ -1398,6 +1484,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         previous: "Previous period",
         next: "Next period",
         credit_pending: "Credit",
+        credit_received: "Credit earned",
+        credit_pending_title: "Credit pending",
         open_traces: "Open Traces",
         quit: "Quit",
         core_unreachable: MONITOR_CORE_UNREACHABLE,
@@ -1418,14 +1506,10 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         safeguards: MonitorSafeguardsCopy {
             eyebrow: "RUNTIME",
             heading: "Contribution safeguards",
-            daily_limit: "Daily limit",
             inference_routing: "Inference routing",
             daemon_owned: "daemon-owned",
             rows_unavailable_one: "1 row unavailable",
             rows_unavailable: "{count} rows unavailable",
-            remaining: "{uploads} uploads left \u{00b7} {megabytes} MB left",
-            held_by_limit_one: "1 queued trace held by limit",
-            held_by_limit: "{count} queued traces held by limit",
             capacity_unreadable: "Some approved traces may be waiting and have not been sent, \
                 but this build could not read how many or why.",
             routing_not_declared: "Not declared",
@@ -1592,6 +1676,19 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             uncontributed: "Not contributed",
             uncontributed_size: "{size}",
             uncontributed_estimate: "Could earn {min}\u{2013}{max}",
+            section_private_ai: "Private AI",
+            section_traces: "Traces",
+            section_account: "Account",
+            private_ai_sign_in: "Sign in to NEAR AI to get started.",
+            traces_hero_title: "Contribute traces, earn credit, use Private AI",
+            traces_hero_body: "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.",
+            traces_hero_action: "Start earning",
+            traces_hero_step_contribute: "Contribute traces",
+            traces_hero_step_contribute_detail: "Share the sessions from your AI coding tools",
+            traces_hero_step_earn: "Earn credit",
+            traces_hero_step_earn_detail: "Each accepted trace earns you credit",
+            traces_hero_step_use: "Use Private AI",
+            traces_hero_step_use_detail: "Spend your credit on Private AI",
             credit_delta: "{amount} since yesterday",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",
@@ -1601,6 +1698,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             campaign_action: "Try it",
             missions_action: "Review drafts",
             insights_action: "See insights",
+            promotions_title: "Home",
+            promotions_toggle: "Show promotions on Home",
+            promotions_caption: "News from NEAR AI, such as a new model. A promotion you close comes back only when it changes.",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",
@@ -1610,6 +1710,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             records: "{count} records",
             status_line: "Status: {label}",
             row_credit: "credit {amount}",
+            row_no_credit: "no credit: {label}",
             held_count_one: "1 held for privacy review",
             held_count: "{count} held for privacy review",
             public_standing: "Public standing",
@@ -1654,7 +1755,31 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             in_the_library_line: "{count} contributions sent from this Mac.",
             nothing_sent: "Nothing is sent from the rail.",
         },
+        cli_tool: MonitorCliToolCopy {
+            title: "Command-line tool",
+            not_installed: "Not installed",
+            installed: "Installed: {path}",
+            stale: "Link out of date: {path}",
+            foreign: "{path} already exists and wasn't installed by this app.",
+            install: "Install",
+            uninstall: "Uninstall",
+            update_link: "Update link",
+            install_label: "Install command-line tool",
+            uninstall_label: "Uninstall command-line tool",
+            update_link_label: "Update command-line tool link",
+            menu_install: "Install Command-Line Tool\u{2026}",
+            menu_uninstall: "Uninstall Command-Line Tool\u{2026}",
+            menu_update_link: "Update Command-Line Tool Link\u{2026}",
+            failed: "Couldn't change {path}.",
+        },
     }
+}
+
+/// The default Private AI promotion, shared by the native app and the
+/// separately published campaign feed. It is compiled into the contributor
+/// so a failed network read never makes the promotion disappear.
+pub fn private_ai_campaign_json() -> &'static str {
+    include_str!("private_ai_campaign.json")
 }
 
 #[cfg(test)]
@@ -1784,6 +1909,16 @@ mod tests {
         }
     }
 
+    /// Owner, 2026-10-30: the folder Submit tip read awkwardly ("Sends
+    /// every eligible waiting trace here."). The core's withheld line
+    /// follows it whenever some traces are held back.
+    #[test]
+    fn the_folder_submit_tip_names_the_folder() {
+        let tree = monitor_traces_copy().tree;
+        assert!(tree.submit_tip.contains("folder"), "{}", tree.submit_tip);
+        assert_ne!(tree.submit_tip, tree.submit_trace_tip);
+    }
+
     /// Ron's lines verbatim, with his numbers as `{name}` holes.
     #[test]
     fn rons_counted_lines_hold_their_numbers() {
@@ -1793,15 +1928,6 @@ mod tests {
         assert_eq!(traces.inspector.submit_all_eligible, "Submit {count}");
         assert_eq!(traces.inspector.waiting_sessions, "{count} waiting traces");
         assert_eq!(traces.inspector.waiting_sessions_one, "1 waiting trace");
-        // `queue-status-panel.tsx`'s daily limit row and its held line.
-        assert_eq!(
-            monitor_screens_copy().safeguards.remaining,
-            "{uploads} uploads left \u{00b7} {megabytes} MB left"
-        );
-        assert_eq!(
-            monitor_screens_copy().safeguards.held_by_limit,
-            "{count} queued traces held by limit"
-        );
         assert_eq!(traces.optional_automation, "OPTIONAL AUTOMATION");
         assert_eq!(
             traces.inspector.apply_outcome,
@@ -1908,6 +2034,7 @@ mod tests {
         assert_eq!(copy.contribution_history, "Contribution history");
         assert_eq!(copy.status_line, "Status: {label}");
         assert_eq!(copy.row_credit, "credit {amount}");
+        assert!(copy.row_no_credit.contains("{label}"));
         assert!(copy.sources.contains("{count}") && !copy.sources_one.contains('{'));
         assert!(copy.records.contains("{count}") && !copy.records_one.contains('{'));
         assert!(copy.held_count.contains("{count}") && !copy.held_count_one.contains('{'));
@@ -1953,6 +2080,37 @@ mod tests {
             assert!(
                 !word.to_lowercase().contains("proxy"),
                 "{key} says proxy: {word}"
+            );
+        }
+    }
+
+    /// The command-line tool's status lines name the link path, and its
+    /// buttons, accessible names and menu items each have their own key.
+    #[test]
+    fn the_cli_tool_words_name_the_path_and_keep_separate_keys() {
+        let words = monitor_screens_copy().cli_tool;
+        for line in [words.installed, words.stale, words.foreign, words.failed] {
+            assert!(line.contains("{path}"), "{line}");
+        }
+        assert!(!words.not_installed.contains('{'));
+        for (button, label) in [
+            (words.install, words.install_label),
+            (words.uninstall, words.uninstall_label),
+            (words.update_link, words.update_link_label),
+        ] {
+            assert_ne!(button, label);
+            // The accessible name starts with the visible action's verb.
+            let verb = button.split(' ').next().unwrap();
+            assert!(label.starts_with(verb), "{label}");
+        }
+        for item in [
+            words.menu_install,
+            words.menu_uninstall,
+            words.menu_update_link,
+        ] {
+            assert!(
+                item.ends_with('\u{2026}'),
+                "a menu item that asks more ends with an ellipsis"
             );
         }
     }

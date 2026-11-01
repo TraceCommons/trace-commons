@@ -58,7 +58,39 @@ private struct GlassPressBody: View {
     }
 }
 
+/// A control drawn as a `GlassPressStyle` button but made of a tap, for
+/// the small controls repeated on every row of a long list (a row's
+/// disclosure chevron and its "..." menu). SwiftUI walks the window's whole
+/// responder tree for accessibility focus each time a `Button` appears or
+/// its accessibility changes, so three buttons on each of a few dozen rows
+/// put about a hundred such walks behind each tab switch. A tap is not a
+/// focus responder, so it adds none. It looks and presses the same: the
+/// press darkens the fill through `glassPressed`, and a disabled control
+/// fades and takes no tap. The caller gives it its accessibility: a label,
+/// the button trait and the action, or a representation.
+struct GlassTapControl: ViewModifier {
+    let action: () -> Void
+    @GestureState private var pressed = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.glassPressed, pressed && isEnabled)
+            .opacity(isEnabled ? 1 : GlassTokens.Opacity.disabled)
+            .onTapGesture { if isEnabled { action() } }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0).updating($pressed) { _, state, _ in state = true },
+                including: isEnabled ? .all : .none)
+    }
+}
+
 extension View {
+    /// A press-styled tap control (`GlassTapControl`), in place of a
+    /// `Button` with `GlassPressStyle`, for a control on every row of a list.
+    func glassTapControl(action: @escaping () -> Void) -> some View {
+        modifier(GlassTapControl(action: action))
+    }
+
     /// Darken this fill while the surrounding button is pressed. Apply it to
     /// a fill, never to a label.
     func glassPressedFill() -> some View {

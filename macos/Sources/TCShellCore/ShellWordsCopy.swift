@@ -130,6 +130,7 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
         public let appliesFromNow: String
         public let alwaysIncluded: String
         public let optionalDataUse: String
+        public let rewardOpportunities: String?
         public let credit: String
         public let required: String
         public let nothingPreselected: String

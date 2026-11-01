@@ -36,7 +36,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::copy;
-use crate::model::Project;
+use crate::model::{Project, Status};
 use crate::ui::App;
 use crate::ui::style::{self, space};
 use adw::prelude::*;
@@ -157,16 +157,31 @@ fn completion_file() -> Option<std::path::PathBuf> {
         .map(|d| d.join("trace-commons").join("onboarded.json"))
 }
 
+fn setup_complete(status: &Status, legacy_complete: bool) -> bool {
+    status.logged_in
+        && status.tenant_id.as_deref().is_some_and(|id| !id.is_empty())
+        && (status.shared_setup_complete() || legacy_complete)
+}
+
 /// Show onboarding if this device needs it, or do nothing.
 ///
 /// Called after a `status` read, because both halves of the question --
 /// enrolled at all, and walked to the end for *this* tenant -- are answers
 /// the daemon has to give first.
-pub fn present_if_needed(app: &Rc<App>, logged_in: bool, tenant_id: Option<&str>) {
+pub fn present_if_needed(app: &Rc<App>, status: &Status) {
+    if status.shared_setup_complete() {
+        AUTOMATIC_WINDOW.with(|current| {
+            let window = current.borrow_mut().take().and_then(|weak| weak.upgrade());
+            if let Some(window) = window {
+                PRESENTED.with(|presented| presented.set(false));
+                window.close();
+            }
+        });
+    }
     if app.stack.visible_child_name().as_deref() == Some("insights") {
         return;
     }
-    if logged_in && is_complete(tenant_id) {
+    if setup_complete(status, is_complete(status.tenant_id.as_deref())) {
         return;
     }
     // Camera only, in the same family as TC_FORCE_CONNECT_NOTICES below.
@@ -195,6 +210,9 @@ pub fn present_if_needed(app: &Rc<App>, logged_in: bool, tenant_id: Option<&str>
 
 thread_local! {
     static PRESENTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Weak ownership lets CLI completion close first-run without retaining it
+    // or dismissing explicitly opened health/privacy windows.
+    static AUTOMATIC_WINDOW: RefCell<Option<gtk::glib::WeakRef<adw::Window>>> = const { RefCell::new(None) };
     /// An invite handed to this process on the command line, waiting for
     /// the Connect screen to be built.
     static PENDING_INVITE: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -336,6 +354,7 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
     // the instance is named and the button still has to be pressed. The
     // welcome screen is skipped because someone who clicked an invite has
     // already been told what this is by whoever sent it.
+    let automatic = start.is_none() && PENDING_INVITE.with(|pending| pending.borrow().is_none());
     match (start, PENDING_INVITE.with(|p| p.borrow_mut().take())) {
         // An explicit starting screen wins: it is only ever set by someone
         // who clicked a control asking for that screen.
@@ -345,6 +364,9 @@ fn present_at(app: &Rc<App>, start: Option<Step>) {
             onboarding.go(Step::Connect);
         }
         (None, None) => onboarding.go(Step::Welcome),
+    }
+    if automatic {
+        AUTOMATIC_WINDOW.with(|current| *current.borrow_mut() = Some(window.downgrade()));
     }
     window.present();
 }
@@ -1134,6 +1156,70 @@ fn done_page(app: &Rc<App>, onboarding: &Rc<Onboarding>) -> gtk::Box {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn setup_status(wire: serde_json::Value) -> crate::model::Status {
+        serde_json::from_value(wire).expect("valid status")
+    }
+
+    #[test]
+    fn cli_completion_is_live_proof_without_a_legacy_marker() {
+        let mut status = setup_status(serde_json::json!({
+            "logged_in": true, "tenant_id": "cli-completion-test-tenant"
+        }));
+        assert!(!setup_complete(&status, false));
+        status.setup_complete = Some(true);
+        assert!(setup_complete(&status, false));
+        assert!(!is_complete(status.tenant_id.as_deref()));
+        status.setup_complete = Some(false);
+        assert!(!setup_complete(&status, false));
+        status.tenant_id = Some("another-cli-completion-test-tenant".into());
+        status.setup_complete = None;
+        assert!(!setup_complete(&status, false));
+    }
+
+    #[test]
+    fn shared_completion_requires_current_enrollment() {
+        for wire in [
+            serde_json::json!({"logged_in": false, "tenant_id": "a", "setup_complete": true}),
+            serde_json::json!({"logged_in": true, "setup_complete": true}),
+            serde_json::json!({"logged_in": true, "tenant_id": "", "setup_complete": true}),
+        ] {
+            let status = setup_status(wire);
+            assert!(!status.shared_setup_complete());
+            assert!(!setup_complete(&status, false));
+        }
+    }
+
+    #[test]
+    fn legacy_gui_completion_survives_absent_or_false_shared_status() {
+        for value in [serde_json::Value::Null, serde_json::json!(false)] {
+            let mut status = setup_status(serde_json::json!({
+                "logged_in": true, "tenant_id": "a", "setup_complete": value
+            }));
+            assert!(setup_complete(&status, true));
+            assert!(!status.shared_setup_complete());
+            status.logged_in = false;
+            assert!(!setup_complete(&status, true));
+        }
+    }
+
+    #[test]
+    fn shared_completion_preserves_optional_wire_values() {
+        for (wire, expected) in [
+            (serde_json::json!({}), None),
+            (serde_json::json!({"setup_complete": null}), None),
+            (serde_json::json!({"setup_complete": false}), Some(false)),
+            (serde_json::json!({"setup_complete": true}), Some(true)),
+        ] {
+            assert_eq!(setup_status(wire).setup_complete, expected);
+        }
+        assert!(
+            serde_json::from_value::<crate::model::Status>(serde_json::json!({
+                "setup_complete": "true"
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn no_tenant_is_never_complete() {

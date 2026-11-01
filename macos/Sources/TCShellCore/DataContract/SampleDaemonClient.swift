@@ -467,6 +467,10 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("inference_calls", as: DaemonData.InferenceCallPage.self)
     }
 
+    public func inferenceActivity() async throws -> DaemonData.InferenceActivity {
+        try serve("inference_activity", as: DaemonData.InferenceActivity.self)
+    }
+
     // MARK: Insights
 
     public func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek {
@@ -476,16 +480,8 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         throw DaemonDataError.notAvailableYet(method: "insights_week")
     }
 
-    public func insightsSessions() async throws -> DaemonData.InsightsSessions {
-        guard set != .coreDown else { throw DaemonDataError.unreachable }
-        // SAMPLE: no counter pass is recorded, so Sessions shows saved
-        // snapshots, as against a daemon that predates it.
-        throw DaemonDataError.notAvailableYet(method: "insights_sessions")
-    }
-
-    public func insightsSessionDrill(sessionRef: String) async throws -> DaemonData.InsightsSessionDrillAnswer {
-        guard set != .coreDown else { throw DaemonDataError.unreachable }
-        throw DaemonDataError.notAvailableYet(method: "insights_session_drill")
+    public func insightsModelAnswers() async throws -> DaemonData.InsightsModelAnswers {
+        try serve("insights_model_answers", as: DaemonData.InsightsModelAnswers.self)
     }
 
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
@@ -543,10 +539,6 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
 
     public func lookupInvite(code: String) async throws -> DaemonData.InviteLookup {
         try serve("invite_lookup", as: DaemonData.InviteLookup.self)
-    }
-
-    public func passkeyState() async throws -> DaemonData.PasskeyState {
-        try serve("passkey_state", as: DaemonData.PasskeyState.self)
     }
 
     public func accountState() async throws -> DaemonData.AccountState {

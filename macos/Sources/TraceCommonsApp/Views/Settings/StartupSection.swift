@@ -18,11 +18,9 @@ struct StartupSection: View {
     var body: some View {
         // #1146's `DESKTOP / System integrations`, with Refresh re-reading
         // the login item from the system.
-        GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle) {
-            Button(SettingsLegacyWords.refresh) { loginItemState = LoginItemManager.currentState }
-                .buttonStyle(GlassButtonStyle(.link))
-                .fixedSize()
-        } content: {
+        GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle, accessory: {
+            GlassRefreshButton(SettingsLegacyWords.refresh) { loginItemState = LoginItemManager.currentState }
+        }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 switch loginItemState {
                 case .enabled:
@@ -42,6 +40,8 @@ struct StartupSection: View {
                 if let loginItemActionError = model.loginItemActionError {
                     GlassAlert(loginItemActionError)
                 }
+                // The command-line tool (owner, 2026-10-29).
+                CliToolRow()
             }
         }
         .onAppear { loginItemState = LoginItemManager.currentState }

@@ -62,30 +62,64 @@ public struct GlassCard<Content: View>: View {
     }
 }
 
-/// A bare refresh glyph, no pill around it (owner, 2026-10-10), named for
-/// assistive tech and in its tooltip.
+/// The refresh control: the round glass icon button with the refresh
+/// glyph, at the trailing end of what it re-reads (owner, 2026-10-20: the
+/// right-aligned icon button pattern, as the Traces list's search and
+/// filter; it was a bare glyph, 2026-10-10, and some were "Refresh" in
+/// words). Named for assistive tech and in its tooltip. `small` is the
+/// small round button, for a card's head.
 public struct GlassRefreshButton: View {
     private let label: String
-    private let size: CGFloat
+    private let small: Bool
+    private let isRefreshing: Bool
     private let action: () -> Void
+    @State private var clickedAt: Date?
+    @State private var completingClick = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init(_ label: String, size: CGFloat = 13, action: @escaping () -> Void) {
+    public static let systemImage = "arrow.clockwise"
+    /// Align the refresh ring's optical centre with the round control.
+    public static let opticalOffset = CGSize(width: 0.5, height: -0.6)
+
+    public init(_ label: String, small: Bool = false, isRefreshing: Bool = false, action: @escaping () -> Void) {
         self.label = label
-        self.size = size
+        self.small = small
+        self.isRefreshing = isRefreshing
         self.action = action
     }
 
+    /// A fast cached answer still completes the click's first turn. Longer
+    /// requests keep rotating; Reduce Motion keeps the icon still.
+    static func angle(elapsed: TimeInterval, isRefreshing: Bool, reduceMotion: Bool) -> Double {
+        guard !reduceMotion else { return 0 }
+        let turns = max(0, elapsed) / GlassTokens.Motion.spin
+        return (isRefreshing ? turns.truncatingRemainder(dividingBy: 1) : min(turns, 1)) * 360
+    }
+
+    static func animates(isRefreshing: Bool, completingClick: Bool, reduceMotion: Bool) -> Bool {
+        !reduceMotion && (isRefreshing || completingClick)
+    }
+
     public var body: some View {
-        Button(action: action) {
-            Image(systemName: "arrow.clockwise")
-                .glassGlyph(size, weight: .medium)
-                .foregroundStyle(GlassColor.textSecondary)
-                .frame(width: size + 7, height: size + 7)
-                .contentShape(Rectangle())
+        GlassAnimationTimeline(minimumInterval: 1 / 30,
+            paused: !Self.animates(isRefreshing: isRefreshing, completingClick: completingClick, reduceMotion: reduceMotion)) { date in
+            let elapsed = clickedAt.map { date.timeIntervalSince($0) } ?? (isRefreshing ? date.timeIntervalSinceReferenceDate : 0)
+            GlassRoundButton(label, icon: .symbol(Self.systemImage), small: small, opticalOffset: Self.opticalOffset,
+                symbolRotation: .degrees(Self.angle(elapsed: elapsed, isRefreshing: isRefreshing, reduceMotion: reduceMotion))) {
+                    clickedAt = Date()
+                    completingClick = true
+                    action()
+                }
+                .disabled(isRefreshing)
         }
-        .buttonStyle(GlassPressStyle())
-        .accessibilityLabel(label)
-        .help(label)
+        .task(id: clickedAt) {
+            guard clickedAt != nil else { return }
+            // Only the visual acknowledgement has a minimum duration; the
+            // request and its result are never delayed by the animation.
+            try? await Task.sleep(for: .seconds(GlassTokens.Motion.spin))
+            guard !Task.isCancelled else { return }
+            completingClick = false
+        }
     }
 }
 
@@ -93,11 +127,13 @@ public struct GlassRefreshButton: View {
 public struct GlassCardRefresh {
     let label: String
     let isDisabled: Bool
+    let isRefreshing: Bool
     let action: () -> Void
 
-    public init(_ label: String, isDisabled: Bool = false, action: @escaping () -> Void) {
+    public init(_ label: String, isDisabled: Bool = false, isRefreshing: Bool = false, action: @escaping () -> Void) {
         self.label = label
         self.isDisabled = isDisabled
+        self.isRefreshing = isRefreshing
         self.action = action
     }
 }
@@ -192,7 +228,11 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
 
     /// The head and anything under it.
     private var stack: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+        // Alignment guides may run outside the main actor. Resolve the
+        // font metric here and capture only the immutable scalar values.
+        let iconTopInset = Self.iconTopInset
+        let titleCapHeight = Self.titleCapHeight
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
                 HStack(alignment: .iconTitleTop, spacing: GlassTokens.Space.s5) {
                     // The icon's top on the title's cap height, the top
@@ -201,7 +241,7 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                         .glassGlyph(Self.iconSize, weight: .regular)
                         .foregroundStyle(promo == nil ? GlassColor.textSecondary : GlassColor.accentText)
                         .frame(width: Self.iconColumn)
-                        .alignmentGuide(.iconTitleTop) { $0[.top] + Self.iconTopInset }
+                        .alignmentGuide(.iconTitleTop) { $0[.top] + iconTopInset }
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                         HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
@@ -209,12 +249,8 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                                 .glassType(GlassTokens.TypeScale.bodyStrong)
                                 .foregroundStyle(GlassColor.textPrimary)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .alignmentGuide(.iconTitleTop) { $0[.firstTextBaseline] - Self.titleCapHeight }
+                                .alignmentGuide(.iconTitleTop) { $0[.firstTextBaseline] - titleCapHeight }
                                 .accessibilityAddTraits(.isHeader)
-                            if let refresh {
-                                GlassRefreshButton(refresh.label, size: 12, action: refresh.action)
-                                    .disabled(refresh.isDisabled)
-                            }
                             if subtitle.isEmpty { infoButton }
                         }
                         ForEach(Array(subtitle.enumerated()), id: \.offset) { index, line in
@@ -230,6 +266,12 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                     }
                 }
                 Spacer(minLength: GlassTokens.Space.s4)
+                // The re-read control at the head's trailing end (owner,
+                // 2026-10-20), before whatever else sits there.
+                if let refresh {
+                    GlassRefreshButton(refresh.label, small: true, isRefreshing: refresh.isRefreshing, action: refresh.action)
+                        .disabled(refresh.isDisabled)
+                }
                 accessory
             }
             if Content.self != EmptyView.self {
@@ -315,10 +357,9 @@ public extension GlassIconCard where Accessory == EmptyView {
     }
 }
 
-/// A card with an eyebrow heading and an optional accessory on the right.
-/// With `title`, #1146's two-level head: the eyebrow over an h2, the
-/// accessory (a chip, a re-read link) top-right. With `action` the whole
-/// card is a button (Home's Missions and History).
+/// A card with one heading and an optional accessory beside it.
+/// A specific title replaces the category heading. With `action` the
+/// whole card is a button (Home's Missions and History).
 public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
     private let eyebrow: String
     private let title: String?
@@ -358,17 +399,12 @@ public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
     /// The heading, its accessory, and the content under them.
     private var stack: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            HStack(alignment: title == nil ? .center : .top, spacing: GlassTokens.Space.s6) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                    Text(eyebrow).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
-                    if let title {
-                        Text(title)
-                            .glassType(GlassTokens.TypeScale.title)
-                            .foregroundStyle(GlassColor.textPrimary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityAddTraits(.isHeader)
-                    }
-                }
+            HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+                Text(title ?? eyebrow)
+                    .glassType(title == nil ? GlassTokens.TypeScale.eyebrow : GlassTokens.TypeScale.title)
+                    .foregroundStyle(title == nil ? GlassColor.textTertiary : GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: GlassTokens.Space.s4)
                 accessory
             }

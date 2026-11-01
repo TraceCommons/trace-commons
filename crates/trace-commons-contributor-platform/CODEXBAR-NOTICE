@@ -1,0 +1,39 @@
+Claude credential parsing and no-data metadata query design references:
+https://github.com/steipete/CodexBar/tree/5f93dc3068b3bee3f8753f3772614cc2949c335d
+Sources/CodexBarCore/Providers/Claude/ClaudeOAuth/ClaudeOAuthCredentials.swift
+Sources/CodexBarCore/Providers/Claude/ClaudeOAuth/ClaudeOAuthCredentialModels.swift
+Sources/CodexBarCore/Providers/Claude/ClaudeConfigPaths.swift
+
+No-UI Keychain query and decrypt-ACL preflight design references:
+https://github.com/steipete/CodexBar/tree/897bff3
+Sources/CodexBarCore/KeychainNoUIQuery.swift
+Sources/CodexBarCore/KeychainAccessPreflight.swift
+
+A read without UI carries both the UI-fail policy and an LAContext with
+interactionNotAllowed, and runs only after the item's decrypt access list is
+found to admit this process's code signature. No token refresh, ACL change or
+preauthorization is implemented, and Claude Code's refresh token is never
+parsed, used or stored. Native Claude profile service selection was
+independently checked against the installed Claude Code 2.1.311 bundle.
+
+MIT License
+
+Copyright (c) 2026 Peter Steinberger
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -12,18 +12,47 @@ import TCShellCore
 /// Every label is a single word, a formatted number or date, a name the
 /// core reports, or the core's Monitor words (`MonitorTracesCopy`, the
 /// disclosure bundle's folder mode names) (`ShellWordingTests`).
-struct TracesTreeView: View {
+struct TracesTreeView: View, Equatable {
     let store: TracesStore
-    /// The missions switch, which a row's tags follow.
-    @EnvironmentObject private var model: AppModel
     /// The folder or session selected; nil for none.
     @Binding var selection: MonitorSelection?
+    /// `selection` when this view was made. The tree draws from it, and it
+    /// is what `==` compares: the binding reads the live value, so two
+    /// views would always compare equal through it.
+    private let selected: MonitorSelection?
+    /// The missions switch, which a row's tags follow. A value, not the
+    /// app model: every change the model published redrew the whole tree.
+    let missionsShown: Bool
     /// A session's Review pill: select it and show the inspector its review
     /// lives in, so Review is never a press that does nothing visible.
-    var onReview: (String) -> Void = { _ in }
+    var onReview: (String) -> Void
     /// Opens History on the Traces tab, from the button beside the order
     /// control (owner, 2026-10-12).
-    var openHistory: (() -> Void)? = nil
+    var openHistory: (() -> Void)?
+
+    init(
+        store: TracesStore, selection: Binding<MonitorSelection?>, missionsShown: Bool = false,
+        onReview: @escaping (String) -> Void = { _ in }, openHistory: (() -> Void)? = nil
+    ) {
+        self.store = store
+        _selection = selection
+        selected = selection.wrappedValue
+        self.missionsShown = missionsShown
+        self.onReview = onReview
+        self.openHistory = openHistory
+    }
+
+    /// Whether a new tree from the window draws anything this one does not.
+    /// The window makes a new one, with a new binding and new closures, on
+    /// every pass of its own; without this each pass rebuilt every row.
+    /// The closures it ignores act through the window's stored state, so an
+    /// older copy of them does the same.
+    nonisolated static func == (lhs: TracesTreeView, rhs: TracesTreeView) -> Bool {
+        MainActor.assumeIsolated {
+            lhs.store === rhs.store && lhs.selected == rhs.selected && lhs.missionsShown == rhs.missionsShown
+                && (lhs.openHistory == nil) == (rhs.openHistory == nil)
+        }
+    }
 
     /// The folders opened: every folder starts collapsed (#1146
     /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
@@ -34,28 +63,59 @@ struct TracesTreeView: View {
     /// closes by hand leaves this set and stays as they left it.
     @State private var searchOpened: Set<String> = []
     /// The selection last revealed, so a folder the person closes over a
-    /// selected session stays closed until the selection moves.
-    @State private var revealed: MonitorSelection?
+    /// selected session stays closed until the selection moves. Held in a
+    /// box SwiftUI does not watch: writing it is bookkeeping, and as plain
+    /// state it redrew the whole tree a second time on every click.
+    @State private var revealed = Revealed()
+
+    final class Revealed {
+        var selection: MonitorSelection?
+        /// A row to scroll to once the folder just opened for it is drawn:
+        /// the lazy stack has no such row until then.
+        var scrollTarget: String?
+    }
     /// A mode change waiting on the core's confirmation: arming always,
     /// ignoring when the folder has sessions waiting. It carries the core's
     /// words for that folder, decoded when the change was asked for.
     @State private var confirming: Confirmation?
-    /// The folder whose row menu (its contribution rule, and Ignore) is
-    /// open.
-    @State private var folderMenu: String?
+    /// The one row menu open, if any: a folder's "..." menu, a folder's
+    /// Submit split button's menu, or a session's menu. One value, so
+    /// opening a menu closes the others and every open or switch changes it.
+    @State private var rowMenu: RowMenu?
     /// The folder whose Submit all as is open, from its row's split
     /// button (owner, 2026-10-19).
     @State private var verdictFolder: TracesTree.FolderNode?
-    /// The folder whose Submit split button's menu is open.
-    @State private var submitMenu: String?
-    /// The session whose row menu (Dismiss session) is open.
-    @State private var sessionMenu: String?
     /// The session whose Dismiss confirmation is open (Ron's
     /// `SessionRow`): dismissing asks first, and only its button dismisses.
     @State private var dismissing: DaemonData.QueueEntry?
     /// VoiceOver's focus, which follows the selection the arrow keys move,
     /// so a person hearing the tree hears where it went.
     @AccessibilityFocusState private var spoken: String?
+    /// VoiceOver's focus on an open row menu. The menu floats over the
+    /// stack rather than inside its row, so it is read after the rows on
+    /// screen; focus goes to it when it opens, as it went to the row.
+    /// Keyed on the menu, not a Bool: a switch from one menu to another is
+    /// a new value, so focus moves again.
+    @AccessibilityFocusState private var menuSpoken: RowMenu?
+    /// Whether keeping the selection on screen animates. Off only where no
+    /// animation can run: a window that is never shown (the render tests).
+    @Environment(\.tracesScrollAnimates) private var scrollAnimates
+
+    /// A row menu, tagged with its kind and its row's id.
+    enum RowMenu: Hashable {
+        /// A folder's "..." menu: its contribution rule, and Ignore.
+        case folder(String)
+        /// A folder's Submit split button's menu: Submit all as.
+        case submit(String)
+        /// A session's menu: Dismiss session.
+        case session(String)
+    }
+
+    /// The menu open after a control for `menu` is pressed: that menu,
+    /// closing whichever was open, or none when it was the one open.
+    static func toggled(_ menu: RowMenu, current: RowMenu?) -> RowMenu? {
+        current == menu ? nil : menu
+    }
 
     struct Confirmation {
         let folder: TracesTree.FolderNode
@@ -126,6 +186,14 @@ struct TracesTreeView: View {
                 VStack(spacing: 0) {
                     TracesListControls(store: store, openHistory: openHistory)
                         .padding(.bottom, GlassTokens.Space.s2)
+                    if let automatic = automaticSwitch {
+                        SharingChoiceCard(asSwitch: automatic)
+                            .padding(.bottom, GlassTokens.Space.s2)
+                    }
+                    if automaticSwitch != nil, let tree = store.words?.tree,
+                        let folders = tree.columnFolders, let submit = tree.columnSubmit, let auto = tree.columnAutomatic {
+                        TracesColumnTitles(folders: folders, submit: submit, automatic: auto)
+                    }
                     tree
                 }
             }
@@ -173,13 +241,56 @@ struct TracesTreeView: View {
         Set(tree.folders.filter { !$0.sessions.isEmpty }.map(\.id))
     }
 
+    /// One row of the tree as drawn: a folder, or a session under an open
+    /// folder. Flat, so the lazy stack knows every row by the id
+    /// `scrollTo` and VoiceOver focus use, built or not.
+    enum DrawnRow: Identifiable, Equatable {
+        case folder(TracesTree.FolderNode)
+        /// `off`: under an ignored folder, so drawn off too (#1146).
+        case session(DaemonData.QueueEntry, off: Bool)
+
+        var id: String {
+            switch self {
+            case .folder(let folder): TracesTreeView.rowID(.folder(projectID: folder.id))
+            case .session(let entry, _): TracesTreeView.rowID(.session(entryID: entry.entryId))
+            }
+        }
+    }
+
+    /// The rows in drawing order: every folder, and the sessions of the
+    /// folders in `expanded`. The same order as `visibleRows`.
+    static func drawnRows(in tree: TracesTree, expanded: Set<String>) -> [DrawnRow] {
+        var rows: [DrawnRow] = []
+        for folder in tree.folders {
+            rows.append(.folder(folder))
+            if expanded.contains(folder.id) {
+                let off = folder.mode == .ignore
+                rows += folder.sessions.map { .session($0, off: off) }
+            }
+        }
+        return rows
+    }
+
     /// The folders and sessions, in their own scroll.
+    ///
+    /// Lazy: with a few hundred watched folders, building and laying out
+    /// every row took a fifth of a second each time the tab opened, and the
+    /// rows on screen are a few dozen. Each row is its own view of plain
+    /// values (`TracesFolderRow`, `TracesSessionRow`), so a click or a read
+    /// that changes one session rebuilds only the rows it changed. The row
+    /// menus float over the stack (`openMenus`), not inside a row, so they
+    /// draw over the rows below without a `zIndex` between lazy children.
     private var tree: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(spacing: 2) {
+                LazyVStack(spacing: 2) {
                     // The search narrows what is drawn, never the read.
-                    ForEach(store.shownTree.folders) { folderRows($0) }
+                    ForEach(Self.drawnRows(in: store.shownTree, expanded: expanded)) { row in
+                        switch row {
+                        case .folder(let folder): folderRow(folder)
+                        case .session(let entry, let off): sessionRow(entry, off: off)
+                        }
+                    }
                     if store.shownTree.folders.isEmpty, let none = store.words?.tree.searchNone {
                         Text(none)
                             .glassType(GlassTokens.TypeScale.body)
@@ -190,26 +301,42 @@ struct TracesTreeView: View {
                 }
                 // Folders are the top level: no tool level to indent past.
                 .environment(\.glassTreeRoot, .folder)
+                .overlayPreferenceValue(TracesMenuAnchors.self, alignment: .topLeading) { anchors in
+                    GeometryReader { space in openMenus(anchors, in: space) }
+                }
             }
             // The keyboard moves the selection; keep it on screen,
             // opening a session's folder if it was closed.
             .onChange(of: selection, initial: true) { _, selected in
-                reveal(selected)
+                let opened = reveal(selected)
                 guard let id = selected.map(Self.rowID) else { return }
-                withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
-                    proxy.scrollTo(id)
+                if opened {
+                    revealed.scrollTarget = id
+                } else {
+                    scroll(to: id, proxy)
                 }
-                spoken = id
+            }
+            .onChange(of: expanded) { _, _ in
+                guard let id = revealed.scrollTarget else { return }
+                revealed.scrollTarget = nil
+                scroll(to: id, proxy)
             }
         }
         .scrollIndicators(.never)
+        .onChange(of: rowMenu) { _, open in
+            guard open != nil else { return }
+            Task { @MainActor in menuSpoken = open }
+        }
         // A restored selection whose session arrives with a later
         // read is revealed then.
         .onChange(of: store.tree) { _, _ in
             reveal(selection)
             // The idle card's Review lists the sessions it named: their
             // folders open, so the list is the sessions, not closed folders.
-            if store.idleOnly { expanded.formUnion(Self.idleFolders(store.tree)) }
+            if store.idleOnly {
+                let open = expanded.union(Self.idleFolders(store.tree))
+                if open != expanded { expanded = open }
+            }
         }
         // A search opens the folders it matched, so the matches are rows,
         // not closed folders; clearing it closes what it opened. On the
@@ -236,6 +363,20 @@ struct TracesTreeView: View {
             onReview(entryID)
             return .handled
         }
+    }
+
+    /// Automatic for every folder, over the tree (owner, 2026-10-30): the
+    /// Settings choice as one switch, with its count. Nil without the
+    /// core's words.
+    private var automaticSwitch: SharingChoiceCard.Switch? {
+        guard let tree = store.words?.tree, let name = tree.automaticAll, let line = tree.automaticCount else {
+            return nil
+        }
+        let store = store
+        return SharingChoiceCard.Switch(
+            accessibleName: name,
+            line: SharingChoice.automaticCount(store.tree.folders, words: line),
+            saved: { await store.load() })
     }
 
     /// A mode change's confirmation, in the core's words for that folder.
@@ -298,6 +439,21 @@ struct TracesTreeView: View {
         Task { await store.setFolderMode(folder, mode, promised: folder.sessions.count) }
     }
 
+    /// A folder row's Automatic switch (owner, 2026-10-30): on at
+    /// Automatic, off at Ask, when the core offers the other; nil at Never
+    /// or for a folder the core lists no mode for. Turning it on arms the
+    /// folder through `modeChange`, so the core's arming question is asked.
+    nonisolated static func automaticSwitch(_ folder: TracesTree.FolderNode) -> Bool? {
+        // Traces with no project: a switch that stays off (owner,
+        // 2026-10-30); pressing it says why.
+        if folder.isBucket { return folder.mode == nil ? nil : false }
+        return switch folder.mode {
+        case .autoUpload: folder.offerableModes.contains(.ask) ? true : nil
+        case .ask: folder.offerableModes.contains(.autoUpload) ? false : nil
+        case .ignore, nil: nil
+        }
+    }
+
     static func status(_ mode: ProjectMode) -> GlassStatus {
         switch mode {
         case .ask: .ask
@@ -330,12 +486,28 @@ struct TracesTreeView: View {
         return expanded.union([folder])
     }
 
-    private func reveal(_ selected: MonitorSelection?) {
-        guard selected != revealed else { return }
+    /// Opens the folder of a selected session; true when that opened one.
+    @discardableResult
+    private func reveal(_ selected: MonitorSelection?) -> Bool {
+        guard selected != revealed.selection else { return false }
         // Wait for a session the tree does not hold yet.
-        if case .session(let entryID) = selected, Self.folder(of: entryID, in: store.shownTree) == nil { return }
-        expanded = Self.revealing(selected, in: store.shownTree, expanded: expanded)
-        revealed = selected
+        if case .session(let entryID) = selected, Self.folder(of: entryID, in: store.shownTree) == nil { return false }
+        revealed.selection = selected
+        // Written only when a folder opens: a write of the same set still
+        // redraws the tree.
+        let open = Self.revealing(selected, in: store.shownTree, expanded: expanded)
+        guard open != expanded else { return false }
+        expanded = open
+        return true
+    }
+
+    /// Keeps a row on screen. VoiceOver follows once the scroll has built
+    /// the row: a lazy row off screen does not exist until then.
+    private func scroll(to id: String, _ proxy: ScrollViewProxy) {
+        withAnimation(scrollAnimates ? GlassMotion.fast(GlassMotion.systemReducesMotion) : nil) {
+            proxy.scrollTo(id)
+        }
+        Task { @MainActor in spoken = id }
     }
 
     /// One step up or down from the current row; the top row when nothing
@@ -390,7 +562,7 @@ struct TracesTreeView: View {
     }
 
     /// The row id a selection scrolls to and VoiceOver focuses.
-    static func rowID(_ selected: MonitorSelection) -> String { selected.rawValue }
+    nonisolated static func rowID(_ selected: MonitorSelection) -> String { selected.rawValue }
 
     /// The folder holding a session.
     static func folder(of entryId: String, in tree: TracesTree) -> String? {
@@ -442,151 +614,99 @@ struct TracesTreeView: View {
         return lines
     }
 
-    /// Caption lines under a row, indented to its content.
-    @ViewBuilder
-    private func notes(_ lines: [String], depth: GlassListRow.Depth) -> some View {
-        if !lines.isEmpty {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                ForEach(lines, id: \.self) { line in
-                    Text(line)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        // #1146: tertiary, as a row's own sub line.
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            // #1146 `px-14`: 56 in from both sides.
-            .padding(.horizontal, Self.noteInset)
-            .padding(.bottom, GlassTokens.Space.s2)
-        }
-    }
-
     /// #1146's inset for the lines under a folder row (`px-14`).
     static let noteInset: CGFloat = 38
 
+    /// A folder row's values, worked out here and handed to its own view,
+    /// which is rebuilt only when one of them changes.
     @ViewBuilder
-    private func folderRows(_ folder: TracesTree.FolderNode) -> some View {
+    private func folderRow(_ folder: TracesTree.FolderNode) -> some View {
         let words = store.words
         let ignored = folder.mode == .ignore
         // Submit all is a consent action: drawn only when the shared table
         // offers Contribute for the daemon's counts, never for a folder that
         // is not sent, and removed rather than disabled. Submit all as is
-        // the Folder inspector's modal.
+        // the Folder inspector's modal. The offer was worked out with the
+        // read, off the main thread.
         let offer = store.groupOffer(folder)
         let submits = offer.offersContribute && store.mayContributeFolder(folder)
         let busy = store.submittingFolder == folder.id
-        // The switch and the Ignore menu need a mode the core listed and
-        // both ends of the switch among the modes it accepts.
-        let switchable = folder.mode != nil && folder.offerableModes.contains(.ask)
-            && folder.offerableModes.contains(.ignore)
+        // Ignore remains available when a global Automatic default removes
+        // the per-folder Ask choice.
+        let switchable = folder.mode != nil && folder.offerableModes.contains(.ignore)
         let ignorable = switchable && !ignored
         // The row menu holds the contribution rule (owner, 2026-10-19), the
         // Folder inspector's picker, whenever the core lists a mode and
         // offers others; and Ignore.
         let rulable = folder.mode != nil && !folder.offerableModes.isEmpty
         let menu = rulable || ignorable
+        let automatic = words?.tree.automaticFolder == nil ? nil : Self.automaticSwitch(folder)
         // Submit is the Folder inspector's split button (owner, 2026-10-19):
         // the action, and a chevron to Submit all as, when the core's
         // outcome words are read; else the plain pill.
         let outcome = store.disclosure?.outcome
         let split = submits && outcome != nil
         let submitWord: String? = words.map { busy ? $0.tree.submitting : Self.submitTitle(offer.count, words: $0) }
-        GlassListRow(
-            depth: .folder,
-            tile: .folder,
-            title: folder.label,
-            // The mode's word and the count waiting; an ignored folder says so.
-            sub: words.flatMap {
-                Self.folderSub(folder, words: $0, modeLabels: store.disclosure?.folderModeLabels ?? [:])
-            },
-            selected: selection == .folder(projectID: folder.id),
-            off: folder.mode == .ignore,
-            expanded: folder.sessions.isEmpty ? nil : isOpen(folder.id),
-            submitTitle: submits && !split ? submitWord : nil,
-            accessory: split ? AnyView(splitSubmit(folder, title: submitWord ?? "", busy: busy)) : nil,
-            // No watch switch on the row (owner, 2026-10-08): a folder's
-            // mode is in the row menu and the Folder inspector's picker.
-            expandLabel: folder.label,
-            menuLabel: menu ? words?.tree.folderMenu ?? "" : "",
-            menuOpen: folderMenu == folder.id,
-            onToggleExpand: { toggle(folder.id) },
-            onSelect: { selection = Self.toggled(.folder(projectID: folder.id), current: selection) },
-            onSubmit: submits && !busy ? { Task { await store.contributeFolder(folder, verdict: nil) } } : nil,
-            onMenu: menu ? {
-                submitMenu = nil
-                folderMenu = folderMenu == folder.id ? nil : folder.id
-            } : nil
-        )
-        .help(submits ? Self.submitHelp(offer.withheldLine, words: words) : "")
-        .disabled(store.writing.contains(folder.id))
-        // The row menu floats over the rows below it (#1146 `RowMenuPill`).
-        .overlay(alignment: .topTrailing) {
-            if menu, folderMenu == folder.id, let words {
-                TracesFolderMenu(
-                    folder: folder, ruleTitle: words.inspector.contributionRule,
-                    ignoreLabel: ignorable ? words.tree.ignoreFolder : nil,
-                    onRule: { mode in
-                        folderMenu = nil
-                        if mode != folder.mode { request(folder, mode) }
-                    },
-                    onIgnore: {
-                        folderMenu = nil
-                        request(folder, .ignore)
-                    },
-                    onDismiss: { folderMenu = nil })
-            } else if split, submitMenu == folder.id, let outcome {
-                TracesSubmitMenu(
-                    label: outcome.submitAllAs, tip: outcome.submitAllAsTooltip,
-                    onPick: {
-                        submitMenu = nil
-                        verdictFolder = folder
-                    },
-                    onDismiss: { submitMenu = nil })
-                    .offset(TracesSubmitMenu.offset)
-            }
-        }
-        .zIndex(folderMenu == folder.id || submitMenu == folder.id ? 1 : 0)
-        .id(Self.rowID(.folder(projectID: folder.id)))
-        .accessibilityFocused($spoken, equals: Self.rowID(.folder(projectID: folder.id)))
         // The withheld line is drawn once: the tab's notice may already say
         // it. #1146 puts the count Submit sends before it.
         let withheld: [String] = ignored
             ? [] : offer.withheldLine.flatMap {
                 $0 == store.folderNotice ? nil : [Self.withheldNote($0, eligible: offer.count, words: words)]
             } ?? []
-        notes(folderNotes(folder) + withheld, depth: .folder)
-        if isOpen(folder.id) {
-            // #1146: a session under an ignored folder is drawn off too.
-            ForEach(folder.sessions) { sessionRow($0, off: ignored) }
-        }
-    }
-
-    /// A folder row's Submit as the Folder inspector's split button (owner,
-    /// 2026-10-19): Submit all, and a chevron to Submit all as.
-    @ViewBuilder
-    private func splitSubmit(_ folder: TracesTree.FolderNode, title: String, busy: Bool) -> some View {
-        if let outcome = store.disclosure?.outcome {
-            GlassSplitButton(
-                title, menuLabel: outcome.submitAllAs, menuOpen: submitMenu == folder.id,
-                onMenu: {
-                    folderMenu = nil
-                    submitMenu = submitMenu == folder.id ? nil : folder.id
+        // A write to this folder in flight: the row dims and turns its
+        // controls off at once, and says nothing else until the daemon
+        // answers and the read redraws it.
+        let writing = store.writing.contains(folder.id)
+        TracesFolderRow(
+            folder: folder,
+            // The mode's word and the count waiting; an ignored folder says so.
+            sub: words.flatMap {
+                Self.folderSub(folder, words: $0, modeLabels: store.disclosure?.folderModeLabels ?? [:])
+            },
+            selected: selected == .folder(projectID: folder.id),
+            off: folder.mode == .ignore,
+            open: isOpen(folder.id),
+            submitTitle: submits && !split ? submitWord : nil,
+            split: split ? TracesFolderRow.Split(
+                title: submitWord ?? "", menuLabel: outcome?.submitAllAs ?? "",
+                menuOpen: rowMenu == .submit(folder.id), busy: busy) : nil,
+            menuLabel: menu ? words?.tree.folderMenu ?? "" : "",
+            menuOpen: rowMenu == .folder(folder.id),
+            automatic: automatic,
+            automaticLabel: words?.tree.automaticFolder.map { $0.replacingOccurrences(of: "{label}", with: folder.label) } ?? "",
+            floats: (menu && rowMenu == .folder(folder.id)) || (split && rowMenu == .submit(folder.id)),
+            help: submits ? Self.submitHelp(offer.withheldLine, words: words) : "",
+            writing: writing,
+            // The pill already says Submitting for a Submit all.
+            spins: writing && !busy,
+            notes: folderNotes(folder) + withheld,
+            onToggleExpand: { toggle(folder.id) },
+            onSelect: { selection = Self.toggled(.folder(projectID: folder.id), current: selection) },
+            onSubmit: submits && !busy ? { Task { await store.contributeFolder(folder, verdict: nil) } } : nil,
+            onSplitSubmit: { Task { await store.contributeFolder(folder, verdict: nil) } },
+            onSplitMenu: { rowMenu = Self.toggled(.submit(folder.id), current: rowMenu) },
+            onMenu: menu ? { rowMenu = Self.toggled(.folder(folder.id), current: rowMenu) } : nil,
+            onAutomatic: { on in
+                if folder.isBucket {
+                    if on, let note = ProjectCopy.unresolvedBucketNote { store.say(note) }
+                } else {
+                    request(folder, on ? .autoUpload : .ask)
                 }
-            ) {
-                Task { await store.contributeFolder(folder, verdict: nil) }
-            }
-            .disabled(busy)
-        }
+            },
+            spoken: $spoken
+        )
+        .equatable()
+        .id(Self.rowID(.folder(projectID: folder.id)))
     }
 
+    /// A session row's values, worked out here and handed to its own view.
     @ViewBuilder
     private func sessionRow(_ entry: DaemonData.QueueEntry, off: Bool) -> some View {
         let words = store.words
-        let selected = selection == .session(entryID: entry.entryId)
+        let selected = self.selected == .session(entryID: entry.entryId)
         let lines = store.lines(entry)
-        GlassListRow(
-            depth: .session,
+        TracesSessionRow(
+            entry: entry,
             tile: Self.sessionTile(entry),
             title: Self.when(entry),
             sub: Self.sub(entry, held: words?.held, ineligible: lines.ineligible,
@@ -594,37 +714,101 @@ struct TracesTreeView: View {
             flag: Self.flag(entry, ineligible: lines.ineligible != nil, attestation: lines.tone),
             selected: selected,
             off: off,
-            // D10 default: a session's pill opens its review. Focus roves:
-            // only the selected row's pill is a tab stop; Return opens it.
-            submitTitle: selected ? words?.tree.reviewing : words?.review,
-            submitFocusable: selected,
+            // A review action on it in flight (Contribute, Keep, Dismiss):
+            // dimmed, its pill off and turning, until the daemon answers.
+            acting: store.acting.contains(entry.entryId),
+            // A session's pill is Submit (owner, 2026-10-22, in place of
+            // D10's Review): it sends the trace at once, as a folder's
+            // Submit does, and is drawn turned off while it cannot be sent.
+            // Focus roves: only the selected row's pill is a tab stop;
+            // Return still opens the session's review.
+            pill: words?.tree.submit,
             menuLabel: words?.tree.dismissSession ?? "",
-            menuOpen: sessionMenu == entry.entryId,
+            menuOpen: rowMenu == .session(entry.entryId),
+            help: words?.tree.submitTraceTip ?? "",
+            // The tool's name for VoiceOver: the tile shows it, the sub line
+            // (#1146's size and state) does not.
+            toolName: Self.toolName(entry) ?? "",
+            // The core's tags for the row: a mission it fits, and its
+            // estimate only while the daemon says to draw it. The mission
+            // tag is blanked while missions are hidden; the estimate keeps
+            // its own switch.
+            tags: store.rowTags[entry.entryId].map { $0.showing(missions: missionsShown) },
             onSelect: { selection = Self.toggled(.session(entryID: entry.entryId), current: selection) },
-            onSubmit: { onReview(entry.entryId) },
-            onMenu: { sessionMenu = sessionMenu == entry.entryId ? nil : entry.entryId }
+            onSubmit: store.maySubmitSession(entry, folderIgnored: off)
+                ? { Task { await store.submitSession(entry, folderIgnored: off) } } : nil,
+            onMenu: { rowMenu = Self.toggled(.session(entry.entryId), current: rowMenu) },
+            spoken: $spoken
         )
-        .help(words?.tree.reviewTip ?? "")
-        // The tool's name for VoiceOver: the tile shows it, the sub line
-        // (#1146's size and state) does not.
-        .accessibilityHint(Self.toolName(entry) ?? "")
-        .overlay(alignment: .topTrailing) {
-            if sessionMenu == entry.entryId, let label = words?.tree.dismissSession {
-                TracesRowMenuPill(label, onDismiss: { sessionMenu = nil }) {
-                    sessionMenu = nil
-                    dismissing = entry
-                }
-            }
-        }
-        .zIndex(sessionMenu == entry.entryId ? 1 : 0)
+        .equatable()
         .id(Self.rowID(.session(entryID: entry.entryId)))
-        .accessibilityFocused($spoken, equals: Self.rowID(.session(entryID: entry.entryId)))
-        // The core's tags for the row: a mission it fits, and its estimate
-        // only while the daemon says to draw it.
-        if let tags = store.rowTags[entry.entryId] {
-            // The mission tag is blanked while missions are hidden; the
-            // estimate keeps its own switch.
-            NudgeRowTags(tags: tags.showing(missions: model.missionsShown))
+    }
+
+    /// The open row menus, floated over the tree at their rows (#1146
+    /// `RowMenuPill`: under the row's kebab, over the rows below it, never
+    /// pushing them down). A row publishes its bounds only while its menu
+    /// is open (`TracesMenuAnchors`).
+    @ViewBuilder
+    private func openMenus(_ anchors: [String: Anchor<CGRect>], in space: GeometryProxy) -> some View {
+        if let open = rowMenu, let id = Self.folderID(of: open),
+           let anchor = anchors[Self.rowID(.folder(projectID: id))],
+           let folder = store.shownTree.folders.first(where: { $0.id == id }) {
+            let rect = space[anchor]
+            folderMenus(folder)
+                .accessibilityElement(children: .contain)
+                .accessibilityFocused($menuSpoken, equals: open)
+                .frame(width: rect.width, height: rect.height, alignment: .topTrailing)
+                .offset(x: rect.minX, y: rect.minY)
+        }
+        if case .session(let id) = rowMenu,
+           let anchor = anchors[Self.rowID(.session(entryID: id))],
+           let label = store.words?.tree.dismissSession,
+           let entry = store.shownTree.allSessions.first(where: { $0.entryId == id }) {
+            let rect = space[anchor]
+            TracesRowMenuPill(label, onDismiss: { rowMenu = nil }) {
+                rowMenu = nil
+                dismissing = entry
+            }
+            .accessibilityFocused($menuSpoken, equals: .session(id))
+            .frame(width: rect.width, height: rect.height, alignment: .topTrailing)
+            .offset(x: rect.minX, y: rect.minY)
+        }
+    }
+
+    /// The folder whose menu is open, for either of a folder row's menus.
+    static func folderID(of menu: RowMenu) -> String? {
+        switch menu {
+        case .folder(let id), .submit(let id): id
+        case .session: nil
+        }
+    }
+
+    /// A folder row's open menu: its rule and Ignore, or Submit all as.
+    @ViewBuilder
+    private func folderMenus(_ folder: TracesTree.FolderNode) -> some View {
+        let ignorable = folder.mode != nil && folder.offerableModes.contains(.ignore) && folder.mode != .ignore
+        if rowMenu == .folder(folder.id), let words = store.words {
+            TracesFolderMenu(
+                folder: folder, ruleTitle: words.inspector.contributionRule,
+                ignoreLabel: ignorable ? words.tree.ignoreFolder : nil,
+                onRule: { mode in
+                    rowMenu = nil
+                    if mode != folder.mode { request(folder, mode) }
+                },
+                onIgnore: {
+                    rowMenu = nil
+                    request(folder, .ignore)
+                },
+                onDismiss: { rowMenu = nil })
+        } else if rowMenu == .submit(folder.id), let outcome = store.disclosure?.outcome {
+            TracesSubmitMenu(
+                label: outcome.submitAllAs, tip: outcome.submitAllAsTooltip,
+                onPick: {
+                    rowMenu = nil
+                    verdictFolder = folder
+                },
+                onDismiss: { rowMenu = nil })
+                .offset(TracesSubmitMenu.offset)
         }
     }
 
@@ -667,7 +851,7 @@ struct TracesTreeView: View {
 
     // MARK: Formatting
 
-    static func glassTool(_ kind: SourceKind) -> GlassTool {
+    nonisolated static func glassTool(_ kind: SourceKind) -> GlassTool {
         kind.glassTool
     }
 
@@ -803,6 +987,259 @@ struct TracesTreeView: View {
     }
 }
 
+extension EnvironmentValues {
+    /// See `TracesTreeView.scrollAnimates`.
+    @Entry var tracesScrollAnimates = true
+}
+
+/// The bounds of the rows whose menu is open, by row id, so the tree
+/// floats the menu over the rows below at its row (`openMenus`).
+struct TracesMenuAnchors: PreferenceKey {
+    static var defaultValue: [String: Anchor<CGRect>] { [:] }
+
+    static func reduce(value: inout [String: Anchor<CGRect>], nextValue: () -> [String: Anchor<CGRect>]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+/// How much a row with a write or review action in flight is dimmed.
+/// Not `rowOff`, which says a folder is ignored.
+enum TracesRowBusy {
+    static let opacity = GlassTokens.Opacity.disabledCheck
+}
+
+/// A folder row of the Traces tree, and the lines under it. Every value it
+/// draws is a field, and `==` compares them all, so SwiftUI rebuilds it
+/// only when one changes; the actions are left out of `==`, since each
+/// acts on the folder (compared) through the tree's stored state.
+struct TracesFolderRow: View, Equatable {
+    /// The split button's state (owner, 2026-10-19).
+    struct Split: Equatable {
+        let title: String
+        let menuLabel: String
+        let menuOpen: Bool
+        let busy: Bool
+    }
+
+    let folder: TracesTree.FolderNode
+    let sub: String?
+    let selected: Bool
+    let off: Bool
+    let open: Bool
+    let submitTitle: String?
+    let split: Split?
+    let menuLabel: String
+    let menuOpen: Bool
+    /// The folder's Automatic switch beside Submit (owner, 2026-10-30): on
+    /// for Automatic, off for Ask; nil for a folder it cannot switch
+    /// (Never, or a mode the core does not offer). Its accessible name.
+    let automatic: Bool?
+    let automaticLabel: String
+    /// One of this row's menus is open: it publishes its bounds for it.
+    let floats: Bool
+    let help: String
+    let writing: Bool
+    let spins: Bool
+    let notes: [String]
+    let onToggleExpand: () -> Void
+    let onSelect: () -> Void
+    let onSubmit: (() -> Void)?
+    let onSplitSubmit: () -> Void
+    let onSplitMenu: () -> Void
+    let onMenu: (() -> Void)?
+    let onAutomatic: (Bool) -> Void
+    /// The tree's VoiceOver focus, put on the `GlassListRow`: the element
+    /// VoiceOver lands on, an accessibility container. Left out of `==`:
+    /// it is the same focus state for every row.
+    let spoken: AccessibilityFocusState<String?>.Binding
+
+    /// SwiftUI compares views on the main thread.
+    nonisolated static func == (lhs: TracesFolderRow, rhs: TracesFolderRow) -> Bool {
+        MainActor.assumeIsolated {
+            lhs.folder == rhs.folder && lhs.sub == rhs.sub && lhs.selected == rhs.selected && lhs.off == rhs.off
+                && lhs.open == rhs.open && lhs.submitTitle == rhs.submitTitle && lhs.split == rhs.split
+                && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen && lhs.automatic == rhs.automatic
+                && lhs.automaticLabel == rhs.automaticLabel && lhs.floats == rhs.floats
+                && lhs.help == rhs.help && lhs.writing == rhs.writing && lhs.spins == rhs.spins && lhs.notes == rhs.notes
+                && (lhs.onSubmit == nil) == (rhs.onSubmit == nil) && (lhs.onMenu == nil) == (rhs.onMenu == nil)
+        }
+    }
+
+    var body: some View {
+        #if DEBUG
+        let _ = TracesRowBodies.folders += 1
+        let _ = TracesRowBodies.built.insert(TracesTreeView.rowID(.folder(projectID: folder.id)))
+        #endif
+        VStack(spacing: 2) {
+            GlassListRow(
+                depth: .folder,
+                tile: .folder,
+                title: folder.label,
+                sub: sub,
+                selected: selected,
+                off: off,
+                expanded: folder.sessions.isEmpty ? nil : open,
+                submitTitle: submitTitle,
+                submitHelp: help,
+                accessory: accessory,
+                // The Automatic switch is on the row again (owner,
+                // 2026-10-30), beside Submit; Never stays in the row menu.
+                expandLabel: folder.label,
+                menuLabel: menuLabel,
+                menuOpen: menuOpen,
+                onToggleExpand: onToggleExpand,
+                onSelect: onSelect,
+                onSubmit: onSubmit,
+                onMenu: onMenu
+            )
+            .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.folder(projectID: folder.id)))
+            // Spoken, not a hover tip: the pill carries that, and VoiceOver
+            // lands on the row, so the core's withheld sentence is heard here.
+            .accessibilityHint(help)
+            .disabled(writing)
+            .opacity(writing ? TracesRowBusy.opacity : 1)
+            .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
+                floats ? [TracesTreeView.rowID(.folder(projectID: folder.id)): $0] : [:]
+            }
+            if !notes.isEmpty {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                    ForEach(notes, id: \.self) { line in
+                        Text(line)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            // #1146: tertiary, as a row's own sub line.
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // #1146 `px-14`: 56 in from both sides.
+                .padding(.horizontal, TracesTreeView.noteInset)
+                .padding(.bottom, GlassTokens.Space.s2)
+            }
+        }
+    }
+
+    /// The row's Submit as the Folder inspector's split button (owner,
+    /// 2026-10-19): Submit all, and a chevron to Submit all as; the
+    /// spinner while a mode change is in flight; and the Automatic switch
+    /// after them (owner, 2026-10-30).
+    private var accessory: AnyView? {
+        guard split != nil || spins || automatic != nil else { return nil }
+        return AnyView(HStack(spacing: GlassTokens.Space.s3) {
+            if spins { GlassSpinner() }
+            if let split {
+                GlassSplitButton(split.title, menuLabel: split.menuLabel, menuOpen: split.menuOpen, onMenu: onSplitMenu) {
+                    onSplitSubmit()
+                }
+                .actionHelp(help)
+                .disabled(split.busy)
+            }
+            if let automatic {
+                Toggle(automaticLabel, isOn: Binding(get: { automatic }, set: { onAutomatic($0) }))
+                    .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
+                    .help(automaticLabel)
+            } else {
+                // A row with no switch (Traces with no project) keeps its
+                // place, so every Submit lines up.
+                Color.clear
+                    .frame(width: GlassTokens.Size.watchSwitchWidth, height: 1)
+                    .accessibilityHidden(true)
+            }
+        })
+    }
+}
+
+/// A session row of the Traces tree, and the core's tags under it. As
+/// `TracesFolderRow`: every value drawn is a field `==` compares.
+struct TracesSessionRow: View, Equatable {
+    let entry: DaemonData.QueueEntry
+    let tile: GlassToolTile.Kind
+    let title: String
+    let sub: String?
+    let flag: GlassListRow.Flag?
+    let selected: Bool
+    let off: Bool
+    let acting: Bool
+    let pill: String?
+    let menuLabel: String
+    let menuOpen: Bool
+    let help: String
+    let toolName: String
+    let tags: NudgeEntryTags?
+    let onSelect: () -> Void
+    /// Nil while the session cannot be sent: the pill is drawn turned off.
+    let onSubmit: (() -> Void)?
+    let onMenu: () -> Void
+    /// As `TracesFolderRow.spoken`.
+    let spoken: AccessibilityFocusState<String?>.Binding
+
+    nonisolated static func == (lhs: TracesSessionRow, rhs: TracesSessionRow) -> Bool {
+        MainActor.assumeIsolated {
+            lhs.entry == rhs.entry && lhs.tile == rhs.tile && lhs.title == rhs.title && lhs.sub == rhs.sub
+                && lhs.flag == rhs.flag && lhs.selected == rhs.selected && lhs.off == rhs.off && lhs.acting == rhs.acting
+                && lhs.pill == rhs.pill && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen
+                && lhs.help == rhs.help && lhs.toolName == rhs.toolName && lhs.tags == rhs.tags
+                && (lhs.onSubmit == nil) == (rhs.onSubmit == nil)
+        }
+    }
+
+    var body: some View {
+        #if DEBUG
+        let _ = TracesRowBodies.sessions += 1
+        let _ = TracesRowBodies.built.insert(TracesTreeView.rowID(.session(entryID: entry.entryId)))
+        #endif
+        VStack(spacing: 2) {
+            GlassListRow(
+                depth: .session,
+                tile: tile,
+                title: title,
+                sub: sub,
+                flag: flag,
+                selected: selected,
+                off: off,
+                submitTitle: pill,
+                submitHelp: help,
+                submitFocusable: selected && !acting,
+                accessory: acting ? AnyView(GlassSpinner()) : nil,
+                menuLabel: menuLabel,
+                menuOpen: menuOpen,
+                onSelect: onSelect,
+                onSubmit: acting ? nil : onSubmit,
+                onMenu: acting ? nil : onMenu
+            )
+            .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.session(entryID: entry.entryId)))
+            .opacity(acting ? TracesRowBusy.opacity : 1)
+            .accessibilityHint(toolName)
+            .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
+                menuOpen ? [TracesTreeView.rowID(.session(entryID: entry.entryId)): $0] : [:]
+            }
+            if let tags {
+                NudgeRowTags(tags: tags)
+            }
+        }
+    }
+}
+
+#if DEBUG
+/// How many times the tree's rows were built. For tests: a selection
+/// change or a reload that changes one session rebuilds only the rows it
+/// changed, and the rows off screen are not built at all.
+@MainActor
+enum TracesRowBodies {
+    static var folders = 0
+    static var sessions = 0
+    /// The rows built since the last reset, by row id.
+    static var built: Set<String> = []
+    static var total: Int { folders + sessions }
+
+    static func reset() {
+        folders = 0
+        sessions = 0
+        built = []
+    }
+}
+#endif
+
 /// The inspector's one preview, keyed by the session it was asked for. A
 /// result for any other session -- one that was selected, then left before
 /// its blocking `preview` returned -- is refused, so it can never be shown,
@@ -870,13 +1307,19 @@ struct TracesMenuPanel<Content: View>: View {
     }
 }
 
-/// One item in a `TracesMenuPanel`: its glyph and the core's words.
+/// One item in a `TracesMenuPanel`: its glyph and the core's words. Under
+/// the pointer it takes the menu's own highlight, the accent with the
+/// menu's hover ink, as every menu row does (owner, 2026-10-22: the control
+/// hover, a dark well, all but vanished on the dark menu).
 struct TracesMenuItem: View {
     let systemImage: String
     let label: String
     let action: () -> Void
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
+        let lit = GlassHover.shows(hovering: hovering, enabled: isEnabled)
         Button(action: action) {
             HStack(spacing: GlassTokens.Space.s3) {
                 Image(systemName: systemImage)
@@ -886,12 +1329,23 @@ struct TracesMenuItem: View {
                     .glassType(GlassTokens.TypeScale.label)
                     .lineLimit(1)
             }
-            .foregroundStyle(GlassColor.textPrimary)
+            .foregroundStyle(TracesMenuHighlight.ink(lit: lit).color)
             .padding(.horizontal, GlassTokens.Space.s4)
             .frame(height: GlassTokens.Size.control)
-            .glassHover(GlassTokens.Color.controlHover, in: Capsule())
+            .glassHover(TracesMenuHighlight.fill, in: Capsule())
+            .onHover { hovering = $0 }
         }
         .buttonStyle(GlassPressStyle())
+    }
+}
+
+/// A Traces menu row's highlight under the pointer: the menu's own, as
+/// `GlassMenuItem` draws it.
+enum TracesMenuHighlight {
+    static let fill = GlassTokens.Color.menuHover
+
+    static func ink(lit: Bool) -> GlassRGBA {
+        lit ? GlassTokens.Color.menuHoverText : GlassTokens.Color.textPrimary
     }
 }
 
@@ -961,6 +1415,7 @@ struct TracesRowMenuPill: View {
     private let onDismiss: () -> Void
     private let action: () -> Void
     @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
 
     /// Where it sits under the row (#1146 `top-[38px] right-1.5`).
     static let offset = CGSize(width: -6, height: 38)
@@ -981,10 +1436,11 @@ struct TracesRowMenuPill: View {
                     .glassType(GlassTokens.TypeScale.label)
                     .lineLimit(1)
             }
-            .foregroundStyle(GlassColor.textPrimary)
+            .foregroundStyle(TracesMenuHighlight.ink(lit: GlassHover.shows(hovering: hovering, enabled: isEnabled)).color)
             .padding(.horizontal, GlassTokens.Space.s6)
             .frame(height: GlassTokens.Size.control)
-            .glassHover(GlassTokens.Color.controlHover, in: Capsule())
+            .glassHover(TracesMenuHighlight.fill, in: Capsule())
+            .onHover { hovering = $0 }
             .glassSurface(.menu, radius: GlassTokens.Radius.pill, floating: true)
             .fixedSize()
         }
@@ -995,3 +1451,37 @@ struct TracesRowMenuPill: View {
     }
 }
 
+/// The titles over the tree's columns while the Automatic switches show
+/// (owner, 2026-10-30, Proposal A): the folders at the left, Submit, and
+/// Auto over the rows' switches. Decorative: each control has its own
+/// accessible name, so the titles are hidden from assistive tech.
+struct TracesColumnTitles: View {
+    let folders: String
+    let submit: String
+    let automatic: String
+
+    var body: some View {
+        HStack(spacing: GlassTokens.Space.s4) {
+            Text(folders)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // Submit and the switch sit 6pt apart in the row's accessory;
+            // the switch ends it, before the row menu's 22pt column and the
+            // row's 6pt trailing inset. Submit's title is centred over the
+            // usual split button, "Submit all (n)" and its chevron.
+            HStack(spacing: GlassTokens.Space.s3) {
+                Text(submit)
+                    .frame(minWidth: 128)
+                Text(automatic)
+                    .frame(width: GlassTokens.Size.watchSwitchWidth)
+            }
+            Color.clear.frame(width: 22, height: 0)
+        }
+        .glassType(GlassTokens.TypeScale.eyebrow)
+        .foregroundStyle(GlassColor.textTertiary)
+        .lineLimit(1)
+        .padding(.leading, 8)
+        .padding(.trailing, 6)
+        .padding(.bottom, GlassTokens.Space.s2)
+        .accessibilityHidden(true)
+    }
+}

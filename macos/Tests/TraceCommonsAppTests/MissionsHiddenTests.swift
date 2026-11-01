@@ -106,10 +106,16 @@ final class MissionsHiddenTests: XCTestCase {
     }
 
     func test_theEdgeRailAndTracesGateTheirMissionSurfaces() throws {
+        // The rail's Missions card was in its Home peek, which is gone
+        // (owner, 2026-10-22): the rail draws no Missions surface at all.
         let rail = try Self.source("Views/EdgeRail/EdgeRailView.swift")
-        XCTAssertTrue(rail.contains("if model.missionsShown {\n                headCard(\n"
-            + "                    systemImage: HomeOverviewIcons.missions,"))
+        XCTAssertFalse(rail.contains("HomeOverviewIcons.missions"), "the rail draws Missions again")
+        XCTAssertFalse(rail.contains("MonitorWords.missions"))
         let traces = try Self.source("Views/Monitor/TracesViews.swift")
-        XCTAssertTrue(traces.contains("NudgeRowTags(tags: tags.showing(missions: model.missionsShown))"))
+        let window = try Self.source("Views/MonitorWindowView.swift")
+        // The tree takes the switch as a value (no app model in the tree,
+        // whose every publish redrew each row); its rows blank the tag.
+        XCTAssertTrue(traces.contains("tags: store.rowTags[entry.entryId].map { $0.showing(missions: missionsShown) }"))
+        XCTAssertTrue(window.contains("missionsShown: model.missionsShown,"))
     }
 }
