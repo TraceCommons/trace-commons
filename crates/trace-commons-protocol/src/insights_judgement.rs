@@ -344,9 +344,11 @@ impl JudgementRefusalBody {
     /// [`JUDGEMENT_RESET_AT_SKEW_SECS`] of `now_unix`, and otherwise the
     /// next month start by the client's own clock. A believed month start
     /// the client's clock has already passed (a service clock behind, just
-    /// before the turn of the month) is `now_unix`: the reset has happened,
-    /// so the client may retry now. `None` for a refusal without
-    /// `reset_at`.
+    /// before the turn of the month) is `now_unix` plus
+    /// [`JUDGEMENT_SATURATED_RETRY_AFTER_SECS`]: the reset has happened by
+    /// the client's clock, but a service still behind refuses again with
+    /// the same `reset_at`, so each retry waits that long rather than
+    /// looping. `None` for a refusal without `reset_at`.
     ///
     /// Refusal bodies are not signed. Without this a forged or broken month
     /// start such as 2099-01-01 would turn an account's judgements off for
@@ -362,7 +364,10 @@ impl JudgementRefusalBody {
             .checked_add(JUDGEMENT_RESET_AT_SKEW_SECS)
             .and_then(next);
         if earliest == Some(sent) || latest == Some(sent) {
-            return Some(sent.max(now_unix));
+            if sent > now_unix {
+                return Some(sent);
+            }
+            return now_unix.checked_add(i64::from(JUDGEMENT_SATURATED_RETRY_AFTER_SECS));
         }
         next(now_unix)
     }
@@ -421,6 +426,17 @@ fn parse_closed<T: serde::de::DeserializeOwned>(
     bytes: &[u8],
     array_fields: &[&str],
 ) -> Result<T, ()> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ())?;
+    parse_closed_value(&value, bytes, array_fields)
+}
+
+/// [`parse_closed`] for a caller that has already parsed `bytes` into
+/// `value`: the shape walk runs on `value`, the struct parse on `bytes`.
+fn parse_closed_value<T: serde::de::DeserializeOwned>(
+    value: &serde_json::Value,
+    bytes: &[u8],
+    array_fields: &[&str],
+) -> Result<T, ()> {
     fn objects_only(value: &serde_json::Value, array_fields: &[&str]) -> bool {
         match value {
             serde_json::Value::Object(map) => map.iter().all(|(name, field)| match field {
@@ -436,14 +452,40 @@ fn parse_closed<T: serde::de::DeserializeOwned>(
             _ => true,
         }
     }
-    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ())?;
-    if !value.is_object() || !objects_only(&value, array_fields) {
+    if !value.is_object() || !objects_only(value, array_fields) {
         return Err(());
     }
     // The walk is the shape check only. Deserialize from the bytes, not the
     // `Value`: a `Value` keeps the last of duplicate keys, where the derived
     // struct parse refuses them.
     serde_json::from_slice(bytes).map_err(|_| ())
+}
+
+/// Whether `bytes` is a JSON object that names each top-level key once.
+fn top_level_keys_unique(bytes: &[u8]) -> bool {
+    struct Keys;
+    impl<'de> serde::de::Visitor<'de> for Keys {
+        type Value = bool;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            let mut seen = std::collections::BTreeSet::new();
+            let mut unique = true;
+            while let Some(key) = map.next_key::<String>()? {
+                map.next_value::<serde::de::IgnoredAny>()?;
+                unique &= seen.insert(key);
+            }
+            Ok(unique)
+        }
+    }
+    struct Unique(bool);
+    impl<'de> Deserialize<'de> for Unique {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_map(Keys).map(Unique)
+        }
+    }
+    serde_json::from_slice::<Unique>(bytes).is_ok_and(|unique| unique.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1992,8 +2034,11 @@ impl TurnDigest {
         let recent = |keep: fn(&TurnCall) -> bool| {
             u32::try_from(self.recent.iter().filter(|call| keep(call)).count()).unwrap_or(u32::MAX)
         };
-        if self.digest_version != TURN_DIGEST_VERSION {
+        if self.digest_version > TURN_DIGEST_VERSION {
             return Err(JudgementWireError::WireVersionUnsupported);
+        }
+        if self.digest_version != TURN_DIGEST_VERSION {
+            return Err(JudgementWireError::Malformed("turn_digest"));
         }
         if !(within(self.edits, self.calls)
             && within(self.failures, self.calls)
@@ -2058,13 +2103,20 @@ impl TurnDigest {
             .and_then(serde_json::Value::as_u64)
             .ok_or(malformed)?;
         if version > u64::from(TURN_DIGEST_VERSION) {
+            // A `Value` keeps the last of duplicate keys, so a current
+            // digest with a later `digest_version` appended would read as
+            // later. Only one that names its version once is.
+            if !top_level_keys_unique(bytes) {
+                return Err(malformed);
+            }
             return Err(JudgementWireError::WireVersionUnsupported);
         }
         if version != u64::from(TURN_DIGEST_VERSION) {
             return Err(malformed);
         }
-        let digest: Self = parse_closed(bytes, &["recent"])
-            .map_err(|_| JudgementWireError::Malformed("turn_digest"))?;
+        // The same `Value` serves the shape walk; the struct parse from the
+        // bytes refuses duplicate keys.
+        let digest: Self = parse_closed_value(&value, bytes, &["recent"]).map_err(|_| malformed)?;
         digest.check()?;
         Ok(digest)
     }
@@ -2118,6 +2170,19 @@ mod turn_digest_tests {
         );
     }
 
+    /// A failed check followed by an edit, with `last_check_failed` false,
+    /// is a valid digest: the edit came after it, so no check has run since.
+    #[test]
+    fn an_edit_after_the_last_check_means_none_failed() {
+        let edited = TurnDigest {
+            last_check_failed: false,
+            recent: vec![digest().recent[1], digest().recent[0]],
+            ..digest()
+        };
+        let bytes = edited.to_bytes().unwrap();
+        assert_eq!(TurnDigest::parse(&bytes).unwrap(), edited);
+    }
+
     #[test]
     fn a_turn_digest_is_closed_and_consistent() {
         let bytes = digest().to_bytes().unwrap();
@@ -2141,6 +2206,33 @@ mod turn_digest_tests {
         earlier["digest_version"] = serde_json::json!(0);
         let mut text = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
         text["digest_version"] = serde_json::json!("2");
+        // A current digest with a later version appended as a duplicate key
+        // is malformed, not later.
+        let mut duplicate = bytes.clone();
+        duplicate.pop();
+        duplicate.extend_from_slice(br#","digest_version":2}"#);
+        assert_eq!(
+            TurnDigest::parse(&duplicate),
+            Err(JudgementWireError::Malformed("turn_digest"))
+        );
+        // `check` agrees with `parse`: earlier is malformed, later is
+        // unsupported.
+        assert_eq!(
+            TurnDigest {
+                digest_version: 0,
+                ..digest()
+            }
+            .to_bytes(),
+            Err(JudgementWireError::Malformed("turn_digest"))
+        );
+        assert_eq!(
+            TurnDigest {
+                digest_version: TURN_DIGEST_VERSION + 1,
+                ..digest()
+            }
+            .to_bytes(),
+            Err(JudgementWireError::WireVersionUnsupported)
+        );
         for broken in [
             b"[2]".to_vec(),
             b"[1]".to_vec(),
@@ -2277,6 +2369,8 @@ mod turn_digest_tests {
                 recent: vec![digest().recent[1], digest().recent[0]],
                 ..digest()
             },
+            // The same edit-last order with last_check_failed false is
+            // valid; see `an_edit_after_the_last_check_means_none_failed`.
         ] {
             assert_eq!(
                 broken.to_bytes(),
@@ -2705,7 +2799,9 @@ mod tests {
     }
 
     /// `reset_at` is acted on only as the next month start by the client's
-    /// clock, give or take the skew; anything else is clamped to it.
+    /// clock, give or take the skew; anything else is clamped to it, and a
+    /// month start already passed within the skew means retry after a
+    /// short floor, never at once.
     #[test]
     fn reset_at_is_checked_against_the_clients_clock() {
         let now = 1_792_497_600; // 2026-10-20T12:00:00Z
@@ -2728,10 +2824,13 @@ mod tests {
         assert_eq!(at(1_803_859_200, dec_31), Some(1_798_761_600));
         // A service clock just behind the turn of the month sends the month
         // start the client has already passed: the reset has happened, so
-        // the client retries now, not a month later.
-        assert_eq!(at(next, next + 1), Some(next + 1));
+        // the client retries after the short floor, not a month later, and
+        // never straight away, since a service still behind refuses again.
+        let floor = i64::from(JUDGEMENT_SATURATED_RETRY_AFTER_SECS);
+        assert_eq!(at(next, next), Some(next + floor));
+        assert_eq!(at(next, next + 1), Some(next + 1 + floor));
         let nov_1_morning = next + 6 * 3600;
-        assert_eq!(at(next, nov_1_morning), Some(nov_1_morning));
+        assert_eq!(at(next, nov_1_morning), Some(nov_1_morning + floor));
         // A past month start outside the skew is still not believed.
         let oct_1 = 1_790_812_800; // 2026-10-01T00:00:00Z
         assert_eq!(at(oct_1, now), Some(next));
