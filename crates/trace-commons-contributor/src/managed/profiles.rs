@@ -879,27 +879,17 @@ fn holds_workflows(dir: &Path) -> bool {
 }
 
 /// The folders Claude Code's `--add-dir` names in `cli_options`, relative
-/// ones taken from `cwd`. The flag takes every value up to the next flag,
-/// or one with `=`; Claude Code reads agents and commands from each
+/// ones taken from `cwd` as Node resolves them
+/// ([`super::options::add_dir_values`]; a drive-relative Windows folder is
+/// refused when the options are parsed). Claude Code reads agents and commands from each
 /// folder's `.claude` (2.1.316, its additional directories). Project
 /// settings' `permissions.additionalDirectories` only widen what the tools
 /// may touch and are not read for agents, so they are not listed.
 fn added_dirs(cli_options: &[String], cwd: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![];
-    let mut taking = false;
-    for arg in cli_options {
-        if let Some(value) = arg.strip_prefix("--add-dir=") {
-            dirs.push(cwd.join(value));
-            taking = false;
-        } else if arg == "--add-dir" {
-            taking = true;
-        } else if arg.starts_with('-') {
-            taking = false;
-        } else if taking {
-            dirs.push(cwd.join(arg));
-        }
-    }
-    dirs
+    super::options::add_dir_values(cli_options)
+        .into_iter()
+        .map(|value| cwd.join(value))
+        .collect()
 }
 
 /// Whether the folder `dir` holds anything but hidden files (a
@@ -1616,6 +1606,33 @@ mod tests {
             plain.path(),
             None
         ));
+    }
+
+    /// End to end on Windows (#1814 review): options text naming a folder
+    /// the Windows way, unquoted, is parsed and checked as Claude Code would
+    /// read it, and a model an agent there names refuses the launch.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_add_dir_is_checked_from_the_options_text() {
+        let launch = project(&[]);
+        let extra = tempfile::tempdir().unwrap();
+        let agents = extra.path().join(".claude/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("x.md"), markdown(&format!("model: {ID}"))).unwrap();
+        let text = format!(r#"--add-dir "{}""#, extra.path().display());
+        assert!(text.contains('\\'), "{text}");
+        let args = crate::managed::options::parse(ToolId::Claude, &text).unwrap();
+        assert_eq!(args[1], extra.path().display().to_string());
+        assert_eq!(
+            project_model_check_in(
+                ToolId::Claude,
+                ConnectionKind::NearAi,
+                launch.path(),
+                &args,
+                None
+            ),
+            Err(ManagedError::ProjectChoosesModel)
+        );
     }
 
     #[test]

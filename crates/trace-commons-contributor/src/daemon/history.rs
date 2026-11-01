@@ -555,7 +555,36 @@ pub fn rollup(records: &[HistoryRecord], now: DateTime<Utc>) -> HistoryRollup {
 pub struct ContributedSince {
     pub count: usize,
     pub project_labels: BTreeSet<String>,
-    pub credit_pending: f32,
+    /// Credit the server has decided (a final figure, 0 included), summed
+    /// from each figure as written ([`super::nudge::decimal_credit`]).
+    pub credit_final: f64,
+    /// Credit still being scored, summed the same way.
+    pub credit_pending: f64,
+    /// Each decided trace's credit by submission id (opaque, never on the
+    /// wire), so a digest can leave out the traces its verdicts fold states.
+    pub credit_final_by_submission: BTreeMap<String, f64>,
+}
+
+impl ContributedSince {
+    /// Decided credit of the traces NOT in `folded`: what is left to state
+    /// when a verdicts fold already states those traces' credit.
+    pub fn credit_final_not_in(&self, folded: &BTreeSet<String>) -> f64 {
+        self.credit_final_by_submission
+            .iter()
+            .filter(|(id, _)| !folded.contains(*id))
+            .map(|(_, f)| f)
+            .sum()
+    }
+
+    /// Decided credit in tenths, rounded once; `None` when it rounds to zero.
+    pub fn credit_final_tenths(&self) -> Option<u64> {
+        super::nudge::tenths_of(self.credit_final)
+    }
+
+    /// Pending credit in tenths, rounded once; `None` when it rounds to zero.
+    pub fn credit_pending_tenths(&self) -> Option<u64> {
+        super::nudge::tenths_of(self.credit_pending)
+    }
 }
 
 pub fn contributed_since(
@@ -579,8 +608,14 @@ pub fn contributed_since(
         if !rec.project_label.is_empty() {
             out.project_labels.insert(rec.project_label.clone());
         }
-        if rec.credit_points_final.is_none() {
-            out.credit_pending += rec.credit_points_pending;
+        match rec.credit_points_final {
+            Some(f) => {
+                let f = super::nudge::decimal_credit(f);
+                out.credit_final += f;
+                out.credit_final_by_submission
+                    .insert(rec.submission_id.to_string(), f);
+            }
+            None => out.credit_pending += super::nudge::decimal_credit(rec.credit_points_pending),
         }
     }
     out
@@ -778,7 +813,7 @@ mod tests {
         let mut fresh = record(STATUS_ACCEPTED, "2026-08-08T13:00:00Z");
         fresh.credit_points_pending = 1.5;
         let out = contributed_since(&[old, fresh], Some(at("2026-08-08T12:00:00Z")));
-        assert!((out.credit_pending - 1.5).abs() < f32::EPSILON, "{:?}", out);
+        assert_eq!(out.credit_pending_tenths(), Some(15), "{:?}", out);
     }
 
     fn labels(id: Uuid) -> ProjectAttribution {
@@ -1034,7 +1069,36 @@ mod tests {
         assert_eq!(r.credit_pending, 0.0);
         assert_eq!(r.credit_final, 0.0);
         let since = contributed_since(&[decided], None);
-        assert_eq!(since.credit_pending, 0.0);
+        assert_eq!(since.credit_pending_tenths(), None);
+        assert_eq!(since.credit_final_tenths(), None);
+    }
+
+    /// A decided trace's credit is earned: it counts toward the digest's
+    /// final figure, and its leftover pending figure counts toward nothing.
+    #[test]
+    fn contributed_since_sums_final_credit_apart_from_pending() {
+        let mut decided = record("accepted", "2026-08-08T13:00:00Z");
+        decided.credit_points_pending = 9.0;
+        decided.credit_points_final = Some(2.5);
+        let mut scoring = record("submitted", "2026-08-08T13:00:00Z");
+        scoring.credit_points_pending = 1.5;
+        scoring.credit_points_final = None;
+        let out = contributed_since(&[decided, scoring], None);
+        assert_eq!(out.credit_final_tenths(), Some(25));
+        assert_eq!(out.credit_pending_tenths(), Some(15));
+    }
+
+    /// Summed from each figure as written, so three 0.35s give 1.05 -> 1.1
+    /// and a lone 0.35 gives 0.4, not 0.3; a sum under 0.05 is absent.
+    #[test]
+    fn contributed_since_credit_rounds_once_from_the_decimal() {
+        let mut a = record("accepted", "2026-08-08T13:00:00Z");
+        a.credit_points_final = Some(0.35);
+        let out = contributed_since(&[a], None);
+        assert_eq!(out.credit_final_tenths(), Some(4));
+        let mut tiny = record("accepted", "2026-08-08T13:00:00Z");
+        tiny.credit_points_final = Some(0.04);
+        assert_eq!(contributed_since(&[tiny], None).credit_final_tenths(), None);
     }
 
     /// The server's reason label rides from the status read-back onto the
