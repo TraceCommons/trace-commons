@@ -125,10 +125,16 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                 .filter(|h| harness.is_none_or(|only| only == *h))
             {
                 let key = repo_key(&cwd, harness);
-                let mut state = store.repo(&key);
-                let given = state.tools.restore(harness, &Thresholds::default());
+                if !store.has_repo(&key) {
+                    continue;
+                }
+                // Under the folder's lock, so a session ending at the same
+                // time neither loses its fold nor undoes the Give back.
+                let given = store.update_repo(&key, |state| {
+                    let given = state.tools.restore(harness, &Thresholds::default());
+                    (!given.is_empty(), given)
+                })?;
                 if !given.is_empty() {
-                    store.save_repo(&key, &state)?;
                     restored.push((harness, given));
                 }
             }

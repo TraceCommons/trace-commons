@@ -22,11 +22,17 @@ use std::time::Duration;
 
 use super::Harness;
 use super::loop_guard::{self, Thresholds};
-use super::signals::{ToolCall, short_digest};
+use super::signals::{CallKind, ToolCall, short_digest};
 use super::store::{SessionState, Store};
 
 /// How long the hook waits for its input.
 pub const BUDGET: Duration = Duration::from_secs(3);
+/// How long the hook waits for a folder's state lock before giving up
+/// on its write. Giving up drops that turn's calls (`Stop`) or that
+/// session's evidence (`SessionEnd`), so the economizer learns from one
+/// session fewer; it never undoes another writer's change, and the agent
+/// is never held at the end of a turn.
+const HOOK_LOCK_WAIT: Duration = Duration::from_millis(500);
 /// The largest input read.
 const MAX_INPUT: u64 = 4 * 1024 * 1024;
 
@@ -69,7 +75,13 @@ pub fn handle(
             None
         }
         "PostToolUse" | "PostToolUseFailure" => {
-            let call = ToolCall::from_hook(input, event == "PostToolUseFailure")?;
+            let mut call = ToolCall::from_hook(input, event == "PostToolUseFailure")?;
+            // Claude Code reports a command that exited non-zero through
+            // `PostToolUseFailure`, so one it reports through `PostToolUse`
+            // exited 0.
+            if harness == Harness::Claude && !call.failed && call.exit_code.is_none() {
+                call.exit_code = matches!(call.kind, CallKind::Command { .. }).then_some(0);
+            }
             let mut session = load();
             if session.used_tools.len() < 512 {
                 session.used_tools.insert(call.tool.clone());
@@ -86,12 +98,12 @@ pub fn handle(
             let mut session = load();
             if session.turn.ended_well() {
                 let calls = session.turn.calls;
-                store
-                    .update_repo(repo, |state| {
-                        state.envelope.add(calls);
-                        (true, ())
-                    })
-                    .ok()?;
+                // A busy lock drops this turn's calls from the envelope;
+                // the turn is still reset below.
+                let _ = store.try_update_repo(repo, HOOK_LOCK_WAIT, |state| {
+                    state.envelope.add(calls);
+                    (true, ())
+                });
             }
             session.turn = Default::default();
             store.save_session(session_id, &session).ok()?;
@@ -102,16 +114,16 @@ pub fn handle(
                 .session(session_id)
                 .filter(|state| state.repo == repo)?;
             let digest = short_digest("session", session_id);
-            store
-                .update_repo(repo, |state| {
-                    state
-                        .tools
-                        .fold_session(harness, session.prompts, &session.used_tools);
-                    state.facts.fold_session(&digest, &session.observations);
-                    state.sessions = state.sessions.saturating_add(1);
-                    (true, ())
-                })
-                .ok()?;
+            // A busy lock drops this session's evidence; its file is
+            // removed either way, as nothing would fold it later.
+            let _ = store.try_update_repo(repo, HOOK_LOCK_WAIT, |state| {
+                state
+                    .tools
+                    .fold_session(harness, session.prompts, &session.used_tools);
+                state.facts.fold_session(&digest, &session.observations);
+                state.sessions = state.sessions.saturating_add(1);
+                (true, ())
+            });
             store.remove_session(session_id);
             None
         }

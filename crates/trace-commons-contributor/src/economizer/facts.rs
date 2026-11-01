@@ -214,17 +214,28 @@ impl FactBook {
         self.facts
             .retain(|fact| fact.contradictions < CONTRADICTIONS);
         // Over the cap, the oldest untold fact goes first, then the oldest
-        // told one, so a folder full of one-off repairs still learns new
-        // ones.
+        // told one, never one this session added or confirmed: a folder
+        // full of one-off repairs, or of told facts, still learns new ones.
         while self.facts.len() > MAX_KEPT {
-            let at = self.facts.iter().position(|fact| !fact.told()).unwrap_or(0);
+            let older = |fact: &Fact| fact.sessions.last().is_none_or(|last| last != session);
+            let at = self
+                .facts
+                .iter()
+                .position(|fact| older(fact) && !fact.told())
+                .or_else(|| self.facts.iter().position(older))
+                .unwrap_or(0);
             self.facts.remove(at);
         }
     }
 
-    /// The facts told at a session's start.
+    /// The facts told at a session's start: the most recently confirmed
+    /// first.
     pub fn told(&self) -> impl Iterator<Item = &Fact> {
-        self.facts.iter().filter(|fact| fact.told()).take(MAX_TOLD)
+        self.facts
+            .iter()
+            .rev()
+            .filter(|fact| fact.told())
+            .take(MAX_TOLD)
     }
 
     /// The context a session starts with, or none when no fact is told.
