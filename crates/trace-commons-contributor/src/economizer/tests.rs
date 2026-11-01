@@ -526,7 +526,8 @@ fn a_passing_check_is_not_a_failure() {
     for command in [
         "cargo test; echo done",
         "pytest > out.txt\ntail out.txt",
-        "cargo test && true",
+        "cargo test || true",
+        "cargo test &",
     ] {
         let sequenced = ToolCall::from_hook(
             &json!({"tool_name": "Bash", "tool_input": {"command": command},
@@ -535,6 +536,21 @@ fn a_passing_check_is_not_a_failure() {
         )
         .unwrap();
         assert!(sequenced.is_failure(), "{command}");
+    }
+    // `&&` and the `2>&1` / `&>` redirections keep the check's own exit, so
+    // an exit of 0 there means it passed.
+    for command in [
+        "cargo test 2>&1",
+        "cd crate && cargo test",
+        "cargo test &> out.txt",
+    ] {
+        let own_exit = ToolCall::from_hook(
+            &json!({"tool_name": "Bash", "tool_input": {"command": command},
+                    "tool_response": {"stdout": "error: logged\nFAILED x (expected)", "exit_code": 0}}),
+            false,
+        )
+        .unwrap();
+        assert!(!own_exit.is_failure(), "{command}");
     }
 }
 
@@ -800,6 +816,45 @@ fn claudes_known_exit_status_wins_over_printed_text() {
     let session = store.session("c1").unwrap();
     assert_eq!(session.turn.calls, 1);
     assert!(session.turn.failure_signatures.is_empty(), "not a failure");
+}
+
+/// The prune removes only idle session files: a live session older than
+/// the stale age keeps its state, and one whose file does not read starts
+/// over rather than switching off.
+#[test]
+fn a_long_live_session_survives_the_prune() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    store.set_enabled(true).unwrap();
+    let old = Utc::now() - chrono::Duration::days(30);
+    handle(
+        &store,
+        "repo1",
+        Harness::Claude,
+        &event("SessionStart", "long"),
+        old,
+    );
+    store.prune_sessions(Utc::now());
+    assert!(store.session("long").is_some(), "written just now, so live");
+    let file = store.root().join("sessions").join("long.json");
+    std::fs::write(&file, b"{\"schema\": 99}").unwrap();
+    handle(
+        &store,
+        "repo1",
+        Harness::Claude,
+        &event("UserPromptSubmit", "long"),
+        Utc::now(),
+    );
+    assert_eq!(store.session("long").unwrap().prompts, 1, "started over");
+    let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(stale)
+        .unwrap();
+    store.prune_sessions(Utc::now());
+    assert!(!file.exists(), "an idle file is pruned");
 }
 
 /// Give back takes the folder's lock: it waits for a writer holding it.

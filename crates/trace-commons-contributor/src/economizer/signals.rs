@@ -188,10 +188,17 @@ fn response_text(response: &Value) -> String {
     }
 }
 
-/// Whether `command` is one command, whose exit status is its own: no
-/// pipe, sequence, background job or second line.
+/// Whether `command`'s exit status is its check's own: no pipe or `||`,
+/// no `;` sequence, background job or second line. `&&` keeps it (a
+/// failing step stops the chain with its own status), and so do the
+/// redirections `2>&1` and `&>`.
 fn is_simple_command(command: &str) -> bool {
-    !command.trim().contains(['|', ';', '&', '\n'])
+    let command = command
+        .trim()
+        .replace("&&", " ")
+        .replace(">&", ">")
+        .replace("&>", ">");
+    !command.contains(['|', ';', '&', '\n'])
 }
 
 /// The exit status a response object carries: `exit_code`, `exitCode`, or

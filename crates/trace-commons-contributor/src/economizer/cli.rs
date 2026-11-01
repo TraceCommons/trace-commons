@@ -6,7 +6,7 @@ use serde_json::json;
 use std::path::PathBuf;
 
 use super::Harness;
-use super::store::{Store, repo_key};
+use super::store::{StateBusy, Store, repo_key};
 use super::tools::Thresholds;
 use crate::config::ConfigStore;
 
@@ -142,26 +142,18 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
                 }) {
                     Ok(given) if !given.is_empty() => restored.push((harness, given)),
                     Ok(_) => {}
-                    Err(_) => busy.push(harness),
+                    Err(error) if error.is::<StateBusy>() => busy.push(harness),
+                    Err(error) => {
+                        // Not one trying again can fix: report what was
+                        // given back so far, then the cause.
+                        if !restored.is_empty() {
+                            report_restored(&restored, &busy, as_json);
+                        }
+                        return Err(error);
+                    }
                 }
             }
-            if as_json {
-                let rows: Vec<_> = restored
-                    .iter()
-                    .map(|(harness, tools)| json!({ "harness": harness, "restored": tools }))
-                    .collect();
-                println!("{}", json!({ "restored": rows, "busy": busy }));
-            } else if restored.is_empty() && busy.is_empty() {
-                println!("Nothing was left out here.");
-            } else {
-                for (harness, tools) in restored {
-                    println!(
-                        "{}: given back from the next session: {}",
-                        label(harness),
-                        tools.join(", ")
-                    );
-                }
-            }
+            report_restored(&restored, &busy, as_json);
             if !busy.is_empty() {
                 let names: Vec<_> = busy.iter().map(|harness| label(*harness)).collect();
                 anyhow::bail!(
@@ -172,4 +164,25 @@ pub fn run(config: &ConfigStore, command: EconomizerCommand, as_json: bool) -> a
         }
     }
     Ok(())
+}
+
+/// Print what Give back gave back, and which harnesses were busy.
+fn report_restored(restored: &[(Harness, Vec<String>)], busy: &[Harness], as_json: bool) {
+    if as_json {
+        let rows: Vec<_> = restored
+            .iter()
+            .map(|(harness, tools)| json!({ "harness": harness, "restored": tools }))
+            .collect();
+        println!("{}", json!({ "restored": rows, "busy": busy }));
+    } else if restored.is_empty() && busy.is_empty() {
+        println!("Nothing was left out here.");
+    } else {
+        for (harness, tools) in restored {
+            println!(
+                "{}: given back from the next session: {}",
+                label(*harness),
+                tools.join(", ")
+            );
+        }
+    }
 }
