@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::OwnedSemaphorePermit;
 use trace_commons_contributor_platform::external_claude_credentials as external;
+use trace_commons_contributor_platform::external_claude_credentials::ItemRevision;
 
 use super::claude_cli::{self, CliProbe};
 use super::claude_token_cache::TokenCache;
@@ -188,7 +189,7 @@ struct OAuth<'a> {
 /// real one. Production delegates to `external_claude_credentials`.
 pub(super) trait NativeKeychain: Send + Sync {
     /// Attribute-only item revision; never decrypts and never shows UI.
-    fn version(&self, service: &str) -> Result<Option<String>, &'static str>;
+    fn version(&self, service: &str) -> Result<Option<ItemRevision>, &'static str>;
     /// The item's payload. With `allow_ui` false the query refuses to show a
     /// dialog and reports `external::INTERACTION_REQUIRED` when one is needed.
     fn read(
@@ -200,7 +201,7 @@ pub(super) trait NativeKeychain: Send + Sync {
 
 struct ClaudeCodeKeychain;
 impl NativeKeychain for ClaudeCodeKeychain {
-    fn version(&self, service: &str) -> Result<Option<String>, &'static str> {
+    fn version(&self, service: &str) -> Result<Option<ItemRevision>, &'static str> {
         external::version(service)
     }
     fn read(
@@ -300,9 +301,7 @@ enum Source {
     File,
     Keychain {
         service: String,
-        /// `None` when the item was not consulted: a background load in a
-        /// build that serves its in-memory copy without opening the item.
-        revision: Option<String>,
+        revision: ItemRevision,
         login_key: String,
     },
 }
@@ -470,13 +469,17 @@ fn load(login: &LoginSpec, interactive: bool, deps: &Deps) -> Result<Credential,
 }
 
 /// The token for a Keychain-backed login. A cached token is served while it
-/// is valid. When Claude Code has written its item since (it renews its own
-/// token in place, which keeps the item's access list), one read that cannot
-/// show a dialog decides whether the item now holds a different token. Any
-/// failure of that read keeps the cached token: only expiry, Anthropic
-/// rejecting it, or an account or login change ends it. A build without the
-/// keychain entitlement keeps its cache in memory only and does not open
-/// Claude Code's item at all off a pressed Refresh.
+/// is valid and was read from the item that is there now. When Claude Code
+/// has written that item in place since (it renews its own token with
+/// `security add-generic-password -U`, which keeps the item's access list),
+/// one read that cannot show a dialog decides whether the item now holds a
+/// different token; a failure of that read keeps the cached token, and is
+/// not repeated in the background until the item moves again. A deleted
+/// item is a sign-out, and a recreated one (a sign-out and sign-in, perhaps
+/// as another account) ends the cached token, so only a pressed Refresh can
+/// read the new one. A build without the keychain entitlement keeps its
+/// cache in memory only and never reads the item's payload off a pressed
+/// Refresh; it still reads the item's attributes, which never prompt.
 fn load_keychain(
     login: &LoginSpec,
     local_identity: &Identity,
@@ -489,27 +492,32 @@ fn load_keychain(
     let now = Utc::now();
     // The first store operation, so `unentitled()` is known after it.
     let cached = deps.cache.lookup(&key, &binding, now);
-    if !interactive && deps.cache.unentitled() {
-        let cached = cached.ok_or("keychain_needs_permission")?;
-        return Ok((
-            cached.token,
-            Source::Keychain {
-                service,
-                revision: None,
-                login_key: key,
-            },
-        ));
-    }
-    // Attribute-only and prompt-free.
-    let before = deps.keychain.version(&service)?.ok_or("auth_missing")?;
-    let source = |service: String| Source::Keychain {
-        service,
-        revision: Some(before.clone()),
+    // Attribute-only and prompt-free, in every build.
+    let Some(before) = deps.keychain.version(&service)? else {
+        if cached.is_some() {
+            deps.cache.forget(&key);
+        }
+        return Err("auth_missing");
+    };
+    let cached = match cached {
+        Some(cached) if cached.revision.item != before.item => {
+            deps.cache.forget(&key);
+            None
+        }
+        other => other,
+    };
+    let source = Source::Keychain {
+        service: service.clone(),
+        revision: before.clone(),
         login_key: key.clone(),
     };
+    if !interactive && deps.cache.unentitled() {
+        let cached = cached.ok_or("keychain_needs_permission")?;
+        return Ok((cached.token, source));
+    }
     if let Some(cached) = cached {
-        if cached.revision == before {
-            return Ok((cached.token, source(service)));
+        if cached.revision == before || (!interactive && deps.cache.unanswered(&key, &before)) {
+            return Ok((cached.token, source));
         }
         let epoch = deps.cache.epoch();
         let token = match reread_silently(deps.keychain.as_ref(), &service, &before, now) {
@@ -528,9 +536,12 @@ fn load_keychain(
                 deps.cache.forget(&key);
                 token
             }
-            None => cached.token,
+            None => {
+                deps.cache.note_unanswered(&key, &before);
+                cached.token
+            }
         };
-        return Ok((token, source(service)));
+        return Ok((token, source));
     }
     let epoch = deps.cache.epoch();
     let bytes =
@@ -544,7 +555,7 @@ fn load_keychain(
         deps.cache
             .remember(epoch, &key, &binding, &before, expires_at, &token);
     }
-    Ok((token, source(service)))
+    Ok((token, source))
 }
 
 /// The item's current token, read without any possibility of a dialog, or
@@ -553,11 +564,11 @@ fn load_keychain(
 fn reread_silently(
     keychain: &dyn NativeKeychain,
     service: &str,
-    before: &str,
+    before: &ItemRevision,
     now: DateTime<Utc>,
 ) -> Option<(external::SecretBytes, Option<i64>)> {
     let bytes = keychain.read(service, false).ok()??;
-    if keychain.version(service).ok()?.as_deref() != Some(before) {
+    if keychain.version(service).ok()?.as_ref() != Some(before) {
         return None;
     }
     parse_oauth(&bytes, now).ok()
@@ -573,11 +584,8 @@ fn unchanged(
     }
     match &credential.source {
         Source::File => Ok(true),
-        Source::Keychain { revision: None, .. } => Ok(true),
         Source::Keychain {
-            service,
-            revision: Some(revision),
-            ..
+            service, revision, ..
         } => Ok(deps.keychain.version(service)?.as_ref() == Some(revision)),
     }
 }
@@ -754,7 +762,7 @@ async fn collect_oauth(
         native_read(lease, move || {
             let same = unchanged(&spec, &credential, &check_deps);
             if let Source::Keychain { login_key, .. } = &credential.source {
-                if forget_after_request(&outcome, &same) {
+                if forget_after_request(&outcome) {
                     check_deps.cache.forget(login_key);
                 }
             }
@@ -775,14 +783,12 @@ async fn collect_oauth(
 
 /// Whether a request's outcome drops the cached token: only a token
 /// Anthropic refused (401 and 403 are `auth_expired`), or one whose account
-/// no longer matches. Claude Code writing its item during the request
-/// (`same` not `Ok(true)`) still fails this reading as `auth_changed`, but
-/// leaves the cache to the next load's silent check, so a renewal Claude Code
+/// no longer matches. Whether the item changed during the request is
+/// deliberately not an input: such a change still fails this reading as
+/// `auth_changed`, but leaves the cache to the next load, which checks a
+/// recreated item and an in-place write separately, so a renewal Claude Code
 /// made in place does not discard a token Anthropic just accepted.
-fn forget_after_request<T>(
-    result: &Result<T, &'static str>,
-    _same: &Result<bool, &'static str>,
-) -> bool {
+fn forget_after_request<T>(result: &Result<T, &'static str>) -> bool {
     matches!(
         result,
         Err("auth_expired" | "auth_changed" | "scope_missing" | "identity_unavailable")
@@ -892,7 +898,10 @@ mod tests {
     /// A stand-in for Claude Code's Keychain item. Records whether each
     /// payload read allowed UI; never reaches Security.framework.
     pub(in super::super) struct FakeKeychain {
+        /// The content revision; `None` is a deleted item.
         pub version: std::sync::Mutex<Option<String>>,
+        /// The item's identity; a new value is a deleted and recreated item.
+        pub item: std::sync::Mutex<String>,
         pub silent: std::sync::Mutex<Result<Option<Vec<u8>>, &'static str>>,
         pub with_ui: std::sync::Mutex<Result<Option<Vec<u8>>, &'static str>>,
         pub reads: std::sync::Mutex<Vec<bool>>,
@@ -905,6 +914,7 @@ mod tests {
         ) -> Arc<Self> {
             Arc::new(Self {
                 version: std::sync::Mutex::new(Some("item-1".into())),
+                item: std::sync::Mutex::new("item".into()),
                 silent: std::sync::Mutex::new(silent),
                 with_ui: std::sync::Mutex::new(with_ui),
                 reads: std::sync::Mutex::new(Vec::new()),
@@ -919,9 +929,15 @@ mod tests {
         }
     }
     impl NativeKeychain for FakeKeychain {
-        fn version(&self, _service: &str) -> Result<Option<String>, &'static str> {
+        fn version(&self, _service: &str) -> Result<Option<ItemRevision>, &'static str> {
             *self.versions.lock().unwrap() += 1;
-            Ok(self.version.lock().unwrap().clone())
+            let item = self.item.lock().unwrap().clone();
+            Ok(self
+                .version
+                .lock()
+                .unwrap()
+                .clone()
+                .map(|content| ItemRevision { item, content }))
         }
         fn read(
             &self,
@@ -1109,7 +1125,8 @@ mod tests {
             deps.cache
                 .lookup(&key, &binding, Utc::now())
                 .unwrap()
-                .revision,
+                .revision
+                .content,
             "item-2"
         );
         assert!(load(&spec, false, &deps).is_ok());
@@ -1124,7 +1141,7 @@ mod tests {
         );
         let cached = deps.cache.lookup(&key, &binding, Utc::now()).unwrap();
         assert_eq!(cached.token.as_ref(), b"fixture-token-2");
-        assert_eq!(cached.revision, "item-3");
+        assert_eq!(cached.revision.content, "item-3");
         assert!(load(&spec, false, &deps).is_ok());
         assert_eq!(keychain.reads().len(), 3);
     }
@@ -1133,17 +1150,16 @@ mod tests {
     fn a_rejected_token_is_forgotten_and_only_a_pressed_refresh_may_ask_again() {
         // Anthropic answering 401 (or 403) is `auth_expired`.
         let rejected: Result<(), &'static str> = Err(status(401).unwrap_err());
-        assert!(forget_after_request(&rejected, &Ok(true)));
+        assert!(forget_after_request(&rejected));
         for reason in ["auth_changed", "scope_missing", "identity_unavailable"] {
-            assert!(forget_after_request::<()>(&Err(reason), &Ok(true)));
+            assert!(forget_after_request::<()>(&Err(reason)));
         }
         for reason in ["rate_limited", "unavailable", "invalid_response"] {
-            assert!(!forget_after_request::<()>(&Err(reason), &Ok(true)));
+            assert!(!forget_after_request::<()>(&Err(reason)));
         }
-        // Claude Code writing its item during the request is not a reason to
-        // drop a token Anthropic accepted.
-        assert!(!forget_after_request(&Ok(()), &Ok(false)));
-        assert!(!forget_after_request(&Ok(()), &Err("unavailable")));
+        // A token Anthropic accepted is kept, whatever happened to the item
+        // during the request.
+        assert!(!forget_after_request(&Ok(())));
 
         let dir = tempfile::tempdir().unwrap();
         let spec = login(dir.path());
@@ -1179,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unentitled_build_never_opens_claudes_item_in_the_background() {
+    fn an_unentitled_build_never_reads_claudes_token_in_the_background() {
         let dir = tempfile::tempdir().unwrap();
         let spec = login(dir.path());
         let keychain = FakeKeychain::new(Ok(Some(KEYCHAIN_DOC.to_vec())), Err("unexpected"));
@@ -1193,23 +1209,117 @@ mod tests {
             Err("keychain_needs_permission")
         ));
         assert!(deps.cache.unentitled());
-        assert_eq!(keychain.versions(), 0);
         assert!(keychain.reads().is_empty());
 
         // A pressed Refresh reads it, and the token is kept in memory.
         assert!(load(&spec, true, &deps).is_ok());
         assert_eq!(keychain.reads(), [false]);
-        let versions = keychain.versions();
 
-        // Later background loads use that copy and touch nothing, even after
-        // the item moved.
+        // Later background loads use that copy, even after the item was
+        // written in place. They read the item's attributes, which never
+        // prompt, and never its payload.
         *keychain.version.lock().unwrap() = Some("item-2".into());
+        let versions = keychain.versions();
         assert_eq!(
             load(&spec, false, &deps).ok().unwrap().token.as_ref(),
             b"fixture-token"
         );
-        assert_eq!(keychain.versions(), versions);
+        assert!(keychain.versions() > versions);
         assert_eq!(keychain.reads(), [false]);
+    }
+
+    #[test]
+    fn an_unentitled_build_still_notices_a_deleted_or_recreated_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = login(dir.path());
+        let keychain = FakeKeychain::new(Ok(Some(KEYCHAIN_DOC.to_vec())), Err("unexpected"));
+        let deps = Deps {
+            keychain: Arc::clone(&keychain) as Arc<dyn NativeKeychain>,
+            cache: Arc::new(TokenCache::new(Box::new(UnentitledStore))),
+            cli: Arc::new(claude_cli::NoCli),
+        };
+        assert!(load(&spec, true, &deps).is_ok());
+
+        // Claude Code signed out: the item is gone. Nothing to ask for.
+        *keychain.version.lock().unwrap() = None;
+        assert!(matches!(load(&spec, false, &deps), Err("auth_missing")));
+        // Nor is the old token served once the item is back.
+        *keychain.version.lock().unwrap() = Some("item-1".into());
+        assert!(matches!(
+            load(&spec, false, &deps),
+            Err("keychain_needs_permission")
+        ));
+
+        // Signed in again as a recreated item: the old token is not served.
+        assert!(load(&spec, true, &deps).is_ok());
+        *keychain.item.lock().unwrap() = "recreated".into();
+        assert!(matches!(
+            load(&spec, false, &deps),
+            Err("keychain_needs_permission")
+        ));
+        assert_eq!(keychain.reads(), [false, false]);
+    }
+
+    #[test]
+    fn a_recreated_item_ends_the_cached_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = login(dir.path());
+        let keychain = FakeKeychain::new(
+            Err(external::INTERACTION_REQUIRED),
+            Ok(Some(KEYCHAIN_DOC.to_vec())),
+        );
+        let deps = deps_with(Arc::clone(&keychain));
+        assert!(load(&spec, true, &deps).is_ok());
+        assert_eq!(keychain.reads(), [false, true]);
+
+        // Claude Code signed out and in, perhaps as another account: the item
+        // was deleted and recreated, with no grant for this app on it. The
+        // previous account's token must not be served.
+        *keychain.item.lock().unwrap() = "recreated".into();
+        *keychain.version.lock().unwrap() = Some("item-9".into());
+        assert!(matches!(
+            load(&spec, false, &deps),
+            Err("keychain_needs_permission")
+        ));
+        assert_eq!(keychain.reads(), [false, true, false]);
+
+        // A pressed Refresh may ask, and gets the new account's token.
+        *keychain.with_ui.lock().unwrap() = Ok(Some(RENEWED_DOC.to_vec()));
+        assert_eq!(
+            load(&spec, true, &deps).ok().unwrap().token.as_ref(),
+            b"fixture-token-2"
+        );
+        assert_eq!(keychain.reads(), [false, true, false, false, true]);
+    }
+
+    #[test]
+    fn a_silent_check_that_found_no_answer_is_not_repeated_until_the_item_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = login(dir.path());
+        let keychain = FakeKeychain::new(Ok(Some(KEYCHAIN_DOC.to_vec())), Err("unexpected"));
+        let deps = deps_with(Arc::clone(&keychain));
+        assert!(load(&spec, false, &deps).is_ok());
+        assert_eq!(keychain.reads().len(), 1);
+
+        *keychain.silent.lock().unwrap() = Err(external::INTERACTION_REQUIRED);
+        *keychain.version.lock().unwrap() = Some("item-2".into());
+        assert!(load(&spec, false, &deps).is_ok());
+        assert_eq!(keychain.reads().len(), 2);
+        // Same revision, background: not tried again.
+        assert!(load(&spec, false, &deps).is_ok());
+        assert!(load(&spec, false, &deps).is_ok());
+        assert_eq!(keychain.reads().len(), 2);
+        // A pressed Refresh tries again, still without UI.
+        assert!(load(&spec, true, &deps).is_ok());
+        assert_eq!(keychain.reads(), [false, false, false]);
+        // The item moved again: worth one more try.
+        *keychain.silent.lock().unwrap() = Ok(Some(RENEWED_DOC.to_vec()));
+        *keychain.version.lock().unwrap() = Some("item-3".into());
+        assert_eq!(
+            load(&spec, false, &deps).ok().unwrap().token.as_ref(),
+            b"fixture-token-2"
+        );
+        assert_eq!(keychain.reads().len(), 4);
     }
 
     #[test]

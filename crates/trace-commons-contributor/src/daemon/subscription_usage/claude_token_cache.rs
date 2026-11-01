@@ -29,13 +29,17 @@
 //! only. `unentitled()` lets the caller skip background reads of Claude
 //! Code's item in such a build.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use trace_commons_contributor_platform::credential_store::MAX_SECRET_BYTES;
-use trace_commons_contributor_platform::external_claude_credentials::{SecretBytes, wipe};
+use trace_commons_contributor_platform::external_claude_credentials::{
+    ItemRevision, SecretBytes, wipe,
+};
 
 /// A cached token is not used within this margin of its expiry.
 const EXPIRY_MARGIN_SECONDS: i64 = 5 * 60;
@@ -46,6 +50,10 @@ const MAX_ENTRIES: usize = 8;
 const VERSION: u8 = 2;
 /// The error a store returns when this build is not entitled to it.
 pub(super) const UNENTITLED: &str = "unentitled";
+/// How long an `UNENTITLED` answer is trusted before the OS store is asked
+/// again, so a transient refusal in a signed build does not last until the
+/// process restarts.
+const REPROBE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// Where the cache document lives. Production is the OS credential store;
 /// test builds use memory only. A store this build cannot reach at all
@@ -70,7 +78,10 @@ struct Entry {
     /// service, local account evidence and login spec. Not the item
     /// revision, which moves whenever Claude Code renews its own token.
     binding: String,
-    /// The attribute-only item revision this token was last confirmed at.
+    /// Which item this token was read from: changes when Claude Code deletes
+    /// and recreates its item, as a sign-out and sign-in do.
+    item: String,
+    /// The attribute-only content revision this token was last confirmed at.
     revision: String,
     /// Milliseconds since the epoch, from Claude Code's `expiresAt`.
     expires_at: i64,
@@ -84,17 +95,23 @@ impl Drop for Entry {
     }
 }
 
-/// A cached token and the item revision it was last confirmed at.
+/// A cached token, the item it was read from and the content revision it
+/// was last confirmed at.
 pub(super) struct Cached {
     pub token: SecretBytes,
-    pub revision: String,
+    pub revision: ItemRevision,
 }
 
 pub(super) struct TokenCache {
     store: Box<dyn TokenStore>,
     /// Where the cache lives once `store` has answered `UNENTITLED`.
     memory: MemoryStore,
-    unentitled: AtomicBool,
+    /// When `store` last answered `UNENTITLED`; `None` while it is usable.
+    unentitled_since: Mutex<Option<Instant>>,
+    reprobe_after: Duration,
+    /// Per login, the item revision whose silent check last ended without
+    /// an answer. Memory only: it only spares repeating that check.
+    unanswered: Mutex<BTreeMap<String, ItemRevision>>,
     /// Serializes read-modify-write of the single entry.
     lock: Mutex<()>,
     /// Bumped by `clear`. A write that started under an older epoch is
@@ -107,30 +124,81 @@ impl TokenCache {
         Self {
             store,
             memory: MemoryStore::default(),
-            unentitled: AtomicBool::new(false),
+            unentitled_since: Mutex::new(None),
+            reprobe_after: REPROBE_AFTER,
+            unanswered: Mutex::new(BTreeMap::new()),
             lock: Mutex::new(()),
             epoch: AtomicU64::new(0),
         }
     }
 
-    /// True once the OS store has said this build is not entitled to it.
-    /// Known only after the first store operation, which `lookup` makes.
-    pub(super) fn unentitled(&self) -> bool {
-        self.unentitled.load(Ordering::SeqCst)
+    #[cfg(test)]
+    pub(super) fn with_reprobe_after(mut self, after: Duration) -> Self {
+        self.reprobe_after = after;
+        self
     }
 
-    /// The OS store, or memory once that store has refused this build.
+    /// True while the OS store's last answer was that this build is not
+    /// entitled to it. Known only after the first store operation, which
+    /// `lookup` makes.
+    pub(super) fn unentitled(&self) -> bool {
+        self.unentitled_since
+            .lock()
+            .map_or(true, |since| since.is_some())
+    }
+
+    /// The OS store, or memory once that store has refused this build. A
+    /// refusal is trusted for `reprobe_after`; the next operation after that
+    /// asks the OS store again, and any other answer ends the in-memory mode
+    /// and wipes the memory copy.
     fn with_store<T>(
         &self,
         operation: impl Fn(&dyn TokenStore) -> Result<T, &'static str>,
     ) -> Result<T, &'static str> {
-        if !self.unentitled() {
-            match operation(self.store.as_ref()) {
-                Err(UNENTITLED) => self.unentitled.store(true, Ordering::SeqCst),
-                other => return other,
+        let Ok(mut since) = self.unentitled_since.lock() else {
+            return operation(&self.memory);
+        };
+        if since.is_some_and(|at| at.elapsed() < self.reprobe_after) {
+            return operation(&self.memory);
+        }
+        match operation(self.store.as_ref()) {
+            Err(UNENTITLED) => {
+                *since = Some(Instant::now());
+                operation(&self.memory)
+            }
+            other => {
+                if since.take().is_some() {
+                    let _ = self.memory.clear();
+                }
+                other
             }
         }
-        operation(&self.memory)
+    }
+
+    /// Whether `login`'s silent check already ended without an answer at
+    /// exactly `revision`.
+    pub(super) fn unanswered(&self, login: &str, revision: &ItemRevision) -> bool {
+        self.unanswered
+            .lock()
+            .is_ok_and(|map| map.get(login) == Some(revision))
+    }
+
+    /// Note that `login`'s silent check at `revision` found no answer.
+    pub(super) fn note_unanswered(&self, login: &str, revision: &ItemRevision) {
+        if let Ok(mut map) = self.unanswered.lock() {
+            map.insert(login.into(), revision.clone());
+        }
+    }
+
+    fn answered(&self, login: Option<&str>) {
+        if let Ok(mut map) = self.unanswered.lock() {
+            match login {
+                Some(login) => {
+                    map.remove(login);
+                }
+                None => map.clear(),
+            }
+        }
     }
 
     /// The cache this build uses. Test builds never reach an OS store.
@@ -184,7 +252,10 @@ impl TokenCache {
         if usable {
             return Some(Cached {
                 token: SecretBytes::new(entry.token.as_bytes().to_vec()),
-                revision: entry.revision.clone(),
+                revision: ItemRevision {
+                    item: entry.item.clone(),
+                    content: entry.revision.clone(),
+                },
             });
         }
         document.entries.remove(index);
@@ -200,13 +271,14 @@ impl TokenCache {
         epoch: u64,
         login: &str,
         binding: &str,
-        revision: &str,
+        revision: &ItemRevision,
         expires_at: i64,
         token: &[u8],
     ) {
         let Ok(token) = std::str::from_utf8(token) else {
             return;
         };
+        self.answered(Some(login));
         let Ok(_guard) = self.lock.lock() else {
             return;
         };
@@ -218,7 +290,8 @@ impl TokenCache {
         document.entries.push(Entry {
             login: login.into(),
             binding: binding.into(),
-            revision: revision.into(),
+            item: revision.item.clone(),
+            revision: revision.content.clone(),
             expires_at,
             token: token.into(),
         });
@@ -239,9 +312,10 @@ impl TokenCache {
 
     /// Record that `login`'s cached token is still the one the item holds at
     /// `revision`, so later loads do not read the item again. A no-op when
-    /// the entry is gone, bound elsewhere, or the cache was cleared since
-    /// `epoch`.
-    pub(super) fn confirm(&self, epoch: u64, login: &str, binding: &str, revision: &str) {
+    /// the entry is gone, bound elsewhere, read from another item, or the
+    /// cache was cleared since `epoch`.
+    pub(super) fn confirm(&self, epoch: u64, login: &str, binding: &str, revision: &ItemRevision) {
+        self.answered(Some(login));
         let Ok(_guard) = self.lock.lock() else {
             return;
         };
@@ -252,19 +326,21 @@ impl TokenCache {
         let Some(entry) = document
             .entries
             .iter_mut()
-            .find(|e| e.login == login && e.binding == binding)
+            .find(|e| e.login == login && e.binding == binding && e.item == revision.item)
         else {
             return;
         };
-        if entry.revision == revision {
+        if entry.revision == revision.content {
             return;
         }
-        entry.revision = revision.into();
+        entry.revision = revision.content.clone();
         self.save(&document);
     }
 
-    /// Remove `login`'s entry: Anthropic rejected it.
+    /// Remove `login`'s entry: Anthropic rejected it, or Claude Code's item
+    /// is gone or was recreated.
     pub(super) fn forget(&self, login: &str) {
+        self.answered(Some(login));
         let Ok(_guard) = self.lock.lock() else {
             return;
         };
@@ -288,8 +364,8 @@ impl TokenCache {
             return;
         };
         self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.answered(None);
         let _ = self.with_store(|store| store.clear());
-        let _ = self.memory.clear();
     }
 }
 
@@ -419,6 +495,12 @@ mod tests {
     fn cache() -> TokenCache {
         TokenCache::new(Box::new(MemoryStore::default()))
     }
+    fn rev(content: &str) -> ItemRevision {
+        ItemRevision {
+            item: "item".into(),
+            content: content.into(),
+        }
+    }
 
     #[test]
     fn a_remembered_token_is_reused_only_under_the_same_binding() {
@@ -427,7 +509,7 @@ mod tests {
             cache.epoch(),
             "login-a",
             "bind-1",
-            "rev",
+            &rev("rev"),
             later(60),
             b"token-a",
         );
@@ -451,7 +533,7 @@ mod tests {
             cache.epoch(),
             "login-a",
             "bind",
-            "rev",
+            &rev("rev"),
             later(4),
             b"token-a",
         );
@@ -460,7 +542,7 @@ mod tests {
             cache.epoch(),
             "login-a",
             "bind",
-            "rev",
+            &rev("rev"),
             later(6),
             b"token-a",
         );
@@ -479,7 +561,7 @@ mod tests {
             cache.epoch(),
             "login-a",
             "bind",
-            "rev",
+            &rev("rev"),
             later(60),
             b"token-a",
         );
@@ -487,7 +569,7 @@ mod tests {
             cache.epoch(),
             "login-b",
             "bind",
-            "rev",
+            &rev("rev"),
             later(60),
             b"token-b",
         );
@@ -510,20 +592,27 @@ mod tests {
             cache.epoch(),
             "login-a",
             "bind",
-            "rev",
+            &rev("rev"),
             later(60),
             b"token-a",
         );
         let started = cache.epoch();
         cache.clear();
         assert!(cache.store.read().unwrap().is_none());
-        cache.remember(started, "login-b", "bind", "rev", later(60), b"token-b");
+        cache.remember(
+            started,
+            "login-b",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-b",
+        );
         assert!(cache.store.read().unwrap().is_none());
         cache.remember(
             cache.epoch(),
             "login-b",
             "bind",
-            "rev",
+            &rev("rev"),
             later(60),
             b"token-b",
         );
@@ -539,7 +628,7 @@ mod tests {
                 cache.epoch(),
                 &format!("login-{login}"),
                 &"b".repeat(64),
-                "rev",
+                &rev("rev"),
                 later(60),
                 &token,
             );
@@ -553,7 +642,14 @@ mod tests {
         assert!(!text.contains("refresh"));
         // A token that cannot fit on its own is simply not cached.
         let huge = vec![b'y'; MAX_SECRET_BYTES];
-        cache.remember(cache.epoch(), "login-huge", "b", "rev", later(60), &huge);
+        cache.remember(
+            cache.epoch(),
+            "login-huge",
+            "b",
+            &rev("rev"),
+            later(60),
+            &huge,
+        );
         assert!(cache.lookup("login-huge", "b", now()).is_none());
     }
 
@@ -564,31 +660,37 @@ mod tests {
             cache.epoch(),
             "login-a",
             "bind",
-            "rev-1",
+            &rev("rev-1"),
             later(60),
             b"token-a",
         );
         // The caller sees the revision the token was confirmed at; a lookup
         // never removes an entry because the item moved since.
         let cached = cache.lookup("login-a", "bind", now()).unwrap();
-        assert_eq!(cached.revision, "rev-1");
+        assert_eq!(cached.revision, rev("rev-1"));
         assert_eq!(cached.token.as_ref(), b"token-a");
-        cache.confirm(cache.epoch(), "login-a", "bind", "rev-2");
+        cache.confirm(cache.epoch(), "login-a", "bind", &rev("rev-2"));
         let cached = cache.lookup("login-a", "bind", now()).unwrap();
-        assert_eq!(cached.revision, "rev-2");
+        assert_eq!(cached.revision, rev("rev-2"));
         assert_eq!(cached.token.as_ref(), b"token-a");
-        // Not under another binding, and not after a clear.
-        cache.confirm(cache.epoch(), "login-a", "other", "rev-3");
+        // Not under another binding, not for another item, and not after a
+        // clear.
+        cache.confirm(cache.epoch(), "login-a", "other", &rev("rev-3"));
+        let recreated = ItemRevision {
+            item: "recreated".into(),
+            content: "rev-3".into(),
+        };
+        cache.confirm(cache.epoch(), "login-a", "bind", &recreated);
         assert_eq!(
             cache.lookup("login-a", "bind", now()).unwrap().revision,
-            "rev-2"
+            rev("rev-2")
         );
         let started = cache.epoch();
         cache.begin_clear();
-        cache.confirm(started, "login-a", "bind", "rev-4");
+        cache.confirm(started, "login-a", "bind", &rev("rev-4"));
         assert_eq!(
             cache.lookup("login-a", "bind", now()).unwrap().revision,
-            "rev-2"
+            rev("rev-2")
         );
     }
 
@@ -625,7 +727,7 @@ mod tests {
             cache.epoch(),
             "login-a",
             "bind",
-            "rev",
+            &rev("rev"),
             later(60),
             b"token-a",
         );
@@ -644,6 +746,94 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    /// Refuses the first `refusals` operations as unentitled, then behaves
+    /// as a working store.
+    struct RecoveringStore {
+        refusals: Mutex<usize>,
+        inner: MemoryStore,
+    }
+    impl RecoveringStore {
+        fn refused(&self) -> bool {
+            let mut left = self.refusals.lock().unwrap();
+            let refused = *left > 0;
+            *left = left.saturating_sub(1);
+            refused
+        }
+    }
+    impl TokenStore for RecoveringStore {
+        fn read(&self) -> Result<Option<SecretBytes>, &'static str> {
+            if self.refused() {
+                return Err(UNENTITLED);
+            }
+            self.inner.read()
+        }
+        fn write(&self, bytes: &[u8]) -> Result<(), &'static str> {
+            if self.refused() {
+                return Err(UNENTITLED);
+            }
+            self.inner.write(bytes)
+        }
+        fn clear(&self) -> Result<(), &'static str> {
+            if self.refused() {
+                return Err(UNENTITLED);
+            }
+            self.inner.clear()
+        }
+    }
+
+    #[test]
+    fn an_unentitled_answer_is_asked_again_after_the_window() {
+        let recovering = |refusals| RecoveringStore {
+            refusals: Mutex::new(refusals),
+            inner: MemoryStore::default(),
+        };
+        // A transient refusal: once the window has passed, the OS store is
+        // asked again, and its answer ends the in-memory mode.
+        let cache = TokenCache::new(Box::new(recovering(1))).with_reprobe_after(Duration::ZERO);
+        assert!(cache.lookup("login-a", "bind", now()).is_none());
+        assert!(cache.unentitled());
+        cache.remember(
+            cache.epoch(),
+            "login-a",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-a",
+        );
+        assert!(!cache.unentitled());
+        assert!(cache.lookup("login-a", "bind", now()).is_some());
+        // The in-memory copy was not left behind.
+        assert!(cache.memory.read().unwrap().is_none());
+
+        // Within the window the refusal stands and memory is used.
+        let cache = TokenCache::new(Box::new(recovering(1)));
+        assert!(cache.lookup("login-a", "bind", now()).is_none());
+        cache.remember(
+            cache.epoch(),
+            "login-a",
+            "bind",
+            &rev("rev"),
+            later(60),
+            b"token-a",
+        );
+        assert!(cache.unentitled());
+        assert!(cache.lookup("login-a", "bind", now()).is_some());
+    }
+
+    #[test]
+    fn an_unanswered_check_is_remembered_until_the_item_moves_or_the_entry_changes() {
+        let cache = cache();
+        cache.note_unanswered("login-a", &rev("rev-2"));
+        assert!(cache.unanswered("login-a", &rev("rev-2")));
+        assert!(!cache.unanswered("login-a", &rev("rev-3")));
+        assert!(!cache.unanswered("login-b", &rev("rev-2")));
+        cache.forget("login-a");
+        assert!(!cache.unanswered("login-a", &rev("rev-2")));
+        cache.note_unanswered("login-a", &rev("rev-2"));
+        cache.clear();
+        assert!(!cache.unanswered("login-a", &rev("rev-2")));
+    }
+
     #[test]
     fn an_unreadable_document_is_a_miss_not_an_error() {
         let cache = cache();
@@ -653,7 +843,7 @@ mod tests {
             cache.epoch(),
             "login-a",
             "bind",
-            "rev",
+            &rev("rev"),
             later(60),
             b"token-a",
         );
