@@ -56,7 +56,7 @@ impl AppDaemon {
             // The point of the whole file. A shipped application sets none of
             // these, so neither does this harness.
             .env_remove("TRACE_COMMONS_ALLOWED_HOSTS")
-            .env_remove("TRACE_COMMONS_CONTRIBUTOR_DIR")
+            .env_remove(trace_commons_contributor::channel::STATE_DIR_ENV)
             .env_remove("TRACE_COMMONS_INFERENCE_RECEIPT_ENDPOINT");
         let child = command.spawn().unwrap();
         let daemon = Self {
@@ -110,21 +110,21 @@ fn socket_answers(path: &Path) -> bool {
 }
 
 /// An https origin on a port nothing is listening on: shape-valid, reachable
-/// only if the daemon actually tries.
+/// only if the daemon actually tries. Port 1 is below every ephemeral range,
+/// so a server another test binds to port 0 can never be handed it, as a
+/// port bound and released could be (#1759), and the refusal is immediate.
 fn closed_https_origin() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    format!("https://127.0.0.1:{port}")
+    "https://127.0.0.1:1".to_string()
 }
 
 #[tokio::test]
 async fn a_daemon_with_no_allowed_hosts_env_attempts_the_signup_endpoint() {
     let daemon = AppDaemon::start();
+    let closed = closed_https_origin();
     let reply = daemon
         .call(
             "near_account_capabilities",
-            serde_json::json!({"ingest_url": closed_https_origin()}),
+            serde_json::json!({"ingest_url": closed}),
         )
         .await;
     let result = &reply["result"];
@@ -164,10 +164,11 @@ async fn the_three_refusal_reasons_are_reported_distinctly() {
             serde_json::json!({"ingest_url": "https://commons.example/path?query=1"}),
         )
         .await;
+    let closed = closed_https_origin();
     let unreachable = daemon
         .call(
             "near_account_capabilities",
-            serde_json::json!({"ingest_url": closed_https_origin()}),
+            serde_json::json!({"ingest_url": closed}),
         )
         .await;
     assert_ne!(

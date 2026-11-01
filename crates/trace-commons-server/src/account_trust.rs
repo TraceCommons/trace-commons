@@ -22,6 +22,9 @@ pub struct TrustAccount {
 pub enum TrustFactSource {
     /// A submission ID with an `accepted` credit-ledger event.
     AcceptedSubmission(Uuid),
+    /// A server-accepted submission without requiring a monetary credit event.
+    /// Only gate-required policies may qualify this source.
+    AcceptedSubmissionStatus(Uuid),
     /// A gate decision ID.
     GateEvaluation(Uuid),
     /// A submission ID whose `withdrawn_at` is set: a contributor withdrawal.
@@ -41,6 +44,7 @@ impl TrustFactSource {
     pub fn source_id(self) -> Uuid {
         match self {
             Self::AcceptedSubmission(id)
+            | Self::AcceptedSubmissionStatus(id)
             | Self::GateEvaluation(id)
             | Self::SubmissionWithdrawn(id)
             | Self::SubmissionRevoked(id)
@@ -53,6 +57,7 @@ impl TrustFactSource {
     pub fn kind(self) -> &'static str {
         match self {
             Self::AcceptedSubmission(_) => "accepted_submission",
+            Self::AcceptedSubmissionStatus(_) => "accepted_submission_status",
             Self::GateEvaluation(_) => "gate_evaluation",
             Self::SubmissionWithdrawn(_) => "submission_withdrawn",
             Self::SubmissionRevoked(_) => "submission_revoked",
@@ -66,6 +71,7 @@ impl TrustFactSource {
     pub fn from_storage(kind: &str, source_id: Uuid) -> Option<Self> {
         Some(match kind {
             "accepted_submission" => Self::AcceptedSubmission(source_id),
+            "accepted_submission_status" => Self::AcceptedSubmissionStatus(source_id),
             "gate_evaluation" => Self::GateEvaluation(source_id),
             "submission_withdrawn" => Self::SubmissionWithdrawn(source_id),
             "submission_revoked" => Self::SubmissionRevoked(source_id),
@@ -244,6 +250,29 @@ pub fn device_claim_actor(tenant_id: &str, device_key_id: &str, subject: Option<
         Some(subject) => format!("instance:{tenant_id}:{device_key_id}:user:{subject}"),
         None => device_key_id.to_string(),
     }
+}
+
+/// The current and legacy provenance identities of a verified device claim.
+/// This does not authenticate an actor: the caller must first verify the
+/// registered device signature. Parsing binds a subject-scoped actor to the
+/// exact device and tenant, avoiding caller-supplied arbitrary principal refs.
+pub fn device_upload_principal_refs(
+    tenant_id: &str,
+    device_key_id: &str,
+    actor_ref: &str,
+) -> Option<[String; 2]> {
+    use sha2::{Digest as _, Sha256};
+    if device_claim_key_id(tenant_id, actor_ref)? != device_key_id {
+        return None;
+    }
+    let material = format!("signed:{tenant_id}:{actor_ref}");
+    let bound = format!("12:signed_claim:{}:{material}", material.len());
+    Some([bound, material].map(|value| {
+        format!(
+            "principal_sha256:{}",
+            hex::encode(Sha256::digest(value.as_bytes()))
+        )
+    }))
 }
 
 /// The device key id inside a device-shaped upload-claim actor for `tenant_id`,

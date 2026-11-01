@@ -68,6 +68,16 @@ public sealed class OnboardingState
         return Read().Contains(tenantId);
     }
 
+    /// <summary>Shared completion is proof only for a live, identified enrollment.</summary>
+    public static bool HasSharedCompletion(DaemonStatus? status) =>
+        status is { LoggedIn: true, SetupComplete: true }
+        && !string.IsNullOrEmpty(status.TenantId);
+
+    /// <summary>Accept CLI completion without copying it into the legacy GUI marker.</summary>
+    public bool IsSetupComplete(DaemonStatus? status) =>
+        status is { LoggedIn: true }
+        && (HasSharedCompletion(status) || IsComplete(status.TenantId));
+
     /// <summary>
     /// Records that onboarding finished for this tenant.
     /// </summary>

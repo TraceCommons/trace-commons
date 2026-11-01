@@ -130,6 +130,13 @@ pub struct PublicRunCopy {
     /// session-detail table. A status not in it is
     /// `contribution_status_unavailable`.
     pub history_status_labels: [PublicRunValueLabel; 11],
+    /// Why a decided trace earned no credit, one row per server reason
+    /// label (`history_copy::CREDIT_OUTCOME_LABELS`). A reason not in it is
+    /// `credit_outcome_unavailable`.
+    pub credit_outcome_labels: [PublicRunValueLabel; 8],
+    /// The words for a no-credit reason not in `credit_outcome_labels`
+    /// (`history_copy::NO_CREDIT_REASON_UNAVAILABLE`), never the raw label.
+    pub credit_outcome_unavailable: &'static str,
     pub permitted_use_choices: [PublicRunValueLabel; 6],
     pub reuse_permissions: [PublicRunReuseChoice; 2],
 }
@@ -332,6 +339,13 @@ pub fn public_run_copy() -> PublicRunCopy {
             value: row.status,
             label: row.label,
         }),
+        credit_outcome_labels: crate::history_copy::CREDIT_OUTCOME_LABELS.map(|row| {
+            PublicRunValueLabel {
+                value: row.reason,
+                label: row.label,
+            }
+        }),
+        credit_outcome_unavailable: crate::history_copy::NO_CREDIT_REASON_UNAVAILABLE,
         permitted_use_choices: [
             PublicRunValueLabel {
                 value: "debugging",
@@ -447,7 +461,7 @@ fn normalize_source_slug(source: &str) -> Result<Option<String>, ()> {
     }
     let url = url::Url::parse(source).map_err(|_| ())?;
     if url.scheme() != "https"
-        || url.host_str() != Some("tracecommons.ai")
+        || url.host_str() != Some(crate::channel::PUBLIC_SITE_HOST)
         || !url.username().is_empty()
         || url.password().is_some()
         || url.port().is_some()
@@ -515,6 +529,17 @@ mod tests {
         {
             assert_eq!((exported.value, exported.label), (row.status, row.label));
         }
+        for (exported, row) in copy
+            .credit_outcome_labels
+            .iter()
+            .zip(crate::history_copy::CREDIT_OUTCOME_LABELS)
+        {
+            assert_eq!((exported.value, exported.label), (row.reason, row.label));
+        }
+        assert_eq!(
+            copy.credit_outcome_unavailable,
+            crate::history_copy::NO_CREDIT_REASON_UNAVAILABLE
+        );
         assert!(
             copy.contribution_status_choices
                 .iter()
@@ -563,7 +588,7 @@ mod tests {
                 event_id: Uuid::nil(),
                 excerpt: "The retry succeeded.".to_string(),
             }],
-            source: "https://tracecommons.ai/runs/run-source-workflow".to_string(),
+            source: format!("{}run-source-workflow", crate::channel::PUBLIC_RUNS_PREFIX),
         };
         let valid = validate_public_run_editor(input.clone());
         let draft = valid.draft.expect("valid draft");

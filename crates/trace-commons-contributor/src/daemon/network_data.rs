@@ -24,9 +24,24 @@ pub(crate) async fn handle_summary(shared: &DaemonShared, req: &Request) -> Resp
         },
     };
     let ledger = shared.routing_ledger();
-    let mut summary = match ledger.as_ref() {
+    super::managed_history::refresh(shared).await;
+    let primary = match ledger.as_ref() {
         Some(ledger) => ledger.read_summary(since).await,
         None => None,
+    };
+    let primary_unreadable = ledger.is_some() && primary.is_none();
+    let mut summary = match super::managed_history::snapshot(shared) {
+        Ok(history) if !primary_unreadable => match history {
+            Some(history) => match history.summary(since) {
+                Ok(managed) => match primary {
+                    Some(primary) => super::managed_history::merge(primary, managed),
+                    None => Some(managed),
+                },
+                Err(_) => None,
+            },
+            None => primary,
+        },
+        _ => None,
     };
     if let Some(summary) = summary.as_mut() {
         normalize_summary(summary);
@@ -35,7 +50,12 @@ pub(crate) async fn handle_summary(shared: &DaemonShared, req: &Request) -> Resp
         req.id,
         serde_json::json!({
             "readable": summary.is_some(), "window_hours": window_hours,
-            "observed_at": ledger.and_then(|ledger| ledger.last_summary_at()),
+            // Retain the last successful observation on failed refreshes;
+            // readable=false says it is stale, not a fresh empty window.
+            "observed_at": match ledger {
+                Some(ledger) => ledger.last_summary_at(),
+                None => shared.managed_history_observed_at.read().ok().and_then(|at| *at),
+            },
             "summary": summary,
         }),
     )
@@ -102,16 +122,17 @@ pub(crate) async fn handle_model_spend(shared: &DaemonShared, req: &Request) -> 
 
 pub(crate) fn handle_private_ai(shared: &DaemonShared, req: &Request) -> Response {
     let (on, lifecycle) = match super::settings::DaemonSettings::load(&shared.store) {
-        Ok(_) => (
-            Some(
-                shared
-                    .settings
-                    .lock()
-                    .expect("settings lock")
-                    .private_inference,
-            ),
-            shared.private_inference_value(),
-        ),
+        Ok(_) => {
+            // Read, and the guard dropped, before the lifecycle: that reads
+            // the settings lock too, and a guard held across it would
+            // deadlock.
+            let on = shared
+                .settings
+                .lock()
+                .expect("settings lock")
+                .private_inference;
+            (Some(on), shared.private_inference_value())
+        }
         Err(_) => (None, serde_json::json!({"state":null,"port":null})),
     };
     Response::ok(
@@ -194,6 +215,50 @@ pub(crate) async fn handle_invite_lookup(shared: &DaemonShared, req: &Request) -
     )
 }
 
+/// `first_run_estimate`: the commons' dollar estimate per accepted trace
+/// for the first run's Traces step (`GET /v1/public/first-run-estimate`),
+/// asked on demand once the first run has started the daemon. It always
+/// answers: the protocol document with the range, or `{}` when the commons
+/// publishes none, cannot be reached, or sends one this build would not
+/// show -- and the first run then words its estimate in points.
+///
+/// The request is anonymous, like the estimate tables'. It goes to the
+/// configured commons, or before any configuration to the channel's account
+/// origin, the commons a first-run sign-in enrolls with (`native_identity`).
+pub(crate) async fn handle_first_run_estimate(shared: &DaemonShared, req: &Request) -> Response {
+    let range = first_run_estimate(shared).await;
+    let doc = trace_commons_protocol::first_run_estimate::FirstRunEstimate {
+        usd_micros_per_accepted_trace: range,
+    };
+    Response::ok(
+        req.id,
+        serde_json::to_value(doc).expect("estimate serializes"),
+    )
+}
+
+async fn first_run_estimate(
+    shared: &DaemonShared,
+) -> Option<trace_commons_protocol::first_run_estimate::UsdMicrosRange> {
+    let (ingest, allowed) = first_run_estimate_target(&shared.store)?;
+    let origin = crate::config::ingest_origin_url(&ingest, "/").ok()?;
+    let client =
+        crate::credit_estimate_table::EstimateTableClient::new(origin.as_str(), allowed.as_deref())
+            .ok()?;
+    client.fetch_first_run_estimate().await.ok().flatten()
+}
+
+/// The configured commons and its host policy, as the estimate table's
+/// fetch asks it; before any configuration, the channel's account origin
+/// under the default policy. `None` when the configuration cannot be read.
+fn first_run_estimate_target(
+    store: &crate::config::ConfigStore,
+) -> Option<(String, Option<String>)> {
+    Some(match store.load_config().ok()? {
+        Some(cfg) => (cfg.ingest_url, cfg.allowed_hosts),
+        None => (crate::channel::NATIVE_ACCOUNT_ORIGIN.to_string(), None),
+    })
+}
+
 fn valid_invite_answer(answer: &InviteLookupResponse) -> bool {
     if answer.valid {
         answer.reason_label.is_none()
@@ -253,6 +318,75 @@ mod tests {
             "../../tests/fixtures/ironwire/sample-summary.json"
         ))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn managed_only_histories_count_after_restart_without_a_shared_proxy() {
+        use crate::routing::managed_history::tests::fixture;
+        let (_dir, s) = shared();
+        let root = s.store.dir().join("managed-routes");
+        let a = fixture(&root, "verified");
+        let b = fixture(&root, "gateway_only");
+        for home in [&a, &b] {
+            rusqlite::Connection::open(home.join("ledger.sqlite"))
+                .unwrap()
+                .execute(
+                    "UPDATE exchanges SET started_at = ?1",
+                    [(Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()],
+                )
+                .unwrap();
+        }
+        // Retained evidence remains readable even after it leaves today's window.
+        let old = fixture(&root, "pending");
+        rusqlite::Connection::open(old.join("ledger.sqlite"))
+            .unwrap()
+            .execute(
+                "UPDATE exchanges SET started_at = ?1",
+                [(Utc::now() - chrono::Duration::days(180)).to_rfc3339()],
+            )
+            .unwrap();
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        for daemon in [&s, &restarted] {
+            assert!(daemon.routing_ledger().is_none());
+            let result =
+                handle_summary(daemon, &request("inference_summary", serde_json::json!({})))
+                    .await
+                    .result
+                    .unwrap();
+            assert_eq!(result["readable"], true);
+            assert_eq!(result["summary"]["routed"]["calls"], 2);
+            assert_eq!(result["summary"]["routed"]["proof"]["verified"], 1);
+            assert_eq!(result["summary"]["routed"]["proof"]["gateway_only"], 1);
+            assert!(result["observed_at"].is_string());
+            let retained = handle_summary(
+                daemon,
+                &request(
+                    "inference_summary",
+                    serde_json::json!({"since":DateTime::<Utc>::UNIX_EPOCH.to_rfc3339()}),
+                ),
+            )
+            .await
+            .result
+            .unwrap();
+            assert_eq!(retained["readable"], true);
+            assert_eq!(retained["summary"]["routed"]["calls"], 3);
+            let wire = result.to_string();
+            assert!(
+                !wire.contains("body_ref")
+                    && !wire.contains("client_session_id")
+                    && !wire.contains("ledger.sqlite")
+            );
+        }
+        let page = super::super::inference_map::handle_calls(
+            &s,
+            &request("inference_calls", serde_json::json!({})),
+        )
+        .result
+        .unwrap();
+        assert_eq!(
+            page["readable"], false,
+            "the shared page cannot gate managed totals"
+        );
     }
 
     #[test]
@@ -867,5 +1001,104 @@ mod tests {
             assert_eq!(response.error.unwrap().message, "invite-lookup-unavailable");
             task.abort();
         }
+    }
+
+    fn configure_origin(s: &DaemonShared, origin: &str) {
+        let cfg: crate::config::ContributorConfig = serde_json::from_value(serde_json::json!({
+            "schema_version":crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION,
+            "issuer_url":"https://issuer.example","ingest_url":origin,"audience":"upload",
+            "tenant_id":"tenant-a","instance_id":"instance-a","user_subject":"device-a",
+            "device_key_id":"device-a","consent_scopes":[],"allowed_hosts":"127.0.0.1"
+        }))
+        .unwrap();
+        s.store.save_config(&cfg).unwrap();
+    }
+
+    async fn first_run_estimate_against(answer: Option<serde_json::Value>) -> serde_json::Value {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let router = match answer {
+            Some(answer) => Router::new().route(
+                trace_commons_protocol::first_run_estimate::FIRST_RUN_ESTIMATE_PATH,
+                get(move |headers: axum::http::HeaderMap| {
+                    let answer = answer.clone();
+                    let calls = observed.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        assert!(!headers.contains_key("authorization"));
+                        Json(answer)
+                    }
+                }),
+            ),
+            None => Router::new(),
+        };
+        let (port, task) = serve(router).await;
+        let (_dir, s) = shared();
+        configure_origin(&s, &format!("http://127.0.0.1:{port}/v1/traces"));
+        let response = super::super::ipc::handle_request_async(
+            &s,
+            &request("first_run_estimate", serde_json::json!({})),
+        )
+        .await;
+        task.abort();
+        response.result.expect("first_run_estimate always answers")
+    }
+
+    /// The commons' range comes back as the protocol names it; no range,
+    /// an unreachable route or one this build would not show is `{}`, and
+    /// the first run words its estimate in points. Synthetic values.
+    #[tokio::test]
+    async fn first_run_estimate_relays_the_range_or_nothing() {
+        let range =
+            serde_json::json!({"usd_micros_per_accepted_trace": {"min": 120_000, "max": 340_000}});
+        assert_eq!(first_run_estimate_against(Some(range.clone())).await, range);
+        assert_eq!(
+            first_run_estimate_against(Some(serde_json::json!({}))).await,
+            serde_json::json!({})
+        );
+        assert_eq!(
+            first_run_estimate_against(Some(serde_json::json!({
+                "usd_micros_per_accepted_trace": {"min": 0, "max": 340_000}
+            })))
+            .await,
+            serde_json::json!({})
+        );
+        assert_eq!(
+            first_run_estimate_against(None).await,
+            serde_json::json!({})
+        );
+    }
+
+    /// Before enrollment there is no configuration: the first run asks the
+    /// channel's account origin, the commons its sign-in enrolls with.
+    #[test]
+    fn an_unconfigured_first_run_asks_the_channel_commons() {
+        let (_dir, s) = shared();
+        assert_eq!(
+            first_run_estimate_target(&s.store),
+            Some((crate::channel::NATIVE_ACCOUNT_ORIGIN.to_string(), None))
+        );
+        configure_origin(&s, "https://commons.example/v1/traces");
+        assert_eq!(
+            first_run_estimate_target(&s.store),
+            Some((
+                "https://commons.example/v1/traces".to_string(),
+                Some("127.0.0.1".to_string())
+            ))
+        );
+    }
+
+    #[test]
+    fn first_run_estimate_is_advertised_and_async_only() {
+        assert!(super::super::ipc::METHODS.contains(&"first_run_estimate"));
+        let (_dir, s) = shared();
+        let response = super::super::ipc::handle_request(
+            &s,
+            &request("first_run_estimate", serde_json::json!({})),
+        );
+        assert_eq!(
+            response.error.expect("refused synchronously").message,
+            "first-run-estimate-requires-async"
+        );
     }
 }

@@ -43,7 +43,7 @@ final class RulesScreenTests: XCTestCase {
             session("c", selectable: false),
             session("d", state: .stillActive, selectable: false),
         ]
-        var state = FirstRunState(tier: .custom, step: .rules, account: .enrolled)
+        var state = FirstRunState(step: .tools, account: .enrolled)
 
         // One write per tickable row, as the native group toggle sends them.
         for _ in sessions.filter(RulesScreenLayout.isTickable) {
@@ -88,7 +88,7 @@ final class RulesScreenTests: XCTestCase {
     /// and the folder's other rules leave it alone.
     func test_neverClearsTheFolderSelection() {
         let sessions = [session("a"), session("b")]
-        var state = FirstRunState(tier: .custom, step: .rules)
+        var state = FirstRunState(step: .tools)
         RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: sessions, on: true)
         RulesScreenLayout.includeEvery(&state, projectID: "p2", sessions: sessions, on: true)
 
@@ -110,37 +110,48 @@ final class RulesScreenTests: XCTestCase {
     /// daemon's mode, and the plan sends no `setProjectMode` for it.
     func test_anUntouchedRuleIsNotSent() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
-        let state = FirstRunState(tier: .custom, step: .rules)
+        let state = FirstRunState(step: .tools)
         XCTAssertEqual(RulesScreenLayout.rule(state, for: project), .ask)
         XCTAssertTrue(state.rules.isEmpty)
     }
 
-    /// Automatic needs an enrollment. A watch-only person is not offered it per
-    /// folder, and the layout refuses it however it is asked, so the plan
-    /// never sends an arming the daemon would refuse for want of terms.
-    func test_watchOnlyIsNotOfferedAutomaticPerFolder() {
+    /// Automatic is offered per folder before sign-in, as on Uses (Ron,
+    /// 2026-10-22): picking it still asks first, the confirmation records
+    /// it, and until an enrollment is held the row says it turns on once
+    /// the person signs in; Start arms it then (`FirstRunPlan`). A folder
+    /// the daemon will not arm is offered no Automatic at all.
+    func test_automaticIsOfferedPerFolderBeforeSignIn() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
-        let watching = FirstRunState(tier: .custom, step: .rules, account: .watchOnly)
-        let joined = FirstRunState(tier: .custom, step: .rules, account: .nearAI, enrolledInvite: "INVITE-1")
-        XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: watching), [.ask, .ignore])
+        let watching = FirstRunState(step: .tools, account: .watchOnly)
+        let joined = FirstRunState(step: .tools, account: .nearAI, enrolledInvite: "INVITE-1")
+        XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: FirstRunState(step: .tools)), [.ask, .autoUpload, .ignore])
+        XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: watching), [.ask, .autoUpload, .ignore])
         XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: joined), [.ask, .autoUpload, .ignore])
 
-        var state = FirstRunState(tier: .custom, step: .rules, account: .watchOnly)
-        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .refused)
-        XCTAssertFalse(RulesScreenLayout.confirmArming(&state, project: project))
-        XCTAssertTrue(state.rules.isEmpty)
+        var state = FirstRunState(step: .tools)
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .needsConfirmation)
+        XCTAssertTrue(state.rules.isEmpty, "nothing is written before the confirmation")
+        XCTAssertFalse(RulesScreenLayout.armsAfterSignIn(state, project: project))
+        XCTAssertTrue(RulesScreenLayout.confirmArming(&state, project: project))
+        XCTAssertEqual(state.rules["p1"], .autoUpload)
+        XCTAssertTrue(RulesScreenLayout.armsAfterSignIn(state, project: project))
 
-        // A folder the daemon already arms keeps its mode on the picker, so
-        // the picker never shows a mode it has no option for.
-        let armed = ProjectRow(projectId: "p2", projectLabel: "armed", mode: .autoUpload)
-        XCTAssertEqual(RulesScreenLayout.offeredModes(armed, state: watching), [.ask, .autoUpload, .ignore])
+        var signedIn = joined
+        XCTAssertTrue(RulesScreenLayout.confirmArming(&signedIn, project: project))
+        XCTAssertFalse(RulesScreenLayout.armsAfterSignIn(signedIn, project: project), "armed at Start, no note")
+
+        let bucket = ProjectRow(projectId: "p9", projectLabel: "unresolved", mode: .ask, isUnresolvedBucket: true)
+        XCTAssertFalse(RulesScreenLayout.offeredModes(bucket, state: joined).contains(.autoUpload))
+        var other = FirstRunState(step: .tools)
+        XCTAssertEqual(RulesScreenLayout.pick(&other, project: bucket, wanted: .autoUpload), .refused)
+        XCTAssertFalse(RulesScreenLayout.confirmArming(&other, project: bucket))
     }
 
     /// Arming is a grant, so it is never silent: picking Automatic asks
     /// first, and only the confirmation writes the rule the plan sends.
     func test_automaticWaitsForTheArmingConfirmation() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
-        var state = FirstRunState(tier: .custom, step: .rules, account: .nearAI, enrolledInvite: "INVITE-1")
+        var state = FirstRunState(step: .tools, account: .nearAI, enrolledInvite: "INVITE-1")
 
         XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .autoUpload), .needsConfirmation)
         XCTAssertTrue(state.rules.isEmpty)
@@ -158,19 +169,27 @@ final class RulesScreenTests: XCTestCase {
         XCTAssertEqual(state.rules["p1"], .autoUpload)
     }
 
-    /// Picking the mode the daemon already has is not a change, so nothing
-    /// is sent for it, as Settings does.
-    func test_repickingTheDaemonsModeIsNotSent() {
+    /// Picking Never or Automatic when the daemon already has it is not a
+    /// change, so nothing is sent for it, as Settings does. Ask is
+    /// different: every folder reads Ask on a first run, and an Ask the
+    /// person picked is kept even if they later choose "Automatic,
+    /// including existing history" on Uses (owner decision 2026-10-29,
+    /// #1747). It is recorded so Start sends it after the grant.
+    func test_repickingTheDaemonsModeIsNotSentExceptAsk() {
         let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
-        var state = FirstRunState(tier: .custom, step: .rules, account: .nearAI, enrolledInvite: "INVITE-1")
+        var state = FirstRunState(step: .tools, account: .nearAI, enrolledInvite: "INVITE-1")
 
         XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .ask), .applied)
-        XCTAssertTrue(state.rules.isEmpty)
+        XCTAssertEqual(state.rules["p1"], .ask, "an Ask the person picked is recorded")
 
         XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .ignore), .applied)
         XCTAssertEqual(state.rules["p1"], .ignore)
         XCTAssertEqual(RulesScreenLayout.pick(&state, project: project, wanted: .ask), .applied)
-        XCTAssertTrue(state.rules.isEmpty)
+        XCTAssertEqual(state.rules["p1"], .ask)
+
+        let never = ProjectRow(projectId: "p2", projectLabel: "other", mode: .ignore)
+        XCTAssertEqual(RulesScreenLayout.pick(&state, project: never, wanted: .ignore), .applied)
+        XCTAssertNil(state.rules["p2"], "re-picking the daemon's Never sends nothing")
     }
 
     /// A `still_active` row cannot be ticked, whatever the wire said about
@@ -179,7 +198,7 @@ final class RulesScreenTests: XCTestCase {
         let active = session("live", state: .stillActive, selectable: true)
         XCTAssertFalse(RulesScreenLayout.isTickable(active))
 
-        var state = FirstRunState(tier: .custom, step: .rules)
+        var state = FirstRunState(step: .tools)
         RulesScreenLayout.setTicked(&state, projectID: "p1", session: active, on: true)
         XCTAssertNil(state.pastSelections["p1"])
         RulesScreenLayout.includeEvery(&state, projectID: "p1", sessions: [active], on: true)
@@ -243,7 +262,7 @@ final class RulesScreenTests: XCTestCase {
     /// in a repo only those sessions. A repo whose tools the daemon has not
     /// named is not known to be from a watched tool, so it is left out.
     func test_rulesOffersOnlyReposOfWatchedTools() {
-        var state = FirstRunState(tier: .custom, step: .rules)
+        var state = FirstRunState(step: .tools)
         state.answer(.claudeCode, .watch(path: "/Users/someone/.claude"))
         state.answer(.codex, .off)
         let claude = ProjectRow(
@@ -275,28 +294,31 @@ final class RulesScreenTests: XCTestCase {
         XCTAssertEqual(RulesScreenLayout.offered([exported], state: state).map(\.projectId), ["p5"])
     }
 
-    /// Ron's review of #1235, item 13: the Rules picker shows its status
-    /// dots, in Ron's order -- Ask on the ask colour, Automatic on the
-    /// on colour, Never on the off colour. Settings' picker is unchanged.
-    func test_theRulesPickerShowsItsStatusDots() throws {
-        let modes = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON()))
-        let options = ProjectModeChoices.options(
-            for: [.ask, .autoUpload, .ignore], copy: modes, dot: RulesScreenLayout.dot(for:))
-        XCTAssertEqual(options.map(\.value), [.ask, .autoUpload, .ignore])
-        XCTAssertEqual(options.map(\.dot), [.ask, .on, .off])
-        XCTAssertEqual(
-            ProjectModeChoices.options(for: [.ask, .autoUpload, .ignore], copy: modes).map(\.dot), [nil, nil, nil])
+    /// Ron, 2026-10-22, over #1235's item 13 for Customize: a repo's rule is
+    /// the canvas's Ask / Automatic / Never control with no status dot, and
+    /// before sign-in an Automatic repo says it turns on once the person
+    /// signs in. Settings' picker keeps its dots.
+    func test_theRulesControlShowsEveryModeAndNoDots() throws {
+        let project = ProjectRow(projectId: "p1", projectLabel: "repo", mode: .ask)
+        let watching = FirstRunState(step: .tools, account: .watchOnly)
+        XCTAssertEqual(RulesScreenLayout.offeredModes(project, state: watching), [.ask, .autoUpload, .ignore])
         let screen = try String(
             contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
                 .deletingLastPathComponent().appendingPathComponent(
-                    "Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift"), encoding: .utf8)
-        XCTAssertTrue(screen.contains("copy: modeCopy, dot: RulesScreenLayout.dot(for:))"))
+                    "Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift"), encoding: .utf8)
+        XCTAssertTrue(screen.contains("options: RulesScreenLayout.offeredModes(project, state: runner.state).compactMap"))
+        XCTAssertTrue(screen.contains("Text(copy.uses.automaticAfterSignIn)"))
+        XCTAssertFalse(screen.contains("GlassSegmentedTabs("))
+        XCTAssertFalse(screen.contains("GlassSegment("), "no segment carries a status dot")
+        // The past traces' switches sit before their words.
+        XCTAssertFalse(screen.contains("GlassToggleStyle(.standard)"))
+        XCTAssertTrue(screen.contains(".toggleStyle(FirstRunSwitchStyle())"))
     }
 
     /// "{selected} of {total} selected" counts folders that are not Never.
     func test_theSummaryLeavesNeverFoldersOut() {
         let sessions = [session("a"), session("b"), session("c")]
-        var state = FirstRunState(tier: .custom, step: .rules)
+        var state = FirstRunState(step: .tools)
         let projects = [
             ProjectRow(projectId: "p1", projectLabel: "one", mode: .ask),
             ProjectRow(projectId: "p2", projectLabel: "two", mode: .ask),
@@ -316,10 +338,10 @@ final class RulesScreenTests: XCTestCase {
     /// with the core's line, for watching only and for nothing else.
     func test_watchingOnlySaysPastSessionsWaitLocally() throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
-        var state = FirstRunState(tier: .custom, step: .rules)
+        var state = FirstRunState(step: .tools)
         state.account = .watchOnly
         XCTAssertEqual(RulesScreenLayout.pastSessionsNote(state, copy: copy.rules), copy.rules.pastSessionsWatchOnly)
-        for account: AccountAnswer in [.nearAI, .passkeyChosen, .passkey(name: "p"), .enrolled, .none] {
+        for account: AccountAnswer in [.nearAI, .enrolled, .none] {
             state.account = account
             XCTAssertNil(RulesScreenLayout.pastSessionsNote(state, copy: copy.rules), "\(account)")
         }
@@ -334,26 +356,23 @@ final class RulesScreenTests: XCTestCase {
         // (one signed out of, or an invite enrolled before a sign-in
         // failed), watching only sends nothing, so nothing waits to say so.
         for held in [
-            FirstRunState(tier: .custom, step: .rules, account: .watchOnly, signedOutOfEnrolment: true),
-            FirstRunState(tier: .custom, step: .rules, account: .watchOnly, enrolledInvite: "INVITE-1"),
+            FirstRunState(step: .tools, account: .watchOnly, signedOutOfEnrolment: true),
+            FirstRunState(step: .tools, account: .watchOnly, enrolledInvite: "INVITE-1"),
         ] {
             XCTAssertNil(RulesScreenLayout.pastSessionsNote(held, copy: copy.rules))
         }
 
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift")
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift")
         XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("RulesScreenLayout.pastSessionsNote("))
     }
 
-    /// Ron's ruling of 2026-10-06: folders that cannot be read show the
-    /// core's unavailable line with a retry, as Compute and History do, and
-    /// Continue stays disabled until they load. The line names no Back link,
-    /// which the first run no longer has.
-    func test_unreadableFoldersOfferARetryAndHoldContinue() throws {
+    /// Ron's ruling of 2026-10-06: repos that cannot be read show the
+    /// core's unavailable line with a retry, as Compute and History do. The
+    /// line names no Back link.
+    func test_unreadableFoldersOfferARetry() throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
-        XCTAssertFalse(RulesScreenLayout.canContinue(projects: nil))
-        XCTAssertTrue(RulesScreenLayout.canContinue(projects: []))
         XCTAssertEqual(RulesScreenLayout.retryTitle(copy), copy.rules.retry)
         XCTAssertEqual(copy.rules.retry, "Try again")
         XCTAssertNotEqual(copy.rules.retry, copy.folders.retry)
@@ -361,7 +380,7 @@ final class RulesScreenTests: XCTestCase {
 
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift")
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         // The retry sits in the unavailable branch and reads again.
         let branch = try XCTUnwrap(source.range(of: "case .failed:"))
@@ -370,8 +389,8 @@ final class RulesScreenTests: XCTestCase {
         let failed = rest[..<end.lowerBound]
         XCTAssertTrue(failed.contains("copy.rules.unavailable"))
         XCTAssertTrue(failed.contains("RulesScreenLayout.retryTitle(copy)"))
-        XCTAssertTrue(failed.contains("await load()"))
-        XCTAssertTrue(source.contains("isEnabled: RulesScreenLayout.canContinue(projects: projects)"))
+        XCTAssertTrue(failed.contains("await repos.load("))
+        XCTAssertTrue(failed.contains("force: true"))
     }
 
     /// Kristi's review of #1261: while "Try again" reads the folders again,
@@ -387,10 +406,10 @@ final class RulesScreenTests: XCTestCase {
 
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift")
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(source.contains("RulesScreenLayout.phase(projects: projects, loadFailed: loadFailed, loading: loading)"))
         // One read at a time: a second press while one runs does nothing.
-        XCTAssertTrue(source.contains("guard projects == nil, !loading else { return }"))
+        XCTAssertTrue(source.contains("guard !loading, force ||"))
     }
 }

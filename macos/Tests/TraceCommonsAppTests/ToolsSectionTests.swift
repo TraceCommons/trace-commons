@@ -19,6 +19,7 @@ final class ToolsSectionTests: XCTestCase {
     }
 
     /// Only the four routing tones exist; none maps to a failure look.
+    @MainActor
     func test_routingTonesNeverReadAsFailed() {
         for tone in [RoutingTone.clear, .held, .attention, .neutral] {
             XCTAssertNotEqual(ToolsSection.tone(tone), .outside)

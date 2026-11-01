@@ -297,6 +297,7 @@ pub async fn login(
     allowed_hosts: Option<&str>,
     scopes: Option<&str>,
     default_consent: bool,
+    no_browser: bool,
 ) -> Result<()> {
     let env_invite = std::env::var("TRACE_COMMONS_INVITE").ok();
     login_with(
@@ -307,7 +308,7 @@ pub async fn login(
         allowed_hosts,
         scopes,
         default_consent,
-        &mut |store, consent| crate::near_ai_login::run(store, consent),
+        &mut |store, consent| crate::near_ai_login::run(store, consent, no_browser),
     )
     .await
 }
@@ -437,7 +438,7 @@ fn consent_source(
 ///
 /// Also answers whether the scopes are the person's choice
 /// ([`ConsentSource::is_a_choice`]).
-fn resolve_consent_scopes(
+pub(crate) fn resolve_consent_scopes(
     scopes: Option<&str>,
     default_consent: bool,
 ) -> Result<(Vec<String>, bool)> {
@@ -1328,7 +1329,7 @@ pub(crate) async fn enroll_before_submit(
     if let Some(invite) = auto_enroll_invite(sel.invite, env_invite, sel.json) {
         // Consent is asked in full here, exactly as `login` asks it.
         // Pre-seeding scopes from an invite would be a dark pattern.
-        return login(store, None, Some(&invite), None, None, false)
+        return login(store, None, Some(&invite), None, None, false, false)
             .await
             .context("enrolling with the supplied invite");
     }
@@ -1580,7 +1581,11 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
             &mut |store| {
                 // Consent is asked in full here, exactly as `login` asks it.
                 let (scopes, chosen) = resolve_consent_scopes(None, false)?;
-                crate::near_ai_login::run(store, &crate::near_ai_login::Consent { scopes, chosen })
+                crate::near_ai_login::run(
+                    store,
+                    &crate::near_ai_login::Consent { scopes, chosen },
+                    false,
+                )
             },
         )
         .await?;
@@ -1971,6 +1976,17 @@ pub async fn profile(
     Ok(())
 }
 
+/// The FINAL cell of the status and history tables: the final figure, with
+/// the server's reason label beside a figure decided without an award, and
+/// `-` while the trace is still pending.
+fn final_credit_cell(final_points: Option<f32>, reason: Option<&str>) -> String {
+    match (final_points, reason) {
+        (Some(points), Some(reason)) => format!("{points:.2} ({reason})"),
+        (Some(points), None) => format!("{points:.2}"),
+        (None, _) => "-".to_string(),
+    }
+}
+
 pub async fn status(store: &ConfigStore) -> Result<()> {
     let cfg = store
         .load_config()
@@ -1991,9 +2007,7 @@ pub async fn status(store: &ConfigStore) -> Result<()> {
                 u.status.clone(),
                 scopes_cell(&u.consent_scopes),
                 format!("{:.2}", u.credit_points_pending),
-                u.credit_points_final
-                    .map(|f| format!("{f:.2}"))
-                    .unwrap_or_else(|| "-".to_string()),
+                final_credit_cell(u.credit_points_final, u.credit_outcome_reason.as_deref()),
             ]
         })
         .collect();
@@ -2199,6 +2213,18 @@ pub async fn import_antigravity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A decided trace with no award shows 0 and why; a pending one shows
+    /// no figure.
+    #[test]
+    fn the_final_cell_names_a_no_credit_reason() {
+        assert_eq!(
+            final_credit_cell(Some(0.0), Some("duplicate")),
+            "0.00 (duplicate)"
+        );
+        assert_eq!(final_credit_cell(Some(5.0), None), "5.00");
+        assert_eq!(final_credit_cell(None, None), "-");
+    }
 
     /// The three zero-import causes must each get their own sentence, and
     /// in particular a run whose matches were all empty must NOT be told
@@ -2481,6 +2507,7 @@ mod tests {
             Some("api.example"),
             None,
             false,
+            false,
         )
         .await
         .unwrap_err();
@@ -2536,9 +2563,17 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        let err = login(&store, Some(&grant.encode()), None, None, None, false)
-            .await
-            .unwrap_err();
+        let err = login(
+            &store,
+            Some(&grant.encode()),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("already enrolled"), "{msg}");
         // The original config must survive untouched: no repointing to a
@@ -2707,9 +2742,17 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        let err = login(&store, Some(&grant.encode()), None, None, None, false)
-            .await
-            .unwrap_err();
+        let err = login(
+            &store,
+            Some(&grant.encode()),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{err:#}").contains("already enrolled"));
 
         // The invite path refuses before the redemption call, so an
@@ -3667,6 +3710,9 @@ pub(crate) fn parse_invite(raw: &str) -> Result<ParsedInvite> {
     if !matches!(url.scheme(), "https" | "http") {
         anyhow::bail!("--invite must be an http(s) URL");
     }
+    // The other channel's issuer: refused here, before anything redeems the
+    // code, shows its host or asks the issuer about it.
+    crate::channel::refuse_other_channel_origin(url.as_str())?;
     let code = url
         .fragment()
         .map(str::to_string)
@@ -3748,7 +3794,10 @@ pub(crate) fn acceptable_invite(raw: &str) -> Option<(ParsedInvite, reqwest::Url
 /// to find out.
 pub fn invite_from_deep_link(arg: &str) -> Option<String> {
     let url = reqwest::Url::parse(arg).ok()?;
-    if !url.scheme().eq_ignore_ascii_case("tracecommons") {
+    if !url
+        .scheme()
+        .eq_ignore_ascii_case(crate::channel::URL_SCHEME)
+    {
         return None;
     }
     if !url.host_str()?.eq_ignore_ascii_case("enroll") {
@@ -3764,18 +3813,27 @@ pub fn invite_from_deep_link(arg: &str) -> Option<String> {
 mod invite_tests {
     use super::{invite_from_deep_link, invite_issuer_host, parse_invite};
 
+    /// `rest` under this build's URL scheme (`tracecommons`, or
+    /// `tracecommons-staging` in a staging build), in `case`.
+    fn link(scheme_case: fn(&str) -> String, rest: &str) -> String {
+        format!("{}://{rest}", scheme_case(crate::channel::URL_SCHEME))
+    }
+
     #[test]
     fn deep_link_yields_the_invite() {
-        let got = invite_from_deep_link(
-            "tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
-        );
+        let got = invite_from_deep_link(&link(
+            str::to_owned,
+            "enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
+        ));
         assert_eq!(got.as_deref(), Some("https://issuer.example/onboard#CODE"));
     }
 
     #[test]
     fn deep_link_scheme_and_host_are_case_insensitive() {
-        let got =
-            invite_from_deep_link("TraceCommons://ENROLL?invite=https%3A%2F%2Fi.example%2Fo%23C");
+        let got = invite_from_deep_link(&link(
+            str::to_uppercase,
+            "ENROLL?invite=https%3A%2F%2Fi.example%2Fo%23C",
+        ));
         assert_eq!(got.as_deref(), Some("https://i.example/o#C"));
     }
 
@@ -3789,12 +3847,13 @@ mod invite_tests {
     /// free to normalise as the Windows shell was.
     #[test]
     fn the_form_a_shell_actually_delivers() {
-        let got = invite_from_deep_link(
-            "tracecommons://enroll/?invite=https%3A%2F%2Fissuer.tracecommons.ai%2Fonboard%23VQWWPGYSG8Y4LTP6",
-        );
+        let got = invite_from_deep_link(&link(
+            str::to_owned,
+            "enroll/?invite=https%3A%2F%2Fissuer.example.ai%2Fonboard%23VQWWPGYSG8Y4LTP6",
+        ));
         assert_eq!(
             got.as_deref(),
-            Some("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6")
+            Some("https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6")
         );
     }
 
@@ -3803,16 +3862,22 @@ mod invite_tests {
         // Registering a scheme handler means this is asked about every
         // argument the shell is ever launched with, including its own.
         assert_eq!(invite_from_deep_link("https://example.com/"), None);
-        assert_eq!(invite_from_deep_link("tracecommons://open?x=1"), None);
+        assert_eq!(
+            invite_from_deep_link(&link(str::to_owned, "open?x=1")),
+            None
+        );
         assert_eq!(invite_from_deep_link("--state-dir"), None);
-        assert_eq!(invite_from_deep_link("tracecommons://enroll?invite="), None);
+        assert_eq!(
+            invite_from_deep_link(&link(str::to_owned, "enroll?invite=")),
+            None
+        );
     }
 
     #[test]
     fn issuer_host_is_shown_without_the_code() {
-        let host = invite_issuer_host("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6")
+        let host = invite_issuer_host("https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6")
             .expect("a well-formed invite resolves to its host");
-        assert_eq!(host, "issuer.tracecommons.ai");
+        assert_eq!(host, "issuer.example.ai");
         // The point of the narrow return type: the credential is not in it.
         assert!(!host.contains("VQWWPGYSG8Y4LTP6"));
     }
@@ -3823,7 +3888,7 @@ mod invite_tests {
         // because the interface shows one sentence for every failure here.
         assert_eq!(invite_issuer_host("VQWWPGYSG8Y4LTP6"), None);
         assert_eq!(
-            invite_issuer_host("https://issuer.tracecommons.ai/onboard"),
+            invite_issuer_host("https://issuer.example.ai/onboard"),
             None
         );
     }
@@ -3836,19 +3901,19 @@ mod invite_tests {
     #[test]
     fn issuer_host_refuses_what_invite_lookup_refuses() {
         for bad in [
-            "http://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
-            "https://someone@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
-            "https://someone:secret@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "http://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "https://someone@issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6",
+            "https://someone:secret@issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6",
         ] {
             assert_eq!(invite_issuer_host(bad), None, "{bad}");
             assert!(super::acceptable_invite(bad).is_none(), "{bad}");
         }
-        let long = format!("https://issuer.tracecommons.ai/onboard#{}", "A".repeat(257));
+        let long = format!("https://issuer.example.ai/onboard#{}", "A".repeat(257));
         assert_eq!(invite_issuer_host(&long), None);
         assert_eq!(
-            invite_issuer_host("https://issuer.tracecommons.ai:8443/onboard#VQWWPGYSG8Y4LTP6")
+            invite_issuer_host("https://issuer.example.ai:8443/onboard#VQWWPGYSG8Y4LTP6")
                 .as_deref(),
-            Some("issuer.tracecommons.ai")
+            Some("issuer.example.ai")
         );
         assert_eq!(
             invite_issuer_host("http://127.0.0.1:8080/onboard#VQWWPGYSG8Y4LTP6").as_deref(),
@@ -3858,15 +3923,15 @@ mod invite_tests {
 
     #[test]
     fn parses_fragment_form() {
-        let p = parse_invite("https://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6").unwrap();
-        assert_eq!(p.issuer_url, "https://issuer.tracecommons.ai");
+        let p = parse_invite("https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6").unwrap();
+        assert_eq!(p.issuer_url, "https://issuer.example.ai");
         assert_eq!(p.code, "VQWWPGYSG8Y4LTP6");
     }
 
     #[test]
     fn parses_query_form_when_fragment_was_stripped() {
-        let p = parse_invite("https://issuer.tracecommons.ai/onboard?code=ABC123XYZ").unwrap();
-        assert_eq!(p.issuer_url, "https://issuer.tracecommons.ai");
+        let p = parse_invite("https://issuer.example.ai/onboard?code=ABC123XYZ").unwrap();
+        assert_eq!(p.issuer_url, "https://issuer.example.ai");
         assert_eq!(p.code, "ABC123XYZ");
     }
 
@@ -3880,7 +3945,7 @@ mod invite_tests {
 
     #[test]
     fn rejects_a_url_with_no_code() {
-        let err = parse_invite("https://issuer.tracecommons.ai/onboard")
+        let err = parse_invite("https://issuer.example.ai/onboard")
             .unwrap_err()
             .to_string();
         assert!(err.contains("no code"), "got: {err}");
@@ -3889,6 +3954,26 @@ mod invite_tests {
     #[test]
     fn rejects_a_non_http_scheme() {
         assert!(parse_invite("file:///etc/passwd#CODE").is_err());
+    }
+
+    /// An invite to the other channel's issuer is refused when it is parsed,
+    /// which is before `enroll_with_invite_core` redeems it and before a
+    /// shell shows its host or the daemon's `invite_lookup` asks about it: a
+    /// production build never sends a code or a device key to the staging
+    /// issuer, nor the reverse.
+    #[test]
+    fn an_invite_to_the_other_channel_is_refused_before_any_request() {
+        #[cfg(not(feature = "near-ai-staging"))]
+        let other = format!("issuer.{}", ["staging", "tracecommons", "ai"].join("."));
+        #[cfg(feature = "near-ai-staging")]
+        let other = "issuer.tracecommons.ai".to_string();
+        let invite = format!("https://{other}/onboard#VQWWPGYSG8Y4LTP6");
+        let error = parse_invite(&invite).unwrap_err();
+        assert_eq!(error.to_string(), "service-origin-other-channel");
+        assert!(super::acceptable_invite(&invite).is_none());
+        assert_eq!(invite_issuer_host(&invite), None);
+        // Positive control: the same invite on another host parses.
+        parse_invite("https://issuer.example.ai/onboard#VQWWPGYSG8Y4LTP6").unwrap();
     }
 }
 
@@ -3933,7 +4018,11 @@ fn daemon_shared(store: &ConfigStore) -> Result<DaemonShared> {
 /// overwrites the files from its own copy on its next pass. See
 /// `daemon::client`'s module doc for the full list of what silently did not
 /// work before this.
-fn daemon_call(store: &ConfigStore, method: &str, params: serde_json::Value) -> Result<Response> {
+pub(crate) fn daemon_call(
+    store: &ConfigStore,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<Response> {
     daemon_call_probed(store, method, params).map(|(resp, _)| resp)
 }
 
@@ -4075,7 +4164,8 @@ pub fn daemon_status(store: &ConfigStore, json: bool) -> Result<()> {
 }
 
 pub fn daemon_pending(store: &ConfigStore, json: bool) -> Result<()> {
-    let resp = daemon_call(store, "list_pending", serde_json::json!({}))?;
+    let (resp, liveness) = daemon_call_probed(store, "list_pending", serde_json::json!({}))?;
+    let resp = annotate_daemon_running(resp, liveness);
     render(resp, json, |v| {
         let empty = Vec::new();
         let entries = v["pending"].as_array().unwrap_or(&empty);
@@ -4358,7 +4448,8 @@ pub fn daemon_pause(store: &ConfigStore, pause: bool, json: bool) -> Result<()> 
 }
 
 pub fn daemon_projects(store: &ConfigStore, json: bool) -> Result<()> {
-    let resp = daemon_call(store, "list_projects", serde_json::json!({}))?;
+    let (resp, liveness) = daemon_call_probed(store, "list_projects", serde_json::json!({}))?;
+    let resp = annotate_daemon_running(resp, liveness);
     render(resp, json, |v| {
         let empty = Vec::new();
         let projects = v["projects"].as_array().unwrap_or(&empty);
@@ -4603,10 +4694,10 @@ pub async fn daemon_history(
                     r["project_label"].as_str().unwrap_or("-").to_string(),
                     r["status"].as_str().unwrap_or("-").to_string(),
                     format!("{:.2}", r["credit_points_pending"].as_f64().unwrap_or(0.0)),
-                    r["credit_points_final"]
-                        .as_f64()
-                        .map(|f| format!("{f:.2}"))
-                        .unwrap_or_else(|| "-".to_string()),
+                    final_credit_cell(
+                        r["credit_points_final"].as_f64().map(|f| f as f32),
+                        r["credit_outcome_reason"].as_str(),
+                    ),
                 ]
             })
             .collect();

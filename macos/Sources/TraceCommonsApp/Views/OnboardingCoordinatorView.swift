@@ -4,8 +4,10 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// Hosts Ron's first run (#1030): Quick setup (Join, Folders, Uses) and
-/// Custom setup (Join, Tools, Rules, Uses), one screen per step.
+/// Hosts the animated first run (Ron's 2026-10-21 canvas, built on the
+/// owner's request of 2026-10-22): Welcome, Tools, Uses, Traces, Private AI
+/// and Join, one screen per step over one scene, with the step thread above
+/// them and the NEAR mark and the tool tiles moving from step to step.
 ///
 /// Every decision is in `FirstRunState`, every daemon call in
 /// `FirstRunPlan`, run in order by one `FirstRunRunner` this view holds for
@@ -16,30 +18,28 @@ import TCShellCore
 ///   table that will not decode shows no step at all: every word a step
 ///   shows is the core's, and none is written here to fall back on. That
 ///   is logged, label only, so a broken table is diagnosable;
-/// - the passkey sheets, mounted here exactly once, so a request the
-///   Folders or Tools commit raises presents on whichever step follows;
-/// - invite links (`PendingInvite`), which fill Join and bring it up, in a
-///   host that takes them (`takesInvites`).
+/// - the scene, the step thread and what the stage remembers
+///   (`FirstRunStageMemory`), so going Back does not replay the scan;
+/// - invite links (`PendingInvite`), which fill Join's invite, in a host
+///   that takes them (`takesInvites`).
 ///
 /// The daemon is not running on a fresh install: the core refuses to start
-/// it until the session roots are declared, and Folders or Tools is where
-/// they are. So the invite pasted on Join is looked up and joined, and a
-/// near.ai chosen there signed in, only once that commit has started the
-/// daemon (`CommitPoint.leaveRoots`). Create passkey is the exception: its
-/// sheets open over Join (#1030), so it starts the daemon there with both
-/// roots declared `off`, which reads nothing until Folders or Tools answers
-/// (`CommitPoint.passkeyOnJoin`).
+/// it until the session roots are declared, and Tools is where they are
+/// (`CommitPoint.leaveTools`, or Customize's `declareRoots`). Signing in is
+/// the last step, Join, where the daemon is already running, so the invite
+/// is looked up and joined, and near.ai signed in, at once
+/// (`CommitPoint.signIn`).
 ///
 /// ## Resuming
 ///
-/// A host starts the first run at `startAt` (Join, unless it names another
-/// step). What an earlier first run left on the daemon is recorded
+/// A host starts the first run at `startAt` (Welcome, unless it names
+/// another step). What an earlier first run left on the daemon is recorded
 /// (`OnboardingNavigation.initialState`): a running daemon is not started
 /// again, and an enrollment is the account (`recordEnrolment`), so its
-/// invite is not joined again, Join reads Continue, and Automatic is
-/// offered. The daemon's first status can arrive after this view is up, so
-/// the enrollment is recorded then too. Start's marker (the tenant's, or
-/// watching only's) is what tells "enrolled" from "set up".
+/// invite is not joined again. The daemon's first status can arrive after
+/// this view is up, so the enrollment is recorded then too. Start's marker
+/// (the tenant's, or watching only's) is what tells "enrolled" from "set
+/// up".
 struct OnboardingCoordinatorView: View {
     @EnvironmentObject private var model: AppModel
     var startAt: Step
@@ -60,7 +60,7 @@ struct OnboardingCoordinatorView: View {
     @State private var runner: FirstRunRunner?
 
     init(
-        startAt: Step = .join, onStep: ((Step) -> Void)? = nil, takesInvites: Bool = true,
+        startAt: Step = .welcome, onStep: ((Step) -> Void)? = nil, takesInvites: Bool = true,
         onComplete: @escaping () -> Void
     ) {
         self.startAt = startAt
@@ -103,61 +103,65 @@ private struct FirstRunSteps: View {
     let onComplete: () -> Void
 
     @ObservedObject private var pendingInvite = PendingInvite.shared
-    /// The account the passkey sheets complete with: the running daemon's.
-    /// Nil until it runs, which Join reads as "start it, then open them".
-    @State private var passkeyAccount: LivePasskeyAccount?
-    @State private var passkeyClient: DaemonClient?
+    @StateObject private var memory = FirstRunStageMemory()
+    @Namespace private var actors
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        screen
-            .firstRunPasskeySheets(copy: copy, runner: runner, account: passkeyAccount)
-            .onChange(of: runner.state.step, initial: true) { _, step in onStep?(step) }
-            .onChange(of: runner.completed) { _, completed in
-                if completed { onComplete() }
+        FirstRunStageFit {
+            ZStack(alignment: .top) {
+                FirstRunBackdrop()
+                screen
+                if let index = FirstRunStageLayout.threadIndex(of: runner.state.step) {
+                    FirstRunStepThread(labels: copy.threadLabels, current: index, enabled: !runner.isCommitting) { picked in
+                        runner.state = FirstRunNavigation.back(
+                            to: FirstRunNavigation.threadSteps[picked], from: runner.state)
+                    }
+                    .padding(.top, 14)
+                    .transition(.opacity.combined(with: .offset(y: -10)))
+                }
             }
-            .onChange(of: model.startup, initial: true) { _, _ in refreshPasskeyAccount() }
-            .onChange(of: model.status.loggedIn, initial: true) { _, _ in recordEnrolment() }
-            // Not `onOpenURL`: a link can arrive before any window exists,
-            // so `AppDelegate` parks it and the first run collects it when
-            // it next appears, or at once while it is up.
-            .onAppear(perform: receivePendingInvite)
-            .onChange(of: pendingInvite.value) { _, _ in receivePendingInvite() }
-            .onChange(of: runner.isCommitting) { _, _ in
-                recordEnrolment()
-                receivePendingInvite()
-            }
+            .environment(\.firstRunActors, actors)
+            .animation(GlassMotion.spatial(reduceMotion), value: runner.state.step)
+        }
+        .onChange(of: runner.state.step, initial: true) { _, step in
+            onStep?(step)
+        }
+        .onChange(of: runner.completed) { _, completed in
+            if completed { onComplete() }
+        }
+        .onChange(of: model.status.loggedIn, initial: true) { _, _ in recordEnrolment() }
+        // Not `onOpenURL`: a link can arrive before any window exists,
+        // so `AppDelegate` parks it and the first run collects it when
+        // it next appears, or at once while it is up.
+        .onAppear(perform: receivePendingInvite)
+        .onChange(of: pendingInvite.value) { _, _ in receivePendingInvite() }
+        .onChange(of: runner.isCommitting) { _, _ in
+            recordEnrolment()
+            receivePendingInvite()
+        }
     }
-
-    /// Where Install leads, from the core's one table (`install_guides`).
-    private static let installGuides = InstallGuides(json: TCCoreCopy.installGuidesJSON())
 
     @ViewBuilder private var screen: some View {
         switch runner.state.step {
-        case .join:
-            JoinScreen(copy: copy, runner: runner, passkeyAccount: passkeyAccount)
-        case .folders:
-            FoldersScreen(copy: copy, runner: runner, installURL: Self.installGuides.url(for:))
+        case .welcome:
+            WelcomeScreen(copy: copy, runner: runner)
+                .transition(.opacity)
         case .tools:
-            ToolsScreen(copy: copy, runner: runner, installURL: Self.installGuides.url(for:))
-        case .rules:
-            RulesScreen(copy: copy, runner: runner, source: model)
+            ToolsScreen(copy: copy, runner: runner, memory: memory, source: model)
+                .transition(.opacity)
         case .uses:
             UsesScreen(copy: copy, runner: runner)
-        }
-    }
-
-    /// One account per daemon client: a restarted daemon gets a new one.
-    /// Once there is one, a returning person is offered Welcome back (P-7);
-    /// the runner decides, and offers it at most once.
-    private func refreshPasskeyAccount() {
-        let client = model.passkeyClient
-        guard client !== passkeyClient else { return }
-        passkeyClient = client
-        passkeyAccount = client.map {
-            LivePasskeyAccount(client: $0, presentationAnchor: { NSApp.keyWindow ?? NSApp.mainWindow })
-        }
-        if let passkeyAccount {
-            Task { await runner.offerWelcomeBack(from: passkeyAccount) }
+                .transition(.opacity)
+        case .traces:
+            TracesScreen(copy: copy, runner: runner, memory: memory)
+                .transition(.opacity)
+        case .privateAI:
+            PrivateAIScreen(copy: copy, runner: runner, memory: memory)
+                .transition(.opacity)
+        case .join:
+            JoinScreen(copy: copy, runner: runner)
+                .transition(.opacity)
         }
     }
 
@@ -183,6 +187,28 @@ private struct FirstRunSteps: View {
             _ = pendingInvite.take()
             runner.state = state
             runner.failure = failure
+        }
+    }
+}
+
+/// The stage at its design size, scaled down to fit a smaller host (the
+/// Private AI tab's Tools step), and at the host's size otherwise.
+private struct FirstRunStageFit<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        GeometryReader { geometry in
+            let canvas = FirstRunStageLayout.canvas
+            let scale = min(1, geometry.size.width / canvas.width, geometry.size.height / canvas.height)
+            if scale < 1 {
+                content
+                    .frame(width: canvas.width, height: canvas.height)
+                    .scaleEffect(scale)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+            } else {
+                content
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+            }
         }
     }
 }

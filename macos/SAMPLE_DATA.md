@@ -8,7 +8,7 @@ real daemon sent against a throwaway store, bundled into `TCShellCore` as a
 resource (`Package.swift`) and read through `Bundle.module`. `coreDown` and
 the network methods (C3, #1187: `inference_summary`, `inference_call_proof`,
 `model_spend`, `private_ai`, `mission_catalogue`, `invite_lookup`,
-`passkey_state`, `account_session_status`, `activity_missions_catalogue`,
+`account_session_status`, `activity_missions_catalogue`,
 marked `"_sample":"hand-written"` in the JSON) stay hand-written, the first
 because it answers `nil` for every method by construction and the second
 because they answer from the network and the recorder's temp store has none
@@ -39,8 +39,8 @@ hand-written `readable: true` page, shaped exactly like the real reply
 `calls_page` builds in `daemon/inference_map.rs`, because `readable` needs a
 live IronWire proxy answering and no temp store runs one. For the same
 reason, `normalDay` and `busyQueue` override `status.json`'s
-`private_inference_state` (running on 8463), `routing` (`rows_seen`) and
-`daily_budget` (4 uploads today), and `harness_list.json`'s Claude Code row
+`private_inference_state` (running on 8463) and `routing` (`rows_seen`),
+and `harness_list.json`'s Claude Code row
 (connected, `answering`), `activity`, `spend` (known) and
 `destination_port`; `empty/harness_list.json` overrides `spend` to a known
 zero.
@@ -52,9 +52,12 @@ can run against your own real Claude Code and Codex sessions while you build
 screens, with a guarantee enforced by the daemon itself, not by this app --
 **nothing it does can reach the network.**
 
-Set `TC_DEV_DRY_RUN=1` (or `true`) in the process environment before
-launching a Debug build (an Xcode scheme's environment variables, or
-`TC_DEV_DRY_RUN=1 .build/debug/TraceCommonsApp`). The Rust library must be a
+Set `TC_DEV_DRY_RUN=1` (or `true`) in the environment of the bundled
+debug app: build it with `macos/scripts/make-app-bundle.sh`, then run
+`open -n .build/Near.ai.app --env TC_DEV_DRY_RUN=1`, as `run-demo.sh` does.
+An unbundled launch (`.build/debug/TraceCommonsApp` or an Xcode scheme) has
+no Info.plist channel, so it refuses to start by design (staging design,
+section 4.3). The Rust library must be a
 debug build too: the switch is compiled out of release builds
 (`cfg(debug_assertions)`), so a release dylib ignores the variable.
 

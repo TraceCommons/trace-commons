@@ -918,7 +918,7 @@ async fn foreign_legacy_claim_cannot_poison_bulk_withdrawal() {
         GRANT trace_account_admission_runtime TO trace_z4_claim_runtime;
         GRANT SELECT,INSERT,UPDATE ON trace_tenants,trace_submissions,trace_source_sessions,trace_submission_sessions TO trace_z4_claim_runtime;
         GRANT SELECT,INSERT ON trace_withdrawals TO trace_z4_claim_runtime;
-        GRANT SELECT ON trace_export_manifest_items TO trace_z4_claim_runtime;
+        GRANT SELECT ON trace_export_manifest_items,trace_device_upload_principals TO trace_z4_claim_runtime;
         GRANT SELECT,UPDATE ON trace_token_bundles TO trace_z4_claim_runtime;")).await.unwrap();
     let mut runtime_url = reqwest::Url::parse(&url).unwrap();
     runtime_url.set_username("trace_z4_claim_runtime").unwrap();
@@ -1285,7 +1285,7 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_z4_merge_runtime') THEN CREATE ROLE trace_z4_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT SELECT,INSERT,UPDATE ON trace_tenants TO trace_z4_merge_runtime;
              GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
-                 trace_webauthn_credentials,trace_near_identities,trace_public_runs,trace_sessions TO trace_z4_merge_runtime;
+                 trace_near_identities,trace_public_runs,trace_sessions TO trace_z4_merge_runtime;
              GRANT INSERT ON trace_account_audit TO trace_z4_merge_runtime;
              GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_z4_merge_runtime;",
         ))
@@ -1449,4 +1449,70 @@ async fn account_merge_carries_source_sessions_and_withdrawals_to_the_survivor()
             .is_err(),
         "a mapping cannot be moved back to the absorbed account"
     );
+}
+
+#[tokio::test]
+async fn verified_upload_alias_can_claim_and_update_its_accounts_source_session() {
+    use sha2::{Digest, Sha256};
+    use trace_commons_server::account_trust::{device_claim_actor, device_principal_ref};
+    let Some(url) = database_url() else {
+        return;
+    };
+    let admin = migrated_client(&url).await;
+    let backend = PgBackend::new(&database_config(&url)).await.unwrap();
+    let tenant = format!("alias-session-{}", Uuid::new_v4());
+    let device = format!("sha256:{}", hex::encode(Sha256::digest(tenant.as_bytes())));
+    let parent = device_principal_ref(&tenant, &device);
+    let actor = device_claim_actor(&tenant, &device, Some("subject"));
+    let material = format!("signed:{tenant}:{actor}");
+    let alias = format!(
+        "principal_sha256:{}",
+        hex::encode(Sha256::digest(
+            format!("12:signed_claim:{}:{material}", material.len()).as_bytes()
+        ))
+    );
+    let account = backend
+        .create_or_reuse_account(&tenant, &parent)
+        .await
+        .unwrap();
+    admin.execute("INSERT INTO device_keys(tenant_id,device_key_id,public_key,invite_subject_hash) VALUES($1,$2,'test',$2)", &[&tenant,&device]).await.unwrap();
+    admin.execute("INSERT INTO trace_near_account_anchors(tenant_id,account_id,anchor_hash,sealed_account_name,index_pepper_ref,account_name_key_ref) VALUES($1,$2,$3,'{}',$3,$3)", &[&tenant,&account,&device]).await.unwrap();
+    admin.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,account_id,principal_ref,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$4)", &[&tenant,&account,&parent,&device]).await.unwrap();
+    backend
+        .bind_device_upload_principal(&tenant, &device, &actor)
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    let mut row = submission(&tenant, id, TraceCorpusStatus::Quarantined);
+    row.auth_principal_ref = alias;
+    backend.upsert_trace_submission(row.clone()).await.unwrap();
+    backend
+        .claim_trace_source_session(&tenant, account, &[9; 32], id)
+        .await
+        .expect("verified upload belongs to its device account");
+    backend
+        .upsert_trace_submission_with_witness(row.clone(), None)
+        .await
+        .expect("mapped upload alias may update its own submission");
+    let foreign = backend
+        .create_or_reuse_account(&tenant, "principal:foreign")
+        .await
+        .unwrap();
+    assert!(
+        backend
+            .claim_trace_source_session(&tenant, foreign, &[8; 32], id)
+            .await
+            .is_err()
+    );
+    // Ownership proof for an existing immutable session survives parent unlink;
+    // removing live membership must not let another account claim the old row.
+    admin.execute("UPDATE trace_account_principals SET unlinked_at=now() WHERE tenant_id=$1 AND principal_ref=$2", &[&tenant,&parent]).await.unwrap();
+    backend
+        .claim_trace_source_session(&tenant, account, &[9; 32], id)
+        .await
+        .unwrap();
+    backend
+        .upsert_trace_submission_with_witness(row, None)
+        .await
+        .unwrap();
 }

@@ -3,22 +3,38 @@ use crate::config::ConfigStore;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+#[path = "cli/config.rs"]
+mod config_cli;
 #[path = "cli/insights.rs"]
 mod insights_cli;
 #[path = "cli/mission_draft.rs"]
 mod mission_draft_cli;
 
+/// The `--version` line: the build identity, then the channel
+/// (`channel::VERSION_CHANNEL_SUFFIX`), last, where the macOS bundle scripts
+/// read it to check the bundled CLI against the bundle (staging design 4.3).
+fn version_line() -> &'static str {
+    static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| {
+        format!(
+            "{}{}",
+            trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION")),
+            crate::channel::VERSION_CHANNEL_SUFFIX
+        )
+    })
+}
+
 #[derive(Parser)]
 #[command(
     name = "trace-commons-contributor",
     // The semver does not move when a deploy does, so --version carries the
-    // commit the binary was built from as well.
-    version = trace_commons_build_info::version_line(env!("CARGO_PKG_VERSION")),
+    // commit the binary was built from as well, and then the channel.
+    version = version_line(),
     about = "Submit local coding-agent traces to Trace Commons"
 )]
 struct Cli {
-    /// Override the config directory (default: $TRACE_COMMONS_CONTRIBUTOR_DIR, then OS config dir)
-    #[arg(long, global = true)]
+    // The help names the channel's override variable: `channel::CONFIG_DIR_HELP`.
+    #[arg(long, global = true, help = crate::channel::CONFIG_DIR_HELP)]
     config_dir: Option<PathBuf>,
     /// Emit machine-readable JSON instead of human-readable lines. For
     /// callers driving this CLI programmatically (MCP servers, CI).
@@ -30,6 +46,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Discover, inspect, preview, and apply running-app settings as JSON
+    Config(config_cli::ConfigArgs),
     /// Launch a coding tool in this terminal with an isolated saved account.
     Launch(crate::managed::cli::LaunchArgs),
     /// Manage saved native subscriptions and OS-protected API keys.
@@ -50,6 +68,13 @@ enum Command {
         /// The proxy's home: `<config dir>/managed-routes/<session id>`
         #[arg(long)]
         home: Option<PathBuf>,
+    },
+    #[command(hide = true)]
+    ManagedSessionBind {
+        #[arg(long)]
+        directory: PathBuf,
+        #[arg(long)]
+        nonce: String,
     },
     #[command(hide = true)]
     RedeemLaunch {
@@ -93,7 +118,7 @@ enum Command {
         invite: Option<String>,
         /// Print this device's key id for an instance operator to mint a
         /// grant against, and enroll nothing
-        #[arg(long, conflicts_with_all = ["grant", "invite", "allowed_hosts", "scopes", "default_consent"])]
+        #[arg(long, conflicts_with_all = ["grant", "invite", "allowed_hosts", "scopes", "default_consent", "no_browser"])]
         key_id: bool,
         /// CSV of allowed issuer hosts (default: $TRACE_COMMONS_ALLOWED_HOSTS); persisted for later commands
         #[arg(long)]
@@ -114,6 +139,22 @@ enum Command {
             conflicts_with = "scopes"
         )]
         default_consent: bool,
+        /// Print the sign-in address instead of opening a browser. Over SSH,
+        /// or with no display, this is automatic, and `login` also prints the
+        /// `ssh -L` command that forwards the sign-in to your own computer.
+        #[arg(long, conflicts_with_all = ["grant", "invite"])]
+        no_browser: bool,
+        /// One-time code from `devices add` on a signed-in computer. Links
+        /// this machine to that account with no browser: the way to sign in
+        /// a server or headless machine. TRACE_COMMONS_DEVICE_CODE works too.
+        #[arg(long, conflicts_with_all = ["grant", "invite", "key_id", "allowed_hosts", "no_browser"])]
+        code: Option<String>,
+    },
+    /// The devices linked to your account, and linking a server with a
+    /// one-time code
+    Devices {
+        #[command(subcommand)]
+        action: DevicesAction,
     },
     /// List discoverable local sessions
     List {
@@ -353,6 +394,35 @@ enum AccountAction {
     Logout,
 }
 
+/// The devices linked to one account.
+#[derive(Subcommand)]
+enum DevicesAction {
+    /// Make a one-time code that links a server or another machine to this
+    /// account, then wait until it is used. Run `login --code <code>` there.
+    Add {
+        /// A name for the new device, shown in `devices list`
+        #[arg(long)]
+        label: Option<String>,
+        /// Print the code and return without waiting for it to be used
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// List the devices linked to this account
+    List,
+    /// Name a device; leave out the name to clear it
+    Rename {
+        device_key_id: String,
+        label: Option<String>,
+    },
+    /// Unlink a device: it is signed out and can no longer renew its sign-in
+    Revoke {
+        device_key_id: String,
+        /// Skip the confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 /// Consent, after enrollment.
 #[derive(Subcommand)]
 enum ConsentAction {
@@ -389,6 +459,9 @@ enum DaemonAction {
     /// Show what the daemon is doing and whether anything is wrong
     Status,
     /// List sessions waiting for a decision
+    #[command(
+        long_about = "List pending traces. With --json, rows include available settlement_estimate low_usd_micros/high_usd_micros bands; absent means unknown, not zero. Estimates are not guaranteed payouts."
+    )]
     Pending,
     /// Show what would be sent for one queued session
     Preview { entry_id: String },
@@ -417,9 +490,9 @@ enum DaemonAction {
     Pause,
     /// Resume after a pause
     Resume,
-    /// List projects and their upload modes
+    /// List folders, effective upload modes, and each folder's stored rule
     Projects,
-    /// Set a project's upload mode
+    /// Set a folder to ignore, notify, or automatic (auto includes backlog by default)
     Project {
         /// The project's working directory
         path: PathBuf,
@@ -530,6 +603,12 @@ async fn async_main(cli: Cli, json: bool) -> std::process::ExitCode {
 }
 
 async fn dispatch(cli: Cli) -> anyhow::Result<()> {
+    // Exact-session hook receipts never open the daemon/config store, and
+    // malformed or unavailable receipts never print hook JSON or credentials.
+    if let Command::ManagedSessionBind { directory, nonce } = &cli.command {
+        crate::managed::session_binding::run_record(directory, nonce);
+        return Ok(());
+    }
     // Before anything that opens or creates the config directory: this runs
     // on every render of Claude Code's status line.
     if let Command::Statusline { home } = &cli.command {
@@ -559,6 +638,11 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&preview)?);
         return Ok(());
     }
+    if let Command::Config(args) = &cli.command {
+        let store = ConfigStore::resolve_existing(cli.config_dir.clone())
+            .map_err(|_| anyhow::anyhow!("config-state-dir-unavailable: check --config-dir"))?;
+        return config_cli::run(&store, args);
+    }
     let store = ConfigStore::resolve(cli.config_dir)?;
     match cli.command {
         Command::Launch(args) => {
@@ -568,7 +652,18 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Accounts { action } => {
             crate::managed::cli::accounts(&store, action, cli.json).await
         }
-        Command::Sessions { action } => crate::managed::cli::sessions(&store, action, cli.json),
+        Command::Sessions {
+            action: crate::managed::cli::SessionCommand::Resume { session_id },
+        } => {
+            let code = crate::managed::cli::resume(&store, session_id).await?;
+            std::process::exit(code);
+        }
+        Command::Sessions {
+            action: crate::managed::cli::SessionCommand::List,
+        } => crate::managed::cli::list_sessions(&store, cli.json),
+        Command::ManagedSessionBind { .. } => {
+            unreachable!("binding recorder handled before config resolution")
+        }
         Command::RedeemLaunch { session_id, ticket } => {
             let code = crate::managed::supervisor::redeem_and_run(
                 &store,
@@ -588,7 +683,32 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             allowed_hosts,
             scopes,
             default_consent,
+            no_browser,
+            code,
         } => {
+            let env_code = std::env::var(crate::devices_cli::CODE_ENV).ok();
+            // The variable is a fallback for the flag only: any other route
+            // named on the command line, or an exported invite, wins, so a
+            // spent code left in the environment never hijacks a later login.
+            let other_route = grant.is_some()
+                || invite.is_some()
+                || no_browser
+                || allowed_hosts.is_some()
+                || std::env::var("TRACE_COMMONS_INVITE")
+                    .is_ok_and(|invite| !invite.trim().is_empty());
+            let from_env = code.is_none();
+            if let Some(code) =
+                crate::devices_cli::code_from(code.as_deref(), env_code.as_deref(), other_route)
+            {
+                return crate::devices_cli::login_with_code(
+                    &store,
+                    &code,
+                    scopes.as_deref(),
+                    default_consent,
+                    cli.json,
+                )
+                .map_err(|error| crate::devices_cli::naming_the_variable(error, from_env));
+            }
             commands::refuse_json_sign_in(
                 cli.json,
                 grant.as_deref(),
@@ -602,6 +722,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 allowed_hosts.as_deref(),
                 scopes.as_deref(),
                 default_consent,
+                no_browser,
             )
             .await
         }
@@ -646,6 +767,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             commands::submit(&store, &sel).await
         }
         Command::ImportPreview { .. }
+        | Command::Config(_)
         | Command::Insights(_)
         | Command::MissionDraft { .. }
         | Command::MissionDrafts(_)
@@ -689,6 +811,51 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Update { stage_only } => commands::update(&store, stage_only, cli.json).await,
         Command::Logout { yes } => commands::logout(&store, yes),
         Command::Unenroll { yes } => commands::unenroll(&store, yes, cli.json),
+        Command::Devices { action } => {
+            let mut call = |method: &str, params: serde_json::Value| {
+                commands::daemon_call(&store, method, params)
+            };
+            let mut stdout = std::io::stdout();
+            match action {
+                DevicesAction::Add { label, no_wait } => crate::devices_cli::add_with(
+                    &mut call,
+                    label.as_deref(),
+                    !no_wait,
+                    cli.json,
+                    &mut |d| std::thread::sleep(d),
+                    &mut stdout,
+                ),
+                DevicesAction::List => {
+                    crate::devices_cli::list_with(&mut call, cli.json, &mut stdout)
+                }
+                DevicesAction::Rename {
+                    device_key_id,
+                    label,
+                } => crate::devices_cli::rename_with(
+                    &mut call,
+                    &device_key_id,
+                    label.as_deref(),
+                    cli.json,
+                    &mut stdout,
+                ),
+                DevicesAction::Revoke { device_key_id, yes } => {
+                    use std::io::IsTerminal;
+                    if !yes && !std::io::stdin().is_terminal() {
+                        anyhow::bail!(
+                            "devices revoke requires confirmation; use --yes in non-interactive mode"
+                        );
+                    }
+                    crate::devices_cli::revoke_with(
+                        &mut call,
+                        &device_key_id,
+                        yes,
+                        cli.json,
+                        &mut std::io::stdin(),
+                        &mut stdout,
+                    )
+                }
+            }
+        }
         Command::Consent { action } => match action {
             ConsentAction::Scopes { scopes } => {
                 commands::consent_scopes(&store, scopes.as_deref(), cli.json)
@@ -708,7 +875,13 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             AccountAction::Logout => commands::account_logout(&store).await,
         },
         Command::Daemon { action } => match action {
-            DaemonAction::Run { dry_run } => crate::daemon::run(store, dry_run).await,
+            DaemonAction::Run { dry_run } => {
+                // `install_for` applies the dry-run store first (a no-op when
+                // already applied), so a dev dry run never writes the real
+                // state directory, and the daemon runs against that store.
+                let store = crate::daemon::diagnostics_log::install_for(store)?;
+                crate::daemon::run(store, dry_run).await
+            }
             DaemonAction::TokenStorage {
                 cleanup,
                 discard,
@@ -791,11 +964,54 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// `--config-dir`'s help names the override variable this build reads,
+    /// so a staging build does not tell people to set production's.
+    #[test]
+    fn the_config_dir_help_names_the_channel_s_variable() {
+        use clap::CommandFactory;
+        let command = Cli::command();
+        let help = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "config_dir")
+            .and_then(|arg| arg.get_help())
+            .expect("--config-dir has help")
+            .to_string();
+        assert!(
+            help.contains(&format!("${}", crate::channel::STATE_DIR_ENV)),
+            "{help}"
+        );
+    }
+
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(
             std::iter::once("trace-commons-contributor").chain(args.iter().copied()),
         )
         .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    /// `sessions resume <session-id>` names the session to continue; the
+    /// id is required and must be one.
+    #[test]
+    fn sessions_resume_takes_a_session_id() {
+        let id = uuid::Uuid::new_v4();
+        match parse(&["sessions", "resume", &id.to_string()]).command {
+            Command::Sessions {
+                action: crate::managed::cli::SessionCommand::Resume { session_id },
+            } => assert_eq!(session_id, id),
+            _ => panic!("not sessions resume"),
+        }
+        for args in [
+            &["sessions", "resume"][..],
+            &["sessions", "resume", "previous"],
+        ] {
+            assert!(
+                Cli::try_parse_from(
+                    std::iter::once("trace-commons-contributor").chain(args.iter().copied())
+                )
+                .is_err(),
+                "{args:?}"
+            );
+        }
     }
 
     /// `daemon project` takes `--from-now` and still takes
@@ -891,9 +1107,71 @@ mod tests {
     }
 
     #[test]
-    fn key_id_does_not_combine_with_an_enrollment_flag() {
+    fn login_code_parses_and_refuses_the_other_routes() {
+        match parse(&["login", "--code", "tcd1_dA.s"]).command {
+            Command::Login { code: Some(c), .. } => assert_eq!(c, "tcd1_dA.s"),
+            _ => panic!("login --code"),
+        }
         for other in [
             &["--grant", "g"][..],
+            &["--invite", "https://i.example/onboard#C"],
+            &["--no-browser"],
+            &["--key-id"],
+        ] {
+            let args: Vec<&str> = ["trace-commons-contributor", "login", "--code", "c"]
+                .into_iter()
+                .chain(other.iter().copied())
+                .collect();
+            assert!(Cli::try_parse_from(args).is_err(), "{other:?}");
+        }
+        assert!(matches!(
+            parse(&["devices", "add", "--label", "box", "--no-wait"]).command,
+            Command::Devices {
+                action: DevicesAction::Add { no_wait: true, .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["devices", "revoke", "sha256:ab", "--yes"]).command,
+            Command::Devices {
+                action: DevicesAction::Revoke { yes: true, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn login_no_browser_parses_and_belongs_to_the_near_ai_route() {
+        assert!(matches!(
+            parse(&["login", "--no-browser"]).command,
+            Command::Login {
+                no_browser: true,
+                key_id: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["login"]).command,
+            Command::Login {
+                no_browser: false,
+                ..
+            }
+        ));
+        for other in [
+            &["--grant", "g"][..],
+            &["--invite", "https://i.example/onboard#C"],
+        ] {
+            let args: Vec<&str> = ["trace-commons-contributor", "login", "--no-browser"]
+                .into_iter()
+                .chain(other.iter().copied())
+                .collect();
+            assert!(Cli::try_parse_from(args).is_err(), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn key_id_does_not_combine_with_an_enrollment_flag() {
+        for other in [
+            &["--no-browser"][..],
+            &["--grant", "g"],
             &["--invite", "https://i.example/onboard#C"],
             &["--scopes", "model_training"],
             &["--default"],

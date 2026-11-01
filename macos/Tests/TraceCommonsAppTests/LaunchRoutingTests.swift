@@ -73,6 +73,29 @@ final class LaunchRoutingTests: XCTestCase {
                        "a failed first read is not 'onboarding required'")
     }
 
+    /// A launch the CLI made to sign in (`near-ai login` with the app not
+    /// running) opens no window, first run included, so the app neither
+    /// comes forward nor interrupts the terminal. The CLI passes the
+    /// argument through `open -g … --args --background-launch`.
+    func test_aBackgroundLaunchOpensNothing() {
+        for startup: AppModel.Startup in [.starting, .running, .needsRoots, .refused("locked")] {
+            for answered in [true, false] {
+                for requires in [true, false] {
+                    XCTAssertEqual(
+                        LaunchRouting.launchOpening(startup: startup, statusAnswered: answered,
+                                                    requiresOnboarding: requires, background: true),
+                        .nothing, "\(startup) answered=\(answered) requires=\(requires)")
+                }
+            }
+        }
+        XCTAssertTrue(LaunchRouting.isBackgroundLaunch(["/Applications/Near.ai.app/Contents/MacOS/TraceCommonsApp",
+                                                        "--background-launch"]))
+        XCTAssertFalse(LaunchRouting.isBackgroundLaunch(["/Applications/Near.ai.app/Contents/MacOS/TraceCommonsApp"]))
+        XCTAssertFalse(LaunchRouting.isBackgroundLaunch(["x", "--background-launch=1"]))
+        XCTAssertEqual(LaunchRouting.backgroundLaunchArgument, "--background-launch",
+                       "near_ai_login.rs BACKGROUND_LAUNCH_ARG passes this spelling")
+    }
+
     /// M3: a Settings destination (a quit refusal, "Manage rules") opens
     /// Settings at its section and no window behind it.
     func test_aSettingsDestinationOpensSettingsAlone() {

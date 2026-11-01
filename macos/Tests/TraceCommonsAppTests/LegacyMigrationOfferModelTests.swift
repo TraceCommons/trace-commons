@@ -46,21 +46,13 @@ private func refusal(_ label: String) -> String {
 /// lasts, and how Move ends.
 @MainActor
 final class LegacyMigrationOfferModelTests: XCTestCase {
-    /// Tenants this run used, so their dismiss markers are removed after.
-    private var tenants: [String] = []
-
-    override func tearDown() {
-        for tenant in tenants {
-            if let key = AppModel.legacyMigrationOfferDismissedKey(tenant) {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-        }
-        super.tearDown()
-    }
-
     private func freshTenant(_ prefix: String = "tenant-") -> String {
         let tenant = prefix + UUID().uuidString.lowercased()
-        tenants.append(tenant)
+        // Resolve the actor-owned key now; teardown owns only its immutable
+        // copy and never needs to access this UI-isolated test instance.
+        if let key = AppModel.legacyMigrationOfferDismissedKey(tenant) {
+            addTeardownBlock { UserDefaults.standard.removeObject(forKey: key) }
+        }
         return tenant
     }
 
@@ -84,8 +76,9 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         let offer = try XCTUnwrap(AppModel().legacyMigrationOffer)
         XCTAssertFalse(offer.dismiss.isEmpty)
         XCTAssertFalse(offer.later.isEmpty)
-        XCTAssertTrue(offer.passkeyWaiting.contains("passkey"))
-        XCTAssertFalse(offer.passkeyCancel.isEmpty)
+        XCTAssertFalse(offer.nearAILoginWaiting.isEmpty)
+        XCTAssertFalse(offer.nearAILoginWaiting.lowercased().contains("passkey"))
+        XCTAssertFalse(offer.nearAILoginCancel.isEmpty)
     }
 
     /// An invite-enrolled device the daemon offers the move to: Settings
@@ -258,12 +251,12 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         XCTAssertEqual(last, ["invite": "SYNTHETICINVITE01"])
     }
 
-    // MARK: - The passkey step
+    // MARK: - The NEAR AI login step
 
-    /// With no session the move leads with the passkey step: Move runs it
+    /// With no session the move leads with the NEAR AI login step: Move runs it
     /// (the browser step the first run uses), then retries the move without
     /// a second press. Nothing says "sign in".
-    func testWithNoSessionThePasskeyStepRunsAndTheMoveContinues() async throws {
+    func testWithNoSessionTheNearAILoginStepRunsAndTheMoveContinues() async throws {
         let tenant = freshTenant()
         let daemon = MigrationDaemon(
             answers: [
@@ -278,25 +271,25 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         model.setStatusForTesting(try status(tenant: tenant, offered: true))
         var steps = 0
         var waitingDuringStep = false
-        model.legacyMigrationPasskeyStep = { [weak model] in
+        model.legacyMigrationNearAILoginStep = { [weak model] in
             steps += 1
-            waitingDuringStep = model?.legacyMigrationAwaitingPasskey ?? false
+            waitingDuringStep = model?.legacyMigrationAwaitingNearAILogin ?? false
             return true
         }
 
         await model.migrateLegacyInvite()
         XCTAssertEqual(steps, 1)
-        XCTAssertTrue(waitingDuringStep, "the offer says it waits on the passkey while the step runs")
-        XCTAssertFalse(model.legacyMigrationAwaitingPasskey)
+        XCTAssertTrue(waitingDuringStep, "the offer says it waits on the browser while the step runs")
+        XCTAssertFalse(model.legacyMigrationAwaitingNearAILogin)
         XCTAssertEqual(daemon.calls.filter { $0.0 == "legacy_invite_migrate" }.count, 2)
         XCTAssertNil(model.legacyMigrationRefusal)
-        XCTAssertFalse(model.legacyMigrationPasskeyFailed)
+        XCTAssertFalse(model.legacyMigrationNearAILoginFailed)
         try await waitUntil { !model.isLegacyMigrationOffered }
     }
 
-    /// Cancelled while waiting on the passkey: the move is not retried,
+    /// Cancelled while waiting on the NEAR AI login: the move is not retried,
     /// nothing changed, no failure is claimed, and the offer stays.
-    func testACancelledPasskeyStepChangesNothing() async throws {
+    func testACancelledNearAILoginStepChangesNothing() async throws {
         let tenant = freshTenant()
         let daemon = MigrationDaemon(
             answers: [refusal("legacy_migration_no_near_ai_session")],
@@ -306,30 +299,30 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         model.setClientForTesting(DaemonClient(daemon: daemon))
         model.setStatusForTesting(try status(tenant: tenant, offered: true))
         var cancelled = 0
-        model.legacyMigrationPasskeyStep = {
+        model.legacyMigrationNearAILoginStep = {
             while !Task.isCancelled { try? await Task.sleep(nanoseconds: 5_000_000) }
             return false
         }
-        model.legacyMigrationPasskeyCancel = { cancelled += 1 }
+        model.legacyMigrationNearAILoginCancel = { cancelled += 1 }
 
         let move = Task { await model.migrateLegacyInvite() }
-        try await waitUntil { model.legacyMigrationAwaitingPasskey }
-        model.cancelLegacyMigrationPasskey()
+        try await waitUntil { model.legacyMigrationAwaitingNearAILogin }
+        model.cancelLegacyMigrationNearAILogin()
         await move.value
 
         XCTAssertEqual(cancelled, 1, "the browser step is ended too")
         XCTAssertEqual(daemon.calls.filter { $0.0 == "legacy_invite_migrate" }.count, 1)
-        XCTAssertFalse(model.legacyMigrationAwaitingPasskey)
+        XCTAssertFalse(model.legacyMigrationAwaitingNearAILogin)
         XCTAssertFalse(model.legacyMigrationBusy)
-        XCTAssertFalse(model.legacyMigrationPasskeyFailed)
+        XCTAssertFalse(model.legacyMigrationNearAILoginFailed)
         XCTAssertNil(model.legacyMigrationRefusal)
         XCTAssertFalse(model.legacyMigrationStartFailed)
         XCTAssertTrue(model.isLegacyMigrationOffered)
     }
 
-    /// A passkey step that ends without finishing: the core's line, the
+    /// A NEAR AI login step that ends without finishing: the core's line, the
     /// move is not retried, and the offer stays.
-    func testAFailedPasskeyStepSaysTheCoresLine() async throws {
+    func testAFailedNearAILoginStepSaysTheCoresLine() async throws {
         let tenant = freshTenant()
         let daemon = MigrationDaemon(
             answers: [refusal("legacy_migration_no_near_ai_session")],
@@ -338,20 +331,20 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         defer { model.shutdown() }
         model.setClientForTesting(DaemonClient(daemon: daemon))
         model.setStatusForTesting(try status(tenant: tenant, offered: true))
-        model.legacyMigrationPasskeyStep = { false }
+        model.legacyMigrationNearAILoginStep = { false }
 
         await model.migrateLegacyInvite()
-        XCTAssertTrue(model.legacyMigrationPasskeyFailed)
+        XCTAssertTrue(model.legacyMigrationNearAILoginFailed)
         XCTAssertNil(model.legacyMigrationRefusal)
         XCTAssertEqual(daemon.calls.filter { $0.0 == "legacy_invite_migrate" }.count, 1)
         XCTAssertTrue(model.isLegacyMigrationOffered)
-        let line = try XCTUnwrap(model.legacyMigrationOffer?.passkeyFailed)
-        XCTAssertTrue(line.contains("passkey"))
+        let line = try XCTUnwrap(model.legacyMigrationOffer?.nearAILoginFailed)
+        XCTAssertFalse(line.isEmpty)
     }
 
-    /// The passkey step runs once per press: a second "no session" after it
+    /// The NEAR AI login step runs once per press: a second "no session" after it
     /// finished is said as the refusal it is, not looped on.
-    func testThePasskeyStepRunsOncePerPress() async throws {
+    func testTheNearAILoginStepRunsOncePerPress() async throws {
         let tenant = freshTenant()
         let daemon = MigrationDaemon(
             answers: [
@@ -364,7 +357,7 @@ final class LegacyMigrationOfferModelTests: XCTestCase {
         model.setClientForTesting(DaemonClient(daemon: daemon))
         model.setStatusForTesting(try status(tenant: tenant, offered: true))
         var steps = 0
-        model.legacyMigrationPasskeyStep = { steps += 1; return true }
+        model.legacyMigrationNearAILoginStep = { steps += 1; return true }
 
         await model.migrateLegacyInvite()
         XCTAssertEqual(steps, 1)

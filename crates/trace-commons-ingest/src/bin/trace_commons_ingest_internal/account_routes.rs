@@ -1,195 +1,25 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The authenticated `/v1/account/*` surface, and what an unbound account may
-//! reach on it (Z2 native passkey identity, slice S1).
+//! The authenticated `/v1/account/*` surface.
 //!
-//! Two things live here and they are deliberately next to each other:
-//!
-//! - [`AccountRoutes`], the only way a route joins the authenticated account
-//!   surface. It records every `(method, path)` it registers, so the set of
-//!   routes behind `account_auth_middleware` can be read back from the router
-//!   definition itself. axum cannot enumerate a router's routes; this is what
-//!   lets a test do it anyway.
-//! - [`UNBOUND_ACCOUNT_ROUTE_POLICY`], which classifies every one of those
-//!   routes as reachable or refused for an unbound account. The gate in
-//!   `account_auth_middleware` reads it by the request's method and matched
-//!   path template; a route missing from it is refused, never reachable.
-//!
-//! The test `every_authenticated_account_route_is_classified_for_unbound_accounts`
-//! compares the two in both directions, so a route added without a
-//! classification (or a classification left behind by a removed route) fails
-//! CI instead of silently defaulting either way.
+//! [`AccountRoutes`] is the only way a route joins the authenticated account
+//! surface. It records every `(method, path)` it registers, so the set of
+//! routes behind `account_auth_middleware` can be read back from the router
+//! definition itself. axum cannot enumerate a router's routes; this is what
+//! lets a test do it anyway.
 
 use std::future::Future;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::handler::Handler;
-use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::MethodRouter;
 
 use crate::ingest::app::{AppState, account_auth_middleware};
-
-/// Whether an unbound account's session may reach a route.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UnboundAccess {
-    Allowed,
-    Refused,
-}
-
-/// The label an unbound account's refused request answers with (403).
-pub(crate) const ACCOUNT_UNBOUND: &str = "account_unbound";
-
-/// The unbound-account classification of EVERY authenticated account route,
-/// as `(method, matched path template, access)`.
-///
-/// The spec's allowlist
-/// (`docs/superpowers/specs/2026-09-28-native-passkey-identity-design.md`,
-/// "The unbound gate") is the `Allowed` rows, including the bind routes
-/// (`POST /v1/account/near-ai/provision/bind/{start,finish}`, S3), the only
-/// way forward. Everything else is `Refused`:
-/// invites and the legacy link (an invite must never attach to an account that
-/// may close), inference connections, reward reservations (finite offers),
-/// NEAR wallet enrollment and payout, merge, adding or removing a passkey, and
-/// traces and credit.
-///
-/// Adding a route to the account surface without a row here fails the
-/// classification test. A row whose route is gone fails it too.
-pub(crate) const UNBOUND_ACCOUNT_ROUTE_POLICY: &[(&str, &str, UnboundAccess)] = {
-    use UnboundAccess::{Allowed, Refused};
-    &[
-        // The app's state machine and the one way forward.
-        ("GET", "/v1/account/binding", Allowed),
-        ("GET", "/v1/account/activity-missions/status", Refused),
-        // Z2 S3: connect near.ai. For an unbound account the handlers bind;
-        // a bound account (never gated) enrolls a further device through the
-        // same routes; a legacy or closed account is refused
-        // (`account_already_bound`) and gets nothing.
-        ("POST", "/v1/account/near-ai/provision/bind/start", Allowed),
-        ("POST", "/v1/account/near-ai/provision/bind/finish", Allowed),
-        // Answers `account_identity_unlinked` for an unbound account.
-        ("GET", "/v1/account/contribution-status", Allowed),
-        // Cancel is sign-out.
-        ("POST", "/v1/account/logout", Allowed),
-        ("POST", "/v1/account/sessions/revoke-all", Allowed),
-        // See and rename its one passkey.
-        ("GET", "/v1/account/passkeys", Allowed),
-        ("PATCH", "/v1/account/passkeys/{credential_id}", Allowed),
-        // Refused: adding or removing an authenticator.
-        ("POST", "/v1/account/passkeys/register/start", Refused),
-        ("POST", "/v1/account/passkeys/register/finish", Refused),
-        // Z2 S2: one passkey per unbound account.
-        (
-            "POST",
-            "/v1/account/passkeys/native/register/start",
-            Refused,
-        ),
-        (
-            "POST",
-            "/v1/account/passkeys/native/register/finish",
-            Refused,
-        ),
-        ("DELETE", "/v1/account/passkeys/{credential_id}", Refused),
-        // Refused: invites and the legacy invite link.
-        ("POST", "/v1/account/invites/redeem", Refused),
-        ("POST", "/v1/account/invites/legacy-link/challenge", Refused),
-        ("POST", "/v1/account/invites/legacy-link", Refused),
-        // Refused: inference connections.
-        ("GET", "/v1/account/inference-connection/offers", Refused),
-        ("GET", "/v1/account/inference-connection", Refused),
-        ("POST", "/v1/account/inference-connection", Refused),
-        (
-            "DELETE",
-            "/v1/account/inference-connection/{connection_id}",
-            Refused,
-        ),
-        // Refused: traces, sessions of traces and credit (empty anyway).
-        ("GET", "/v1/account/traces", Refused),
-        ("POST", "/v1/account/source-sessions/status", Refused),
-        ("GET", "/v1/account/credit-summary", Refused),
-        ("GET", "/v1/account/traces/{submission_id}", Refused),
-        ("GET", "/v1/account/traces/{submission_id}/content", Refused),
-        (
-            "GET",
-            "/v1/account/traces/{submission_id}/session-detail",
-            Refused,
-        ),
-        (
-            "POST",
-            "/v1/account/traces/{submission_id}/withdraw",
-            Refused,
-        ),
-        // The pipeline withdrawal (versioned pipeline), an account route like
-        // the one above.
-        (
-            "POST",
-            "/v1/contributors/me/pipeline-submissions/{submission_id}/withdraw",
-            Refused,
-        ),
-        (
-            "GET",
-            "/v1/account/traces/{submission_id}/publication",
-            Refused,
-        ),
-        (
-            "PUT",
-            "/v1/account/traces/{submission_id}/publication",
-            Refused,
-        ),
-        (
-            "DELETE",
-            "/v1/account/traces/{submission_id}/publication",
-            Refused,
-        ),
-        // Refused: NEAR wallet enrollment, identities and payout.
-        ("POST", "/v1/account/near/enroll/start", Refused),
-        ("POST", "/v1/account/near/enroll/finish", Refused),
-        ("GET", "/v1/account/near-identities", Refused),
-        ("PATCH", "/v1/account/near-identities/{public_key}", Refused),
-        (
-            "DELETE",
-            "/v1/account/near-identities/{public_key}",
-            Refused,
-        ),
-        (
-            "PATCH",
-            "/v1/account/near-identities/{public_key}/payout",
-            Refused,
-        ),
-        // Refused: merge.
-        ("POST", "/v1/account/merge/start", Refused),
-        ("POST", "/v1/account/merge/confirm", Refused),
-        // Refused: rewards.
-        ("GET", "/v1/account/rewards", Refused),
-        (
-            "GET",
-            "/v1/account/reward-reservations/{reservation_id}",
-            Refused,
-        ),
-        (
-            "POST",
-            "/v1/account/reward-offers/{program_id}/reservations",
-            Refused,
-        ),
-    ]
-};
-
-/// What an unbound account's request to `(method, matched_path)` gets. A path
-/// the router did not match, or one missing from the policy, is refused.
-pub(crate) fn unbound_access(method: &Method, matched_path: Option<&MatchedPath>) -> UnboundAccess {
-    let Some(path) = matched_path.map(MatchedPath::as_str) else {
-        return UnboundAccess::Refused;
-    };
-    UNBOUND_ACCOUNT_ROUTE_POLICY
-        .iter()
-        .find(|(m, p, _)| *m == method.as_str() && *p == path)
-        .map(|(_, _, access)| *access)
-        .unwrap_or(UnboundAccess::Refused)
-}
 
 /// One `(method, path template)` registered on the account surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -309,8 +139,7 @@ impl AccountRoutes {
     }
 
     /// Put every registered route behind `account_auth_middleware`, which
-    /// resolves the session, enforces the unbound gate, and attaches rotated
-    /// credentials.
+    /// resolves the session and attaches rotated credentials.
     pub(crate) fn authenticated(self, state: Arc<AppState>) -> AuthenticatedAccountRoutes {
         AuthenticatedAccountRoutes {
             router: self
@@ -327,7 +156,7 @@ impl AccountRoutes {
 /// Account routes already behind `account_auth_middleware`, with their record.
 pub(crate) struct AuthenticatedAccountRoutes {
     router: Router<Arc<AppState>>,
-    // Read only by the classification test; production reads the policy.
+    // Read only by tests.
     #[cfg_attr(not(test), allow(dead_code))]
     registered: Vec<RegisteredAccountRoute>,
 }

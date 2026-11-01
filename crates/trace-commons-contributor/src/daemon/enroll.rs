@@ -31,26 +31,26 @@ use crate::consent::{VALID_SCOPES, validate_scopes};
 const DESCRIPTIONS: [(&str, &str, &str, bool); 5] = [
     (
         "debugging_evaluation",
-        "Finding bugs and measuring agents",
-        "Researchers read traces to find where coding agents fail, and score agents against each other.",
+        "Debugging and evaluation",
+        "Researchers can read your traces to study errors and compare coding agents.",
         true,
     ),
     (
         "benchmark_only",
-        "Turn my traces into test cases",
-        "Parts of your traces may become benchmark problems that agents are scored against.",
+        "Create benchmarks",
+        "Turn parts of your traces into tests for coding agents.",
         true,
     ),
     (
         "ranking_training",
-        "Train models that judge agent output",
-        "Used to train models that rank or grade what an agent produced. Not models that write code.",
+        "Train evaluators",
+        "Train models that rank or grade coding-agent answers.",
         true,
     ),
     (
         "model_training",
-        "Train coding models directly",
-        "Your traces become training data for models that write code, potentially including commercial ones.",
+        "Train coding models",
+        "Train models that write code, including commercial models.",
         true,
     ),
     (
@@ -177,49 +177,80 @@ pub(super) fn handle_set_consent_scopes(shared: &DaemonShared, req: &Request) ->
         Ok(s) => s,
         Err(_) => return Response::err(req.id, ERR_BAD_PARAMS, "scopes-invalid"),
     };
-    let Ok(Some(mut cfg)) = shared.store.load_config() else {
+    let Ok(Some(cfg)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, "not-logged-in");
     };
-    // The audit entry goes down FIRST, before the config is rewritten, the
-    // way `acknowledge_near_ai_notice` does it.
-    //
-    // The reverse order saved the config, appended, and on an append
-    // failure restored the previous config best-effort -- but the disk-full
-    // or permissions failure that broke the append breaks that restore just
-    // as reliably, and the daemon reads its consent scopes from disk. A
-    // widened scope set could survive with no record of the widening, which
-    // is the exact outcome this entry exists to prevent. Recording first
-    // means there is nothing to roll back.
-    //
-    // Label data, not secret: these are wire-name scope identifiers, the
-    // same ones already returned in this very response and in `status`.
-    if let Err(_e) = audit::append(
-        &shared.store,
-        &AuditEntry {
-            at: Utc::now(),
-            action: "consent-scopes-changed".to_string(),
-            project_label: None,
-            detail: Some(scopes.join(",")),
-        },
-    ) {
-        return Response::err(req.id, ERR_UNAVAILABLE, "audit-write-failed");
+    match persist_scope_choice(shared, &cfg, &scope_names, scopes) {
+        Ok(cfg) => Response::ok(req.id, json!({ "consent_scopes": cfg.consent_scopes })),
+        Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
     }
-    cfg.consent_scopes = scopes.clone();
-    // R7: this call is the contributor's choice, and the only writer of the
-    // record the Flow 1 grant requires. An empty list names nothing -- it
-    // saves the floor scope `validate_scopes` adds -- so it records no
-    // choice. Enrollment never sets it. A config that predates the record
-    // (`None`) keeps predating it on an empty list: naming nothing is not
-    // a reason to start holding a contributor who joined before it existed.
-    cfg.consent_scopes_chosen = if !scope_names.is_empty() {
+}
+
+/// The agent's explicit data-use choice has the same audit and validation as
+/// the existing consent command, bound to the setup snapshot it inspected.
+pub(super) fn apply_setup_scopes(
+    shared: &DaemonShared,
+    cfg: &crate::config::ContributorConfig,
+    names: &[String],
+) -> Result<crate::config::ContributorConfig, &'static str> {
+    let scopes = validate_scopes(names).map_err(|_| "scopes-invalid")?;
+    persist_scope_choice(shared, cfg, names, scopes)
+}
+
+fn persist_scope_choice(
+    shared: &DaemonShared,
+    cfg: &crate::config::ContributorConfig,
+    names: &[String],
+    scopes: Vec<String>,
+) -> Result<crate::config::ContributorConfig, &'static str> {
+    let mut candidate = cfg.clone();
+    candidate.consent_scopes = scopes.clone();
+    candidate.consent_scopes_chosen = if !names.is_empty() {
         Some(true)
     } else {
         cfg.consent_scopes_chosen.map(|_| false)
     };
-    if shared.store.save_config(&cfg).is_err() {
-        return Response::err(req.id, ERR_UNAVAILABLE, "config-write-failed");
+    let body = serde_json::to_vec_pretty(&candidate).map_err(|_| "config-write-failed")?;
+    // The contributor's own choice of data uses carries every standing
+    // grant with it, so Automatic stays on (`adopt_chosen_scopes`). Recorded
+    // before the config is written: the grants only gain scopes, so a sweep
+    // between the two writes still finds them covering the config.
+    {
+        let mut policy = shared.policy.lock().expect("policy lock");
+        let chosen = scopes.iter().cloned().collect();
+        if policy.adopt_chosen_scopes(&chosen) && policy.save(&shared.store).is_err() {
+            return Err("config-write-failed");
+        }
     }
-    Response::ok(req.id, json!({ "consent_scopes": scopes }))
+    let mut audit_failed = false;
+    super::commons_credentials::with_current_config(&shared.store, cfg, || {
+        if let Err(error) = audit::append(
+            &shared.store,
+            &AuditEntry {
+                at: Utc::now(),
+                action: "consent-scopes-changed".into(),
+                project_label: None,
+                detail: Some(scopes.join(",")),
+            },
+        ) {
+            audit_failed = true;
+            return Err(error);
+        }
+        crate::config::write_atomic_0600(
+            shared.store.dir(),
+            &shared.store.dir().join("contributor.json"),
+            &body,
+        )?;
+        super::cloud_credential_lifecycle::sync_directory(&shared.store)
+    })
+    .map_err(|_| {
+        if audit_failed {
+            "audit-write-failed"
+        } else {
+            "config-write-failed"
+        }
+    })?;
+    Ok(candidate)
 }
 
 /// Record that the NEAR AI first-use disclosure was shown in a UI, and clear
@@ -299,10 +330,10 @@ mod tests {
         assert_eq!(
             titles,
             [
-                ("debugging_evaluation", "Finding bugs and measuring agents"),
-                ("benchmark_only", "Turn my traces into test cases"),
-                ("ranking_training", "Train models that judge agent output"),
-                ("model_training", "Train coding models directly"),
+                ("debugging_evaluation", "Debugging and evaluation"),
+                ("benchmark_only", "Create benchmarks"),
+                ("ranking_training", "Train evaluators"),
+                ("model_training", "Train coding models"),
                 (
                     "public_attribution",
                     "List my handle publicly as a contributor"
@@ -354,7 +385,7 @@ mod tests {
         assert_eq!(
             tags,
             [
-                ("debugging_evaluation", "required"),
+                ("debugging_evaluation", "always on"),
                 ("benchmark_only", "data use"),
                 ("ranking_training", "data use"),
                 ("model_training", "data use"),
@@ -881,6 +912,49 @@ mod tests {
                 .unwrap()
                 .consent_scopes_chosen,
             Some(false)
+        );
+    }
+
+    /// Allowing Train coding models, the use credit needs, keeps an
+    /// Automatic folder Automatic (product owner, 2026-10-29). Before, the
+    /// next sweep turned it back to Ask as `scopes-widened`.
+    #[test]
+    fn choosing_a_new_data_use_keeps_an_automatic_folder_automatic() {
+        use crate::daemon::grant_terms::GrantTerms;
+        use crate::daemon::policy::ProjectMode;
+        let s = enrolled_shared();
+        let key = "/w/api";
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode(key, ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            assert!(policy.record_grant_terms(key, GrantTerms::in_force(&s).unwrap()));
+        }
+        let r = handle_set_consent_scopes(
+            &s,
+            &req(
+                "set_consent_scopes",
+                json!({"scopes": ["debugging_evaluation", "model_training"]}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+
+        let current = GrantTerms::in_force(&s).unwrap();
+        assert!(current.consent_scopes.contains("model_training"));
+        let mut policy = s.policy.lock().unwrap();
+        let sweep = policy.sweep_grants(&current, Utc::now());
+        assert!(sweep.voided.is_empty(), "{:?}", sweep.voided);
+        assert_eq!(policy.resolve(key), ProjectMode::AutoUpload);
+        // Persisted, so a restarted daemon agrees.
+        let saved = crate::daemon::policy::ProjectPolicy::load(&s.store).unwrap();
+        assert!(
+            saved.projects[key]
+                .armed_under
+                .as_ref()
+                .unwrap()
+                .consent_scopes
+                .contains("model_training")
         );
     }
 

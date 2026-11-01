@@ -44,8 +44,9 @@ final class InsightsLeverCardSwitch {
 }
 
 /// The Insights switches in Settings (Ron's #1287 review, adopted by the
-/// owner): count tokens in the watched folders (off by default, D4), the
-/// weekly summary card and the higher-than-usual card. Drawn under Tools
+/// owner): the weekly summary card and the higher-than-usual card. Counting
+/// tokens in the watched folders is always on (product owner, 2026-10-29),
+/// so it has no switch here. Drawn under Tools
 /// (`GlassSettingsContent`), which waits for first run (R-43). Each switch reads the value its owner
 /// confirmed and is drawn only once that owner reported one; every word is
 /// the core's analytics copy.
@@ -63,21 +64,13 @@ struct InsightsSettingsCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // No headed card without a switch in it.
-            if model.daemonSettings?.insightsCounterPass != nil
-                || model.daemonSettings?.insightsRecapCardEnabled != nil
+            if model.daemonSettings?.insightsRecapCardEnabled != nil
                 || lever.enabled != nil {
                 GlassEyebrowCard(text("title")) {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                         if let settings = model.daemonSettings {
-                            if let on = settings.insightsCounterPass {
-                                Toggle(text("analytics_setting_counter_pass"), isOn: Binding(
-                                    get: { on },
-                                    set: { on in Task { await model.setInsightsSwitch(.counterPass, on) } }
-                                ))
-                                .toggleStyle(GlassToggleStyle(.settings))
-                                .disabled(model.insightsSwitchBusy.contains(.counterPass))
-                                refusal(model.insightsSwitchRefusal[.counterPass])
-                            }
+                            // Counting is always on (product owner, 2026-10-29),
+                            // so it has no switch.
                             if let on = settings.insightsRecapCardEnabled {
                                 Toggle(text("analytics_setting_recap_card"), isOn: Binding(
                                     get: { on },

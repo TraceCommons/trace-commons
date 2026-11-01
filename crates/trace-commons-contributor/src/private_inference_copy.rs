@@ -91,6 +91,14 @@
 //! subtitle says what actually happens, and [`OFFER_EXPOSURE`] still states
 //! in full what turning this on lets anything else on the machine do. The
 //! name carries the model; the sentences carry the truth.
+//!
+//! # The second exception: the subtitle
+//!
+//! The owner ruled on 2026-10-27 (#1674) that [`SUBTITLE`] may say "Add a
+//! privacy layer to AI models you are already using." It is the one
+//! sentence on this surface that uses the word, it is pinned verbatim by
+//! `the_subtitle_is_the_one_sentence_that_claims_a_privacy_layer`, and it is not a
+//! precedent: any other sentence claiming privacy stays unwriteable.
 
 // PRIVATE-INFERENCE-SURFACE-BEGIN
 //
@@ -107,8 +115,13 @@
 pub const DESTINATION: &str = "Private AI";
 
 /// The one line under the destination's title saying what it is for.
-pub const SUBTITLE: &str =
-    "Send your tools' AI calls through this app to see them and pick who answers.";
+pub const SUBTITLE: &str = "Add a privacy layer to AI models you are already using.";
+
+/// Said after [`SUBTITLE`] only while NEAR AI answers calls (`running`),
+/// the one place this surface may say "credit" (product owner,
+/// 2026-10-28). With NEAR AI not connected, calls use the accounts the
+/// tools already have, so a shell must not show it then.
+pub const SUBTITLE_CREDIT: &str = "It uses your NEAR AI credit.";
 
 /// The offer’s heading names the intended provider. The body explains that
 /// existing provider connections are not changed by enabling the service.
@@ -520,6 +533,8 @@ pub fn quit_needs_notice(requested_on: bool, label: &str) -> bool {
 pub struct PrivateInferenceCopy {
     pub destination: &'static str,
     pub subtitle: &'static str,
+    /// Shown after `subtitle` only in the `running` state.
+    pub subtitle_credit: &'static str,
     pub offer_title: &'static str,
     pub offer_what: &'static str,
     pub offer_exposure: &'static str,
@@ -730,6 +745,8 @@ pub struct PrivateInferenceCopy {
     pub funding_manage: &'static str,
     pub funding_refresh: &'static str,
     pub funding_unavailable: &'static str,
+    /// The balance card's button to billing. [`BALANCE_ADD_FUNDS`].
+    pub balance_add_funds: &'static str,
     /// [`BALANCE_WHAT`].
     pub balance_what: &'static str,
     /// [`BALANCE_NO_SESSION`].
@@ -819,7 +836,7 @@ pub const TRAY_OPEN_TO_TURN_ON: &str = "Private AI…";
 /// a tool is the unit a contributor can decide about. Answering model calls
 /// at all is a consequence of connecting one, not a question to be settled
 /// first.
-pub const HARNESSES_TITLE: &str = "Your tools";
+pub const HARNESSES_TITLE: &str = "Default tool connections";
 
 /// The one line under that heading.
 ///
@@ -829,8 +846,7 @@ pub const HARNESSES_TITLE: &str = "Your tools";
 /// unqualified list reads as the second, and a contributor whose tool is
 /// missing from it would conclude their tool cannot be connected rather than
 /// that this app has not been taught about it yet.
-pub const HARNESSES_WHAT: &str =
-    "Pick which tools send their AI calls through this app. Only supported tools are listed.";
+pub const HARNESSES_WHAT: &str = "Choose supported tools to send AI requests through this app by default. Project settings or environment overrides can take precedence.";
 
 /// What the amount [`harness_spend_line`] names does and does not cover.
 ///
@@ -858,16 +874,15 @@ pub const HARNESSES_SPEND_SCOPE: &str =
 /// was looked for.
 ///
 /// It must be rendered INSTEAD of [`HARNESS_NOT_CONNECTED`] and never
-/// beside it. That sentence says a tool's own settings still send its calls
-/// somewhere, which is a claim about settings belonging to something that is
-/// not on this computer at all.
+/// beside it. A missing executable and an inactive proxy connection are
+/// different facts; the row needs the installation status in that case.
 pub const HARNESS_NOT_INSTALLED: &str = "Not found on this computer.";
 
 /// A tool whose own settings still send its calls wherever they went before.
 ///
 /// Said as a fact about the tool's settings rather than as a fault. Nothing
 /// is wrong with a tool nobody has connected.
-pub const HARNESS_NOT_CONNECTED: &str = "Uses its own settings.";
+pub const HARNESS_NOT_CONNECTED: &str = "Not connected to this app.";
 
 /// A tool whose settings are right and from which nothing has arrived yet.
 ///
@@ -943,7 +958,7 @@ pub const HARNESSES_NONE_FOUND: &str = "No supported tools found on this compute
 /// say the right thing or nothing at all; either way it is refused, so that
 /// somebody's own mistake in their own file never comes back looking like
 /// this app's.
-pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn't read this tool's settings, so nothing changed. Edit the file or run the command shown.";
+pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn't read this tool's settings, so nothing changed. Review the settings file, then try again.";
 
 /// A plan that found the file already saying what the action wanted.
 ///
@@ -951,7 +966,7 @@ pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn't read this tool's settings,
 /// plan with nothing in it opened a preview holding a title, a path and
 /// nothing else, which reads as this app having lost the change rather than
 /// as there being none to make.
-pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "Nothing to change. Its settings already match.";
+pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "No changes were prepared.";
 
 /// This app's own description of a tool did not survive checking.
 ///
@@ -968,7 +983,15 @@ pub const HARNESS_PLAN_ENTRY_UNUSABLE: &str =
 /// shown on the row does by hand exactly what this app could not work out
 /// how to do.
 pub const HARNESS_PLAN_NO_CONFIG_PATH: &str =
-    "Couldn't find this tool's settings file. Run the command shown instead.";
+    "Couldn't find this tool's settings file. Check its configuration directory, then try again.";
+
+/// OpenCode's installed major version could not be qualified.
+pub const HARNESS_PLAN_UNSUPPORTED_VERSION: &str =
+    "Couldn't identify a supported OpenCode version. Check its installation, then try again.";
+
+/// No actual model can be selected for a persistent provider configuration.
+pub const HARNESS_PLAN_MODELS_UNAVAILABLE: &str =
+    "No models are available from Private AI. Check its connection, then try again.";
 
 /// Why a tool this app hosts the answering for cannot be connected yet.
 ///
@@ -1088,6 +1111,8 @@ pub fn harness_outcome_line(outcome: &str) -> &'static str {
         Some(PlanOutcome::NotInstalled) => HARNESS_NOT_INSTALLED,
         Some(PlanOutcome::EntryUnusable) => HARNESS_PLAN_ENTRY_UNUSABLE,
         Some(PlanOutcome::NoConfigPath) => HARNESS_PLAN_NO_CONFIG_PATH,
+        Some(PlanOutcome::UnsupportedVersion) => HARNESS_PLAN_UNSUPPORTED_VERSION,
+        Some(PlanOutcome::ModelsUnavailable) => HARNESS_PLAN_MODELS_UNAVAILABLE,
     }
 }
 
@@ -1801,10 +1826,92 @@ pub const FUNDING_WHAT: &str = "Opens billing for the organization shown above."
 pub const FUNDING_MANAGE: &str = "Manage billing";
 /// #1146's "Verify current account".
 pub const FUNDING_REFRESH: &str = "Check account";
+/// The NEAR AI balance card's button (owner, 2026-10-27): it opens the same
+/// verified billing page as [`FUNDING_MANAGE`]. "Funds", not "credits", so
+/// NEAR AI billing stays apart from contribution credit.
+pub const BALANCE_ADD_FUNDS: &str = "Add funds";
 /// #1146's "Account destination not read.", then the remedy, by the
 /// [`FUNDING_REFRESH`] control's name. Approved 2026-10-07: it was "The billing destination could not be
 /// verified. Refresh account to try again."
 pub const FUNDING_UNAVAILABLE: &str = "Your account hasn't been read. Check again.";
+
+// ---- Spending organization (DRAFT, awaiting owner review) ----
+//
+// Owner request, 2026-10-23: a contributor whose NEAR AI account has several
+// organizations chooses which one's balance Private AI spends from, in
+// Settings, and the Private AI screen says so when no choice has been made.
+// That request is the approval for the prompt existing (ui-copy-guide rule
+// 9). The WORDING below is a draft and is not approved.
+
+/// The Settings card's heading. DRAFT.
+pub const SPEND_ORG_TITLE: &str = "Spending organization";
+/// What the card is a choice about. DRAFT.
+pub const SPEND_ORG_WHAT: &str = "Private AI spends from this organization's NEAR AI balance.";
+/// The picker's label, also its accessible name. Picking an organization
+/// switches to it; there is no separate button. DRAFT.
+pub const SPEND_ORG_PICKER: &str = "Organization to spend from";
+/// Shown while a switch is in flight; it takes about ten seconds. DRAFT.
+pub const SPEND_ORG_SWITCHING: &str = "Switching. This takes a few seconds.";
+/// A switch that failed. Every failure changes nothing. DRAFT.
+pub const SPEND_ORG_FAILED: &str = "Couldn't switch. Nothing changed.";
+/// A switch refused because the sign-in ended. DRAFT.
+pub const SPEND_ORG_SESSION_EXPIRED: &str = "Sign in to NEAR AI again, then switch.";
+/// A switch NEAR AI refused for that organization (for example, a role that
+/// may not create access there). DRAFT.
+pub const SPEND_ORG_REFUSED: &str =
+    "NEAR AI didn't allow Private AI to use that organization. Nothing changed.";
+/// The previous organization's access is still being removed. DRAFT.
+pub const SPEND_ORG_REVOKE_PENDING: &str = "Still removing access from the previous organization.";
+/// The Private AI screen's prompt heading. DRAFT.
+pub const SPEND_ORG_PROMPT_TITLE: &str = "Choose an organization";
+/// The prompt's line, over `{organization}`, the current one's name. DRAFT.
+pub const SPEND_ORG_PROMPT_LINE: &str = "Your NEAR AI account has several organizations. Private AI is spending from {organization}. Choose one in Settings.";
+/// The prompt's line when the current organization's name is not known. DRAFT.
+pub const SPEND_ORG_PROMPT_LINE_UNNAMED: &str = "Your NEAR AI account has several organizations. Choose which one Private AI spends from in Settings.";
+/// The prompt's action: it opens Settings, so it says so (rule 2). DRAFT.
+pub const SPEND_ORG_PROMPT_ACTION: &str = "Review settings";
+/// The action's accessible name. DRAFT.
+pub const SPEND_ORG_PROMPT_ACTION_ACCESSIBILITY: &str = "Review settings to choose an organization";
+/// The prompt's second action: it keeps the current organization and hides
+/// the prompt (owner request, 2026-10-24). DRAFT.
+pub const SPEND_ORG_PROMPT_DISMISS: &str = "Not now";
+/// The dismiss action's accessible name, over `{organization}`. DRAFT.
+pub const SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY: &str = "Keep spending from {organization}";
+/// The dismiss action's accessible name when the organization's name is not
+/// known. DRAFT.
+pub const SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY_UNNAMED: &str =
+    "Keep spending from the current organization";
+
+/// The spending-organization words, carried in the daemon's
+/// `near_ai_spend_organizations` answer so no shell owns a sentence of it.
+/// `current_name` is the current organization's name, when listed.
+#[must_use]
+pub fn spend_org_view(current_name: Option<&str>) -> serde_json::Value {
+    let prompt_line = match current_name {
+        Some(name) => SPEND_ORG_PROMPT_LINE.replace("{organization}", name),
+        None => SPEND_ORG_PROMPT_LINE_UNNAMED.to_owned(),
+    };
+    let dismiss_accessibility = match current_name {
+        Some(name) => SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY.replace("{organization}", name),
+        None => SPEND_ORG_PROMPT_DISMISS_ACCESSIBILITY_UNNAMED.to_owned(),
+    };
+    serde_json::json!({
+        "title": SPEND_ORG_TITLE,
+        "what": SPEND_ORG_WHAT,
+        "picker": SPEND_ORG_PICKER,
+        "switching": SPEND_ORG_SWITCHING,
+        "failed": SPEND_ORG_FAILED,
+        "session_expired": SPEND_ORG_SESSION_EXPIRED,
+        "refused": SPEND_ORG_REFUSED,
+        "revoke_pending": SPEND_ORG_REVOKE_PENDING,
+        "prompt_title": SPEND_ORG_PROMPT_TITLE,
+        "prompt_line": prompt_line,
+        "prompt_action": SPEND_ORG_PROMPT_ACTION,
+        "prompt_action_accessibility": SPEND_ORG_PROMPT_ACTION_ACCESSIBILITY,
+        "prompt_dismiss": SPEND_ORG_PROMPT_DISMISS,
+        "prompt_dismiss_accessibility": dismiss_accessibility,
+    })
+}
 
 /// Canonical wording for the organization handoff; no shell chooses a payer.
 pub fn funding_message(
@@ -1953,6 +2060,41 @@ pub fn format_amount(nanos: i64, scale: u8) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     let magnitude = cents.unsigned_abs();
     format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100)
+}
+
+/// The NEAR AI balance's change over the last 24 hours, under the Balance
+/// tile's figure. `{amount}` is signed: `+$3.20`, `-$1.00`. DRAFT, awaiting
+/// owner review.
+pub const BALANCE_CHANGE_24H: &str = "{amount} in the last 24 hours";
+
+pub const BALANCE_CHANGE_24H_UNAVAILABLE: &str = "24-hour balance change unavailable";
+pub const CREDIT_RECEIVED_24H_UNAVAILABLE: &str = "Amount received in 24 hours unavailable";
+
+/// Incoming transfers only; a known empty ledger is explicitly zero.
+#[must_use]
+pub fn credit_received_24h_line(nanos: i64, scale: u8) -> String {
+    let amount = format_amount(nanos, scale);
+    if nanos < 0 || amount.is_empty() {
+        return String::new();
+    }
+    format!("{amount} received in the last 24 hours")
+}
+
+/// [`BALANCE_CHANGE_24H`] for a change of `nanos`, or the EMPTY STRING for a
+/// scale this build cannot honour. Zero and subcent changes are neutral. The magnitude is floored like every amount here, so
+/// the line never claims more movement, either way, than happened.
+#[must_use]
+pub fn balance_change_line(nanos: i64, scale: u8) -> String {
+    let magnitude = i64::try_from(nanos.unsigned_abs()).unwrap_or(i64::MAX);
+    let amount = format_amount(magnitude, scale);
+    if amount.is_empty() {
+        return String::new();
+    }
+    if nanos == 0 || amount == "$0.00" || amount == "less than $0.01" {
+        return BALANCE_CHANGE_24H.replace("{amount}", "$0.00");
+    }
+    let sign = if nanos > 0 { "+" } else { "-" };
+    BALANCE_CHANGE_24H.replace("{amount}", &format!("{sign}{amount}"))
 }
 
 /// What is left, as a sentence, or the sentence for there being no figure.
@@ -2211,12 +2353,59 @@ pub fn runtime_word(label: &str) -> &'static str {
     }
 }
 
+/// The menu-bar popover's Private AI word for a listener that is running,
+/// whatever it can reach. The dot says whether anything is wrong.
+pub const MENU_WORD_ON: &str = "On";
+/// `off`.
+pub const MENU_WORD_OFF: &str = "Off";
+/// `stopping`.
+pub const MENU_WORD_STOPPING: &str = "Stopping";
+/// `port_in_use`, `start_failed`, `crashed`: asked for, and not working.
+pub const MENU_WORD_NOT_WORKING: &str = "Not working";
+/// Unreported, or a label this build does not know. Never "On" or "Off".
+pub const MENU_WORD_UNKNOWN: &str = "Unknown";
+
+/// The menu-bar popover's one word for a Private AI state label, and the
+/// tone its dot is painted in.
+///
+/// ONE WORD, NOT THE SENTENCE. The popover row is narrow and a truncated
+/// sentence read as an error; the full sentence stays at [`state_line`] on
+/// the Private AI page and everywhere else. The dot carries the difference:
+/// [`PrivateInferenceTone::Clear`] is green, [`PrivateInferenceTone::Attention`]
+/// amber, [`PrivateInferenceTone::Refused`] red, and
+/// [`PrivateInferenceTone::Neutral`] grey.
+///
+/// Only `running` is `Clear`. Every other running label is "On" with an
+/// `Attention` dot, so the word never claims more than the dot. A label this
+/// build does not know is "Unknown" and `Neutral`, never "On".
+///
+/// Every label in [`STATE_LABELS`] is named here; the test
+/// `every_state_label_has_a_menu_word` fails when a new label is added
+/// without one.
+#[must_use]
+pub fn menu_state(label: &str) -> (&'static str, PrivateInferenceTone) {
+    match label {
+        LABEL_RUNNING => (MENU_WORD_ON, PrivateInferenceTone::Clear),
+        LABEL_RUNNING_NO_BACKENDS
+        | LABEL_RUNNING_ANSWERED_ELSEWHERE
+        | LABEL_RUNNING_DESTINATION_UNKNOWN
+        | LABEL_RUNNING_ELSEWHERE => (MENU_WORD_ON, PrivateInferenceTone::Attention),
+        LABEL_OFF => (MENU_WORD_OFF, PrivateInferenceTone::Neutral),
+        LABEL_STOPPING => (MENU_WORD_STOPPING, PrivateInferenceTone::Neutral),
+        LABEL_PORT_IN_USE | LABEL_START_FAILED | LABEL_CRASHED => {
+            (MENU_WORD_NOT_WORKING, PrivateInferenceTone::Refused)
+        }
+        _ => (MENU_WORD_UNKNOWN, PrivateInferenceTone::Neutral),
+    }
+}
+
 /// The payload, built from the constants above.
 #[must_use]
 pub fn private_inference_copy() -> PrivateInferenceCopy {
     PrivateInferenceCopy {
         destination: DESTINATION,
         subtitle: SUBTITLE,
+        subtitle_credit: SUBTITLE_CREDIT,
         offer_title: OFFER_TITLE,
         offer_what: OFFER_WHAT,
         offer_exposure: OFFER_EXPOSURE,
@@ -2356,6 +2545,7 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         funding_title: FUNDING_TITLE,
         funding_what: FUNDING_WHAT,
         funding_manage: FUNDING_MANAGE,
+        balance_add_funds: BALANCE_ADD_FUNDS,
         funding_refresh: FUNDING_REFRESH,
         funding_unavailable: FUNDING_UNAVAILABLE,
         balance_what: BALANCE_WHAT,
@@ -2752,8 +2942,16 @@ pub const NEAR_AI_ENROLL_COMMONS_UNREACHABLE_LINE: &str =
 /// A commons that is reachable and working, and simply does not offer this
 /// way in. Distinct from both of the above, because the thing to do is
 /// different: neither retrying nor signing in will help.
+#[cfg(not(feature = "near-ai-staging"))]
 pub const NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE: &str =
     "That commons does not offer joining with a NEAR AI login. You can still join with a wallet.";
+/// Staging has no wallet to fall back on: NEAR AI's Google login is the
+/// only way in (staging spec S12, S18), so the line says so. Still its own
+/// sentence, as every refusal's is.
+///
+/// Approved 2026-10-23 (owner: "say only google is supported").
+#[cfg(feature = "near-ai-staging")]
+pub const NEAR_AI_ENROLL_COMMONS_UNSUPPORTED_LINE: &str = "Only Google sign-in is supported.";
 
 /// `invalid`. A malformed request, which a contributor cannot cause from the
 /// app and cannot act on.
@@ -2863,7 +3061,6 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
             "Content changed; review again before sending"
         }
         health::LABEL_NOT_LOGGED_IN => "Waiting for you to reconnect",
-        health::LABEL_DAILY_CAP_REACHED => "Waiting for the daily upload limit to reset",
         health::LABEL_QUEUE_FULL => "Queue was full",
         health::LABEL_INGEST_UNREACHABLE | health::LABEL_CLAIM_MINT_FAILED => {
             "Could not reach the commons"
@@ -3003,6 +3200,35 @@ pub use crate::daemon::private_inference::{
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_24_hour_change_is_signed_and_never_rounds_up() {
+        assert_eq!(
+            balance_change_line(3_209_000_000, 9),
+            "+$3.20 in the last 24 hours"
+        );
+        assert_eq!(
+            balance_change_line(-1_009_000_000, 9),
+            "-$1.00 in the last 24 hours"
+        );
+    }
+
+    #[test]
+    fn known_zero_and_under_a_cent_are_neutral_but_not_unknown() {
+        // Known zero differs from a missing day-old sample.
+        assert_eq!(balance_change_line(0, 9), "$0.00 in the last 24 hours");
+        assert_eq!(
+            balance_change_line(9_000_000, 9),
+            "$0.00 in the last 24 hours"
+        );
+        assert_eq!(
+            balance_change_line(-9_000_000, 9),
+            "$0.00 in the last 24 hours"
+        );
+        // A scale this build cannot honour is no figure, not a wrong one.
+        assert_eq!(balance_change_line(5_000_000_000, 200), "");
+        assert!(!balance_change_line(i64::MIN, 9).is_empty());
+    }
     /// The panels' refresh icons all say "Refresh", so each has its own
     /// accessible name that says what it re-reads (docs/ui-copy-guide.md
     /// section 5), carried by the export rather than joined in a shell.
@@ -3080,7 +3306,6 @@ mod tests {
             queue::REASON_SCOPES_CHANGED,
             "envelope-changed-after-approval",
             health::LABEL_NOT_LOGGED_IN,
-            health::LABEL_DAILY_CAP_REACHED,
             health::LABEL_QUEUE_FULL,
             health::LABEL_INGEST_UNREACHABLE,
             health::LABEL_CLAIM_MINT_FAILED,
@@ -3632,6 +3857,8 @@ mod tests {
             PlanOutcome::NotInstalled,
             PlanOutcome::EntryUnusable,
             PlanOutcome::NoConfigPath,
+            PlanOutcome::UnsupportedVersion,
+            PlanOutcome::ModelsUnavailable,
         ] {
             assert!(!outcome.is_committable(), "{outcome:?} became committable");
             let line = harness_outcome_line(outcome.label());
@@ -4609,6 +4836,43 @@ mod tests {
         }
     }
 
+    /// Production's refusal for a commons without the NEAR AI login still
+    /// points at the wallet, as it shipped.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn production_points_an_unsupported_commons_at_the_wallet() {
+        assert_eq!(
+            near_ai_enroll_line(NEAR_AI_ENROLL_COMMONS_UNSUPPORTED),
+            "That commons does not offer joining with a NEAR AI login. You can still join with a wallet."
+        );
+    }
+
+    /// Staging is reached through a NEAR AI login only: no refusal the
+    /// first run can show after the NEAR AI enrollment offers a wallet.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn staging_offers_no_wallet_when_a_near_ai_join_is_refused() {
+        for label in [
+            NEAR_AI_ENROLL_ALREADY_ENROLLED,
+            NEAR_AI_ENROLL_NO_SESSION,
+            NEAR_AI_ENROLL_ENDPOINT_REFUSED,
+            NEAR_AI_ENROLL_TOKEN_UNAVAILABLE,
+            NEAR_AI_ENROLL_START_FAILED,
+            NEAR_AI_ENROLL_COMMONS_UNREACHABLE,
+            NEAR_AI_ENROLL_COMMONS_UNSUPPORTED,
+            NEAR_AI_ENROLL_INVALID,
+            NEAR_AI_ENROLL_VERIFICATION_FAILED,
+            "near_ai_enroll_unavailable",
+        ] {
+            let line = near_ai_enroll_line(label).to_lowercase();
+            assert!(!line.contains("wallet"), "{label}: {line}");
+        }
+        assert_eq!(
+            private_inference_copy().near_ai_enroll_commons_unsupported,
+            "Only Google sign-in is supported."
+        );
+    }
+
     /// The offer says a wallet is not needed, because that is the whole point
     /// of it existing and the thing a contributor is deciding.
     #[test]
@@ -4707,7 +4971,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            180,
+            182,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -4988,11 +5252,21 @@ mod tests {
     /// is no convention here to generalise from, and a field added later is
     /// a fourth answer to a fourth question rather than a fourth instance of
     /// a pattern.
+    /// The balance card's Add funds (owner, 2026-10-27). "Funds", not
+    /// "credits": NEAR AI billing stays apart from contribution credit, as
+    /// [`FUNDING_MANAGE`] does.
+    #[test]
+    fn the_balance_card_offers_add_funds() {
+        assert_eq!(private_inference_copy().balance_add_funds, "Add funds");
+        assert_eq!(BALANCE_ADD_FUNDS, "Add funds");
+    }
+
     #[test]
     fn the_balance_row_carries_its_own_words() {
         let copy = private_inference_copy();
         for field in [
             copy.balance_title,
+            copy.balance_add_funds,
             copy.balance_what,
             copy.balance_no_session,
             copy.balance_session_expired,
@@ -5008,6 +5282,36 @@ mod tests {
             copy.balance_what.contains("whole account"),
             "the scope sentence stopped saying the figure is not per-computer: {}",
             copy.balance_what
+        );
+    }
+
+    /// The subtitle is the one sentence that may claim a privacy layer
+    /// (owner, 2026-10-27, #1674). Pinned verbatim so that any change to it,
+    /// or a second sentence borrowing the claim, is a deliberate edit here.
+    /// (The health labels say "privacy scan"; that is a different thing.)
+    #[test]
+    fn the_subtitle_is_the_one_sentence_that_claims_a_privacy_layer() {
+        assert_eq!(
+            SUBTITLE,
+            "Add a privacy layer to AI models you are already using."
+        );
+        assert_eq!(SUBTITLE_CREDIT, "It uses your NEAR AI credit.");
+        let source = include_str!("private_inference_copy.rs");
+        let region = source
+            .split_once("PRIVATE-INFERENCE-SURFACE-BEGIN")
+            .expect("begin marker present")
+            .1
+            .split_once("PRIVATE-INFERENCE-SURFACE-END")
+            .expect("end marker present")
+            .0;
+        let literals_saying_privacy = region
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.to_lowercase().contains("privacy layer"))
+            .count();
+        assert_eq!(
+            literals_saying_privacy, 1,
+            "another line in the surface claims a 'privacy layer'"
         );
     }
 
@@ -5163,6 +5467,8 @@ mod tests {
             "not_installed",
             "entry_unusable",
             "no_config_path",
+            "unsupported_version",
+            "models_unavailable",
             "an_outcome_from_a_later_daemon",
         ] {
             strings.push(harness_outcome_line(outcome).to_string());
@@ -5198,7 +5504,8 @@ mod tests {
                 let text = text
                     .replace(DESTINATION, "")
                     .replace("Route AI requests through NEAR AI", "")
-                    .replace(OFFER_LEARN_MORE, "");
+                    .replace(OFFER_LEARN_MORE, "")
+                    .replace(SUBTITLE_CREDIT, "");
                 assert!(
                     !text.to_lowercase().contains(word),
                     "{word:?} appears in: {text}"
@@ -5283,5 +5590,67 @@ mod state_table_tests {
             wire,
             serde_json::json!({"line": STATE_RUNNING, "working": true})
         );
+    }
+
+    /// The popover's one word and its dot, for every label.
+    #[test]
+    fn every_state_label_has_a_menu_word() {
+        use PrivateInferenceTone as T;
+        let expected = [
+            (LABEL_RUNNING, MENU_WORD_ON, T::Clear),
+            (
+                LABEL_RUNNING_DESTINATION_UNKNOWN,
+                MENU_WORD_ON,
+                T::Attention,
+            ),
+            (LABEL_RUNNING_ANSWERED_ELSEWHERE, MENU_WORD_ON, T::Attention),
+            (LABEL_RUNNING_NO_BACKENDS, MENU_WORD_ON, T::Attention),
+            (LABEL_RUNNING_ELSEWHERE, MENU_WORD_ON, T::Attention),
+            (LABEL_STOPPING, MENU_WORD_STOPPING, T::Neutral),
+            (LABEL_OFF, MENU_WORD_OFF, T::Neutral),
+            (LABEL_PORT_IN_USE, MENU_WORD_NOT_WORKING, T::Refused),
+            (LABEL_START_FAILED, MENU_WORD_NOT_WORKING, T::Refused),
+            (LABEL_CRASHED, MENU_WORD_NOT_WORKING, T::Refused),
+        ];
+        // A label added to STATE_LABELS without a row here fails this.
+        assert_eq!(expected.len(), STATE_LABELS.len());
+        for label in STATE_LABELS {
+            assert!(
+                expected.iter().any(|(l, _, _)| *l == label),
+                "{label} has no expected menu word"
+            );
+            assert_ne!(menu_state(label).0, MENU_WORD_UNKNOWN, "{label}");
+        }
+        for (label, word, tone) in expected {
+            assert_eq!(menu_state(label), (word, tone), "{label}");
+        }
+    }
+
+    /// The word is one word of the popover's own, never the sentence, and
+    /// an unreported or unfamiliar label claims neither On nor Off.
+    #[test]
+    fn the_menu_word_is_short_and_never_over_claims() {
+        for label in STATE_LABELS {
+            let (word, tone) = menu_state(label);
+            assert!(word.split_whitespace().count() <= 2, "{label}");
+            assert_ne!(word, state_line(label), "{label}");
+            // Green only for the one state that may be painted as working.
+            assert_eq!(
+                tone.reads_as_working(),
+                state_tone(label).reads_as_working(),
+                "{label}"
+            );
+            // Anything the state table refuses is never "On".
+            if state_tone(label) == PrivateInferenceTone::Refused {
+                assert_eq!(tone, PrivateInferenceTone::Refused, "{label}");
+                assert_ne!(word, MENU_WORD_ON, "{label}");
+            }
+        }
+        for label in ["", "a_state_from_a_later_daemon"] {
+            assert_eq!(
+                menu_state(label),
+                (MENU_WORD_UNKNOWN, PrivateInferenceTone::Neutral)
+            );
+        }
     }
 }

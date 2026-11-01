@@ -1,7 +1,8 @@
 //! `insights_sessions` and `insights_session_drill`: the Sessions tab over
 //! the counter pass (feed T).
 //!
-//! Gated exactly as `insights_week` is (owner decision D4, open): off, both
+//! Gated exactly as `insights_week` is (on by default; product owner,
+//! 2026-10-29): off, both
 //! answer `enabled: false` without opening the store or the key; on, a store,
 //! key or folder-rule read that fails answers `readable: false` with its
 //! fixed reason, never an empty list. Sessions in a folder that is Never are
@@ -14,8 +15,9 @@
 //! scroll): at most [`WATCHED_SESSIONS_MAX`] a page, with an opaque cursor
 //! for the next ([`select_page`] has the order). No params is the first
 //! page, as the list answered before it was paged. Each row carries an
-//! opaque reference (`t` and the order the pass made the row in: never a
-//! digest or a path), its harness, its first recorded event's time, its
+//! opaque reference (`t` and the order the pass made the row in, `.` and
+//! the store's tag, as the cursor names the store: never a digest or a
+//! path), its harness, its first recorded event's time, its
 //! turn count (Claude Code only), its tokens and an integer sparkline of
 //! tokens per turn (`insights::session_sparkline`), and its folder's display
 //! label (owner decision 2026-10-20).
@@ -32,14 +34,29 @@
 //! same drill shape a saved snapshot's `session_drill` has, computed by the
 //! same engine (`insights::session_drill`) from the stored counters, with
 //! `feed: "counter_pass"`.
+//!
+//! # The person's own labels
+//!
+//! Each row also carries the task the rules infer from its stored facts
+//! (`inferred_task`) and the person's own labels (`user_task`,
+//! `user_outcome`; Insights PM request, 2026-10-21), and
+//! `insights_session_label` sets or clears them by the row's reference,
+//! answering the row as listed. Two closed sets
+//! (`insights::session_labels`), checked before the gate; gated as the list
+//! is, and never written while the pass is off. The daemon keeps a label in
+//! its labels file beside the counter store, by the row's keyed session
+//! digest, so it survives the row being made again under a new reference
+//! and the store being begun again (`insights_week` has the rules), and it
+//! is never sent anywhere.
 
 use chrono::{DateTime, FixedOffset, Offset, Utc};
 
 use super::insights_week::{
     FEED_COUNTER_PASS, NeverFolders, UNREADABLE_POLICY, never_project_keys,
 };
-use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
+use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
 use super::policy::{UNKNOWN_PROJECT_KEY, disambiguated_label, display_path_for_key, known_keys};
+use crate::insights::session_labels::{LabelledTask, SessionOutcome};
 
 /// The most sessions one `insights_sessions` page lists, newest first.
 /// `truncated` and `next` say when more follow.
@@ -47,13 +64,100 @@ pub const WATCHED_SESSIONS_MAX: usize = 200;
 /// `session_ref` missing or not a string.
 pub const ERR_SESSION_REF_INVALID: &str = "insights-session-ref-invalid";
 /// No listed session has that reference: never stored, dropped since, made
-/// again under a new reference when its file grew, or in a Never folder.
+/// again under a new reference when its file grew, in a Never folder, or
+/// answered from a store since begun again.
 pub const ERR_SESSION_UNKNOWN: &str = "insights-session-unknown";
 
 /// `before` is not a cursor an earlier page gave.
 pub const ERR_SESSIONS_CURSOR_INVALID: &str = "insights-sessions-cursor-invalid";
 /// `limit` is not a whole number of at least 1.
 pub const ERR_SESSIONS_LIMIT_INVALID: &str = "insights-sessions-limit-invalid";
+/// `task` or `outcome` is not one of its closed words, or `null`; or
+/// neither was given.
+pub const ERR_SESSION_LABEL_INVALID: &str = "insights-session-label-invalid";
+/// The labels file could not be written, or is not in the labels shape and
+/// is never written over; the label is as it was.
+pub const ERR_SESSION_LABEL_WRITE_FAILED: &str = "insights-session-label-write-failed";
+
+/// What one `insights_session_label` call does to one of a row's labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LabelEdit<T> {
+    /// The param was absent: the label stays as it is.
+    Keep,
+    /// `null`: the label is unset (the inferred task shows again).
+    Clear,
+    Set(T),
+}
+
+impl<T: Copy> LabelEdit<T> {
+    /// Apply it to the field `name` of a label as the labels file keeps
+    /// it, by `wire` word.
+    fn apply_stored(
+        self,
+        stored: &mut serde_json::Map<String, serde_json::Value>,
+        name: &str,
+        wire: fn(T) -> &'static str,
+    ) {
+        match self {
+            LabelEdit::Keep => {}
+            LabelEdit::Clear => {
+                stored.remove(name);
+            }
+            LabelEdit::Set(value) => {
+                stored.insert(name.to_string(), wire(value).into());
+            }
+        }
+    }
+}
+
+/// An `insights_session_label` call's change to a row's labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LabelChange {
+    pub(crate) task: LabelEdit<LabelledTask>,
+    pub(crate) outcome: LabelEdit<SessionOutcome>,
+}
+
+impl LabelChange {
+    /// Apply it to a label as the labels file keeps it: only the fields it
+    /// names change, so a field or word another build wrote is kept.
+    pub(crate) fn apply_stored(self, stored: &mut serde_json::Map<String, serde_json::Value>) {
+        self.task.apply_stored(stored, "task", LabelledTask::wire);
+        self.outcome
+            .apply_stored(stored, "outcome", SessionOutcome::wire);
+    }
+}
+
+/// `session_ref` (required), and `task` and `outcome`, each absent (kept),
+/// `null` (cleared) or one of its closed words; at least one of the two.
+pub(crate) fn label_params(
+    params: &serde_json::Value,
+) -> Result<(String, LabelChange), &'static str> {
+    let reference = params
+        .get("session_ref")
+        .and_then(|value| value.as_str())
+        .ok_or(ERR_SESSION_REF_INVALID)?;
+    fn edit<T>(
+        value: Option<&serde_json::Value>,
+        parse: fn(&str) -> Option<T>,
+    ) -> Result<LabelEdit<T>, &'static str> {
+        match value {
+            None => Ok(LabelEdit::Keep),
+            Some(serde_json::Value::Null) => Ok(LabelEdit::Clear),
+            Some(serde_json::Value::String(wire)) => parse(wire)
+                .map(LabelEdit::Set)
+                .ok_or(ERR_SESSION_LABEL_INVALID),
+            Some(_) => Err(ERR_SESSION_LABEL_INVALID),
+        }
+    }
+    let change = LabelChange {
+        task: edit(params.get("task"), LabelledTask::from_wire)?,
+        outcome: edit(params.get("outcome"), SessionOutcome::from_wire)?,
+    };
+    if change.task == LabelEdit::Keep && change.outcome == LabelEdit::Keep {
+        return Err(ERR_SESSION_LABEL_INVALID);
+    }
+    Ok((reference.to_string(), change))
+}
 
 /// Where one page of the list starts: the recency key of the last row the
 /// previous page listed by recency. Crosses as an opaque string.
@@ -202,7 +306,7 @@ pub(crate) fn select_page<T>(
 
 /// Whether the pass is on, and the Never folders while it is; `Err` is the
 /// answer to send instead (the folder rules could not be read).
-fn gate(shared: &DaemonShared) -> Result<(bool, NeverFolders), serde_json::Value> {
+pub(crate) fn gate(shared: &DaemonShared) -> Result<(bool, NeverFolders), serde_json::Value> {
     // A poisoned lock reads as off: fail closed, never a guess.
     let enabled = shared
         .settings
@@ -311,6 +415,34 @@ pub fn handle_sessions(shared: &DaemonShared, req: &Request) -> Response {
     }
 }
 
+/// `insights_session_label`.
+pub fn handle_session_label(shared: &DaemonShared, req: &Request) -> Response {
+    let (reference, change) = match label_params(&req.params) {
+        Ok(found) => found,
+        Err(label) => return Response::err(req.id, ERR_BAD_PARAMS, label),
+    };
+    let (enabled, never) = match gate(shared) {
+        Ok(gate) => gate,
+        Err(answer) => return Response::ok(req.id, answer),
+    };
+    // Resolved only while the pass is on: off, nothing is read or written.
+    let folders = if enabled {
+        folder_labels(shared)
+    } else {
+        Vec::new()
+    };
+    match shared
+        .insights_counter
+        .label_value(enabled, &reference, change, &never, &folders)
+    {
+        Ok(answer) => Response::ok(req.id, answer),
+        Err(ERR_SESSION_LABEL_WRITE_FAILED) => {
+            Response::err(req.id, ERR_UNAVAILABLE, ERR_SESSION_LABEL_WRITE_FAILED)
+        }
+        Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
+    }
+}
+
 /// `insights_session_drill`.
 pub fn handle_session_drill(shared: &DaemonShared, req: &Request) -> Response {
     let Some(reference) = req.params.get("session_ref").and_then(|v| v.as_str()) else {
@@ -344,7 +476,7 @@ mod tests {
     use trace_commons_protocol::insights_usage_series::InMemoryDigestKeyStore;
 
     use super::super::insights_week::{
-        COUNTER_ROWS_FILE, CounterCandidate, CounterPass, UNREADABLE_STORE,
+        COUNTER_ROWS_FILE, CounterCandidate, CounterPass, SESSION_LABELS_FILE, UNREADABLE_STORE,
     };
     use super::*;
     use crate::source::{SOURCE_CLAUDE_CODE, SOURCE_CODEX};
@@ -363,24 +495,33 @@ mod tests {
 
     /// One Codex session: two token counts a minute apart, after a nonzero
     /// baseline, with earlier records that are not counters.
+    /// Two turns: 100 input (60 cached) and 20 output, then 80 input (40
+    /// cached) and 30 output. The observed change between the first and
+    /// last counter is the second turn's 110; the per-turn series holds
+    /// both, 230.
     fn codex_bytes() -> Vec<u8> {
-        let usage = |at: &str, input: u64, cached: u64, output: u64| {
+        let usage = |at: &str, total: [u64; 3], last: [u64; 3]| {
             serde_json::json!({
                 "type": "event_msg",
                 "timestamp": at,
                 "payload": {"type": "token_count", "info": {"total_token_usage": {
-                    "input_tokens": input, "cached_input_tokens": cached,
-                    "output_tokens": output, "reasoning_output_tokens": 0,
-                    "total_tokens": input + output
+                    "input_tokens": total[0], "cached_input_tokens": total[1],
+                    "output_tokens": total[2], "reasoning_output_tokens": 0,
+                    "total_tokens": total[0] + total[2]
+                }, "last_token_usage": {
+                    "input_tokens": last[0], "cached_input_tokens": last[1],
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": last[2], "reasoning_output_tokens": 0,
+                    "total_tokens": last[0] + last[2]
                 }}}
             })
         };
         [
             serde_json::json!({"type": "session_meta", "timestamp": "2026-09-14T08:29:00Z", "payload": {"id": "PRIVATE-CODEX-ID", "model_provider": "openai"}}),
             serde_json::json!({"type": "turn_context", "timestamp": "2026-09-14T08:29:30Z", "payload": {"model": "gpt-6"}}),
-            usage("2026-09-14T08:30:00Z", 100, 60, 20),
+            usage("2026-09-14T08:30:00Z", [100, 60, 20], [100, 60, 20]),
             serde_json::json!({"type": "response_item", "timestamp": "2026-09-14T08:30:30Z", "payload": {"type": "message", "role": "assistant", "content": []}}),
-            usage("2026-09-14T08:31:00Z", 180, 100, 50),
+            usage("2026-09-14T08:31:00Z", [180, 100, 50], [80, 40, 30]),
         ]
         .iter()
         .map(|v| v.to_string())
@@ -413,6 +554,7 @@ mod tests {
     struct Fixture {
         dir: tempfile::TempDir,
         pass: CounterPass,
+        seed: u8,
     }
 
     impl Fixture {
@@ -426,7 +568,28 @@ mod tests {
                 dir.path().join(COUNTER_ROWS_FILE),
                 Box::new(InMemoryDigestKeyStore::with_seed([seed; 32])),
             );
-            Self { dir, pass }
+            Self { dir, pass, seed }
+        }
+
+        /// Rewrite every stored Codex row as made before the per-turn
+        /// reader, with no series, and open the store again.
+        fn without_codex_series(mut self) -> Self {
+            let path = self.dir.path().join(COUNTER_ROWS_FILE);
+            let mut value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            for row in value["rows"].as_object_mut().unwrap().values_mut() {
+                let body = row["body"].as_object_mut().unwrap();
+                if body["kind"] == "codex" {
+                    assert!(body.remove("series").is_some());
+                }
+            }
+            std::fs::write(&path, value.to_string()).unwrap();
+            self.pass = CounterPass::with_keys(
+                path,
+                Box::new(InMemoryDigestKeyStore::with_seed([self.seed; 32])),
+            );
+            self.pass.keys_load_or_create_for_test();
+            self
         }
 
         fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
@@ -448,6 +611,7 @@ mod tests {
                     modified_at: written(),
                     started_at: None,
                     group_member_count: 0,
+                    role: crate::daemon::insights_week::CandidateRole::Watched,
                 })
                 .collect();
             self.pass
@@ -625,18 +789,26 @@ mod tests {
             .map(|row| row["source"].as_str().unwrap())
             .collect();
         assert_eq!(sources, ["claude_code", "claude_code", "codex"]);
-        // Claude Code rows carry their turn count; Codex records none.
+        // Every row read turn by turn carries its turn count, Codex's
+        // included (owner decision D11, settled).
         assert!(listed[0]["turns"].as_u64().unwrap() > 0);
         assert_eq!(listed[0]["turns"], listed[1]["turns"]);
-        assert_eq!(listed[2]["turns"], serde_json::Value::Null);
+        assert_eq!(listed[2]["turns"], 2);
         let mut references = std::collections::BTreeSet::new();
         for row in &listed {
             let reference = row["session_ref"].as_str().unwrap();
-            assert!(reference.starts_with('t'), "{reference}");
+            // `t`, the row's order, `.`, the store's tag: digits only.
+            let (order, tag) = reference
+                .strip_prefix('t')
+                .and_then(|rest| rest.split_once('.'))
+                .unwrap_or_else(|| panic!("{reference}"));
             assert!(
-                reference[1..].chars().all(|c| c.is_ascii_digit()),
+                [order, tag]
+                    .iter()
+                    .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())),
                 "{reference}"
             );
+            assert_eq!(tag, f.pass.store_tag().to_string());
             assert!(references.insert(reference.to_string()), "unique");
             let keys: std::collections::BTreeSet<&str> = row
                 .as_object()
@@ -647,13 +819,17 @@ mod tests {
             assert_eq!(
                 keys,
                 [
+                    "analyzable",
                     "folder",
+                    "inferred_task",
                     "session_ref",
                     "source",
                     "sparkline",
                     "started_at",
                     "tokens",
-                    "turns"
+                    "turns",
+                    "user_outcome",
+                    "user_task",
                 ]
                 .into(),
                 "only these fields cross"
@@ -868,6 +1044,13 @@ mod tests {
             let f = Fixture::new();
             let path = f.write("watched.jsonl", &bytes);
             f.run(&[(source, &path, PROJECT)]);
+            // A saved snapshot holds no Codex per-turn series: compare
+            // with a row made before the per-turn reader.
+            let f = if source == SOURCE_CODEX {
+                f.without_codex_series()
+            } else {
+                f
+            };
             let listed = rows(&f.list(&[], &[]));
             assert_eq!(listed.len(), 1);
             let reference = listed[0]["session_ref"].as_str().unwrap().to_string();
@@ -890,10 +1073,39 @@ mod tests {
     }
 
     #[test]
+    fn a_codex_drill_draws_its_per_turn_series() {
+        let f = Fixture::new();
+        let path = f.write("codex.jsonl", &codex_bytes());
+        f.run(&[(SOURCE_CODEX, &path, PROJECT)]);
+        let listed = rows(&f.list(&[], &[]));
+        let reference = listed[0]["session_ref"].as_str().unwrap().to_string();
+        let drill = f.drill(&reference, &[]).unwrap()["session"].clone();
+        assert_eq!(drill["source"], "codex");
+        assert_eq!(drill["series_unavailable"], serde_json::Value::Null);
+        assert_eq!(drill["series"].as_array().unwrap().len(), 2);
+        assert_eq!(drill["turns"], 2);
+        // The observed change, the one basis a Codex row's tokens have: the
+        // same figure once its series is trimmed (below).
+        assert_eq!(drill["tokens"], 110);
+        assert_eq!(drill["state"], "partial");
+        assert_eq!(
+            drill["reasons"],
+            serde_json::json!(["codex_baseline_excluded"])
+        );
+        // The listed row counts what the drill draws.
+        assert_eq!(listed[0]["tokens"], drill["tokens"]);
+        assert_eq!(listed[0]["turns"], 2);
+        assert!(listed[0]["sparkline"].is_object());
+        assert_nothing_identifying(&f, &drill);
+    }
+
+    #[test]
     fn a_codex_drill_says_per_turn_usage_is_not_recorded() {
         let f = Fixture::new();
         let path = f.write("codex.jsonl", &codex_bytes());
         f.run(&[(SOURCE_CODEX, &path, PROJECT)]);
+        // Made before the per-turn reader.
+        let f = f.without_codex_series();
         let reference = rows(&f.list(&[], &[]))[0]["session_ref"]
             .as_str()
             .unwrap()
@@ -930,6 +1142,7 @@ mod tests {
                 Box::new(InMemoryDigestKeyStore::with_seed([3; 32])),
             ),
             dir: f.dir,
+            seed: 3,
         };
         old.pass.keys_load_or_create_for_test();
         let reference = rows(&old.list(&[], &[]))[0]["session_ref"]
@@ -1423,7 +1636,8 @@ mod tests {
         assert_eq!(claude_row["tokens"], drill["session"]["tokens"]);
         let codex_row = &listed[1];
         assert_eq!(codex_row["source"], "codex");
-        assert_eq!(codex_row["sparkline"], serde_json::Value::Null);
+        // Drawn over its per-turn series, as a Claude row's is.
+        assert!(codex_row["sparkline"].is_object());
         let codex_drill = f
             .drill(codex_row["session_ref"].as_str().unwrap(), &[])
             .unwrap();
@@ -1460,6 +1674,7 @@ mod tests {
             );
             let (_dir, mut s) = shared();
             s.dev_dry_run = true;
+            s.settings.lock().unwrap().insights_counter_pass = false;
             let r = super::super::ipc::handle_request(
                 &s,
                 &call(method, serde_json::json!({"session_ref": "t0"})),
@@ -1594,6 +1809,7 @@ mod tests {
                 modified_at: written(),
                 started_at: None,
                 group_member_count: 0,
+                role: crate::daemon::insights_week::CandidateRole::Watched,
             })
             .collect();
         s.insights_counter
@@ -1635,5 +1851,680 @@ mod tests {
         .unwrap();
         assert_eq!(drill["session"]["session_ref"], reference);
         assert_eq!(drill["session"]["feed"], "counter_pass");
+    }
+
+    // The person's own labels (`insights_session_label`).
+
+    impl Fixture {
+        /// One pass over `files` at `at`, with `never` the Never folders;
+        /// a file in one of them is not read.
+        fn run_at(&self, files: &[(&'static str, &Path, &str)], never: &[&str], at: DateTime<Utc>) {
+            let candidates: Vec<CounterCandidate> = files
+                .iter()
+                .enumerate()
+                .map(|(origin, (source, path, _))| CounterCandidate {
+                    origin,
+                    source,
+                    path: path.to_path_buf(),
+                    size_bytes: std::fs::metadata(path).unwrap().len(),
+                    modified_at: written(),
+                    started_at: None,
+                    group_member_count: 0,
+                    role: crate::daemon::insights_week::CandidateRole::Watched,
+                })
+                .collect();
+            self.pass
+                .run_pass(
+                    &candidates,
+                    &NeverFolders::These(never.iter().map(|k| k.to_string()).collect()),
+                    at,
+                    QUIET,
+                    &mut |c| {
+                        let folder = files[c.origin].2;
+                        (folder.to_string(), never.contains(&folder))
+                    },
+                )
+                .unwrap();
+        }
+
+        fn label(
+            &self,
+            params: serde_json::Value,
+            never: &[&str],
+        ) -> Result<serde_json::Value, &'static str> {
+            let (reference, change) = label_params(&params)?;
+            self.pass.label_value(
+                true,
+                &reference,
+                change,
+                &NeverFolders::These(never.iter().map(|k| k.to_string()).collect()),
+                &[(PROJECT.to_string(), "PRIVATE_REPO".to_string())],
+            )
+        }
+
+        /// The labels the labels file holds, however many rows there are.
+        fn stored_labels(&self) -> usize {
+            let path = self.dir.path().join(SESSION_LABELS_FILE);
+            let Ok(text) = std::fs::read_to_string(path) else {
+                return 0;
+            };
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            value
+                .get("labels")
+                .and_then(|labels| labels.as_object())
+                .map_or(0, |labels| labels.len())
+        }
+    }
+
+    fn only(value: &serde_json::Value) -> serde_json::Value {
+        let listed = rows(value);
+        assert_eq!(listed.len(), 1, "{value}");
+        listed[0].clone()
+    }
+
+    #[test]
+    fn a_label_is_set_cleared_and_answered_as_the_listed_row() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let listed = only(&f.list(&[], &[(PROJECT, "PRIVATE_REPO")]));
+        // Before any label: the inferred task, and nothing of the person's.
+        assert!(listed["inferred_task"].is_string(), "{listed}");
+        assert!(listed["user_task"].is_null());
+        assert!(listed["user_outcome"].is_null());
+        let reference = listed["session_ref"].as_str().unwrap().to_string();
+
+        let answer = f
+            .label(
+                serde_json::json!({"session_ref": reference, "task": "bug_fix"}),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(answer["enabled"], true);
+        assert_eq!(answer["readable"], true);
+        let row = &answer["session"];
+        assert_eq!(row["user_task"], "bug_fix");
+        assert!(row["user_outcome"].is_null(), "absent keeps it unset");
+        // The answer is the row as the list now gives it.
+        assert_eq!(*row, only(&f.list(&[], &[(PROJECT, "PRIVATE_REPO")])));
+        assert_eq!(row["inferred_task"], listed["inferred_task"]);
+
+        let row = f
+            .label(
+                serde_json::json!({"session_ref": reference, "outcome": "partly_kept"}),
+                &[],
+            )
+            .unwrap()["session"]
+            .clone();
+        assert_eq!(row["user_task"], "bug_fix", "absent keeps the task");
+        assert_eq!(row["user_outcome"], "partly_kept");
+
+        let row = f
+            .label(
+                serde_json::json!({"session_ref": reference, "task": null}),
+                &[],
+            )
+            .unwrap()["session"]
+            .clone();
+        assert!(row["user_task"].is_null(), "null clears it");
+        assert_eq!(row["user_outcome"], "partly_kept");
+        assert_eq!(f.stored_labels(), 1);
+
+        f.label(
+            serde_json::json!({"session_ref": reference, "outcome": null}),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(f.stored_labels(), 0, "a label with nothing set is not kept");
+        assert_nothing_identifying(&f, &f.list(&[], &[]));
+    }
+
+    #[test]
+    fn only_the_closed_words_are_taken() {
+        for params in [
+            serde_json::json!({"task": "bug_fix"}),
+            serde_json::json!({"session_ref": 7, "task": "bug_fix"}),
+        ] {
+            assert_eq!(
+                label_params(&params),
+                Err(ERR_SESSION_REF_INVALID),
+                "{params}"
+            );
+        }
+        for params in [
+            serde_json::json!({"session_ref": "t0"}),
+            serde_json::json!({"session_ref": "t0", "task": "no_edits"}),
+            serde_json::json!({"session_ref": "t0", "task": "Bug fix"}),
+            serde_json::json!({"session_ref": "t0", "task": 1}),
+            serde_json::json!({"session_ref": "t0", "outcome": "accepted"}),
+            serde_json::json!({"session_ref": "t0", "outcome": true}),
+            serde_json::json!({"session_ref": "t0", "task": "docs", "outcome": "kept!"}),
+        ] {
+            assert_eq!(
+                label_params(&params),
+                Err(ERR_SESSION_LABEL_INVALID),
+                "{params}"
+            );
+        }
+        let (reference, change) = label_params(
+            &serde_json::json!({"session_ref": "t3", "task": "tests", "outcome": null}),
+        )
+        .unwrap();
+        assert_eq!(reference, "t3");
+        assert_eq!(change.task, LabelEdit::Set(LabelledTask::Tests));
+        assert_eq!(change.outcome, LabelEdit::Clear);
+    }
+
+    /// A row read again when its file grows is made under a new reference,
+    /// and keeps the person's label: it is keyed by the session, not the
+    /// reference.
+    #[test]
+    fn a_label_survives_the_row_being_read_again() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let before = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.label(
+            serde_json::json!({"session_ref": before, "task": "refactor", "outcome": "kept"}),
+            &[],
+        )
+        .unwrap();
+
+        let mut grown = claude_bytes();
+        grown.extend_from_slice(b"\n");
+        std::fs::write(&path, grown).unwrap();
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let row = only(&f.list(&[], &[]));
+        let after = row["session_ref"].as_str().unwrap();
+        assert_ne!(after, before, "made again under a new reference");
+        assert_eq!(row["user_task"], "refactor");
+        assert_eq!(row["user_outcome"], "kept");
+        // The old reference names nothing now.
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": before, "outcome": "thrown_away"}),
+                &[]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+        // A store opened again reads the same label.
+        let reopened = CounterPass::with_keys(
+            f.dir.path().join(COUNTER_ROWS_FILE),
+            Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+        );
+        reopened.keys_load_or_create_for_test();
+        let row = only(&reopened.sessions_value(true, &NeverFolders::NONE, &[], 10));
+        assert_eq!(row["user_task"], "refactor");
+    }
+
+    /// No label is set on a row in a Never folder, and one whose folder
+    /// becomes Never goes with its row: it does not come back when the
+    /// folder is watched again.
+    #[test]
+    fn a_never_folder_keeps_no_label() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let reference = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": reference, "task": "docs"}),
+                &[PROJECT]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+        assert_eq!(f.stored_labels(), 0);
+
+        f.label(
+            serde_json::json!({"session_ref": reference, "task": "docs"}),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(f.stored_labels(), 1);
+        // Never: hidden at once, and gone from the store with the row at
+        // the next pass.
+        assert_eq!(
+            rows(&f.list(&[PROJECT], &[])),
+            Vec::<serde_json::Value>::new()
+        );
+        f.run_at(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)], &[PROJECT], now());
+        assert_eq!(f.stored_labels(), 0);
+
+        // Watched again: read again, with no label.
+        f.run_at(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)], &[], now());
+        let row = only(&f.list(&[], &[]));
+        assert!(row["user_task"].is_null(), "{row}");
+    }
+
+    /// A label goes with its row when the row ages out of the kept weeks.
+    #[test]
+    fn a_label_ages_out_with_its_row() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let reference = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.label(
+            serde_json::json!({"session_ref": reference, "outcome": "kept"}),
+            &[],
+        )
+        .unwrap();
+        let later = now()
+            + Duration::weeks(crate::insights::analytics_constants::COUNTER_STORE_KEEP_WEEKS)
+            + Duration::days(1);
+        f.run_at(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)], &[], later);
+        assert_eq!(rows(&f.list(&[], &[])), Vec::<serde_json::Value>::new());
+        assert_eq!(f.stored_labels(), 0);
+    }
+
+    #[test]
+    fn clear_removes_every_label() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let reference = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.label(
+            serde_json::json!({"session_ref": reference, "task": "tests"}),
+            &[],
+        )
+        .unwrap();
+        assert!(f.dir.path().join(SESSION_LABELS_FILE).exists());
+        f.pass.clear().unwrap();
+        assert!(!f.dir.path().join(COUNTER_ROWS_FILE).exists());
+        assert!(!f.dir.path().join(SESSION_LABELS_FILE).exists());
+        // A label after the clear names nothing, and makes no key.
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": reference, "task": "tests"}),
+                &[]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+        assert!(f.pass.key_is_absent_for_test());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        assert!(only(&f.list(&[], &[]))["user_task"].is_null());
+    }
+
+    #[test]
+    fn off_writes_nothing_and_an_automated_row_takes_no_label() {
+        let f = Fixture::new();
+        let (reference, change) =
+            label_params(&serde_json::json!({"session_ref": "t0", "task": "docs"})).unwrap();
+        assert_eq!(
+            f.pass
+                .label_value(false, &reference, change, &NeverFolders::NONE, &[]),
+            Ok(serde_json::json!({"enabled": false, "feed": "counter_pass"}))
+        );
+        assert!(f.pass.key_is_absent_for_test(), "no key made");
+        assert!(!f.dir.path().join(COUNTER_ROWS_FILE).exists());
+
+        let automated = String::from_utf8(codex_bytes()).unwrap().replace(
+            r#""model_provider":"openai""#,
+            r#""model_provider":"openai","source":{"subagent":"review"}"#,
+        );
+        let path = f.write("auto.jsonl", automated.as_bytes());
+        f.run(&[(SOURCE_CODEX, &path, PROJECT)]);
+        assert_eq!(
+            f.list(&[], &[])["sessions_stored"],
+            0,
+            "automated, not listed"
+        );
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": "t0", "task": "docs"}),
+                &[]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+    }
+
+    /// Back-compat: the store is written as before labels, which live in
+    /// their own file, and lists every row as before, plus the new keys.
+    #[test]
+    fn a_store_from_before_labels_reads_and_is_written_as_before() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &path, PROJECT)]);
+        let text = std::fs::read_to_string(f.dir.path().join(COUNTER_ROWS_FILE)).unwrap();
+        assert!(!text.contains("\"labels\""), "{text}");
+        assert!(!f.dir.path().join(SESSION_LABELS_FILE).exists());
+        let row = only(&f.list(&[], &[]));
+        let keys: std::collections::BTreeSet<&str> = row
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for added in ["inferred_task", "user_task", "user_outcome"] {
+            assert!(keys.contains(added), "{added}");
+        }
+        // A label moves no key a row carried before.
+        let reference = row["session_ref"].as_str().unwrap().to_string();
+        let labelled = f
+            .label(
+                serde_json::json!({"session_ref": reference, "task": "other"}),
+                &[],
+            )
+            .unwrap()["session"]
+            .clone();
+        for key in [
+            "session_ref",
+            "source",
+            "started_at",
+            "turns",
+            "tokens",
+            "sparkline",
+            "inferred_task",
+        ] {
+            assert_eq!(labelled[key], row[key], "{key}");
+        }
+        assert_eq!(labelled["user_task"], "other");
+        let text = std::fs::read_to_string(f.dir.path().join(COUNTER_ROWS_FILE)).unwrap();
+        assert!(
+            !text.contains("\"labels\""),
+            "the store is not written: {text}"
+        );
+    }
+
+    fn labelled_once(f: &Fixture, path: &Path, params: serde_json::Value) -> String {
+        f.run(&[(SOURCE_CLAUDE_CODE, path, PROJECT)]);
+        let reference = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut params = params;
+        params["session_ref"] = reference.clone().into();
+        f.label(params, &[]).unwrap();
+        reference
+    }
+
+    /// The store is begun again whenever it cannot be read, a store a
+    /// later build wrote included. The labels are not in it: while its rows
+    /// come back a poll's budget at a time, a label waits for its row.
+    #[test]
+    fn a_label_survives_the_store_being_begun_again() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        labelled_once(
+            &f,
+            &path,
+            serde_json::json!({"task": "tests", "outcome": "kept"}),
+        );
+        // A field this build does not know: the store is unreadable.
+        let rows_file = f.dir.path().join(COUNTER_ROWS_FILE);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&rows_file).unwrap()).unwrap();
+        value["a_later_field"] = serde_json::json!(1);
+        std::fs::write(&rows_file, value.to_string()).unwrap();
+        let f = Fixture {
+            pass: CounterPass::with_keys(
+                rows_file,
+                Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+            ),
+            ..f
+        };
+        f.pass.keys_load_or_create_for_test();
+        assert_eq!(f.list(&[], &[])["readable"], false);
+        // Begun again with a poll's worth of other sessions read first: the
+        // labelled one waits for the next poll, and so does its label.
+        let others: Vec<PathBuf> = (0
+            ..crate::insights::analytics_constants::COUNTER_PASS_MAX_READS_PER_TICK)
+            .map(|i| f.write(&format!("o{i}.jsonl"), &codex_bytes()))
+            .collect();
+        let mut files: Vec<(&'static str, &Path, &str)> = others
+            .iter()
+            .map(|other| (SOURCE_CODEX, other.as_path(), OTHER))
+            .collect();
+        files.push((SOURCE_CLAUDE_CODE, &path, PROJECT));
+        f.run(&files);
+        assert!(
+            rows(&f.list(&[], &[]))
+                .iter()
+                .all(|row| row["source"] == "codex"),
+            "not read yet"
+        );
+        assert_eq!(f.stored_labels(), 1);
+        f.run(&files);
+        let row = rows(&f.list(&[], &[]))
+            .into_iter()
+            .find(|row| row["source"] == "claude_code")
+            .unwrap();
+        assert_eq!(row["user_task"], "tests");
+        assert_eq!(row["user_outcome"], "kept");
+        assert_eq!(f.stored_labels(), 1);
+    }
+
+    /// A store begun again numbers its rows from `t0` again, so a reference
+    /// answered before it would name another session. It carries the
+    /// store's tag, and is refused: no label or drill lands on the session
+    /// that now has its order.
+    #[test]
+    fn a_reference_from_before_the_store_was_begun_again_is_refused() {
+        let f = Fixture::new();
+        let first = f.write("first.jsonl", &claude_bytes());
+        let second = f.write("second.jsonl", &codex_bytes());
+        f.run(&[(SOURCE_CLAUDE_CODE, &first, PROJECT)]);
+        let stale = only(&f.list(&[], &[]))["session_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(stale.starts_with("t0."), "{stale}");
+        // Unreadable: begun again, and another session is read first.
+        std::fs::write(f.dir.path().join(COUNTER_ROWS_FILE), b"{not json").unwrap();
+        let f = Fixture {
+            pass: CounterPass::with_keys(
+                f.dir.path().join(COUNTER_ROWS_FILE),
+                Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+            ),
+            ..f
+        };
+        f.pass.keys_load_or_create_for_test();
+        f.run(&[(SOURCE_CODEX, &second, OTHER)]);
+        let now_first = only(&f.list(&[], &[]));
+        assert_eq!(now_first["source"], "codex");
+        let fresh = now_first["session_ref"].as_str().unwrap();
+        assert!(fresh.starts_with("t0."), "the order begins again: {fresh}");
+        assert_ne!(fresh, stale);
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": stale, "task": "docs"}),
+                &[]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+        assert_eq!(f.stored_labels(), 0);
+        assert_eq!(f.drill(&stale, &[]).unwrap_err(), ERR_SESSION_UNKNOWN);
+        // Nor does the short name alone name a row.
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": "t0", "task": "docs"}),
+                &[]
+            ),
+            Err(ERR_SESSION_UNKNOWN)
+        );
+        // The reference listed now does.
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": fresh, "task": "docs"}),
+                &[]
+            )
+            .unwrap()["session"]["user_task"],
+            "docs"
+        );
+    }
+
+    /// A label written by another build: an unknown field, a task word
+    /// this build does not know and another schema name are read past,
+    /// answered as unset, and kept when the person changes the other label.
+    #[test]
+    fn a_label_file_from_another_build_is_read_and_kept() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        let reference = labelled_once(&f, &path, serde_json::json!({"task": "docs"}));
+        let labels = f.dir.path().join(SESSION_LABELS_FILE);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&labels).unwrap()).unwrap();
+        value["schema"] = "trace_commons.insights_session_labels.v9".into();
+        value["a_later_field"] = serde_json::json!({"kept": true});
+        let session = value["labels"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        value["labels"][&session] = serde_json::json!({"task": "migration", "confidence": 3});
+        std::fs::write(&labels, value.to_string()).unwrap();
+        let f = Fixture {
+            pass: CounterPass::with_keys(
+                f.dir.path().join(COUNTER_ROWS_FILE),
+                Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+            ),
+            ..f
+        };
+        f.pass.keys_load_or_create_for_test();
+        let row = only(&f.list(&[], &[]));
+        assert_eq!(f.list(&[], &[])["readable"], true);
+        assert!(
+            row["user_task"].is_null(),
+            "an unknown word is unset: {row}"
+        );
+        let row = f
+            .label(
+                serde_json::json!({"session_ref": reference, "outcome": "kept"}),
+                &[],
+            )
+            .unwrap()["session"]
+            .clone();
+        assert_eq!(row["user_outcome"], "kept");
+        assert!(row["user_task"].is_null());
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&labels).unwrap()).unwrap();
+        assert_eq!(
+            written["labels"][&session],
+            serde_json::json!({"task": "migration", "confidence": 3, "outcome": "kept"})
+        );
+        assert_eq!(written["a_later_field"], serde_json::json!({"kept": true}));
+        // A file not in the labels shape at all is never written over.
+        std::fs::write(&labels, b"[1, 2]").unwrap();
+        let f = Fixture {
+            pass: CounterPass::with_keys(
+                f.dir.path().join(COUNTER_ROWS_FILE),
+                Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+            ),
+            ..f
+        };
+        f.pass.keys_load_or_create_for_test();
+        assert!(only(&f.list(&[], &[]))["user_outcome"].is_null());
+        assert_eq!(
+            f.label(
+                serde_json::json!({"session_ref": reference, "task": "docs"}),
+                &[]
+            ),
+            Err(ERR_SESSION_LABEL_WRITE_FAILED)
+        );
+        assert_eq!(std::fs::read(&labels).unwrap(), b"[1, 2]");
+    }
+
+    /// A labels file that fails to read (here, unreadable by its owner) is
+    /// read again on the next call, not answered as no labels until a
+    /// restart.
+    #[cfg(unix)]
+    #[test]
+    fn a_labels_file_that_failed_to_read_is_read_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        labelled_once(&f, &path, serde_json::json!({"task": "docs"}));
+        let labels = f.dir.path().join(SESSION_LABELS_FILE);
+        let f = Fixture {
+            pass: CounterPass::with_keys(
+                f.dir.path().join(COUNTER_ROWS_FILE),
+                Box::new(InMemoryDigestKeyStore::with_seed([f.seed; 32])),
+            ),
+            ..f
+        };
+        f.pass.keys_load_or_create_for_test();
+        std::fs::set_permissions(&labels, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = only(&f.list(&[], &[]));
+        std::fs::set_permissions(&labels, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(unreadable["user_task"].is_null(), "{unreadable}");
+        assert_eq!(only(&f.list(&[], &[]))["user_task"], "docs");
+    }
+
+    /// A label that could not be written is not answered, listed or kept
+    /// for a later write.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_label_write_keeps_the_label_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        let reference = labelled_once(&f, &path, serde_json::json!({"task": "docs"}));
+        let dir = f.dir.path();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let refused = f.label(
+            serde_json::json!({"session_ref": reference, "task": "tests", "outcome": "kept"}),
+            &[],
+        );
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(refused, Err(ERR_SESSION_LABEL_WRITE_FAILED));
+        let row = only(&f.list(&[], &[]));
+        assert_eq!(row["user_task"], "docs");
+        assert!(row["user_outcome"].is_null());
+        // The next write writes only its own change.
+        let row = f
+            .label(
+                serde_json::json!({"session_ref": reference, "outcome": "partly_kept"}),
+                &[],
+            )
+            .unwrap()["session"]
+            .clone();
+        assert_eq!(row["user_task"], "docs");
+        assert_eq!(row["user_outcome"], "partly_kept");
+    }
+
+    #[test]
+    fn the_label_method_is_advertised_dispatched_gated_and_local() {
+        let method = "insights_session_label";
+        assert!(super::super::ipc::METHODS.contains(&method));
+        assert!(super::super::ipc::DEV_DRY_RUN_LOCAL_METHODS.contains(&method));
+        let (_dir, mut s) = shared();
+        s.dev_dry_run = true;
+        s.settings.lock().unwrap().insights_counter_pass = false;
+        let params = serde_json::json!({"session_ref": "t0", "task": "docs"});
+        let r = super::super::ipc::handle_request(&s, &call(method, params.clone()));
+        assert_eq!(
+            r.result.unwrap(),
+            serde_json::json!({"enabled": false, "feed": "counter_pass"})
+        );
+        // Params are checked before the gate.
+        let r = super::super::ipc::handle_request(
+            &s,
+            &call(
+                method,
+                serde_json::json!({"session_ref": "t0", "task": "no_edits"}),
+            ),
+        );
+        let error = r.error.unwrap();
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(error.message, ERR_SESSION_LABEL_INVALID);
+        // On, with no row by that reference.
+        s.settings.lock().unwrap().insights_counter_pass = true;
+        let r = super::super::ipc::handle_request(&s, &call(method, params));
+        let error = r.error.unwrap();
+        assert_eq!(error.code, ERR_BAD_PARAMS);
+        assert_eq!(error.message, ERR_SESSION_UNKNOWN);
     }
 }

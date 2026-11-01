@@ -68,31 +68,6 @@ extension View {
     }
 }
 
-/// A disclosure: `GlassExpander` and, while open, its content indented
-/// under it. The replacement for a stock `DisclosureGroup`.
-struct InsightsDisclosure<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: () -> Content
-    @State private var isOpen = false
-
-    init(_ title: String, @ViewBuilder content: @escaping () -> Content) {
-        self.title = title
-        self.content = content
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            GlassExpander(title, isOpen: $isOpen)
-            if isOpen {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    content()
-                }
-                .padding(.leading, GlassTokens.Space.s8)
-            }
-        }
-    }
-}
-
 /// The hairline between a screen's sections.
 struct InsightsRule: View {
     var body: some View {
@@ -132,6 +107,62 @@ enum InsightsLayout {
     /// its title and its actions do (owner, 2026-10-19: the content between
     /// a card's title and its buttons ran too close to the card's sides).
     static let bodyInset: CGFloat = GlassTokens.Space.s5
+}
+
+/// Cards side by side in equal columns that fill the row, as many as fit
+/// at `minimum` each and never more than there are cards, wrapping onto
+/// rows of equal height (product owner, 2026-10-29: two cards in a row of
+/// three left a hole, and cards of one row differed in height). A card
+/// that should fill its row's height takes `maxHeight: .infinity`.
+struct InsightsCardFlow: Layout {
+    var minimum: CGFloat
+    /// The widest a card grows: a lone card keeps an empty column beside
+    /// it rather than stretch across the pane. `nil` fills the row.
+    var maximum: CGFloat? = nil
+    var spacing: CGFloat = GlassTokens.Space.cardGap
+
+    private func columns(_ width: CGFloat, count: Int) -> Int {
+        let fit = max(1, Int((width + spacing) / (minimum + spacing)))
+        let filled = min(count, fit)
+        guard let maximum else { return max(1, filled) }
+        let needed = Int(((width + spacing) / (maximum + spacing)).rounded(.up))
+        return max(1, min(fit, max(filled, needed)))
+    }
+
+    private func rows(_ width: CGFloat, _ subviews: Subviews) -> (width: CGFloat, heights: [CGFloat], columns: Int) {
+        let columns = columns(width, count: subviews.count)
+        let column = (width - spacing * CGFloat(columns - 1)) / CGFloat(columns)
+        let heights = stride(from: 0, to: subviews.count, by: columns).map { start in
+            subviews[start ..< min(start + columns, subviews.count)]
+                .map { $0.sizeThatFits(ProposedViewSize(width: column, height: nil)).height }
+                .max() ?? 0
+        }
+        return (column, heights, columns)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let width = proposal.width ?? minimum * CGFloat(subviews.count) + spacing * CGFloat(subviews.count - 1)
+        let laid = rows(width, subviews)
+        return CGSize(width: width,
+                      height: laid.heights.reduce(0, +) + spacing * CGFloat(max(0, laid.heights.count - 1)))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard !subviews.isEmpty else { return }
+        let laid = rows(bounds.width, subviews)
+        var y = bounds.minY
+        for (row, height) in laid.heights.enumerated() {
+            for column in 0 ..< laid.columns {
+                let index = row * laid.columns + column
+                guard index < subviews.count else { break }
+                let x = bounds.minX + CGFloat(column) * (laid.width + spacing)
+                subviews[index].place(at: CGPoint(x: x, y: y), anchor: .topLeading,
+                                      proposal: ProposedViewSize(width: laid.width, height: height))
+            }
+            y += height + spacing
+        }
+    }
 }
 
 extension View {
@@ -246,27 +277,12 @@ extension InsightsSectionTitle where Trailing == EmptyView {
     }
 }
 
-/// A group's heading at the body-strong step, with its info.
-struct InsightsGroupHeading: View {
-    let title: String
-    var info: [String] = []
-
-    init(_ title: String, info: [String] = []) {
-        self.title = title
-        self.info = info
-    }
-
-    var body: some View {
-        InsightsTextWithInfo(title, style: GlassTokens.TypeScale.bodyStrong, infoTitle: title, info: info)
-            .foregroundStyle(GlassColor.textPrimary)
-            .accessibilityAddTraits(.isHeader)
-    }
-}
-
 extension View {
     /// A headline figure: the number step, tabular.
     func insightsFigure() -> some View {
-        glassType(GlassTokens.TypeScale.number).foregroundStyle(GlassColor.textPrimary)
+        // Home's stat figure (`GlassStatCard.valueType`, 17pt bold), so a
+        // figure reads the same size across the app (owner, 2026-10-29).
+        glassType(GlassTokens.TypeScale.heading.weight(.bold)).foregroundStyle(GlassColor.textPrimary)
     }
 
     /// The name over a figure.
@@ -320,35 +336,26 @@ enum InsightsSeries: CaseIterable {
     static let stack: [InsightsSeries] = [.cacheRead, .cacheWrite, .uncached, .output]
 }
 
-/// The coverage line behind a status dot: green when every count is
-/// known, amber when any is partial or unknown, grey with no traces.
+/// The coverage line: the trace count, with what is known of them (full
+/// details, some missing, none) behind its "i" (owner, 2026-10-29). It
+/// carried a status dot until then; nothing else read it.
 struct InsightsCoverageLine: View {
     let coverage: InsightsWeekCoverage
     let copy: [String: String]
     /// What qualifies the counts (which feed, undated and overlapping
-    /// traces, a tab's own notes), behind the line's "i".
+    /// traces, a tab's own notes), behind the line's "i" after the
+    /// breakdown of what is known.
     var info: [String] = []
-
-    static func status(_ coverage: InsightsWeekCoverage) -> GlassStatus {
-        if coverage.sessions == 0 { return .off }
-        return coverage.partial + coverage.unknown == 0 ? .on : .ask
-    }
 
     /// The line's type step.
     static let style = GlassTokens.TypeScale.label.weight(.regular)
 
     var body: some View {
-        // Top-aligned, the dot centred on the first line: the words flow in
-        // a layout of their own (`InsightsTextWithInfo`), which has no
-        // first baseline to align on.
-        HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
-            GlassStatusDot(Self.status(coverage), size: GlassTokens.Size.dotLarge, halo: true)
-                .padding(.top, max(0, (Self.style.lineHeight - GlassTokens.Size.dotLarge) / 2))
-            InsightsTextWithInfo(InsightsOverviewWords.coverageLine(coverage, copy: copy),
-                                 style: Self.style,
-                                 infoTitle: copy["analytics_drill_coverage"] ?? "", info: info)
-                .foregroundStyle(GlassColor.textSecondary)
-        }
+        InsightsTextWithInfo(InsightsOverviewWords.coverageLine(coverage, copy: copy),
+                             style: Self.style,
+                             infoTitle: copy["analytics_drill_coverage"] ?? "",
+                             info: (InsightsOverviewWords.coverageInfo(coverage, copy: copy).map { [$0] } ?? []) + info)
+            .foregroundStyle(GlassColor.textSecondary)
     }
 }
 
@@ -436,8 +443,13 @@ struct InsightsDrillRow<Extra: View>: View {
                 if let label {
                     Text(label).insightsCaption().lineLimit(1).truncationMode(.tail)
                 }
-                Text(reasons.isEmpty ? state : state + " \u{b7} " + reasons).insightsCaption()
-                    .fixedSize(horizontal: false, vertical: true)
+                // One line, the full text on hover (owner, 2026-10-29: the
+                // day's rows felt crowded); VoiceOver reads it whole.
+                let coverage = reasons.isEmpty ? state : state + " \u{b7} " + reasons
+                Text(coverage).insightsCaption()
+                    .lineLimit(1).truncationMode(.tail)
+                    .help(coverage)
+                    .accessibilityLabel(coverage)
                 extra()
             }
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -52,7 +52,7 @@ issuer.tracecommons.ai  <--Caddy-->  127.0.0.1:3917  trace-commons-upload-claim-
 
 ## Contributor accounts provisioning (Slices 1-3b)
 
-The contributor-account feature (accounts, passkeys, login-with-NEAR, credit
+The contributor-account feature (accounts, login-with-NEAR, credit
 consolidation) ships its schema in migrations V30-V34, which apply automatically
 on `trace-commons-ingest` boot (`run_migrations` runs before the HTTP bind). Two
 manual prerequisites must be in place or the feature fail-closes:
@@ -68,14 +68,11 @@ manual prerequisites must be in place or the feature fail-closes:
   GRANT trace_login_resolver TO tc_login_resolver_login;
   ```
   Then set `TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL` (in `ingest.env.template`)
-  to that role. If unset, every device-link / passkey / NEAR login redeem returns
+  to that role. If unset, every device-link / NEAR login redeem returns
   400 and no browser session resolves.
-- **Passkey RP config (REQUIRED for passkeys).** Set `TRACE_COMMONS_WEBAUTHN_RP_ID`
-  / `_RP_ORIGIN` / `_RP_NAME` (all three together) to the browser origin that serves
-  the account login UI. Partial config disables passkeys with a startup warning.
-  The template takes the RP ID and origin from `TC_WEBAUTHN_RP_ID` (the apex,
-  `tracecommons.ai`), independent of `TC_PUBLIC_HOST`. Changing the RP ID
-  invalidates every registered passkey, so do not change it after launch.
+- **No passkey configuration.** Passkeys were removed in V144; the
+  `TRACE_COMMONS_WEBAUTHN_RP_*` settings are ignored and the template no
+  longer renders them. See [`deployment.md`](deployment.md#v144-passkey-removal).
 
 Optional / posture:
 - **NEAR login** (`TRACE_COMMONS_NEAR_RPC_URL` / `_NEAR_NETWORK` /
@@ -121,7 +118,6 @@ export TC_GCP_PROJECT=tracecommons-pilot-2026
 export TC_GCP_REGION=us-central1
 export TC_CLOUD_SQL_INSTANCE=tc-pilot
 export TC_PUBLIC_HOST=tracecommons.ai
-export TC_WEBAUTHN_RP_ID=tracecommons.ai   # apex; changing it invalidates every registered passkey
 export TC_LE_EMAIL=ops@example.com
 export TC_KMS_KEY_NAME=projects/$TC_GCP_PROJECT/locations/$TC_GCP_REGION/keyRings/tc-pilot/cryptoKeys/kek-v1
 export TC_GCS_BUCKET=tc-pilot-artifacts-<DATE>
@@ -135,15 +131,21 @@ envsubst < deploy/pilot-gcp/systemd/cloud-sql-proxy.service > /tmp/cloud-sql-pro
 ```
 
 The Caddy template contains three load-bearing security controls. Its global
-`read_body 300s` deadline prevents a slow request body from holding an ingest
+`read_body 2300s` deadline prevents a slow request body from holding an ingest
 connection indefinitely. It is one deadline for the whole body on every route,
-so it is sized for the largest upload ingest accepts (~20.2 MB, about
-0.55 Mbit/s of sustained upstream); do not shorten it without shrinking that
-ceiling. The ingest site's `request_body { max_size 21MB }` is the matching
-edge ceiling: Caddy's `MB` is decimal, so 21MB sits just above ingest's
-20,194,304-byte maximum and refuses anything larger with 413 before ingest
-reads it. Ingest enforces its own per-route limits and in-flight caps behind
-it; this is defence in depth, so raise both together. Separately, the
+so it is sized for the largest upload ingest accepts (272,629,760 bytes: a
+256 MiB envelope plus 4 MiB of framing, about 0.95 Mbit/s of sustained
+upstream, just above the contributor's upload timeout for that body); do not
+shorten it without shrinking that ceiling. The ingest site's
+`request_body { max_size 273MB }` is the matching edge ceiling: Caddy's `MB`
+is decimal, so 273MB sits just above ingest's maximum and refuses anything
+larger with 413 before ingest reads it. Ingest enforces its own per-route
+limits, in-flight caps and upload byte budget
+(`TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET`) behind it; this is defence in depth,
+so raise both together. A slow upload holds its share of the byte budget for
+as long as its body takes, up to this deadline; one whose body stops arriving
+for 60 s is refused by ingest itself (`408` `upload_body_idle_timeout`), which
+releases its share and slots sooner. Separately, the
 default/error logger plus both access-log encoders replace the `code` query
 value before JSON is written. Error-log filtering is necessary because a
 reverse-proxy 502 includes the request URI in stderr/journald even when the

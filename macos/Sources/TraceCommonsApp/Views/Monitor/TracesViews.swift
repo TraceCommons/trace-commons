@@ -186,6 +186,14 @@ struct TracesTreeView: View, Equatable {
                 VStack(spacing: 0) {
                     TracesListControls(store: store, openHistory: openHistory)
                         .padding(.bottom, GlassTokens.Space.s2)
+                    if let automatic = automaticSwitch {
+                        SharingChoiceCard(asSwitch: automatic)
+                            .padding(.bottom, GlassTokens.Space.s2)
+                    }
+                    if automaticSwitch != nil, let tree = store.words?.tree,
+                        let folders = tree.columnFolders, let submit = tree.columnSubmit, let auto = tree.columnAutomatic {
+                        TracesColumnTitles(folders: folders, submit: submit, automatic: auto)
+                    }
                     tree
                 }
             }
@@ -357,6 +365,20 @@ struct TracesTreeView: View, Equatable {
         }
     }
 
+    /// Automatic for every folder, over the tree (owner, 2026-10-30): the
+    /// Settings choice as one switch, with its count. Nil without the
+    /// core's words.
+    private var automaticSwitch: SharingChoiceCard.Switch? {
+        guard let tree = store.words?.tree, let name = tree.automaticAll, let line = tree.automaticCount else {
+            return nil
+        }
+        let store = store
+        return SharingChoiceCard.Switch(
+            accessibleName: name,
+            line: SharingChoice.automaticCount(store.tree.folders, words: line),
+            saved: { await store.load() })
+    }
+
     /// A mode change's confirmation, in the core's words for that folder.
     private func confirmation(_ pending: Confirmation) -> GlassConfirmation {
         let cancel = { confirming = nil }
@@ -415,6 +437,21 @@ struct TracesTreeView: View, Equatable {
     private func apply(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) {
         confirming = nil
         Task { await store.setFolderMode(folder, mode, promised: folder.sessions.count) }
+    }
+
+    /// A folder row's Automatic switch (owner, 2026-10-30): on at
+    /// Automatic, off at Ask, when the core offers the other; nil at Never
+    /// or for a folder the core lists no mode for. Turning it on arms the
+    /// folder through `modeChange`, so the core's arming question is asked.
+    nonisolated static func automaticSwitch(_ folder: TracesTree.FolderNode) -> Bool? {
+        // Traces with no project: a switch that stays off (owner,
+        // 2026-10-30); pressing it says why.
+        if folder.isBucket { return folder.mode == nil ? nil : false }
+        return switch folder.mode {
+        case .autoUpload: folder.offerableModes.contains(.ask) ? true : nil
+        case .ask: folder.offerableModes.contains(.autoUpload) ? false : nil
+        case .ignore, nil: nil
+        }
     }
 
     static func status(_ mode: ProjectMode) -> GlassStatus {
@@ -525,7 +562,7 @@ struct TracesTreeView: View, Equatable {
     }
 
     /// The row id a selection scrolls to and VoiceOver focuses.
-    static func rowID(_ selected: MonitorSelection) -> String { selected.rawValue }
+    nonisolated static func rowID(_ selected: MonitorSelection) -> String { selected.rawValue }
 
     /// The folder holding a session.
     static func folder(of entryId: String, in tree: TracesTree) -> String? {
@@ -594,16 +631,16 @@ struct TracesTreeView: View, Equatable {
         let offer = store.groupOffer(folder)
         let submits = offer.offersContribute && store.mayContributeFolder(folder)
         let busy = store.submittingFolder == folder.id
-        // The switch and the Ignore menu need a mode the core listed and
-        // both ends of the switch among the modes it accepts.
-        let switchable = folder.mode != nil && folder.offerableModes.contains(.ask)
-            && folder.offerableModes.contains(.ignore)
+        // Ignore remains available when a global Automatic default removes
+        // the per-folder Ask choice.
+        let switchable = folder.mode != nil && folder.offerableModes.contains(.ignore)
         let ignorable = switchable && !ignored
         // The row menu holds the contribution rule (owner, 2026-10-19), the
         // Folder inspector's picker, whenever the core lists a mode and
         // offers others; and Ignore.
         let rulable = folder.mode != nil && !folder.offerableModes.isEmpty
         let menu = rulable || ignorable
+        let automatic = words?.tree.automaticFolder == nil ? nil : Self.automaticSwitch(folder)
         // Submit is the Folder inspector's split button (owner, 2026-10-19):
         // the action, and a chevron to Submit all as, when the core's
         // outcome words are read; else the plain pill.
@@ -635,6 +672,8 @@ struct TracesTreeView: View, Equatable {
                 menuOpen: rowMenu == .submit(folder.id), busy: busy) : nil,
             menuLabel: menu ? words?.tree.folderMenu ?? "" : "",
             menuOpen: rowMenu == .folder(folder.id),
+            automatic: automatic,
+            automaticLabel: words?.tree.automaticFolder.map { $0.replacingOccurrences(of: "{label}", with: folder.label) } ?? "",
             floats: (menu && rowMenu == .folder(folder.id)) || (split && rowMenu == .submit(folder.id)),
             help: submits ? Self.submitHelp(offer.withheldLine, words: words) : "",
             writing: writing,
@@ -647,6 +686,13 @@ struct TracesTreeView: View, Equatable {
             onSplitSubmit: { Task { await store.contributeFolder(folder, verdict: nil) } },
             onSplitMenu: { rowMenu = Self.toggled(.submit(folder.id), current: rowMenu) },
             onMenu: menu ? { rowMenu = Self.toggled(.folder(folder.id), current: rowMenu) } : nil,
+            onAutomatic: { on in
+                if folder.isBucket {
+                    if on, let note = ProjectCopy.unresolvedBucketNote { store.say(note) }
+                } else {
+                    request(folder, on ? .autoUpload : .ask)
+                }
+            },
             spoken: $spoken
         )
         .equatable()
@@ -671,12 +717,15 @@ struct TracesTreeView: View, Equatable {
             // A review action on it in flight (Contribute, Keep, Dismiss):
             // dimmed, its pill off and turning, until the daemon answers.
             acting: store.acting.contains(entry.entryId),
-            // D10 default: a session's pill opens its review. Focus roves:
-            // only the selected row's pill is a tab stop; Return opens it.
-            pill: selected ? words?.tree.reviewing : words?.review,
+            // A session's pill is Submit (owner, 2026-10-22, in place of
+            // D10's Review): it sends the trace at once, as a folder's
+            // Submit does, and is drawn turned off while it cannot be sent.
+            // Focus roves: only the selected row's pill is a tab stop;
+            // Return still opens the session's review.
+            pill: words?.tree.submit,
             menuLabel: words?.tree.dismissSession ?? "",
             menuOpen: rowMenu == .session(entry.entryId),
-            help: words?.tree.reviewTip ?? "",
+            help: words?.tree.submitTraceTip ?? "",
             // The tool's name for VoiceOver: the tile shows it, the sub line
             // (#1146's size and state) does not.
             toolName: Self.toolName(entry) ?? "",
@@ -686,7 +735,8 @@ struct TracesTreeView: View, Equatable {
             // its own switch.
             tags: store.rowTags[entry.entryId].map { $0.showing(missions: missionsShown) },
             onSelect: { selection = Self.toggled(.session(entryID: entry.entryId), current: selection) },
-            onSubmit: { onReview(entry.entryId) },
+            onSubmit: store.maySubmitSession(entry, folderIgnored: off)
+                ? { Task { await store.submitSession(entry, folderIgnored: off) } } : nil,
             onMenu: { rowMenu = Self.toggled(.session(entry.entryId), current: rowMenu) },
             spoken: $spoken
         )
@@ -736,8 +786,7 @@ struct TracesTreeView: View, Equatable {
     /// A folder row's open menu: its rule and Ignore, or Submit all as.
     @ViewBuilder
     private func folderMenus(_ folder: TracesTree.FolderNode) -> some View {
-        let ignorable = folder.mode != nil && folder.offerableModes.contains(.ask)
-            && folder.offerableModes.contains(.ignore) && folder.mode != .ignore
+        let ignorable = folder.mode != nil && folder.offerableModes.contains(.ignore) && folder.mode != .ignore
         if rowMenu == .folder(folder.id), let words = store.words {
             TracesFolderMenu(
                 folder: folder, ruleTitle: words.inspector.contributionRule,
@@ -802,7 +851,7 @@ struct TracesTreeView: View, Equatable {
 
     // MARK: Formatting
 
-    static func glassTool(_ kind: SourceKind) -> GlassTool {
+    nonisolated static func glassTool(_ kind: SourceKind) -> GlassTool {
         kind.glassTool
     }
 
@@ -981,6 +1030,11 @@ struct TracesFolderRow: View, Equatable {
     let split: Split?
     let menuLabel: String
     let menuOpen: Bool
+    /// The folder's Automatic switch beside Submit (owner, 2026-10-30): on
+    /// for Automatic, off for Ask; nil for a folder it cannot switch
+    /// (Never, or a mode the core does not offer). Its accessible name.
+    let automatic: Bool?
+    let automaticLabel: String
     /// One of this row's menus is open: it publishes its bounds for it.
     let floats: Bool
     let help: String
@@ -993,6 +1047,7 @@ struct TracesFolderRow: View, Equatable {
     let onSplitSubmit: () -> Void
     let onSplitMenu: () -> Void
     let onMenu: (() -> Void)?
+    let onAutomatic: (Bool) -> Void
     /// The tree's VoiceOver focus, put on the `GlassListRow`: the element
     /// VoiceOver lands on, an accessibility container. Left out of `==`:
     /// it is the same focus state for every row.
@@ -1003,7 +1058,8 @@ struct TracesFolderRow: View, Equatable {
         MainActor.assumeIsolated {
             lhs.folder == rhs.folder && lhs.sub == rhs.sub && lhs.selected == rhs.selected && lhs.off == rhs.off
                 && lhs.open == rhs.open && lhs.submitTitle == rhs.submitTitle && lhs.split == rhs.split
-                && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen && lhs.floats == rhs.floats
+                && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen && lhs.automatic == rhs.automatic
+                && lhs.automaticLabel == rhs.automaticLabel && lhs.floats == rhs.floats
                 && lhs.help == rhs.help && lhs.writing == rhs.writing && lhs.spins == rhs.spins && lhs.notes == rhs.notes
                 && (lhs.onSubmit == nil) == (rhs.onSubmit == nil) && (lhs.onMenu == nil) == (rhs.onMenu == nil)
         }
@@ -1024,9 +1080,10 @@ struct TracesFolderRow: View, Equatable {
                 off: off,
                 expanded: folder.sessions.isEmpty ? nil : open,
                 submitTitle: submitTitle,
+                submitHelp: help,
                 accessory: accessory,
-                // No watch switch on the row (owner, 2026-10-08): a folder's
-                // mode is in the row menu and the Folder inspector's picker.
+                // The Automatic switch is on the row again (owner,
+                // 2026-10-30), beside Submit; Never stays in the row menu.
                 expandLabel: folder.label,
                 menuLabel: menuLabel,
                 menuOpen: menuOpen,
@@ -1036,7 +1093,9 @@ struct TracesFolderRow: View, Equatable {
                 onMenu: onMenu
             )
             .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.folder(projectID: folder.id)))
-            .help(help)
+            // Spoken, not a hover tip: the pill carries that, and VoiceOver
+            // lands on the row, so the core's withheld sentence is heard here.
+            .accessibilityHint(help)
             .disabled(writing)
             .opacity(writing ? TracesRowBusy.opacity : 1)
             .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
@@ -1061,17 +1120,30 @@ struct TracesFolderRow: View, Equatable {
     }
 
     /// The row's Submit as the Folder inspector's split button (owner,
-    /// 2026-10-19): Submit all, and a chevron to Submit all as; and the
-    /// spinner while a mode change is in flight.
+    /// 2026-10-19): Submit all, and a chevron to Submit all as; the
+    /// spinner while a mode change is in flight; and the Automatic switch
+    /// after them (owner, 2026-10-30).
     private var accessory: AnyView? {
-        guard split != nil || spins else { return nil }
+        guard split != nil || spins || automatic != nil else { return nil }
         return AnyView(HStack(spacing: GlassTokens.Space.s3) {
             if spins { GlassSpinner() }
             if let split {
                 GlassSplitButton(split.title, menuLabel: split.menuLabel, menuOpen: split.menuOpen, onMenu: onSplitMenu) {
                     onSplitSubmit()
                 }
+                .actionHelp(help)
                 .disabled(split.busy)
+            }
+            if let automatic {
+                Toggle(automaticLabel, isOn: Binding(get: { automatic }, set: { onAutomatic($0) }))
+                    .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
+                    .help(automaticLabel)
+            } else {
+                // A row with no switch (Traces with no project) keeps its
+                // place, so every Submit lines up.
+                Color.clear
+                    .frame(width: GlassTokens.Size.watchSwitchWidth, height: 1)
+                    .accessibilityHidden(true)
             }
         })
     }
@@ -1095,7 +1167,8 @@ struct TracesSessionRow: View, Equatable {
     let toolName: String
     let tags: NudgeEntryTags?
     let onSelect: () -> Void
-    let onSubmit: () -> Void
+    /// Nil while the session cannot be sent: the pill is drawn turned off.
+    let onSubmit: (() -> Void)?
     let onMenu: () -> Void
     /// As `TracesFolderRow.spoken`.
     let spoken: AccessibilityFocusState<String?>.Binding
@@ -1106,6 +1179,7 @@ struct TracesSessionRow: View, Equatable {
                 && lhs.flag == rhs.flag && lhs.selected == rhs.selected && lhs.off == rhs.off && lhs.acting == rhs.acting
                 && lhs.pill == rhs.pill && lhs.menuLabel == rhs.menuLabel && lhs.menuOpen == rhs.menuOpen
                 && lhs.help == rhs.help && lhs.toolName == rhs.toolName && lhs.tags == rhs.tags
+                && (lhs.onSubmit == nil) == (rhs.onSubmit == nil)
         }
     }
 
@@ -1124,6 +1198,7 @@ struct TracesSessionRow: View, Equatable {
                 selected: selected,
                 off: off,
                 submitTitle: pill,
+                submitHelp: help,
                 submitFocusable: selected && !acting,
                 accessory: acting ? AnyView(GlassSpinner()) : nil,
                 menuLabel: menuLabel,
@@ -1133,7 +1208,6 @@ struct TracesSessionRow: View, Equatable {
                 onMenu: acting ? nil : onMenu
             )
             .accessibilityFocused(spoken, equals: TracesTreeView.rowID(.session(entryID: entry.entryId)))
-            .help(help)
             .opacity(acting ? TracesRowBusy.opacity : 1)
             .accessibilityHint(toolName)
             .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
@@ -1233,13 +1307,19 @@ struct TracesMenuPanel<Content: View>: View {
     }
 }
 
-/// One item in a `TracesMenuPanel`: its glyph and the core's words.
+/// One item in a `TracesMenuPanel`: its glyph and the core's words. Under
+/// the pointer it takes the menu's own highlight, the accent with the
+/// menu's hover ink, as every menu row does (owner, 2026-10-22: the control
+/// hover, a dark well, all but vanished on the dark menu).
 struct TracesMenuItem: View {
     let systemImage: String
     let label: String
     let action: () -> Void
+    @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
+        let lit = GlassHover.shows(hovering: hovering, enabled: isEnabled)
         Button(action: action) {
             HStack(spacing: GlassTokens.Space.s3) {
                 Image(systemName: systemImage)
@@ -1249,12 +1329,23 @@ struct TracesMenuItem: View {
                     .glassType(GlassTokens.TypeScale.label)
                     .lineLimit(1)
             }
-            .foregroundStyle(GlassColor.textPrimary)
+            .foregroundStyle(TracesMenuHighlight.ink(lit: lit).color)
             .padding(.horizontal, GlassTokens.Space.s4)
             .frame(height: GlassTokens.Size.control)
-            .glassHover(GlassTokens.Color.controlHover, in: Capsule())
+            .glassHover(TracesMenuHighlight.fill, in: Capsule())
+            .onHover { hovering = $0 }
         }
         .buttonStyle(GlassPressStyle())
+    }
+}
+
+/// A Traces menu row's highlight under the pointer: the menu's own, as
+/// `GlassMenuItem` draws it.
+enum TracesMenuHighlight {
+    static let fill = GlassTokens.Color.menuHover
+
+    static func ink(lit: Bool) -> GlassRGBA {
+        lit ? GlassTokens.Color.menuHoverText : GlassTokens.Color.textPrimary
     }
 }
 
@@ -1324,6 +1415,7 @@ struct TracesRowMenuPill: View {
     private let onDismiss: () -> Void
     private let action: () -> Void
     @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
 
     /// Where it sits under the row (#1146 `top-[38px] right-1.5`).
     static let offset = CGSize(width: -6, height: 38)
@@ -1344,10 +1436,11 @@ struct TracesRowMenuPill: View {
                     .glassType(GlassTokens.TypeScale.label)
                     .lineLimit(1)
             }
-            .foregroundStyle(GlassColor.textPrimary)
+            .foregroundStyle(TracesMenuHighlight.ink(lit: GlassHover.shows(hovering: hovering, enabled: isEnabled)).color)
             .padding(.horizontal, GlassTokens.Space.s6)
             .frame(height: GlassTokens.Size.control)
-            .glassHover(GlassTokens.Color.controlHover, in: Capsule())
+            .glassHover(TracesMenuHighlight.fill, in: Capsule())
+            .onHover { hovering = $0 }
             .glassSurface(.menu, radius: GlassTokens.Radius.pill, floating: true)
             .fixedSize()
         }
@@ -1358,3 +1451,37 @@ struct TracesRowMenuPill: View {
     }
 }
 
+/// The titles over the tree's columns while the Automatic switches show
+/// (owner, 2026-10-30, Proposal A): the folders at the left, Submit, and
+/// Auto over the rows' switches. Decorative: each control has its own
+/// accessible name, so the titles are hidden from assistive tech.
+struct TracesColumnTitles: View {
+    let folders: String
+    let submit: String
+    let automatic: String
+
+    var body: some View {
+        HStack(spacing: GlassTokens.Space.s4) {
+            Text(folders)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // Submit and the switch sit 6pt apart in the row's accessory;
+            // the switch ends it, before the row menu's 22pt column and the
+            // row's 6pt trailing inset. Submit's title is centred over the
+            // usual split button, "Submit all (n)" and its chevron.
+            HStack(spacing: GlassTokens.Space.s3) {
+                Text(submit)
+                    .frame(minWidth: 128)
+                Text(automatic)
+                    .frame(width: GlassTokens.Size.watchSwitchWidth)
+            }
+            Color.clear.frame(width: 22, height: 0)
+        }
+        .glassType(GlassTokens.TypeScale.eyebrow)
+        .foregroundStyle(GlassColor.textTertiary)
+        .lineLimit(1)
+        .padding(.leading, 8)
+        .padding(.trailing, 6)
+        .padding(.bottom, GlassTokens.Space.s2)
+        .accessibilityHidden(true)
+    }
+}

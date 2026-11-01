@@ -53,6 +53,7 @@ extension MonitorDestination {
         switch destination {
         case .traces(let idleOnly): self = idleOnly ? .idleSessions : .traces(entryId: nil)
         case .history: self = .home(.history)
+        case .privateAI: self = .inference
         }
     }
 }
@@ -78,6 +79,10 @@ enum OpenMonitor {
     /// still a request.
     @MainActor private static var pending: (held: Bool, destination: MonitorDestination?, activate: Bool) = (false, nil, true)
 
+    /// An explicit opener can cause the first activation itself. Record its
+    /// delivery before calling the handler, which may reenter the delegate.
+    @MainActor private static var deliveredActivatingRequest = false
+
     /// Every opener activates the app, as a click does; only the launch's
     /// own request may stay quiet (R-44).
     @MainActor
@@ -86,13 +91,28 @@ enum OpenMonitor {
             pending = (true, destination, activate)
             return
         }
+        if activate { deliveredActivatingRequest = true }
         handler(destination, activate)
+    }
+
+    /// The first foreground activation opens the app without needing a
+    /// Dock click. A notification or deep link may already be waiting for
+    /// the launcher; keep its destination instead of replacing it with nil.
+    @MainActor
+    static func requestForInitialActivation() {
+        guard !deliveredActivatingRequest else { return }
+        if pending.held {
+            pending.activate = true
+        } else {
+            request()
+        }
     }
 
     /// Tests only: no handler and nothing held.
     @MainActor
     static func reset() {
         pending = (false, nil, true)
+        deliveredActivatingRequest = false
         handler = nil
     }
 
@@ -101,6 +121,7 @@ enum OpenMonitor {
         guard let handler, pending.held else { return }
         let held = pending
         pending = (false, nil, true)
+        if held.activate { deliveredActivatingRequest = true }
         handler(held.destination, held.activate)
     }
 }
@@ -145,8 +166,23 @@ enum LaunchRouting {
     /// install that may have finished it long ago.
     enum LaunchOpening: Equatable { case wait, nothing, firstRun, monitor }
 
-    static func launchOpening(startup: AppModel.Startup, statusAnswered: Bool, requiresOnboarding: Bool) -> LaunchOpening {
-        switch startup {
+    /// The argument `near-ai login` launches the app with
+    /// (`BACKGROUND_LAUNCH_ARG` in near_ai_login.rs).
+    static let backgroundLaunchArgument = "--background-launch"
+
+    /// Whether this launch is the CLI's background one.
+    static func isBackgroundLaunch(_ arguments: [String]) -> Bool {
+        arguments.dropFirst().contains(backgroundLaunchArgument)
+    }
+
+    /// A `background` launch opens nothing at all: the CLI started the app
+    /// to answer its sign-in (`near_ai_login::hand_off_to_app`), and a
+    /// window, first run's included, would take the person out of the
+    /// terminal they are working in.
+    static func launchOpening(startup: AppModel.Startup, statusAnswered: Bool, requiresOnboarding: Bool,
+                              background: Bool = false) -> LaunchOpening {
+        if background { return .nothing }
+        return switch startup {
         case .starting: .wait
         case .refused: .monitor
         case .needsRoots: .firstRun

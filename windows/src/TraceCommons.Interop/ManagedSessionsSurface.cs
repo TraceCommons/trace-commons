@@ -144,12 +144,17 @@ public static class ManagedSignIn
         template.Replace("{destination}", destination ?? fallback);
 
     /// <summary>The line for a failed managed action: the sign-in prompt
-    /// when the daemon refused for want of a NEAR AI sign-in, and the
-    /// not-found line when the chosen terminal was not found.</summary>
+    /// when the daemon refused for want of a NEAR AI sign-in, the not-found
+    /// line when the chosen terminal was not found, the add-funds line
+    /// when the sign-in's balance cannot pay for a session's first calls,
+    /// and the line that says why when a NEAR AI project chooses a
+    /// model.</summary>
     public static string ErrorKey(string? code) => code switch
     {
         "managed-near-ai-sign-in-required" => "sign_in_needed",
         "managed-terminal-not-found" => "terminal_not_found",
+        "managed-near-ai-balance-too-low" => "balance_too_low",
+        "managed-project-chooses-model" => "project_chooses_model",
         _ => "action_failed",
     };
 

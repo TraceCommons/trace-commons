@@ -10,6 +10,7 @@ import XCTest
 /// accent's ink, as the NEAR AI design system's switch draws it (owner,
 /// 2026-10-20). The flat theme's tracks are measured in `NearAccentTests`.
 final class SwitchContrastTests: XCTestCase {
+    @MainActor
     func test_everyKnobClearsTheGlyphFloorWhenOn() {
         for kind in [GlassSwitchKind.standard, .settings, .watch] {
             let track = GlassToggleStyle.onColor(kind)
@@ -21,6 +22,7 @@ final class SwitchContrastTests: XCTestCase {
 
     /// The knob is white while off and the accent's ink while on, on every
     /// track.
+    @MainActor
     func test_theKnobIsWhiteOffAndTheAccentInkOn() {
         XCTAssertEqual(GlassTokens.Color.toggleKnobOff.rgb, 0xFFFFFF)
         for kind in [GlassSwitchKind.standard, .settings, .watch] {
@@ -29,8 +31,25 @@ final class SwitchContrastTests: XCTestCase {
         }
     }
 
+    /// The flat theme's Dark draws the off knob the same navy as the on
+    /// knob (owner, 2026-10-22), on an off track light enough that the knob
+    /// still clears the 3:1 glyph floor on a pane or a card; Light keeps
+    /// the white knob.
+    func test_theFlatDarkOffKnobIsTheOnKnobsNavy() throws {
+        typealias Flat = FlatThemeContrastTests
+        let knob = try Flat.colour("toggleKnobOff", theme: "flatDark").rgb
+        XCTAssertEqual(knob, try Flat.colour("textOnAccent", theme: "flatDark").rgb)
+        let pane = try Flat.colour("paneOpaque", theme: "flatDark").rgb
+        for ground in [pane, Flat.over(pane, try Flat.gradientMax("cardFill", theme: "flatDark"))] {
+            let track = Flat.over(ground, try Flat.colour("toggleOff", theme: "flatDark"))
+            XCTAssertGreaterThanOrEqual(Flat.contrast(knob, track), 3)
+        }
+        XCTAssertEqual(try Flat.colour("toggleKnobOff", theme: "flatLight").rgb, Flat.RGB(r: 1, g: 1, b: 1))
+    }
+
     /// The watch switch matches the Settings switches; white on the watch
     /// green would not clear the floor without a ring.
+    @MainActor
     func test_theWatchSwitchMatchesTheOthers() {
         XCTAssertEqual(GlassToggleStyle.onColor(.watch), GlassToggleStyle.onColor(.settings))
         XCTAssertLessThan(Self.contrast(GlassTokens.Color.textOnAccent, GlassTokens.Color.watchOn), 3)
@@ -38,6 +57,7 @@ final class SwitchContrastTests: XCTestCase {
 
     /// #1146's timings: a toggle slides in `--tc-dur` (220ms), the watch
     /// switch in 150ms.
+    @MainActor
     func test_switchDurationsFollowTheReference() {
         XCTAssertEqual(GlassToggleStyle.duration(.standard), GlassTokens.Motion.standard)
         XCTAssertEqual(GlassToggleStyle.duration(.settings), GlassTokens.Motion.standard)

@@ -69,8 +69,23 @@ it.
    # Signed in. This device is enrolled.
    ```
 
-   The sign-in finishes on a loopback address, so complete it in a browser
-   on this machine. If you are already signed in to NEAR AI here (for
+   The sign-in finishes on a loopback address on this machine. Over SSH, or
+   on a Linux machine with no display, `login` opens no browser and prints
+   the command that forwards that address to your own computer instead:
+
+   ```bash
+   trace-commons-contributor login
+   # No browser on this machine can reach you, so sign in from your own computer:
+   #   1. In a terminal on your computer, forward the sign-in port and leave it running:
+   #        ssh -N -o ExitOnForwardFailure=yes -L <port>:127.0.0.1:<port> <this-machine>
+   #      Put the host you SSH to in place of <this-machine>.
+   #   2. Open this address in your computer's browser within 5 minutes:
+   #        http://127.0.0.1:<port>/...
+   ```
+
+   Open the address exactly as printed, with `127.0.0.1` and the same port
+   on both sides of the forward. `login --no-browser` prints the address
+   without opening a browser on any machine. If you are already signed in to NEAR AI here (for
    example in the desktop app), the browser step is skipped. When the
    daemon is running, `login` goes through it, so the app and the CLI share
    one sign-in and one enrollment. `--allowed-hosts` applies to the invite
@@ -491,7 +506,7 @@ the redactor and mapper produce from message content.
 
 | Command | What it does |
 |---|---|
-| `login [--invite <link> \| --grant <b64> \| --key-id] [--allowed-hosts <csv>] [--scopes <csv> \| --default]` | With no `--invite` or `--grant`, signs in with NEAR AI in the browser and enrolls this device (no invite needed; skips the browser when a NEAR AI sign-in is already kept). With `--invite` (or `TRACE_COMMONS_INVITE`), redeems an invite link. With `--grant`, redeems an enrollment grant. `--key-id` prints this device's key id to hand to an instance operator and enrolls nothing. `--allowed-hosts` applies to `--invite` and `--grant` only. Refuses on a device that is already enrolled. |
+| `login [--invite <link> \| --grant <b64> \| --key-id] [--allowed-hosts <csv>] [--scopes <csv> \| --default] [--no-browser]` | With no `--invite` or `--grant`, signs in with NEAR AI in the browser and enrolls this device (no invite needed; skips the browser when a NEAR AI sign-in is already kept). With `--invite` (or `TRACE_COMMONS_INVITE`), redeems an invite link. With `--grant`, redeems an enrollment grant. `--key-id` prints this device's key id to hand to an instance operator and enrolls nothing. `--allowed-hosts` applies to `--invite` and `--grant` only. `--no-browser` prints the sign-in address instead of opening a browser; over SSH, or on Linux with no display, that is automatic and `login` also prints the `ssh` command that forwards the sign-in to your own computer. Refuses on a device that is already enrolled. |
 | `list [--trajectory <path>]` | Lists discoverable local sessions from all sources (no network). Trajectory sessions appear when `--trajectory` names a file or directory, and — without it — from the working directory's `*.trajectory.json(l)` files and the trajectory staging folder that `import-antigravity` writes to. |
 | `submit [--all] [--since <dur>] [--project <path>] [--source claude-code\|codex\|trajectory] [--trajectory <path>] [--no-reasoning] [--remediate-quarantined] [--yes] [--dry-run] [--pii-filter near-ai]` | Redacts and uploads selected sessions. `--trajectory` names a Letta Trajectory v1 file or directory. `--no-reasoning` excludes model reasoning, which is otherwise included. `--remediate-quarantined` re-uploads sessions whose local receipt is `quarantined`, keeping the same `submission_id` so the server can supersede the stored envelope. `--dry-run` runs the full pipeline (parse, redact, canary check, sizing) without uploading. `--all` widens selection to every session but still asks for confirmation. `--yes` skips confirmation; the existing `--json --all` mode remains non-interactive. |
 | `import-antigravity [--project <path>\|--all]` | Imports conversations from a running Antigravity IDE instance and stages them for `submit`. Requires Antigravity to be running, since its conversations are only readable through the local API it serves. `--project` scopes to one workspace (default: the current directory); `--all` takes every conversation the running instance exposes. |

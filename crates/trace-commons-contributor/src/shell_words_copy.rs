@@ -456,8 +456,11 @@ pub struct SettingsWords {
     /// The optional scopes' heading. Approved 2026-10-07: it was "Optional \u{2014} each one lets your traces do
     /// more".
     pub optional_data_use: &'static str,
+    pub reward_opportunities: &'static str,
     pub credit: &'static str,
-    /// The tag on the always-on scope.
+    /// The tag on the always-on scope: the core's one spelling
+    /// (`consent_copy::SCOPE_TAG_REQUIRED`, "always on"), matching the
+    /// first run's "Always on" line, so the two never differ.
     pub required: &'static str,
     pub nothing_preselected: &'static str,
     pub nothing_changed: &'static str,
@@ -471,7 +474,7 @@ pub struct SettingsWords {
 #[must_use]
 pub fn settings_words() -> SettingsWords {
     SettingsWords {
-        consent_heading: "How may your traces be used?",
+        consent_heading: "Data uses",
         connected: "Connected",
         not_connected: "Not connected",
         queued_nothing_sent: concat!(
@@ -523,8 +526,9 @@ pub fn settings_words() -> SettingsWords {
         ),
         always_included: "Always included",
         optional_data_use: "Optional data use",
+        reward_opportunities: crate::consent_copy::DATA_USE_REWARD_OPPORTUNITIES,
         credit: "Credit",
-        required: "required",
+        required: crate::consent_copy::SCOPE_TAG_REQUIRED,
         nothing_preselected: "Nothing here is pre-selected on your behalf.",
         nothing_changed: "Nothing has been changed.",
         audit_actions: BTreeMap::from([

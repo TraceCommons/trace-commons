@@ -122,7 +122,10 @@ pub struct RoutedExchange {
     ///
     /// Priced, not billed: work served on a subscription is priced at what it
     /// *would* have cost on the meter. No surface may render it as money the
-    /// contributor spent.
+    /// contributor spent, with one exception: owner decision D5 (settled
+    /// 2026-10-20) shows it as a NEAR AI charge, labelled so, for calls
+    /// through the NEAR AI route only (the Insights Models answers, via the
+    /// route tally). It is never shown as a charge for any other backend.
     #[serde(default)]
     pub cost_usd: Option<f64>,
     pub status: i64,
@@ -233,6 +236,17 @@ where
 pub trait RoutingLedger: Send + Sync {
     /// Rows at or after `from`, oldest first.
     fn exchanges_since(&self, from: DateTime<Utc>) -> Vec<RoutedExchange>;
+
+    /// The authorized body store owning this exact row. Composite ledgers
+    /// must resolve provenance rather than trusting store-local row ids or
+    /// body references, and return `None` when body access is not permitted.
+    fn bodies_dir_for(
+        &self,
+        _row: &RoutedExchange,
+        fallback: Option<&std::path::Path>,
+    ) -> Option<std::path::PathBuf> {
+        fallback.map(std::path::Path::to_path_buf)
+    }
 }
 
 /// A ledger over a fixed set of rows. Used by tests and by the `Off` state.

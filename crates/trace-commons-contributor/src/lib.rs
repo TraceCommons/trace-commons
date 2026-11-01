@@ -8,7 +8,9 @@ pub mod account_contribution;
 pub(crate) mod antigravity;
 pub mod attach_copy;
 pub mod brand;
+pub mod channel;
 pub mod cli;
+pub mod cli_tool;
 pub mod commands;
 pub mod commons_credit;
 pub mod compute;
@@ -31,10 +33,61 @@ pub mod health_copy;
 pub mod history_copy;
 pub mod identity;
 pub mod inference_connection;
+pub mod large_session_gate;
 // Insights lives in the `trace-commons-contributor-insights` crate, so client
 // builds that edit the rest of this crate do not recompile it; re-exported at
 // its old path.
-pub use trace_commons_contributor_insights::insights;
+pub mod insights {
+    pub use trace_commons_contributor_insights::insights::*;
+
+    /// The Insights service at its old path, with every entry point that can
+    /// open a store when the caller names no directory bound to this build's
+    /// channel: its default store under the channel's state directory name,
+    /// and its keychain for the OS-held digest key. Every other item is the
+    /// insights crate's own.
+    pub mod service {
+        pub use trace_commons_contributor_insights::insights::service::*;
+
+        use super::{LocalInsight, LocalInsightStore};
+        use trace_commons_contributor_insights::insights::service as inner;
+
+        /// This build's Insights store and keychain.
+        pub const STORE_CHANNEL: inner::StoreChannel = inner::StoreChannel {
+            keychain: crate::channel::KEYCHAIN,
+            state_dir_name: crate::channel::STATE_DIR_NAME,
+        };
+
+        /// This build's default Insights store.
+        pub fn default_store_dir() -> anyhow::Result<std::path::PathBuf> {
+            inner::default_store_dir(STORE_CHANNEL.state_dir_name)
+        }
+
+        /// [`inner::execute`] in this build's channel.
+        pub fn execute(request: LocalInsightsRequest) -> anyhow::Result<LocalInsightsResponse> {
+            inner::execute_for(request, STORE_CHANNEL)
+        }
+
+        /// [`inner::dispatch_json`] in this build's channel.
+        pub fn dispatch_json(bytes: &[u8]) -> anyhow::Result<String> {
+            inner::dispatch_json_for(bytes, STORE_CHANNEL)
+        }
+
+        /// [`inner::open_store`] in this build's channel.
+        pub fn open_store(
+            store_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<LocalInsightStore> {
+            inner::open_store_for(store_dir, STORE_CHANNEL)
+        }
+
+        /// [`inner::list_saved`] in this build's channel.
+        pub fn list_saved(
+            store_dir: Option<&std::path::Path>,
+        ) -> anyhow::Result<Vec<LocalInsight>> {
+            inner::list_saved_for(store_dir, STORE_CHANNEL)
+        }
+    }
+}
+pub(crate) mod devices_cli;
 pub mod install_guides;
 pub mod issuer_client;
 pub mod managed;
@@ -42,11 +95,13 @@ pub mod mission_attempt;
 pub mod mission_catalog;
 pub mod mission_draft;
 pub mod mission_draft_service;
+pub mod model_training_consent;
 pub(crate) mod near_ai_login;
 pub mod nudge_copy;
 pub mod nudge_render;
 pub mod onboarding_copy;
 pub mod outcome_copy;
+pub mod payout_link;
 pub mod picker;
 pub mod preview_copy;
 pub mod pricing;
@@ -56,6 +111,9 @@ pub mod project_copy;
 pub mod quit_copy;
 pub mod redaction_labels;
 pub mod redaction_summary;
+pub mod referral;
+pub mod referral_copy;
+pub mod retry_jitter;
 pub mod routing;
 pub mod routing_copy;
 pub mod shell_words_copy;

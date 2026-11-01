@@ -11,6 +11,10 @@
 // crate it was extracted from, so the paths the operator docs cite change
 // only in the crate name.
 
+#[path = "trace_commons_ingest_internal/account_device_codes.rs"]
+mod account_device_codes_routes;
+#[path = "trace_commons_ingest_internal/account_devices.rs"]
+mod account_devices_routes;
 #[path = "trace_commons_ingest_internal/account_routes.rs"]
 mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
@@ -27,12 +31,24 @@ mod file_witness;
 mod inference_connection_routes;
 #[path = "trace_commons_ingest_internal/legacy_invite_link.rs"]
 mod legacy_invite_link_routes;
+#[path = "trace_commons_ingest_internal/model_training_consent.rs"]
+mod model_training_consent;
+#[path = "trace_commons_ingest_internal/payout_link.rs"]
+mod payout_link_routes;
+#[path = "trace_commons_ingest_internal/payout_rails.rs"]
+mod payout_rails;
 #[path = "trace_commons_ingest_internal/public_run.rs"]
 mod public_run;
+#[path = "trace_commons_ingest_internal/referral_admin.rs"]
+mod referral_admin;
+#[path = "trace_commons_ingest_internal/referral.rs"]
+mod referral_routes;
 #[path = "trace_commons_ingest_internal/rewards.rs"]
 mod rewards;
 #[path = "trace_commons_ingest_internal/token_bundles.rs"]
 mod token_bundles;
+#[path = "trace_commons_ingest_internal/upload_allowance.rs"]
+mod upload_allowance;
 
 #[cfg(test)]
 use public_run::validate_public_run_provenance;
@@ -119,11 +135,8 @@ use trace_commons_server::versioned_pipeline_score_registry::ScorePolicyRegistry
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
-use trace_commons_server::account_passkey::{
-    CeremonyState, CeremonyStore, build_webauthn, credential_id_from_string,
-    credential_id_to_string,
-};
-use trace_commons_server::config::{DatabaseConfig, NearConfig, WebauthnConfig};
+use trace_commons_server::account_ceremony::{CeremonyState, CeremonyStore};
+use trace_commons_server::config::{DatabaseConfig, NearConfig};
 use trace_commons_server::db::DeviceKeyRecord as StorageDeviceKeyRecord;
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::db::{
@@ -139,7 +152,7 @@ use trace_commons_server::near_account_identity::{
     NearAccountIdentity, TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER,
 };
 use trace_commons_server::near_attestation::client::{
-    API_KEY_CONTROL as NEAR_ATTESTATION_API_KEY_CONTROL,
+    API_KEY_CONTROL as NEAR_ATTESTATION_API_KEY_CONTROL, ATTESTATION_GATEWAY_BASE_URL,
     AttestationClient as NearAttestationClient, AttestedKeyReportClient,
     BASE_URL_CONTROL as NEAR_ATTESTATION_BASE_URL_CONTROL, HttpAttestationClient, INTEL_PCS_URL,
     MODEL_CONTROL as NEAR_ATTESTATION_MODEL_CONTROL,
@@ -526,12 +539,30 @@ const TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: &str =
     "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA";
 const TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE: &str =
     "TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE";
+/// RFC 3339 cut-over for the gate's scoring award: settlement counts a
+/// `NoveltyUtility` event only when it was written at or after this instant
+/// (`trace_credit_event_counts_toward_settlement`). Unset, no scoring award
+/// settles; a delta above 0 refuses to start without it
+/// (`validate_novelty_utility_credit_config`).
+const TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM: &str = "TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM";
+/// Startup refusal: a delta above 0 with the production gate not required,
+/// so a test gate (`in_memory`, `enclave_mock`, `legacy_deterministic`) could
+/// mint credit that settles and is paid.
+const NOVELTY_UTILITY_CREDIT_REQUIRES_PRODUCTION_GATE_LABEL: &str =
+    "novelty_utility_credit_requires_production_gate";
+/// Startup refusal: a delta above 0 with no
+/// `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` cut-over.
+const NOVELTY_UTILITY_SETTLE_FROM_MISSING_LABEL: &str = "novelty_utility_settle_from_missing";
+/// Startup refusal: `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` is not an
+/// RFC 3339 timestamp. The value itself is never echoed.
+const NOVELTY_UTILITY_SETTLE_FROM_INVALID_LABEL: &str = "novelty_utility_settle_from_invalid";
 /// Zero by default. Emission pays this flat delta without consulting
 /// the `credit_quality` and `contributor_cap` signals that are computed
 /// and stored on every gate decision, so a non-zero default issues
-/// value that the quality signals never gated. Operators can set
-/// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` explicitly once
-/// emission consults those signals.
+/// value that the quality signals never gated. The award is
+/// settlement-eligible (`trace_credit_event_type_is_settlement_eligible`),
+/// so a non-zero `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` is
+/// value that settles and is paid out; at zero nothing new settles.
 const DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA: f32 = 0.0;
 // Candle-backed perplexity scorer (Phase A2). Read only when
 // `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
@@ -705,6 +736,12 @@ const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
 /// See `SubmitPrincipalLimits`.
 const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN: &str =
     "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN";
+/// Deployment-wide upload byte budget; see [`parse_large_body_byte_budget`].
+const TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET: &str = "TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET";
+/// Most of that budget one principal may hold; see
+/// [`parse_large_body_principal_byte_share`].
+const TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES: &str =
+    "TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES";
 /// `POST /v1/traces` submissions one principal may have in flight at once.
 const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY: &str =
     "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY";
@@ -757,6 +794,15 @@ const TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR";
 const TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR: &str =
     "TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR";
+/// The per-account hourly submission ceiling. Unlike the two quotas above it
+/// is on by default ([`ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT`]); `0` turns it
+/// off.
+const TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR: &str =
+    "TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR";
+/// The per-account hourly ceiling when the variable is unset: a circuit
+/// breaker set far above any contributor's real pace (one upload every six
+/// seconds for an hour), not a pacing limit.
+const ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT: usize = 600;
 const TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT: &str =
     "TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT";
 const TRACE_COMMONS_CREDIT_SETTLEMENT_ALLOWED_POLICY_VERSIONS: &str =
@@ -954,27 +1000,6 @@ const TRACE_COMMONS_PII_BACKSTOP_PER_SUBMISSION_TIMEOUT_SECONDS: &str =
 /// 210 others were never touched, because the driver takes them oldest-first
 /// and nothing bounded the first one.
 const TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS: i64 = 900;
-/// The unbound-account reaper (Z2 S5). Off unless `_ENABLED`; when on it needs
-/// its own least-privilege login, never the runtime URL.
-const TRACE_COMMONS_UNBOUND_REAPER_ENABLED: &str = "TRACE_COMMONS_UNBOUND_REAPER_ENABLED";
-const TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL: &str = "TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL";
-const TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS: &str =
-    "TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS";
-const TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS: &str =
-    "TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS";
-/// Names an earlier, never-released draft of the reaper read. Neither is an
-/// alias: the idle window they configured no longer exists, so boot refuses
-/// either one rather than silently ignoring it.
-const TRACE_COMMONS_UNBOUND_REAPER_REMOVED_VARS: &[&str] = &[
-    "TRACE_COMMONS_UNBOUND_REAPER_TTL_DAYS",
-    "TRACE_COMMONS_UNBOUND_REAPER_NEVER_USED_TTL_DAYS",
-];
-const TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS: &str =
-    "TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS";
-const TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE: &str = "TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE";
-const TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS: u64 = 3600;
-/// Batches one tick may run back to back while each one comes back full.
-const TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK: usize = 10;
 const TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON: &str =
     "TRACE_COMMONS_BENCHMARK_PIPELINE_SCHEDULER_REASON";
 const TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED: &str =
@@ -1412,6 +1437,19 @@ pub async fn run_ingest(
     }
 
     let _ = tracing_subscriber::fmt::try_init();
+    // Before any database or network is opened: a NEAR AI host from the
+    // other channel stops the boot (staging design, section 3.9).
+    let scorer_host = near_ai_host_coherence_from_lookup(&|name: &str| std::env::var(name).ok())?;
+    if scorer_host == NearAiScorerHostChannel::ProductionCompletionsException {
+        // A label, never the host or the key.
+        tracing::info!(
+            control = NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL,
+            setting = TRACE_COMMONS_NEAR_AI_BASE_URL,
+            "NEAR AI scorer production-host exception active: the scorer calls a NEAR AI \
+             production direct-completions host with its own key; every other NEAR AI host \
+             is staging"
+        );
+    }
     tracing::info!(
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
@@ -1457,7 +1495,6 @@ pub async fn run_ingest(
     spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
     spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
     spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
-    spawn_unbound_account_reaper_task(&state, state.unbound_account_reaper.clone());
     spawn_trace_benchmark_registry_scheduler_task(
         &state,
         state.benchmark_registry_scheduler.clone(),
@@ -1484,6 +1521,11 @@ pub async fn run_ingest(
         &state,
         state.community_snapshot_invalidation_scheduler.clone(),
     );
+    // One worker per enabled payout rail; a disabled rail spawns nothing. An
+    // enabled rail with no recipient key refuses the start: every link it
+    // found would be unreadable.
+    payout_rails::require_payout_recipient_key(&state)?;
+    let _payout_rail_workers = payout_rails::spawn_payout_rail_workers(&state);
     tracing::info!(
         addr = %listener.local_addr()?,
         "Trace Commons ingestion service listening"
@@ -1710,6 +1752,36 @@ struct AppState {
     /// none is installed; the route then answers 404. No built-in.
     credit_settlement_table:
         Option<Arc<trace_commons_protocol::settlement_estimate::SettlementEstimateTable>>,
+    /// The payout rails (payout spec sections 3, 4 and 7): one entry per
+    /// rail this build knows, each `disabled` unless configured, with its
+    /// readiness status (`payout_rails::payout_rails_from_env`).
+    payout_rails: Arc<trace_commons_server::payout_worker::PayoutRails>,
+    /// The payout store the rails' workers and operator routes use: the
+    /// database mirror's PostgreSQL backend, or `None` without one.
+    payout_store: Option<Arc<dyn trace_commons_server::db::PayoutStore>>,
+    /// The sha256 of the operator's payout control token
+    /// (`TRACE_COMMONS_PAYOUT_CONTROL_TOKEN`), the only credential the
+    /// rail-wide payout controls (halt, resume, hold clearing) accept. `None`
+    /// when unset: those routes then refuse every caller. Never the token.
+    payout_control_token_hash: Option<String>,
+    /// The referral code store (referral spec sections 2 and 3): the
+    /// database mirror's PostgreSQL backend, or `None` without one. The
+    /// referral routes then answer `referral_unavailable`, and a sign-up
+    /// code is not applied.
+    referral_store: Option<Arc<dyn trace_commons_server::db::ReferralStore>>,
+    /// The referral program's settings (`TRACE_COMMONS_REFERRAL_*`),
+    /// validated at boot. Unset means the program has not started.
+    referral_config: Arc<trace_commons_server::referral_config::ReferralConfig>,
+    /// The key network marks are made under
+    /// (`TRACE_COMMONS_REFERRAL_NETWORK_MARK_KEY`). Required, at boot,
+    /// whenever the referral program or its bonus is configured; `None`
+    /// otherwise, and then no mark is recorded.
+    referral_network_mark_key:
+        Option<Arc<trace_commons_server::referral_network::ReferralNetworkMarkKey>>,
+    /// The first run's dollar estimate `GET /v1/public/first-run-estimate`
+    /// serves: from the operator's two settings, validated at boot, or
+    /// empty when neither is set.
+    first_run_estimate: Arc<trace_commons_protocol::first_run_estimate::FirstRunEstimate>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -1719,6 +1791,15 @@ struct AppState {
     /// provisioning is disabled; when it is enabled, boot fails rather than
     /// leaving this unset, so no request path can find it missing and improvise.
     near_account_identity: Option<Arc<NearAccountIdentity>>,
+    /// The NEAR AI sign-up policy template
+    /// (`TRACE_COMMONS_NEAR_AI_SIGNUP_POLICY_TEMPLATE`, owner decision
+    /// 2026-10-24). NEAR AI provisioning, bind and device enrollment write the
+    /// device's contributor grant from it -- the grant invite enrollment
+    /// writes, which the issuer reads as the claim ceiling. `None` writes no
+    /// grant, so the device's claims keep the floor. A malformed value fails
+    /// boot.
+    near_ai_signup_policy_template:
+        Option<trace_commons_server::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     root: PathBuf,
     /// #438: per-driver liveness, so a background loop that has been failing
     /// for days is visible as such instead of only as a repeating WARN.
@@ -1879,6 +1960,21 @@ struct AppState {
     max_export_items_per_request: usize,
     /// Per-principal `POST /v1/traces` rate and in-flight caps.
     submit_principal_limits: SubmitPrincipalLimits,
+    /// Deployment-wide budget of upload body bytes in flight, taken by
+    /// [`authenticate_large_body_request`] for each upload by its declared
+    /// size. Shared by every clone of the state.
+    large_body_bytes: Arc<tokio::sync::Semaphore>,
+    /// Upload body bytes each principal holds of [`Self::large_body_bytes`],
+    /// and the most it may hold. Shared by every clone of the state.
+    large_body_principal_bytes: Arc<LargeBodyPrincipalBytes>,
+    /// How long an upload body may go without a new chunk before
+    /// [`authenticate_large_body_request`] refuses it
+    /// ([`UPLOAD_BODY_IDLE_TIMEOUT`]; tests shorten it).
+    upload_body_idle_timeout: StdDuration,
+    /// Submit attempts this process admitted past the hourly ceiling, per
+    /// ceiling scope, for [`enforce_account_hourly_submission_ceiling`].
+    /// Shared by every clone of the state.
+    submission_attempts: Arc<HourlySubmissionAttempts>,
     analytics_min_cell_count: usize,
     analytics_broad_release_noise: Option<TraceAnalyticsNoiseConfig>,
     analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
@@ -1991,10 +2087,6 @@ struct AppState {
     /// the config + reader-pool plumbing lands first.
     #[allow(dead_code)]
     pii_backstop_driver: Option<PiiBackstopDriverConfig>,
-    /// Unbound passkey-account reaper. `None` (the default) means it is off;
-    /// `TRACE_COMMONS_UNBOUND_REAPER_ENABLED` turns it on. Its own pool, built
-    /// at boot from its own login, so the runtime pool never runs the sweep.
-    unbound_account_reaper: Option<UnboundAccountReaperConfig>,
     /// Redaction-witness PII-backstop bypass. `None` -- the default, and the
     /// posture every deployment ships in -- means an arriving certificate is
     /// ignored entirely and every content-bearing trace holds exactly as it
@@ -2006,14 +2098,19 @@ struct AppState {
     witness_capture_pin: Option<WitnessPin>,
     admission: Option<admission::AdmissionConfig>,
     account_admission: Option<admission::AccountAdmissionConfig>,
+    /// Optional narrow nonowner trust pool; the ingest source pool is unchanged.
+    client_upload_trust_database: Option<Arc<dyn Database>>,
     /// A candidate earned-trust growth policy for the shadow evaluator. Never
     /// read by admission; see `account_trust_growth_routes`.
     account_trust_shadow_policy:
         Option<Arc<trace_commons_server::account_trust_rule::GrowthPolicy>>,
-    /// The admission policy's own growth rule when it names `tiered-v1`:
-    /// what the evaluator's `applied` mode runs and admission reads.
+    /// The admission policy's `tiered-v1` rule or the independent client
+    /// upload trust rule. Both use the existing evaluator's `applied` mode.
     account_trust_applied_policy:
         Option<Arc<trace_commons_server::account_trust_rule::GrowthPolicy>>,
+    /// `TRACE_COMMONS_NEAR_AI_STARTER_MODE`: whether submissions record the
+    /// starter advance's plausibility features. See `starter_advance`.
+    near_ai_starter_mode: starter_advance::StarterMode,
     /// Unattended fact recording and evaluation under the scoped
     /// `account_trust_worker` token.
     account_trust_scheduler: Option<account_trust_growth_routes::AccountTrustSchedulerConfig>,
@@ -2061,25 +2158,19 @@ struct AppState {
     /// `credit_withheld_reason = "non_production_gate"`. Toggle via
     /// `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE`.
     novelty_utility_require_production_gate: bool,
-    /// Slice 2 passkeys: the WebAuthn relying party, present only when
-    /// `WebauthnConfig` is fully configured. `None` makes the passkey surface
-    /// fail closed (its accessor 503s). Wired into ceremony handlers in later
-    /// Slice 2 tasks.
-    account_webauthn: Option<Arc<webauthn_rs::Webauthn>>,
-    /// Slice 2 passkeys: in-process, single-use, TTL-bounded ceremony store.
-    /// Single-instance only (see `account_passkey` module docs). Consumed by
-    /// the register/login ceremony handlers in later Slice 2 tasks.
+    /// The scoring award's settlement cut-over
+    /// (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`): a `NoveltyUtility`
+    /// event written before it never settles, and with `None` none does.
+    novelty_utility_settle_from: Option<DateTime<Utc>>,
+    /// The principal the scoring driver issues the scoring award as
+    /// (`scoring_driver_credit_issuer`):
+    /// `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`, the issuer the
+    /// pipeline credits as. `None` falls back to a label no central-issuer
+    /// allowlist can hold.
+    scoring_driver_credit_issuer_principal_ref: Option<String>,
+    /// The NEAR wallet sign-in's in-process, single-use, TTL-bounded ceremony
+    /// store. Single-instance only (see the `account_ceremony` module docs).
     account_ceremony_store: Arc<CeremonyStore>,
-    /// Z2 S2: the cap on unbound passkey-origin accounts, from
-    /// `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`. Unset disables native
-    /// passkey creation.
-    account_unbound_ceiling:
-        Arc<trace_commons_server::account_native_passkey::UnboundAccountCeiling>,
-    /// Z2 S2: successful native passkey creations per client IP in a rolling
-    /// 24 hours, from `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY`
-    /// (default 10). In process, like the other account limiters.
-    account_native_creation_cap:
-        Arc<trace_commons_server::account_native_passkey::PerSourceCreationCap>,
     /// Loopback native-app sign-in: pending authorization requests, keyed by
     /// `request_id`, holding only the PKCE challenge and the validated loopback
     /// redirect. Single-use and TTL-bounded, same in-process store and same
@@ -2329,19 +2420,6 @@ struct PiiBackstopDriverConfig {
     per_submission_timeout: StdDuration,
 }
 
-/// In-process unbound-account reaper config (Z2 S5). Like the PII-backstop
-/// driver it has no bearer-token worker route; unlike it, the cross-tenant
-/// pool is the reaper's own, held here rather than in `PgBackend`, and the
-/// only thing it can run is the V101 definer function.
-#[derive(Clone)]
-struct UnboundAccountReaperConfig {
-    interval: StdDuration,
-    unbound_ttl_days: i64,
-    closed_ttl_days: i64,
-    batch_size: i32,
-    reaper: trace_commons_server::account_reaper::UnboundAccountReaper,
-}
-
 /// Per-tick outcome tally returned by `run_pii_backstop_driver_tick` and
 /// logged by `spawn_pii_backstop_driver_task`. `done` counts submissions that
 /// were re-redacted and released (to `Accepted`/`Quarantined`); `failed`
@@ -2404,6 +2482,7 @@ struct TraceCreditCycleSchedulerConfig {
 
 #[derive(Clone)]
 struct TraceCreditSettlementSchedulerConfig {
+    scope: CreditSettlementSchedulerScope,
     worker_token: SecretString,
     interval: StdDuration,
     dry_run: bool,
@@ -2414,6 +2493,38 @@ struct TraceCreditSettlementSchedulerConfig {
     ranking_model_version: Option<String>,
     ranking_target_use: Option<TraceAllowedUse>,
     limit: usize,
+}
+
+#[derive(Clone, Default)]
+enum CreditSettlementSchedulerScope {
+    #[default]
+    Tenant,
+    AllTenants {
+        cursor: Arc<tokio::sync::Mutex<Option<String>>>,
+    },
+}
+
+const CREDIT_SETTLEMENT_SCHEDULER_SCOPE_ENV: &str =
+    "TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_SCOPE";
+const CREDIT_SETTLEMENT_TENANT_PAGE_LIMIT: usize = 100;
+
+fn internal_credit_settlement_actor(tenant_id: &str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: tenant_id.to_owned(),
+        role: TokenRole::UtilityWorker,
+        principal_ref: format!(
+            "principal_sha256:{}",
+            hex::encode(Sha256::digest(b"internal:credit-settlement-scheduler:v1"))
+        ),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::InternalScheduler,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
 }
 
 #[derive(Clone)]
@@ -2621,13 +2732,24 @@ impl TraceTenantRolloutGates {
     }
 }
 
+/// `Default` is every limit off, including the account ceiling: the default
+/// a deployment gets is set by the environment parser, not here, so a test
+/// state stays unbounded.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 struct TraceSubmissionQuotaConfig {
     max_per_tenant_per_hour: usize,
     max_per_principal_per_hour: usize,
+    /// Submissions per rolling hour for one account, whatever its admission
+    /// authority (bounded, invited or attested), or for one principal of a
+    /// tenant outside the account namespaces. Enforced by
+    /// `enforce_account_hourly_submission_ceiling`; it does not touch the
+    /// account admission budget.
+    max_per_account_per_hour: usize,
 }
 
 impl TraceSubmissionQuotaConfig {
+    /// Whether the tenant and principal quotas are both off. The account
+    /// ceiling is separate and is not consulted here.
     fn is_disabled(self) -> bool {
         self.max_per_tenant_per_hour == 0 && self.max_per_principal_per_hour == 0
     }
@@ -3578,6 +3700,7 @@ impl TenantCtx {
 enum TraceAuthMethod {
     StaticToken,
     SignedClaim,
+    InternalScheduler,
 }
 
 impl TraceAuthMethod {
@@ -3585,6 +3708,7 @@ impl TraceAuthMethod {
         match self {
             Self::StaticToken => "static_token",
             Self::SignedClaim => "signed_claim",
+            Self::InternalScheduler => "internal_scheduler",
         }
     }
 }
@@ -3967,7 +4091,7 @@ impl AppState {
         let tenant_policies = parse_tenant_submission_policies_from_env()?;
         let require_tenant_submission_policy =
             env_truthy("TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY");
-        let db_connections = trace_corpus_db_mirror_from_env().await?;
+        let (db_connections, db_source_config) = trace_corpus_db_mirror_from_env().await?;
         let db_mirror = db_connections
             .as_ref()
             .map(|connections| connections.database.clone());
@@ -4102,6 +4226,17 @@ impl AppState {
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
         let submit_principal_limits = parse_submit_principal_limits_from_env()?;
+        let large_body_byte_budget = parse_large_body_byte_budget(
+            std::env::var(TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET)
+                .ok()
+                .as_deref(),
+        )?;
+        let large_body_principal_byte_share = parse_large_body_principal_byte_share(
+            std::env::var(TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES)
+                .ok()
+                .as_deref(),
+            large_body_byte_budget,
+        )?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
         let community_tenant_ids =
             parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_COMMUNITY_TENANT_IDS)?
@@ -4166,12 +4301,15 @@ impl AppState {
         ) || pipeline_default_routing_config.is_some();
         let novelty_utility_require_production_gate =
             env_truthy(TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE);
+        // The server's credit issuer: the pipeline's, and the scoring
+        // driver's for the awards it emits.
+        let credit_issuer_principal_ref = parse_pipeline_credit_issuer_principal_ref_from_env()?;
         // Ruling T15-6: the configuration of `main`'s NoveltyUtility credit
         // checks, for a compatibility run's Trace Credit leg, and (Zaki
         // review 1, item 2) `main`'s settlement controls, for the paid leg.
         let pipeline_novelty_utility_checks = PipelineNoveltyUtilityChecks {
             central_issuer_principal_refs: credit_settlement_central_issuer_principal_refs.clone(),
-            issuer_principal_ref: parse_pipeline_credit_issuer_principal_ref_from_env()?,
+            issuer_principal_ref: credit_issuer_principal_ref.clone(),
             require_production_gate: novelty_utility_require_production_gate,
             settlement_allowed_policy_versions: credit_settlement_allowed_policy_versions.clone(),
             settlement_require_issuer_approval: credit_settlement_require_issuer_approval,
@@ -4194,6 +4332,14 @@ impl AppState {
         // bundle must hold.
         let novelty_utility_credit_points_delta =
             parse_novelty_utility_credit_points_delta_from_env()?;
+        let novelty_utility_settle_from = parse_novelty_utility_settle_from(
+            optional_trimmed_env(TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM)?.as_deref(),
+        )?;
+        validate_novelty_utility_credit_config(
+            novelty_utility_credit_points_delta,
+            novelty_utility_require_production_gate,
+            novelty_utility_settle_from,
+        )?;
         let pipeline_main_gate = pipeline_main_gate_config_from_env(
             pipeline_runtime_assembler.is_some(),
             novelty_utility_credit_points_delta,
@@ -4540,29 +4686,6 @@ impl AppState {
         let vector_index_scheduler = parse_trace_vector_index_scheduler_config_from_env()?;
         let perplexity_score_driver = parse_perplexity_score_driver_config_from_env()?;
         let pii_backstop_driver = parse_pii_backstop_driver_config_from_env()?;
-        let unbound_account_reaper = parse_unbound_account_reaper_config_from_env()?;
-        if let Some(reaper) = &unbound_account_reaper {
-            // The pool connects lazily; take one connection now and check the
-            // login may execute the reaper function, so a login that cannot
-            // connect, or lacks trace_unbound_account_reaper, fails boot, not
-            // the first tick. The error names the variable, never the URL.
-            reaper.reaper.verify_login().await.map_err(|error| {
-                let denied = matches!(
-                    &error,
-                    trace_commons_server::error::DatabaseError::Pool(label)
-                        if label == "unbound_reaper_execute_denied"
-                );
-                if denied {
-                    anyhow::anyhow!(
-                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} connects but cannot execute trace_reap_unbound_accounts (unbound_reaper_execute_denied)"
-                    )
-                } else {
-                    anyhow::anyhow!(
-                        "{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} did not accept a connection"
-                    )
-                }
-            })?;
-        }
         // Fail closed on configuration. An enabled bypass missing its signing
         // address, its measurement set, or its policy allowlist refuses to
         // boot naming the control, rather than running with a control an
@@ -4579,16 +4702,52 @@ impl AppState {
         let account_admission = admission::account_config_from_env(
             db_mirror.is_some() && require_db_mirror_writes && require_postgres_trace_rls_ready,
         )?;
+        let client_upload_trust_policy = upload_allowance::trust_policy_from_env()?.map(Arc::new);
+        let account_trust_shadow_policy =
+            account_trust_growth_routes::shadow_policy_from_env()?.map(Arc::new);
+        let client_upload_trust_database = account_trust_growth_routes::trust_database_from_env(
+            db_source_config.as_ref(),
+            client_upload_trust_policy.is_some(),
+            account_trust_shadow_policy.is_some(),
+            account_admission.is_some(),
+            admission.is_some(),
+            require_db_mirror_writes,
+        )
+        .await?;
+        account_trust_growth_routes::require_independent_upload_trust_controls(
+            client_upload_trust_policy.is_some(),
+            account_admission.is_some(),
+            admission.is_some(),
+            db_mirror.is_some(),
+            require_db_mirror_writes,
+            require_postgres_trace_rls_ready || client_upload_trust_database.is_some(),
+        )?;
         admission::require_legacy_evidence_policy(
             account_admission.is_some(),
             admission.is_some(),
         )?;
-        let account_trust_shadow_policy =
-            account_trust_growth_routes::shadow_policy_from_env()?.map(Arc::new);
-        let account_trust_applied_policy =
+        let account_trust_applied_policy = if client_upload_trust_policy.is_some() {
+            account_trust_growth_routes::select_applied_policy(
+                account_admission.as_ref(),
+                client_upload_trust_policy.as_deref(),
+                |key| std::env::var(key),
+            )?
+        } else {
             account_trust_growth_routes::applied_policy_from_env(account_admission.as_ref())?
-                .map(Arc::new);
+        }
+        .map(Arc::new);
         let account_trust_scheduler = account_trust_growth_routes::scheduler_config_from_env()?;
+        let near_ai_starter_mode = starter_advance::starter_mode_from_env(db_mirror.is_some())?;
+        if client_upload_trust_policy.is_some() || client_upload_trust_database.is_some() {
+            let db = client_upload_trust_database
+                .as_ref()
+                .or(db_mirror.as_ref())
+                .ok_or_else(|| anyhow::anyhow!("client_upload_trust_database_unavailable"))?;
+            account_trust_growth_routes::require_independent_upload_trust_runtime_ready(
+                db.as_ref(),
+            )
+            .await?;
+        }
         if let Some(account_config) = account_admission.as_ref() {
             let db = db_mirror
                 .as_ref()
@@ -4803,29 +4962,11 @@ impl AppState {
             "TRACE_COMMONS_OBJECT_PRIMARY_DERIVED_EXPORTS requires TRACE_COMMONS_DERIVED_EXPORT_REQUIRE_OBJECT_REFS",
         )?;
 
-        // Slice 2 passkeys: build the relying party only when fully configured.
-        // A partial WebauthnConfig is dropped to None by the loader, so the
-        // passkey surface stays fail-closed. An invalid origin fails startup.
-        let account_webauthn = match WebauthnConfig::from_env() {
-            Some(cfg) => Some(Arc::new(build_webauthn(&cfg)?)),
-            None => None,
-        };
-
         // Slice 3a login-with-NEAR: capture the NEAR sign-in config only when
         // fully configured. A partial NearConfig is dropped to None by the loader,
         // so the NEAR sign-in surface stays fail-closed (its accessor 503s).
         let account_near_config = NearConfig::from_env().map(Arc::new);
         let account_ceremony_store = Arc::new(CeremonyStore::new());
-        // Z2 S2: unset disables native passkey creation; a malformed value
-        // fails startup rather than guessing either way.
-        let account_unbound_ceiling = Arc::new(
-            trace_commons_server::account_native_passkey::UnboundAccountCeiling::from_env()
-                .map_err(|error| anyhow::anyhow!(error))?,
-        );
-        let account_native_creation_cap = Arc::new(
-            trace_commons_server::account_native_passkey::PerSourceCreationCap::from_env()
-                .map_err(|error| anyhow::anyhow!(error))?,
-        );
         let account_native_requests = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_REQUEST_TTL));
         let account_native_codes = Arc::new(CeremonyStore::with_ttl(NATIVE_AUTH_CODE_TTL));
 
@@ -4855,6 +4996,65 @@ impl AppState {
             .map(|client| client as Arc<dyn NearAttestationClient>);
         let near_attestation_key_report_client =
             near_attestation_endpoint.map(|client| client as Arc<dyn AttestedKeyReportClient>);
+
+        // Payout rails (docs/superpowers/specs/2026-10-21-nearai-credit-
+        // payout-design.md, section 4 "Rate"): unless the NEAR AI rail is
+        // disabled, the default, record the installed settlement table's
+        // rate as that rail's epoch. A version re-installed with a different
+        // rate refuses boot. Disabled touches nothing, so an ingest login
+        // without the payout writer role boots as before. Logs carry the
+        // rail and a label, never the rate.
+        let credit_settlement_table = credit_estimate::settlement_table_from_env()?;
+        let payout_store = db_connections.as_ref().map(|connections| {
+            connections.postgres.clone() as Arc<dyn trace_commons_server::db::PayoutStore>
+        });
+        // The referral bonus rides the near_ai pass; `disabled`, the
+        // default, attaches nothing.
+        let payout_rails = Arc::new(referral_admin::with_referral_bonus_from_env(
+            payout_rails::payout_rails_from_env(
+                credit_settlement_table.as_deref(),
+                payout_store.as_deref(),
+            )
+            .await?,
+            db_connections
+                .as_ref()
+                .map(|connections| connections.postgres.clone()),
+        )?);
+        // Any live rail needs the operator's control token, or its kill
+        // switch would be unreachable.
+        let payout_control_token_hash =
+            payout_rails::payout_control_token_hash_from_env(&payout_rails)?;
+        // Referral codes (referral spec section 3): the settings refuse boot
+        // when malformed, naming the setting, never its value.
+        let referral_config = Arc::new(
+            trace_commons_server::referral_config::ReferralConfig::from_env()
+                .map_err(|error| anyhow::anyhow!("{}: {}", error.label(), error.setting()))?,
+        );
+        // Server-observed network marks (owner decision 2026-10-29): with the
+        // program or its bonus configured, a missing key refuses the start
+        // rather than run the abuse checks without the network signal.
+        let referral_network_mark_key =
+            trace_commons_server::referral_network::ReferralNetworkMarkKey::from_env(
+                referral_config.program_start.is_some() || payout_rails.referral_bonus().is_some(),
+            )
+            .map_err(|error| anyhow::anyhow!("{}: {}", error.label(), error.setting()))?
+            .map(Arc::new);
+        // The operator's grant of trace_referral_resolver, checked once at
+        // boot while referrals are on (fail closed, safe label).
+        referral_admin::require_referral_resolver(
+            db_connections
+                .as_ref()
+                .map(|connections| connections.postgres.as_ref()),
+            referral_config.program_start.is_some() || payout_rails.referral_bonus().is_some(),
+        )
+        .await?;
+        let referral_store = db_connections.as_ref().map(|connections| {
+            connections.postgres.clone() as Arc<dyn trace_commons_server::db::ReferralStore>
+        });
+        // A finalized pipeline credit batch wakes every enabled rail.
+        if let Some(service) = pipeline_service.as_ref() {
+            service.attach_payout_notifier(payout_rails.notifier());
+        }
 
         let state = Self {
             root,
@@ -4930,6 +5130,12 @@ impl AppState {
             tenant_rollout_gates,
             max_export_items_per_request,
             submit_principal_limits,
+            large_body_bytes: Arc::new(tokio::sync::Semaphore::new(large_body_byte_budget)),
+            large_body_principal_bytes: Arc::new(LargeBodyPrincipalBytes::new(
+                large_body_principal_byte_share,
+            )),
+            upload_body_idle_timeout: UPLOAD_BODY_IDLE_TIMEOUT,
+            submission_attempts: Arc::new(HourlySubmissionAttempts::default()),
             analytics_min_cell_count,
             analytics_broad_release_noise,
             analytics_broad_release_privacy_accounting,
@@ -4987,13 +5193,14 @@ impl AppState {
             vector_index_scheduler,
             perplexity_score_driver,
             pii_backstop_driver,
-            unbound_account_reaper,
             witness_bypass,
             witness_capture_pin,
             near_provisioning_admission_ready: admission.is_some() || account_admission.is_some(),
             admission,
             account_admission,
+            client_upload_trust_database,
             account_trust_shadow_policy,
+            near_ai_starter_mode,
             account_trust_applied_policy,
             account_trust_scheduler,
             benchmark_registry_scheduler,
@@ -5023,10 +5230,9 @@ impl AppState {
                 parse_revocation_propagation_max_attempts_from_env()?,
             novelty_utility_credit_points_delta,
             novelty_utility_require_production_gate,
-            account_webauthn,
+            novelty_utility_settle_from,
+            scoring_driver_credit_issuer_principal_ref: credit_issuer_principal_ref,
             account_ceremony_store,
-            account_unbound_ceiling,
-            account_native_creation_cap,
             near_provisioning_public_origin: std::env::var(
                 "TRACE_COMMONS_NEAR_PROVISIONING_PUBLIC_ORIGIN",
             )
@@ -5034,13 +5240,22 @@ impl AppState {
             near_provisioning_enabled: std::env::var("TRACE_COMMONS_NEAR_PROVISIONING_ENABLED")
                 .is_ok_and(|v| v == "true"),
             near_account_identity: build_near_account_identity_from_env().await?,
+            near_ai_signup_policy_template:
+                trace_commons_server::near_ai_signup_policy::NearAiSignupPolicyTemplate::from_env()?,
             account_native_requests,
             account_native_codes,
             account_near_config,
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             activity_missions_policy: activity_missions::policy_from_env()?,
             credit_estimate_table: credit_estimate::table_from_env()?,
-            credit_settlement_table: credit_estimate::settlement_table_from_env()?,
+            credit_settlement_table,
+            payout_rails,
+            payout_store,
+            payout_control_token_hash,
+            referral_store,
+            referral_config,
+            referral_network_mark_key,
+            first_run_estimate: credit_estimate::first_run_estimate_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -7558,72 +7773,6 @@ fn parse_pii_backstop_driver_config_from_env() -> anyhow::Result<Option<PiiBacks
     }))
 }
 
-/// The unbound passkey-account reaper. Off by default (`Ok(None)`), so
-/// existing deployments and CI are unaffected until an operator opts in.
-///
-/// Fail-closed at boot: `_ENABLED` without a reaper login URL refuses with a
-/// missing-control label rather than silently leaving the reaper off, and a
-/// login that cannot connect refuses in `AppState::from_env`. The error text
-/// never includes the URL. The unbound TTL defaults to 7 days from binding
-/// creation and the closed TTL to 30 days from `closed_at`; neither can be set
-/// under one day, and the V101 function refuses that too. A variable from the
-/// earlier draft's idle window refuses boot.
-fn parse_unbound_account_reaper_config_from_env()
--> anyhow::Result<Option<UnboundAccountReaperConfig>> {
-    use trace_commons_server::account_reaper::{
-        DEFAULT_BATCH, DEFAULT_CLOSED_TTL_DAYS, DEFAULT_UNBOUND_TTL_DAYS, MAX_BATCH, MAX_TTL_DAYS,
-        MIN_TTL_DAYS, UnboundAccountReaper,
-    };
-    for removed in TRACE_COMMONS_UNBOUND_REAPER_REMOVED_VARS {
-        if optional_trimmed_env(removed)?.is_some() {
-            anyhow::bail!(
-                "{removed} is no longer read; use {TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS} and {TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS}"
-            );
-        }
-    }
-    if !env_truthy(TRACE_COMMONS_UNBOUND_REAPER_ENABLED) {
-        return Ok(None);
-    }
-    let Some(url) = optional_trimmed_env(TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL)? else {
-        anyhow::bail!(
-            "{TRACE_COMMONS_UNBOUND_REAPER_ENABLED}=true but {TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is not set"
-        );
-    };
-    let unbound_ttl_days = parse_optional_scheduler_i64_env(
-        TRACE_COMMONS_UNBOUND_REAPER_UNBOUND_TTL_DAYS,
-        DEFAULT_UNBOUND_TTL_DAYS,
-        MIN_TTL_DAYS,
-        MAX_TTL_DAYS,
-    )?;
-    let closed_ttl_days = parse_optional_scheduler_i64_env(
-        TRACE_COMMONS_UNBOUND_REAPER_CLOSED_TTL_DAYS,
-        DEFAULT_CLOSED_TTL_DAYS,
-        MIN_TTL_DAYS,
-        MAX_TTL_DAYS,
-    )?;
-    let interval_seconds = parse_optional_scheduler_u64_env(
-        TRACE_COMMONS_UNBOUND_REAPER_INTERVAL_SECONDS,
-        TRACE_UNBOUND_REAPER_DEFAULT_INTERVAL_SECONDS,
-        60,
-        86_400,
-    )?;
-    let batch_size = parse_optional_scheduler_i64_env(
-        TRACE_COMMONS_UNBOUND_REAPER_BATCH_SIZE,
-        i64::from(DEFAULT_BATCH),
-        1,
-        i64::from(MAX_BATCH),
-    )?;
-    let reaper = UnboundAccountReaper::connect(&url)
-        .map_err(|_| anyhow::anyhow!("{TRACE_COMMONS_UNBOUND_REAPER_DATABASE_URL} is invalid"))?;
-    Ok(Some(UnboundAccountReaperConfig {
-        interval: StdDuration::from_secs(interval_seconds),
-        unbound_ttl_days,
-        closed_ttl_days,
-        batch_size: batch_size as i32,
-        reaper,
-    }))
-}
-
 fn parse_trace_credit_cycle_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditCycleSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_CREDIT_CYCLE_SCHEDULER_ENABLED);
@@ -7695,10 +7844,31 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
 -> anyhow::Result<Option<TraceCreditSettlementSchedulerConfig>> {
     let enabled = env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED);
     let worker_token = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN)?;
+    let scope = match optional_trimmed_env(CREDIT_SETTLEMENT_SCHEDULER_SCOPE_ENV)?.as_deref() {
+        None | Some("tenant") => CreditSettlementSchedulerScope::Tenant,
+        Some("all_tenants") => {
+            anyhow::ensure!(
+                enabled,
+                "all_tenants settlement requires explicit scheduler enablement"
+            );
+            anyhow::ensure!(
+                worker_token.is_none(),
+                "all_tenants settlement must not configure a tenant bearer"
+            );
+            CreditSettlementSchedulerScope::AllTenants {
+                cursor: Arc::new(tokio::sync::Mutex::new(None)),
+            }
+        }
+        Some(_) => anyhow::bail!("invalid credit settlement scheduler scope"),
+    };
     if !enabled && worker_token.is_none() {
         return Ok(None);
     }
-    let Some(worker_token) = worker_token else {
+    let worker_token = if matches!(scope, CreditSettlementSchedulerScope::AllTenants { .. }) {
+        String::new()
+    } else if let Some(worker_token) = worker_token {
+        worker_token
+    } else {
         anyhow::bail!(
             "{TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_ENABLED}=true requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN}"
         );
@@ -7712,7 +7882,7 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
     let policy_version = optional_trimmed_env(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION)?
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "{TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_TOKEN} requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION}"
+                "credit settlement scheduler requires {TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_POLICY_VERSION}"
             )
         })
         .and_then(|configured| {
@@ -7763,6 +7933,7 @@ fn parse_trace_credit_settlement_scheduler_config_from_env()
         TRACE_CREDIT_SETTLEMENT_WORKER_RUN_MAX_LIMIT,
     )?;
     Ok(Some(TraceCreditSettlementSchedulerConfig {
+        scope,
         worker_token: SecretString::from(worker_token),
         interval: StdDuration::from_secs(interval_seconds),
         dry_run: env_truthy(TRACE_COMMONS_CREDIT_SETTLEMENT_SCHEDULER_DRY_RUN),
@@ -8049,9 +8220,10 @@ struct TraceCorpusDbConnections {
     postgres: Arc<PgBackend>,
 }
 
-async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<TraceCorpusDbConnections>> {
+async fn trace_corpus_db_mirror_from_env()
+-> anyhow::Result<(Option<TraceCorpusDbConnections>, Option<DatabaseConfig>)> {
     if !env_truthy("TRACE_COMMONS_DB_DUAL_WRITE") {
-        return Ok(None);
+        return Ok((None, None));
     }
 
     let url = std::env::var("DATABASE_URL")
@@ -8072,7 +8244,10 @@ async fn trace_corpus_db_mirror_from_env() -> anyhow::Result<Option<TraceCorpusD
         .context("failed to migrate Trace Commons DB dual-write mirror")?;
     let database = postgres.clone() as Arc<dyn Database>;
     tracing::info!("Trace Commons PostgreSQL DB dual-write mirror enabled");
-    Ok(Some(TraceCorpusDbConnections { database, postgres }))
+    Ok((
+        Some(TraceCorpusDbConnections { database, postgres }),
+        Some(config),
+    ))
 }
 
 async fn validate_required_postgres_trace_rls_ready(
@@ -8401,11 +8576,7 @@ fn authenticated_account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
 /// Every authenticated account route, with the record of what was registered.
 ///
 /// Routes join ONLY through [`account_routes::AccountRoutes`], which records
-/// each `(method, path)`. Each one must also be classified in
-/// [`account_routes::UNBOUND_ACCOUNT_ROUTE_POLICY`] -- the unbound gate in
-/// `account_auth_middleware` refuses any route that is not -- and the test
-/// `every_authenticated_account_route_is_classified_for_unbound_accounts`
-/// fails until it is.
+/// each `(method, path)`.
 fn authenticated_account_surface(
     state: Arc<AppState>,
 ) -> account_routes::AuthenticatedAccountRoutes {
@@ -8417,19 +8588,29 @@ fn authenticated_account_surface(
 
 /// The account routes before authentication, as two groups because the reward
 /// routes take an extra response layer outside the auth middleware. The
-/// production surface above and the gate tests both build from this, so they
+/// production surface above and the tests both build from this, so they
 /// cannot disagree about which routes exist.
 fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::AccountRoutes) {
     let general = account_routes::AccountRoutes::new()
+        .get("/v1/account/upload-allowance", upload_allowance::handler)
         .get(
             "/v1/account/contribution-status",
             admission::account_status_handler,
         )
-        // Z2 S1: the caller's binding state, for the native app's state machine.
-        .get("/v1/account/binding", account_binding_handler)
         .post("/v1/account/invites/redeem", account_invite_redeem_handler)
         .merge(legacy_invite_link_routes::routes())
         .merge(inference_connection_routes::routes())
+        // Payout recipient links (payout spec section 5): start, confirm and
+        // status on the signed-in account session; no passkey (owner,
+        // 2026-10-23).
+        .merge(payout_link_routes::routes())
+        // Referral codes and applying one (referral spec section 6), on the
+        // signed-in account session as the payout links are.
+        .merge(referral_routes::routes())
+        // The devices linked to the account: list, rename, revoke.
+        .merge(account_devices_routes::routes())
+        // One-time codes that link a headless device: mint and status.
+        .merge(account_device_codes_routes::account_routes())
         .get("/v1/account/traces", account_traces_list_handler)
         .post(
             "/v1/account/source-sessions/status",
@@ -8480,35 +8661,6 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
             "/v1/account/sessions/revoke-all",
             account_revoke_all_handler,
         )
-        .post(
-            "/v1/account/passkeys/register/start",
-            account_passkey_register_start_handler,
-        )
-        .post(
-            "/v1/account/passkeys/register/finish",
-            account_passkey_register_finish_handler,
-        )
-        // The native sibling (Z2 S2): the same registration with the ceremony
-        // id in the body instead of a cookie, native session only.
-        .post(
-            "/v1/account/passkeys/native/register/start",
-            account_passkey_native_register_start_handler,
-        )
-        .post(
-            "/v1/account/passkeys/native/register/finish",
-            account_passkey_native_register_finish_handler,
-        )
-        // Passkey credential management (Slice 2 Task 7). list / rename / remove the
-        // caller's OWN credentials. `{credential_id}` is the public base64url id.
-        .get("/v1/account/passkeys", account_passkeys_list_handler)
-        .patch(
-            "/v1/account/passkeys/{credential_id}",
-            account_passkey_rename_handler,
-        )
-        .delete(
-            "/v1/account/passkeys/{credential_id}",
-            account_passkey_remove_handler,
-        )
         // Login-with-NEAR enroll ceremony (Slice 3a Task 6). Links a NEAR access
         // key to the caller's account behind the same account-auth middleware.
         .post(
@@ -8545,19 +8697,7 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         // consuming device B's login-link as proof-of-control (a weak session may
         // stage); `confirm` performs the irreversible fold and is strong-auth-gated.
         .post("/v1/account/merge/start", account_merge_start_handler)
-        .post("/v1/account/merge/confirm", account_merge_confirm_handler)
-        // Connect near.ai (Z2 S3): bind this unbound passkey account to a NEAR
-        // AI login through the provisioning ceremony. Behind the account
-        // middleware, unlike the unauthenticated provisioning pair: the account
-        // comes from the session, and the ceremony is bound to it.
-        .post(
-            "/v1/account/near-ai/provision/bind/start",
-            near_ai_bind_start_handler,
-        )
-        .post(
-            "/v1/account/near-ai/provision/bind/finish",
-            near_ai_bind_finish_handler,
-        );
+        .post("/v1/account/merge/confirm", account_merge_confirm_handler);
     (general, rewards::account_routes())
 }
 
@@ -8590,8 +8730,16 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 }
 
 fn app(state: Arc<AppState>) -> Router {
-    let large_body_auth =
-        axum::middleware::from_fn_with_state(state.clone(), authenticate_large_body_request);
+    // One gate per body ceiling, so a declared length over the route's own
+    // ceiling is refused before any bytes are budgeted or read.
+    let large_body_auth = axum::middleware::from_fn_with_state(
+        state.clone(),
+        authenticate_large_body_request::<MAX_INGEST_BODY_BYTES>,
+    );
+    let large_attachment_auth = axum::middleware::from_fn_with_state(
+        state.clone(),
+        authenticate_large_body_request::<MAX_TOKEN_BUNDLE_BODY_BYTES>,
+    );
     Router::new()
         .route("/v1/reward-offers/{program_id}", get(rewards::offer))
         .route("/v1/missions", get(rewards::mission_catalog))
@@ -8614,7 +8762,7 @@ fn app(state: Arc<AppState>) -> Router {
             get(token_bundles::capabilities).merge(
                 post(token_bundles::begin)
                     .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
-                    .layer(large_body_auth.clone()),
+                    .layer(large_attachment_auth.clone()),
             ),
         )
         .route(
@@ -8622,6 +8770,18 @@ fn app(state: Arc<AppState>) -> Router {
             get(token_bundles::status).merge(
                 post(token_bundles::finalize)
                     .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                    // Finalize runs the submit work, so it takes the same
+                    // per-principal admission before its body is read.
+                    .layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        admit_submit_before_body,
+                    ))
+                    // Outer to the admission: a disabled, unknown or revoked
+                    // bundle is refused before it takes a submit slot or rate.
+                    .layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        token_bundles::finalize_precheck,
+                    ))
                     .layer(large_body_auth.clone()),
             ),
         )
@@ -8630,7 +8790,7 @@ fn app(state: Arc<AppState>) -> Router {
             get(token_bundles::read).merge(
                 axum::routing::put(token_bundles::put)
                     .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
-                    .layer(large_body_auth.clone()),
+                    .layer(large_attachment_auth),
             ),
         )
         .route("/health", get(health_handler))
@@ -8646,6 +8806,12 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/credit-estimate/table",
             get(credit_estimate::table_handler),
         )
+        // Same reason: the first run's dollar estimate is public operator
+        // configuration, read before an account exists. `{}` when unset.
+        .route(
+            "/v1/public/first-run-estimate",
+            get(credit_estimate::first_run_estimate_handler),
+        )
         // Same reason: the settlement table is public, non-personal data.
         // 404 when the operator installed none.
         .route(
@@ -8659,6 +8825,12 @@ fn app(state: Arc<AppState>) -> Router {
                 .merge(
                     post(submit_trace_route)
                         .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                        // Inner to `large_body_auth`, which it reads the
+                        // pre-body context from.
+                        .layer(axum::middleware::from_fn_with_state(
+                            state.clone(),
+                            admit_submit_before_body,
+                        ))
                         .layer(large_body_auth),
                 ),
         )
@@ -8692,6 +8864,13 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/contributors/me/submission-status",
             post(submission_status_handler),
+        )
+        // Add the model_training use to traces already sent, and re-run
+        // the scoring award withheld for lack of it.
+        .route(
+            trace_commons_protocol::model_training_consent::MODEL_TRAINING_CONSENT_PATH,
+            get(model_training_consent::eligibility_handler)
+                .post(model_training_consent::grant_handler),
         )
         .route(
             "/v1/contributors/me/score-attestation",
@@ -8768,8 +8947,8 @@ fn app(state: Arc<AppState>) -> Router {
         // and MUST NOT sit behind the account-auth middleware:
         //  - `login-links` mint authenticates the DEVICE bearer via
         //    `authenticate_ctx_with_tenant_access_grant` (NOT a cookie/account ctx).
-        //  - The redeem + passkey-login flows are the credential themselves (the
-        //    single-use code / the WebAuthn assertion).
+        //  - The redeem and NEAR wallet login flows are the credential
+        //    themselves (the single-use code / the wallet assertion).
         .route("/v1/account/login-links", post(mint_login_link_handler))
         // Loopback native-app sign-in. BOTH endpoints are unauthenticated by
         // necessity, and neither confers anything on its own:
@@ -8783,28 +8962,6 @@ fn app(state: Arc<AppState>) -> Router {
             post(native_authorize_start_handler),
         )
         .route("/v1/account/native/token", post(native_token_handler))
-        // Native passkey identity (Z2 S2). Unauthenticated for the same reason
-        // as the pair above: create/finish and login/finish CREATE the
-        // session, so they cannot require one. The credential is the verified
-        // WebAuthn ceremony itself; every refusal is `native_generic_deny`.
-        // Outside `AccountRoutes` on purpose, so the unbound gate and its
-        // classification table do not apply to them.
-        .route(
-            "/v1/account/native/passkey/create/start",
-            post(native_passkey_create_start_handler),
-        )
-        .route(
-            "/v1/account/native/passkey/create/finish",
-            post(native_passkey_create_finish_handler),
-        )
-        .route(
-            "/v1/account/native/passkey/login/start",
-            post(native_passkey_login_start_handler),
-        )
-        .route(
-            "/v1/account/native/passkey/login/finish",
-            post(native_passkey_login_finish_handler),
-        )
         .route(
             "/v1/account/near/provision/capabilities",
             get(near_provisioning::capabilities),
@@ -8853,31 +9010,24 @@ fn app(state: Arc<AppState>) -> Router {
             "/v1/account/near-ai/provision/finish/v2",
             post(near_provisioning::near_ai_provision_finish_v2_handler),
         )
+        // A headless device redeems a code minted by a signed-in device, and
+        // a device that joined that way renews its session with its key.
+        // Unauthenticated: the code, or the key's signature, is the credential.
+        .route(
+            trace_commons_protocol::account_device_code::DEVICE_CODE_REDEEM_PATH,
+            post(account_device_codes_routes::redeem_handler),
+        )
+        .route(
+            trace_commons_protocol::account_device_code::DEVICE_SESSION_RENEW_PATH,
+            post(account_device_codes_routes::renew_handler),
+        )
         // Browser-facing redeem flow. Intentionally NOT under /v1 and
         // un-authenticated: the single-use code IS the credential. The mint URL
         // (`/account/login?code=...`) points here.
         .route("/account/login", get(login_interstitial_handler))
         .route("/account/login/confirm", post(confirm_login_handler))
-        // Discoverable passkey login (Slice 2 Task 6). Un-versioned and un-authed,
-        // beside the redeem flow: the assertion IS the credential.
-        .route(
-            "/account/passkey/login/start",
-            post(account_passkey_login_start_handler),
-        )
-        .route(
-            "/account/passkey/login/finish",
-            post(account_passkey_login_finish_handler),
-        )
-        // The browser passkey step-up page (Z2 S7). Un-versioned and un-authed
-        // beside the login it drives: a plain page whose one script calls the
-        // routes above and the authenticated passkey and payout routes, so a
-        // weak native session's owner can get a strong cookie session.
-        .route(
-            step_up_page::STEP_UP_PATH,
-            get(step_up_page::step_up_page_handler),
-        )
         // Discoverable NEAR wallet login (Slice 3a Task 7). Un-versioned and
-        // un-authed, beside the passkey login flow: the NEP-413 wallet assertion
+        // un-authed, beside the redeem flow: the NEP-413 wallet assertion
         // IS the credential. No RPC at login — the signature is verified offline.
         .route(
             "/account/near/login/start",
@@ -8887,7 +9037,7 @@ fn app(state: Arc<AppState>) -> Router {
             "/account/near/login/finish",
             post(account_near_login_finish_handler),
         )
-        // AUTHENTICATED account surface (read-back, session, passkey enrollment +
+        // AUTHENTICATED account surface (read-back, session, NEAR identity
         // management). Grouped behind `account_auth_middleware` so the resolved
         // `AccountCtx` is injected AND any rotated session cookie is attached on
         // EVERY response (the single guaranteed rotation attach point).
@@ -9179,6 +9329,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(account_trust_growth_routes::account_trust_drill_handler),
         )
         .route(
+            "/v1/admin/starter-advance/dry-run-report",
+            post(starter_advance::starter_dry_run_report_handler),
+        )
+        .route(
             "/v1/admin/scores-by-submission",
             post(scores_by_submission_handler),
         )
@@ -9197,6 +9351,46 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/credit-settlement-drill",
             post(credit_settlement_drill_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/halt",
+            post(payout_rails::payout_rail_halt_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/resume",
+            post(payout_rails::payout_rail_resume_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/tenants/{tenant_id}/holds",
+            get(payout_rails::payout_holds_list_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/tenants/{tenant_id}/holds/clear",
+            post(payout_rails::payout_hold_clear_handler),
+        )
+        .route(
+            "/v1/admin/payout-rails/{rail_id}/links/{link_id_hash}/release",
+            post(payout_rails::payout_link_release_handler),
+        )
+        .route(
+            "/v1/admin/referrals/suspended",
+            get(referral_admin::referral_suspended_handler),
+        )
+        .route(
+            "/v1/admin/referrals/codes/clear",
+            post(referral_admin::referral_code_clear_handler),
+        )
+        .route(
+            "/v1/admin/referrals/codes/void",
+            post(referral_admin::referral_code_void_handler),
+        )
+        .route(
+            "/v1/admin/referrals/void",
+            post(referral_admin::referral_void_handler),
+        )
+        .route(
+            "/v1/admin/referrals/dry-run-report",
+            post(referral_admin::referral_dry_run_report_handler),
         )
         .route(
             "/v1/admin/near-attestation-drill",
@@ -9415,17 +9609,30 @@ fn app(state: Arc<AppState>) -> Router {
 
 /// Reject a missing or invalid bearer before a large upload extractor is
 /// allowed to poll the body, then bound how many upload bodies that principal,
-/// and the deployment, may be buffering at once. Both slots are held until the
-/// handler returns, which is after the body has been read and dropped.
-/// Handlers authenticate again on purpose: their existing rate-limit,
-/// tenant-access-grant, and admission ordering remains the authoritative
-/// authorization path, while this middleware is only the cheap pre-body gate.
+/// and the deployment, may be buffering at once, and how many of the
+/// deployment's upload bytes the principal may hold
+/// ([`LargeBodyPrincipalBytes`]) and the deployment holds in all. Every slot
+/// and byte is held until the handler returns, which is after the body has
+/// been read and dropped. The tenant-access-grant and admission checks stay
+/// in the handlers, after the body.
 ///
-/// Concurrency only, no per-minute rate: a token bundle may carry up to
+/// This middleware takes no per-minute rate: a token bundle may carry up to
 /// `MAX_ATTACHMENTS` attachments, uploaded one `put` at a time, so any rate a
 /// legitimate bundle fits under bounds nothing. Memory is what an in-flight
-/// cap bounds.
-async fn authenticate_large_body_request(
+/// cap bounds. The two routes that run submit work, `POST /v1/traces` and
+/// bundle finalize, also take the submit rate and slot before the body, in
+/// [`admit_submit_before_body`], which runs inside this middleware.
+///
+/// `LIMIT` is the route's body ceiling (its `DefaultBodyLimit`). A declared
+/// `Content-Length` over it is refused here with 413, before any budget is
+/// taken: axum's own limit only trips once that many bytes have been read.
+///
+/// The body is handed on under an idle timeout
+/// ([`AppState::upload_body_idle_timeout`], [`UPLOAD_BODY_IDLE_TIMEOUT`]):
+/// a body with no new chunk for that long fails its extraction, the route
+/// answers [`upload_body_idle_timeout_refusal`], and everything taken here
+/// is released as the request returns.
+async fn authenticate_large_body_request<const LIMIT: usize>(
     State(state): State<Arc<AppState>>,
     request: Request,
     next: Next,
@@ -9442,17 +9649,312 @@ async fn authenticate_large_body_request(
     let Some(_slots) = large_body_slots_for(&ACCOUNT_RATE_LIMITER, &principal_key) else {
         return large_body_concurrency_refusal();
     };
+    // Bytes, not just requests: at the envelope cap one upload is hundreds of
+    // MB and ingest holds several copies of it, so a count of 32 bounds
+    // nothing. Weighed from `Content-Length` before the body is polled.
+    let exact_length = axum::body::HttpBody::size_hint(request.body()).exact();
+    let Some(weight) = large_body_weight(request.headers(), exact_length, LIMIT) else {
+        return api_error(StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+    };
+    // The principal's share before the deployment's budget, so a principal
+    // at its share never takes bytes from the shared budget.
+    let Some(_share) = state
+        .large_body_principal_bytes
+        .try_take(principal_key, weight)
+    else {
+        return large_body_concurrency_refusal();
+    };
+    let Some(_bytes) = large_body_byte_permit(&state.large_body_bytes, weight) else {
+        return large_body_concurrency_refusal();
+    };
+    // Handed to `admit_submit_before_body`, which passes it on to the submit
+    // handlers, so they use the context established here.
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(PreBodyAuthenticated(tenant));
+    // An idle timeout between body chunks, so a stalled upload is refused
+    // and drops every slot and byte held above when this returns. Wrapping
+    // does not poll the body: the timer starts when the extractor first
+    // reads it, after the pre-body admission.
+    let idle = state.upload_body_idle_timeout;
+    let request = request
+        .map(|body| axum::body::Body::new(tower_http::timeout::TimeoutBody::new(idle, body)));
     next.run(request).await
 }
 
+/// The context [`authenticate_large_body_request`] authenticated before the
+/// body was read. Only that middleware inserts it; [`admit_submit_before_body`]
+/// reads it.
+#[derive(Clone)]
+struct PreBodyAuthenticated(TenantCtx);
+
+/// How long an upload body may go without a new chunk before it is refused
+/// (decision 1 on #1794). An idle timeout, not a total one: an upload that
+/// keeps moving finishes however long it takes. A stalled one (laptop sleep,
+/// a NAT drop with no FIN) is refused with [`UPLOAD_BODY_IDLE_TIMEOUT_LABEL`]
+/// and gives back every slot and byte it held, which would otherwise stay
+/// held until the socket died.
+const UPLOAD_BODY_IDLE_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+
+/// The fixed refusal for an upload body that stopped arriving.
+const UPLOAD_BODY_IDLE_TIMEOUT_LABEL: &str = "upload_body_idle_timeout";
+
+fn upload_body_idle_timeout_refusal() -> axum::response::Response {
+    api_error(StatusCode::REQUEST_TIMEOUT, UPLOAD_BODY_IDLE_TIMEOUT_LABEL).into_response()
+}
+
+/// Whether a body-read failure is the idle timeout
+/// [`authenticate_large_body_request`] put on the body, anywhere in its
+/// source chain.
+fn upload_body_idle_timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(error) = next {
+        if error.is::<tower_http::timeout::TimeoutError>() {
+            return true;
+        }
+        next = error.source();
+    }
+    false
+}
+
+/// `Bytes` for the large-body routes: the same extraction and rejections,
+/// except that a body that went idle past [`UPLOAD_BODY_IDLE_TIMEOUT`] is
+/// refused with the fixed [`upload_body_idle_timeout_refusal`] rather than
+/// axum's generic "Failed to buffer the request body".
+struct UploadBytes(Bytes);
+
+impl<S> FromRequest<S> for UploadBytes
+where
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Bytes::from_request(request, state)
+            .await
+            .map(UploadBytes)
+            .map_err(|rejection| {
+                if upload_body_idle_timed_out(&rejection) {
+                    upload_body_idle_timeout_refusal()
+                } else {
+                    rejection.into_response()
+                }
+            })
+    }
+}
+
+/// `POST /v1/traces` and bundle finalize, inside [`authenticate_large_body_request`]: take
+/// the per-principal in-flight slot and submission rate before the body is
+/// read, with the same refusals the handler gives (429,
+/// `submit_rate_limited`, `Retry-After`). The slot is held until the handler
+/// returns. The handler is handed [`SubmitAdmittedBeforeBody`], which
+/// carries the pre-body context, and does not count the request again; a
+/// request without it (a direct call, or a route this did not run on) is
+/// authenticated and admitted by the handler as before.
+///
+/// Every request admitted here counts, whether or not its body arrives,
+/// parses, or reaches submit work: the count is taken before the body is
+/// read, which is the point.
+///
+/// It runs after the large-body gate's own slots and byte budget, so an
+/// upload refused there is not counted against the principal's window.
+async fn admit_submit_before_body(
+    State(state): State<Arc<AppState>>,
+    mut request: Request,
+    next: Next,
+) -> axum::response::Response {
+    let Some(PreBodyAuthenticated(tenant)) = request.extensions().get().cloned() else {
+        return next.run(request).await;
+    };
+    let _submit_slot = match admit_submit_principal(&tenant, state.submit_principal_limits) {
+        Ok(slot) => slot,
+        Err(refusal) => return api_error_response_with_retry_after(refusal),
+    };
+    request
+        .extensions_mut()
+        .insert(SubmitAdmittedBeforeBody(tenant));
+    next.run(request).await
+}
+
+/// Set by [`admit_submit_before_body`] once the request holds its in-flight
+/// slot and submission rate count. It carries the context
+/// [`authenticate_large_body_request`] authenticated before the body was
+/// read: a large upload can outlive a five-minute upload claim, and the
+/// claim was valid when the request began, so the handler uses this context
+/// rather than refusing the request it admitted.
+#[derive(Clone)]
+struct SubmitAdmittedBeforeBody(TenantCtx);
+
+/// Take one of the principal's in-flight slots, then count one submission
+/// against its window, or the refusal to answer with. A request refused for
+/// concurrency is not counted. Both refusals name
+/// themselves (`submit_rate_limited`) and say when to come back, so a client
+/// keeps the upload queued instead of giving it up.
+///
+/// Length-prefixing the authenticated tenant, method, and principal
+/// components makes every authentication boundary unambiguous. Static-token
+/// configuration has no stable caller identity beyond the credential, so
+/// that path is necessarily per credential; overlapping rotation
+/// credentials receive separate budgets.
+fn admit_submit_principal(
+    tenant: &TenantCtx,
+    configured: SubmitPrincipalLimits,
+) -> ApiResult<ConcurrencyGuard<'static>> {
+    let submit_key = submit_principal_rate_limit_key(
+        tenant.tenant_id(),
+        tenant.safe_auth_method(),
+        tenant.principal_ref(),
+    );
+    let (rate, concurrency) = submit_rate_limits(&submit_key, configured);
+    // The slot before the rate: a slot is held for a whole body upload, so a
+    // principal retrying while its slots are busy must not spend its window
+    // on requests that were refused anyway. A rate refusal drops the slot.
+    let slot = ACCOUNT_RATE_LIMITER
+        .acquire(&submit_key, concurrency)
+        .ok_or_else(|| submit_rate_limited(submit_concurrency_retry_after_seconds()))?;
+    if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, rate) {
+        return Err(submit_rate_limited(
+            ACCOUNT_RATE_LIMITER.principal_retry_after_seconds(&submit_key),
+        ));
+    }
+    Ok(slot)
+}
+
+/// What one upload weighs against [`AppState::large_body_bytes`]: its
+/// declared `Content-Length`, else the body's exact length when it knows one
+/// (`exact_length`, its size hint), else the route's ceiling `limit`, since a
+/// body of unknown length can be that large. `None` when the length is over
+/// `limit`: that request is refused outright rather than buffered up to the
+/// limit first.
+fn large_body_weight(headers: &HeaderMap, exact_length: Option<u64>, limit: usize) -> Option<u32> {
+    // Every upload ceiling fits a u32 (asserted at compile time).
+    let limit = limit.min(MAX_INGEST_BODY_BYTES) as u64;
+    let declared = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .or(exact_length)
+        .unwrap_or(limit);
+    (declared <= limit).then_some(declared.max(1) as u32)
+}
+
+/// Take `weight` bytes from the deployment-wide upload budget, or `None` when
+/// that many are not free right now. Never waits: the caller is refused with
+/// `Retry-After` and keeps the upload queued.
+fn large_body_byte_permit(
+    budget: &Arc<tokio::sync::Semaphore>,
+    weight: u32,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    budget.clone().try_acquire_many_owned(weight).ok()
+}
+
+/// Upload body bytes each principal holds of the deployment's budget, by the
+/// same weight [`large_body_byte_permit`] takes, and the most one principal
+/// may hold at once (`cap`). Entries exist only while bytes are held, so the
+/// table is bounded by the uploads in flight.
+struct LargeBodyPrincipalBytes {
+    cap: u64,
+    held: std::sync::Mutex<HashMap<String, u64>>,
+}
+
+impl LargeBodyPrincipalBytes {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap: cap as u64,
+            held: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Add `weight` bytes to `key`'s holding, or `None` when that would take
+    /// it past `cap`. Never waits: the caller is refused with `Retry-After`.
+    /// A poisoned lock fails CLOSED (`None`), as [`AccountRateLimiter`] does.
+    fn try_take(
+        self: &Arc<Self>,
+        key: String,
+        weight: u32,
+    ) -> Option<LargeBodyPrincipalBytesGuard> {
+        let weight = u64::from(weight);
+        let mut held = self.held.lock().ok()?;
+        match held.get_mut(&key) {
+            Some(current) => {
+                *current = current
+                    .checked_add(weight)
+                    .filter(|next| *next <= self.cap)?;
+            }
+            None => {
+                if weight > self.cap {
+                    return None;
+                }
+                held.insert(key.clone(), weight);
+            }
+        }
+        drop(held);
+        Some(LargeBodyPrincipalBytesGuard {
+            table: self.clone(),
+            key,
+            weight,
+        })
+    }
+
+    #[cfg(test)]
+    fn held_for_test(&self, key: &str) -> u64 {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// RAII release of bytes taken by [`LargeBodyPrincipalBytes::try_take`].
+struct LargeBodyPrincipalBytesGuard {
+    table: Arc<LargeBodyPrincipalBytes>,
+    key: String,
+    weight: u64,
+}
+
+impl Drop for LargeBodyPrincipalBytesGuard {
+    fn drop(&mut self) {
+        // A poisoned table already refuses every take, so there is nothing
+        // left to release into.
+        let Ok(mut held) = self.table.held.lock() else {
+            return;
+        };
+        if let Some(current) = held.get_mut(&self.key) {
+            *current = current.saturating_sub(self.weight);
+            if *current == 0 {
+                held.remove(&self.key);
+            }
+        }
+    }
+}
+
 /// Most upload bodies one principal may have in flight at once, across every
-/// large-body route. Above the submit handler's own concurrency of 2, so a
-/// contributor submitting while a bundle uploads is never refused here first.
+/// large-body route. Above the submit concurrency (default 2), so a
+/// contributor submitting while a bundle's attachments upload is never
+/// refused here first. The submit slots are held for the whole body upload
+/// and are shared by `POST /v1/traces` and bundle finalize, so with two
+/// slow uploads in flight a finalize is refused (429, `Retry-After: 2`) until
+/// one finishes; that refusal does not spend the principal's rate.
 const LARGE_BODY_PER_PRINCIPAL_CONCURRENCY: u32 = 4;
-/// Most upload bodies in flight across the deployment. Bounds what uploads can
-/// make ingest buffer to about this many times `MAX_INGEST_BODY_BYTES`
-/// (~650 MB), whatever the number of valid tokens.
+/// Most upload bodies in flight across the deployment, whatever their size.
+/// Memory is bounded by [`LARGE_BODY_GLOBAL_BYTES`], not by this count.
 const LARGE_BODY_GLOBAL_CONCURRENCY: u32 = 32;
+/// Default deployment-wide budget of upload body bytes in flight, by declared
+/// `Content-Length` (`TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET` overrides it).
+///
+/// One maximal upload plus 128 MiB for everything else. Ingest holds several
+/// copies of a body while it is processed (parsed envelope, serialized and
+/// encrypted artifact), so resident memory for uploads is a multiple of this
+/// budget, not the budget itself; size it against the host's memory with that
+/// multiple, measured in `large_envelope_tests`.
+const LARGE_BODY_GLOBAL_BYTES: usize = MAX_INGEST_BODY_BYTES + 128 * 1024 * 1024;
+/// A budget below one maximal body would refuse that upload forever.
+const _: () = assert!(LARGE_BODY_GLOBAL_BYTES >= MAX_INGEST_BODY_BYTES);
+/// Upload weights are `u32` permits.
+const _: () = assert!(MAX_INGEST_BODY_BYTES <= u32::MAX as usize);
 const LARGE_BODY_GLOBAL_KEY: &str = "large-body-global";
 
 fn large_body_principal_key(
@@ -11026,7 +11528,6 @@ const CREDIT_CYCLE_SCHEDULER_DRIVER_NAME: &str = "credit_cycle_scheduler";
 const CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME: &str = "credit_settlement_scheduler";
 const PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME: &str = "process_evaluation_scheduler";
 const REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME: &str = "revocation_propagation_scheduler";
-const UNBOUND_ACCOUNT_REAPER_DRIVER_NAME: &str = "unbound_account_reaper";
 const ACCOUNT_TRUST_SCHEDULER_DRIVER_NAME: &str = "account_trust_scheduler";
 
 /// Every driver the liveness registry knows about. The distinctness test
@@ -11044,7 +11545,6 @@ const ALL_DRIVER_NAMES: &[&str] = &[
     CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME,
     PROCESS_EVALUATION_SCHEDULER_DRIVER_NAME,
     REVOCATION_PROPAGATION_SCHEDULER_DRIVER_NAME,
-    UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
     ACCOUNT_TRUST_SCHEDULER_DRIVER_NAME,
 ];
 
@@ -11209,67 +11709,6 @@ fn spawn_pii_backstop_driver_task(state: &Arc<AppState>, config: Option<PiiBacks
                     "Trace Commons PII backstop driver tick completed"
                 );
                 pii_backstop_tick_outcome(&summary)
-            }
-        },
-    );
-}
-
-/// Spawn the in-process unbound-account reaper (Z2 S5). Copies
-/// `spawn_pii_backstop_driver_task`: `spawn_driver_loop`, a cross-tenant pool
-/// that is not the runtime pool, no bearer-token worker route, hash-free
-/// count-only logging. A tick runs bounded batches back to back while each
-/// comes back full of deletions, up to `TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK`.
-fn spawn_unbound_account_reaper_task(
-    state: &Arc<AppState>,
-    config: Option<UnboundAccountReaperConfig>,
-) {
-    let Some(config) = config else {
-        return;
-    };
-    tracing::info!(
-        interval_seconds = config.interval.as_secs(),
-        unbound_ttl_days = config.unbound_ttl_days,
-        closed_ttl_days = config.closed_ttl_days,
-        batch_size = config.batch_size,
-        "Trace Commons unbound account reaper enabled"
-    );
-    let tick_config = config.clone();
-    spawn_driver_loop(
-        state,
-        UNBOUND_ACCOUNT_REAPER_DRIVER_NAME,
-        config.interval,
-        move |_state| {
-            let config = tick_config.clone();
-            async move {
-                let mut reaped_unbound = 0u64;
-                let mut reaped_closed = 0u64;
-                let mut skipped = 0u64;
-                for _ in 0..TRACE_UNBOUND_REAPER_MAX_BATCHES_PER_TICK {
-                    let summary = config
-                        .reaper
-                        .reap(
-                            config.unbound_ttl_days,
-                            config.closed_ttl_days,
-                            config.batch_size,
-                        )
-                        .await
-                        .context("unbound account reaper batch failed")?;
-                    reaped_unbound += summary.reaped_unbound;
-                    reaped_closed += summary.reaped_closed;
-                    skipped += summary.skipped;
-                    if summary.reaped() < u64::try_from(config.batch_size).unwrap_or(0) {
-                        break;
-                    }
-                }
-                tracing::info!(
-                    reaped_unbound,
-                    reaped_closed,
-                    skipped,
-                    unbound_ttl_days = config.unbound_ttl_days,
-                    closed_ttl_days = config.closed_ttl_days,
-                    "Trace Commons unbound account reaper tick completed"
-                );
-                Ok(())
             }
         },
     );
@@ -11452,6 +11891,31 @@ fn spawn_trace_credit_settlement_scheduler_task(
         move |state| {
             let config = tick_config.clone();
             async move {
+                if matches!(
+                    config.scope,
+                    CreditSettlementSchedulerScope::AllTenants { .. }
+                ) {
+                    let summary = run_all_tenant_credit_settlement_tick(
+                        state,
+                        &config,
+                        CREDIT_SETTLEMENT_TENANT_PAGE_LIMIT,
+                    )
+                    .await
+                    .map_err(|error| {
+                        worker_route_error(CREDIT_SETTLEMENT_SCHEDULER_DRIVER_NAME, error)
+                    })?;
+                    tracing::info!(
+                        tenants_checked = summary.tenants_checked,
+                        tenants_failed = summary.tenants_failed,
+                        settled_source_event_count = summary.settled_source_event_count,
+                        "All-tenant credit settlement scheduler tick completed"
+                    );
+                    anyhow::ensure!(
+                        summary.tenants_failed == 0,
+                        "credit settlement tenant failures; inspect hashed failure diagnostics"
+                    );
+                    return Ok(());
+                }
                 let summary = run_trace_credit_settlement_scheduler_tick(state, &config)
                     .await
                     .map_err(|error| {
@@ -11930,11 +12394,30 @@ async fn validate_trace_credit_settlement_scheduler_config(
     let Some(config) = config else {
         return Ok(());
     };
-    let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
-        .map_err(trace_credit_settlement_scheduler_config_error)?;
-    let auth = authenticate_with_tenant_access_grant(state, &headers)
-        .await
-        .map_err(trace_credit_settlement_scheduler_config_error)?;
+    let auth = match &config.scope {
+        CreditSettlementSchedulerScope::Tenant => {
+            let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())
+                .map_err(trace_credit_settlement_scheduler_config_error)?;
+            authenticate_with_tenant_access_grant(state, &headers)
+                .await
+                .map_err(trace_credit_settlement_scheduler_config_error)?
+        }
+        CreditSettlementSchedulerScope::AllTenants { .. } => {
+            anyhow::ensure!(
+                state.require_db_mirror_writes && state.db_reviewer_reads,
+                "all_tenants settlement requires database mirror writes and reviewer reads"
+            );
+            let db = state
+                .db_mirror
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("all_tenants settlement requires a database"))?;
+            // Fail startup on absent role/migration. Enumeration never mints
+            // an HTTP credential and restores the ordinary role on return.
+            db.pending_credit_settlement_tenants(None, 1, state.novelty_utility_settle_from)
+                .await?;
+            internal_credit_settlement_actor("scheduler-validation")
+        }
+    };
     require_utility_operator(&auth).map_err(trace_credit_settlement_scheduler_config_error)?;
     require_credit_settlement_central_issuer_principal_if_configured(state, &auth, config.dry_run)
         .map_err(trace_credit_settlement_scheduler_config_error)?;
@@ -12608,22 +13091,44 @@ fn parse_submission_quota_config_from_env() -> anyhow::Result<TraceSubmissionQuo
     Ok(TraceSubmissionQuotaConfig {
         max_per_tenant_per_hour: parse_submission_quota_limit_from_env(
             TRACE_COMMONS_MAX_SUBMISSIONS_PER_TENANT_PER_HOUR,
+            0,
         )?,
         max_per_principal_per_hour: parse_submission_quota_limit_from_env(
             TRACE_COMMONS_MAX_SUBMISSIONS_PER_PRINCIPAL_PER_HOUR,
+            0,
+        )?,
+        max_per_account_per_hour: parse_submission_quota_limit_from_env(
+            TRACE_COMMONS_MAX_SUBMISSIONS_PER_ACCOUNT_PER_HOUR,
+            ACCOUNT_SUBMISSIONS_PER_HOUR_DEFAULT,
         )?,
     })
 }
 
-fn parse_submission_quota_limit_from_env(var_name: &'static str) -> anyhow::Result<usize> {
+/// An hourly submission quota from `var_name`; see
+/// [`parse_submission_quota_limit`].
+fn parse_submission_quota_limit_from_env(
+    var_name: &'static str,
+    default: usize,
+) -> anyhow::Result<usize> {
     match std::env::var(var_name) {
-        Ok(configured) => parse_submission_quota_limit(var_name, &configured),
-        Err(std::env::VarError::NotPresent) => Ok(0),
+        Ok(configured) => parse_submission_quota_limit(var_name, Some(&configured), default),
+        Err(std::env::VarError::NotPresent) => {
+            parse_submission_quota_limit(var_name, None, default)
+        }
         Err(error) => Err(error).with_context(|| format!("failed to read {var_name}")),
     }
 }
 
-fn parse_submission_quota_limit(var_name: &'static str, configured: &str) -> anyhow::Result<usize> {
+/// An hourly submission quota: unset (`None`) is `default`, `0` turns it
+/// off, and anything that is not a non-negative integer refuses startup.
+fn parse_submission_quota_limit(
+    var_name: &'static str,
+    configured: Option<&str>,
+    default: usize,
+) -> anyhow::Result<usize> {
+    let Some(configured) = configured else {
+        return Ok(default);
+    };
     configured
         .trim()
         .parse::<usize>()
@@ -12653,7 +13158,9 @@ fn parse_ranking_min_confidence_threshold_from_env() -> anyhow::Result<f32> {
 
 /// Parse and validate the `novelty_utility` per-pass credit-points delta from
 /// the environment. Defaulted to `DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`
-/// (1.0) when unset. The value must be finite and within the existing
+/// (0.0) when unset. A non-zero value settles (see
+/// `trace_credit_event_type_is_settlement_eligible`). The value must be
+/// finite and within the existing
 /// `MAX_DELAYED_CREDIT_POINTS_DELTA` envelope; we validate here so startup
 /// fails fast rather than every gate-evaluate call. Negative values are
 /// rejected — novelty credit is purely positive issuance.
@@ -12677,6 +13184,43 @@ fn parse_novelty_utility_credit_points_delta_from_env() -> anyhow::Result<f32> {
         "{TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA} exceeds the delayed credit policy limit"
     );
     Ok(parsed)
+}
+
+/// Parse `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` (already trimmed; `None`
+/// when unset) as an RFC 3339 timestamp. A value that does not parse refuses
+/// the start with a fixed label, never the value.
+fn parse_novelty_utility_settle_from(raw: Option<&str>) -> anyhow::Result<Option<DateTime<Utc>>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let parsed = DateTime::parse_from_rfc3339(raw)
+        .map_err(|_| anyhow::anyhow!(NOVELTY_UTILITY_SETTLE_FROM_INVALID_LABEL))?;
+    Ok(Some(parsed.with_timezone(&Utc)))
+}
+
+/// The scoring award settles and is paid, so a delta above 0 refuses to start
+/// unless (1) only a production gate may mint it
+/// (`TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE`): otherwise a
+/// test gate's decisions would mint payable credit; and (2) a cut-over
+/// (`TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM`) says which awards are
+/// payable: otherwise every past award with a positive delta, from whatever
+/// gate wrote it, would settle at the next run. At the default delta (0)
+/// nothing new is minted with value, and neither control is required.
+fn validate_novelty_utility_credit_config(
+    credit_points_delta: f32,
+    require_production_gate: bool,
+    settle_from: Option<DateTime<Utc>>,
+) -> anyhow::Result<()> {
+    if credit_points_delta <= 0.0 {
+        return Ok(());
+    }
+    if !require_production_gate {
+        anyhow::bail!(NOVELTY_UTILITY_CREDIT_REQUIRES_PRODUCTION_GATE_LABEL);
+    }
+    if settle_from.is_none() {
+        anyhow::bail!(NOVELTY_UTILITY_SETTLE_FROM_MISSING_LABEL);
+    }
+    Ok(())
 }
 
 /// Parse the revocation-propagation per-item retry cap from the environment
@@ -12983,6 +13527,10 @@ struct HealthResponse {
     /// The crate version. Reported alongside the commit, never instead of it:
     /// it does not move when a deploy does.
     build_version: &'static str,
+    /// Whether this binary was built with `near-ai-staging`. A build fact, not
+    /// a secret: the deploy script refuses a binary built for the other
+    /// channel by reading it (staging design, section 3.11).
+    near_ai_staging: bool,
 }
 
 async fn health_handler() -> Json<HealthResponse> {
@@ -12992,6 +13540,7 @@ async fn health_handler() -> Json<HealthResponse> {
         build_commit: trace_commons_build_info::COMMIT,
         build_time: trace_commons_build_info::BUILD_TIME,
         build_version: env!("CARGO_PKG_VERSION"),
+        near_ai_staging: trace_commons_server::near_ai_api::near_ai_staging(),
     })
 }
 
@@ -14616,8 +15165,10 @@ async fn append_tenant_access_grant_update_audit(
 /// hand-rolling axum's rejection shape too -- status, body text and
 /// content-type -- and any drift there is a regression for every client,
 /// including the ones that never send a certificate. Instead this reproduces
-/// `Json`'s own `FromRequest` and returns `JsonRejection` **verbatim**, so a
-/// malformed body fails exactly as it did before.
+/// `Json`'s own `FromRequest` and answers with `JsonRejection`'s response
+/// **verbatim**, so a malformed body fails exactly as it did before. The one
+/// addition is a body that went idle on a large-body route, which gets the
+/// fixed [`upload_body_idle_timeout_refusal`] (see [`UploadBytes`]).
 struct SubmitBody {
     envelope: TraceContributionEnvelope,
     /// The body exactly as received, for the witness digest and nothing else.
@@ -14648,14 +15199,15 @@ impl<S> FromRequest<S> for SubmitBody
 where
     S: Send + Sync,
 {
-    type Rejection = JsonRejection;
+    type Rejection = axum::response::Response;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         if !json_content_type(request.headers()) {
-            return Err(MissingJsonContentType::default().into());
+            return Err(JsonRejection::from(MissingJsonContentType::default()).into_response());
         }
-        let raw = Bytes::from_request(request, state).await?;
-        let Json(envelope) = Json::<TraceContributionEnvelope>::from_bytes(&raw)?;
+        let UploadBytes(raw) = UploadBytes::from_request(request, state).await?;
+        let Json(envelope) = Json::<TraceContributionEnvelope>::from_bytes(&raw)
+            .map_err(IntoResponse::into_response)?;
         Ok(SubmitBody { envelope, raw })
     }
 }
@@ -15066,15 +15618,18 @@ async fn pipeline_owner_and_routing_for_new_upload(
 }
 
 /// `503 pipeline_routing_unavailable` for a routing read that failed, with a
-/// hash-only log line.
+/// hash-only log line. A failed read is transient, so the answer says when to
+/// come back (`retry_after_seconds`, and `Retry-After` on the submit route),
+/// with a spread so clients refused together do not return together.
 fn routing_read_failed(error: &impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
     tracing::warn!(
         error_hash = %safe_display_error_hash(error),
         "Trace Commons pipeline routing read failed"
     );
-    api_error(
+    api_error_with_retry(
         StatusCode::SERVICE_UNAVAILABLE,
         PIPELINE_ROUTING_UNAVAILABLE_LABEL,
+        Some(transient_unavailable_retry_after_seconds()),
     )
 }
 
@@ -15610,58 +16165,75 @@ async fn claim_legacy_receipt(
 /// The handler keeps `ApiResult` so its tests can call it directly.
 async fn submit_trace_route(
     state: State<Arc<AppState>>,
+    admitted: Option<axum::Extension<SubmitAdmittedBeforeBody>>,
     headers: HeaderMap,
     body: SubmitBody,
 ) -> axum::response::Response {
-    match submit_trace_handler(state, headers, body).await {
+    let admitted = admitted.map(|axum::Extension(admitted)| admitted);
+    match submit_trace_handler_authenticated(state, headers, body, admitted).await {
         Ok(receipt) => receipt.into_response(),
         Err(error) => api_error_response_with_retry_after(error),
     }
 }
 
+/// [`submit_trace_handler_authenticated`] that authenticates the request
+/// itself: tests.
+#[cfg(test)]
 async fn submit_trace_handler(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: SubmitBody,
+) -> ApiResult<Json<TraceSubmissionReceipt>> {
+    submit_trace_handler_authenticated(state, headers, body, None).await
+}
+
+/// `admitted` is set when [`admit_submit_before_body`] already took this
+/// request's in-flight slot and rate count, before the body was read; the
+/// handler then uses the context authenticated there (a credential that
+/// expired while the body was uploading is still the credential this request
+/// began with). Without it (a direct call) the handler authenticates and
+/// admits the request itself, as the first submit work.
+async fn submit_trace_handler_authenticated(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: SubmitBody,
+    admitted: Option<SubmitAdmittedBeforeBody>,
 ) -> ApiResult<Json<TraceSubmissionReceipt>> {
     let SubmitBody {
         mut envelope,
         raw: raw_body,
     } = body;
-    let authenticated_tenant = authenticate_ctx(state.as_ref(), &headers)?;
-
     // Submission work includes the server re-scrub and gate preparation, so
     // bound it before the tenant-access-grant query, envelope validation, or any
-    // submission-record read. Length-prefixing the authenticated tenant, method,
-    // and principal components makes every authentication boundary unambiguous.
-    // Static-token configuration has no stable caller identity beyond the
-    // credential, so that path is necessarily per credential; overlapping
-    // rotation credentials receive separate budgets.
-    let submit_key = submit_principal_rate_limit_key(
-        authenticated_tenant.tenant_id(),
-        authenticated_tenant.safe_auth_method(),
-        authenticated_tenant.principal_ref(),
-    );
-    let (submit_rate_limit, submit_concurrency_limit) =
-        submit_rate_limits(&submit_key, state.submit_principal_limits);
-    // Both refusals name themselves (`submit_rate_limited`) and say when to
-    // come back, so a client keeps the upload queued instead of giving it up.
-    if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, submit_rate_limit) {
-        return Err(submit_rate_limited(
-            ACCOUNT_RATE_LIMITER.principal_retry_after_seconds(&submit_key),
-        ));
-    }
-    let _submit_slot = match ACCOUNT_RATE_LIMITER.acquire(&submit_key, submit_concurrency_limit) {
-        Some(guard) => guard,
+    // submission-record read. Through the router this was done before the
+    // body was read; see `admit_submit_before_body`.
+    let (authenticated_tenant, _submit_slot) = match admitted {
+        Some(SubmitAdmittedBeforeBody(tenant)) => (tenant, None),
         None => {
-            return Err(submit_rate_limited(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS));
+            let tenant = authenticate_ctx(state.as_ref(), &headers)?;
+            let slot = admit_submit_principal(&tenant, state.submit_principal_limits)?;
+            (tenant, Some(slot))
         }
     };
     #[cfg(test)]
-    pause_submit_after_rate_limit_for_test(&submit_key).await;
+    pause_submit_after_rate_limit_for_test(&submit_principal_rate_limit_key(
+        authenticated_tenant.tenant_id(),
+        authenticated_tenant.safe_auth_method(),
+        authenticated_tenant.principal_ref(),
+    ))
+    .await;
     if state.account_admission.is_some() {
         validate_envelope(&envelope)?;
     }
+    // The per-account hourly ceiling, before admission reserves anything: a
+    // refusal here holds no lease and charges nothing.
+    enforce_account_hourly_submission_ceiling(
+        state.as_ref(),
+        &authenticated_tenant,
+        envelope.submission_id,
+        HourlyCeilingCharge::Upload,
+    )
+    .await?;
     let mut admission = admission::reserve(
         &state,
         &authenticated_tenant,
@@ -15864,6 +16436,25 @@ async fn submit_trace_handler(
             tenant_policy.as_ref(),
             state.require_tenant_submission_policy,
         )?;
+        // The hourly quota runs before the witness check, the re-scrub and
+        // the per-tenant history reads below, so an upload it refuses costs
+        // none of them. The admission attempt is not yet `processing` here:
+        // a refusal leaves it reserved and the trailing `finish(false)`
+        // releases it. Same-id quarantine remediation does not consume a new
+        // quota slot -- the prior quarantined row already counted.
+        if remediating_prior.is_none() {
+            enforce_submission_quota(state.as_ref(), &tenant)?;
+        } else {
+            // A remediation re-runs the re-scrub, so it is charged to the
+            // hourly ceiling, which let the known id through uncharged.
+            enforce_account_hourly_submission_ceiling(
+                state.as_ref(),
+                &tenant,
+                envelope.submission_id,
+                HourlyCeilingCharge::Remediation,
+            )
+            .await?;
+        }
 
         // AT RECEIPT: against `raw_body`, the bytes the extractor captured before
         // any handler code ran. `rescrub_trace_envelope` on the next line rewrites
@@ -15926,7 +16517,17 @@ async fn submit_trace_handler(
                 )
                 .await?;
         }
-        let residual_risk_basis = rescrub_trace_envelope(&mut envelope)
+        // CPU-bound and linear in the envelope, which at the cap is hundreds
+        // of MB: on a blocking thread, so it cannot hold a runtime worker
+        // (and every request queued behind it) for the duration.
+        let (rescrubbed, residual_risk_basis) = tokio::task::spawn_blocking(move || {
+            let basis = rescrub_trace_envelope(&mut envelope);
+            (envelope, basis)
+        })
+        .await
+        .map_err(|_| internal_error("rescrub task failed"))?;
+        let mut envelope = rescrubbed;
+        let residual_risk_basis = residual_risk_basis
             .map_err(|err| internal_error(format!("privacy filter config invalid: {err}")))?;
         bind_envelope_server_tenant_scope_for_storage(&mut envelope, tenant.tenant_id());
         let existing_revocations = read_revocations_for_submit(state.as_ref(), tenant.tenant_id())
@@ -15941,11 +16542,6 @@ async fn submit_trace_handler(
             &envelope.privacy.redaction_hash,
             &derived_precheck.canonical_summary_hash,
         )?;
-        // Same-id quarantine remediation does not consume a new quota slot — the
-        // prior quarantined row already counted.
-        if remediating_prior.is_none() {
-            enforce_submission_quota(state.as_ref(), &tenant)?;
-        }
         apply_embedding_precheck(&mut envelope, &derived_precheck);
         // Writes the scorecard and `submission_score` (the review queue and
         // the ranker exports read them) and holds `credit_points_pending` at
@@ -16036,14 +16632,19 @@ async fn submit_trace_handler(
             .as_ref()
             .filter(|_| db_first)
             .map(|prior| quarantine_remediation_prior_snapshot(state.as_ref(), prior));
-        let stored_envelope = store_envelope(
-            &state,
-            tenant.tenant_id(),
-            corpus_status,
-            artifact_label,
-            &envelope,
-        )
-        .map_err(internal_error)?;
+        // Serialize, encrypt and write: as the rescrub, off the runtime.
+        let (stored_envelope, envelope) = {
+            let state = state.clone();
+            let tenant_id = tenant.tenant_id().to_string();
+            tokio::task::spawn_blocking(move || {
+                let stored =
+                    store_envelope(&state, &tenant_id, corpus_status, artifact_label, &envelope);
+                (stored, envelope)
+            })
+            .await
+            .map_err(|_| internal_error("envelope store task failed"))?
+        };
+        let stored_envelope = stored_envelope.map_err(internal_error)?;
         let derived_record = build_derived_record(
             tenant.tenant_id(),
             corpus_status,
@@ -16235,6 +16836,21 @@ async fn submit_trace_handler(
                     );
                 }
             }
+        }
+
+        // The starter advance's plausibility features, hash-only, when its
+        // mode is on. Never blocks or fails the upload. Accepted submissions
+        // only: the row is write-once, so one recorded from a quarantined
+        // body would outlive the remediation that replaces that body. The
+        // remediation that accepts it writes the first and only row.
+        if record.status == TraceCorpusStatus::Accepted {
+            starter_advance::observe_submission(
+                state.as_ref(),
+                tenant.tenant_id(),
+                record.submission_id,
+                &envelope,
+                record.received_at,
+            );
         }
 
         // The record has only just landed (or been re-scrubbed from
@@ -17906,6 +18522,8 @@ fn compatibility_credit_decision(
         chunk_count: count(quality.chunk_count),
         total_chunk_count: count(quality.total_chunk_count),
         chunks_capped: quality.chunks_capped,
+        perplexity_passed: None,
+        novelty_passed: None,
     })
 }
 
@@ -18033,18 +18651,37 @@ fn submission_status_from_pipeline(
     } else {
         Vec::new()
     };
+    // A leg `main`'s credit checks withheld is decided with no award: final
+    // 0, and the withheld reason on the contributor's closed set, as `main`'s
+    // own document says for the same refusal (`trace_credit_outcome`).
+    let withheld_reason = (status.credit == PipelineCreditStatus::Withheld).then(|| {
+        status
+            .instruments
+            .iter()
+            .find(|instrument| instrument.instrument_id == "trace_credit")
+            .and_then(|instrument| instrument.reason_label.as_deref())
+            .map_or(
+                trace_commons_protocol::credit_outcome::OTHER,
+                credit_outcome_reason_for_withheld_label,
+            )
+    });
+    let credit_points_final = match status.credit {
+        PipelineCreditStatus::Finalized => Some(trace_credit_points),
+        PipelineCreditStatus::Withheld => Some(0.0),
+        _ => None,
+    };
     TraceSubmissionStatusUpdate {
         submission_id: status.submission_id,
         trace_id: status.trace_id,
         status: main_status_for_pipeline(status).to_string(),
         credit_points_pending,
-        credit_points_final: (status.credit == PipelineCreditStatus::Finalized)
-            .then_some(trace_credit_points),
+        credit_points_final,
         credit_points_ledger: 0.0,
         credit_points_total: None,
         explanation,
         delayed_credit_explanations: Vec::new(),
         consent_scopes: Vec::new(),
+        credit_outcome_reason: withheld_reason.map(str::to_string),
         pipeline: Some(pipeline_status_for_protocol(status)),
     }
 }
@@ -18940,24 +19577,9 @@ async fn account_invite_redeem_handler(
     ))
 }
 
-/// Resolve the configured WebAuthn relying party for the passkey ceremonies.
-///
-/// Fails closed exactly like `account_db`: when the relying party is not
-/// configured (partial or absent `WebauthnConfig`), it returns a 503 with a safe
-/// missing-control label rather than letting a ceremony proceed without a
-/// relying party. Wired into the register/login handlers in later Slice 2 tasks.
-fn account_webauthn(state: &AppState) -> ApiResult<Arc<webauthn_rs::Webauthn>> {
-    state.account_webauthn.as_ref().cloned().ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "passkey relying party is not configured",
-        )
-    })
-}
-
 /// Resolve the configured NEAR sign-in config for the login-with-NEAR ceremonies.
 ///
-/// Fails closed exactly like `account_webauthn`: when NEAR sign-in is not
+/// Fails closed exactly like `account_db`: when NEAR sign-in is not
 /// configured (partial or absent `NearConfig`), it returns a 503 with a safe
 /// missing-control label rather than letting a ceremony proceed without a
 /// verifier. Wired into the begin/finish handlers in later Slice 3a tasks.
@@ -18971,8 +19593,7 @@ fn account_near_config(state: &AppState) -> ApiResult<Arc<NearConfig>> {
 }
 
 /// Borrow the in-process ceremony store. Infallible: the store is always present
-/// on `AppState`. Consumed by the register/login ceremony handlers in later
-/// Slice 2 tasks.
+/// on `AppState`.
 fn account_ceremony_store(state: &AppState) -> Arc<CeremonyStore> {
     state.account_ceremony_store.clone()
 }
@@ -19057,7 +19678,7 @@ async fn account_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> axum::response::Response {
-    let (ctx, rotated_secret_value, binding) =
+    let (ctx, rotated_secret_value) =
         match resolve_account_ctx_with_rotation(state.as_ref(), request.headers()).await {
             Ok(resolved) => resolved,
             // Auth failure: return the error response, do NOT run the handler.
@@ -19071,23 +19692,6 @@ async fn account_auth_middleware(
             }
         };
 
-    // The unbound gate (Z2 S1). An account whose binding state is gated
-    // reaches only the routes `UNBOUND_ACCOUNT_ROUTE_POLICY` marks `Allowed`,
-    // looked up by method and matched path template; anything else, including
-    // a route missing from the policy, is refused here, before any handler.
-    // Legacy (no binding row) and bound accounts skip this entirely. The
-    // binding state was read in the same query that validated the session, and
-    // a failed read already refused above.
-    //
-    // A refusal still flows through the rotation attach below: the session may
-    // have rotated in this very request, and withholding the new secret would
-    // sign the client out once the grace window lapses.
-    let gate_refused = binding.is_gated()
-        && account_routes::unbound_access(
-            request.method(),
-            request.extensions().get::<axum::extract::MatchedPath>(),
-        ) != account_routes::UnboundAccess::Allowed;
-
     // A native token rotates exactly like a cookie session, but a native client
     // has no cookie jar. Hand the new token back in a response header — the
     // bearer analogue of `Set-Cookie`, on the same channel, to the same
@@ -19095,18 +19699,26 @@ async fn account_auth_middleware(
     // ever emitted for a native client.
     let native_rotation = matches!(ctx.auth_method, AccountAuthMethod::NativeToken);
     if native_rotation {
-        let mut response = if gate_refused {
-            unbound_gate_refusal(state.as_ref(), &ctx).await
-        } else {
-            request.extensions_mut().insert(ctx);
-            request.extensions_mut().insert(binding);
-            next.run(request).await
-        };
-        if let Some((token, _)) = rotated_secret_value {
+        request.extensions_mut().insert(ctx);
+        let mut response = next.run(request).await;
+        if let Some((token, expires_at)) = rotated_secret_value {
             if let Ok(value) = HeaderValue::from_str(&token) {
                 response
                     .headers_mut()
                     .insert(ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, value);
+                // The rotation extended the session; the new expiry travels
+                // with the new token, so the client stores both together. An
+                // older client ignores the header and keeps its stored expiry,
+                // which is earlier than the real one, so it only re-signs in
+                // sooner than it needs to. Whole seconds, truncated: never
+                // later than the stored expiry.
+                if let Ok(value) = HeaderValue::from_str(
+                    &expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                ) {
+                    response
+                        .headers_mut()
+                        .insert(ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER, value);
+                }
                 response.headers_mut().insert(
                     axum::http::header::CACHE_CONTROL,
                     HeaderValue::from_static("no-store"),
@@ -19116,13 +19728,8 @@ async fn account_auth_middleware(
         return response;
     }
 
-    let mut response = if gate_refused {
-        unbound_gate_refusal(state.as_ref(), &ctx).await
-    } else {
-        request.extensions_mut().insert(ctx);
-        request.extensions_mut().insert(binding);
-        next.run(request).await
-    };
+    request.extensions_mut().insert(ctx);
+    let mut response = next.run(request).await;
 
     if let Some((cookie_value, expires_at)) = rotated_secret_value {
         // Build the IDENTICAL Slice 1 session cookie: Secure / HttpOnly /
@@ -19161,9 +19768,7 @@ async fn account_auth_middleware(
 
 /// Max-Age for a rotated session cookie: the usual lifetime, capped at what
 /// is left of the session's absolute `expires_at`, so rotation can never make
-/// the cookie outlive its row. That matters for a step-up session
-/// (`STEP_UP_SESSION_TTL_MINUTES`), whose row expires long before a fresh
-/// seven-day cookie would.
+/// the cookie outlive its row.
 fn rotated_cookie_max_age(
     expires_at: chrono::DateTime<Utc>,
     now: chrono::DateTime<Utc>,
@@ -19178,63 +19783,8 @@ async fn resolve_account_ctx(state: &AppState, headers: &HeaderMap) -> ApiResult
     // call sites (which assert resolver semantics, not cookie attach) keep working.
     // The PRODUCTION attach point is `account_auth_middleware`, which calls
     // `resolve_account_ctx_with_rotation` and emits the `Set-Cookie` itself.
-    let (ctx, _rotated, _binding) = resolve_account_ctx_with_rotation(state, headers).await?;
+    let (ctx, _rotated) = resolve_account_ctx_with_rotation(state, headers).await?;
     Ok(ctx)
-}
-
-/// The unbound gate's refusal: `403 account_unbound`, one label-only audit row
-/// (`account_unbound_gate_denied`, empty metadata), and a label-only log line.
-/// The refusal does not depend on the audit write: if that fails, the request
-/// is refused all the same.
-async fn unbound_gate_refusal(state: &AppState, ctx: &AccountCtx) -> axum::response::Response {
-    if let Some(db) = state.db_mirror.as_ref() {
-        if db
-            .append_account_audit(
-                &ctx.tenant_id,
-                "account_unbound_gate_denied",
-                &ctx.actor_ref,
-                "denied",
-                serde_json::json!({}),
-            )
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                label = "account_unbound_gate_audit_failed",
-                "unbound gate refusal could not be audited"
-            );
-        }
-    }
-    tracing::info!(
-        label = account_routes::ACCOUNT_UNBOUND,
-        "unbound gate refusal"
-    );
-    let mut response =
-        api_error(StatusCode::FORBIDDEN, account_routes::ACCOUNT_UNBOUND).into_response();
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    response
-}
-
-/// `GET /v1/account/binding` (Z2 S1): the caller's binding state, as a label.
-///
-/// `unbound` and `bound` for a passkey-origin account, `closed` for one closed
-/// by the existing-account branch of bind, and `legacy` for an account with no
-/// binding row. The state comes from `account_auth_middleware`, which read it
-/// in the session validation query; a request that did not pass through the
-/// middleware has no such extension and is refused by the extractor.
-async fn account_binding_handler(
-    Extension(binding): Extension<trace_commons_server::account_binding::AccountBindingState>,
-) -> axum::response::Response {
-    let mut response =
-        Json(serde_json::json!({ "binding_state": binding.label() })).into_response();
-    response.headers_mut().insert(
-        axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    response
 }
 
 /// A session that rotated on this request: the new credential value (cookie
@@ -19248,11 +19798,7 @@ type RotatedSession = (String, chrono::DateTime<Utc>);
 async fn resolve_account_ctx_with_rotation(
     state: &AppState,
     headers: &HeaderMap,
-) -> ApiResult<(
-    AccountCtx,
-    Option<RotatedSession>,
-    trace_commons_server::account_binding::AccountBindingState,
-)> {
+) -> ApiResult<(AccountCtx, Option<RotatedSession>)> {
     let bearer = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -19312,11 +19858,7 @@ async fn resolve_account_ctx_with_rotation(
 async fn resolve_account_ctx_native(
     state: &AppState,
     bearer: &str,
-) -> ApiResult<(
-    AccountCtx,
-    Option<RotatedSession>,
-    trace_commons_server::account_binding::AccountBindingState,
-)> {
+) -> ApiResult<(AccountCtx, Option<RotatedSession>)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -19362,15 +19904,13 @@ async fn resolve_account_ctx_native(
             auth_method: AccountAuthMethod::NativeToken,
             tenant_id,
             actor_ref: account_actor_ref(&account),
-            // The passkey that minted a native session (Z2 S2), so the passkey
-            // list can mark `this_device`. NULL for loopback and NEAR AI
-            // sessions. A public id; it confers no strength (see below).
+            // NULL for loopback and NEAR AI sessions. A public id; it confers
+            // no strength (see below).
             auth_credential_id: session.auth_credential_id,
             client_kind: NATIVE_SESSION_CLIENT_KIND.to_string(),
             session_token_hash: Some(token_hash),
         },
         rotated,
-        session.binding,
     ))
 }
 
@@ -19382,11 +19922,7 @@ async fn resolve_account_ctx_native(
 async fn resolve_account_ctx_cookie(
     state: &AppState,
     cookie: &str,
-) -> ApiResult<(
-    AccountCtx,
-    Option<RotatedSession>,
-    trace_commons_server::account_binding::AccountBindingState,
-)> {
+) -> ApiResult<(AccountCtx, Option<RotatedSession>)> {
     let invalid = || {
         api_error(
             StatusCode::UNAUTHORIZED,
@@ -19432,16 +19968,15 @@ async fn resolve_account_ctx_cookie(
             principal_set,
             auth_method: AccountAuthMethod::SessionCookie,
             tenant_id,
-            // Carried through from the validated session row so the passkey list can
-            // flag the currently-authenticating credential as `this_device`.
+            // Carried through from the validated session row so the NEAR identity
+            // list can flag the currently-authenticating key as `this_session`.
             auth_credential_id: session.auth_credential_id,
-            // Session strength for the authenticator-change gate: `'web'` is weak,
-            // `'passkey'`/`'near'` are strong.
+            // Session strength for the authenticator-change gate: only `'near'`
+            // is strong.
             client_kind: session.client_kind,
             session_token_hash: Some(token_hash),
         },
         rotated_cookie_value,
-        session.binding,
     ))
 }
 
@@ -20708,7 +21243,12 @@ async fn account_trace_withdraw_handler(
 
     // Credit is retained only if it is retained for every withdrawn version.
     let credit_retained = affected_ids.iter().all(|affected_id| {
-        withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
+        withdrawal_retains_all_credit(
+            *affected_id,
+            &credit_events,
+            &finalized_credit_event_ids,
+            state.novelty_utility_settle_from,
+        )
     });
 
     let response = finish_account_trace_withdrawal(
@@ -20891,7 +21431,12 @@ async fn pipeline_account_trace_withdrawal(
     };
     let credit_retained = !outcome.trace_credit_forfeited
         && outcome.affected_submission_ids.iter().all(|affected_id| {
-            withdrawal_retains_all_credit(*affected_id, &credit_events, &finalized_credit_event_ids)
+            withdrawal_retains_all_credit(
+                *affected_id,
+                &credit_events,
+                &finalized_credit_event_ids,
+                state.novelty_utility_settle_from,
+            )
         });
     let response = finish_account_trace_withdrawal(
         state,
@@ -20980,7 +21525,13 @@ async fn mint_login_link_handler(
     let account_id = db
         .create_or_reuse_account(tenant_id, principal_ref)
         .await
-        .map_err(internal_error)?;
+        .map_err(|error| match error {
+            DatabaseError::UploadPrincipalAuthenticationDenied => api_error(
+                StatusCode::FORBIDDEN,
+                "upload-only credentials cannot create account login links",
+            ),
+            other => internal_error(other),
+        })?;
 
     // 3. Mint the single-use code; store ONLY its hash.
     let code = generate_login_code();
@@ -21042,6 +21593,9 @@ async fn mint_login_link_handler(
 /// presented the old token.
 const ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER: &str =
     trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
+/// The rotated native session's new expiry, sent beside the rotated token.
+const ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER: &str =
+    trace_commons_protocol::ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER;
 
 /// Query/form field naming the pending native authorization request that the
 /// browser redeem should complete. Optional everywhere: a plain browser login
@@ -21182,24 +21736,14 @@ async fn native_authorize_start_handler(
     response
 }
 
-#[path = "trace_commons_ingest_internal/native_passkey.rs"]
-mod native_passkey;
-#[cfg(test)]
-use native_passkey::NATIVE_PASSKEY_PER_IP_LIMIT;
-use native_passkey::{
-    account_passkey_native_register_finish_handler, account_passkey_native_register_start_handler,
-    native_passkey_create_finish_handler, native_passkey_create_start_handler,
-    native_passkey_login_finish_handler, native_passkey_login_start_handler,
-};
-
-#[path = "trace_commons_ingest_internal/step_up_page.rs"]
-mod step_up_page;
+#[path = "trace_commons_ingest_internal/starter_advance.rs"]
+mod starter_advance;
 
 #[path = "trace_commons_ingest_internal/near_provisioning.rs"]
 mod near_provisioning;
 use near_provisioning::{
-    near_ai_bind_finish_handler, near_ai_bind_start_handler, near_ai_provision_finish_handler,
-    near_ai_provision_start_handler, near_provision_finish_handler, near_provision_start_handler,
+    near_ai_provision_finish_handler, near_ai_provision_start_handler,
+    near_provision_finish_handler, near_provision_start_handler,
 };
 
 #[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
@@ -21416,12 +21960,6 @@ where
 /// Issued session lifetime. Matches the spec's ~7d browser session.
 const ACCOUNT_SESSION_TTL_DAYS: i64 = 7;
 
-/// Lifetime of a browser passkey session minted for the step-up page (Z2 S7):
-/// a sign-in whose `login/start` asked for `purpose=step_up`. Absolute, like
-/// every session's `expires_at`: activity and rotation-on-use never move it.
-/// A constant, as the other session lifetimes are.
-const STEP_UP_SESSION_TTL_MINUTES: i64 = 15;
-
 /// The session cookie name. Value is `{b64url(tenant_id)}.{secret}`; only the
 /// sha256 hash of the SECRET part is persisted server-side. The tenant prefix
 /// lets the (tenant-less) browser request bootstrap an RLS tenant tx without the
@@ -21520,8 +22058,15 @@ struct ConfirmLoginBody {
 /// not sleep. See `confirm_login_handler`.
 const REDEEM_MIN_LATENCY: StdDuration = StdDuration::from_millis(250);
 
-/// Fixed-window length for all account-surface rate limiters.
+/// Fixed-window length for all account-surface rate limiters. A literal: the
+/// login and content limits below are sized per 60 s, so retuning the submit
+/// pacing must not move them.
 const ACCOUNT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
+// The submit limiter shares this window, and the daemon paces itself against
+// the protocol's value, so the two must still agree.
+const _: () = assert!(
+    ACCOUNT_RATE_WINDOW.as_secs() == trace_commons_protocol::submit_rate::SUBMIT_RATE_WINDOW_SECS
+);
 
 /// Per-IP cap on `GET /account/login` interstitial renders per window.
 const INTERSTITIAL_PER_IP_LIMIT: u32 = 120;
@@ -21549,25 +22094,13 @@ const CONFIRM_GLOBAL_LIMIT: u32 = 600;
 /// before the single-use consume would. A login link is meant to be redeemed
 /// once; a handful of attempts covers a legitimate retry.
 const CONFIRM_PER_CODE_LIMIT: u32 = 5;
-/// Per-IP cap on `POST /account/passkey/login/start` + `/finish` attempts per
-/// window. A discoverable login is a couple of round-trips; this comfortably
-/// covers a legitimate retry while bounding a guessing/replay flood from one IP.
-const PASSKEY_LOGIN_PER_IP_LIMIT: u32 = 30;
-/// Coarse global cap on passkey-login attempts per window across ALL callers — a
-/// blast-radius ceiling mirroring `CONFIRM_GLOBAL_LIMIT`.
-const PASSKEY_LOGIN_GLOBAL_LIMIT: u32 = 600;
-/// Hard per-`credential_id` ceiling on `login/finish` attempts per window. A
-/// given passkey should assert a handful of times at most in a minute; beyond
-/// that the credential collapses to the uniform deny (replay/brute ceiling). The
-/// credential id is a PUBLIC, globally-unique label (not a secret).
-const PASSKEY_LOGIN_PER_CRED_LIMIT: u32 = 5;
 /// Per-IP cap on `POST /account/near/login/start` + `/finish` attempts per
-/// window. Mirrors `PASSKEY_LOGIN_PER_IP_LIMIT`: a discoverable NEAR login is a
+/// window. A discoverable NEAR login is a
 /// couple of round-trips, comfortably covering a legitimate retry while bounding
 /// a guessing/replay flood from one IP.
 const NEAR_LOGIN_PER_IP_LIMIT: u32 = 30;
 /// Coarse global cap on NEAR-login attempts per window across ALL callers — a
-/// blast-radius ceiling mirroring `PASSKEY_LOGIN_GLOBAL_LIMIT`.
+/// blast-radius ceiling mirroring `CONFIRM_GLOBAL_LIMIT`.
 const NEAR_LOGIN_GLOBAL_LIMIT: u32 = 600;
 /// Hard per-`publicKey` ceiling on `login/finish` attempts per window. A given
 /// NEAR access key should assert a handful of times at most in a minute; beyond
@@ -21595,7 +22128,8 @@ const CONTENT_PER_ACCOUNT_CONCURRENCY: u32 = 4;
 /// Per-principal cap on `POST /v1/traces` submissions per window. A submission
 /// performs more work than a content read, so this is half the content limit of
 /// 60 and matches the existing confirm-attempt ceiling of 30.
-const SUBMIT_PER_PRINCIPAL_LIMIT: u32 = 30;
+const SUBMIT_PER_PRINCIPAL_LIMIT: u32 =
+    trace_commons_protocol::submit_rate::SUBMIT_PER_PRINCIPAL_LIMIT;
 /// Concurrency cap on in-flight submissions per principal. The re-scrub and gate
 /// path gets half the content-read concurrency allowance of 4.
 const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;
@@ -21610,10 +22144,53 @@ const SUBMIT_PER_PRINCIPAL_RATE_MAX: u32 = 600;
 /// `retry_after_seconds` rather than giving it up, so it is a wire contract.
 /// The status stays 429.
 const SUBMIT_RATE_LIMITED_LABEL: &str = "submit_rate_limited";
-/// The retry hint for an in-flight (concurrency) refusal. A slot frees when
-/// one of the principal's own uploads returns, which has no deadline to
-/// report, so this is a short constant rather than a computed wait.
+/// The shortest retry hint for an in-flight (concurrency) refusal. A slot
+/// frees when one of the principal's own uploads returns, which has no
+/// deadline to report, so the hint is a short number rather than a computed
+/// wait. It is not one fixed number: see
+/// [`submit_concurrency_retry_after_seconds`].
 const SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS: i64 = 2;
+/// How many seconds above [`SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS`] a
+/// concurrency hint may spread, so the hint is 2 to 5 seconds.
+const SUBMIT_CONCURRENCY_RETRY_AFTER_SPREAD_SECONDS: i64 = 3;
+/// The retry hint, in seconds, of a transient `503` (a read the service could
+/// not complete right now): this many seconds at least, and up to
+/// [`TRANSIENT_UNAVAILABLE_RETRY_AFTER_SPREAD_SECONDS`] more.
+const TRANSIENT_UNAVAILABLE_RETRY_AFTER_SECONDS: i64 = 5;
+const TRANSIENT_UNAVAILABLE_RETRY_AFTER_SPREAD_SECONDS: i64 = 10;
+
+/// `base` plus a spread in `0..=spread` taken from `random`. Pure, so the
+/// bounds are testable without a random source.
+fn retry_after_with_spread(base: i64, spread: i64, random: u64) -> i64 {
+    base + (random % (spread as u64 + 1)) as i64
+}
+
+fn random_u64_for_retry_hint() -> u64 {
+    use rand::RngCore as _;
+    rand::rngs::OsRng.next_u64()
+}
+
+/// The retry hint of an in-flight (concurrency) or byte-budget refusal, 2 to
+/// 5 seconds. A fixed 2 s made every client refused in the same second return
+/// in the same second; the spread desynchronises them. The header and the
+/// body carry this one value.
+fn submit_concurrency_retry_after_seconds() -> i64 {
+    retry_after_with_spread(
+        SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS,
+        SUBMIT_CONCURRENCY_RETRY_AFTER_SPREAD_SECONDS,
+        random_u64_for_retry_hint(),
+    )
+}
+
+/// The retry hint of a transient `503`, with the same spread idea: 5 to 15
+/// seconds.
+fn transient_unavailable_retry_after_seconds() -> i64 {
+    retry_after_with_spread(
+        TRANSIENT_UNAVAILABLE_RETRY_AFTER_SECONDS,
+        TRANSIENT_UNAVAILABLE_RETRY_AFTER_SPREAD_SECONDS,
+        random_u64_for_retry_hint(),
+    )
+}
 
 /// The per-principal submission limits in force, from
 /// `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` and
@@ -21636,6 +22213,56 @@ impl Default for SubmitPrincipalLimits {
     }
 }
 
+/// `TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET`: the deployment-wide upload byte
+/// budget, from [`MAX_INGEST_BODY_BYTES`] (one maximal upload) to
+/// `u32::MAX`. Unset is [`LARGE_BODY_GLOBAL_BYTES`]. Anything else refuses
+/// startup, naming the variable: a budget under one maximal body would turn
+/// the largest accepted upload into a permanent 429.
+fn parse_large_body_byte_budget(configured: Option<&str>) -> anyhow::Result<usize> {
+    let Some(configured) = configured else {
+        return Ok(LARGE_BODY_GLOBAL_BYTES);
+    };
+    let min = MAX_INGEST_BODY_BYTES;
+    let max = u32::MAX as usize;
+    let parsed = configured.trim().parse::<usize>().with_context(|| {
+        format!("{TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET} must be an integer from {min} to {max}")
+    })?;
+    if !(min..=max).contains(&parsed) {
+        anyhow::bail!(
+            "{TRACE_COMMONS_LARGE_BODY_BYTE_BUDGET} must be an integer from {min} to {max}"
+        );
+    }
+    Ok(parsed)
+}
+
+/// `TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES`: the most of the upload
+/// byte budget (`budget`) one principal may hold at once, from
+/// [`MAX_INGEST_BODY_BYTES`] (one maximal upload) to `budget`. Unset is half
+/// the budget, but never less than one maximal upload, so the largest
+/// accepted upload always fits a principal's share. Anything else refuses
+/// startup, naming the variable.
+fn parse_large_body_principal_byte_share(
+    configured: Option<&str>,
+    budget: usize,
+) -> anyhow::Result<usize> {
+    let min = MAX_INGEST_BODY_BYTES;
+    let max = budget.max(min);
+    let Some(configured) = configured else {
+        return Ok((budget / 2).max(min).min(max));
+    };
+    let parsed = configured.trim().parse::<usize>().with_context(|| {
+        format!(
+            "{TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES} must be an integer from {min} to {max}"
+        )
+    })?;
+    if !(min..=max).contains(&parsed) {
+        anyhow::bail!(
+            "{TRACE_COMMONS_LARGE_BODY_PER_PRINCIPAL_BYTES} must be an integer from {min} to {max}"
+        );
+    }
+    Ok(parsed)
+}
+
 fn parse_submit_principal_limits_from_env() -> anyhow::Result<SubmitPrincipalLimits> {
     fn read(name: &str) -> anyhow::Result<Option<String>> {
         match std::env::var(name) {
@@ -21651,8 +22278,8 @@ fn parse_submit_principal_limits_from_env() -> anyhow::Result<SubmitPrincipalLim
 
 /// Bounded: the rate is `1..=SUBMIT_PER_PRINCIPAL_RATE_MAX`, and the
 /// concurrency is `1..=LARGE_BODY_PER_PRINCIPAL_CONCURRENCY`, because the
-/// large-body middleware holds its own per-principal slot before this
-/// handler runs: a submit cap above it could never be reached, and the
+/// large-body middleware takes its own per-principal slot before the submit
+/// slot is taken: a submit cap above it could never be reached, and the
 /// refusal would come from the middleware instead. Anything else refuses
 /// startup, naming the variable.
 fn parse_submit_principal_limits(
@@ -21724,7 +22351,9 @@ fn api_error_response_with_retry_after(
 /// The large-body middleware's per-principal (or deployment-wide) in-flight
 /// refusal. Same label and header as the handler's own concurrency refusal.
 fn large_body_concurrency_refusal() -> axum::response::Response {
-    api_error_response_with_retry_after(submit_rate_limited(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS))
+    api_error_response_with_retry_after(submit_rate_limited(
+        submit_concurrency_retry_after_seconds(),
+    ))
 }
 
 fn submit_principal_rate_limit_key(
@@ -22017,7 +22646,7 @@ impl AccountRateLimiter {
     }
 
     /// TEST-ONLY: clear all fixed-window and concurrency state so a test starts
-    /// from a pristine limiter. The DB-backed account/passkey/session/rotation
+    /// from a pristine limiter. The DB-backed account/session/rotation
     /// tests share the process-global `ACCOUNT_RATE_LIMITER`; without this reset a
     /// test inherits hit counts from whatever ran before it, causing spurious
     /// rate-limit denials when the suite runs with default parallelism. Each such
@@ -22089,7 +22718,7 @@ impl AccountRateLimiter {
 }
 
 /// TEST-ONLY: reset the process-global account-surface rate limiter. The
-/// DB-backed account/passkey/session/rotation tests call this at the start of
+/// DB-backed account/session/rotation tests call this at the start of
 /// each test so they don't inherit hit counts from prior tests sharing the
 /// `ACCOUNT_RATE_LIMITER` singleton. See `AccountRateLimiter::reset_for_test`.
 #[cfg(test)]
@@ -22176,6 +22805,18 @@ static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
 /// never used for authorization.
 fn client_ip_for_rate_limit(headers: &HeaderMap) -> String {
     lookup_client_key(
+        headers,
+        &axum::http::HeaderName::from_static("x-forwarded-for"),
+    )
+}
+
+/// The client address the trusted edge observed, for a referral network
+/// mark: the same hop, and the same trust assumption, as
+/// [`client_ip_for_rate_limit`], but the address itself, so the mark can
+/// take its /24 or /48. `None` when unattributed or malformed: nothing is
+/// recorded then. Never a client-set field, and never logged.
+fn client_ip_for_referral_mark(headers: &HeaderMap) -> Option<std::net::IpAddr> {
+    trace_commons_server::invite_lookup::trusted_edge_hop(
         headers,
         &axum::http::HeaderName::from_static("x-forwarded-for"),
     )
@@ -22724,48 +23365,31 @@ async fn account_revoke_all_handler(
     Ok(Json(serde_json::json!({ "revoked": revoked })))
 }
 
-// ============================================================================
-// Slice 2 Task 5: passkey enrollment ceremony (authenticated).
-//
-// Two dual-auth handlers guarded by `resolve_account_ctx`. `register/start`
-// issues a WebAuthn registration challenge, stashes the server-side
-// `PasskeyRegistration` state in the in-process ceremony store, and binds the
-// ceremony to the browser via a short-lived `__Host-tc_passkey_ceremony` cookie.
-// `register/finish` consumes that cookie (single-use), verifies the attestation,
-// and persists the resulting passkey. Discoverable login (Task 6) and credential
-// management (Task 7+) are intentionally out of scope here.
-// ============================================================================
-
-/// Short-lived cookie that binds a passkey registration ceremony to the browser
-/// that started it. Carries only the opaque ceremony id (an unguessable CSPRNG
-/// token), never any key or challenge material; the server-side challenge state
-/// lives in the ceremony store keyed by this id.
-const ACCOUNT_PASSKEY_CEREMONY_COOKIE: &str = "__Host-tc_passkey_ceremony";
-
-/// Ceremony cookie lifetime. Matches the ceremony-store TTL window (a few
-/// minutes): long enough for an interactive authenticator tap, short enough to
-/// bound stale challenge state.
-const ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
-
-/// Generic, non-PII WebAuthn user name / display name presented to the
-/// authenticator. There is no contributor handle wired into the account model at
-/// this slice, and the spec calls for a generic label when no handle is set, so
-/// we deliberately use a fixed string rather than leak any account identifier
-/// (which would otherwise be stored by the authenticator / surfaced in its UI).
-const ACCOUNT_PASSKEY_USER_LABEL: &str = "TraceCommons contributor";
+/// Ceremony cookie lifetime (the NEAR wallet ceremonies). Matches the
+/// ceremony-store TTL window (a few minutes): long enough for an interactive
+/// wallet approval, short enough to bound stale challenge state.
+const ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
 
 /// Slice 3a Task 8: the strong-authenticator-change gate.
 ///
-/// Adding or removing an authenticator (passkey or NEAR key) is only freely
-/// allowed from a STRONG session — one minted by a passkey or NEAR assertion.
-/// From a WEAK session (a device-link `'web'` cookie or a `'device'` bearer) the
-/// change is REFUSED *once the account already holds at least one strong
-/// authenticator*, so a leaked device bearer or a phished device-link link cannot
-/// silently swap the account's real second factor.
+/// Adding or removing an authenticator (a NEAR key) is only freely allowed
+/// from a STRONG session — one minted by a NEAR wallet assertion. From a WEAK
+/// session (a device-link `'web'` cookie, a native token, or a `'passkey'`
+/// session minted before passkeys were removed) the change is REFUSED *once the
+/// account already holds at least one strong authenticator*, so a leaked
+/// session or a phished device-link link cannot silently swap the account's
+/// real second factor.
+///
+/// The strong authenticators are the account's NEAR keys and, if it signs in
+/// with NEAR AI, that login (`count_active_strong_authenticators`). A NEAR AI
+/// session is still weak: the daemon's unattended renewal mints the same
+/// session a person's sign-in does, so no NEAR AI session proves that someone
+/// just signed in. An account that signs in with NEAR AI therefore needs a NEAR
+/// wallet session for these changes.
 ///
 /// The single exception is the BOOTSTRAPPING carve-out: when the account has zero
 /// strong authenticators a weak session MAY add the FIRST one (otherwise a
-/// contributor who only ever held a device link could never enroll a passkey).
+/// contributor who only ever held a device link could never enroll a NEAR key).
 /// The carve-out is symmetric for removal — when zero strong authenticators
 /// remain the account is already back at bootstrap, so a weak-session remove is
 /// permitted.
@@ -22800,196 +23424,8 @@ async fn require_authenticator_change_allowed(state: &AppState, ctx: &AccountCtx
     .map_err(internal_error)?;
     Err(api_error(
         StatusCode::FORBIDDEN,
-        "a passkey or NEAR sign-in is required to change authenticators",
+        "a NEAR wallet sign-in is required to change authenticators",
     ))
-}
-
-/// Request body for `POST /v1/account/passkeys/register/finish`. The browser's
-/// `RegisterPublicKeyCredential` (the attestation response) is flattened in;
-/// `label` is an optional, user-supplied display name for the new credential.
-#[derive(serde::Deserialize)]
-struct AccountPasskeyRegisterFinishBody {
-    #[serde(flatten)]
-    credential: webauthn_rs::prelude::RegisterPublicKeyCredential,
-    #[serde(default)]
-    label: Option<String>,
-}
-
-/// `POST /v1/account/passkeys/register/start` — begin enrolling a passkey for the
-/// authenticated account (Slice 2 Task 5). Dual-auth via `resolve_account_ctx`;
-/// fails closed with 503 if the relying party is unconfigured. Builds
-/// `exclude_credentials` from the account's existing active credentials so the
-/// same authenticator cannot enroll twice, stashes the server-side
-/// `PasskeyRegistration` state in the ceremony store, and returns the
-/// `CreationChallengeResponse` plus a short-lived `__Host-tc_passkey_ceremony` cookie
-/// binding the ceremony to this browser.
-async fn account_passkey_register_start_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-) -> ApiResult<axum::response::Response> {
-    use axum::response::IntoResponse;
-
-    // Strong-authenticator gate (Slice 3a Task 8): a weak session may add the
-    // FIRST authenticator (bootstrapping) but not a second.
-    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
-
-    let webauthn = account_webauthn(state.as_ref())?;
-    let db = account_db(state.as_ref())?;
-
-    // Exclude the account's already-enrolled credentials so an authenticator the
-    // user already registered cannot be double-enrolled. A stored id that fails to
-    // decode is a corrupt row, not a client error: fail closed with a 500 rather
-    // than silently dropping it from the exclusion list.
-    let existing = db
-        .list_account_credentials(&ctx.tenant_id, ctx.account_id.as_uuid())
-        .await
-        .map_err(internal_error)?;
-    let mut exclude = Vec::with_capacity(existing.len());
-    for cred in &existing {
-        exclude.push(credential_id_from_string(&cred.credential_id).map_err(internal_error)?);
-    }
-    let exclude = if exclude.is_empty() {
-        None
-    } else {
-        Some(exclude)
-    };
-
-    // The user id is the account's own UUID (stable, non-PII). user_name /
-    // user_display_name are a fixed generic label (no handle is wired here).
-    let (challenge, reg_state) = webauthn
-        .start_passkey_registration(
-            ctx.account_id.as_uuid(),
-            ACCOUNT_PASSKEY_USER_LABEL,
-            ACCOUNT_PASSKEY_USER_LABEL,
-            exclude,
-        )
-        .map_err(|_| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not start passkey registration",
-            )
-        })?;
-
-    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
-    account_ceremony_store(state.as_ref())
-        .put(ceremony_id.clone(), CeremonyState::Registration(reg_state));
-
-    // Bind the ceremony to this browser. Secure + HttpOnly + SameSite=Strict +
-    // Path=/, short Max-Age. Carries only the opaque ceremony id.
-    let cookie = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ceremony_id))
-        .secure(true)
-        .http_only(true)
-        .same_site(cookie::SameSite::Strict)
-        .path("/")
-        .max_age(cookie::time::Duration::seconds(
-            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
-        ))
-        .build();
-
-    // Coarse, hash-only audit. Records only the count of excluded (existing)
-    // credentials — never any credential id, challenge, or key material.
-    db.append_account_audit(
-        &ctx.tenant_id,
-        "account_passkey_register_started",
-        &ctx.actor_ref,
-        "success",
-        serde_json::json!({ "existing_credentials": existing.len() }),
-    )
-    .await
-    .map_err(internal_error)?;
-
-    let mut response = Json(challenge).into_response();
-    match HeaderValue::from_str(&cookie.to_string()) {
-        Ok(value) => {
-            response
-                .headers_mut()
-                .insert(axum::http::header::SET_COOKIE, value);
-        }
-        Err(_) => {
-            return Err(api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not set ceremony cookie",
-            ));
-        }
-    }
-    Ok(response)
-}
-
-/// `POST /v1/account/passkeys/register/finish` — complete passkey enrollment
-/// (Slice 2 Task 5). Dual-auth via `resolve_account_ctx`; fails closed with 503
-/// if the relying party is unconfigured. Recovers the pending
-/// `PasskeyRegistration` via the single-use `__Host-tc_passkey_ceremony` cookie
-/// (missing / expired / already-consumed / wrong-variant -> 400), verifies the
-/// browser's attestation, and persists the resulting passkey under the canonical
-/// credential-id encoding. A failed/invalid attestation is rejected with a 400
-/// and NO row is written.
-async fn account_passkey_register_finish_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-    headers: HeaderMap,
-    Json(body): Json<AccountPasskeyRegisterFinishBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    // Strong-authenticator gate (Slice 3a Task 8). Enforced again on finish so a
-    // weak session cannot complete a registration it could not start.
-    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
-
-    let webauthn = account_webauthn(state.as_ref())?;
-    let db = account_db(state.as_ref())?;
-
-    // Recover and CONSUME (single-use `take`) the pending registration state.
-    let ceremony_id = cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE)
-        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "no passkey ceremony in progress"))?;
-    let reg_state = match account_ceremony_store(state.as_ref()).take(ceremony_id) {
-        Some(CeremonyState::Registration(reg_state)) => reg_state,
-        // Missing / expired / already-consumed, or a non-registration ceremony id.
-        Some(_) | None => {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "no passkey ceremony in progress",
-            ));
-        }
-    };
-
-    // Verify the attestation. An invalid/forged attestation is a client error:
-    // reject with 400 and write no row.
-    let passkey = webauthn
-        .finish_passkey_registration(&body.credential, &reg_state)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "passkey registration failed"))?;
-
-    let credential_id = credential_id_to_string(passkey.cred_id());
-    let passkey_json = serde_json::to_value(&passkey).map_err(internal_error)?;
-    // Treat a blank/whitespace label as absent.
-    let label = body
-        .label
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    db.insert_webauthn_credential(
-        &ctx.tenant_id,
-        ctx.account_id.as_uuid(),
-        &credential_id,
-        &passkey_json,
-        label,
-    )
-    .await
-    .map_err(internal_error)?;
-
-    // Hash-only / label-only audit. Records only whether a label was supplied —
-    // never the credential id, public key, or attestation material.
-    db.append_account_audit(
-        &ctx.tenant_id,
-        "account_passkey_enrolled",
-        &ctx.actor_ref,
-        "success",
-        serde_json::json!({ "labeled": label.is_some() }),
-    )
-    .await
-    .map_err(internal_error)?;
-
-    // The credential id is a PUBLIC identifier (not a secret); returning it lets
-    // the client correlate the new credential for management (Task 7+).
-    Ok(Json(serde_json::json!({ "credential_id": credential_id })))
 }
 
 // ============================================================================
@@ -23003,7 +23439,7 @@ async fn account_passkey_register_finish_handler(
 //     the key is a FullAccess key of the named account, then persist the link.
 //
 // NOTE: this is the ENROLL surface only. The strong-auth GATE (requiring a
-// passkey-backed session before linking a NEAR key) is Task 8; here the
+// strong session before linking a further NEAR key) is Task 8; here the
 // middleware-injected `AccountCtx` is the only guard. The unauthenticated NEAR
 // LOGIN flow is Task 7.
 //
@@ -23029,7 +23465,7 @@ const NEAR_LOGIN_MESSAGE: &str = "Trace Commons sign-in";
 
 /// Ceremony cookie binding a NEAR enroll ceremony to this browser. Shares the
 /// shape (Secure + HttpOnly + SameSite=Strict + Path=/ + short Max-Age) of the
-/// passkey ceremony cookie but a distinct name so the two ceremonies never alias.
+/// other ceremony cookies but a distinct name so ceremonies never alias.
 const ACCOUNT_NEAR_CEREMONY_COOKIE: &str = "__Host-tc_near_ceremony";
 
 /// Encode the 32-byte challenge nonce for the wire as lowercase hex (64 chars).
@@ -23066,7 +23502,7 @@ async fn account_near_enroll_start_handler(
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let recipient = cfg.recipient.clone();
 
-    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
+    let ceremony_id = trace_commons_server::account_ceremony::new_ceremony_id();
     account_ceremony_store(state.as_ref()).put(
         ceremony_id.clone(),
         CeremonyState::NearChallenge {
@@ -23081,7 +23517,7 @@ async fn account_near_enroll_start_handler(
         .same_site(cookie::SameSite::Strict)
         .path("/")
         .max_age(cookie::time::Duration::seconds(
-            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
+            ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS,
         ))
         .build();
 
@@ -23161,8 +23597,8 @@ async fn account_near_enroll_finish_handler(
         .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "no near ceremony in progress"))?;
     let (nonce, recipient) = match account_ceremony_store(state.as_ref()).take(ceremony_id) {
         Some(CeremonyState::NearChallenge { nonce, recipient }) => (nonce, recipient),
-        // Missing / expired / already-consumed, or a non-NEAR ceremony id.
-        Some(_) | None => {
+        // Missing / expired / already-consumed.
+        None => {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
                 "no near ceremony in progress",
@@ -23268,189 +23704,6 @@ async fn account_near_enroll_finish_handler(
 }
 
 // ============================================================================
-// Slice 2 Task 7: passkey credential management (authenticated).
-//
-// Three dual-auth handlers guarded by `resolve_account_ctx`, scoped to the
-// caller's OWN account by the DB ops (forced RLS + account_id predicate):
-//
-//   * GET    /v1/account/passkeys                 — list active credentials.
-//   * PATCH  /v1/account/passkeys/{credential_id} — rename one credential.
-//   * DELETE /v1/account/passkeys/{credential_id} — soft-revoke one credential.
-//
-// A credential not owned by the caller (or unknown / already-revoked) is a
-// UNIFORM 404 on rename/remove — no oracle distinguishing not-found from
-// not-owned. `credential_id` is the PUBLIC base64url WebAuthn id; it is safe to
-// return in list responses but is NEVER recorded in hash-only audit metadata.
-// ============================================================================
-
-/// One credential as surfaced by `GET /v1/account/passkeys`. `this_device` is
-/// `true` only when THIS exact credential authenticated the current (passkey)
-/// session — always `false` for bearer and device-link cookie sessions.
-#[derive(Debug, Serialize)]
-struct AccountPasskeyListItem {
-    credential_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-    created_at: DateTime<Utc>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_used_at: Option<DateTime<Utc>>,
-    this_device: bool,
-}
-
-/// `GET /v1/account/passkeys` — list the caller's ACTIVE credentials.
-///
-/// Dual-auth via `resolve_account_ctx`. The owning account is auth-derived; the
-/// DB op is tenant- + account-scoped under forced RLS, so another account's
-/// credentials are never listed. `this_device` flags the credential that
-/// authenticated the current session (passkey-cookie path only). No audit row is
-/// written: this is a read of the caller's own label/timestamp metadata (no key
-/// material, no other account's data), consistent with the other account read
-/// surfaces that do not audit plain list reads.
-async fn account_passkeys_list_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let db = account_db(state.as_ref())?;
-
-    let creds = db
-        .list_account_credentials(&ctx.tenant_id, ctx.account_id.as_uuid())
-        .await
-        .map_err(internal_error)?;
-
-    let passkeys: Vec<AccountPasskeyListItem> = creds
-        .into_iter()
-        .map(|c| {
-            let this_device = ctx
-                .auth_credential_id
-                .as_deref()
-                .is_some_and(|active| active == c.credential_id);
-            AccountPasskeyListItem {
-                credential_id: c.credential_id,
-                label: c.label,
-                created_at: c.created_at,
-                last_used_at: c.last_used_at,
-                this_device,
-            }
-        })
-        .collect();
-
-    Ok(Json(serde_json::json!({ "passkeys": passkeys })))
-}
-
-/// Request body for `PATCH /v1/account/passkeys/{credential_id}`. A blank /
-/// whitespace-only `label` clears the credential's label (stored as NULL).
-#[derive(Debug, Deserialize)]
-struct AccountPasskeyRenameBody {
-    #[serde(default)]
-    label: Option<String>,
-}
-
-/// `PATCH /v1/account/passkeys/{credential_id}` — rename one of the caller's
-/// credentials.
-///
-/// Dual-auth via `resolve_account_ctx`. The DB op is tenant- + account-scoped, so
-/// a credential the caller does not own (or one that is unknown / already
-/// revoked) affects zero rows and yields a UNIFORM 404 — no existence oracle
-/// distinguishing not-found from not-owned. Audited hash-only as
-/// `account_passkey_renamed`, recording ONLY whether a label was set (never the
-/// credential id or label text).
-async fn account_passkey_rename_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-    AxumPath(credential_id): AxumPath<String>,
-    Json(body): Json<AccountPasskeyRenameBody>,
-) -> ApiResult<StatusCode> {
-    let db = account_db(state.as_ref())?;
-
-    // Treat a blank/whitespace label as absent (clears the label).
-    let label = body
-        .label
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    let renamed = db
-        .rename_account_credential(
-            &ctx.tenant_id,
-            ctx.account_id.as_uuid(),
-            &credential_id,
-            label,
-        )
-        .await
-        .map_err(internal_error)?;
-
-    if !renamed {
-        // Uniform 404: unknown / revoked / not-owned are indistinguishable.
-        return Err(api_error(StatusCode::NOT_FOUND, "passkey not found"));
-    }
-
-    db.append_account_audit(
-        &ctx.tenant_id,
-        "account_passkey_renamed",
-        &ctx.actor_ref,
-        "success",
-        serde_json::json!({ "labeled": label.is_some() }),
-    )
-    .await
-    .map_err(internal_error)?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// `DELETE /v1/account/passkeys/{credential_id}` — soft-revoke one of the
-/// caller's credentials.
-///
-/// Dual-auth via `resolve_account_ctx`. The DB op is tenant- + account-scoped, so
-/// a credential the caller does not own (or one that is unknown / already
-/// revoked) yields a UNIFORM 404. On success returns the count of the account's
-/// remaining active credentials. Audited hash-only as `account_passkey_removed`,
-/// recording ONLY the remaining count (never the credential id).
-async fn account_passkey_remove_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(ctx): Extension<AccountCtx>,
-    AxumPath(credential_id): AxumPath<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    // Strong-authenticator gate (Slice 3a Task 8): a weak session may remove only
-    // while zero strong authenticators remain (bootstrapping); otherwise refused.
-    // NOTE: NEAR-identity removal (Task 9) will call this SAME gate.
-    require_authenticator_change_allowed(state.as_ref(), &ctx).await?;
-
-    let db = account_db(state.as_ref())?;
-
-    // Z2 S2: every live session this passkey minted is revoked with it, browser
-    // and native, except the session making this request.
-    let result = db
-        .revoke_account_credential_sparing_session(
-            &ctx.tenant_id,
-            ctx.account_id.as_uuid(),
-            &credential_id,
-            ctx.session_token_hash.as_deref(),
-        )
-        .await
-        .map_err(internal_error)?;
-
-    if !result.removed {
-        // Uniform 404: unknown / revoked / not-owned are indistinguishable.
-        return Err(api_error(StatusCode::NOT_FOUND, "passkey not found"));
-    }
-
-    db.append_account_audit(
-        &ctx.tenant_id,
-        "account_passkey_removed",
-        &ctx.actor_ref,
-        "success",
-        serde_json::json!({ "remaining": result.remaining }),
-    )
-    .await
-    .map_err(internal_error)?;
-
-    Ok(Json(serde_json::json!({
-        "removed": true,
-        "remaining_credentials": result.remaining,
-    })))
-}
-
-// ============================================================================
 // Slice 3a Task 9: NEAR identity management (authenticated).
 //
 // Three dual-auth handlers behind `account_auth_middleware`, scoped to the
@@ -23465,14 +23718,13 @@ async fn account_passkey_remove_handler(
 // not-owned. `public_key` and `near_account_id` are PUBLIC identifiers (not
 // secrets); they are safe to return in list responses but are NEVER recorded in
 // hash-only audit metadata. Removal is an authenticator change, so it shares the
-// Task 8 strong-authenticator gate with passkey removal; rename and list are
-// not gated.
+// Task 8 strong-authenticator gate; rename and list are not gated.
 // ============================================================================
 
 /// One NEAR identity as surfaced by `GET /v1/account/near-identities`.
 /// `this_session` is `true` only when THIS exact identity (its public key)
-/// authenticated the current (NEAR-login) session — always `false` for passkey
-/// and device-link cookie sessions and for the bearer path, whose
+/// authenticated the current (NEAR-login) session — always `false` for
+/// device-link cookie sessions and for the bearer path, whose
 /// `auth_credential_id` is a credential id or `None` and never equals a NEAR
 /// public key.
 #[derive(Debug, Serialize)]
@@ -23497,7 +23749,7 @@ struct AccountNearIdentityListItem {
 /// `this_session` flags the identity that authenticated the current session
 /// (NEAR-login cookie path only). No audit row is written: this is a read of the
 /// caller's own label/timestamp metadata (no key material, no other account's
-/// data), consistent with the passkey list read which also does not audit.
+/// data), consistent with the other account list reads, which do not audit.
 async fn account_near_identities_list_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -23513,9 +23765,10 @@ async fn account_near_identities_list_handler(
         .into_iter()
         .map(|i| {
             // True only when THIS NEAR identity authenticated the current session.
-            // NEAR login set `auth_credential_id` to the public key; passkey login
-            // set it to a credential id; device-link is None — none of which can
-            // false-positive against a NEAR public key.
+            // NEAR login set `auth_credential_id` to the public key; a session
+            // minted by a pre-removal passkey login carries a credential id;
+            // device-link is None — none of which can false-positive against a
+            // NEAR public key.
             let this_session = ctx
                 .auth_credential_id
                 .as_deref()
@@ -23596,7 +23849,7 @@ async fn account_near_identity_rename_handler(
 /// caller's NEAR identities.
 ///
 /// Dual-auth via `resolve_account_ctx`. Removal is an authenticator change, so it
-/// runs behind the SAME Task 8 strong-authenticator gate as passkey removal: a
+/// runs behind the Task 8 strong-authenticator gate: a
 /// weak session may remove only while zero strong authenticators remain
 /// (bootstrapping); otherwise refused with 403. The DB op is tenant- +
 /// account-scoped, so an identity the caller does not own (or unknown / already
@@ -24003,460 +24256,10 @@ async fn account_merge_confirm_handler(
 }
 
 // ============================================================================
-// Slice 2 Task 6: discoverable passkey login (UNAUTHENTICATED surface).
-//
-// Two handlers, both un-versioned and un-authed, sitting beside the Slice 1
-// `/account/login/*` redeem flow:
-//
-//   * `/account/passkey/login/start` issues a discoverable-credential WebAuthn
-//     challenge (no allow-list), stashes the server-side
-//     `DiscoverableAuthentication` state in the in-process ceremony store, and
-//     binds it to the browser via the same short-lived `__Host-tc_passkey_ceremony`
-//     cookie used by enrollment.
-//   * `/account/passkey/login/finish` verifies the browser's assertion and, on
-//     success, mints the IDENTICAL Slice 1 session cookie. It bootstraps the
-//     tenant from the asserted credential id via the NARROW resolver pool (NO
-//     ensure_trace_tenant before the credential is verified), loads the stored
-//     passkey under that tenant's RLS, runs webauthn-rs `finish_discoverable_
-//     authentication` (which enforces the sign-counter / clone-detection check
-//     INSIDE finish), and issues the session under the resolved tenant tx.
-//
-// SECURITY: EVERY failure mode — unknown credential, missing/expired ceremony,
-// malformed body, sign-counter regression, handle/account mismatch, rate-limit
-// — collapses to ONE byte-identical uniform deny (`passkey_login_generic_deny`)
-// behind a fixed timing floor (`sleep_to_redeem_floor`), so nothing about the
-// attempt is enumerable by status, body, or latency. No credential key or raw
-// session secret is ever logged or audited.
-// ============================================================================
-
-/// The ONE uniform, non-enumerating deny for EVERY passkey-login failure mode.
-/// Byte-identical status + body across unknown-credential / missing-ceremony /
-/// malformed-body / counter-regression / handle-mismatch / rate-limited, with
-/// no-store + no-referrer. Shape mirrors `redeem_generic_deny`; kept distinct so
-/// the login surface has a single, self-contained deny site.
-fn passkey_login_generic_deny() -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let mut response =
-        (StatusCode::BAD_REQUEST, "passkey login invalid or expired").into_response();
-    let headers = response.headers_mut();
-    headers.insert(
-        axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    headers.insert(
-        axum::http::header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
-    response
-}
-
-/// Body extractor for `login/finish`: the browser's `PublicKeyCredential`
-/// assertion. On ANY extraction failure (malformed JSON, wrong shape, missing
-/// body) it rejects with the SAME uniform passkey-login deny so a malformed body
-/// is indistinguishable from a bad/unknown credential. Mirrors `ConfirmLoginForm`.
-struct PasskeyAssertionBody(webauthn_rs::prelude::PublicKeyCredential);
-
-impl<S> axum::extract::FromRequest<S> for PasskeyAssertionBody
-where
-    S: Send + Sync,
-{
-    type Rejection = axum::response::Response;
-
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        match axum::Json::<webauthn_rs::prelude::PublicKeyCredential>::from_request(req, state)
-            .await
-        {
-            Ok(axum::Json(assertion)) => Ok(PasskeyAssertionBody(assertion)),
-            Err(_) => Err(passkey_login_generic_deny()),
-        }
-    }
-}
-
-/// What a browser passkey sign-in is for, fixed at `login/start` and carried
-/// in the ceremony to `finish`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PasskeyLoginPurpose {
-    /// An ordinary sign-in: a session of `ACCOUNT_SESSION_TTL_DAYS`.
-    Session,
-    /// The step-up page's sign-in (Z2 S7): a session of
-    /// `STEP_UP_SESSION_TTL_MINUTES`.
-    StepUp,
-}
-
-/// The `purpose` of a `login/start`, from its raw query. No `purpose` is an
-/// ordinary sign-in and other parameters are ignored, as before. A `purpose`
-/// must be exactly `step_up`, once; any other value (or a repeat) is `None`,
-/// which the handler answers with the uniform deny. The value is compared, not
-/// decoded, and never logged.
-fn passkey_login_purpose(query: Option<&str>) -> Option<PasskeyLoginPurpose> {
-    let mut purposes = query.unwrap_or_default().split('&').filter_map(|pair| {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        (key == "purpose").then_some(value)
-    });
-    match (purposes.next(), purposes.next()) {
-        (None, _) => Some(PasskeyLoginPurpose::Session),
-        (Some("step_up"), None) => Some(PasskeyLoginPurpose::StepUp),
-        _ => None,
-    }
-}
-
-/// `POST /account/passkey/login/start` — begin a discoverable passkey login
-/// (Slice 2 Task 6). UNAUTHENTICATED. Fails closed (uniform deny) when the
-/// relying party is unconfigured. Rate-limited per-IP + global. Issues a
-/// discoverable-credential challenge (no allow-list — the authenticator
-/// "discovers" the credential and user handle), stashes the server-side
-/// `DiscoverableAuthentication` state under a fresh ceremony id, and binds it to
-/// this browser with the short-lived `__Host-tc_passkey_ceremony` cookie. Returns the
-/// `RequestChallengeResponse`. ANY failure collapses to the uniform deny.
-async fn account_passkey_login_start_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    axum::extract::RawQuery(query): axum::extract::RawQuery,
-) -> axum::response::Response {
-    // The one optional input: `purpose=step_up` from the step-up page. Checked
-    // before anything else so a refused purpose costs nothing.
-    let Some(purpose) = passkey_login_purpose(query.as_deref()) else {
-        return passkey_login_generic_deny();
-    };
-    // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
-    // in the `REDEEM_MIN_LATENCY` timing floor. It performs NO credential or tenant
-    // lookup — it only mints a fresh discoverable-auth challenge — so there is no
-    // found-vs-not-found oracle to erase. Do not "fix" this by adding a floor here;
-    // the floor belongs only on paths whose latency could leak credential existence.
-    // Per-IP + coarse global rate limit; both collapse to the uniform deny.
-    let client_ip = client_ip_for_rate_limit(&headers);
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("passkey-login-ip:{client_ip}"),
-        PASSKEY_LOGIN_PER_IP_LIMIT,
-    ) {
-        return passkey_login_generic_deny();
-    }
-    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
-        return passkey_login_generic_deny();
-    }
-
-    // Fail-closed: an unconfigured relying party yields the uniform deny (NOT a
-    // 503), so the login surface does not enumerate configuration state.
-    let webauthn = match account_webauthn(state.as_ref()) {
-        Ok(webauthn) => webauthn,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-
-    let (challenge, auth_state) = match webauthn.start_discoverable_authentication() {
-        Ok(pair) => pair,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-
-    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
-    account_ceremony_store(state.as_ref()).put(
-        ceremony_id.clone(),
-        match purpose {
-            PasskeyLoginPurpose::Session => CeremonyState::DiscoverableAuthentication(auth_state),
-            PasskeyLoginPurpose::StepUp => CeremonyState::StepUpDiscoverable(auth_state),
-        },
-    );
-
-    // Same short-lived ceremony cookie shape as enrollment (Task 5): opaque id
-    // only, Secure + HttpOnly + SameSite=Strict + Path=/, short Max-Age.
-    let cookie = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ceremony_id))
-        .secure(true)
-        .http_only(true)
-        .same_site(cookie::SameSite::Strict)
-        .path("/")
-        .max_age(cookie::time::Duration::seconds(
-            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
-        ))
-        .build();
-
-    use axum::response::IntoResponse;
-    let mut response = Json(challenge).into_response();
-    match HeaderValue::from_str(&cookie.to_string()) {
-        Ok(value) => {
-            response
-                .headers_mut()
-                .insert(axum::http::header::SET_COOKIE, value);
-        }
-        // A cookie that cannot be serialized would leave the ceremony unbindable;
-        // collapse to the uniform deny rather than returning an unusable challenge.
-        Err(_) => return passkey_login_generic_deny(),
-    }
-    response
-}
-
-/// A discoverable passkey assertion that verified: the tenant the credential
-/// lives in, the account it belongs to, and its canonical credential id.
-struct VerifiedPasskeyAssertion {
-    tenant: String,
-    account_id: uuid::Uuid,
-    credential_id: String,
-}
-
-/// The ONE passkey login verifier, shared by the browser
-/// (`/account/passkey/login/finish`) and native
-/// (`/v1/account/native/passkey/login/finish`) sign-ins. The two differ only in
-/// how the ceremony state was recovered (a cookie or a body-borne id) and what
-/// they issue; every check on the assertion itself lives here, so the surfaces
-/// cannot drift apart. `None` on any failure; the caller answers with its own
-/// uniform deny.
-///
-/// Steps, in order: identify the asserted handle and credential id (no tenant
-/// context yet); the per-credential ceiling; resolve the tenant through the
-/// NARROW resolver pool with NO tenant write; load the active credential under
-/// that tenant's RLS; require the asserted user handle to equal the
-/// credential's account (before verification runs); verify, which enforces the
-/// signature and the sign-counter clone check; persist the advanced counter.
-async fn verify_discoverable_passkey_assertion(
-    webauthn: &webauthn_rs::Webauthn,
-    db: &dyn Database,
-    assertion: &webauthn_rs::prelude::PublicKeyCredential,
-    auth_state: webauthn_rs::prelude::DiscoverableAuthentication,
-) -> Option<VerifiedPasskeyAssertion> {
-    // Extract the asserted user handle + credential id from the assertion (no
-    // tenant context yet). Encode the credential id with the SAME canonical
-    // base64url encoding enrollment used so the lookup agrees byte-for-byte.
-    let (account_handle_uuid, cred_id_bytes) = webauthn
-        .identify_discoverable_authentication(assertion)
-        .ok()?;
-    let credential_id =
-        credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(cred_id_bytes));
-
-    // Per-credential hard ceiling (replay/brute bound on one specific credential,
-    // IP-independent, and shared by both surfaces).
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("passkey-login-cred:{credential_id}"),
-        PASSKEY_LOGIN_PER_CRED_LIMIT,
-    ) {
-        return None;
-    }
-
-    // Tenant bootstrap via the NARROW resolver pool. Returns tenant ONLY; NO
-    // ensure_trace_tenant. None / Err (incl. fail-closed unconfigured resolver)
-    // -> deny, and critically NO tenant row is written for a forged id.
-    let tenant = db.resolve_credential_tenant(&credential_id).await.ok()??;
-
-    // Under the resolved tenant's RLS, load the active credential. Deserialize
-    // the stored passkey JSON into a webauthn-rs `Passkey`; a corrupt row also
-    // denies.
-    let credential = db
-        .load_webauthn_credential_for_login(&tenant, &credential_id)
-        .await
-        .ok()??;
-    let credential_account_id = credential.account_id;
-    let mut passkey: webauthn_rs::prelude::Passkey =
-        serde_json::from_value(credential.passkey).ok()?;
-
-    // Cross-account / handle binding (checked BEFORE finish so a mismatch never
-    // reaches verification): the user handle the authenticator asserted MUST
-    // equal the account the stored credential belongs to. Defense-in-depth on
-    // top of the credential_id -> account binding.
-    if account_handle_uuid != credential_account_id {
-        return None;
-    }
-
-    // Verify the assertion. The SIGN-COUNTER regression / clone-detection check
-    // is enforced INSIDE finish_discoverable_authentication (a regressed counter
-    // -> Err), as is the allowed-credential / signature check.
-    let discoverable_key = webauthn_rs::prelude::DiscoverableKey::from(&passkey);
-    let auth_result = webauthn
-        .finish_discoverable_authentication(assertion, auth_state, &[discoverable_key])
-        .ok()?;
-
-    // Persist the advanced sign counter (clone-detection state) when it moved.
-    // `update_credential` mutates `passkey` in place and returns Some(true) iff a
-    // property (counter / backup flags) actually changed. A persistence failure is
-    // NOT fatal to this login (the assertion already verified), but we fail closed
-    // so a stuck counter can't silently accumulate.
-    if matches!(passkey.update_credential(&auth_result), Some(true)) {
-        let updated = serde_json::to_value(&passkey).ok()?;
-        db.update_webauthn_credential_after_login(&tenant, &credential_id, &updated)
-            .await
-            .ok()?;
-    }
-
-    Some(VerifiedPasskeyAssertion {
-        tenant,
-        account_id: credential_account_id,
-        credential_id,
-    })
-}
-
-/// `POST /account/passkey/login/finish` — complete a discoverable passkey login
-/// and issue a session (Slice 2 Task 6). UNAUTHENTICATED, with full redeem-style
-/// hardening: a fixed timing floor wraps the WHOLE handler so success and every
-/// uniform deny take at least `REDEEM_MIN_LATENCY`, erasing the
-/// found-vs-not-found (and rate-limited-vs-not) timing oracle.
-async fn account_passkey_login_finish_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: PasskeyAssertionBody,
-) -> axum::response::Response {
-    let start = std::time::Instant::now();
-    let response = account_passkey_login_finish_inner(state, headers, body).await;
-    sleep_to_redeem_floor(start).await;
-    response
-}
-
-/// Inner body of the passkey `login/finish` handler. Returns on every branch with
-/// the final response; the outer wrapper pads each path to `REDEEM_MIN_LATENCY`.
-async fn account_passkey_login_finish_inner(
-    state: Arc<AppState>,
-    headers: HeaderMap,
-    body: PasskeyAssertionBody,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let PasskeyAssertionBody(assertion) = body;
-
-    // 1. Per-IP + coarse global rate limit. Same uniform deny; floor still applies.
-    let client_ip = client_ip_for_rate_limit(&headers);
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("passkey-login-ip:{client_ip}"),
-        PASSKEY_LOGIN_PER_IP_LIMIT,
-    ) {
-        return passkey_login_generic_deny();
-    }
-    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
-        return passkey_login_generic_deny();
-    }
-
-    let webauthn = match account_webauthn(state.as_ref()) {
-        Ok(webauthn) => webauthn,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-    let db = match account_db(state.as_ref()) {
-        Ok(db) => db,
-        Err(_) => return passkey_login_generic_deny(),
-    };
-
-    // 3. Recover and CONSUME (single-use `take`) the pending discoverable-auth
-    //    state via the ceremony cookie. Missing / expired / already-consumed /
-    //    wrong-variant all collapse to the uniform deny. The purpose was bound
-    //    into the ceremony at `start`; nothing here can change it.
-    let (auth_state, purpose) =
-        match cookie_value_from_headers(&headers, ACCOUNT_PASSKEY_CEREMONY_COOKIE) {
-            Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
-                Some(CeremonyState::DiscoverableAuthentication(auth_state)) => {
-                    (auth_state, PasskeyLoginPurpose::Session)
-                }
-                Some(CeremonyState::StepUpDiscoverable(auth_state)) => {
-                    (auth_state, PasskeyLoginPurpose::StepUp)
-                }
-                Some(_) | None => return passkey_login_generic_deny(),
-            },
-            None => return passkey_login_generic_deny(),
-        };
-
-    // 4-8. Identify, resolve, load, bind and verify the assertion, and persist
-    //    the advanced sign counter: the verification core shared with native
-    //    passkey sign-in. Any failure -> uniform deny.
-    let Some(VerifiedPasskeyAssertion {
-        tenant,
-        account_id: credential_account_id,
-        credential_id,
-    }) =
-        verify_discoverable_passkey_assertion(&webauthn, db.as_ref(), &assertion, auth_state).await
-    else {
-        return passkey_login_generic_deny();
-    };
-
-    // 9. Mint the session secret (>=128-bit CSPRNG); store ONLY its hash. Insert
-    //    the session (client_kind='passkey', auth_credential_id=credential_id) +
-    //    hash-only audit in one RLS-scoped tx under the resolved tenant. NO
-    //    ensure_trace_tenant: the credential is verified, so the tenant provably
-    //    exists via its FK.
-    //    A step-up sign-in's session lasts `STEP_UP_SESSION_TTL_MINUTES`, in
-    //    the row's absolute `expires_at` and in the cookie's Max-Age alike.
-    let secret = generate_session_secret();
-    let token_hash = hash_secret(&secret);
-    let (lifetime, metadata) = match purpose {
-        PasskeyLoginPurpose::Session => (
-            Duration::days(ACCOUNT_SESSION_TTL_DAYS),
-            // Hash-only / label-only: never the credential id or key material.
-            serde_json::json!({ "client_kind": "passkey" }),
-        ),
-        PasskeyLoginPurpose::StepUp => (
-            Duration::minutes(STEP_UP_SESSION_TTL_MINUTES),
-            serde_json::json!({ "client_kind": "passkey", "purpose": "step_up" }),
-        ),
-    };
-    let expires_at = Utc::now() + lifetime;
-    if db
-        .issue_passkey_session(
-            &tenant,
-            credential_account_id,
-            trace_commons_server::db::NewSession {
-                token_hash: &token_hash,
-                client_kind: "passkey",
-                expires_at,
-            },
-            &credential_id,
-            trace_commons_server::db::RedeemAudit {
-                action: "account_passkey_login".to_string(),
-                outcome: "success".to_string(),
-                metadata,
-            },
-        )
-        .await
-        .is_err()
-    {
-        return passkey_login_generic_deny();
-    }
-
-    // 10. Build the IDENTICAL Slice 1 session cookie (`{b64url(tenant)}.{secret}`),
-    //     303 to the account view, no-store + no-referrer, and clear the ceremony
-    //     cookie. See `confirm_login_inner` for the cookie-value rationale.
-    let cookie_value = format!(
-        "{}.{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tenant.as_bytes()),
-        secret,
-    );
-    let session_cookie = cookie::Cookie::build((ACCOUNT_SESSION_COOKIE, cookie_value))
-        .secure(true)
-        .http_only(true)
-        .same_site(cookie::SameSite::Strict)
-        .path("/")
-        .max_age(cookie::time::Duration::seconds(lifetime.num_seconds()))
-        .build();
-    // Expire the ceremony cookie (Max-Age=0) now that it has been consumed.
-    let clear_ceremony = cookie::Cookie::build((ACCOUNT_PASSKEY_CEREMONY_COOKIE, ""))
-        .secure(true)
-        .http_only(true)
-        .same_site(cookie::SameSite::Strict)
-        .path("/")
-        .max_age(cookie::time::Duration::seconds(0))
-        .build();
-
-    let mut response = StatusCode::SEE_OTHER.into_response();
-    let resp_headers = response.headers_mut();
-    resp_headers.insert(
-        axum::http::header::LOCATION,
-        HeaderValue::from_static(ACCOUNT_VIEW_PATH),
-    );
-    match HeaderValue::from_str(&session_cookie.to_string()) {
-        Ok(value) => {
-            resp_headers.append(axum::http::header::SET_COOKIE, value);
-        }
-        Err(_) => return passkey_login_generic_deny(),
-    }
-    if let Ok(value) = HeaderValue::from_str(&clear_ceremony.to_string()) {
-        resp_headers.append(axum::http::header::SET_COOKIE, value);
-    }
-    append_legacy_account_session_clear(resp_headers);
-    resp_headers.insert(
-        axum::http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    resp_headers.insert(
-        axum::http::header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
-    response
-}
-
-// ============================================================================
 // Slice 3a Task 7: discoverable NEAR wallet login (UNAUTHENTICATED surface).
 //
-// Two handlers, both un-versioned and un-authed, sitting beside the Slice 2
-// passkey login flow:
+// Two handlers, both un-versioned and un-authed, sitting beside the Slice 1
+// redeem flow:
 //
 //   * `/account/near/login/start` mints a fresh 32-byte challenge nonce, stashes
 //     a `NearChallenge` ceremony in the in-process store, binds it to the browser
@@ -24481,9 +24284,8 @@ async fn account_passkey_login_finish_inner(
 /// The ONE uniform, non-enumerating deny for EVERY NEAR-login failure mode.
 /// Byte-identical status + body across unknown-key / missing-ceremony /
 /// replayed-nonce / malformed-body / bad-signature / wrong-message /
-/// rate-limited, with no-store + no-referrer. Shape mirrors
-/// `passkey_login_generic_deny`; kept distinct so the NEAR login surface has a
-/// single, self-contained deny site (intra-surface byte-identical).
+/// rate-limited, with no-store + no-referrer. A single, self-contained deny site
+/// for the NEAR login surface (intra-surface byte-identical).
 fn near_login_generic_deny() -> axum::response::Response {
     use axum::response::IntoResponse;
     let mut response = (StatusCode::BAD_REQUEST, "near login invalid or expired").into_response();
@@ -24516,7 +24318,7 @@ struct NearLoginFinishBody {
 /// Body extractor for `near/login/finish`: the wallet's NEP-413 assertion. On ANY
 /// extraction failure (malformed JSON, wrong shape, missing body) it rejects with
 /// the SAME uniform NEAR-login deny so a malformed body is indistinguishable from
-/// a bad/unknown key. Mirrors `PasskeyAssertionBody`.
+/// a bad/unknown key.
 struct NearAssertionBody(NearLoginFinishBody);
 
 impl<S> axum::extract::FromRequest<S> for NearAssertionBody
@@ -24547,8 +24349,7 @@ async fn account_near_login_start_handler(
     use rand::RngCore as _;
     // NOTE: unlike `login/finish`, this start surface is intentionally NOT wrapped
     // in the timing floor. It performs NO key or tenant lookup — it only mints a
-    // fresh challenge — so there is no found-vs-not-found oracle to erase. Mirrors
-    // the passkey login/start rationale.
+    // fresh challenge — so there is no found-vs-not-found oracle to erase.
     let client_ip = client_ip_for_rate_limit(&headers);
     if !ACCOUNT_RATE_LIMITER.check(
         &format!("near-login-ip:{client_ip}"),
@@ -24572,7 +24373,7 @@ async fn account_near_login_start_handler(
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let recipient = cfg.recipient.clone();
 
-    let ceremony_id = trace_commons_server::account_passkey::new_ceremony_id();
+    let ceremony_id = trace_commons_server::account_ceremony::new_ceremony_id();
     account_ceremony_store(state.as_ref()).put(
         ceremony_id.clone(),
         CeremonyState::NearChallenge {
@@ -24589,7 +24390,7 @@ async fn account_near_login_start_handler(
         .same_site(cookie::SameSite::Strict)
         .path("/")
         .max_age(cookie::time::Duration::seconds(
-            ACCOUNT_PASSKEY_CEREMONY_COOKIE_MAX_AGE_SECS,
+            ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS,
         ))
         .build();
 
@@ -24670,8 +24471,7 @@ async fn account_near_login_finish_inner(
     //     longer than NEAR_LOGIN_PUBKEY_MAX_LEN cannot be a valid credential, so we
     //     reject it with the uniform deny here. This stops an attacker from
     //     spraying over-long/garbage `publicKey` values to bloat the limiter map
-    //     keys, and short-circuits malformed keys before any further work. (The
-    //     passkey path needs no analogue: webauthn-rs parses the assertion first.)
+    //     keys, and short-circuits malformed keys before any further work.
     if !body.public_key.starts_with("ed25519:") || body.public_key.len() > NEAR_LOGIN_PUBKEY_MAX_LEN
     {
         return near_login_generic_deny();
@@ -24694,7 +24494,7 @@ async fn account_near_login_finish_inner(
     {
         Some(ceremony_id) => match account_ceremony_store(state.as_ref()).take(ceremony_id) {
             Some(CeremonyState::NearChallenge { nonce, recipient }) => (nonce, recipient),
-            Some(_) | None => return near_login_generic_deny(),
+            None => return near_login_generic_deny(),
         },
         None => return near_login_generic_deny(),
     };
@@ -25683,6 +25483,7 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | AUDIT_CHAIN_REPAIR_AUDIT_KIND
             | TOMBSTONE_REPAIR_AUDIT_KIND
             | PIPELINE_ACTIVATION_AUDIT_KIND
+            | model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND
             | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
@@ -28514,6 +28315,16 @@ async fn append_credit_event_handler(
 ) -> ApiResult<Json<TraceCommonsCreditLedgerRecord>> {
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
+    // The gate's scoring award settles
+    // (`trace_credit_event_type_is_settlement_eligible`), so only the gate
+    // worker route mints it (`attempt_emit_novelty_utility_credit`), after
+    // its production-gate, issuer, tenant-policy and allowed-use checks.
+    if body.event_type == TraceCreditLedgerEventType::NoveltyUtility {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "novelty_utility credit is emitted by the gate only",
+        ));
+    }
     if !body.credit_points_delta.is_finite() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -30305,7 +30116,8 @@ async fn run_credit_settlement(
     // Live settlement serializes per tenant so two overlapping runs cannot both
     // pass the source-event conflict check and finalize divergent batches (or
     // leave a half-written outbox). Dry-runs stay unlocked — they write nothing.
-    let settlement_locks = if body.dry_run {
+    let dry_run = body.dry_run;
+    let settlement_locks = if dry_run {
         None
     } else {
         Some(acquire_credit_settlement_run_locks(state, &tenant.tenant_id).await?)
@@ -30317,10 +30129,16 @@ async fn run_credit_settlement(
         if let Err(error) = locks.release().await {
             tracing::warn!(
                 error_hash = %safe_runtime_error_hash(&error),
-                tenant_id = %tenant.tenant_id,
+                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                 "failed to release credit settlement run locks after settlement"
             );
         }
+    }
+    // A live run that committed may have finalized a batch: wake every
+    // payout rail after the commit (payout spec section 7). A wake with
+    // nothing new costs each rail one enumeration query.
+    if !dry_run && result.is_ok() {
+        state.payout_rails.notifier().notify_all();
     }
     result
 }
@@ -30407,7 +30225,7 @@ async fn run_credit_settlement_unlocked(
         if repaired_outbox_count > 0 {
             tracing::warn!(
                 repaired_outbox_count,
-                tenant_id = %tenant.tenant_id,
+                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                 "repaired missing NEAR credit outbox items for finalized settlement batches"
             );
         }
@@ -30421,7 +30239,9 @@ async fn run_credit_settlement_unlocked(
         .map_err(internal_error)?;
     let candidate_events = credit_events
         .into_iter()
-        .filter(|event| trace_credit_event_type_is_settlement_eligible(event.event_type))
+        .filter(|event| {
+            trace_credit_event_counts_toward_settlement(event, state.novelty_utility_settle_from)
+        })
         .filter(|event| event.credit_points_delta > 0.0)
         .filter(|event| !already_settled_event_ids.contains(&event.event_id))
         .filter(|event| {
@@ -31849,7 +31669,7 @@ async fn build_credit_risk_summary(
         .map_err(internal_error)?;
     let mut account_summaries = BTreeMap::<String, TraceCreditRiskAccountAccumulator>::new();
     for event in credit_events {
-        if !trace_credit_event_type_is_settlement_eligible(event.event_type)
+        if !trace_credit_event_counts_toward_settlement(&event, state.novelty_utility_settle_from)
             || event.credit_points_delta <= 0.0
             || settled_credit_event_ids.contains(&event.event_id)
             || !delayed_credit_eligible_submission_ids.contains(&event.submission_id)
@@ -34322,7 +34142,7 @@ async fn append_credit_settlement_finalize_with_db_mirror(
                 tracing::warn!(
                     repaired_outbox_count = repaired,
                     settlement_batch_id = %batch.settlement_batch_id,
-                    tenant_id = %tenant.tenant_id,
+                    tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                     "repaired missing file NEAR credit outbox items after DB-authoritative finalize"
                 );
             }
@@ -34365,7 +34185,7 @@ async fn append_credit_settlement_finalize_with_db_mirror(
             tracing::warn!(
                 repaired_outbox_count = repaired,
                 settlement_batch_id = %batch.settlement_batch_id,
-                tenant_id = %tenant.tenant_id,
+                tenant_storage_ref = %tenant_storage_ref(&tenant.tenant_id),
                 "repaired missing NEAR credit outbox items after partial settlement finalize"
             );
         }
@@ -34994,12 +34814,23 @@ async fn active_credit_hold_account_refs_for_admin(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<BTreeSet<String>> {
-    Ok(read_credit_holds_for_admin(state, tenant)
+    let refs = read_credit_holds_for_admin(state, tenant)
         .await?
         .into_iter()
         .filter(|hold| hold.released_at.is_none())
         .map(|hold| hold.credit_account_ref)
-        .collect())
+        .collect();
+    if let Some(db) = state.db_mirror.as_ref() {
+        return Ok(
+            trace_commons_server::credit_hold_ownership::expand_credit_hold_ownership(
+                db.as_ref(),
+                &tenant.tenant_id,
+                refs,
+            )
+            .await?,
+        );
+    }
+    Ok(refs)
 }
 
 async fn read_near_credit_outbox_items_for_admin(
@@ -42468,16 +42299,21 @@ fn average_i128(sum: i128, count: usize) -> Option<i64> {
     Some((sum / count as i128) as i64)
 }
 
-/// Event types whose credit may reach on-chain settlement.
+/// Event types whose credit may reach settlement.
 ///
-/// `NoveltyUtility` is deliberately excluded. The graded-credit design
-/// records that novelty and perplexity are cheaply fabricated, and
-/// requires dedup, per-contributor caps, reputation and delayed
-/// settlement before novelty can carry settlement-eligible value.
-/// Those signals (`credit_quality`, `contributor_cap`) are computed and
-/// stored on every gate decision but are still shadow-mode: emission
-/// pays a flat delta without consulting them. Novelty credit therefore
-/// keeps accruing as a signal, but cannot settle.
+/// `NoveltyUtility`, the gate's scoring award, is eligible by the owner's
+/// decision of 2026-10-23: a scored trace's credit counts toward settlement,
+/// or real traces never settle. Its amount is the operator-configured
+/// `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`, which defaults to 0,
+/// and every consumer skips an event whose delta is not positive, so a
+/// deployment that never set the delta settles nothing new. The award is
+/// still a flat delta that does not consult the shadow-mode `credit_quality`
+/// and `contributor_cap` signals; an operator who sets the delta pays that
+/// flat amount, bounded by the settlement controls (per-account cap, credit
+/// holds, issuer approval, allowed policy versions).
+///
+/// The consumers call `trace_credit_event_counts_toward_settlement`, which
+/// adds the scoring award's provenance rule.
 fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerEventType) -> bool {
     matches!(
         event_type,
@@ -42485,7 +42321,57 @@ fn trace_credit_event_type_is_settlement_eligible(event_type: TraceCreditLedgerE
             | TraceCreditLedgerEventType::RegressionCatch
             | TraceCreditLedgerEventType::TrainingUtility
             | TraceCreditLedgerEventType::RankingUtility
+            | TraceCreditLedgerEventType::NoveltyUtility
     )
+}
+
+/// The `external_ref` prefix of a `NoveltyUtility` event the legacy gate path
+/// writes (`attempt_emit_novelty_utility_credit`):
+/// `novelty_utility:<gate_version_hash>:<submission_id>`.
+const NOVELTY_UTILITY_EXTERNAL_REF_PREFIX: &str = "novelty_utility:";
+
+/// Whether the legacy settlement path owes `event`'s type and provenance:
+/// what `run_credit_settlement`, the credit risk summary and
+/// `withdrawal_retains_all_credit` select, before each applies its own delta,
+/// status, hold and finalized-batch filters.
+///
+/// A `NoveltyUtility` event counts only when the legacy gate path wrote it,
+/// at or after the `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` cut-over
+/// (`novelty_utility_settle_from`; with none configured, never).
+/// A compatibility pipeline run writes the same event type into the same
+/// ledger under its own ledger source key, and the pipeline never batches
+/// that leg (Ruling S10); `main` paying it would pay what the pipeline chose
+/// not to. An award with no gate provenance fails closed. The legacy drain
+/// count (`delayed_credit_unsettled` in `versioned_pipeline_activation.rs`)
+/// applies the same rule in SQL.
+fn trace_credit_event_counts_toward_settlement(
+    event: &TraceCommonsCreditLedgerRecord,
+    novelty_utility_settle_from: Option<DateTime<Utc>>,
+) -> bool {
+    if !trace_credit_event_type_is_settlement_eligible(event.event_type) {
+        return false;
+    }
+    if event.event_type == TraceCreditLedgerEventType::NoveltyUtility {
+        let gate_written = is_gate_scoring_award(event);
+        // The cut-over: an award written before it (by a stub gate, or at a
+        // delta nobody meant to pay) never settles, and with no cut-over
+        // configured no award does.
+        let after_cut_over =
+            novelty_utility_settle_from.is_some_and(|settle_from| event.created_at >= settle_from);
+        return gate_written && after_cut_over;
+    }
+    true
+}
+
+/// Whether `event` is a scoring award the legacy gate path wrote
+/// (`attempt_emit_novelty_utility_credit`): a `NoveltyUtility` event with
+/// the gate's `external_ref` prefix. A compatibility pipeline run's
+/// `NoveltyUtility` leg carries its ledger source key instead.
+fn is_gate_scoring_award(event: &TraceCommonsCreditLedgerRecord) -> bool {
+    event.event_type == TraceCreditLedgerEventType::NoveltyUtility
+        && event.external_ref.as_deref().is_some_and(|external_ref| {
+            external_ref.starts_with(NOVELTY_UTILITY_EXTERNAL_REF_PREFIX)
+        })
 }
 
 /// Credit event ids already carried by a finalized settlement batch.
@@ -42510,10 +42396,11 @@ fn withdrawal_retains_all_credit(
     submission_id: Uuid,
     events: &[TraceCommonsCreditLedgerRecord],
     finalized_event_ids: &BTreeSet<Uuid>,
+    novelty_utility_settle_from: Option<DateTime<Utc>>,
 ) -> bool {
     !events.iter().any(|event| {
         event.submission_id == submission_id
-            && trace_credit_event_type_is_settlement_eligible(event.event_type)
+            && trace_credit_event_counts_toward_settlement(event, novelty_utility_settle_from)
             && event.credit_points_delta > 0.0
             && !finalized_event_ids.contains(&event.event_id)
     })
@@ -43637,6 +43524,20 @@ async fn append_automatic_utility_credit_events_once_with_counts(
     config: AutomaticUtilityCreditConfig,
     sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
 ) -> ApiResult<AutomaticUtilityCreditAppendCounts> {
+    append_automatic_utility_credit_events_once_with_counts_at(state, tenant, config, sources, None)
+        .await
+}
+
+/// `append_automatic_utility_credit_events_once_with_counts`, with each
+/// event's `created_at` fixed to `created_at` when given (otherwise the time
+/// of its append).
+async fn append_automatic_utility_credit_events_once_with_counts_at(
+    state: &AppState,
+    tenant: &TenantAuth,
+    config: AutomaticUtilityCreditConfig,
+    sources: impl IntoIterator<Item = AutomaticUtilityCreditSource>,
+    created_at: Option<DateTime<Utc>>,
+) -> ApiResult<AutomaticUtilityCreditAppendCounts> {
     require_positive_credit_issuance_principal_if_configured(
         state,
         tenant,
@@ -43680,7 +43581,7 @@ async fn append_automatic_utility_credit_events_once_with_counts(
             external_ref: Some(config.external_ref.clone()),
             actor_role: tenant.role,
             actor_principal_ref: tenant.principal_ref.clone(),
-            created_at: Utc::now(),
+            created_at: created_at.unwrap_or_else(Utc::now),
             witness_provenance_class: credit_witness_provenance_class(
                 state,
                 tenant,
@@ -47288,6 +47189,12 @@ async fn run_trace_credit_settlement_scheduler_tick(
     state: Arc<AppState>,
     config: &TraceCreditSettlementSchedulerConfig,
 ) -> ApiResult<TraceCreditSettlementRunResponse> {
+    if !matches!(config.scope, CreditSettlementSchedulerScope::Tenant) {
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "tenant scheduler scope required",
+        ));
+    }
     let headers = bearer_auth_headers_from_token(config.worker_token.expose_secret())?;
     let Json(response) = credit_settlement_worker_run_handler(
         State(state),
@@ -47307,6 +47214,106 @@ async fn run_trace_credit_settlement_scheduler_tick(
     )
     .await?;
     Ok(response)
+}
+
+#[derive(Default)]
+struct AllTenantCreditSettlementSummary {
+    tenants_checked: usize,
+    tenants_failed: usize,
+    settled_source_event_count: usize,
+}
+
+/// Deployment-only entry point; no HTTP route accepts this scope or actor.
+/// The existing kernel remains authoritative for financial eligibility.
+async fn run_all_tenant_credit_settlement_tick(
+    state: Arc<AppState>,
+    config: &TraceCreditSettlementSchedulerConfig,
+    tenant_limit: usize,
+) -> ApiResult<AllTenantCreditSettlementSummary> {
+    let CreditSettlementSchedulerScope::AllTenants { cursor } = &config.scope else {
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "all_tenants scheduler scope required",
+        ));
+    };
+    if !state.require_db_mirror_writes || !state.db_reviewer_reads {
+        return Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "all_tenants settlement database reads and writes required",
+        ));
+    }
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "all_tenants settlement database required",
+        )
+    })?;
+    let mut cursor = cursor.lock().await;
+    let mut tenants = db
+        .pending_credit_settlement_tenants(
+            cursor.as_deref(),
+            tenant_limit,
+            state.novelty_utility_settle_from,
+        )
+        .await
+        .map_err(internal_error)?;
+    if tenants.is_empty() && cursor.is_some() {
+        *cursor = None;
+        tenants = db
+            .pending_credit_settlement_tenants(
+                None,
+                tenant_limit,
+                state.novelty_utility_settle_from,
+            )
+            .await
+            .map_err(internal_error)?;
+    }
+    *cursor = if tenants.len() == tenant_limit {
+        tenants.last().cloned()
+    } else {
+        None
+    };
+    let mut summary = AllTenantCreditSettlementSummary::default();
+    for tenant_id in tenants {
+        summary.tenants_checked += 1;
+        let result = if !state.db_reviewer_reads_for_tenant(&tenant_id) {
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "settlement tenant database reviewer reads disabled",
+            ))
+        } else {
+            run_credit_settlement(
+                state.as_ref(),
+                &internal_credit_settlement_actor(&tenant_id),
+                TraceCreditSettlementRunRequest {
+                    dry_run: config.dry_run,
+                    policy_version: config.policy_version.clone(),
+                    reason: config.reason.clone(),
+                    issuer_approval_evidence_hash: config.issuer_approval_evidence_hash.clone(),
+                    near_contract_id: config.near_contract_id.clone(),
+                    ranking_model_version: config.ranking_model_version.clone(),
+                    ranking_target_use: config.ranking_target_use,
+                },
+                Some(config.limit),
+            )
+            .await
+        };
+        match result {
+            Ok(response) if response.policy_version_allowed => {
+                summary.settled_source_event_count += response.settled_source_event_count
+            }
+            Ok(_) => {
+                summary.tenants_failed += 1;
+            }
+            Err(error) => {
+                summary.tenants_failed += 1;
+                tracing::warn!(tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    status = %error.0, error_hash = %sha256_prefixed(&error.1.0.error),
+                    "Automatic credit settlement tenant failed");
+            }
+        }
+    }
+    Ok(summary)
 }
 
 async fn run_trace_process_evaluation_scheduler_tick(
@@ -60123,7 +60130,57 @@ async fn score_one_submission(
 
     // Branch 3: delegate to the real scorer.
     match evaluate_and_record_gate(state, &item.tenant_id, item.submission_id).await {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            // A scored trace earns its scoring award here, through the same
+            // path as the gate worker route. Only this branch earns:
+            // `Cached` copies a decision scored for a different submission,
+            // and `SkippedDuplicate` never ran the gate. The enumeration
+            // (`list_submissions_needing_gate_decision`) already leaves out a
+            // submission a pipeline run owns, which the route refuses with
+            // `refuse_a_pipeline_submission`.
+            if let GateOutcome::Scored {
+                decision_id,
+                perplexity_passed,
+                novelty_passed,
+                vector_entry_id,
+                gate_policy_version,
+                gate_version_hash,
+                chunks_capped,
+                ..
+            } = &outcome
+            {
+                let issuer = scoring_driver_credit_issuer(state, &item.tenant_id);
+                let award = emit_scoring_award_for_scored_decision(
+                    state,
+                    &issuer,
+                    item.submission_id,
+                    ScoredGateDecision {
+                        decision_id: *decision_id,
+                        perplexity_passed: *perplexity_passed,
+                        novelty_passed: *novelty_passed,
+                        vector_entry_id: *vector_entry_id,
+                        gate_policy_version,
+                        gate_version_hash,
+                        chunks_capped: *chunks_capped,
+                    },
+                )
+                .await;
+                // The trace scored; a failed credit check is the award's, not
+                // the trace's. The decision row already says
+                // `CREDIT_CHECK_ERROR_LABEL`, the attempt counter is left
+                // alone, and the outcome stays `Scored`.
+                if let Err((status, _)) = award {
+                    tracing::warn!(
+                        status = status.as_u16(),
+                        submission_hash = %sha256_prefixed(&item.submission_id.to_string()),
+                        tenant_hash = %sha256_prefixed(&item.tenant_id),
+                        "Trace Commons scoring driver could not check the scoring award; \
+                         decision recorded, credit withheld"
+                    );
+                }
+            }
+            outcome
+        }
         Err(err) => {
             // `{err:#}` records the full anyhow chain (outer context + inner
             // cause), so a scorer failure surfaces the specific hash-safe label
@@ -60254,21 +60311,129 @@ async fn gate_evaluate_worker_handler(
         }
     };
 
-    // Phase A5: if the gate passed, attempt to mint a `novelty_utility`
-    // credit-ledger event through the same pipeline that the operator-facing
-    // utility-credit handler uses. ABAC failures do NOT fail gate evaluation
-    // overall — the decision row still lands so the operator can audit; we
-    // only annotate `credit_withheld_reason` with a stable label-only string.
+    // Phase A5: if the gate passed, mint the `novelty_utility` scoring award
+    // (`emit_scoring_award_for_scored_decision`, the one path the scoring
+    // driver takes too). ABAC failures do NOT fail gate evaluation overall —
+    // the decision row still lands so the operator can audit; only
+    // `credit_withheld_reason` carries a stable label-only string.
+    let (credit_emitted, credit_withheld_reason) = emit_scoring_award_for_scored_decision(
+        state.as_ref(),
+        &tenant,
+        body.submission_id,
+        ScoredGateDecision {
+            decision_id,
+            perplexity_passed,
+            novelty_passed,
+            vector_entry_id,
+            gate_policy_version: &gate_policy_version,
+            gate_version_hash: &gate_version_hash,
+            chunks_capped,
+        },
+    )
+    .await?;
+
+    Ok(Json(TraceGateEvaluateWorkerResponse {
+        tenant_id: tenant.tenant_id.clone(),
+        submission_id: body.submission_id,
+        decision_id,
+        gate_policy_version,
+        gate_version_hash,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id,
+        credit_emitted,
+        credit_withheld_reason,
+        coverage_explanation: coverage_explanation(
+            ScoreAttestationCoverage::from_decision_columns(
+                Some(chunk_count as i32),
+                Some(total_chunk_count as i32),
+                Some(chunks_capped),
+            ),
+        ),
+    }))
+}
+
+/// The fallback actor of the scoring driver's awards when
+/// `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is unset. It is not a
+/// canonical principal ref, so it can never be on the central-issuer
+/// allowlist: with that list set and no issuer configured, every driver
+/// award is withheld as `central_issuer_denied`.
+const SCORING_DRIVER_CREDIT_ACTOR_REF: &str = "trace-commons-perplexity-score-driver";
+
+/// The identity the in-process scoring driver issues the scoring award as.
+/// The gate worker route issues it as its authenticated vector worker; the
+/// driver has no credential, so it issues as the server's credit issuer, the
+/// principal the versioned pipeline issues its credit as
+/// (`TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF`), with the route's
+/// role (`main`'s readers parse a gate award's actor role). It carries no
+/// scoped uses or consent scopes, as a static worker token does not, so the
+/// tenant policy and the submission's own uses decide.
+fn scoring_driver_credit_issuer(state: &AppState, tenant_id: &str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: tenant_id.to_string(),
+        role: TokenRole::VectorWorker,
+        principal_ref: state
+            .scoring_driver_credit_issuer_principal_ref
+            .clone()
+            .unwrap_or_else(|| SCORING_DRIVER_CREDIT_ACTOR_REF.to_string()),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+/// The fields of a `GateOutcome::Scored` that the scoring award reads.
+struct ScoredGateDecision<'a> {
+    decision_id: Uuid,
+    perplexity_passed: bool,
+    novelty_passed: bool,
+    vector_entry_id: Option<Uuid>,
+    gate_policy_version: &'a str,
+    gate_version_hash: &'a str,
+    chunks_capped: bool,
+}
+
+/// The scoring award for one decision `evaluate_and_record_gate` just scored
+/// and recorded: the single path by which a scored trace earns its
+/// `NoveltyUtility` award, for the gate worker route
+/// (`gate_evaluate_worker_handler`) and the scoring driver
+/// (`score_one_submission`) alike. With both floors passed it runs
+/// `attempt_emit_novelty_utility_credit` (production gate, central issuer,
+/// tenant policy, accepted status, allowed uses, one award per submission)
+/// and records a withheld reason on the decision row; with a floor failed it
+/// says why credit is withheld (#444). Returns `(credit_emitted,
+/// credit_withheld_reason)`. On a hard error from the credit checks it
+/// patches the row to `CREDIT_CHECK_ERROR_LABEL` and returns the error.
+async fn emit_scoring_award_for_scored_decision(
+    state: &AppState,
+    tenant: &TenantAuth,
+    submission_id: Uuid,
+    scored: ScoredGateDecision<'_>,
+) -> ApiResult<(bool, Option<String>)> {
     let db = state.db_mirror.as_ref().ok_or_else(|| {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "trace gate worker requires a configured DB mirror",
         )
     })?;
-    let (credit_emitted, credit_withheld_reason) = if perplexity_passed && novelty_passed {
+    let ScoredGateDecision {
+        decision_id,
+        perplexity_passed,
+        novelty_passed,
+        vector_entry_id,
+        gate_policy_version,
+        gate_version_hash,
+        chunks_capped,
+    } = scored;
+    let outcome = if perplexity_passed && novelty_passed {
         let decision = GateDecision {
-            gate_policy_version: gate_policy_version.clone(),
-            gate_version_hash: gate_version_hash.clone(),
+            gate_policy_version: gate_policy_version.to_string(),
+            gate_version_hash: gate_version_hash.to_string(),
             perplexity_micros: 0,
             tail_fraction_micros: 0,
             perplexity_passed,
@@ -60312,13 +60477,8 @@ async fn gate_evaluate_worker_handler(
             vector_index_snapshot_id: None,
             index_cardinality_at_scoring: None,
         };
-        let emit_result = attempt_emit_novelty_utility_credit(
-            state.as_ref(),
-            &tenant,
-            &decision,
-            body.submission_id,
-        )
-        .await;
+        let emit_result =
+            attempt_emit_novelty_utility_credit(state, tenant, &decision, submission_id).await;
         let (emitted, withheld_reason) = match emit_result {
             Ok((emitted, withheld_reason)) => (emitted, withheld_reason),
             Err(err) => {
@@ -60367,37 +60527,22 @@ async fn gate_evaluate_worker_handler(
         // the audit row and to the contributor.
         (false, gate_failure_withheld_reason(Some(chunks_capped)))
     };
-
-    Ok(Json(TraceGateEvaluateWorkerResponse {
-        tenant_id: tenant.tenant_id.clone(),
-        submission_id: body.submission_id,
-        decision_id,
-        gate_policy_version,
-        gate_version_hash,
-        perplexity_passed,
-        novelty_passed,
-        vector_entry_id,
-        credit_emitted,
-        credit_withheld_reason,
-        coverage_explanation: coverage_explanation(
-            ScoreAttestationCoverage::from_decision_columns(
-                Some(chunk_count as i32),
-                Some(total_chunk_count as i32),
-                Some(chunks_capped),
-            ),
-        ),
-    }))
+    Ok(outcome)
 }
 
-/// Phase A5: helper called from `gate_evaluate_worker_handler` when both
+/// Phase A5: helper called from `emit_scoring_award_for_scored_decision` when both
 /// gate floors pass. Routes through the same central-issuer ABAC,
 /// tenant-policy allowed-uses, and idempotent-emit pipeline that
 /// `utility_credit_handler` uses for the operator-facing utility-credit
 /// kinds. Returns `(credit_emitted, credit_withheld_reason)`:
 /// - `(true, None)` — credit minted via
 ///   `append_automatic_utility_credit_events_once_with_counts` (`appended > 0`)
-/// - `(false, None)` — idempotent hit (`skipped_existing > 0`); no new credit
-///   minted, but the prior emission is the audit trail
+/// - `(false, None)` — idempotent hit: the submission already has a paid
+///   scoring award, under this gate version or any other (the ledger check),
+///   or already holds the award this write would key on
+///   (`skipped_existing > 0`); no new credit minted, but the prior emission
+///   is the audit trail. A submission earns at most one paid award; a $0 or
+///   pre-cut-over award does not stand in the way of it.
 /// - `(false, Some(label))` — credit withheld; the decision row records the
 ///   stable label-only reason
 ///
@@ -60408,7 +60553,9 @@ async fn gate_evaluate_worker_handler(
 /// library has no `AppState` or `TenantAuth`), so it holds its own copy. A
 /// change to the production-gate, central-issuer, tenant-policy or
 /// allowed-use rule here must be made there too, or the two paths credit
-/// differently.
+/// differently. The one-award-per-submission check (7) has no copy there:
+/// a pipeline run's leg is keyed on its run and never settles (Ruling S10),
+/// and the gate route refuses a submission a pipeline run owns.
 async fn attempt_emit_novelty_utility_credit(
     state: &AppState,
     tenant: &TenantAuth,
@@ -60479,25 +60626,59 @@ async fn attempt_emit_novelty_utility_credit(
         return Ok((false, Some("policy_mismatch".to_string())));
     }
 
-    // (7) Emit. `external_ref` binds the gate version to the submission id —
-    // NOT the decision id, which is freshly minted on every gate-worker call.
-    // Keying on `(gate_version_hash, submission_id)` makes route retries
-    // idempotent at the ledger level (per the spec's open-question
-    // resolution: "allow duplicate decision rows on retry; ledger idempotency
-    // on external_ref handles the credit side"). The `decision_id` itself is
-    // not lost — the trace_gate_decisions row carries it and the audit log
-    // links the two via the `reason` and the row's `decided_at` ordering.
+    // (7) One paid scoring award per submission. The award settles, and
+    // `gate_version_hash` moves with the model, the floors, the chunking and
+    // the render version, so a submission re-scored under a new gate version
+    // must not be paid again. The ledger is the record: a paid award for this
+    // submission (`is_paid_scoring_award`: a positive delta at or after the
+    // cut-over), under any gate version or idempotency key (including the
+    // `(gate_version_hash, submission_id)` key used before), means this
+    // submission has had its award. That is an idempotent hit, not a
+    // withheld reason. A $0 award, or one from before the cut-over, never
+    // settles and does not block (owner decision 2026-10-23). The lock holds
+    // from this check through the append, so racing evaluations in this
+    // process see each other's award.
+    let award_lock = novelty_utility_award_lock(&state.root, &tenant.tenant_id);
+    let _award_guard = award_lock.lock().await;
+    let settle_from = state.novelty_utility_settle_from;
+    let already_paid = read_all_credit_events(&state.root, &tenant.tenant_id)
+        .map_err(internal_error)?
+        .iter()
+        .any(|event| {
+            event.submission_id == submission_id && is_paid_scoring_award(event, settle_from)
+        });
+    if already_paid {
+        return Ok((false, None));
+    }
+
+    // (8) Emit. A paid award (a positive delta, written at or after the
+    // cut-over; `created_at` is fixed here so the key and the timestamp the
+    // settlement reads agree) is keyed on the submission and
+    // `NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF`, so two paid awards for
+    // one submission collide on one event id whatever gate version each ran
+    // under (one database row per id, whichever process writes). Any other
+    // award is keyed on the submission alone, so a submission holds at most
+    // one of those too, and it never takes the paid id. `external_ref` still records the gate
+    // version that scored it:
+    // `novelty_utility:<gate_version_hash>:<submission_id>`. The
+    // `decision_id` is not in it -- it is freshly minted on every
+    // gate-worker call -- but the trace_gate_decisions row carries it, and
+    // the audit log links the two via the `reason` and the row's
+    // `decided_at` ordering.
     let external_ref = format!(
-        "novelty_utility:{}:{}",
+        "{NOVELTY_UTILITY_EXTERNAL_REF_PREFIX}{}:{}",
         decision.gate_version_hash, submission_id,
     );
     let reason = format!("novelty_utility:{}", decision.gate_policy_version);
-    let counts = append_automatic_utility_credit_events_once_with_counts(
+    let created_at = Utc::now();
+    let pays = state.novelty_utility_credit_points_delta > 0.0
+        && settle_from.is_some_and(|settle_from| created_at >= settle_from);
+    let counts = append_automatic_utility_credit_events_once_with_counts_at(
         state,
         tenant,
         AutomaticUtilityCreditConfig {
             idempotency_label: event_type.utility_idempotency_label(),
-            idempotency_ref: Some(external_ref.clone()),
+            idempotency_ref: pays.then(|| NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF.to_string()),
             event_type,
             credit_points_delta: state.novelty_utility_credit_points_delta,
             reason,
@@ -60508,6 +60689,7 @@ async fn attempt_emit_novelty_utility_credit(
             trace_id: submission_record.trace_id,
             auth_principal_ref: submission_record.auth_principal_ref.clone(),
         }],
+        Some(created_at),
     )
     .await?;
 
@@ -60515,13 +60697,56 @@ async fn attempt_emit_novelty_utility_credit(
 }
 
 /// Returns true when `kind` (as returned by `TraceGateService::safe_status()`)
-/// names a production trust boundary. Mirrors the spec's enumeration: the only
-/// production-trust kinds today are `enclave_local_gpu` (Phase A2 real local
-/// GPU) and `dstack` (Phase A2/A3 enclave deployment). Stubs
-/// (`in_memory`, `enclave_mock`, `legacy_deterministic`, `dstack_stub`) are
-/// explicitly non-production.
+/// names a production trust boundary: `enclave_local_gpu` (real local GPU),
+/// `dstack` (enclave deployment) and `enclave_near_ai` (attested NEAR AI TEE
+/// scoring, what the pilot and staging run; owner decision 2026-10-23). The
+/// test gates (`in_memory`, `enclave_mock`, `legacy_deterministic`,
+/// `dstack_stub`) are non-production, so they can never create payable
+/// credit.
 fn is_production_gate_service_kind(kind: &str) -> bool {
-    matches!(kind, "enclave_local_gpu" | "dstack")
+    matches!(kind, "enclave_local_gpu" | "dstack" | "enclave_near_ai")
+}
+
+/// Whether `event` is a scoring award that pays: written by the legacy gate
+/// path, with a positive delta, at or after the
+/// `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` cut-over. Only such an award
+/// blocks a later one (owner decision 2026-10-23); a $0 award, or one from
+/// before the cut-over, never settles and does not count.
+fn is_paid_scoring_award(
+    event: &TraceCommonsCreditLedgerRecord,
+    novelty_utility_settle_from: Option<DateTime<Utc>>,
+) -> bool {
+    is_gate_scoring_award(event)
+        && event.credit_points_delta > 0.0
+        && novelty_utility_settle_from.is_some_and(|settle_from| event.created_at >= settle_from)
+}
+
+/// The `idempotency_ref` of a paid scoring award. A paid award's event id is
+/// keyed on the submission and this constant, apart from the
+/// submission-only id a $0 or pre-cut-over award takes, so a submission has
+/// exactly one id a paid award can be written under, whatever the gate
+/// version or cut-over: two paid awards for one submission collide on it.
+const NOVELTY_UTILITY_PAID_AWARD_IDEMPOTENCY_REF: &str = "paid";
+
+/// Serialises the one-award check and the append of a scoring award within
+/// this process, per tenant ledger, so two evaluations of one submission
+/// cannot both pass the check before either appends. The lock is per
+/// process, and the file ledger lives on one host's disk; the shared event
+/// id is what reaches further: the database mirror's primary key admits one
+/// row under it, so a second ingest process's write of the same paid award
+/// fails there when mirror writes are required.
+fn novelty_utility_award_lock(root: &Path, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+    static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut guard = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .entry(credit_ledger_path(root, tenant_id))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 async fn vector_index_handler(
@@ -61882,6 +62107,410 @@ fn enforce_submission_quota(state: &AppState, tenant: &TenantCtx) -> ApiResult<(
     }
 
     Ok(())
+}
+
+/// Submit attempts [`enforce_account_hourly_submission_ceiling`] let through
+/// in the last hour, per ceiling scope, held in this process's memory
+/// (decision 5 on #1794).
+///
+/// The recorded-submission window only sees uploads that got as far as a
+/// record, so an upload refused after the ceiling (by admission, the
+/// re-scrub, a tombstone, a witness or policy refusal) was never counted, and
+/// a client looping on one paid a full re-scrub every time. This table counts
+/// every attempt the ceiling let through. The ceiling refuses when either
+/// count has reached the limit: the larger of the two, never their sum, since
+/// a recorded submission was also an attempt.
+///
+/// It is per process, like the per-minute limiter: a restart empties it, and
+/// two ingest instances each keep their own, so with N instances a scope can
+/// make up to N times the limit in attempts. The recorded count still holds
+/// across restarts and instances.
+///
+/// An attempt is recorded only while its scope is under the limit, and only
+/// attempts inside the hour are kept, so a scope holds at most `limit`
+/// timestamps. The time is read under the lock, so each scope's timestamps
+/// are in order and the oldest is at the front. A sweep, at most once a
+/// minute, drops scopes with nothing left in the hour, and the table holds
+/// at most `max_scopes` scopes: a new scope that finds it full, even after a
+/// sweep, is refused ([`HourlySubmissionAttemptDecision::Full`]). A poisoned
+/// lock fails closed, as [`AccountRateLimiter`] does.
+struct HourlySubmissionAttempts {
+    table: std::sync::Mutex<HourlySubmissionAttemptTable>,
+    max_scopes: usize,
+}
+
+impl Default for HourlySubmissionAttempts {
+    fn default() -> Self {
+        Self {
+            table: std::sync::Mutex::default(),
+            max_scopes: MAX_HOURLY_SUBMISSION_ATTEMPT_SCOPES,
+        }
+    }
+}
+
+#[derive(Default)]
+struct HourlySubmissionAttemptTable {
+    scopes: HashMap<String, VecDeque<DateTime<Utc>>>,
+    last_sweep: Option<DateTime<Utc>>,
+}
+
+/// Most scopes [`HourlySubmissionAttempts`] holds at once, the same bound
+/// the per-minute limiter puts on its keys.
+const MAX_HOURLY_SUBMISSION_ATTEMPT_SCOPES: usize = MAX_ACCOUNT_RATE_WINDOWS;
+
+/// What [`HourlySubmissionAttempts::admit`] decided.
+#[derive(Debug, PartialEq, Eq)]
+enum HourlySubmissionAttemptDecision {
+    /// Under the limit; the attempt was recorded.
+    Admitted,
+    /// At the limit. The scope has room again an hour after this instant
+    /// (`None`: no instant known, a full hour).
+    Refused { room_after: Option<DateTime<Utc>> },
+    /// A new scope, and the table already holds `max_scopes` scopes with
+    /// attempts in the hour. Refused for the sweep interval.
+    Full,
+}
+
+/// How often [`HourlySubmissionAttempts`] drops scopes with nothing left in
+/// the hour, and the `Retry-After` of a [`HourlySubmissionAttemptDecision::Full`]
+/// refusal.
+const HOURLY_SUBMISSION_ATTEMPT_SWEEP_INTERVAL_SECONDS: i64 = 60;
+
+impl HourlySubmissionAttempts {
+    #[cfg(test)]
+    fn with_max_scopes_for_test(max_scopes: usize) -> Self {
+        Self {
+            table: std::sync::Mutex::default(),
+            max_scopes,
+        }
+    }
+
+    /// Decide one upload against the ceiling `limit` for `scope`, given the
+    /// scope's recorded window `recorded`, and record it, at the current
+    /// time read under the lock, when it is let through. `None` when the
+    /// table's lock is poisoned: the caller refuses.
+    fn admit(
+        &self,
+        scope: &str,
+        limit: usize,
+        recorded: &trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow,
+    ) -> Option<HourlySubmissionAttemptDecision> {
+        let mut table = self.table.lock().ok()?;
+        Some(table.admit_at(scope, limit, recorded, Utc::now(), self.max_scopes))
+    }
+
+    /// [`Self::admit`] at a given instant, for tests.
+    #[cfg(test)]
+    fn admit_at_for_test(
+        &self,
+        scope: &str,
+        limit: usize,
+        recorded: &trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow,
+        now: DateTime<Utc>,
+    ) -> Option<HourlySubmissionAttemptDecision> {
+        let mut table = self.table.lock().ok()?;
+        Some(table.admit_at(scope, limit, recorded, now, self.max_scopes))
+    }
+
+    #[cfg(test)]
+    fn attempts_for_test(&self, scope: &str) -> usize {
+        self.table
+            .lock()
+            .map(|table| table.scopes.get(scope).map_or(0, VecDeque::len))
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn scopes_for_test(&self) -> usize {
+        self.table
+            .lock()
+            .map(|table| table.scopes.len())
+            .unwrap_or(0)
+    }
+}
+
+impl HourlySubmissionAttemptTable {
+    fn admit_at(
+        &mut self,
+        scope: &str,
+        limit: usize,
+        recorded: &trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow,
+        now: DateTime<Utc>,
+        max_scopes: usize,
+    ) -> HourlySubmissionAttemptDecision {
+        let window_start = now - Duration::hours(1);
+        let new_scope = !self.scopes.contains_key(scope);
+        self.sweep(
+            now,
+            window_start,
+            new_scope && self.scopes.len() >= max_scopes,
+        );
+        if new_scope && self.scopes.len() >= max_scopes {
+            return HourlySubmissionAttemptDecision::Full;
+        }
+        let attempts = self.scopes.entry(scope.to_string()).or_default();
+        while attempts.front().is_some_and(|at| *at <= window_start) {
+            attempts.pop_front();
+        }
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let recorded_full = recorded.counted >= limit_i64;
+        let attempts_full = attempts.len() >= limit;
+        if recorded_full || attempts_full {
+            // Room returns once every full count has dropped below the
+            // limit, so the later of the two instants decides.
+            let recorded_room = recorded_full.then_some(recorded.oldest_counted_at);
+            let attempts_room = attempts_full.then(|| attempts.front().copied());
+            let room_after = match (recorded_room, attempts_room) {
+                (Some(None), _) | (_, Some(None)) => None,
+                (Some(Some(a)), Some(Some(b))) => Some(a.max(b)),
+                (Some(Some(a)), None) | (None, Some(Some(a))) => Some(a),
+                (None, None) => None,
+            };
+            if attempts.is_empty() {
+                self.scopes.remove(scope);
+            }
+            return HourlySubmissionAttemptDecision::Refused { room_after };
+        }
+        attempts.push_back(now);
+        HourlySubmissionAttemptDecision::Admitted
+    }
+
+    /// Drop the scopes with nothing left in the hour, at most once a sweep
+    /// interval unless `force`d (a full table meeting a new scope).
+    fn sweep(&mut self, now: DateTime<Utc>, window_start: DateTime<Utc>, force: bool) {
+        if !force
+            && self.last_sweep.is_some_and(|last| {
+                now - last < Duration::seconds(HOURLY_SUBMISSION_ATTEMPT_SWEEP_INTERVAL_SECONDS)
+            })
+        {
+            return;
+        }
+        self.last_sweep = Some(now);
+        self.scopes.retain(|_, attempts| {
+            while attempts.front().is_some_and(|at| *at <= window_start) {
+                attempts.pop_front();
+            }
+            !attempts.is_empty()
+        });
+    }
+}
+
+/// The key [`HourlySubmissionAttempts`] counts an upload under: the same
+/// scope the recorded window counts, length-prefixed so no two scopes share
+/// a key. For an account tenant that is the tenant. Otherwise it is the
+/// principal: its canonical `principal_ref`, from which its legacy alias is
+/// derived, and not the authentication method, so the attempts of one
+/// principal share one budget as its recorded submissions share one count.
+fn hourly_submission_attempt_scope(tenant: &TenantCtx, whole_tenant: bool) -> String {
+    let tenant_id = tenant.tenant_id();
+    if whole_tenant {
+        format!("hourly-tenant:{}:{tenant_id}", tenant_id.len())
+    } else {
+        let principal_ref = tenant.principal_ref();
+        format!(
+            "hourly-principal:{}:{tenant_id}:{}:{principal_ref}",
+            tenant_id.len(),
+            principal_ref.len()
+        )
+    }
+}
+
+/// What an upload is charged for at [`enforce_account_hourly_submission_ceiling`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HourlyCeilingCharge {
+    /// The ceiling's own check, before admission. A submission id that
+    /// already has a record in scope is not charged here: the handler either
+    /// replays its receipt (no work), or remediates it, and a remediation is
+    /// charged when the handler decides on it.
+    Upload,
+    /// A re-POST of an owned quarantined id, which the handler re-scrubs:
+    /// always charged, whatever its body.
+    Remediation,
+}
+
+/// The per-account hourly submission ceiling: a circuit breaker on intake,
+/// checked right after the per-principal rate limiter and before admission
+/// reserves anything, so a refused upload takes no lease, no ledger row, no
+/// re-scrub and no history read.
+///
+/// It bounds every contributor upload whatever its admission authority:
+/// bounded, invited and attested accounts alike. It counts uploads; it never
+/// reads or charges the account admission budget, so an attested upload
+/// still debits nothing there.
+///
+/// The scope is the account. A tenant in an account namespace (`near-`,
+/// `nearai-`) is allocated to one account at provisioning, so the scope is
+/// the tenant, every device of the account together. A tenant outside them
+/// (a legacy invite tenant or a pooled tenant) holds many contributors with
+/// no account, so the scope is the authenticated principal.
+///
+/// It counts two things and refuses when either has reached the limit:
+/// recorded submissions (the store window below), and the attempts this
+/// process let through in the hour ([`HourlySubmissionAttempts`], decision
+/// 5 on #1794). The attempt count covers uploads refused after this check
+/// (by admission, the re-scrub, a tombstone or a gate), which leave no
+/// record. It is in-process memory, per process like the per-minute
+/// limiter: a restart empties it and each instance keeps its own, while the
+/// recorded count holds across both. Nothing is reserved in the store
+/// between the read and the record, so across processes (or after a
+/// restart) uploads in flight at once can each pass at `limit - 1` and
+/// overshoot the ceiling by up to the number in flight; within one process
+/// the attempt count is taken under a lock, so they cannot.
+///
+/// What is charged follows what the handler will do (decision 6 on #1794,
+/// as revised in the #1800 review). A submission id that already has a
+/// record in scope (the tenant for an account tenant, the uploading
+/// principal otherwise) is not charged at this check: a retry of a recorded
+/// submission only replays its receipt, so it is never refused here,
+/// whatever this process remembers and whatever bytes it carries. When the
+/// handler instead remediates a quarantined record (the legacy path, which
+/// re-runs the re-scrub), it charges the ceiling again with
+/// [`HourlyCeilingCharge::Remediation`], which counts every remediation,
+/// an identical body included. An id another principal of a pooled tenant
+/// recorded is not exempt.
+///
+/// Without a PostgreSQL mirror the window is counted from the tenant's file
+/// records, a full record read per contributor upload, on a blocking thread.
+///
+/// The refusal is `429 submit_rate_limited` with the seconds until the
+/// window has room again, the label clients already keep an upload queued
+/// for.
+async fn enforce_account_hourly_submission_ceiling(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    charge: HourlyCeilingCharge,
+) -> ApiResult<()> {
+    let limit = state.submission_quota.max_per_account_per_hour;
+    if limit == 0 || tenant.role() != TokenRole::Contributor {
+        return Ok(());
+    }
+    let window_start = Utc::now() - Duration::hours(1);
+    let whole_tenant = trace_commons_protocol::admission::is_anchored_tenant(tenant.tenant_id());
+    let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+    let window = match state.db_mirror.as_ref() {
+        Some(db) => {
+            let principals: Vec<String> = tenant
+                .auth()
+                .principal_aliases()
+                .map(str::to_string)
+                .collect();
+            db.recent_trace_submission_window(
+                tenant.tenant_id(),
+                (!whole_tenant).then_some(principals.as_slice()),
+                submission_id,
+                window_start,
+                limit_i64,
+            )
+            .await
+            .map_err(internal_error)?
+        }
+        None => {
+            let root = state.root.clone();
+            let tenant_id = tenant.tenant_id().to_string();
+            // `None` counts the whole tenant, as for the mirror.
+            let principals: Option<Vec<String>> = (!whole_tenant).then(|| {
+                tenant
+                    .auth()
+                    .principal_aliases()
+                    .map(str::to_string)
+                    .collect()
+            });
+            tokio::task::spawn_blocking(move || {
+                file_recent_submission_window(
+                    &root,
+                    &tenant_id,
+                    principals.as_deref(),
+                    submission_id,
+                    window_start,
+                    limit,
+                )
+            })
+            .await
+            .map_err(internal_error)?
+            .map_err(internal_error)?
+        }
+    };
+    if charge == HourlyCeilingCharge::Upload && window.submission_known {
+        return Ok(());
+    }
+    let decision = state
+        .submission_attempts
+        .admit(
+            &hourly_submission_attempt_scope(tenant, whole_tenant),
+            limit,
+            &window,
+        )
+        .ok_or_else(|| internal_error("hourly submission attempt table unavailable"))?;
+    let retry_after_seconds = match decision {
+        HourlySubmissionAttemptDecision::Admitted => return Ok(()),
+        HourlySubmissionAttemptDecision::Refused { room_after } => {
+            hourly_ceiling_retry_after_seconds(room_after, Utc::now())
+        }
+        HourlySubmissionAttemptDecision::Full => HOURLY_SUBMISSION_ATTEMPT_SWEEP_INTERVAL_SECONDS,
+    };
+    tracing::warn!(
+        tenant_id = %tenant.tenant_id(),
+        limit,
+        per_principal = !whole_tenant,
+        remediation = charge == HourlyCeilingCharge::Remediation,
+        attempt_table_full = matches!(decision, HourlySubmissionAttemptDecision::Full),
+        "Trace Commons account hourly submission ceiling reached"
+    );
+    Err(submit_rate_limited(retry_after_seconds))
+}
+
+/// [`enforce_account_hourly_submission_ceiling`]'s window from the tenant's
+/// file records, for a deployment without a PostgreSQL mirror. `principals`
+/// narrows both the count and the known-id test to those principals; `None`
+/// is the whole tenant.
+fn file_recent_submission_window(
+    root: &Path,
+    tenant_id: &str,
+    principals: Option<&[String]>,
+    submission_id: Uuid,
+    window_start: DateTime<Utc>,
+    limit: usize,
+) -> anyhow::Result<trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow> {
+    let records = read_all_submission_records(root, tenant_id)?;
+    let in_scope = |record: &&TraceCommonsSubmissionRecord| {
+        principals.is_none_or(|principals| principals.contains(&record.auth_principal_ref))
+    };
+    let submission_known = records
+        .iter()
+        .filter(in_scope)
+        .any(|record| record.submission_id == submission_id);
+    let mut recent: Vec<DateTime<Utc>> = records
+        .iter()
+        .filter(in_scope)
+        .filter(|record| record.received_at > window_start)
+        .map(|record| record.received_at)
+        .collect();
+    recent.sort_unstable_by(|a, b| b.cmp(a));
+    recent.truncate(limit);
+    Ok(
+        trace_commons_server::trace_corpus_storage::RecentTraceSubmissionWindow {
+            counted: i64::try_from(recent.len()).unwrap_or(i64::MAX),
+            oldest_counted_at: recent.last().copied(),
+            submission_known,
+        },
+    )
+}
+
+/// Whole seconds until the oldest counted upload leaves the hour and the
+/// ceiling has room again, rounded up so a client that waits exactly this
+/// long is not refused again, and kept within 1 to 3600.
+fn hourly_ceiling_retry_after_seconds(
+    oldest_counted_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> i64 {
+    oldest_counted_at
+        .map(|oldest| {
+            let millis = (oldest + Duration::hours(1) - now).num_milliseconds();
+            millis.saturating_add(999).div_euclid(1000)
+        })
+        .unwrap_or(3600)
+        .clamp(1, 3600)
 }
 
 fn submission_counts_toward_quota(record: &TraceCommonsSubmissionRecord) -> bool {
@@ -63429,18 +64058,20 @@ async fn caller_credit_account_scope(
         // No DB mirror => no account linkage to broaden from. Own-principal only.
         return Ok(None);
     };
-    let aliases = tenant
-        .principal_aliases()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let resolved = db
-        .resolve_principals_to_accounts(&tenant.tenant_id, &aliases)
-        .await
-        .context("failed to resolve contributor principal to account for credit visibility")?;
-    let Some(account_id) = aliases
-        .iter()
-        .find_map(|alias| resolved.get(alias).copied())
-    else {
+    // Contribution ownership does not confer account authentication authority.
+    // Only a direct active membership may broaden this credential's visibility;
+    // once authorized, expansion includes the account's owned upload aliases.
+    let mut account_id = None;
+    for principal in tenant.principal_aliases() {
+        account_id = db
+            .resolve_account_for_principal(&tenant.tenant_id, principal)
+            .await
+            .context("failed to resolve contributor principal to account for credit visibility")?;
+        if account_id.is_some() {
+            break;
+        }
+    }
+    let Some(account_id) = account_id else {
         // Caller has no active account link: unchanged own-principal scope.
         return Ok(None);
     };
@@ -65217,15 +65848,22 @@ fn submission_status_from_record(
         .iter()
         .filter(|event| event.submission_id == record.submission_id)
         .collect::<Vec<_>>();
+    let outcome = trace_credit_outcome(record, gate_decision, &delayed_events);
+    // An award the outcome already reports as final is not counted again
+    // in the ledger figure, so `total` stays `final + ledger`.
     let ledger_points = if delayed_credit_applies_to_record(record) {
         delayed_events
             .iter()
+            .filter(|event| {
+                !(outcome.absorbs_scoring_awards
+                    && event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+            })
             .map(|event| event.credit_points_delta)
             .sum::<f32>()
     } else {
         0.0
     };
-    let base_final = record.credit_points_final.unwrap_or(0.0);
+    let base_final = outcome.credit_points_final.unwrap_or(0.0);
     let credit_points_total = if delayed_events.is_empty() || record.is_terminal() {
         None
     } else {
@@ -65259,17 +65897,140 @@ fn submission_status_from_record(
         trace_id: record.trace_id,
         status: record.status.as_str().to_string(),
         // The receipt already resolved estimate-vs-gate figure; the two
-        // surfaces must never disagree about the same record.
-        credit_points_pending: receipt
-            .credit_points_pending
-            .unwrap_or(record.credit_points_pending),
-        credit_points_final: record.credit_points_final,
+        // surfaces must never disagree about the same record. Once the
+        // outcome is final nothing is pending: daemons before #1703 add
+        // pending and final together, so sending both counts a decided
+        // trace twice on their Home.
+        credit_points_pending: if outcome.credit_points_final.is_some() {
+            0.0
+        } else {
+            receipt
+                .credit_points_pending
+                .unwrap_or(record.credit_points_pending)
+        },
+        credit_points_final: outcome.credit_points_final,
         credit_points_ledger: ledger_points,
         credit_points_total,
         explanation: receipt.explanation,
         delayed_credit_explanations,
         consent_scopes: record.consent_scopes.clone(),
+        credit_outcome_reason: outcome.reason.map(str::to_string),
         pipeline: None,
+    }
+}
+
+/// A trace's credit outcome as the contributor's status read-back reports
+/// it: the final figure, and, when that figure is 0 because the trace was
+/// decided without an award, why.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TraceCreditOutcome {
+    /// `None` while the trace is still pending.
+    credit_points_final: Option<f32>,
+    /// One of `trace_commons_protocol::credit_outcome::CREDIT_OUTCOME_REASONS`,
+    /// only beside a final figure of 0 with no award.
+    reason: Option<&'static str>,
+    /// Whether `credit_points_final` is the sum of the trace's
+    /// `NoveltyUtility` events, which the ledger figure then leaves out.
+    absorbs_scoring_awards: bool,
+}
+
+/// The one place a trace's final credit is derived, at read time, from the
+/// three things that decide it: the submission row, the trace's latest gate
+/// decision, and its ledger events (`events` is already this submission's).
+///
+/// Derived rather than stored. The row's `credit_points_final` belongs to
+/// the review and retention paths (approve clears it, reject and the
+/// terminal statuses set 0), and the tenant credit summary adds it to the
+/// ledger figure, so writing the gate's award there would count it twice.
+/// Every writer of an award (the gate worker route, the scoring driver, a
+/// compatibility pipeline run, a later award once the contributor adds a
+/// use the award needed) writes the ledger, so reading the ledger here
+/// covers them all, and a later award or reversal is reflected on the next
+/// read with nothing to backfill.
+///
+/// In order:
+/// 1. A figure the row already carries wins, unchanged.
+/// 2. A terminal trace (withdrawn, revoked, purged, expired): the row's
+///    figure as it stands (none unless review stored one), never its gate
+///    award, which the account summary and the ledger figure leave out and
+///    settlement never pays (owner, 2026-10-28: the trace, the summary and
+///    the payout agree).
+/// 3. Any `NoveltyUtility` event: the final figure is their signed sum,
+///    never below 0, with no reason.
+/// 4. A held or non-crediting status: still pending.
+/// 5. A decision with a withheld label, or one that failed a floor: 0 and
+///    the reason. A passing decision with neither is its award still being
+///    written: pending.
+/// 6. No decision: pending.
+fn trace_credit_outcome(
+    record: &TraceCommonsSubmissionRecord,
+    decision: Option<&StorageTraceGateCreditDecisionRow>,
+    events: &[&TraceCommonsCreditLedgerRecord],
+) -> TraceCreditOutcome {
+    let pending = TraceCreditOutcome {
+        credit_points_final: record.credit_points_final,
+        reason: None,
+        absorbs_scoring_awards: false,
+    };
+    if record.credit_points_final.is_some() {
+        return pending;
+    }
+    if record.is_terminal() {
+        return pending;
+    }
+    let awards = events
+        .iter()
+        .filter(|event| event.event_type == TraceCreditLedgerEventType::NoveltyUtility)
+        .map(|event| event.credit_points_delta)
+        .collect::<Vec<_>>();
+    if !awards.is_empty() {
+        return TraceCreditOutcome {
+            credit_points_final: Some(awards.iter().sum::<f32>().max(0.0)),
+            reason: None,
+            absorbs_scoring_awards: true,
+        };
+    }
+    if record.status != TraceCorpusStatus::Accepted {
+        return pending;
+    }
+    let Some(decision) = decision else {
+        return pending;
+    };
+    let reason = match decision.credit_withheld_reason.as_deref() {
+        Some(label) => Some(credit_outcome_reason_for_withheld_label(label)),
+        None if decision.novelty_passed == Some(false) => {
+            Some(trace_commons_protocol::credit_outcome::NOVELTY_FAILED)
+        }
+        None if decision.perplexity_passed == Some(false) => {
+            Some(trace_commons_protocol::credit_outcome::PERPLEXITY_FAILED)
+        }
+        None => None,
+    };
+    match reason {
+        Some(reason) => TraceCreditOutcome {
+            credit_points_final: Some(0.0),
+            reason: Some(reason),
+            absorbs_scoring_awards: false,
+        },
+        None => pending,
+    }
+}
+
+/// Folds a gate decision's `credit_withheld_reason` (or a withheld pipeline
+/// leg's reason label) onto the contributor's closed reason set. A label
+/// this build does not map is `other`, never passed through: the finer
+/// labels name operator configuration a contributor has no use for.
+fn credit_outcome_reason_for_withheld_label(label: &str) -> &'static str {
+    use trace_commons_protocol::credit_outcome as reason;
+    match label {
+        "policy_mismatch" => reason::POLICY_MISMATCH,
+        "skipped_duplicate" | "cached" => reason::DUPLICATE,
+        "submission_not_accepted" => reason::SUBMISSION_NOT_ACCEPTED,
+        INSUFFICIENT_COVERAGE_LABEL => reason::INSUFFICIENT_COVERAGE,
+        "central_issuer_denied" | "non_production_gate" | CREDIT_CHECK_ERROR_LABEL => {
+            reason::CREDIT_NOT_ISSUED
+        }
+        _ => reason::OTHER,
     }
 }
 
@@ -65437,9 +66198,9 @@ fn trace_object_ref_write_from_record(
     record: &TraceCommonsSubmissionRecord,
     envelope: &TraceContributionEnvelope,
 ) -> anyhow::Result<(StorageTraceObjectRefWrite, String)> {
-    let envelope_json = serde_json::to_string_pretty(envelope)
+    // Hashed and measured as it is serialized; the pretty JSON is never held.
+    let (plaintext_sha256, envelope_json_len) = pretty_json_sha256_prefixed_and_len(envelope)
         .context("failed to serialize trace envelope for DB mirror hashing")?;
-    let plaintext_sha256 = sha256_prefixed(&envelope_json);
     let (object_store, object_key, content_sha256) =
         if let Some(receipt) = record.artifact_receipt.as_ref() {
             (
@@ -65464,7 +66225,7 @@ fn trace_object_ref_write_from_record(
             object_key,
             content_sha256: content_sha256.clone(),
             encryption_key_ref: format!("tenant:{}", tenant_storage_ref(&record.tenant_id)),
-            size_bytes: i64::try_from(envelope_json.len()).unwrap_or(i64::MAX),
+            size_bytes: i64::try_from(envelope_json_len).unwrap_or(i64::MAX),
             compression: None,
             created_by_job_id: None,
         },
@@ -76220,7 +76981,10 @@ fn audit_backfill_storage_projection(
             StorageTraceAuditAction::BenchmarkConvert
         }
         "process_evaluation" => StorageTraceAuditAction::ProcessEvaluate,
-        "tenant_policy_update" | "tenant_access_grant_update" | PIPELINE_ACTIVATION_AUDIT_KIND => {
+        "tenant_policy_update"
+        | "tenant_access_grant_update"
+        | PIPELINE_ACTIVATION_AUDIT_KIND
+        | model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND => {
             StorageTraceAuditAction::PolicyUpdate
         }
         "export_job_recovery" => StorageTraceAuditAction::ExportJobRecovery,
@@ -76339,6 +77103,7 @@ fn audit_backfill_storage_projection(
         | AUDIT_CHAIN_REPAIR_AUDIT_KIND
         | TOMBSTONE_REPAIR_AUDIT_KIND
         | PIPELINE_ACTIVATION_AUDIT_KIND
+        | model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -78732,14 +79497,71 @@ fn write_json_file<T: Serialize + ?Sized>(
     value: &T,
     label: &str,
 ) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {} dir {}", label, parent.display()))?;
-    }
-    let body = serde_json::to_string_pretty(value)
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} path has no parent {}", label, path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {} dir {}", label, parent.display()))?;
+    // Written beside `path` and renamed over it, so a reader sees the
+    // previous file or this one, never one cut short. Truncating in place
+    // left it empty until the flush, and a submission reading every derived
+    // record while another wrote its own answered 500. The temporary's
+    // `.tmp*` name matches no `*.json` scan. Its mode is the one
+    // `File::create` gave, not `tempfile`'s owner-only default.
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
+    let temporary = builder
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to write {} {}", label, path.display()))?;
+    // Serialized straight into the file: a body file can be a whole
+    // envelope, and buffering it first would be one more copy of it in
+    // memory. Same bytes as `to_string_pretty`.
+    let mut writer = std::io::BufWriter::with_capacity(1 << 20, temporary);
+    serde_json::to_writer_pretty(&mut writer, value)
         .with_context(|| format!("failed to serialize {label}"))?;
-    std::fs::write(path, body)
-        .with_context(|| format!("failed to write {} {}", label, path.display()))
+    writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)
+        .with_context(|| format!("failed to write {} {}", label, path.display()))?
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to write {} {}", label, path.display()))?;
+    Ok(())
+}
+
+/// A `Write` that keeps only a SHA-256 and a byte count of what passes
+/// through it, so a hash and length of a serialization can be taken without
+/// materializing the serialization.
+#[derive(Default)]
+struct Sha256CountingWriter {
+    hasher: Sha256,
+    bytes: u64,
+}
+
+impl std::io::Write for Sha256CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.hasher.update(buf);
+        self.bytes += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `sha256_prefixed` and the length of `serde_json::to_string_pretty(value)`,
+/// without building that string.
+fn pretty_json_sha256_prefixed_and_len<T: Serialize + ?Sized>(
+    value: &T,
+) -> serde_json::Result<(String, u64)> {
+    let mut writer = Sha256CountingWriter::default();
+    serde_json::to_writer_pretty(&mut writer, value)?;
+    Ok((
+        format!("sha256:{}", hex::encode(writer.hasher.finalize())),
+        writer.bytes,
+    ))
 }
 
 fn tenant_storage_key(tenant_id: &str) -> String {
@@ -82614,6 +83436,36 @@ impl TraceCommonsAuditEvent {
         }
     }
 
+    /// One model-training grant on one trace
+    /// (`model_training_consent`): the kind's label as the purpose
+    /// (hashed), and `granted` as the one count. The event names the trace
+    /// and the actor's principal ref, and no consent text.
+    fn model_training_consent(auth: &TenantAuth, submission_id: Uuid) -> Self {
+        let kind = model_training_consent::MODEL_TRAINING_CONSENT_AUDIT_KIND;
+        let purpose_hash = sha256_prefixed(kind);
+        let action_counts = BTreeMap::from([("granted".to_string(), 1)]);
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id,
+            kind: kind.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
+                false,
+                &action_counts,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
     /// One change through a pipeline admin route (`pipeline_activation`):
     /// the action's label as the purpose (hashed) and as the one count. The
     /// event names no submission, bundle, reason, or record id.
@@ -83843,8 +84695,8 @@ fn trace_revocation_propagation_summary_from_audit_event(
 fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<HttpAttestationClient>>> {
     let base_url = trimmed_env(TRACE_COMMONS_NEAR_AI_BASE_URL);
     let model = trimmed_env(TRACE_COMMONS_NEAR_AI_MODEL);
-    let api_key = trimmed_env(TRACE_COMMONS_NEAR_AI_API_KEY);
-    let (Some(base_url), Some(model), Some(api_key)) = (base_url, model, api_key) else {
+    let keys = near_attestation_keys_from_lookup(&|name: &str| std::env::var(name).ok());
+    let (Some(base_url), Some(model), Some(keys)) = (base_url, model, keys) else {
         return Ok(None);
     };
     let pccs_url =
@@ -83859,16 +84711,218 @@ fn build_near_attestation_client_from_env() -> anyhow::Result<Option<Arc<HttpAtt
         timeout_seconds > 0,
         "{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be greater than zero"
     );
-    let client = HttpAttestationClient::new(
+    let mut client = HttpAttestationClient::new(
         base_url,
         model,
-        SecretString::from(api_key),
+        SecretString::from(keys.endpoint),
         pccs_url,
         StdDuration::from_secs(timeout_seconds),
         trimmed_env(TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL),
     )
     .map_err(|error| anyhow::anyhow!("{error}"))?;
+    if let Some(registry) = keys.registry {
+        client = client.with_registry_api_key(SecretString::from(registry));
+    }
     Ok(Some(Arc::new(client)))
+}
+
+/// The keys the NEAR AI attestation client sends.
+#[derive(Debug)]
+struct NearAttestationKeys {
+    /// For every call to the scorer's host, `TRACE_COMMONS_NEAR_AI_BASE_URL`:
+    /// the ECDSA report, the completion and its receipt.
+    endpoint: String,
+    /// For the registry fetch from the attestation gateway, when it is not
+    /// `endpoint`.
+    registry: Option<String>,
+}
+
+/// The attestation client's keys, or `None` when the shared key is not set.
+///
+/// With the scorer's own key ([`TRACE_COMMONS_NEAR_AI_SCORER_API_KEY`]) the
+/// drill reaches the scorer's host with it, the same key the scorer scores
+/// with, and the gateway with the shared key. A staging ingest scoring
+/// against a production completions host (staging design 3.9) so sends its
+/// production key only to that host and its staging key only to the staging
+/// gateway. Without one, both get the shared key, as before.
+fn near_attestation_keys_from_lookup(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Option<NearAttestationKeys> {
+    let get = |name: &str| {
+        lookup(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let shared = get(TRACE_COMMONS_NEAR_AI_API_KEY)?;
+    Some(match get(TRACE_COMMONS_NEAR_AI_SCORER_API_KEY) {
+        Some(scorer) => NearAttestationKeys {
+            endpoint: scorer,
+            registry: Some(shared),
+        },
+        None => NearAttestationKeys {
+            endpoint: shared,
+            registry: None,
+        },
+    })
+}
+
+/// The boot refusal's control name (staging design, section 3.9).
+const NEAR_AI_STAGING_HOST_COHERENCE_CONTROL: &str = "near_ai_staging_host_coherence";
+
+/// Every NEAR AI host this ingest will call or publish, as each setting
+/// resolves: configured, or its default where an unset setting still names
+/// a host. A setting that is unset and has no default names no host and is
+/// left out.
+fn near_ai_host_settings_from_lookup(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(&'static str, String)> {
+    let get = |name: &str| {
+        lookup(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let mut settings = Vec::new();
+    // The scorer: no default; unset, no scorer is built.
+    if let Some(base) = get(TRACE_COMMONS_NEAR_AI_BASE_URL) {
+        settings.push((TRACE_COMMONS_NEAR_AI_BASE_URL, base));
+    }
+    // The attestation registry: unset means the production gateway.
+    settings.push((
+        TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL,
+        get(TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL)
+            .unwrap_or_else(|| ATTESTATION_GATEWAY_BASE_URL.to_string()),
+    ));
+    // The privacy filter: unset means production, which is called only when
+    // the NEAR AI backend is selected. A configured value is checked always.
+    const PRIVACY_BASE: &str = "TRACE_NEAR_AI_PRIVACY_BASE_URL";
+    match get(PRIVACY_BASE) {
+        Some(base) => settings.push((PRIVACY_BASE, base)),
+        None if get("TRACE_PRIVACY_FILTER_BACKEND").as_deref() == Some("near-ai") => {
+            settings.push((
+                PRIVACY_BASE,
+                trace_commons_protocol::privacy_filter_near_ai::DEFAULT_BASE_URL.to_string(),
+            ));
+        }
+        None => {}
+    }
+    // The receipt endpoint published to contributors: no default; unset,
+    // nothing is published.
+    const RECEIPT_ENDPOINT: &str = "TRACE_COMMONS_NEAR_PROVISIONING_RECEIPT_ENDPOINT";
+    if let Some(endpoint) = get(RECEIPT_ENDPOINT) {
+        settings.push((RECEIPT_ENDPOINT, endpoint));
+    }
+    settings
+}
+
+/// The opt-in that lets a `near-ai-staging` ingest score against a NEAR AI
+/// production direct-completions host (staging design 3.9, owner exception
+/// 2026-10-24). `true` turns it on; a staging build reads `false` or unset
+/// as off. A default build refuses the setting at any value.
+const TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST: &str =
+    "TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST";
+
+/// The boot refusal's control name for the scorer production-host exception.
+const NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL: &str = "near_ai_scorer_production_host";
+
+/// Where the boot guard found the scorer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NearAiScorerHostChannel {
+    /// Every NEAR AI host, the scorer's included, is this build's channel.
+    ThisChannel,
+    /// A staging build whose scorer is a NEAR AI production
+    /// direct-completions host, by the operator's opt-in. Every other NEAR
+    /// AI host was checked as staging.
+    ProductionCompletionsException,
+}
+
+/// Whether the scorer production-host exception is asked for, refusing a
+/// value that is neither `true` nor `false` and any value on a default
+/// build. The refusal names the setting, never the value.
+fn near_ai_scorer_production_host_requested(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<bool> {
+    let Some(value) = lookup(TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+    anyhow::ensure!(
+        trace_commons_server::near_ai_api::near_ai_staging(),
+        "missing_control:{NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL}: \
+         {TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST} is honoured only on a near-ai-staging \
+         build; remove it"
+    );
+    match value.as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => anyhow::bail!(
+            "missing_control:{NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL}: \
+             {TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST} must be true or false"
+        ),
+    }
+}
+
+/// Refuse to boot when a NEAR AI host this ingest will call or publish
+/// belongs to the other channel: a `near-ai-staging` build must name only
+/// the NEAR AI staging host, and a default build must never name it
+/// (staging design, section 3.9). The refusal names the control and the
+/// setting, never the value.
+///
+/// One exception, on a staging build only and only when
+/// [`TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST`] is `true`: the scorer's
+/// base may be a NEAR AI production direct-completions host
+/// (`https://<model>.completions.near.ai`), because NEAR AI staging serves
+/// no endpoint that scores with `echo` and logprobs. The scorer must then
+/// carry its own key, [`TRACE_COMMONS_NEAR_AI_SCORER_API_KEY`], so the staging
+/// key never reaches the production host and the production key reaches
+/// nothing else. Every other NEAR AI setting is checked as without it.
+fn near_ai_host_coherence_from_lookup(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<NearAiScorerHostChannel> {
+    let exception = near_ai_scorer_production_host_requested(lookup)?;
+    let mut settings = near_ai_host_settings_from_lookup(lookup);
+    if exception {
+        let scorer = settings
+            .iter()
+            .position(|(setting, _)| *setting == TRACE_COMMONS_NEAR_AI_BASE_URL)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing_control:{NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL}: \
+                     {TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST} is true but \
+                     {TRACE_COMMONS_NEAR_AI_BASE_URL} is not set"
+                )
+            })?;
+        anyhow::ensure!(
+            trace_commons_server::near_ai_api::is_production_completions_host(&settings[scorer].1),
+            "missing_control:{NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL}: \
+             {TRACE_COMMONS_NEAR_AI_BASE_URL} is not a NEAR AI production direct-completions \
+             host (https, one model label, no port or userinfo)"
+        );
+        anyhow::ensure!(
+            lookup(TRACE_COMMONS_NEAR_AI_SCORER_API_KEY).is_some_and(|key| !key.trim().is_empty()),
+            "missing_control:{NEAR_AI_SCORER_PRODUCTION_HOST_CONTROL}: \
+             {TRACE_COMMONS_NEAR_AI_SCORER_PRODUCTION_HOST} is true but \
+             {TRACE_COMMONS_NEAR_AI_SCORER_API_KEY} is not set"
+        );
+        settings.remove(scorer);
+    }
+    let pairs = settings
+        .iter()
+        .map(|(setting, url)| (*setting, url.as_str()))
+        .collect::<Vec<_>>();
+    trace_commons_server::near_ai_api::near_ai_host_coherence(&pairs).map_err(|setting| {
+        anyhow::anyhow!(
+            "missing_control:{NEAR_AI_STAGING_HOST_COHERENCE_CONTROL}: {setting} names a \
+             NEAR AI host outside this build's channel (near_ai_staging={})",
+            trace_commons_server::near_ai_api::near_ai_staging()
+        )
+    })?;
+    Ok(if exception {
+        NearAiScorerHostChannel::ProductionCompletionsException
+    } else {
+        NearAiScorerHostChannel::ThisChannel
+    })
 }
 
 fn trimmed_env(name: &str) -> Option<String> {

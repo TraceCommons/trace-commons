@@ -47,8 +47,11 @@ struct CertificateSection: View {
                                 .foregroundStyle(GlassColor.textSecondary)
                         }
                     } else if let line = TCCertificate.rowLine(evidenceAdmitted: evidenceAdmitted) {
-                        VStack(spacing: 0) {
+                        LazyVStack(spacing: 0) {
                             ForEach(Array(held.enumerated()), id: \.element.id) { index, entry in
+                                #if DEBUG
+                                let _ = OtherCollectionRowBodies.record("supplementalCertificates", entry.id)
+                                #endif
                                 GlassTableRow(first: index == 0) {
                                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                                         Text(entry.projectLabel)

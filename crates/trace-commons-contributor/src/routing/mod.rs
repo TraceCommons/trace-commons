@@ -12,6 +12,7 @@ pub use trace_commons_contributor_sources::routing::*;
 
 pub mod attestation_report;
 pub mod ironwire;
+pub(crate) mod managed_history;
 pub mod proof_attestor;
 pub mod receipt;
 

@@ -98,12 +98,6 @@ impl HealthLineCopy {
     }
 }
 
-/// The banner title for a spent daily budget. Shared with the real-numbers
-/// banner a shell draws instead when it has `status.daily_budget`
-/// (`daemon::uploader`'s daily-cap accounting); this is only the fallback for
-/// a daemon that reported the label without that object.
-pub const DAILY_BUDGET_TITLE: &str = "Today's upload limit is used up.";
-
 /// The banner for a daemon that cannot be reached
 /// at all -- no IPC call is answering, so there is no label to read and
 /// nothing a shell's own liveness probe can do but say so. New wording: no
@@ -216,11 +210,6 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
                 Some(("Review", HealthActionKind::ReviewQueue)),
             )
         }
-        health::LABEL_DAILY_CAP_REACHED => HealthLineCopy::waiting(
-            DAILY_BUDGET_TITLE,
-            "Approved traces are waiting. Nothing has been lost -- they go out when the limit \
-             resets.",
-        ),
         _ => on_hold_copy(),
     }
 }
@@ -233,6 +222,50 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
 /// the data consequence it states. Approved 2026-10-06.
 pub const READ_UNAVAILABLE: &str =
     "This couldn't be read just now. Nothing has changed. Try again in a moment.";
+
+/// What the app says instead of starting when its bundle and its core
+/// library come from different builds (staging design, section 4.3): a
+/// staging bundle around a production library, or the reverse, would show
+/// one channel while talking to the other, so the app starts nothing. It
+/// calls the copy damaged rather than naming builds. Approved 2026-10-22.
+pub const CHANNEL_MISMATCH: &str = concat!(
+    crate::app_name!(),
+    " can't start because this copy of the app is damaged. \
+     Nothing is being watched or sent. Install ",
+    crate::app_name!(),
+    " again to fix it."
+);
+
+/// What the app says instead of starting when its state directory comes
+/// from the override variable and the core refused it
+/// (`config::resolve_state_dir`, staging design 4.4): the override names
+/// the other channel's state directory, or it could not be checked. It
+/// names no path and no channel, so it is the same sentence in both builds.
+/// Approved 2026-10-22.
+pub const STATE_DIR_OVERRIDE_REFUSED: &str = concat!(
+    crate::app_name!(),
+    " can't start because its folder override points to a folder this \
+     copy of the app can't use. Nothing is being watched or sent. Remove \
+     the override, then open ",
+    crate::app_name!(),
+    " again."
+);
+
+/// The short label a staging build shows in its windows (staging design S7
+/// and section 4.8), so a tester never mistakes the staging app for
+/// production. A notice under `docs/ui-copy-guide.md` section 9: the owner
+/// approved it existing (S7) and its wording. Approved 2026-10-22.
+pub const STAGING_WINDOW_LABEL: &str = "Staging";
+
+/// The label this build shows in its main window: [`STAGING_WINDOW_LABEL`]
+/// on the staging channel, none on production.
+pub const fn window_label() -> Option<&'static str> {
+    if crate::channel::near_ai_staging() {
+        Some(STAGING_WINDOW_LABEL)
+    } else {
+        None
+    }
+}
 
 /// The button beside [`core_down_copy`] in a shell that can ask its
 /// background service to start again, and the same button while it is
@@ -364,7 +397,6 @@ mod tests {
             health::LABEL_PII_FILTER_UNAVAILABLE,
             health::LABEL_CLAIM_MINT_FAILED,
             health::LABEL_INGEST_UNREACHABLE,
-            health::LABEL_DAILY_CAP_REACHED,
             health::LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED,
         ] {
             assert!(
@@ -413,7 +445,6 @@ mod tests {
                 Actionable,
             ),
             (health::LABEL_QUEUE_FULL, Actionable),
-            (health::LABEL_DAILY_CAP_REACHED, Waiting),
             ("a-future-label", Waiting),
         ] {
             assert_eq!(
@@ -466,5 +497,29 @@ mod tests {
             serde_json::to_value(health_copy_for_label(health::LABEL_QUEUE_FULL, None)).unwrap();
         assert_eq!(queue_full["action_kind"], "review_queue");
         assert_eq!(queue_full["severity"], "actionable");
+    }
+
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_channel_shows_the_label() {
+        assert_eq!(window_label(), Some(STAGING_WINDOW_LABEL));
+    }
+
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_production_channel_shows_none() {
+        assert_eq!(window_label(), None);
+    }
+
+    /// The approved wording (2026-10-22) is one word, with no sentence
+    /// punctuation and nothing that names a host or a build.
+    #[test]
+    fn the_staging_window_label_is_the_approved_word() {
+        assert_eq!(STAGING_WINDOW_LABEL, "Staging");
+        assert!(!STAGING_WINDOW_LABEL.contains(char::is_whitespace));
+        assert!(!STAGING_WINDOW_LABEL.ends_with('.'));
+        for internal in ["near-ai", "tracecommons", "channel", "feature"] {
+            assert!(!STAGING_WINDOW_LABEL.to_lowercase().contains(internal));
+        }
     }
 }

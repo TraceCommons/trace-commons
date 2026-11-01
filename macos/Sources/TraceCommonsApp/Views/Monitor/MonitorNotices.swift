@@ -28,8 +28,10 @@ import TCShellCore
 /// effect was to put it away (Dismiss, Got it), the X does that and the
 /// button is gone; where answering is its own decision (No thanks, Not
 /// now), the button stays and the X only closes the card until the window
-/// is opened again (`closed`). A notice that goes only when its cause does
-/// (the core's health, a gate hold, the attached daemon) has no X.
+/// is opened again (`closed`). The four acknowledged safeguards instead
+/// stay closed for the same incident across windows and restarts. A notice
+/// that goes only when its cause does (a down core, a consent gate hold, the
+/// attached daemon) has no X.
 ///
 /// Every word is the core's, the daemon's, or the cards' own as before;
 /// this view lays them out and writes none.
@@ -57,11 +59,12 @@ struct MonitorNotices: View {
     @Environment(\.openURL) private var openURL
     /// The one-time notification offers' store, as Settings reads it.
     @State private var offers = NudgeSettingsStore(client: nil)
+    @State private var dismissals = MonitorNoticeDismissals.shared
     /// Closed with its X, for good on this Mac (owner, 2026-10-08).
     @AppStorage("monitor.firstContributionDismissed") private var firstContributionDismissed = false
 
     var body: some View {
-        let shown = Self.shown(items, closed: closed)
+        let shown = Self.shown(items, closed: closed.union(persistentClosed))
         VStack(spacing: 0) {
             if !shown.isEmpty {
                 // Not in a glass group: one would blend the stacked cards'
@@ -76,6 +79,10 @@ struct MonitorNotices: View {
         .onChange(of: currentHealthIDs) { _, current in
             closed = Self.prunedClosed(closed, currentHealth: current)
         }
+        .onChange(of: dismissalSnapshot, initial: true) { previous, snapshot in
+            closed = Self.closedAfterScopeChange(closed, from: previous.scope, to: snapshot.scope)
+            dismissals.reconcile(snapshot.conditions, scope: snapshot.scope)
+        }
         .task(id: model.liveData.map(ObjectIdentifier.init)) {
             offers.attach(model.daemonData)
             await offers.load()
@@ -88,12 +95,15 @@ struct MonitorNotices: View {
     }
 
     /// The close id of a health banner, or nil when it may not be closed.
-    /// A waiting safeguard (the daily upload limit, a busy witness, a gate
-    /// hold) is closable by its title alone, so another one appearing above
-    /// it does not reopen it. A core that is down or unread is not: closing
-    /// it would leave the tab reading as healthy.
+    /// Durable safeguards use the daemon's condition code; other waiting
+    /// notices keep their window-local title identity. A down or unread core
+    /// is not closable: dismissing it would leave the tab reading as healthy.
     static func healthCloseID(for banner: TracesHealth.Banner) -> String? {
-        banner.tone == .ask ? "health:" + banner.title : nil
+        guard banner.tone == .ask else { return nil }
+        if let code = banner.condition, let kind = MonitorNoticeDismissals.Kind(rawValue: code) {
+            return kind.closeID
+        }
+        return "health:" + banner.title
     }
 
     /// `closed` without the closed health banners that are no longer shown,
@@ -101,6 +111,15 @@ struct MonitorNotices: View {
     /// day's upload limit, say). Other closed cards are left as they are.
     static func prunedClosed(_ closed: Set<String>, currentHealth: Set<String>) -> Set<String> {
         closed.filter { !$0.hasPrefix("health:") || currentHealth.contains($0) }
+    }
+
+    /// A close made before the account was known is window-local. It must
+    /// not hide the same condition for a subsequently identified account.
+    static func closedAfterScopeChange(
+        _ closed: Set<String>, from previous: MonitorNoticeDismissals.Scope?, to current: MonitorNoticeDismissals.Scope?
+    ) -> Set<String> {
+        guard previous != current else { return closed }
+        return closed.subtracting(MonitorNoticeDismissals.Kind.allCases.map(\.closeID))
     }
 
     /// Where a tab's notices go: History is the Traces tab's other page.
@@ -344,7 +363,7 @@ struct MonitorNotices: View {
             items.append(GlassPopoverItem(id: closeID ?? "health:" + banner.id) {
                 GlassPopoverNotice(
                     title: banner.title, closeLabel: closeID == nil ? nil : closeWord,
-                    onClose: closeID.map(close)
+                    onClose: closeID.map { closeHealth(banner, id: $0) }
                 ) {
                     GlassNoticeMark(banner.tone)
                 } summary: {
@@ -354,6 +373,36 @@ struct MonitorNotices: View {
         }
         items += undoItems
         return items
+    }
+
+    /// Read the scope from the same status as the safeguards. An unread
+    /// identity never borrows the previous account's presentation choices.
+    private var dismissalSnapshot: MonitorNoticeDismissals.Snapshot {
+        let status = traces.status
+        let account = status?.accountScope ?? status?.tenantId ?? ""
+        let scope = MonitorNoticeDismissals.Scope(
+            configDirectory: model.configDirectory,
+            channel: BuildChannelGate.dylibChannel?.channel ?? "", account: account)
+        return .init(scope: scope, conditions: MonitorNoticeDismissals.conditions(
+            status: status, loaded: traces.phase == .loaded))
+    }
+
+    private var persistentClosed: Set<String> {
+        let snapshot = dismissalSnapshot
+        return Set(snapshot.conditions.compactMap { kind, condition in
+            guard case .active(let incident) = condition,
+                  dismissals.isDismissed(incident, scope: snapshot.scope) else { return nil }
+            return kind.closeID
+        })
+    }
+
+    private func closeHealth(_ banner: TracesHealth.Banner, id: String) -> () -> Void {
+        let snapshot = dismissalSnapshot
+        if let code = banner.condition, let kind = MonitorNoticeDismissals.Kind(rawValue: code),
+           let scope = snapshot.scope, case .active(let incident) = snapshot.conditions[kind] {
+            return { dismissals.dismiss(incident, scope: scope) }
+        }
+        return close(id)
     }
 
     /// The close ids of the closable health banners shown now, read the
@@ -686,15 +735,15 @@ struct MonitorNotices: View {
 /// The NEAR AI sign-in, begun as Settings > Private AI begins it: the
 /// daemon starts the ceremony and the browser finishes it. A browser that
 /// never opened leaves a ceremony nobody can finish, so it is stopped
-/// rather than left to time out.
+/// rather than left to time out. It names no provider, so the daemon starts
+/// this build's default (`channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER`): the
+/// NEAR wallet in production, NEAR AI's Google login in staging.
 @MainActor
 enum NearAiSignIn {
     static func begin(_ model: AppModel, openURL: OpenURLAction, then: (() -> Void)? = nil) {
         Task {
-            guard let url = await model.startNearAiCredential(provider: "near") else { return }
-            let accepted = await withCheckedContinuation { continuation in
-                openURL(url) { continuation.resume(returning: $0) }
-            }
+            guard let url = await model.startNearAiCredential() else { return }
+            let accepted = await openURL.opened(url)
             if !accepted { model.cancelNearAiCredential() }
             then?()
         }

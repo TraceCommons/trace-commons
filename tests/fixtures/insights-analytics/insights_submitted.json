@@ -1,0 +1,517 @@
+{
+  "enabled": true,
+  "feed": "counter_pass",
+  "readable": true,
+  "updated_at": "2026-09-20T12:00:00+00:00",
+  "weeks": 13,
+  "window_start": "2026-06-22T00:00:00+00:00",
+  "window_end": "2026-09-20T12:00:00+00:00",
+  "pricing": {
+    "basis": "api_list",
+    "tables": [
+      {
+        "table_id": "sha256:be28771d884edcf6a26a3a5147dcc05cc01a7001d24141be756676a43273d184",
+        "version": 1
+      }
+    ]
+  },
+  "totals": {
+    "submitted": 7,
+    "accepted": 3,
+    "credit_final": 6.0,
+    "credit_pending": 4.0,
+    "matched": 3,
+    "unmatched": 4,
+    "by_status": {
+      "accepted": 3,
+      "other": 0,
+      "pending": 1,
+      "quarantined": 1,
+      "rejected": 1,
+      "withdrawn": 1
+    },
+    "by_outcome_reason": {
+      "novelty_failed": 1,
+      "policy_mismatch": 1
+    },
+    "unmatched_by_reason": {
+      "no_queue_entry": 2,
+      "no_session_row": 1,
+      "source_not_read": 1
+    }
+  },
+  "by_model": [
+    {
+      "label": "claude-sonnet-5-5",
+      "tool": "claude_code",
+      "submitted": 2,
+      "accepted": 1,
+      "credit_final": 0.0,
+      "credit_pending": 2.5,
+      "matched": 2,
+      "usd_micros_known": 6400,
+      "usd_partial": false,
+      "priced_sessions": 2,
+      "unpriced_sessions": 0,
+      "near_ai_sessions": 0,
+      "edits_known": 2,
+      "edits_partial": false,
+      "edits_kept_known": 2,
+      "edits_kept_partial": false,
+      "edits_undone_known": 0,
+      "edits_undone_partial": false,
+      "edits_denied_known": 0,
+      "edits_denied_partial": true,
+      "lines_added_known": 2,
+      "lines_removed_known": 2,
+      "lines_partial": false,
+      "tasks": {
+        "docs": 1,
+        "tests": 1
+      }
+    },
+    {
+      "label": "claude-opus-5-5",
+      "tool": "claude_code",
+      "submitted": 1,
+      "accepted": 1,
+      "credit_final": 5.0,
+      "credit_pending": 0.0,
+      "matched": 1,
+      "usd_micros_known": 9400,
+      "usd_partial": false,
+      "priced_sessions": 1,
+      "unpriced_sessions": 0,
+      "near_ai_sessions": 0,
+      "edits_known": 1,
+      "edits_partial": false,
+      "edits_kept_known": 1,
+      "edits_kept_partial": false,
+      "edits_undone_known": 0,
+      "edits_undone_partial": false,
+      "edits_denied_known": 0,
+      "edits_denied_partial": true,
+      "lines_added_known": 1,
+      "lines_removed_known": 1,
+      "lines_partial": false,
+      "tasks": {
+        "feature": 1
+      }
+    }
+  ],
+  "by_model_left_out": {
+    "mixed_models": 0,
+    "no_model": 0,
+    "unmatched": 4
+  },
+  "by_task": [
+    {
+      "key": "bug_fix",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "key": "feature",
+      "submitted": 1,
+      "accepted": 1,
+      "credit_final": 5.0,
+      "credit_pending": 0.0,
+      "matched": 1
+    },
+    {
+      "key": "refactor",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "key": "tests",
+      "submitted": 1,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 2.5,
+      "matched": 1
+    },
+    {
+      "key": "docs",
+      "submitted": 1,
+      "accepted": 1,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 1
+    },
+    {
+      "key": "understand",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "key": "review",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "key": "setup",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    }
+  ],
+  "by_task_unknown": {
+    "submitted": 4,
+    "accepted": 1,
+    "credit_final": 1.0,
+    "credit_pending": 1.5,
+    "matched": 0
+  },
+  "code": {
+    "sessions": 3,
+    "sessions_with_files": 3,
+    "files": {
+      "source": 1,
+      "test": 1,
+      "doc": 1,
+      "config": 0,
+      "total": 3
+    },
+    "files_partial": false,
+    "edits_known": 3,
+    "edits_partial": false,
+    "edits_kept_known": 3,
+    "edits_kept_partial": false,
+    "edits_undone_known": 0,
+    "edits_undone_partial": false,
+    "edits_denied_known": 0,
+    "edits_denied_partial": true,
+    "lines_added_known": 3,
+    "lines_removed_known": 3,
+    "lines_partial": false,
+    "usd_micros_known": 15800,
+    "usd_partial": false,
+    "priced_sessions": 3,
+    "unpriced_sessions": 0,
+    "near_ai_sessions": 0
+  },
+  "by_week": [
+    {
+      "week_start": "2026-06-22",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-06-29",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-07-06",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-07-13",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-07-20",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-07-27",
+      "submitted": 1,
+      "accepted": 1,
+      "credit_final": 1.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-08-03",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-08-10",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-08-17",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-08-24",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-08-31",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-09-07",
+      "submitted": 0,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    },
+    {
+      "week_start": "2026-09-14",
+      "submitted": 6,
+      "accepted": 2,
+      "credit_final": 5.0,
+      "credit_pending": 4.0,
+      "matched": 3
+    }
+  ],
+  "by_project": [
+    {
+      "label": "my-app",
+      "submitted": 6,
+      "accepted": 3,
+      "credit_final": 6.0,
+      "credit_pending": 4.0,
+      "matched": 3
+    },
+    {
+      "label": "other-app",
+      "submitted": 1,
+      "accepted": 0,
+      "credit_final": 0.0,
+      "credit_pending": 0.0,
+      "matched": 0
+    }
+  ],
+  "left_out": {
+    "never_folder": 0
+  },
+  "traces_total": 7,
+  "traces": [
+    {
+      "submission_id": "7e570000-0000-4000-8000-000000000006",
+      "submitted_at": "2026-09-19T15:00:00+00:00",
+      "project_label": "other-app",
+      "source": "claude-code",
+      "status": "rejected",
+      "credit_points_pending": 0.0,
+      "credit_points_final": 0.0,
+      "credit_outcome_reason": "novelty_failed",
+      "matched": false,
+      "unmatched_reason": "no_session_row",
+      "tool": null,
+      "model": null,
+      "mixed_models": false,
+      "task": null,
+      "files": null,
+      "edits": null,
+      "edits_kept": null,
+      "edits_undone": null,
+      "edits_denied": null,
+      "usd_micros": null,
+      "near_ai": false
+    },
+    {
+      "submission_id": "7e570000-0000-4000-8000-000000000005",
+      "submitted_at": "2026-09-18T15:00:00+00:00",
+      "project_label": "my-app",
+      "source": "opencode",
+      "status": "withdrawn",
+      "credit_points_pending": 0.0,
+      "credit_points_final": null,
+      "credit_outcome_reason": null,
+      "matched": false,
+      "unmatched_reason": "source_not_read",
+      "tool": null,
+      "model": null,
+      "mixed_models": false,
+      "task": null,
+      "files": null,
+      "edits": null,
+      "edits_kept": null,
+      "edits_undone": null,
+      "edits_denied": null,
+      "usd_micros": null,
+      "near_ai": false
+    },
+    {
+      "submission_id": "7e570000-0000-4000-8000-000000000004",
+      "submitted_at": "2026-09-17T15:00:00+00:00",
+      "project_label": "my-app",
+      "source": "claude-code",
+      "status": "pending",
+      "credit_points_pending": 1.5,
+      "credit_points_final": null,
+      "credit_outcome_reason": null,
+      "matched": false,
+      "unmatched_reason": "no_queue_entry",
+      "tool": null,
+      "model": null,
+      "mixed_models": false,
+      "task": null,
+      "files": null,
+      "edits": null,
+      "edits_kept": null,
+      "edits_undone": null,
+      "edits_denied": null,
+      "usd_micros": null,
+      "near_ai": false
+    },
+    {
+      "submission_id": "7e570000-0000-4000-8000-000000000003",
+      "submitted_at": "2026-09-16T15:00:00+00:00",
+      "project_label": "my-app",
+      "source": "claude-code",
+      "status": "quarantined",
+      "credit_points_pending": 2.5,
+      "credit_points_final": null,
+      "credit_outcome_reason": null,
+      "matched": true,
+      "unmatched_reason": null,
+      "tool": "claude_code",
+      "model": "claude-sonnet-5-5",
+      "mixed_models": false,
+      "task": "tests",
+      "files": {
+        "source": 0,
+        "test": 1,
+        "doc": 0,
+        "config": 0,
+        "total": 1
+      },
+      "edits": 1,
+      "edits_kept": 1,
+      "edits_undone": 0,
+      "edits_denied": null,
+      "usd_micros": 3700,
+      "near_ai": false
+    },
+    {
+      "submission_id": "7e570000-0000-4000-8000-000000000002",
+      "submitted_at": "2026-09-15T15:00:00+00:00",
+      "project_label": "my-app",
+      "source": "claude-code",
+      "status": "accepted",
+      "credit_points_pending": 0.0,
+      "credit_points_final": 0.0,
+      "credit_outcome_reason": "policy_mismatch",
+      "matched": true,
+      "unmatched_reason": null,
+      "tool": "claude_code",
+      "model": "claude-sonnet-5-5",
+      "mixed_models": false,
+      "task": "docs",
+      "files": {
+        "source": 0,
+        "test": 0,
+        "doc": 1,
+        "config": 0,
+        "total": 1
+      },
+      "edits": 1,
+      "edits_kept": 1,
+      "edits_undone": 0,
+      "edits_denied": null,
+      "usd_micros": 2700,
+      "near_ai": false
+    },
+    {
+      "submission_id": "7e570000-0000-4000-8000-000000000001",
+      "submitted_at": "2026-09-14T15:00:00+00:00",
+      "project_label": "my-app",
+      "source": "claude-code",
+      "status": "accepted",
+      "credit_points_pending": 0.0,
+      "credit_points_final": 5.0,
+      "credit_outcome_reason": null,
+      "matched": true,
+      "unmatched_reason": null,
+      "tool": "claude_code",
+      "model": "claude-opus-5-5",
+      "mixed_models": false,
+      "task": "feature",
+      "files": {
+        "source": 1,
+        "test": 0,
+        "doc": 0,
+        "config": 0,
+        "total": 1
+      },
+      "edits": 1,
+      "edits_kept": 1,
+      "edits_undone": 0,
+      "edits_denied": null,
+      "usd_micros": 9400,
+      "near_ai": false
+    },
+    {
+      "submission_id": "7e570000-0000-4000-8000-000000000007",
+      "submitted_at": "2026-08-01T15:00:00+00:00",
+      "project_label": "my-app",
+      "source": "claude-code",
+      "status": "accepted",
+      "credit_points_pending": 0.0,
+      "credit_points_final": 1.0,
+      "credit_outcome_reason": null,
+      "matched": false,
+      "unmatched_reason": "no_queue_entry",
+      "tool": null,
+      "model": null,
+      "mixed_models": false,
+      "task": null,
+      "files": null,
+      "edits": null,
+      "edits_kept": null,
+      "edits_undone": null,
+      "edits_denied": null,
+      "usd_micros": null,
+      "near_ai": false
+    }
+  ]
+}

@@ -204,9 +204,11 @@ jobs:
     # Xcode 26 / Swift 6.3, which is also what this app is developed against
     # locally, so CI and the developer toolchain now match.
     runs-on: macos-26
-    # This job holds a Developer ID private key. The environment scopes those
-    # secrets to release runs and gives the signing path a place to hang
-    # required reviewers, matching how the Windows job is gated.
+    # This job holds a Developer ID private key. The signing secrets are
+    # repository secrets, not environment secrets, and the environment has
+    # no protection rules today, so it scopes nothing yet: it is the place to
+    # hang required reviewers or environment secrets, matching how the
+    # Windows job is gated.
     environment: release
     timeout-minutes: 60
     steps:
@@ -248,6 +250,14 @@ jobs:
           TC_SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
         run: |
           ./macos/scripts/make-release-dmg.sh "$SHORT_VERSION" "$BUILD_VERSION"
+
+      # The staging pin verifier -- the signed pin-set format, its public key
+      # and the pin URL -- is compiled only into the internal staging build.
+      # The release check keeps that build's feature off every release build
+      # line; this checks the bytes that ship, the FFI dylib and the bundled
+      # CLI included, and fails the release if any of it is there.
+      - name: No staging pin verifier in the shipped bundle
+        run: ./scripts/ci/assert-no-staging-markers.sh check macos/.build/Near.ai.app
 
       # The signed app is launched here, not merely inspected. An app carrying
       # the keychain entitlement without its provisioning profile is killed by

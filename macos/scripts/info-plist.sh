@@ -20,21 +20,36 @@
 # would be asking Sparkle to fetch an appcast it cannot authenticate. A
 # release cannot reach that state because make-release-dmg.sh refuses to run
 # without the key.
+#
+# # Channel
+#
+# TC_CHANNEL (unset means production) picks macos/channels/<channel>.env,
+# which supplies the bundle id, name, URL scheme, feed URL and the NAME of the
+# variable holding the Sparkle key: TC_SPARKLE_PUBLIC_ED_KEY for production,
+# a staging variable for staging, so a staging bundle never takes the
+# production key. See channel.sh. A production plist is byte-identical to the
+# one rendered before the channel files existed
+# (scripts/ci/test-macos-channel-plist.sh).
 set -euo pipefail
+
+# shellcheck source=channel.sh
+. "$(dirname "$0")/channel.sh"
+load_channel
 
 SHORT_VERSION="${1:?usage: info-plist.sh <short_version> <build_version>}"
 BUILD_VERSION="${2:?usage: info-plist.sh <short_version> <build_version>}"
 
-# The published appcast, written by scripts/updates/generate-appcast.sh into
-# the same public bucket as the flatpak repo. HTTPS is not decoration here:
-# the appcast is what authorizes an install.
-SPARKLE_FEED_URL="https://storage.googleapis.com/tracecommons-flatpak/updates/appcast.xml"
+# The published appcast, written by scripts/updates/generate-appcast.sh. For
+# production that is the same public bucket as the flatpak repo. HTTPS is not
+# decoration here: the appcast is what authorizes an install.
+SPARKLE_FEED_URL="$TC_SPARKLE_FEED_URL"
+SPARKLE_PUBLIC_ED_KEY_VALUE="${!TC_SPARKLE_KEY_VAR:-}"
 
 SPARKLE_KEYS=""
-if [ -n "${TC_SPARKLE_PUBLIC_ED_KEY:-}" ]; then
+if [ -n "$SPARKLE_PUBLIC_ED_KEY_VALUE" ]; then
   SPARKLE_KEYS="$(cat <<KEYS
     <key>SUFeedURL</key><string>${SPARKLE_FEED_URL}</string>
-    <key>SUPublicEDKey</key><string>${TC_SPARKLE_PUBLIC_ED_KEY}</string>
+    <key>SUPublicEDKey</key><string>${SPARKLE_PUBLIC_ED_KEY_VALUE}</string>
     <!-- Check automatically, never install automatically. Sparkle looks for
          an update on launch and once a day thereafter without asking
          permission to look; the bytes on disk do not change until a person
@@ -53,9 +68,14 @@ cat <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Near.ai</string>
-    <key>CFBundleDisplayName</key><string>Near.ai</string>
-    <key>CFBundleIdentifier</key><string>ai.tracecommons.shell</string>
+    <key>CFBundleName</key><string>${TC_BUNDLE_NAME}</string>
+    <key>CFBundleDisplayName</key><string>${TC_BUNDLE_NAME}</string>
+    <key>CFBundleIdentifier</key><string>${TC_BUNDLE_ID}</string>
+    <!-- The channel this bundle is. The app compares it with the linked
+         dylib's channel at launch and starts nothing on a mismatch or when
+         this key is missing (staging design, section 4.3). -->
+    <key>TCChannel</key><string>${TC_CHANNEL}</string>
+    <key>TCPrivateAICampaignURL</key><string>${TC_PRIVATE_AI_CAMPAIGN_URL}</string>
     <key>CFBundleExecutable</key><string>TraceCommonsApp</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${SHORT_VERSION}</string>
@@ -66,8 +86,8 @@ cat <<PLIST
 
          This app was a menu-bar-only utility until a contributor could not
          find it: on a display with a notch, once the menu bar fills up, the
-         status item is still assigned a frame -- the accessibility API
-         answers with a plausible 18x24 rectangle -- but it is placed past
+         status item is still assigned a frame (the accessibility API
+         answers with a plausible 18x24 rectangle), but it is placed past
          the notch in a band that never draws. Nothing renders, nothing
          reports an error, and the app has no other way in. A menu-bar-only
          app is one crowded menu bar away from being unreachable.
@@ -93,8 +113,8 @@ cat <<PLIST
     <key>CFBundleURLTypes</key>
     <array>
       <dict>
-        <key>CFBundleURLName</key><string>ai.tracecommons.shell.invite</string>
-        <key>CFBundleURLSchemes</key><array><string>tracecommons</string></array>
+        <key>CFBundleURLName</key><string>${TC_URL_TYPE_NAME}</string>
+        <key>CFBundleURLSchemes</key><array><string>${TC_URL_SCHEME}</string></array>
         <!-- Viewer, not Editor: the app shows what the URL names and waits
              for a person to press the button. A deep link never enrolls. -->
         <key>CFBundleTypeRole</key><string>Viewer</string>

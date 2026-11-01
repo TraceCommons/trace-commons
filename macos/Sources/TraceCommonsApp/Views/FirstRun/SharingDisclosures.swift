@@ -41,10 +41,10 @@ struct SharingDisclosureFlow: Equatable {
     }
 
     /// Whether Start shows the witness disclosure alone: Private AI turned
-    /// on (Custom's switch) and the Automatic path, which already shows it,
+    /// on (the Private AI step's switch) and the Automatic path, which already shows it,
     /// not taken.
     static func isWitnessOnlyNeeded(for state: FirstRunState) -> Bool {
-        UsesScreenLayout.showsPrivateAI(state) && state.privateAI && !isNeeded(for: state)
+        state.privateAI && !isNeeded(for: state)
     }
 
     /// The scrub sheet's Continue. Ignored out of order.
@@ -101,7 +101,7 @@ struct SharingDisclosureFlow: Equatable {
     }
 }
 
-/// The two sheets, one at a time, over the Uses screen. Every word is the
+/// The two sheets, one at a time, over Join's Start sharing. Every word is the
 /// core's: the scrub lines from the automatic contribution copy, then the
 /// route disclosure and the witness's state line. Cancel on either closes
 /// both and grants nothing.
@@ -181,7 +181,7 @@ struct SharingDisclosureSheet: View {
         GlassModal(
             title: title,
             actions: [
-                .cancel(copy.passkey.cancel) { flow = nil },
+                .cancel(copy.frame.cancel) { flow = nil },
                 GlassModalAction(copy.frame.continueButton, isEnabled: isEnabled, isProminent: true) {
                     onContinue()
                     if let finished = flow, finished.step == .done {

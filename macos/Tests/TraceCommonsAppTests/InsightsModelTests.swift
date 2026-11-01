@@ -31,13 +31,10 @@ final class InsightsModelTests: XCTestCase {
         let model = InsightsModel(service: { request in try await gate.call(request) })
         model.open()
         await gate.waitForCall()
-        XCTAssertTrue(model.busy)
         model.close()
         try await gate.resolve("{\"type\":\"copy\",\"copy\":{\"title\":\"late\"}}")
         for _ in 0..<20 { await Task.yield() }
-        XCTAssertFalse(model.busy)
         XCTAssertTrue(model.copy.isEmpty)
-        XCTAssertNil(model.error)
         XCTAssertTrue(model.snapshots.isEmpty)
     }
 
@@ -46,14 +43,88 @@ final class InsightsModelTests: XCTestCase {
         let recorder = Recorder()
         let model = InsightsModel(service: { request in try await recorder.call(request) })
         model.open()
-        for _ in 0..<500 where model.busy || model.episodeBusy { try await Task.sleep(for: .milliseconds(10)) }
+        await model.loading?.value
         XCTAssertEqual(model.text("title"), "Insights")
         let operations = await recorder.operations
-        XCTAssertEqual(Set(operations), ["copy", "episode_list", "list", "summary"])
-        XCTAssertEqual(model.summary?.saved_snapshots, 0)
+        XCTAssertEqual(operations, ["copy", "list"])
+        XCTAssertEqual(model.snapshots.map(\.id), ["snap-1"])
+        model.close()
+    }
+
+    /// A failed read shows the failure line, not blank words or an empty
+    /// store that looks like no snapshots.
+    @MainActor
+    func testAFailedCopyReadSetsTheFailureLine() async {
+        let model = InsightsModel(service: { _ in throw InsightsError.operationFailed })
+        model.open()
+        await model.loading?.value
+        XCTAssertEqual(model.error, "insights-operation-failed")
+        XCTAssertTrue(model.snapshots.isEmpty)
+        model.close()
+        XCTAssertNil(model.error)
+    }
+
+    /// A list read answered with another type is a failure, in the core's
+    /// own words once the copy has been read.
+    @MainActor
+    func testAMismatchedListResponseSetsTheCoresFailureLine() async {
+        let model = InsightsModel(service: { _ in
+            let json = "{\"type\":\"copy\",\"copy\":{\"error\":\"Could not read Insights\"}}"
+            return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
+        })
+        model.open()
+        await model.loading?.value
+        XCTAssertEqual(model.text("error"), "Could not read Insights")
+        XCTAssertEqual(model.error, "Could not read Insights")
         XCTAssertTrue(model.snapshots.isEmpty)
         model.close()
     }
+
+    /// A read that succeeds clears an earlier failure.
+    @MainActor
+    func testASuccessfulReadClearsAnEarlierFailure() async {
+        let recorder = Recorder()
+        let fail = FailOnce()
+        let model = InsightsModel(service: { request in
+            if await fail.next() { throw InsightsError.operationFailed }
+            return try await recorder.call(request)
+        })
+        model.open()
+        await model.loading?.value
+        XCTAssertNotNil(model.error)
+        model.close()
+        model.open()
+        await model.loading?.value
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.snapshots.map(\.id), ["snap-1"])
+        model.close()
+    }
+
+    /// Reading the snapshots again lists only, once the copy is in hand,
+    /// and picks up a snapshot saved since.
+    @MainActor
+    func testReloadSnapshotsListsAgainWithoutTheCopy() async {
+        let recorder = Recorder()
+        let model = InsightsModel(service: { request in try await recorder.call(request) })
+        model.open()
+        await model.loading?.value
+        await recorder.add("snap-2")
+        model.reloadSnapshots()
+        await model.loading?.value
+        let operations = await recorder.operations
+        XCTAssertEqual(operations, ["copy", "list", "list"])
+        XCTAssertEqual(model.snapshots.map(\.id), ["snap-1", "snap-2"])
+        model.close()
+        model.reloadSnapshots()
+        XCTAssertNil(model.loading, "a closed screen reads nothing")
+        let after = await recorder.operations
+        XCTAssertEqual(after.count, 3)
+    }
+}
+
+private actor FailOnce {
+    private var failed = false
+    func next() -> Bool { defer { failed = true }; return !failed }
 }
 
 private actor ResponseGate {
@@ -71,103 +142,16 @@ private actor ResponseGate {
 }
 private actor Recorder {
     var operations: [String] = []
+    private var ids = ["snap-1"]
+    func add(_ id: String) { ids.append(id) }
     func call(_ request: InsightsRequest) throws -> InsightsResponse {
         operations.append(request.operation.type)
-        if request.operation.type == "summary" {
-            return try TCInsights.call(.init(
-                storeDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path,
-                operation: .init("summary")))
+        if request.operation.type == "copy" {
+            let json = "{\"type\":\"copy\",\"copy\":{\"title\":\"Insights\"}}"
+            return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
         }
-        let json = switch request.operation.type {
-        case "copy": "{\"type\":\"copy\",\"copy\":{\"title\":\"Insights\"}}"
-        case "episode_list": "{\"type\":\"episode_list\",\"episodes\":[]}"
-        default: "{\"type\":\"list\",\"insights\":[]}"
-        }
-        return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
-    }
-}
-
-extension InsightsModelTests {
-    @MainActor
-    func testActualModelKeepsAnalysisEphemeralAndSavesOnlyOnAction() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = root.appendingPathComponent("insights")
-        let file = root.appendingPathComponent("fixture.jsonl")
-        try Data("{\"role\":\"meta\",\"source\":\"claude-code\",\"model\":\"fixture\"}\n{\"role\":\"user\",\"timestamp\":\"2026-09-11T12:00:00Z\",\"content\":\"hello\"}\n".utf8).write(to: file)
-        let model = InsightsModel(service: { request in
-            try await Task.detached {
-                try TCInsights.call(.init(storeDirectory: store.path, operation: request.operation))
-            }.value
-        })
-        func settle() async throws {
-            for _ in 0..<500 {
-                if !model.busy && !model.episodeBusy { return }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            XCTFail("Local operation did not finish")
-        }
-        model.open(); try await settle()
-        XCTAssertEqual(model.summary?.saved_snapshots, 0)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
-        model.analyze(file: file, source: "trajectory"); try await settle()
-        XCTAssertNotNil(model.selected)
-        XCTAssertFalse(model.selectedIsSaved)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
-        model.save(); try await settle()
-        XCTAssertTrue(model.selectedIsSaved)
-        XCTAssertEqual(model.snapshots.count, 1)
-        XCTAssertEqual(model.summary?.saved_snapshots, 1)
-        XCTAssertEqual(model.summary?.user_reported.unassessed_snapshots, 1)
-        model.annotate(category: "docs", outcome: "accepted"); try await settle()
-        XCTAssertEqual(model.selected?.manual_annotation?.provenance, "user_reported")
-        XCTAssertEqual(model.assessmentCategory, "docs")
-        XCTAssertEqual(model.assessmentOutcome, "accepted")
-        XCTAssertEqual(model.summary?.user_reported.assessed_snapshots, 1)
-        XCTAssertEqual(model.summary?.user_reported.unassessed_snapshots, 0)
-        XCTAssertEqual(model.summary?.user_reported.outcomes.first { $0.outcome == "accepted" }?.snapshots, 1)
-        let savedID = try XCTUnwrap(model.selected?.id)
-        model.analyze(file: file, source: "trajectory"); try await settle()
-        XCTAssertEqual(model.assessmentCategory, "unknown")
-        XCTAssertEqual(model.assessmentOutcome, "unknown")
-        model.explain(savedID); try await settle()
-        XCTAssertEqual(model.assessmentCategory, "docs", "Explain must populate the editable assessment")
-        XCTAssertEqual(model.assessmentOutcome, "accepted")
-        let detail = InsightDetail(insight: try XCTUnwrap(model.selected), copy: model.copy)
-        let renderer = ImageRenderer(content: detail.padding(20).frame(width: 700).background(Color.white))
-        let image = try XCTUnwrap(renderer.nsImage)
-        XCTAssertGreaterThan(image.size.height, 100)
-        if let path = ProcessInfo.processInfo.environment["TC_INSIGHTS_RENDER_PATH"] {
-            let bitmap = try XCTUnwrap(NSBitmapImageRep(data: XCTUnwrap(image.tiffRepresentation)))
-            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: path))
-        }
-        _ = try TCInsights.call(.init(storeDirectory: store.path,
-            operation: .init("clear_annotation", id: try XCTUnwrap(model.selected?.id))))
-        model.refresh(); try await settle()
-        XCTAssertNil(model.selected?.manual_annotation, "Refresh must replace the selected saved detail after external edits")
-        XCTAssertEqual(model.assessmentCategory, "unknown")
-        XCTAssertEqual(model.assessmentOutcome, "unknown")
-        model.annotate(category: "tests", outcome: "partial"); try await settle()
-        model.clearAnnotation(); try await settle()
-        XCTAssertEqual(model.summary?.user_reported.unassessed_snapshots, 1)
-        XCTAssertEqual(model.assessmentCategory, "unknown")
-        XCTAssertEqual(model.assessmentOutcome, "unknown")
-        let oldID = model.selected?.id
-        let original = try String(contentsOf: file, encoding: .utf8)
-        try Data(original.replacingOccurrences(of: "hello", with: "changed").utf8).write(to: file)
-        model.analyze(file: file, source: "trajectory"); try await settle()
-        model.save(); try await settle()
-        XCTAssertEqual(model.snapshots.count, 1, "Reimport must remove the replaced cached snapshot")
-        XCTAssertNotEqual(model.selected?.id, oldID)
-        XCTAssertNil(model.selected?.manual_annotation)
-        model.delete(); try await settle()
-        XCTAssertNil(model.selected)
-        XCTAssertTrue(model.snapshots.isEmpty)
-        XCTAssertEqual(model.summary?.saved_snapshots, 0)
-        XCTAssertNil(model.summary?.snapshot_analysis_range)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
-        model.close()
+        let list: [String: Any] = ["type": "list", "insights": ids.map { InsightsSessionsTests.snapshotJSON($0) }]
+        return try JSONDecoder().decode(InsightsResponse.self, from: JSONSerialization.data(withJSONObject: list))
     }
 }
 
@@ -176,7 +160,10 @@ extension InsightsModelTests {
 final class InsightsOverviewTests: XCTestCase {
     static let words: [String: String] = [
         "analytics_unavailable": "\u{2014}",
-        "analytics_coverage_line": "Counts known for {k} of {n} traces \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
+        "analytics_coverage_line": "{n} traces",
+        "analytics_coverage_info_known": "Full details for {k}.",
+        "analytics_coverage_info_partial": "Some missing for {p}.",
+        "analytics_coverage_info_unknown": "None for {u}; these aren't counted as zero.",
         "analytics_feed_saved": "FEED_SAVED",
         "analytics_feed_comparisons_need_counter_pass": "NEEDS_T",
         "analytics_unknown_label": "UNKNOWN_LABEL",
@@ -206,6 +193,11 @@ final class InsightsOverviewTests: XCTestCase {
       "weeks":["2026-09-07"]}}
     """
 
+    static func coverage(_ known: Int, _ partial: Int, _ unknown: Int) throws -> InsightsWeekCoverage {
+        let json = "{\"known\":\(known),\"partial\":\(partial),\"unknown\":\(unknown),\"reasons\":{}}"
+        return try JSONDecoder().decode(InsightsWeekCoverage.self, from: Data(json.utf8))
+    }
+
     func overview() throws -> InsightsWeekOverview {
         try XCTUnwrap(JSONDecoder().decode(InsightsResponse.self, from: Data(Self.overviewJSON.utf8)).overview)
     }
@@ -226,7 +218,18 @@ final class InsightsOverviewTests: XCTestCase {
     func testCoverageAndFeedLinesAreTheCoresWordsFilled() throws {
         let week = try overview()
         XCTAssertEqual(InsightsOverviewWords.coverageLine(week.coverage, copy: Self.words),
-                       "Counts known for 1 of 4 traces \u{b7} 1 partial \u{b7} 2 unknown, not counted as zero")
+                       "4 traces")
+        XCTAssertEqual(InsightsOverviewWords.coverageInfo(week.coverage, copy: Self.words),
+                       "Full details for 1. Some missing for 1. None for 2; these aren't counted as zero.")
+        // Only the counts that are not 0 get a sentence; nothing known of nothing is no "i".
+        let some = try Self.coverage(3, 0, 1)
+        XCTAssertEqual(InsightsOverviewWords.coverageLine(some, copy: Self.words), "4 traces")
+        XCTAssertEqual(InsightsOverviewWords.coverageInfo(some, copy: Self.words),
+                       "Full details for 3. None for 1; these aren't counted as zero.")
+        let all = try Self.coverage(5, 0, 0)
+        XCTAssertEqual(InsightsOverviewWords.coverageInfo(all, copy: Self.words), "Full details for 5.")
+        let none = try Self.coverage(0, 0, 0)
+        XCTAssertNil(InsightsOverviewWords.coverageInfo(none, copy: Self.words))
         XCTAssertEqual(InsightsOverviewWords.feedLines(week.feed, copy: Self.words), ["FEED_SAVED", "NEEDS_T"])
         XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: Self.words), [""])
         XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: ["analytics_feed_counter_pass": "FEED_T"]),
@@ -250,12 +253,18 @@ final class InsightsOverviewTests: XCTestCase {
         let recorder = OverviewRecorder()
         let model = InsightsOverviewModel(service: { try await recorder.call($0) })
         model.open()
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<500 where model.busy || model.sessionsInputs == nil { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(model.overview?.week_start, "2026-09-07")
         var requests = await recorder.requests
-        XCTAssertEqual(requests.map(\.operation.type), ["week_overview"])
+        // The week, then the Sessions figure's breakdown, always read with
+        // it (owner, 2026-10-22).
+        XCTAssertEqual(requests.map(\.operation.type), ["week_overview", "card_inputs"])
         XCTAssertNil(requests[0].operation.week_start)
         XCTAssertEqual(requests[0].operation.tz, Int32(TimeZone.current.secondsFromGMT()))
+        XCTAssertEqual(requests[1].operation.card, "sessions")
+        XCTAssertEqual(requests[1].operation.week_start, "2026-09-07")
+        XCTAssertEqual(model.sessionsInputs?.card, "sessions")
+        XCTAssertNil(model.openCard, "the breakdown is not a figure's drill-down")
 
         model.showInputs("cache_share")
         for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
@@ -474,30 +483,7 @@ private actor FlipReader {
 final class InsightsPatternsTests: XCTestCase {
     static let words: [String: String] = [
         "analytics_unavailable": "\u{2014}",
-        "analytics_pattern_repeated_reads": "REPEATED",
-        "analytics_pattern_repeated_reads_count": "{r} reads of {f} files",
-        "analytics_pattern_retried_calls_count": "{c} calls",
-        "analytics_pattern_edit_fail_edit_count": "{l} times",
-        "analytics_pattern_long_context_line": "after {threshold}",
-        "analytics_pattern_repeated_reads_headline_one": "{r} READ",
-        "analytics_pattern_repeated_reads_headline_other": "{r} READS",
-        "analytics_pattern_repeated_reads_count_under_count_one": "in {f} file",
-        "analytics_pattern_repeated_reads_count_under_count_other": "in {f} files",
-        "analytics_pattern_retried_calls_headline_one": "{c} CALL",
-        "analytics_pattern_retried_calls_headline_other": "{c} CALLS",
-        "analytics_pattern_retried_calls_count_under_count": "same tool and input",
-        "analytics_pattern_edit_fail_edit_headline_one": "{l} TIME",
-        "analytics_pattern_edit_fail_edit_headline_other": "{l} TIMES",
-        "analytics_pattern_edit_fail_edit_count_under_count": "edited, failed, edited",
-        "analytics_pattern_long_context_headline_one": "{n} TURN",
-        "analytics_pattern_long_context_headline_other": "{n} TURNS",
-        "analytics_estimate_from_result_size": "ABOUT",
-        "analytics_from_counters": "COUNTERS",
-        "analytics_inferred_from_order": "INFERRED",
         "analytics_claude_sessions_only": "Claude only: {k} of {n}.",
-        "analytics_see_sessions": "Show {n} traces",
-        "analytics_file_label": "File {letter} \u{b7} {ext}",
-        "analytics_file_label_no_ext": "File {letter}",
     ]
 
     static let patternsJSON = """
@@ -532,133 +518,24 @@ final class InsightsPatternsTests: XCTestCase {
         try XCTUnwrap(JSONDecoder().decode(InsightsResponse.self, from: Data(Self.patternsJSON.utf8)).patterns)
     }
 
-    func testCardsKeepTheCoresOrderAndTheirCountLinesAreTheCoresWordsFilled() throws {
-        let week = try patterns()
-        let copy = Self.words
-        XCTAssertEqual(week.cards.map(\.kind), ["repeated_reads", "retried_calls", "edit_fail_edit", "long_context"])
-        let lines = week.cards.map { InsightsPatternsWords.countLine($0, threshold: week.long_context_threshold, copy: copy) }
-        XCTAssertEqual(lines, ["3 reads of 2 files", "0 calls", "1 times",
-                              "after " + InsightsOverviewWords.figure(200_000, copy: copy)])
-        XCTAssertEqual(InsightsPatternsWords.title("repeated_reads", copy: copy), "REPEATED")
-        // A measured zero stays zero; an unknown figure is the dash.
-        XCTAssertEqual(InsightsOverviewWords.figure(week.cards[1].tokens, copy: copy), "0")
-        XCTAssertEqual(InsightsOverviewWords.figure(week.cards[2].tokens, copy: copy), "\u{2014}")
-    }
-
-    func testDerivationLabelsNameTheBasisAndTheInferredCard() throws {
-        let week = try patterns()
-        XCTAssertEqual(InsightsPatternsWords.basisLines(week.cards[0], copy: Self.words), ["ABOUT"])
-        XCTAssertEqual(InsightsPatternsWords.basisLines(week.cards[2], copy: Self.words), ["INFERRED", "ABOUT"])
-        XCTAssertEqual(InsightsPatternsWords.basisLines(week.cards[3], copy: Self.words), ["COUNTERS"])
-    }
-
-    func testAnAbsentWeekIsAGapNeverAZeroBar() throws {
-        let week = try patterns()
-        let bars = InsightsPatternsWords.bars(week.cards[1])
-        XCTAssertEqual(bars.map(\.week), ["2026-09-07", "2026-09-14"])
-        XCTAssertNil(bars[0].tokens)
-        XCTAssertEqual(bars[1].tokens, 0)
-        XCTAssertEqual(InsightsPatternsWords.drawnBars(week.cards[1]).map(\.week), ["2026-09-14"])
-        XCTAssertEqual(InsightsPatternsWords.drawnBars(week.cards[2]).count, 0)
-    }
-
-    /// Owner decision 2026-10-20: a card whose estimate rounds to 0 leads
-    /// with its count and unit, as the core says, and the line beneath it
-    /// drops the count; a token headline is unchanged, and an answer from
-    /// before the core said leads with tokens.
-    func testACardTheCoreLeadsWithItsCountShowsTheCountAndUnit() throws {
-        let copy = Self.words
-        func card(_ kind: String, tokens: String, count: UInt32, files: String = "null",
-                  headline: String? = "count") throws -> InsightsPatternCard {
-            let field = headline.map { "\"headline\":\"\($0)\"," } ?? ""
-            let json = """
-            {"kind":"\(kind)","tokens":\(tokens),"count":\(count),\(field)"files":\(files),"sessions":1,
-             "basis":"estimate_from_result_size","inferred":false,"weeks":[],"change":250,"change_unavailable":null}
-            """
-            return try JSONDecoder().decode(InsightsPatternCard.self, from: Data(json.utf8))
-        }
-        let reads = try card("repeated_reads", tokens: "0", count: 2, files: "1")
-        XCTAssertTrue(InsightsPatternsWords.leadsWithCount(reads))
-        XCTAssertEqual(InsightsPatternsWords.headline(reads, copy: copy), "2 READS")
-        XCTAssertEqual(InsightsPatternsWords.countLine(reads, threshold: 200_000, copy: copy), "in 1 file")
-        let manyFiles = try card("repeated_reads", tokens: "0", count: 5, files: "3")
-        XCTAssertEqual(InsightsPatternsWords.countLine(manyFiles, threshold: 200_000, copy: copy), "in 3 files")
-        let call = try card("retried_calls", tokens: "0", count: 1)
-        XCTAssertEqual(InsightsPatternsWords.headline(call, copy: copy), "1 CALL")
-        XCTAssertEqual(InsightsPatternsWords.countLine(call, threshold: 200_000, copy: copy), "same tool and input")
-        let cycle = try card("edit_fail_edit", tokens: "0", count: 3)
-        XCTAssertEqual(InsightsPatternsWords.headline(cycle, copy: copy), "3 TIMES")
-        XCTAssertEqual(InsightsPatternsWords.countLine(cycle, threshold: 200_000, copy: copy), "edited, failed, edited")
-        let long = try card("long_context", tokens: "0", count: 1)
-        XCTAssertEqual(InsightsPatternsWords.headline(long, copy: copy), "1 TURN")
-        XCTAssertEqual(InsightsPatternsWords.countLine(long, threshold: 200_000, copy: copy),
-                       "after " + InsightsOverviewWords.figure(200_000, copy: copy))
-
-        // The token headline, as before: the figure, and the count line.
-        let tokens = try card("repeated_reads", tokens: "20000", count: 3, files: "2", headline: "tokens")
-        XCTAssertFalse(InsightsPatternsWords.leadsWithCount(tokens))
-        XCTAssertEqual(InsightsPatternsWords.headline(tokens, copy: copy),
-                       InsightsOverviewWords.figure(20_000, copy: copy))
-        XCTAssertEqual(InsightsPatternsWords.countLine(tokens, threshold: 200_000, copy: copy), "3 reads of 2 files")
-        // An answer without the field leads with tokens, even at 0.
-        let older = try card("retried_calls", tokens: "0", count: 2, headline: nil)
-        XCTAssertNil(older.headline)
-        XCTAssertFalse(InsightsPatternsWords.leadsWithCount(older))
-        XCTAssertEqual(InsightsPatternsWords.headline(older, copy: copy), "0")
-        // A headline this build does not know leads with tokens.
-        XCTAssertFalse(InsightsPatternsWords.leadsWithCount(try card("retried_calls", tokens: "0", count: 2,
-                                                                     headline: "later")))
-        // The count headline never carries the token change beside it.
+    /// No pattern card is drawn on macOS any more (owner, 2026-10-29:
+    /// Retried tool calls, the last one #1723 left, is removed). The core
+    /// still sends the cards, for the other shells.
+    func testBreakdownDrawsNoPatternCard() throws {
+        XCTAssertEqual(try patterns().cards.count, 4, "the core still sends them")
         let view = try InsightsGlassConventionsTests.text("Views/InsightsPatternsTab.swift")
-        XCTAssertTrue(view.contains("Text(InsightsPatternsWords.headline(card, copy: copy)).insightsFigure()"))
-        XCTAssertTrue(view.contains("if card.change != nil, !InsightsPatternsWords.leadsWithCount(card) {"))
-        // Overview's "Where tokens went" rows say the same as the cards.
-        let overview = try InsightsGlassConventionsTests.text("Views/InsightsOverviewTab.swift")
-        XCTAssertTrue(overview.contains("Text(InsightsPatternsWords.headline(card, copy: copy)).insightsMono()"))
+        XCTAssertFalse(view.contains("patternCard("))
+        XCTAssertFalse(view.contains("patterns.cards"))
+        XCTAssertFalse(view.contains("InsightsPatternSessionsView"))
     }
 
-    func testACountHeadlineCardDrawsNoZeroOnItsCurrentWeekBar() throws {
-        let copy = Self.words
-        func card(headline: String, tokens: String, count: UInt32) throws -> InsightsPatternCard {
-            let json = """
-            {"kind":"retried_calls","tokens":\(tokens),"count":\(count),"headline":"\(headline)","files":null,"sessions":1,
-             "basis":"estimate_from_result_size","inferred":false,
-             "weeks":[{"week_start":"2026-10-05","tokens":12000},{"week_start":"2026-10-12","tokens":\(tokens)}],
-             "change":null,"change_unavailable":null}
-            """
-            return try JSONDecoder().decode(InsightsPatternCard.self, from: Data(json.utf8))
-        }
-        // Tokens Some(0), count 1: the headline is the count, and no "0" sits above the bar.
-        let counted = try card(headline: "count", tokens: "0", count: 1)
-        XCTAssertTrue(InsightsPatternsWords.leadsWithCount(counted))
-        XCTAssertNil(InsightsPatternsWords.currentWeekFigure(counted, copy: copy))
-        // A token headline keeps the figure on the current week.
-        let tokens = try card(headline: "tokens", tokens: "20000", count: 3)
-        XCTAssertEqual(InsightsPatternsWords.currentWeekFigure(tokens, copy: copy),
-                       InsightsOverviewWords.figure(20_000, copy: copy))
-        // The view draws that text and nothing else on the current bar.
-        let view = try InsightsGlassConventionsTests.text("Views/InsightsPatternsTab.swift")
-        XCTAssertTrue(view.contains("InsightsPatternsWords.currentWeekFigure(card, copy: copy)"))
-        XCTAssertFalse(view.contains("Text(figure(tokens)).insightsTick(current: true)"))
-    }
-
-    func testNoWeekIsComparedUnderTheSavedFeed() throws {
+    func testTheOtherHarnessLineIsFilled() throws {
         let week = try patterns()
-        for card in week.cards {
-            XCTAssertEqual(InsightsPatternsWords.change(card, copy: Self.words), "\u{2014}")
-        }
-    }
-
-    func testFilesAreLettersWithTheirExtensionAndTheOtherHarnessLineIsFilled() throws {
-        let week = try patterns()
-        XCTAssertEqual(week.reread_files.map { InsightsPatternsWords.fileLabel($0, copy: Self.words) },
-                       ["File B \u{b7} .rs", "File A"])
         XCTAssertEqual(InsightsPatternsWords.claudeOnlyLine(week, copy: Self.words), "Claude only: 1 of 2.")
-        XCTAssertEqual(InsightsPatternsWords.seeSessions(week.cards[0], copy: Self.words), "Show 1 traces")
     }
 
     @MainActor
-    func testPatternsModelAsksForTheWeekInTheLocalOffsetAndListsSessions() async throws {
+    func testPatternsModelAsksForTheWeekInTheLocalOffset() async throws {
         let recorder = PatternsRecorder()
         let model = InsightsPatternsModel(service: { try await recorder.call($0) })
         model.open()
@@ -670,20 +547,10 @@ final class InsightsPatternsTests: XCTestCase {
         XCTAssertNil(requests[0].operation.weeks, "the core's six bars by default")
         XCTAssertEqual(requests[0].operation.tz, Int32(TimeZone.current.secondsFromGMT()))
 
-        model.showSessions("edit_fail_edit")
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        requests = await recorder.requests
-        XCTAssertEqual(requests.last?.operation.type, "pattern_sessions")
-        XCTAssertEqual(requests.last?.operation.pattern, "edit_fail_edit")
-        XCTAssertEqual(requests.last?.operation.week_start, "2026-09-14")
-        XCTAssertEqual(model.sessions?.pattern, "edit_fail_edit")
-        XCTAssertNil(model.sessions?.sessions.first?.tokens)
-
         model.selectWeek("2026-09-07")
         for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
         requests = await recorder.requests
         XCTAssertEqual(requests.last?.operation.week_start, "2026-09-07")
-        XCTAssertNil(model.sessions, "a new week closes the old session list")
 
         await recorder.fail()
         model.reload()
@@ -720,98 +587,34 @@ private actor PatternsRecorder {
     func call(_ request: InsightsRequest) throws -> InsightsResponse {
         requests.append(request)
         if failing { throw InsightsError.service("insights-operation-failed") }
-        let json: String
-        if request.operation.type == "pattern_sessions" {
-            json = """
-            {"type":"pattern_sessions","pattern_sessions":{"pattern":"\(request.operation.pattern ?? "")",
-             "feed":"saved","generation":7,"week_start":"2026-09-14","tz":0,
-             "sessions":[{"session_ref":"abc","count":1,"tokens":null,"state":"known","reasons":[]}]}}
-            """
-        } else {
-            json = InsightsPatternsTests.patternsJSON.replacingOccurrences(
-                of: "\"2026-09-14\",\"week_end\"",
-                with: "\"\(request.operation.week_start ?? "2026-09-14")\",\"week_end\"")
-        }
+        let json = InsightsPatternsTests.patternsJSON.replacingOccurrences(
+            of: "\"2026-09-14\",\"week_end\"",
+            with: "\"\(request.operation.week_start ?? "2026-09-14")\",\"week_end\"")
         return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
     }
 }
 
-/// The Sessions tab's model and words: one saved session turn by turn, its
-/// markers lettered by the core, an unknown turn drawn as a gap, and a Codex
-/// session read as not recorded.
+/// A session row's words: a saved session is labelled by its first event,
+/// harness and tokens, never by its snapshot ID.
 final class InsightsSessionsTests: XCTestCase {
     static let words: [String: String] = [
         "analytics_unavailable": "\u{2014}",
         "claude_code": "CLAUDE",
         "codex": "CODEX",
-        "analytics_session_header": "{date} | {harness} | {n} turns | {t} tokens | {span} between",
         "analytics_session_label": "{date} {time} | {harness} | {t} tokens",
         "analytics_session_label_undated": "Undated | {harness} | {t} tokens",
-        "analytics_turn": "Turn {n}",
-        "analytics_codex_not_recorded": "NOT RECORDED",
-        "analytics_reason_no_usage_counters": "NO COUNTERS",
-        "analytics_reason_source_unsupported": "UNSUPPORTED",
-        "analytics_marker_cache_rewrite": "Rewritten after {m} min",
-        "analytics_marker_cache_rewrite_detail": "Turn {t} wrote {x}",
-        "analytics_marker_crossed": "Passed {threshold}",
-        "analytics_marker_crossed_detail": "LONG RANGE",
-        "analytics_marker_shrank": "Shrank at {t}",
-        "analytics_marker_inferred": "INFERRED",
-        "analytics_marker_reread": "File {letter} again",
-        "analytics_marker_reread_detail": "NO EDIT",
-        "analytics_marker_from_tool_calls": "TOOL ORDER",
-        "analytics_from_counters": "COUNTERS",
-        "analytics_file_label": "File {letter} \u{b7} {ext}",
-        "analytics_file_label_no_ext": "File {letter}",
     ]
-
-    static let claudeJSON = """
-    {"type":"session_drill","session":{
-      "feed":"saved","session_ref":"snap-1","source":"claude_code","date":"2026-10-03","tz":0,
-      "turns":3,"tokens":1100000,"span_secs":7800,"state":"partial","reasons":["some_turns_unknown"],
-      "long_context_threshold":200000,
-      "series":[
-        {"ordinal":1,"uncached":1000,"cache_read":0,"cache_write":60000,"output":100,"context":61000},
-        {"ordinal":2,"uncached":null,"cache_read":null,"cache_write":null,"output":null,"context":null},
-        {"ordinal":3,"uncached":0,"cache_read":0,"cache_write":0,"output":0,"context":0}],
-      "series_unavailable":null,
-      "markers":[
-        {"letter":"A","turn_ordinal":2,"kind":"cache_written_again","basis":"inferred_from_counters",
-         "pause_minutes":14,"cache_write":64000,"context_from":null,"context":null,"file_letter":null,"file_ext":null},
-        {"letter":"B","turn_ordinal":2,"kind":"re_read","basis":"from_tool_calls",
-         "pause_minutes":null,"cache_write":null,"context_from":null,"context":null,"file_letter":"A","file_ext":".rs"},
-        {"letter":"C","turn_ordinal":3,"kind":"context_shrank","basis":"inferred_from_counters",
-         "pause_minutes":null,"cache_write":null,"context_from":90000,"context":1000,"file_letter":null,"file_ext":null},
-        {"letter":"D","turn_ordinal":3,"kind":"crossed_long_context","basis":"from_counters",
-         "pause_minutes":null,"cache_write":null,"context_from":null,"context":210000,"file_letter":null,"file_ext":null}]}}
-    """
-
-    static let codexJSON = """
-    {"type":"session_drill","session":{
-      "feed":"saved","session_ref":"snap-2","source":"codex","date":null,"tz":0,
-      "turns":null,"tokens":null,"span_secs":null,"state":"unknown","reasons":["no_usage_counters"],
-      "long_context_threshold":200000,"series":null,"series_unavailable":"not_recorded","markers":[]}}
-    """
-
-    func drill(_ json: String = claudeJSON) throws -> InsightsSessionDrill {
-        try XCTUnwrap(JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8)).session)
-    }
-
-    func testTheHeaderIsTheCoresTemplateFilledAndAnUnknownIsTheDash() throws {
-        let copy = Self.words
-        let header = InsightsSessionsWords.header(try drill(), copy: copy)
-        XCTAssertTrue(header.contains(" | CLAUDE | 3 turns | "), header)
-        XCTAssertTrue(header.contains(InsightsOverviewWords.figure(1_100_000, copy: copy) + " tokens"), header)
-        XCTAssertFalse(header.contains("{"), header)
-        XCTAssertFalse(header.contains("2026-10-03"), "the date is formatted, not the wire value")
-        let codex = InsightsSessionsWords.header(try drill(Self.codexJSON), copy: copy)
-        XCTAssertEqual(codex, "\u{2014} | CODEX | \u{2014} turns | \u{2014} tokens | \u{2014} between")
-    }
 
     /// A saved snapshot as the core lists it. `earliest` is its first
     /// recorded event; `.some(nil)` is time evidence with no valid timestamp.
     static func snapshot(_ id: String, source: String = "claude_code",
                          earliest: String?? = .some("2026-10-03T14:05:09.123Z")) throws -> LocalInsight {
+        try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(
+            withJSONObject: snapshotJSON(id, source: source, earliest: earliest)))
+    }
+
+    static func snapshotJSON(_ id: String, source: String = "claude_code",
+                             earliest: String?? = .some("2026-10-03T14:05:09.123Z")) -> [String: Any] {
         var json: [String: Any] = ["id": id, "source_format": source, "boundary": "local",
             "analyzed_at": "2026-10-08T09:00:00Z", "cost_unavailable_reason": "unknown",
             "report": ["schema_version": 1,
@@ -828,7 +631,7 @@ final class InsightsSessionsTests: XCTestCase {
                                      "latest": ["recorded_at": "2026-10-03T16:15:00Z",
                                                 "event_refs": [["record_index": 9]], "omitted_event_refs": 0]]
         }
-        return try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: json))
+        return json
     }
 
     static let snapshotID = String(repeating: "ab", count: 32)
@@ -868,18 +671,6 @@ final class InsightsSessionsTests: XCTestCase {
             XCTAssertEqual(InsightsSessionsWords.label(insight, copy: copy), "Undated | CODEX | \u{2014} tokens")
             XCTAssertEqual(InsightsSessionsWords.label(insight, tokens: 0, copy: copy),
                            "Undated | CODEX | 0 tokens", "a measured zero stays zero")
-        }
-    }
-
-    func testThePickerShowsLabelsAndNeverTheSnapshotID() throws {
-        let snapshots = [try Self.snapshot(Self.snapshotID),
-                         try Self.snapshot(String(repeating: "cd", count: 32), source: "codex", earliest: nil)]
-        let options = InsightsSessionsWords.pickerChoices(snapshots, copy: Self.words)
-        XCTAssertEqual(options.map(\.value), snapshots.map(\.id), "the value is still the snapshot ID, in order")
-        for (option, snapshot) in zip(options, snapshots) {
-            XCTAssertNotEqual(option.title, option.value)
-            XCTAssertFalse(option.title.contains(snapshot.id), option.title)
-            XCTAssertEqual(option.title, InsightsSessionsWords.label(snapshot, copy: Self.words))
         }
     }
 
@@ -936,139 +727,13 @@ final class InsightsSessionsTests: XCTestCase {
         let overview = try MonitorNavigationTests.text("Views/InsightsOverviewTab.swift")
         XCTAssertFalse(overview.contains("Text(session.session_ref)"))
         XCTAssertTrue(overview.contains("InsightsSessionsWords.rowLabel("))
-        let sessions = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
-        XCTAssertFalse(sessions.contains("GlassPickerOption($0, value: $0)"))
-        XCTAssertTrue(sessions.contains("InsightsSessionsWords.pickerChoices("))
-    }
-
-    func testAnUnknownTurnIsAGapAndNeverAZeroBar() throws {
-        let segments = InsightsSessionsWords.segments(try drill(), copy: Self.words)
-        XCTAssertFalse(segments.contains { $0.turn == 2 }, "an unknown turn draws nothing")
-        // A measured zero is still a bar.
-        XCTAssertEqual(segments.filter { $0.turn == 3 }.map(\.tokens), [0, 0, 0])
-        XCTAssertEqual(segments.filter { $0.turn == 1 }.map(\.tokens), [0, 1000, 60000])
-    }
-
-    func testMarkerCardsAreTheCoresWordsWithTheirDerivationLabels() throws {
-        let markers = try drill().markers
-        let copy = Self.words
-        let cards = markers.map { InsightsSessionsWords.markerLines($0, threshold: 200_000, copy: copy) }
-        XCTAssertEqual(cards[0], ["Rewritten after 14 min",
-                                  "Turn 2 wrote " + InsightsOverviewWords.figure(64_000, copy: copy), "INFERRED"])
-        XCTAssertEqual(cards[1], ["File A again", "NO EDIT", "File A \u{b7} .rs", "TOOL ORDER"])
-        XCTAssertEqual(cards[2], ["Shrank at 3", "INFERRED"])
-        XCTAssertEqual(cards[3], ["Passed " + InsightsOverviewWords.figure(200_000, copy: copy),
-                                  "LONG RANGE", "COUNTERS"])
-        XCTAssertEqual(markers.map(\.letter), ["A", "B", "C", "D"])
-    }
-
-    func testACodexSessionReadsNotRecordedAndDrawsNoChart() throws {
-        let codex = try drill(Self.codexJSON)
-        XCTAssertEqual(InsightsSessionsWords.unavailableLine(codex, copy: Self.words), "NOT RECORDED")
-        XCTAssertTrue(InsightsSessionsWords.segments(codex, copy: Self.words).isEmpty)
-        XCTAssertNil(InsightsSessionsWords.unavailableLine(try drill(), copy: Self.words))
-    }
-
-    /// A trace with no token counts says so once: in the body line in place
-    /// of the chart, not again under the title.
-    func testAReasonTheBodyLineSaysIsNotRepeatedUnderTheTitle() throws {
-        let unknown = try drill(Self.codexJSON
-            .replacingOccurrences(of: "\"source\":\"codex\"", with: "\"source\":\"claude_code\"")
-            .replacingOccurrences(of: "\"series_unavailable\":\"not_recorded\"",
-                                  with: "\"series_unavailable\":\"no_usage_counters\""))
-        XCTAssertEqual(InsightsSessionsWords.unavailableLine(unknown, copy: Self.words), "NO COUNTERS")
-        XCTAssertEqual(InsightsSessionsWords.headerReasons(unknown, copy: Self.words), [])
-        // A different body line keeps the reason under the title.
-        let codex = try drill(Self.codexJSON)
-        XCTAssertEqual(InsightsSessionsWords.headerReasons(codex, copy: Self.words), ["NO COUNTERS"])
-        // With a chart, every reason stays under the title.
-        let partial = try drill()
-        XCTAssertEqual(InsightsSessionsWords.headerReasons(partial, copy: Self.words).count, 1)
-        let tab = try InsightsGlassConventionsTests.text("Views/InsightsSessionsTab.swift")
-        XCTAssertTrue(tab.contains("InsightsSessionsWords.headerReasons(drill, copy: copy)"))
-        XCTAssertFalse(tab.contains("drill.reasons.map"))
-    }
-
-    @MainActor
-    func testTheSessionsModelFollowsTheSavedListAndDropsAFailedRead() async throws {
-        let recorder = SessionsRecorder()
-        let model = InsightsSessionsModel(service: { try await recorder.call($0) })
-        model.open()
-        model.sync(snapshotIDs: [])
-        XCTAssertNil(model.selected)
-        var requests = await recorder.requests
-        XCTAssertTrue(requests.isEmpty, "no session, no read")
-
-        model.sync(snapshotIDs: ["snap-1", "snap-2"])
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertEqual(model.selected, "snap-1", "the newest saved session first")
-        XCTAssertEqual(model.drill?.session_ref, "snap-1")
-        requests = await recorder.requests
-        XCTAssertEqual(requests.map(\.operation.type), ["session_drill"])
-        XCTAssertEqual(requests[0].operation.snapshot_id, "snap-1")
-        XCTAssertEqual(requests[0].operation.tz, Int32(TimeZone.current.secondsFromGMT()))
-
-        // The list changing without dropping the selection reads nothing.
-        model.sync(snapshotIDs: ["snap-0", "snap-1", "snap-2"])
-        XCTAssertEqual(model.selected, "snap-1")
-        requests = await recorder.requests
-        XCTAssertEqual(requests.count, 1)
-
-        model.select("snap-2")
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertEqual(model.drill?.series_unavailable, "not_recorded")
-
-        // A deleted selection moves to the newest left.
-        model.sync(snapshotIDs: ["snap-1"])
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertEqual(model.selected, "snap-1")
-
-        await recorder.fail()
-        model.reload()
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertNil(model.drill, "a failed read never keeps the old session")
-        XCTAssertTrue(model.failed)
-
-        model.sync(snapshotIDs: [])
-        XCTAssertNil(model.selected)
-        XCTAssertNil(model.drill)
-        model.close()
-    }
-
-    @MainActor
-    func testAnUnknownSnapshotOverTheRealCoreFailsWithoutCreatingTheStore() async throws {
-        let store = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let model = InsightsSessionsModel(service: { request in
-            try await Task.detached {
-                try TCInsights.call(.init(storeDirectory: store.path, operation: request.operation))
-            }.value
-        })
-        model.open()
-        model.sync(snapshotIDs: ["missing"])
-        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertTrue(model.failed)
-        XCTAssertNil(model.drill)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
-        model.close()
-    }
-}
-
-private actor SessionsRecorder {
-    var requests: [InsightsRequest] = []
-    private var failing = false
-    func fail() { failing = true }
-    func call(_ request: InsightsRequest) throws -> InsightsResponse {
-        requests.append(request)
-        if failing { throw InsightsError.service("insights-operation-failed") }
-        let json = request.operation.snapshot_id == "snap-2"
-            ? InsightsSessionsTests.codexJSON : InsightsSessionsTests.claudeJSON
-        return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
     }
 }
 
 /// Feed T comparisons (owner decision D4, open): the daemon's week arrives in
 /// the core's own shapes, its weekly figures go to the core unchanged, and
-/// goals, the lever and the weekly summary card are the core's. Nothing is
+/// the lever and the weekly summary card are the core's. Goals are the
+/// daemon's `/goal` goals, in the core's words. Nothing is
 /// compared in Swift, and nothing is shown under feed S.
 final class InsightsComparisonsTests: XCTestCase {
     /// A real `insights_week` answer, recorded from the daemon's own test
@@ -1082,22 +747,21 @@ final class InsightsComparisonsTests: XCTestCase {
         "analytics_change_down": "\u{25BC} {p}% vs last week",
         "analytics_change_up": "\u{25B2} {p}% vs last week",
         "analytics_best_week": "Your best week \u{b7} previous best {q}%",
-        "analytics_goal_cache_share": "Input read from cache \u{2265} {p}%",
-        "analytics_goal_repeated_reads": "Repeated reads under {t}",
-        "analytics_goal_weekly_tokens": "Weekly tokens under {t}",
+        "analytics_goals_met_of": "Goals met {n} of {m}",
         "analytics_goal_met": "Met",
-        "analytics_goal_not_met": "Not met",
-        "analytics_goal_down_from": "Down from {x} last week.",
-        "analytics_goal_up_from": "Up from {x} last week.",
-        "analytics_lever_line": "{f} files were read again {r} times, about {t} tokens.",
+        "analytics_goal_in_progress": "In progress",
+        "analytics_goal_paused": "Paused",
+        "analytics_goal_blocked": "Blocked",
+        "analytics_goal_limit_reached": "Limit reached",
+        "analytics_goal_status_unknown": "Status unavailable",
+        "analytics_goal_line": "{t} tokens \u{b7} {span}",
+        "analytics_credit_tool_claude_code": "Claude",
+        "analytics_credit_tool_codex": "Codex",
         "analytics_pattern_retried_calls": "RETRIED",
-        "analytics_pattern_repeated_reads": "REPEATED",
         "analytics_your_week": "Your week \u{b7} {range}",
         "analytics_recap_fewer": "{n} traces \u{b7} {p}% fewer tokens than last week",
         "analytics_recap_more": "{n} traces \u{b7} {p}% more tokens than last week",
         "analytics_recap_best_cache": "Best cache week yet: {p}%. Previous best {q}%.",
-        "analytics_recap_goal_met": "Goal met: {goal}.",
-        "analytics_recap_pattern_up": "{pattern} up {p}% on your usual week.",
         "analytics_recap_threshold": "{n} traces passed your {threshold} threshold.",
         "claude_code": "Claude Code",
     ]
@@ -1164,7 +828,6 @@ final class InsightsComparisonsTests: XCTestCase {
         let found = try XCTUnwrap(model.comparisons)
         XCTAssertEqual(found.feed, "counter_pass")
         XCTAssertEqual(found.week_start, "2026-09-14")
-        XCTAssertEqual(found.goals, [])
         // One thin week: below the floor, so no lever.
         XCTAssertNil(found.lever.pick)
         XCTAssertEqual(found.lever.unavailable, "below_coverage_floor")
@@ -1177,7 +840,7 @@ final class InsightsComparisonsTests: XCTestCase {
         let recorder = ComparisonsRecorder()
         let model = InsightsComparisonsModel(service: { try await recorder.call($0) })
         model.load(counterWeeks: nil, weekStart: "2026-10-05", recapCardEnabled: true)
-        model.notUseful(); model.addGoal(InsightsGoal(kind: "repeated_reads_under", tokens: 5))
+        model.notUseful()
         for _ in 0..<20 { await Task.yield() }
         let requests = await recorder.requests
         XCTAssertTrue(requests.isEmpty)
@@ -1241,38 +904,49 @@ final class InsightsComparisonsTests: XCTestCase {
         XCTAssertNil(InsightsOverviewWords.isoWeek("last week"))
     }
 
-    func testGoalWordsAreTheCoresFilled() throws {
-        let words = Self.words
-        let share = InsightsGoal(kind: "cache_share_at_least", source: "claude_code", permille: 600)
-        XCTAssertEqual(InsightsComparisonsWords.goal(share, copy: words),
-                       "Claude Code \u{b7} Input read from cache \u{2265} 60%")
-        XCTAssertEqual(InsightsComparisonsWords.goal(InsightsGoal(kind: "repeated_reads_under", tokens: 50_000),
-                                                     copy: words), "Repeated reads under 50K")
-        XCTAssertEqual(InsightsComparisonsWords.newGoal(kind: "cache_share_at_least", source: "codex", number: "60"),
-                       InsightsGoal(kind: "cache_share_at_least", source: "codex", permille: 600))
-        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "cache_share_at_least", source: "codex", number: "101"))
-        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "repeated_reads_under", source: "codex", number: "0"))
-        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "repeated_reads_under", source: "codex", number: "lots"))
-        XCTAssertEqual(InsightsComparisonsWords.newGoal(kind: "repeated_reads_under", source: "codex", number: "9000"),
-                       InsightsGoal(kind: "repeated_reads_under", tokens: 9000))
-        XCTAssertEqual(InsightsComparisonsWords.mark("met", copy: words), "Met")
-        XCTAssertEqual(InsightsComparisonsWords.mark("not_met", copy: words), "Not met")
-        XCTAssertEqual(InsightsComparisonsWords.mark("no_figure", copy: words), "\u{2014}")
-
-        let view = try JSONDecoder().decode(InsightsGoalView.self, from: Data("""
-        {"id":"goal-1","goal":{"kind":"weekly_tokens_under","source":"claude_code","tokens":900000},
-         "figure":800000,"marks":{"marks":["no_figure","no_figure","no_figure","no_figure","not_met","met"],
-         "change":{"direction":"down","from":1000000}},"unavailable":null}
+    /// The daemon's `/goal` goals (product owner, 2026-10-29): a daemon from
+    /// before them sends none, and each goal reads as its tool, its own
+    /// status, tokens and time in the core's words. No goal text crosses.
+    func testGoalsAreTheDaemonsSlashGoalsInTheCoresWords() throws {
+        XCTAssertNil(try week().goals, "a daemon from before goals sends none")
+        var object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(Self.daemonWeek.utf8)) as? [String: Any])
+        object["goals"] = try JSONSerialization.jsonObject(with: Data("""
+        {"goals":[{"tool":"claude_code","status":"open","met":false,"tokens":null,"time_secs":null,
+                   "iterations":null,"folder":null,"session_ref":"t0.7","updated_at":"2026-09-14T09:09:00Z"},
+                  {"tool":"codex","status":"complete","met":true,"tokens":42000,"time_secs":600,
+                   "iterations":null,"folder":"web","session_ref":"t1.7","updated_at":"2026-09-14T09:00:00Z"},
+                  {"tool":"codex","status":"from_a_newer_codex","met":false,"tokens":1,"time_secs":1,
+                   "iterations":null,"folder":null,"session_ref":"t2.7","updated_at":"2026-09-14T08:00:00Z"}],
+         "met":1,"total":3,"by_tool":{"claude_code":{"met":0,"total":1},"codex":{"met":1,"total":2}}}
         """.utf8))
-        XCTAssertEqual(InsightsComparisonsWords.goalFigure(view, copy: words), "800K")
-        XCTAssertEqual(InsightsComparisonsWords.goalChange(view, copy: words), "Down from 1M last week.")
+        let week = try DaemonDataDecoding.decoder().decode(
+            DaemonData.InsightsWeek.self, from: JSONSerialization.data(withJSONObject: object))
+        let goals = try XCTUnwrap(week.goals)
+        let words = Self.words
+        XCTAssertEqual(InsightsGoalsWords.metOf(goals, copy: words), "Goals met 1 of 3")
+        XCTAssertEqual(goals.goals.map { InsightsGoalsWords.tool($0.tool, copy: words) }, ["Claude", "Codex", "Codex"])
+        XCTAssertEqual(goals.goals.map { InsightsGoalsWords.status($0.status, copy: words) },
+                       ["In progress", "Met", "Status unavailable"])
+        // One set of words for both tools.
+        let shared: [String: String] = [
+            "met": "Met", "complete": "Met",
+            "open": "In progress", "not_met": "In progress", "active": "In progress",
+            "paused": "Paused", "blocked": "Blocked",
+            "usage_limited": "Limit reached", "budget_limited": "Limit reached",
+        ]
+        for (wire, shown) in shared {
+            XCTAssertEqual(InsightsGoalsWords.status(wire, copy: words), shown, wire)
+        }
+        XCTAssertEqual(InsightsGoalsWords.line(goals.goals[0], copy: words), "\u{2014} tokens \u{b7} \u{2014}",
+                       "unknown figures are the dash, never 0")
+        let tenMinutes = Duration.seconds(600).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
+        XCTAssertEqual(InsightsGoalsWords.line(goals.goals[1], copy: words), "42K tokens \u{b7} \(tenMinutes)")
+        XCTAssertEqual(goals.goals[1].folder, "web")
+        XCTAssertEqual(goals.goals[1].sessionRef, "t1.7")
     }
 
     func testTheLeverIsAnObservationInTheCoresWords() throws {
-        let reads = try JSONDecoder().decode(InsightsLeverView.self, from: Data(
-            #"{"kind":"repeated_reads","tokens":300000,"count":9,"files":4,"ratio_permille":3000}"#.utf8))
-        XCTAssertEqual(InsightsComparisonsWords.leverLines(reads, copy: Self.words),
-                       ["4 files were read again 9 times, about 300K tokens."])
         let retried = try JSONDecoder().decode(InsightsLeverView.self, from: Data(
             #"{"kind":"retried_calls","tokens":120000,"count":3,"files":null,"ratio_permille":1500}"#.utf8))
         XCTAssertEqual(InsightsComparisonsWords.leverLines(retried, copy: Self.words), ["RETRIED", "120K"])
@@ -1284,8 +958,9 @@ final class InsightsComparisonsTests: XCTestCase {
          "sources":[{"source":"claude_code","tokens":800000,"change_permille":-200},
                     {"source":"codex","tokens":10,"change_permille":null}],
          "items":[{"kind":"best_cache_week","source":"claude_code","permille":450,"previous_best_permille":300},
-                  {"kind":"goal","id":"goal-1","goal":{"kind":"repeated_reads_under","tokens":50000},"met":true},
+                  {"kind":"goal","id":"goal-1","goal":{"kind":"weekly_tokens_under","source":"claude_code","tokens":50000},"met":true},
                   {"kind":"pattern_up","pattern":"repeated_reads","up_permille":1500},
+                  {"kind":"pattern_up","pattern":"retried_calls","up_permille":500},
                   {"kind":"from_a_newer_core"}],
          "past_threshold":null}
         """.utf8))
@@ -1296,9 +971,7 @@ final class InsightsComparisonsTests: XCTestCase {
                      "no comparable week: no line, never 0%")
         XCTAssertEqual(recap.items.compactMap { InsightsComparisonsWords.recapItem($0, copy: words) }, [
             "Best cache week yet: 45%. Previous best 30%.",
-            "Goal met: Repeated reads under 50K.",
-            "REPEATED up 150% on your usual week.",
-        ])
+        ], "no pattern is shown on macOS, so a pattern_up says nothing (owner, 2026-10-29)")
         XCTAssertNil(InsightsComparisonsWords.recapThreshold(recap, copy: words),
                      "no threshold line until the user sets one")
         XCTAssertTrue(InsightsComparisonsWords.recapTitle(recap, copy: words).hasPrefix("Your week \u{b7} "))

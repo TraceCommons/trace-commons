@@ -307,6 +307,14 @@ pub struct QueueEntry {
     /// `MAX_TRANSIENT_UPLOAD_FAILURES`, and restarted by an approval.
     #[serde(default)]
     pub transient_upload_failures: u32,
+    /// When the first upload of the current `transient_upload_failures` run
+    /// failed. The daemon gives up only once the run is both that many
+    /// failures long and old enough, so a jittered backoff that reaches the
+    /// count early does not shorten how long an outage is survived. Cleared
+    /// with the count. Absent on entries stored before it existed; the next
+    /// failure stamps it.
+    #[serde(default)]
+    pub transient_upload_run_started_at: Option<DateTime<Utc>>,
     pub submission_id: Option<Uuid>,
     /// The consent scopes in force at the moment this entry was approved.
     ///
@@ -991,6 +999,7 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         retry_after: None,
         transient_redaction_failures: 0,
         transient_upload_failures: 0,
+        transient_upload_run_started_at: None,
         submission_id: None,
         review_started_at: None,
         // Provenance carries over; the approval and every term it was given
@@ -1202,6 +1211,13 @@ impl Queue {
         &self.entries
     }
 
+    /// One entry, to edit in place: tests only, for a state no public
+    /// transition reaches in one step.
+    #[cfg(test)]
+    pub(crate) fn entry_mut_for_test(&mut self, id: Uuid) -> Option<&mut QueueEntry> {
+        self.entries.iter_mut().find(|e| e.entry_id == id)
+    }
+
     /// Has the contributor declined the session living at `path`?
     ///
     /// "Not this one" is a decision about the conversation, not about the
@@ -1399,6 +1415,15 @@ impl Queue {
         }
     }
 
+    /// Occupied watcher-admission slots, independent of the health label.
+    /// Manually included sessions and non-live history never consume a slot.
+    pub fn capacity_used(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| counts_against_the_cap(entry))
+            .count()
+    }
+
     pub fn pending(&self) -> Vec<&QueueEntry> {
         self.entries
             .iter()
@@ -1421,11 +1446,7 @@ impl Queue {
         {
             return Ok(());
         }
-        let live = self
-            .entries
-            .iter()
-            .filter(|e| counts_against_the_cap(e))
-            .count();
+        let live = self.capacity_used();
         if live >= max_entries {
             bail!("queue-full");
         }
@@ -1753,6 +1774,7 @@ impl Queue {
         // re-approved after the cap would be held again after one try.
         e.transient_redaction_failures = 0;
         e.transient_upload_failures = 0;
+        e.transient_upload_run_started_at = None;
         // The latest approver wins. An entry can be auto-approved, revoked
         // back to `Pending` by a scope change or an Undo, and then approved
         // by hand; without this reset it would still be marked unattended
@@ -2209,6 +2231,15 @@ impl Queue {
         }
     }
 
+    /// Set when the entry may next be tried, without counting an attempt,
+    /// for a pause that tried nothing: this daemon's own burst guard. Unlike
+    /// [`Queue::record_attempt`], `attempts` stays as it was.
+    pub fn defer_without_attempt(&mut self, entry_id: Uuid, retry_after: DateTime<Utc>) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            e.retry_after = Some(retry_after);
+        }
+    }
+
     /// Count one more transient classifier failure against the entry's
     /// current approval, returning the new count (0 for an unknown id).
     pub fn record_transient_redaction_failure(&mut self, entry_id: Uuid) -> u32 {
@@ -2222,14 +2253,22 @@ impl Queue {
     }
 
     /// Count one more upload that reached no verdict for a passing reason,
-    /// and return the run so far. See `QueueEntry::transient_upload_failures`.
-    pub fn record_transient_upload_failure(&mut self, entry_id: Uuid) -> u32 {
+    /// at `now`, and return the run so far and when it started. The first
+    /// failure of a run (or the next one of a run stored without a start)
+    /// stamps the start. See `QueueEntry::transient_upload_failures` and
+    /// `QueueEntry::transient_upload_run_started_at`.
+    pub fn record_transient_upload_failure(
+        &mut self,
+        entry_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> (u32, Option<DateTime<Utc>>) {
         match self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
             Some(e) => {
                 e.transient_upload_failures = e.transient_upload_failures.saturating_add(1);
-                e.transient_upload_failures
+                let started = *e.transient_upload_run_started_at.get_or_insert(now);
+                (e.transient_upload_failures, Some(started))
             }
-            None => 0,
+            None => (0, None),
         }
     }
 
@@ -4783,6 +4822,69 @@ mod tests {
 
         q.set_state(id, QueueState::Refused, Some(REASON_DISMISSED.to_string()));
         assert!(!q.is_unattended_approval(id), "dismissed");
+    }
+
+    /// The first transient upload failure of a run stamps when the run
+    /// started; later failures keep that stamp; a fresh approval and a
+    /// re-offer both clear it with the count (#1805 review).
+    #[test]
+    fn a_transient_upload_run_remembers_when_it_started_until_reapproved() {
+        let mut q = Queue::default();
+        let e = entry_in("/w/alpha", QueueState::Pending);
+        let id = e.entry_id;
+        q.push_for_test(e);
+        assert!(q.approve(id, &[], None, None, None, None));
+        let first = at("2026-11-01T00:00:00Z");
+        let later = at("2026-11-01T01:00:00Z");
+
+        assert_eq!(
+            q.record_transient_upload_failure(id, first),
+            (1, Some(first))
+        );
+        assert_eq!(
+            q.record_transient_upload_failure(id, later),
+            (2, Some(first))
+        );
+
+        assert!(q.revoke_approval(id, ""));
+        assert!(q.approve(id, &[], None, None, None, None));
+        assert_eq!(q.all()[0].transient_upload_failures, 0);
+        assert_eq!(q.all()[0].transient_upload_run_started_at, None);
+        assert_eq!(
+            q.record_transient_upload_failure(id, later),
+            (1, Some(later))
+        );
+
+        let reoffered = reoffered_from(q.all()[0].clone());
+        assert_eq!(reoffered.transient_upload_failures, 0);
+        assert_eq!(reoffered.transient_upload_run_started_at, None);
+    }
+
+    /// An entry stored before the run start was kept is mid-run with no
+    /// stamp. Its next failure stamps it, so it gets a whole horizon from
+    /// then rather than none.
+    #[test]
+    fn a_stored_run_without_a_start_is_stamped_at_its_next_failure() {
+        let mut q = Queue::default();
+        let e = QueueEntry {
+            transient_upload_failures: 11,
+            transient_upload_run_started_at: None,
+            ..entry_in("/w/alpha", QueueState::Approved)
+        };
+        let id = e.entry_id;
+        q.push_for_test(e);
+        let now = at("2026-11-01T00:00:00Z");
+        assert_eq!(q.record_transient_upload_failure(id, now), (12, Some(now)));
+
+        let stored: QueueEntry = serde_json::from_value({
+            let mut v = serde_json::to_value(&q.all()[0]).unwrap();
+            v.as_object_mut()
+                .unwrap()
+                .remove("transient_upload_run_started_at");
+            v
+        })
+        .expect("an entry stored without the field still loads");
+        assert_eq!(stored.transient_upload_run_started_at, None);
     }
 
     #[test]

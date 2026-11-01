@@ -62,30 +62,6 @@ final class DaemonNetworkContractTests: XCTestCase {
         XCTAssertEqual(try transport.parameters().count, 1)
     }
 
-    func testPasskeyUnknownDoesNotBecomeNoPasskeys() async throws {
-        let transport = NetworkTransport(#"{"state":"unknown","passkey_count":null,"near_ai_connected":null}"#)
-        let result = try await LiveDaemonClient(transport: transport).passkeyState()
-        XCTAssertEqual(result.state, "unknown")
-        XCTAssertNil(result.passkeyCount)
-        XCTAssertNil(result.nearAiConnected)
-        XCTAssertEqual(transport.method, "passkey_state")
-    }
-
-    func testPasskeyStateCarriesTheRememberedName() async throws {
-        let transport = NetworkTransport(#"{"state":"none","passkey_count":1,"remembered_name":"Home","near_ai_connected":null}"#)
-        let result = try await LiveDaemonClient(transport: transport).passkeyState()
-        XCTAssertEqual(result.passkeyCount, 1)
-        XCTAssertEqual(result.rememberedName, "Home")
-        XCTAssertNil(result.signedInName)
-    }
-
-    func testPasskeyStateCarriesTheSignedInAccountsName() async throws {
-        let transport = NetworkTransport(#"{"state":"bound","passkey_count":2,"remembered_name":"Someone else","signed_in_name":"Home","near_ai_connected":true}"#)
-        let result = try await LiveDaemonClient(transport: transport).passkeyState()
-        XCTAssertEqual(result.signedInName, "Home")
-        XCTAssertEqual(result.rememberedName, "Someone else")
-    }
-
     func testAccountUnknownDoesNotBecomeSignedOut() async throws {
         let transport = NetworkTransport(#"{"state":"unknown","signed_in":null,"account_id":null,"expires_at":null}"#)
         let result = try await LiveDaemonClient(transport: transport).accountState()
@@ -148,7 +124,7 @@ final class DaemonNetworkContractTests: XCTestCase {
         for set in SampleDaemonClient.SampleSet.allCases where set != .coreDown {
             let client = SampleDaemonClient(set)
             for method in ["inference_summary", "inference_call_proof", "model_spend", "private_ai", "mission_catalogue",
-                           "invite_lookup", "passkey_state", "account_session_status"] {
+                           "invite_lookup", "account_session_status"] {
                 let json = try XCTUnwrap(client.json(for: method))
                 let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
                 XCTAssertEqual(object["_sample"] as? String, "hand-written", "\(set): \(method)")
@@ -171,10 +147,6 @@ final class DaemonNetworkContractTests: XCTestCase {
         let privateAI = try await client.networkPrivateAI()
         XCTAssertNil(privateAI.on)
         XCTAssertNil(privateAI.state)
-        let passkey = try await client.passkeyState()
-        XCTAssertEqual(passkey.state, "unknown")
-        XCTAssertNil(passkey.passkeyCount)
-        XCTAssertNil(passkey.nearAiConnected)
         let account = try await client.accountState()
         XCTAssertEqual(account.state, "unknown")
         XCTAssertNil(account.signedIn)

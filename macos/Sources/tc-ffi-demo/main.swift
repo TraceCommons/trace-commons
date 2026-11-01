@@ -1,4 +1,5 @@
 import Foundation
+import os
 import TCBridge
 
 // Milestone demo: prove trace-commons-contributor-ffi's C ABI is callable
@@ -59,8 +60,6 @@ func seedSettings(configDir: String) throws {
         "growth_factor": 2.0,
         "growth_min_new_bytes": 65536,
         "max_reuploads": 3,
-        "max_uploads_per_day": 50,
-        "max_bytes_per_day": 209_715_200,
         "max_queue_entries": 500,
         "history_poll_secs": 1800,
         "canary_interval_secs": 3600,
@@ -86,21 +85,21 @@ func seedSettings(configDir: String) throws {
 // A clean run prints `.freed` and exits 0. A regression shows up as a crash
 // (SIGSEGV / malloc double-free), not as a failed assertion, which is why
 // this is a stress loop rather than a unit test.
-final class Counter {
-    private let lock = NSLock()
-    private var refused = 0
-    private var served = 0
+struct Counter: Sendable {
+    private struct Counts: Sendable {
+        var refused = 0
+        var served = 0
+    }
+    private let counts = OSAllocatedUnfairLock(initialState: Counts())
 
     func record(refused isRefused: Bool) {
-        lock.lock()
-        if isRefused { refused += 1 } else { served += 1 }
-        lock.unlock()
+        counts.withLock { state in
+            if isRefused { state.refused += 1 } else { state.served += 1 }
+        }
     }
 
     var snapshot: (served: Int, refused: Int) {
-        lock.lock()
-        defer { lock.unlock() }
-        return (served, refused)
+        counts.withLock { ($0.served, $0.refused) }
     }
 }
 

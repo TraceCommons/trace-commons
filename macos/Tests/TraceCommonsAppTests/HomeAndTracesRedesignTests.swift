@@ -158,6 +158,7 @@ final class HomeAndTracesRedesignTests: XCTestCase {
 /// The opening prompt, split into what was typed and what a tool wrapped
 /// in a tag (owner, 2026-10-12).
 final class PromptQuoteTests: XCTestCase {
+    @MainActor
     func test_typedTextAndTaggedBlocksAreSplit() {
         let prompt = #"<pasted_content id="2cfe">Use the MCP to import</pasted_content> then rebuild"#
         XCTAssertEqual(PromptQuote.parts(prompt), [
@@ -177,6 +178,7 @@ final class PromptQuoteTests: XCTestCase {
 /// The map's node names are cut to 14 characters, the last an ellipsis
 /// (owner, 2026-10-12).
 final class FlowMapLabelTests: XCTestCase {
+    @MainActor
     func test_namesAreCutToFourteenCharacters() {
         XCTAssertEqual(FlowMapView.shortLabel("build-run-latest-design"), "build-run-lat\u{2026}")
         XCTAssertEqual(FlowMapView.shortLabel("build-run-latest-design").count, 14)

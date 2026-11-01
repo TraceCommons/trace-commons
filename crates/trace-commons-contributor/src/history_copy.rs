@@ -140,9 +140,105 @@ pub fn status_label(status: &str) -> &'static str {
         .map_or(STATUS_UNAVAILABLE, |row| row.label)
 }
 
+/// One row of [`CREDIT_OUTCOME_LABELS`]: a server reason label and the
+/// short words a History row shows for it, after "no credit".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct CreditOutcomeLabel {
+    pub reason: &'static str,
+    pub label: &'static str,
+}
+
+/// Why a decided trace earned no credit, one line per server reason label
+/// (`trace_commons_protocol::credit_outcome`). A History row shows it
+/// beside the row's "no credit" line
+/// (`preview_copy::MonitorHomeHistoryCopy::row_no_credit`) where a credited
+/// row shows its points. Carried to macOS by `tc_public_run_copy`
+/// (`credit_outcome_labels`).
+///
+/// Owner-approved 2026-10-28: every label in this table and
+/// [`NO_CREDIT_REASON_UNAVAILABLE`].
+pub const CREDIT_OUTCOME_LABELS: [CreditOutcomeLabel; 8] = [
+    CreditOutcomeLabel {
+        reason: "policy_mismatch",
+        label: "Needs Train consent",
+    },
+    CreditOutcomeLabel {
+        reason: "novelty_failed",
+        label: "Too similar",
+    },
+    CreditOutcomeLabel {
+        reason: "perplexity_failed",
+        label: "Too predictable",
+    },
+    CreditOutcomeLabel {
+        reason: "duplicate",
+        label: "Duplicate",
+    },
+    CreditOutcomeLabel {
+        reason: "submission_not_accepted",
+        label: "Not accepted",
+    },
+    CreditOutcomeLabel {
+        reason: "insufficient_coverage",
+        label: "Too long",
+    },
+    CreditOutcomeLabel {
+        reason: "credit_not_issued",
+        label: "Server error",
+    },
+    CreditOutcomeLabel {
+        reason: "other",
+        label: NO_CREDIT_REASON_UNAVAILABLE,
+    },
+];
+
+/// The words for a reason label this build does not know, and for `other`.
+/// Owner-approved 2026-10-28.
+pub const NO_CREDIT_REASON_UNAVAILABLE: &str = "No reason given";
+
+/// The words for a no-credit reason: its [`CREDIT_OUTCOME_LABELS`] entry, or
+/// [`NO_CREDIT_REASON_UNAVAILABLE`] for a label this build does not know.
+#[must_use]
+pub fn credit_outcome_label(reason: &str) -> &'static str {
+    CREDIT_OUTCOME_LABELS
+        .iter()
+        .find(|row| row.reason == reason)
+        .map_or(NO_CREDIT_REASON_UNAVAILABLE, |row| row.label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every reason the server may send has words of its own, in the
+    /// protocol's order, and nothing else does.
+    #[test]
+    fn every_credit_outcome_reason_has_a_label() {
+        let reasons: Vec<&str> = CREDIT_OUTCOME_LABELS.iter().map(|row| row.reason).collect();
+        assert_eq!(
+            reasons,
+            trace_commons_protocol::credit_outcome::CREDIT_OUTCOME_REASONS.to_vec()
+        );
+        for row in CREDIT_OUTCOME_LABELS {
+            assert!(!row.label.is_empty(), "{} has no words", row.reason);
+            assert_eq!(credit_outcome_label(row.reason), row.label);
+        }
+    }
+
+    /// A reason from a newer server reads the fallback, never the raw label,
+    /// and never claims the trace is still pending.
+    #[test]
+    fn an_unknown_credit_outcome_reason_reads_the_fallback() {
+        assert_eq!(
+            credit_outcome_label("a_label_from_later"),
+            NO_CREDIT_REASON_UNAVAILABLE
+        );
+        for row in CREDIT_OUTCOME_LABELS {
+            let lower = row.label.to_lowercase();
+            assert!(!lower.contains("pending"), "{} says pending", row.reason);
+            assert!(!lower.contains('_'), "{} reads as a token", row.reason);
+        }
+    }
 
     /// An unrecognised status asserts nothing about where the contribution
     /// is: not waiting, not in the commons, not out of it.

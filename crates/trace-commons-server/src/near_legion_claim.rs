@@ -609,7 +609,7 @@ impl InviteGrantSink for crate::db::postgres::PgBackend {
 }
 
 /// A pending claim challenge. Held single-use and TTL-bounded in a
-/// [`crate::account_passkey::CeremonyStore`].
+/// [`crate::account_ceremony::CeremonyStore`].
 ///
 /// `account_id` is bound at issue time so a challenge minted for one account
 /// cannot be redeemed against another. The signature check alone would already
@@ -633,7 +633,7 @@ pub struct NearLegionClaimState {
     pub registry: Option<Arc<crate::trace_invite_registry::DbInviteRegistry>>,
     pub near: Arc<NearConfig>,
     pub legion: Arc<NearLegionConfig>,
-    pub challenges: Arc<crate::account_passkey::CeremonyStore<NearLegionChallenge>>,
+    pub challenges: Arc<crate::account_ceremony::CeremonyStore<NearLegionChallenge>>,
     pub access_key_override: Option<Arc<dyn crate::account_near::NearAccessKeyChecker>>,
     pub token_checker_override: Option<Arc<dyn NearLegionTokenChecker>>,
 }
@@ -702,7 +702,7 @@ impl NearLegionClaimState {
             registry,
             near: Arc::new(near),
             legion: Arc::new(legion),
-            challenges: Arc::new(crate::account_passkey::CeremonyStore::new()),
+            challenges: Arc::new(crate::account_ceremony::CeremonyStore::new()),
             access_key_override: None,
             token_checker_override: None,
         })
@@ -730,7 +730,7 @@ async fn challenge_handler(
     let mut nonce = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let recipient = state.near.recipient.clone();
-    let challenge_id = crate::account_passkey::new_ceremony_id();
+    let challenge_id = crate::account_ceremony::new_ceremony_id();
 
     state.challenges.put(
         challenge_id.clone(),
@@ -1386,7 +1386,7 @@ mod router_tests {
                 recipient: TEST_RECIPIENT.to_string(),
             }),
             legion: Arc::new(legion),
-            challenges: Arc::new(crate::account_passkey::CeremonyStore::new()),
+            challenges: Arc::new(crate::account_ceremony::CeremonyStore::new()),
             access_key_override: Some(Arc::new(FakeKeyChecker(key))),
             token_checker_override: Some(Arc::new(token)),
         };

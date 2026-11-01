@@ -1,8 +1,9 @@
 //! Wire contract for the Insights judgement service.
 //!
-//! The service runs three pinned judgements (`task`, `event_kind`,
-//! `finished`) over one session's judgement digest and returns labels signed
-//! by its per-boot key. This module holds the shared vocabulary only: the
+//! The service runs pinned judgements and returns labels signed by its
+//! per-boot key: three (`task`, `event_kind`, `finished`) over one
+//! session's judgement digest, and `stuck` over one turn's [`TurnDigest`],
+//! which the contributor's economizer asks for alone, while the turn runs. This module holds the shared vocabulary only: the
 //! attestation response, the request plaintext and the response that travel
 //! inside the judgement seal, the two nonces, the closed refusal set, the
 //! capacity rule, the digest and plaintext caps, the signing-bytes encoder
@@ -380,13 +381,15 @@ fn is_lower_hex(value: &str, width: usize) -> bool {
 // Judgements and labels
 // ---------------------------------------------------------------------------
 
-/// The three pinned judgements.
+/// The pinned judgements. `stuck` judges a [`TurnDigest`] and is always
+/// requested alone; the other three judge a session digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JudgementKind {
     Task,
     EventKind,
     Finished,
+    Stuck,
 }
 
 impl JudgementKind {
@@ -395,6 +398,7 @@ impl JudgementKind {
             Self::Task => "task",
             Self::EventKind => "event_kind",
             Self::Finished => "finished",
+            Self::Stuck => "stuck",
         }
     }
 
@@ -420,6 +424,11 @@ impl JudgementKind {
                 JudgementLabel::No,
                 JudgementLabel::Unclear,
             ],
+            Self::Stuck => &[
+                JudgementLabel::Stuck,
+                JudgementLabel::Productive,
+                JudgementLabel::Unclear,
+            ],
         }
     }
 
@@ -428,6 +437,7 @@ impl JudgementKind {
             Self::Task => 1,
             Self::EventKind => 2,
             Self::Finished => 3,
+            Self::Stuck => 4,
         }
     }
 }
@@ -452,6 +462,8 @@ pub enum JudgementLabel {
     Unclear,
     Yes,
     No,
+    Stuck,
+    Productive,
     Unjudged,
 }
 
@@ -469,6 +481,8 @@ impl JudgementLabel {
             Self::Unclear => "unclear",
             Self::Yes => "yes",
             Self::No => "no",
+            Self::Stuck => "stuck",
+            Self::Productive => "productive",
             Self::Unjudged => "unjudged",
         }
     }
@@ -736,7 +750,7 @@ impl JudgementResult {
         }
         match (judgement, event_index) {
             (JudgementKind::EventKind, Some(index)) if index < JUDGEMENT_EVENT_KIND_MAX => {}
-            (JudgementKind::Task | JudgementKind::Finished, None) => {}
+            (JudgementKind::Task | JudgementKind::Finished | JudgementKind::Stuck, None) => {}
             _ => return Err(JudgementWireError::Malformed("event_index")),
         }
         if receipt
@@ -1036,7 +1050,8 @@ impl std::fmt::Debug for JudgementRequest {
 impl JudgementRequest {
     /// The digest must be non-empty and at most
     /// [`JUDGEMENT_DIGEST_MAX_BYTES`] bytes; the claim non-empty; the
-    /// judgements non-empty and distinct; and the encoded plaintext at most
+    /// judgements non-empty and distinct, with `stuck` only alone; and the
+    /// encoded plaintext at most
     /// [`JUDGEMENT_REQUEST_MAX_BYTES`], so a request is never built that the
     /// service would refuse for size. The claim is opaque here; the service
     /// verifies it.
@@ -1054,6 +1069,11 @@ impl JudgementRequest {
         }
         let distinct: BTreeSet<_> = judgements.iter().collect();
         if distinct.len() != judgements.len() {
+            return Err(JudgementRefusal::RequestMalformed);
+        }
+        // `stuck` judges a turn digest, the others a session digest: one
+        // request carries one kind of digest.
+        if judgements.contains(&JudgementKind::Stuck) && judgements.len() > 1 {
             return Err(JudgementRefusal::RequestMalformed);
         }
         let request = Self {
@@ -1361,8 +1381,9 @@ impl JudgementResponse {
     ///
     /// Requires, in order: `wire_version == 1`; the signed request nonce and
     /// digest hash equal the ones sent; `task` and `finished` appear exactly
-    /// once if requested and not at all otherwise; and, if `event_kind` was
-    /// requested, exactly one result for every mark `0..event_marker_count`,
+    /// once if requested and not at all otherwise, as does `stuck`; and, if
+    /// `event_kind` was requested, exactly one result for every mark
+    /// `0..event_marker_count`,
     /// no other index, and none if it was not requested. The result
     /// constructors already hold that only the first
     /// [`JUDGEMENT_EVENT_KIND_MAX`] marks are judged and that no
@@ -1395,7 +1416,11 @@ impl JudgementResponse {
                 marks += 1;
             }
         }
-        for kind in [JudgementKind::Task, JudgementKind::Finished] {
+        for kind in [
+            JudgementKind::Task,
+            JudgementKind::Finished,
+            JudgementKind::Stuck,
+        ] {
             if requested(kind) && !self.results.iter().any(|r| r.judgement == kind) {
                 return Err(JudgementBindingError::JudgementMissing);
             }
@@ -1515,6 +1540,260 @@ pub fn judgement_signing_bytes(
     out.push(spend.account_month_remaining_bucket.tag());
     out.extend_from_slice(&signed_at.to_le_bytes());
     out
+}
+
+// ---------------------------------------------------------------------------
+// Turn digest
+// ---------------------------------------------------------------------------
+
+/// The only turn digest version this crate speaks.
+pub const TURN_DIGEST_VERSION: u32 = 1;
+/// The most recent calls a [`TurnDigest`] carries.
+pub const TURN_DIGEST_RECENT_MAX: usize = 24;
+
+/// What one call in a turn did, as the economizer classifies it. Never the
+/// tool's name or arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnCallKind {
+    /// Changed a file.
+    Edit,
+    /// Ran a test, build, lint or type check.
+    Check,
+    /// Ran any other command.
+    Command,
+    /// Read or searched files.
+    Read,
+    Other,
+}
+
+/// One recent call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnCall {
+    pub kind: TurnCallKind,
+    pub failed: bool,
+    /// The failure matches an earlier failure of the same turn.
+    pub repeated: bool,
+}
+
+/// What the `stuck` judgement sees of one running turn: counts and the
+/// shape of its recent calls. It carries no contributor text at all: no
+/// prompts, paths, commands, file contents or output. Parsed closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnDigest {
+    pub digest_version: u32,
+    /// Tool calls so far in the turn.
+    pub calls: u32,
+    pub edits: u32,
+    pub files_edited: u32,
+    pub most_edits_to_one_file: u32,
+    pub failures: u32,
+    pub repeated_failures: u32,
+    pub checks: u32,
+    /// The latest check since the last edit failed.
+    pub last_check_failed: bool,
+    /// How many calls this folder's turns that ended well usually take (the
+    /// 90th percentile), when the economizer has learned it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usual_calls: Option<u32>,
+    /// The turn's last calls, oldest first, at most
+    /// [`TURN_DIGEST_RECENT_MAX`].
+    pub recent: Vec<TurnCall>,
+}
+
+impl TurnDigest {
+    /// Whether the counts hang together: no count above the calls, the
+    /// per-file and repeat counts within their totals, and at most
+    /// [`TURN_DIGEST_RECENT_MAX`] recent calls, no more than the turn made.
+    fn check(&self) -> Result<(), JudgementWireError> {
+        let within = |part: u32, whole: u32| part <= whole;
+        if self.digest_version != TURN_DIGEST_VERSION {
+            return Err(JudgementWireError::WireVersionUnsupported);
+        }
+        if !(within(self.edits, self.calls)
+            && within(self.failures, self.calls)
+            && within(self.checks, self.calls)
+            && within(self.repeated_failures, self.failures)
+            && within(self.most_edits_to_one_file, self.edits)
+            && within(self.files_edited, self.edits)
+            && (self.edits == 0) == (self.files_edited == 0)
+            && self.recent.len() <= TURN_DIGEST_RECENT_MAX
+            && self.recent.len() as u64 <= u64::from(self.calls)
+            && self.recent.iter().all(|call| call.failed || !call.repeated))
+        {
+            return Err(JudgementWireError::Malformed("turn_digest"));
+        }
+        Ok(())
+    }
+
+    /// The digest's bytes, as sent. Refuses an inconsistent digest.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, JudgementWireError> {
+        self.check()?;
+        serde_json::to_vec(self).map_err(|_| JudgementWireError::Malformed("turn_digest"))
+    }
+
+    /// Parse a turn digest, closed. The version is read leniently first, so
+    /// a later version is reported as unsupported, not malformed.
+    pub fn parse(bytes: &[u8]) -> Result<Self, JudgementWireError> {
+        #[derive(Deserialize)]
+        struct Version {
+            digest_version: u32,
+        }
+        let version: Version = serde_json::from_slice(bytes)
+            .map_err(|_| JudgementWireError::Malformed("turn_digest"))?;
+        if version.digest_version != TURN_DIGEST_VERSION {
+            return Err(JudgementWireError::WireVersionUnsupported);
+        }
+        let digest: Self = serde_json::from_slice(bytes)
+            .map_err(|_| JudgementWireError::Malformed("turn_digest"))?;
+        digest.check()?;
+        Ok(digest)
+    }
+}
+
+#[cfg(test)]
+mod turn_digest_tests {
+    use super::*;
+
+    fn digest() -> TurnDigest {
+        TurnDigest {
+            digest_version: TURN_DIGEST_VERSION,
+            calls: 22,
+            edits: 9,
+            files_edited: 2,
+            most_edits_to_one_file: 7,
+            failures: 8,
+            repeated_failures: 5,
+            checks: 6,
+            last_check_failed: true,
+            usual_calls: Some(14),
+            recent: vec![
+                TurnCall {
+                    kind: TurnCallKind::Edit,
+                    failed: false,
+                    repeated: false,
+                },
+                TurnCall {
+                    kind: TurnCallKind::Check,
+                    failed: true,
+                    repeated: true,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_turn_digest_round_trips_and_stays_small() {
+        let mut full = digest();
+        full.calls = 30;
+        full.recent = vec![full.recent[1]; TURN_DIGEST_RECENT_MAX];
+        let bytes = full.to_bytes().unwrap();
+        assert_eq!(TurnDigest::parse(&bytes).unwrap(), full);
+        assert!(
+            bytes.len() < JUDGEMENT_DIGEST_MAX_BYTES / 4,
+            "{}",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn a_turn_digest_is_closed_and_consistent() {
+        let bytes = digest().to_bytes().unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["prompt"] = serde_json::json!("fix the bug");
+        assert_eq!(
+            TurnDigest::parse(&serde_json::to_vec(&value).unwrap()),
+            Err(JudgementWireError::Malformed("turn_digest"))
+        );
+        let mut later = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+        later["digest_version"] = serde_json::json!(2);
+        later["new_field"] = serde_json::json!(1);
+        assert_eq!(
+            TurnDigest::parse(&serde_json::to_vec(&later).unwrap()),
+            Err(JudgementWireError::WireVersionUnsupported)
+        );
+        for broken in [
+            TurnDigest {
+                failures: 30,
+                ..digest()
+            },
+            TurnDigest {
+                repeated_failures: 9,
+                ..digest()
+            },
+            TurnDigest {
+                most_edits_to_one_file: 10,
+                ..digest()
+            },
+            TurnDigest {
+                files_edited: 0,
+                ..digest()
+            },
+            TurnDigest {
+                calls: 1,
+                edits: 1,
+                files_edited: 1,
+                most_edits_to_one_file: 1,
+                failures: 1,
+                repeated_failures: 1,
+                checks: 1,
+                ..digest()
+            },
+            TurnDigest {
+                recent: vec![TurnCall {
+                    kind: TurnCallKind::Read,
+                    failed: false,
+                    repeated: true,
+                }],
+                ..digest()
+            },
+            TurnDigest {
+                recent: vec![digest().recent[0]; TURN_DIGEST_RECENT_MAX + 1],
+                calls: 40,
+                ..digest()
+            },
+        ] {
+            assert_eq!(
+                broken.to_bytes(),
+                Err(JudgementWireError::Malformed("turn_digest")),
+                "{broken:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stuck_is_requested_alone_and_answered_once() {
+        let nonce = JudgementRequestNonce::from_bytes([7; 32]);
+        let bytes = digest().to_bytes().unwrap();
+        assert!(
+            JudgementRequest::new(
+                nonce,
+                "claim".into(),
+                bytes.clone(),
+                vec![JudgementKind::Stuck]
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            JudgementRequest::new(
+                nonce,
+                "claim".into(),
+                bytes,
+                vec![JudgementKind::Stuck, JudgementKind::Task]
+            )
+            .err(),
+            Some(JudgementRefusal::RequestMalformed)
+        );
+        assert_eq!(JudgementKind::Stuck.as_wire(), "stuck");
+        let wire: Vec<_> = JudgementKind::Stuck
+            .choices()
+            .iter()
+            .map(|label| label.as_wire())
+            .collect();
+        assert_eq!(wire, ["stuck", "productive", "unclear"]);
+    }
 }
 
 #[cfg(test)]

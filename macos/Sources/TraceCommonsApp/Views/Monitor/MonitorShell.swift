@@ -328,7 +328,7 @@ struct TracesGraphFooter: View {
         known ? String(count) : "—"
     }
 
-    static func bar(_ bucket: TracesGraphModel.Bucket, words: MonitorTracesGraphCopy?) -> GlassBarBucket {
+    nonisolated static func bar(_ bucket: TracesGraphModel.Bucket, words: MonitorTracesGraphCopy?) -> GlassBarBucket {
         let day = TracesGraphModel.day(bucket.start)
         return GlassBarBucket(
             id: bucket.start.formatted(.iso8601),

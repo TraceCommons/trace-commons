@@ -1,4 +1,5 @@
 import CoreGraphics
+import SwiftUI
 import XCTest
 
 @testable import TCDesign
@@ -13,6 +14,55 @@ final class GlassBrandMarkTests: XCTestCase {
         XCTAssertTrue(box.insetBy(dx: -0.1, dy: -0.1).contains(bounds), "the mark spills out of its box: \(bounds)")
         XCTAssertGreaterThan(bounds.width / box.width, 0.99)
         XCTAssertGreaterThan(bounds.height / box.height, 0.99)
+    }
+
+    /// The wordmark's six paths parse, "near" and "AI" side by side, and
+    /// together they fill the artwork's box; "AI" takes the kit's brand blue
+    /// and "near" the kit's single inks.
+    @MainActor
+    func test_theWordmarkParsesAndFillsItsBox() throws {
+        let near = try XCTUnwrap(GlassNearWordmark.nearPath).boundingRect
+        let ai = try XCTUnwrap(GlassNearWordmark.aiPath).boundingRect
+        XCTAssertEqual(GlassNearWordmark.near.count, 4)
+        XCTAssertEqual(GlassNearWordmark.ai.count, 2)
+        XCTAssertLessThan(near.maxX, ai.minX, "\"near\" comes before \"AI\"")
+        let box = GlassNearWordmark.viewBox
+        let bounds = near.union(ai)
+        XCTAssertTrue(box.insetBy(dx: -0.5, dy: -0.5).contains(bounds), "the wordmark spills out of its box: \(bounds)")
+        XCTAssertGreaterThan(bounds.width / box.width, 0.99)
+        XCTAssertGreaterThan(bounds.height / box.height, 0.99)
+        XCTAssertEqual(GlassNearWordmark.brandBlue, GlassRGBA(0x0091FD))
+        XCTAssertEqual(GlassTokens.Color.menuItemMark, GlassRGBA(0xFFFFFF, light: GlassRGBA(0x000000)))
+    }
+
+    /// The edge rail's Traces icon (owner, 2026-10-22): four nodes in a T,
+    /// three across the top joined by one line, and one under the middle
+    /// joined to it, all inside the square.
+    @MainActor
+    func test_theTraceNodesMakeAT() {
+        let nodes = GlassTraceNodesGlyph.nodes
+        XCTAssertEqual(nodes.count, 4)
+        XCTAssertEqual(Set(nodes[0...2].map(\.y)).count, 1, "the top three share a row")
+        XCTAssertEqual(nodes[3].x, nodes[1].x, "the fourth is under the middle")
+        XCTAssertGreaterThan(nodes[3].y, nodes[1].y)
+        XCTAssertLessThan(nodes[0].x, nodes[1].x)
+        XCTAssertLessThan(nodes[1].x, nodes[2].x)
+        XCTAssertEqual(GlassTraceNodesGlyph.links.count, 2)
+        XCTAssertTrue(GlassTraceNodesGlyph.links.contains { $0 == (0, 2) })
+        XCTAssertTrue(GlassTraceNodesGlyph.links.contains { $0 == (1, 3) })
+        let r = GlassTraceNodesGlyph.nodeRadius
+        for node in nodes {
+            XCTAssertTrue(CGRect(x: 0, y: 0, width: 1, height: 1).contains(
+                CGRect(x: node.x - r, y: node.y - r, width: 2 * r, height: 2 * r)), "\(node) spills out")
+        }
+    }
+
+    /// The rail's N mark is the brand mark in the kit's brand blue.
+    func test_theNMarkIsTheBrandBlue() throws {
+        let source = try XCTUnwrap(DesignSources.all().first { $0.0 == "GlassNearWordmark.swift" }?.1)
+        XCTAssertTrue(source.contains("public struct GlassNearMark: View {"))
+        XCTAssertTrue(source.contains("context.fill(mark, with: .color(GlassNearWordmark.brandBlue.color))"))
+        XCTAssertNotNil(GlassBrandMark.path(at: .zero, size: 20))
     }
 
     func test_theMarkIsDrawnAtItsSizeAndPlace() throws {
@@ -117,5 +167,54 @@ final class GlassBrandMarkTests: XCTestCase {
             XCTAssertLessThan(ink.alpha, 0.5)
             XCTAssertLessThan(ink.light.alpha, 0.5)
         }
+    }
+
+    /// The first run's marker (Ron's 2026-10-21 canvas): one stroke from
+    /// inside the lower-left hook to the upper-right one, wide enough that,
+    /// drawn whole, it covers every point of the mark, and the shine's band
+    /// rests clear of the mark at both ends of its travel.
+    func test_theMarkerCoversTheMarkAndTheShineRestsClearOfIt() throws {
+        let line = GlassBrandMark.markerLine
+        XCTAssertEqual(line.first, CGPoint(x: 167.5, y: 234.6))
+        XCTAssertEqual(line.last, CGPoint(x: 226, y: 170))
+        XCTAssertEqual(GlassBrandMark.markerLength, 983.4, accuracy: 1)
+        XCTAssertEqual(GlassBrandMark.markerPoint(at: 0), line[0])
+        XCTAssertEqual(GlassBrandMark.markerPoint(at: 10_000), line[line.count - 1])
+        XCTAssertEqual(GlassBrandMark.markerPoint(at: -5), line[0])
+
+        let mark = try XCTUnwrap(SVGPathData.parse(GlassBrandMark.data))
+        var stroke = Path()
+        stroke.addLines(line)
+        let covered = stroke.strokedPath(
+            StrokeStyle(lineWidth: GlassBrandMark.markerWidth, lineCap: .round, lineJoin: .round))
+        let box = GlassBrandMark.viewBox
+        var missed = 0
+        for x in stride(from: box.minX, through: box.maxX, by: 4) {
+            for y in stride(from: box.minY, through: box.maxY, by: 4) {
+                let point = CGPoint(x: x, y: y)
+                if mark.contains(point), !covered.contains(point) { missed += 1 }
+            }
+        }
+        XCTAssertEqual(missed, 0, "the marker leaves part of the mark uninked")
+
+        for end in [GlassBrandMark.shineTravel.lowerBound, GlassBrandMark.shineTravel.upperBound] {
+            let band = GlassBrandMark.shineBand(at: end).band.boundingRect
+            XCTAssertFalse(band.intersects(box), "the shine rests on the mark at \(end)")
+        }
+    }
+
+    /// The light leans with its band (Ron, 2026-10-22): the gradient runs
+    /// square to the band's edge, from its left edge to its right, so its
+    /// brightest line is the band's forward-leaning centre, not upright.
+    func test_theShineLeansForward() {
+        let strip = GlassBrandMark.shineBand(at: 100)
+        let lean = tan(18 * CGFloat.pi / 180)
+        // The band's edge, going down: x falls as y grows.
+        let edge = CGVector(dx: -lean, dy: 1)
+        let across = CGVector(dx: strip.to.x - strip.from.x, dy: strip.to.y - strip.from.y)
+        XCTAssertEqual(edge.dx * across.dx + edge.dy * across.dy, 0, accuracy: 0.0001, "square to the edge")
+        XCTAssertGreaterThan(across.dy, 0, "not a level, upright gradient")
+        // `to` lies on the right edge: x + 110 at its own height.
+        XCTAssertEqual(strip.to.x, 100 + 110 - lean * strip.to.y, accuracy: 0.0001)
     }
 }

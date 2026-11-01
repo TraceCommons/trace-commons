@@ -7,9 +7,9 @@ import XCTest
 /// what they actually asked -- not every prefix they typed on the way there.
 @MainActor
 final class RecentSearchesTests: XCTestCase {
-    override func setUp() {
-        super.setUp()
-        RecentSearches.reset()
+    override func setUp() async throws {
+        try await super.setUp()
+        await MainActor.run { RecentSearches.reset() }
     }
 
     func testAnEmptyListStartsEmpty() {

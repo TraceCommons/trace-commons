@@ -906,30 +906,6 @@ pub const KNOBS_NOTE: &str = "These govern the background watcher, not this wind
      effect as soon as they are changed. The same values are readable and settable from the \
      command line.";
 
-// --- Settings: daily upload budget ----------------------------------------
-//
-// A separate section from the three timing knobs above on purpose: those
-// govern *when* the daemon interrupts or waits, and these bound how much it
-// is willing to send in a day -- the cap that exists to stop a runaway
-// client, not a convenience setting. Kept as its own card so lowering it
-// (a contributor's own throttle) and raising it (unsticking a budget that
-// was already spent) read as one topic, distinct from the pacing knobs.
-
-pub const BUDGET_HEADING: &str = "Daily upload budget";
-pub const KNOB_MAX_UPLOADS_TITLE: &str = "Uploads allowed per day";
-pub const KNOB_MAX_UPLOADS_UNIT: &str = "uploads/day";
-pub const KNOB_MAX_BYTES_TITLE: &str = "Data allowed per day";
-pub const KNOB_MAX_BYTES_UNIT: &str = "MB/day";
-
-/// Under both budget knobs. Says why they cannot be turned off entirely and
-/// what turning them down really means, since a cap of zero is refused
-/// rather than silently accepted as "stop uploading" -- see `KNOB_NOT_CHANGED`
-/// for what a contributor sees if they try.
-pub const BUDGET_NOTE: &str = "These bound how much can be sent in a day, not whether anything \
-     can. Lowering either is a throttle you control; there is no way to raise them past a fixed \
-     ceiling, because the whole point of a daily budget is that nothing on this machine can \
-     spend past it. Changes take effect immediately, with nothing queued waiting for a restart.";
-
 /// A refused write. States the data consequence -- nothing changed -- since
 /// a knob that silently snapped back would otherwise look like a value that
 /// had been accepted.
@@ -1273,15 +1249,6 @@ pub fn health_sentence(label: &str) -> &'static str {
                 " right now. Your queue is safe; it'll retry on its own."
             )
         }
-        // The banner for this condition is built by `daily_cap_sentence`,
-        // which can say how many traces are waiting and exactly when the
-        // limit resets. This line is the fallback for a daemon that
-        // reported the label without the budget object -- so it must not
-        // promise a time it does not have.
-        "daily-cap-reached" => {
-            "Today's upload limit is used up. Approved traces are waiting; nothing has been lost, \
-             and they go out when the limit resets."
-        }
         "queue-full" => {
             concat!(
                 app_name!(),
@@ -1302,8 +1269,7 @@ pub fn health_sentence(label: &str) -> &'static str {
 /// `None` for any other outcome, and for a time this shell cannot read:
 /// never a guessed time. The label is the core review copy's
 /// `busy_retry_at`, the same words Tauri, macOS and Windows show; the time is
-/// the daemon's `view.retry_at`, rendered in local time as the daily-cap
-/// banner renders its reset.
+/// the daemon's `view.retry_at`, rendered in local time.
 pub fn witness_busy_retry_line(result: Option<&serde_json::Value>) -> Option<String> {
     let view = result?.get("view")?;
     if view.get("state")?.as_str()? != "Busy" {
@@ -1367,41 +1333,6 @@ mod witness_busy_retry_tests {
         ] {
             assert_eq!(witness_busy_retry_line(result.as_ref()), None, "{result:?}");
         }
-    }
-}
-
-/// The banner sentence for a spent daily budget.
-///
-/// Said separately from `health_sentence` because the daemon reports the
-/// budget separately from the health label: `daily-cap-reached` is last in
-/// the precedence order, so on the machine this was written for the slot
-/// was occupied by `queue-full` and the real reason nothing was uploading
-/// never reached a screen at all.
-///
-/// Everything in it is something the daemon actually knows. The reset time
-/// is `status.daily_budget.resets_at`, rendered in local time; when it is
-/// absent the sentence stops rather than guessing at "tomorrow". It is not
-/// phrased as an error, because nothing has gone wrong and nothing has been
-/// lost.
-pub fn daily_cap_sentence(
-    blocked_entries: u32,
-    resets_at: Option<chrono::DateTime<chrono::Utc>>,
-) -> String {
-    let waiting = match blocked_entries {
-        0 => "Approved traces are waiting".to_string(),
-        1 => "1 approved trace is waiting".to_string(),
-        n => format!("{n} approved traces are waiting"),
-    };
-    match resets_at {
-        Some(t) => format!(
-            "Today's upload limit is used up. {waiting}. Nothing has been lost -- they go out \
-             when the limit resets at {}.",
-            t.with_timezone(&chrono::Local).format("%H:%M")
-        ),
-        None => format!(
-            "Today's upload limit is used up. {waiting}. Nothing has been lost -- they go out \
-             when the limit resets."
-        ),
     }
 }
 
@@ -1892,78 +1823,6 @@ pub fn submit_flagged_and_skipped_clause(flagged: u64, skipped: &[&str]) -> Opti
         (Some(f), None) => Some(format!("{f}.")),
         (None, Some(s)) => Some(format!("{s}.")),
         (Some(f), Some(s)) => Some(format!("{f}, {s}.")),
-    }
-}
-
-#[cfg(test)]
-mod daily_cap_tests {
-    use super::*;
-
-    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
-        s.parse().unwrap()
-    }
-
-    /// The reset instant rendered the way the banner renders it, so the
-    /// assertions below do not depend on the machine's timezone.
-    fn local_hhmm(t: chrono::DateTime<chrono::Utc>) -> String {
-        t.with_timezone(&chrono::Local).format("%H:%M").to_string()
-    }
-
-    #[test]
-    fn the_sentence_states_how_many_are_waiting_and_when_the_limit_resets() {
-        let resets = at("2026-08-22T00:00:00Z");
-        let text = daily_cap_sentence(14, Some(resets));
-        assert_eq!(
-            text,
-            format!(
-                "Today's upload limit is used up. 14 approved traces are waiting. Nothing has \
-                 been lost -- they go out when the limit resets at {}.",
-                local_hhmm(resets)
-            )
-        );
-    }
-
-    #[test]
-    fn one_waiting_trace_is_not_described_in_the_plural() {
-        let text = daily_cap_sentence(1, Some(at("2026-08-22T00:00:00Z")));
-        assert!(text.contains("1 approved trace is waiting"), "{text}");
-        assert!(!text.contains("traces are waiting"), "{text}");
-    }
-
-    #[test]
-    fn with_no_reset_time_the_sentence_stops_rather_than_guessing() {
-        // Never "tomorrow": the daemon has not said when, so neither do we.
-        let text = daily_cap_sentence(3, None);
-        assert_eq!(
-            text,
-            "Today's upload limit is used up. 3 approved traces are waiting. Nothing has been \
-             lost -- they go out when the limit resets."
-        );
-        assert!(!text.contains("tomorrow"), "{text}");
-    }
-
-    #[test]
-    fn the_sentence_never_reads_as_a_failure() {
-        for text in [
-            daily_cap_sentence(14, Some(at("2026-08-22T00:00:00Z"))),
-            daily_cap_sentence(0, None),
-            health_sentence("daily-cap-reached").to_string(),
-        ] {
-            let lower = text.to_lowercase();
-            for word in ["error", "failed", "problem", "wrong"] {
-                assert!(!lower.contains(word), "{word} in: {text}");
-            }
-            assert!(lower.contains("nothing has been lost"), "{text}");
-        }
-    }
-
-    #[test]
-    fn the_fallback_line_promises_no_particular_time() {
-        // Used only when a daemon reports the label without the budget
-        // object, and it must not invent what the object would have said.
-        let text = health_sentence("daily-cap-reached");
-        assert!(!text.contains("tomorrow"), "{text}");
-        assert!(text.contains("resets"), "{text}");
     }
 }
 
@@ -2629,7 +2488,6 @@ mod tests {
             "near-ai-notice-not-acknowledged",
             "claim-mint-failed",
             "ingest-unreachable",
-            "daily-cap-reached",
             "queue-full",
             "something-nobody-has-written-yet",
         ] {

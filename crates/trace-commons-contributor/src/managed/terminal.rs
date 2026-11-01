@@ -28,31 +28,43 @@ pub enum TerminalApp {
     WindowsTerminal,
     GnomeTerminal,
     Konsole,
+    Kitty,
+    Wezterm,
+    Alacritty,
 }
 
 impl TerminalApp {
     /// Every app any platform offers.
-    pub const ALL: [TerminalApp; 6] = [
+    pub const ALL: [TerminalApp; 9] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
         TerminalApp::WindowsTerminal,
         TerminalApp::GnomeTerminal,
         TerminalApp::Konsole,
+        TerminalApp::Kitty,
+        TerminalApp::Wezterm,
+        TerminalApp::Alacritty,
     ];
     /// macOS, in the order a picker shows them.
-    pub const MACOS: [TerminalApp; 3] = [
+    pub const MACOS: [TerminalApp; 6] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
+        TerminalApp::Kitty,
+        TerminalApp::Wezterm,
+        TerminalApp::Alacritty,
     ];
     /// Windows.
     pub const WINDOWS: [TerminalApp; 1] = [TerminalApp::WindowsTerminal];
     /// Linux, in the order a picker shows them.
-    pub const LINUX: [TerminalApp; 3] = [
+    pub const LINUX: [TerminalApp; 6] = [
         TerminalApp::GnomeTerminal,
         TerminalApp::Konsole,
         TerminalApp::Ghostty,
+        TerminalApp::Kitty,
+        TerminalApp::Wezterm,
+        TerminalApp::Alacritty,
     ];
 
     /// The apps this platform offers, in picker order. Empty where managed
@@ -78,6 +90,9 @@ impl TerminalApp {
             TerminalApp::WindowsTerminal => "windows_terminal",
             TerminalApp::GnomeTerminal => "gnome_terminal",
             TerminalApp::Konsole => "konsole",
+            TerminalApp::Kitty => "kitty",
+            TerminalApp::Wezterm => "wezterm",
+            TerminalApp::Alacritty => "alacritty",
         }
     }
 
@@ -100,6 +115,9 @@ impl TerminalApp {
             TerminalApp::WindowsTerminal => "Windows Terminal",
             TerminalApp::GnomeTerminal => "GNOME Terminal",
             TerminalApp::Konsole => "Konsole",
+            TerminalApp::Kitty => "kitty",
+            TerminalApp::Wezterm => "WezTerm",
+            TerminalApp::Alacritty => "Alacritty",
         }
     }
 
@@ -111,6 +129,9 @@ impl TerminalApp {
             TerminalApp::Terminal => Some("com.apple.Terminal"),
             TerminalApp::Ghostty => Some("com.mitchellh.ghostty"),
             TerminalApp::Iterm2 => Some("com.googlecode.iterm2"),
+            TerminalApp::Kitty => Some("net.kovidgoyal.kitty"),
+            TerminalApp::Wezterm => Some("com.github.wez.wezterm"),
+            TerminalApp::Alacritty => Some("org.alacritty"),
             _ => None,
         }
     }
@@ -124,6 +145,9 @@ impl TerminalApp {
             TerminalApp::GnomeTerminal => Some("gnome-terminal"),
             TerminalApp::Konsole => Some("konsole"),
             TerminalApp::Ghostty => Some("ghostty"),
+            TerminalApp::Kitty => Some("kitty"),
+            TerminalApp::Wezterm => Some("wezterm"),
+            TerminalApp::Alacritty => Some("alacritty"),
             TerminalApp::Terminal | TerminalApp::Iterm2 => None,
         }
     }
@@ -196,6 +220,9 @@ pub enum TerminalSetting {
     WindowsTerminal,
     GnomeTerminal,
     Konsole,
+    Kitty,
+    Wezterm,
+    Alacritty,
     #[serde(other)]
     Unrecognized,
 }
@@ -222,6 +249,9 @@ impl TerminalSetting {
             TerminalSetting::WindowsTerminal => TerminalApp::WindowsTerminal,
             TerminalSetting::GnomeTerminal => TerminalApp::GnomeTerminal,
             TerminalSetting::Konsole => TerminalApp::Konsole,
+            TerminalSetting::Kitty => TerminalApp::Kitty,
+            TerminalSetting::Wezterm => TerminalApp::Wezterm,
+            TerminalSetting::Alacritty => TerminalApp::Alacritty,
             TerminalSetting::Unrecognized => return None,
         };
         TerminalApp::offered().contains(&app).then_some(app)
@@ -237,6 +267,9 @@ impl From<TerminalApp> for TerminalSetting {
             TerminalApp::WindowsTerminal => TerminalSetting::WindowsTerminal,
             TerminalApp::GnomeTerminal => TerminalSetting::GnomeTerminal,
             TerminalApp::Konsole => TerminalSetting::Konsole,
+            TerminalApp::Kitty => TerminalSetting::Kitty,
+            TerminalApp::Wezterm => TerminalSetting::Wezterm,
+            TerminalApp::Alacritty => TerminalSetting::Alacritty,
         }
     }
 }
@@ -353,32 +386,76 @@ fn parse_installed(stdout: &str) -> Vec<TerminalApp> {
         .collect()
 }
 
+/// What a macOS launch runs: a scripted app's `osascript -e` lines
+/// (Terminal, Ghostty, iTerm2), or the `open` plan of an app that takes
+/// its command as argv (kitty, WezTerm, Alacritty).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MacosLaunch {
+    Script(Vec<String>),
+    Open(Plan),
+}
+
 /// The macOS launch with its outside effect passed in. Refuses an
 /// unrecognized choice, and an app that was not found, before running
-/// anything. Never falls back to another app. `run` returns what the
-/// script printed; only Terminal's script prints a tab, which is read back
-/// as a bare tty path and nothing else.
+/// anything. Never falls back to another app. A scripted app gets
+/// `command`, the one shell string; an argv app gets `argv` and `cwd`.
+/// `run` returns what was printed; only Terminal's script prints a tab,
+/// which is read back as a bare tty path and nothing else.
 #[cfg(target_os = "macos")]
 fn launch_macos(
     choice: TerminalSetting,
     installed: &[TerminalApp],
     command: &str,
-    run: impl FnOnce(Vec<String>) -> Result<Vec<u8>, ManagedError>,
+    argv: Vec<std::ffi::OsString>,
+    cwd: Option<&Path>,
+    run: impl FnOnce(MacosLaunch) -> Result<Vec<u8>, ManagedError>,
 ) -> Result<Option<TerminalHandle>, ManagedError> {
     let app = choice.app().ok_or(ManagedError::InvalidRequest)?;
     if !installed.contains(&app) {
         return Err(ManagedError::TerminalNotFound);
     }
-    let printed = run(app.script(command))?;
+    let how = match open_plan(app, cwd, argv) {
+        Some(plan) => MacosLaunch::Open(plan),
+        None => MacosLaunch::Script(app.script(command)),
+    };
+    let printed = run(how)?;
     Ok(match app {
         TerminalApp::Terminal => apple_terminal_tab(&printed),
         _ => None,
     })
 }
 
-/// What a Windows or Linux launch starts: `program` with `args`, each one
+/// Run a macOS launch: `osascript` with the script's lines, or `open` with
+/// the plan's argv. Both return as soon as the app has the command.
+#[cfg(target_os = "macos")]
+fn run_macos(how: MacosLaunch) -> Result<Vec<u8>, ManagedError> {
+    let command = match how {
+        MacosLaunch::Script(lines) => {
+            let mut script = std::process::Command::new("/usr/bin/osascript");
+            for line in &lines {
+                script.args(["-e", line]);
+            }
+            script
+        }
+        MacosLaunch::Open(plan) => {
+            let mut open = std::process::Command::new(&plan.program);
+            open.args(&plan.args);
+            open
+        }
+    };
+    let output = super::profiles::bounded_output(command)?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(ManagedError::LaunchUnknown)
+    }
+}
+
+/// What a Windows or Linux launch starts, and what a macOS launch in kitty,
+/// WezTerm or Alacritty hands to `open`: `program` with `args`, each one
 /// argv element, never joined into a string a shell would parse.
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Plan {
     program: PathBuf,
@@ -386,7 +463,7 @@ struct Plan {
 }
 
 /// The helper's own arguments, after its path.
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 fn helper_args(config: &Path, session: Uuid, ticket: &str) -> Vec<std::ffi::OsString> {
     vec![
         "--config-dir".into(),
@@ -397,6 +474,89 @@ fn helper_args(config: &Path, session: Uuid, ticket: &str) -> Vec<std::ffi::OsSt
         "--ticket".into(),
         ticket.into(),
     ]
+}
+
+/// The terminal's own arguments, before the command: `cwd` as its working
+/// directory when given, keeping the window after the command exits (as
+/// Terminal's window stays on macOS), and whatever marks where the command
+/// starts. `None` for an app that is not started by argv (Terminal and
+/// iTerm2, which are scripted). The same on every platform an app is
+/// offered on; on macOS it follows `open --args`.
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
+fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::OsString>> {
+    use std::ffi::OsString;
+    let with_value = |flag: &str, value: &Path| {
+        let mut joined = OsString::from(flag);
+        joined.push(value.as_os_str());
+        joined
+    };
+    let mut args: Vec<OsString> = Vec::new();
+    match app {
+        // `--working-directory=DIRNAME`, then `--`: "interpret all
+        // subsequent options as a program and arguments".
+        TerminalApp::GnomeTerminal => {
+            args.extend(cwd.map(|cwd| with_value("--working-directory=", cwd)));
+            args.push("--".into());
+        }
+        // `-e` "will catch all following arguments", so it is last.
+        // `--hold`: "Do not close the initial session automatically when
+        // it ends".
+        TerminalApp::Konsole => {
+            if let Some(cwd) = cwd {
+                args.extend(["--workdir".into(), cwd.as_os_str().to_owned()]);
+            }
+            args.extend(["--hold".into(), "-e".into()]);
+        }
+        // Every config key is a flag; `-e` takes the rest as the command
+        // with shell expansion disabled.
+        TerminalApp::Ghostty => {
+            args.extend(cwd.map(|cwd| with_value("--working-directory=", cwd)));
+            args.extend(["--wait-after-command=true".into(), "-e".into()]);
+        }
+        TerminalApp::WindowsTerminal => {
+            args.extend(["new-tab".into(), "--title".into(), "NEAR AI".into()]);
+            if let Some(cwd) = cwd {
+                args.extend(["-d".into(), cwd.as_os_str().to_owned()]);
+            }
+        }
+        // `kitty [options] [program-to-run ...]`: `--directory` "Change to
+        // the specified directory when launching", `--hold` "Remain open,
+        // at a shell prompt, after child process exits". The first
+        // argument that is not an option is the program.
+        TerminalApp::Kitty => {
+            if let Some(cwd) = cwd {
+                args.extend(["--directory".into(), cwd.as_os_str().to_owned()]);
+            }
+            args.push("--hold".into());
+        }
+        // `--config 'exit_behavior="Hold"'` overrides the config file and
+        // keeps the pane; `start --always-new-process` is "don't try to ask
+        // an existing wezterm GUI instance to start the command", so the
+        // override applies; `--cwd`; then `--` and the program.
+        TerminalApp::Wezterm => {
+            args.extend([
+                "--config".into(),
+                "exit_behavior=\"Hold\"".into(),
+                "start".into(),
+                "--always-new-process".into(),
+            ]);
+            if let Some(cwd) = cwd {
+                args.extend(["--cwd".into(), cwd.as_os_str().to_owned()]);
+            }
+            args.push("--".into());
+        }
+        // `--working-directory`, `--hold` "Remain open after child process
+        // exits", and `-e` "Command and args to execute (must be last
+        // argument)".
+        TerminalApp::Alacritty => {
+            if let Some(cwd) = cwd {
+                args.extend(["--working-directory".into(), cwd.as_os_str().to_owned()]);
+            }
+            args.extend(["--hold".into(), "-e".into()]);
+        }
+        TerminalApp::Terminal | TerminalApp::Iterm2 => return None,
+    }
+    Some(args)
 }
 
 /// The argv that opens the helper in `app` with `cwd` as the terminal's
@@ -421,48 +581,11 @@ fn plan(
         || !helper.is_absolute()
         || !config.is_absolute()
         || !cwd.is_absolute()
-        || ticket.is_empty()
-        || !ticket.bytes().all(|b| b.is_ascii_hexdigit())
+        || !valid_ticket(ticket)
     {
         return Err(ManagedError::InvalidRequest);
     }
-    use std::ffi::OsString;
-    let with_value = |flag: &str, value: &Path| {
-        let mut joined = OsString::from(flag);
-        joined.push(value.as_os_str());
-        joined
-    };
-    let mut args: Vec<OsString> = match app {
-        // `--working-directory=DIRNAME`, then `--`: "interpret all
-        // subsequent options as a program and arguments".
-        TerminalApp::GnomeTerminal => vec![with_value("--working-directory=", cwd), "--".into()],
-        // `-e` "will catch all following arguments", so it is last.
-        // `--hold` keeps the window after the helper exits, as Terminal's
-        // window stays on macOS.
-        TerminalApp::Konsole => vec![
-            "--workdir".into(),
-            cwd.as_os_str().to_owned(),
-            "--hold".into(),
-            "-e".into(),
-        ],
-        // Every config key is a flag; `-e` takes the rest as the command
-        // with shell expansion disabled.
-        TerminalApp::Ghostty => vec![
-            with_value("--working-directory=", cwd),
-            "--wait-after-command=true".into(),
-            "-e".into(),
-        ],
-        TerminalApp::WindowsTerminal => vec![
-            "new-tab".into(),
-            "--title".into(),
-            "NEAR AI".into(),
-            "-d".into(),
-            cwd.as_os_str().to_owned(),
-        ],
-        TerminalApp::Terminal | TerminalApp::Iterm2 => {
-            return Err(ManagedError::InvalidRequest);
-        }
-    };
+    let mut args = terminal_args(app, Some(cwd)).ok_or(ManagedError::InvalidRequest)?;
     args.push(helper.as_os_str().to_owned());
     args.extend(helper_args(config, session, ticket));
     if app == TerminalApp::WindowsTerminal
@@ -472,6 +595,41 @@ fn plan(
     }
     Ok(Plan {
         program: program.to_path_buf(),
+        args,
+    })
+}
+
+/// A launch ticket is hex, and never empty.
+fn valid_ticket(ticket: &str) -> bool {
+    !ticket.is_empty() && ticket.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// How a macOS app that takes its command as argv (kitty, WezTerm,
+/// Alacritty) is opened: `/usr/bin/open -n -b <bundle id> --args`, then the
+/// terminal's arguments and `command`, each one argv element. `-n` opens a
+/// new instance even when one is running, and `-b` addresses the app by
+/// the bundle id the installed check found, as the scripts do. `open`
+/// passes everything after `--args` to the app's `main` unparsed. `None`
+/// for a scripted app, Ghostty included: on macOS it is scripted.
+#[cfg(any(target_os = "macos", test))]
+fn open_plan(
+    app: TerminalApp,
+    cwd: Option<&Path>,
+    command: Vec<std::ffi::OsString>,
+) -> Option<Plan> {
+    if !matches!(
+        app,
+        TerminalApp::Kitty | TerminalApp::Wezterm | TerminalApp::Alacritty
+    ) {
+        return None;
+    }
+    let id = app.bundle_id()?;
+    let mut args: Vec<std::ffi::OsString> =
+        vec!["-n".into(), "-b".into(), id.into(), "--args".into()];
+    args.extend(terminal_args(app, cwd)?);
+    args.extend(command);
+    Some(Plan {
+        program: PathBuf::from("/usr/bin/open"),
         args,
     })
 }
@@ -571,11 +729,7 @@ pub fn shell_command(
     session: Uuid,
     ticket: &str,
 ) -> Result<String, ManagedError> {
-    if !helper.is_absolute()
-        || !config.is_absolute()
-        || ticket.is_empty()
-        || !ticket.bytes().all(|b| b.is_ascii_hexdigit())
-    {
+    if !helper.is_absolute() || !config.is_absolute() || !valid_ticket(ticket) {
         return Err(ManagedError::InvalidRequest);
     }
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
@@ -647,10 +801,73 @@ fn destination_for(choice: TerminalSetting) -> Option<&'static str> {
     choice.app().map(TerminalApp::name)
 }
 
+/// Tool maintenance opens a terminal without needing a managed-session helper,
+/// account, profile, ticket or credential. Currently offered by native macOS.
+pub fn tool_setup_available() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// The script tool setup runs under `/bin/bash -lc`: the vendor's
+/// commands, then a login shell, so their output stays visible in every
+/// supported macOS terminal. The body is built by `tool_setup`, never
+/// accepted as an IPC parameter.
+#[cfg(any(target_os = "macos", test))]
+fn setup_script(body: &str) -> Result<String, ManagedError> {
+    if body.is_empty() || body.len() > 16_384 || body.contains('\0') {
+        return Err(ManagedError::InvalidRequest);
+    }
+    Ok(format!(
+        "PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:$PATH\"; export PATH; {body}; exec \"${{SHELL:-/bin/zsh}}\" -l"
+    ))
+}
+
+/// The setup script as one shell string, for a scripted terminal.
+#[cfg(any(target_os = "macos", test))]
+fn setup_shell_command(body: &str) -> Result<String, ManagedError> {
+    let script = setup_script(body)?;
+    Ok(format!("/bin/bash -lc '{}'", script.replace('\'', "'\\''")))
+}
+
+/// The setup script as argv, for a terminal that takes one.
+#[cfg(any(target_os = "macos", test))]
+fn setup_argv(body: &str) -> Result<Vec<std::ffi::OsString>, ManagedError> {
+    Ok(vec![
+        "/bin/bash".into(),
+        "-lc".into(),
+        setup_script(body)?.into(),
+    ])
+}
+
+pub fn launch_tool_setup(
+    choice: TerminalSetting,
+    installed: &[TerminalApp],
+    body: &str,
+) -> Result<(), ManagedError> {
+    #[cfg(target_os = "macos")]
+    {
+        let command = setup_shell_command(body)?;
+        launch_macos(
+            choice,
+            installed,
+            &command,
+            setup_argv(body)?,
+            None,
+            |how| run_macos(how).map_err(|_| ManagedError::LaunchUnknown),
+        )?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (choice, installed, body);
+        Err(ManagedError::TerminalNotFound)
+    }
+}
+
 /// Open the session in the chosen terminal, which must be among
 /// `installed`, with `cwd` as its working directory where the app takes
-/// one by command line (Windows and Linux). On macOS the helper itself
-/// starts the tool in `cwd`, so the scripts stay as they were.
+/// one by command line (Windows, Linux, and kitty, WezTerm and Alacritty
+/// on macOS). The helper itself starts the tool in `cwd` either way, so
+/// the macOS scripts stay as they were.
 ///
 /// The handle names the window it opened in, when the terminal can say
 /// (Terminal's tab, by tty); a launch that cannot is still a launch, with no
@@ -665,20 +882,14 @@ pub fn launch(
 ) -> Result<Option<TerminalHandle>, ManagedError> {
     #[cfg(target_os = "macos")]
     {
-        let _ = cwd;
-        let command = shell_command(&helper_path()?, config, session, ticket)?;
-        launch_macos(choice, installed, &command, |lines| {
-            let mut script = std::process::Command::new("/usr/bin/osascript");
-            for line in &lines {
-                script.args(["-e", line]);
-            }
-            let output = super::profiles::bounded_output(script)?;
-            if output.status.success() {
-                Ok(output.stdout)
-            } else {
-                Err(ManagedError::LaunchUnknown)
-            }
-        })
+        if !cwd.is_absolute() {
+            return Err(ManagedError::InvalidRequest);
+        }
+        let helper = helper_path()?;
+        let command = shell_command(&helper, config, session, ticket)?;
+        let mut argv = vec![helper.into_os_string()];
+        argv.extend(helper_args(config, session, ticket));
+        launch_macos(choice, installed, &command, argv, Some(cwd), run_macos)
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
@@ -724,6 +935,30 @@ fn external_terminal(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_is_one_quoted_shell_invocation_and_keeps_the_terminal_open() {
+        let command = setup_shell_command("printf '%s\\n' 'quoted $HOME `not-code`'").unwrap();
+        assert!(command.starts_with("/bin/bash -lc '"));
+        assert!(command.contains("$HOME/.local/bin:$HOME/.opencode/bin:$PATH"));
+        assert!(command.contains("exec \"${SHELL:-/bin/zsh}\" -l"));
+        for app in [
+            TerminalApp::Terminal,
+            TerminalApp::Ghostty,
+            TerminalApp::Iterm2,
+        ] {
+            let script = app.script(&command);
+            assert_eq!(
+                script
+                    .iter()
+                    .filter(|line| line.contains(&applescript_literal(&command)))
+                    .count(),
+                1
+            );
+        }
+        assert!(setup_shell_command("").is_err());
+        assert!(setup_shell_command("bad\0command").is_err());
+    }
 
     #[cfg(unix)]
     /// A config folder whose path tries to close the AppleScript string
@@ -790,7 +1025,14 @@ mod tests {
         // Each platform's list, as the docs record it.
         assert_eq!(
             TerminalApp::MACOS.map(TerminalApp::name),
-            ["Terminal", "Ghostty", "iTerm2"]
+            [
+                "Terminal",
+                "Ghostty",
+                "iTerm2",
+                "kitty",
+                "WezTerm",
+                "Alacritty"
+            ]
         );
         assert_eq!(
             TerminalApp::WINDOWS.map(TerminalApp::name),
@@ -798,7 +1040,14 @@ mod tests {
         );
         assert_eq!(
             TerminalApp::LINUX.map(TerminalApp::name),
-            ["GNOME Terminal", "Konsole", "Ghostty"]
+            [
+                "GNOME Terminal",
+                "Konsole",
+                "Ghostty",
+                "kitty",
+                "WezTerm",
+                "Alacritty"
+            ]
         );
     }
 
@@ -840,7 +1089,12 @@ mod tests {
     #[test]
     fn every_script_holds_the_command_only_as_one_string_literal() {
         let command = hostile_command();
-        for app in TerminalApp::MACOS {
+        // kitty, WezTerm and Alacritty take argv, never a script.
+        for app in [
+            TerminalApp::Terminal,
+            TerminalApp::Ghostty,
+            TerminalApp::Iterm2,
+        ] {
             let lines = app.script(&command);
             let holding: Vec<&String> = lines
                 .iter()
@@ -941,20 +1195,42 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_chosen_app_that_is_not_installed_is_refused_without_running() {
-        let never = |_: Vec<String>| -> Result<Vec<u8>, ManagedError> {
+        let never = |_: MacosLaunch| -> Result<Vec<u8>, ManagedError> {
             panic!("nothing runs when the chosen app is missing")
         };
+        let argv = || vec![std::ffi::OsString::from("/x/near-ai")];
+        let cwd = Some(Path::new("/Users/x/app"));
         assert_eq!(
             launch_macos(
                 TerminalSetting::Ghostty,
                 &[TerminalApp::Terminal],
                 "'/x/near-ai'",
+                argv(),
+                cwd,
                 never
             ),
             Err(ManagedError::TerminalNotFound)
         );
         assert_eq!(
-            launch_macos(TerminalSetting::Iterm2, &[], "'/x/near-ai'", never),
+            launch_macos(
+                TerminalSetting::Iterm2,
+                &[],
+                "'/x/near-ai'",
+                argv(),
+                cwd,
+                never
+            ),
+            Err(ManagedError::TerminalNotFound)
+        );
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Kitty,
+                &[TerminalApp::Terminal],
+                "'/x/near-ai'",
+                argv(),
+                cwd,
+                never
+            ),
             Err(ManagedError::TerminalNotFound)
         );
         assert_eq!(
@@ -962,6 +1238,8 @@ mod tests {
                 TerminalSetting::Unrecognized,
                 &TerminalApp::MACOS,
                 "'/x/near-ai'",
+                argv(),
+                cwd,
                 never
             ),
             Err(ManagedError::InvalidRequest)
@@ -971,19 +1249,49 @@ mod tests {
             TerminalSetting::Ghostty,
             &[TerminalApp::Ghostty],
             "'/x/near-ai'",
-            |lines| {
-                ran = Some(lines);
+            argv(),
+            cwd,
+            |how| {
+                ran = Some(how);
                 // Whatever another app printed is never read as a tab.
                 Ok(b"/dev/ttys001\n".to_vec())
             },
         )
         .unwrap();
-        assert_eq!(ran, Some(TerminalApp::Ghostty.script("'/x/near-ai'")));
+        assert_eq!(
+            ran,
+            Some(MacosLaunch::Script(
+                TerminalApp::Ghostty.script("'/x/near-ai'")
+            ))
+        );
+        let mut ran = None;
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Wezterm,
+                &[TerminalApp::Wezterm],
+                "'/x/near-ai'",
+                argv(),
+                cwd,
+                |how| {
+                    ran = Some(how);
+                    Ok(b"/dev/ttys001\n".to_vec())
+                },
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            ran,
+            Some(MacosLaunch::Open(
+                open_plan(TerminalApp::Wezterm, cwd, argv()).unwrap()
+            ))
+        );
         assert_eq!(
             launch_macos(
                 TerminalSetting::Terminal,
                 &[TerminalApp::Terminal],
                 "'/x/near-ai'",
+                argv(),
+                cwd,
                 |_| Ok(b"/dev/ttys001\n".to_vec())
             ),
             Ok(Some(TerminalHandle::AppleTerminal {
@@ -995,6 +1303,8 @@ mod tests {
                 TerminalSetting::Terminal,
                 &[TerminalApp::Terminal],
                 "'/x/near-ai'",
+                argv(),
+                cwd,
                 |_| Ok(b"not a tty".to_vec())
             ),
             Ok(None)
@@ -1025,6 +1335,15 @@ mod tests {
                 assert_eq!(app.bundle_id(), None, "{app:?}");
                 assert!(app.script("'/x/near-ai'").is_empty(), "{app:?}");
             }
+        }
+
+        // kitty, WezTerm and Alacritty take argv on macOS too: no script.
+        for app in [
+            TerminalApp::Kitty,
+            TerminalApp::Wezterm,
+            TerminalApp::Alacritty,
+        ] {
+            assert!(app.script("'/x/near-ai'").is_empty(), "{app:?}");
         }
     }
 
@@ -1152,7 +1471,32 @@ mod tests {
                 "/home/x/My Projects/app"
             ]
         );
-        // The macOS apps are opened by script, never by argv.
+        assert_eq!(
+            head(TerminalApp::Kitty),
+            ["--directory", "/home/x/My Projects/app", "--hold"]
+        );
+        assert_eq!(
+            head(TerminalApp::Wezterm),
+            [
+                "--config",
+                "exit_behavior=\"Hold\"",
+                "start",
+                "--always-new-process",
+                "--cwd",
+                "/home/x/My Projects/app",
+                "--"
+            ]
+        );
+        assert_eq!(
+            head(TerminalApp::Alacritty),
+            [
+                "--working-directory",
+                "/home/x/My Projects/app",
+                "--hold",
+                "-e"
+            ]
+        );
+        // Terminal and iTerm2 are opened by script, never by argv.
         for app in [TerminalApp::Terminal, TerminalApp::Iterm2] {
             assert_eq!(plan_for(app, cwd), Err(ManagedError::InvalidRequest));
         }
@@ -1168,6 +1512,9 @@ mod tests {
                 TerminalApp::Konsole,
                 TerminalApp::Ghostty,
                 TerminalApp::WindowsTerminal,
+                TerminalApp::Kitty,
+                TerminalApp::Wezterm,
+                TerminalApp::Alacritty,
             ] {
                 let plan = plan_for(app, &cwd).unwrap();
                 let tail = helper_tail();
@@ -1278,8 +1625,61 @@ mod tests {
         );
         assert_eq!(TerminalApp::Konsole.executable(), Some("konsole"));
         assert_eq!(TerminalApp::Ghostty.executable(), Some("ghostty"));
+        assert_eq!(TerminalApp::Kitty.executable(), Some("kitty"));
+        assert_eq!(TerminalApp::Wezterm.executable(), Some("wezterm"));
+        assert_eq!(TerminalApp::Alacritty.executable(), Some("alacritty"));
         assert_eq!(TerminalApp::Terminal.executable(), None);
         assert_eq!(TerminalApp::Iterm2.executable(), None);
+    }
+
+    /// On macOS, kitty, WezTerm and Alacritty are opened with `open -n -b
+    /// <bundle id> --args`, then the same terminal arguments as elsewhere
+    /// and the command, each one argv element. The scripted apps get no
+    /// plan.
+    #[test]
+    fn macos_argv_apps_are_opened_by_bundle_id_with_the_command_as_argv() {
+        let cwd = Path::new("/Users/x/it's \"quoted\"/$HOME");
+        let command: Vec<std::ffi::OsString> = vec![
+            "/Applications/Trace Commons.app/near-ai".into(),
+            "--ticket".into(),
+            "ab".into(),
+        ];
+        for (app, id) in [
+            (TerminalApp::Kitty, "net.kovidgoyal.kitty"),
+            (TerminalApp::Wezterm, "com.github.wez.wezterm"),
+            (TerminalApp::Alacritty, "org.alacritty"),
+        ] {
+            let plan = open_plan(app, Some(cwd), command.clone()).unwrap();
+            assert_eq!(plan.program, Path::new("/usr/bin/open"));
+            let mut expected: Vec<std::ffi::OsString> =
+                vec!["-n".into(), "-b".into(), id.into(), "--args".into()];
+            expected.extend(terminal_args(app, Some(cwd)).unwrap());
+            expected.extend(command.clone());
+            assert_eq!(plan.args, expected, "{app:?}");
+            assert_eq!(
+                plan.args
+                    .iter()
+                    .filter(|a| a.as_os_str() == cwd.as_os_str())
+                    .count(),
+                1,
+                "{app:?}: the folder is one whole argument"
+            );
+        }
+        for app in [
+            TerminalApp::Terminal,
+            TerminalApp::Ghostty,
+            TerminalApp::Iterm2,
+        ] {
+            assert_eq!(open_plan(app, Some(cwd), command.clone()), None, "{app:?}");
+        }
+        // Tool setup names no folder: no working-directory flag at all.
+        let plan = open_plan(TerminalApp::Alacritty, None, setup_argv("true").unwrap()).unwrap();
+        assert_eq!(
+            plan.args[4..6].to_vec(),
+            vec![std::ffi::OsString::from("--hold"), "-e".into()]
+        );
+        assert_eq!(plan.args[6], "/bin/bash");
+        assert_eq!(plan.args[7], "-lc");
     }
 
     /// The real probe on a Mac: Terminal ships with macOS, so LaunchServices

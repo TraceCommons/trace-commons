@@ -58,6 +58,9 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let flagged: String
     /// Raises the main window from the menu bar ("Open Near.ai").
     public let openApp: String
+    /// The popover's manual update check (owner, 2026-10-29); `nil` from a
+    /// core that predates it.
+    public let checkForUpdates: String?
     public let manageRules: String
     public let settings: String
     /// The Settings modal's title, subtitle, section list name and close
@@ -76,6 +79,10 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let previous: String
     public let next: String
     public let creditPending: String
+    /// Home's received and pending credit tiles (owner, 2026-10-29); `nil`
+    /// from a core that predates them.
+    public let creditReceived: String?
+    public let creditPendingTitle: String?
     public let openTraces: String
     public let quit: String
     public let coreUnreachable: String
@@ -115,6 +122,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let settingsNav: MonitorSettingsNavCopy
     /// The edge rail's switch, icons and peeks.
     public let edgeRail: MonitorEdgeRailCopy
+    /// The command-line tool's Settings row and app-menu item.
+    public let cliTool: MonitorCliToolCopy
 
     enum CodingKeys: String, CodingKey {
         case computer
@@ -165,6 +174,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case recentActivity = "recent_activity"
         case flagged
         case openApp = "open_app"
+        case checkForUpdates = "check_for_updates"
         case manageRules = "manage_rules"
         case settings
         case settingsTitle = "settings_title"
@@ -178,6 +188,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case previous
         case next
         case creditPending = "credit_pending"
+        case creditReceived = "credit_received"
+        case creditPendingTitle = "credit_pending_title"
         case openTraces = "open_traces"
         case quit
         case coreUnreachable = "core_unreachable"
@@ -202,6 +214,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case homeHistory = "home_history"
         case settingsNav = "settings_nav"
         case edgeRail = "edge_rail"
+        case cliTool = "cli_tool"
     }
 
     /// The payload fields this shell decodes, by wire name.
@@ -254,6 +267,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "recent_activity",
         "flagged",
         "open_app",
+        "check_for_updates",
         "manage_rules",
         "settings",
         "settings_title",
@@ -267,6 +281,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "previous",
         "next",
         "credit_pending",
+        "credit_received",
+        "credit_pending_title",
         "open_traces",
         "quit",
         "core_unreachable",
@@ -291,6 +307,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "home_history",
         "settings_nav",
         "edge_rail",
+        "cli_tool",
     ]
 
     /// Each nested table's wire fields, by its wire name.
@@ -303,6 +320,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "home_history": MonitorHomeHistoryCopy.consumedFields,
         "settings_nav": MonitorSettingsNavCopy.consumedFields,
         "edge_rail": MonitorEdgeRailCopy.consumedFields,
+        "cli_tool": MonitorCliToolCopy.consumedFields,
     ]
 
     /// Decode the payload, or nil if it will not parse or a field is empty.
@@ -315,7 +333,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.openApp, copy.manageRules, copy.settings, copy.settingsTitle, copy.settingsSubtitle, copy.settingsSections, copy.close, copy.view, copy.graph, copy.showIgnoredFolders, copy.focus, copy.previous, copy.next, copy.creditPending, copy.openTraces, copy.quit, copy.coreUnreachable, copy.requestFailed, copy.heldForReview, copy.heldExplanation, copy.creditNotCurrency, copy.historyShownOf, copy.historyShown, copy.signedOut, copy.projected, copy.projectedNote, copy.missionCreditPoints, copy.missionCreditPointsOne, copy.windowLastHours, copy.historySubmitted]
         return words.contains(where: \.isEmpty) || !copy.safeguards.isWhole || !copy.historyActions.isWhole
             || !copy.shell.isWhole || !copy.tracesGraph.isWhole || !copy.flowMap.isWhole
-            || !copy.homeHistory.isWhole || !copy.settingsNav.isWhole || !copy.edgeRail.isWhole ? nil : copy
+            || !copy.homeHistory.isWhole || !copy.settingsNav.isWhole || !copy.edgeRail.isWhole
+            || !copy.cliTool.isWhole ? nil : copy
     }
 
     /// What a screen says for a failed read: the core's line for a core that

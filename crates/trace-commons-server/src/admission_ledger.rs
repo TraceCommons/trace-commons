@@ -102,6 +102,10 @@ pub struct AccountAdmissionStatus {
     pub policy_version: String,
     pub ready: bool,
     pub retry_after_seconds: Option<i64>,
+    /// The validated effective allowance used to decide `ready`, including
+    /// freshness, policy, generation and ceiling checks. Invited authority
+    /// has a separate bypass and therefore reports no bounded allowance.
+    pub effective_allowance: Option<i64>,
     /// The account's own earned-growth view: present only for `bounded`
     /// authority under a `tiered-v1` policy (spec rule 7). It is advisory and
     /// read from the same transaction as `ready`, which it never changes.
@@ -478,6 +482,7 @@ impl PgBackend {
         }
         let used = account_period_spend(&tx, tenant, account_id, &raw_period_id).await?;
         let mut growth = None;
+        let mut effective_allowance = None;
         let ready = if authority == "invited" {
             true
         } else {
@@ -489,6 +494,7 @@ impl PgBackend {
                 FrontierRead::Advisory,
             )
             .await?;
+            effective_allowance = Some(allowance.limit);
             if policy
                 .external_growth()
                 .is_some_and(|g| g.source == crate::account_trust::GrowthSource::TieredV1)
@@ -516,6 +522,7 @@ impl PgBackend {
             policy_version: policy.version().into(),
             ready,
             retry_after_seconds: if ready { None } else { retry_after_seconds },
+            effective_allowance,
             growth,
         }))
     }
@@ -868,6 +875,19 @@ impl PgBackend {
 
     /// Additional contract checks only required by an external growth policy.
     pub async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        self.account_trust_runtime_ready(false).await
+    }
+
+    /// The independent client-cap worker has no reservation/transition or
+    /// direct write authority. Keep the admission contract above unchanged.
+    pub async fn client_upload_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        self.account_trust_runtime_ready(true).await
+    }
+
+    async fn account_trust_runtime_ready(
+        &self,
+        client_upload_only: bool,
+    ) -> Result<bool, DatabaseError> {
         let client = self
             .trace_pool()
             .get()
@@ -880,9 +900,95 @@ impl PgBackend {
             AND has_function_privilege(e.oid,to_regprocedure('public.trace_account_trust_worker_accounts(text,uuid,bigint)'),'EXECUTE')
             AND has_function_privilege(e.oid,to_regprocedure('public.trace_account_trust_evaluation_inputs(text,uuid)'),'EXECUTE')
             AND has_function_privilege(e.oid,to_regprocedure('public.trace_account_trust_input_generation(text,uuid)'),'EXECUTE')
-            AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_lock_input_generation(text,uuid)'),'EXECUTE')
+            AND ($1::boolean OR (
+                has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_lock_input_generation(text,uuid)'),'EXECUTE')
+                AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_prune_dependency_locks(integer,boolean)'),'EXECUTE')))
             AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_input_generation(text,uuid)'),'EXECUTE')
-            AND has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_prune_dependency_locks(integer,boolean)'),'EXECUTE')
+            AND (NOT $1::boolean OR (
+                NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolreplication
+                AND NOT pg_has_role(current_user,to_regrole('trace_account_admission_runtime'),'MEMBER')
+                AND has_schema_privilege(current_user,'public','USAGE')
+                AND NOT has_schema_privilege(current_user,'public','CREATE')
+                AND NOT EXISTS (
+                    SELECT 1 FROM pg_class direct_table JOIN pg_namespace direct_schema
+                      ON direct_schema.oid=direct_table.relnamespace
+                    WHERE direct_schema.nspname='public' AND direct_table.relkind IN ('r','p','v','m','f')
+                      AND (direct_table.relowner=r.oid
+                        OR has_table_privilege(current_user,direct_table.oid,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES')
+                        OR has_any_column_privilege(current_user,direct_table.oid,'INSERT,UPDATE,REFERENCES')))
+                AND NOT EXISTS (
+                    SELECT 1 FROM pg_class readable JOIN pg_namespace readable_schema
+                      ON readable_schema.oid=readable.relnamespace
+                      JOIN pg_attribute column_access ON column_access.attrelid=readable.oid
+                        AND column_access.attnum>0 AND NOT column_access.attisdropped
+                    WHERE readable_schema.nspname='public' AND readable.relkind IN ('r','p','v','m','f')
+                      AND readable.relname<>'trace_account_trust_evaluations'
+                      AND EXISTS (
+                        SELECT 1 FROM pg_roles readable_actor
+                        WHERE (readable_actor.oid=r.oid OR pg_has_role(r.oid,readable_actor.oid,'MEMBER'))
+                          AND has_column_privilege(readable_actor.oid,readable.oid,column_access.attnum,'SELECT'))
+                      AND NOT EXISTS (
+                        SELECT 1 FROM (VALUES
+                            ('trace_accounts',ARRAY['tenant_id','account_id','closed_at']),
+                            ('trace_account_principals',ARRAY['tenant_id','account_id','principal_ref','unlinked_at']),
+                            ('trace_near_provisioned_devices',ARRAY['tenant_id','account_id','principal_ref','device_key_id','anchor_hash']),
+                            ('device_keys',ARRAY['tenant_id','device_key_id','revoked_at','onboarding_origin']),
+                            ('trace_account_invite_grants',ARRAY['tenant_id','account_id','revoked_at']),
+                            ('trace_account_trust',ARRAY['tenant_id','account_id','authority','trust_version']),
+                            ('trace_account_admission_budget',ARRAY['tenant_id','account_id','period_id','cost_used','cost_limit','cost_bound','policy_version'])
+                        ) allowed(relation_name,column_names)
+                        WHERE readable.relname=allowed.relation_name
+                          AND column_access.attname=ANY(allowed.column_names)))
+                AND NOT EXISTS (
+                    SELECT 1 FROM (VALUES
+                        ('trace_accounts',ARRAY['tenant_id','account_id','closed_at']),
+                        ('trace_account_principals',ARRAY['tenant_id','account_id','principal_ref','unlinked_at']),
+                        ('trace_near_provisioned_devices',ARRAY['tenant_id','account_id','principal_ref','device_key_id','anchor_hash']),
+                        ('device_keys',ARRAY['tenant_id','device_key_id','revoked_at','onboarding_origin']),
+                        ('trace_account_invite_grants',ARRAY['tenant_id','account_id','revoked_at']),
+                        ('trace_account_trust',ARRAY['tenant_id','account_id','authority','trust_version']),
+                        ('trace_account_admission_budget',ARRAY['tenant_id','account_id','period_id','cost_used','cost_limit','cost_bound','policy_version'])
+                    ) required(relation_name,column_names)
+                    CROSS JOIN LATERAL unnest(required.column_names) required_column(column_name)
+                    LEFT JOIN pg_class status_table ON status_table.oid=to_regclass('public.'||required.relation_name)
+                    LEFT JOIN pg_attribute status_column ON status_column.attrelid=status_table.oid
+                      AND status_column.attname=required_column.column_name
+                      AND status_column.attnum>0 AND NOT status_column.attisdropped
+                    WHERE NOT COALESCE(status_table.relrowsecurity AND status_table.relforcerowsecurity
+                      AND status_table.relowner<>r.oid
+                      AND has_column_privilege(current_user,status_table.oid,status_column.attnum,'SELECT'),FALSE))
+                AND NOT EXISTS (
+                    SELECT 1 FROM pg_roles reachable
+                    WHERE reachable.oid<>r.oid AND pg_has_role(r.oid,reachable.oid,'MEMBER')
+                      AND (reachable.rolsuper OR reachable.rolbypassrls OR reachable.rolcreatedb
+                        OR reachable.rolcreaterole OR reachable.rolreplication
+                        OR has_schema_privilege(reachable.oid,'public','CREATE')
+                        OR EXISTS(SELECT 1 FROM pg_proc owned WHERE owned.proowner=reachable.oid)
+                        OR EXISTS(SELECT 1 FROM pg_namespace owned WHERE owned.nspowner=reachable.oid)
+                        OR EXISTS(SELECT 1 FROM pg_database owned WHERE owned.datdba=reachable.oid)
+                        OR EXISTS (
+                            SELECT 1 FROM pg_class reachable_table JOIN pg_namespace reachable_schema
+                              ON reachable_schema.oid=reachable_table.relnamespace
+                            WHERE reachable_schema.nspname='public' AND reachable_table.relkind IN ('r','p','v','m','f')
+                              AND (reachable_table.relowner=reachable.oid
+                                OR has_table_privilege(reachable.oid,reachable_table.oid,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES')
+                                OR has_any_column_privilege(reachable.oid,reachable_table.oid,'INSERT,UPDATE,REFERENCES')))))
+                AND NOT EXISTS(SELECT 1 FROM pg_proc owned_function WHERE owned_function.proowner=r.oid)
+                AND NOT EXISTS(SELECT 1 FROM pg_namespace owned_schema WHERE owned_schema.nspowner=r.oid)
+                AND NOT EXISTS(SELECT 1 FROM pg_database owned_database WHERE owned_database.datdba=r.oid)
+                AND NOT EXISTS (
+                    SELECT 1 FROM pg_proc forbidden JOIN pg_namespace forbidden_schema
+                      ON forbidden_schema.oid=forbidden.pronamespace
+                    WHERE forbidden_schema.nspname='public'
+                      AND forbidden.proname IN ('trace_reserve_admission','trace_transition_admission',
+                        'trace_resume_legacy_admission','trace_account_admission_live_device',
+                        'trace_account_admission_active_grant','trace_account_admission_linkage_ready',
+                        'trace_account_trust_lock_input_generation','trace_account_trust_prune_dependency_locks',
+                        'trace_record_external_account_trust_evaluation')
+                      AND EXISTS (
+                        SELECT 1 FROM pg_roles executable_actor
+                        WHERE (executable_actor.oid=r.oid OR pg_has_role(r.oid,executable_actor.oid,'MEMBER'))
+                          AND has_function_privilege(executable_actor.oid,forbidden.oid,'EXECUTE')))))
             AND COALESCE(has_function_privilege(current_user,to_regprocedure('public.trace_account_trust_external_growth_enabled()'),'EXECUTE')
                 AND public.trace_account_trust_external_growth_enabled(),FALSE)
             AND has_function_privilege(e.oid,f.oid,'EXECUTE')
@@ -899,6 +1005,34 @@ impl PgBackend {
             AND NOT has_table_privilege(current_user,l.oid,'SELECT,INSERT,UPDATE,DELETE')
             AND NOT has_table_privilege(e.oid,l.oid,'SELECT,INSERT,UPDATE,DELETE')
             AND NOT i.rolsuper AND NOT i.rolbypassrls AND NOT i.rolcanlogin
+            AND a.rolname IS NOT NULL AND NOT a.rolsuper AND NOT a.rolbypassrls AND NOT a.rolcanlogin
+            AND h.prosecdef AND h.proowner=a.oid
+            AND h.proconfig @> ARRAY['search_path=pg_catalog']::text[]
+            AND has_function_privilege(a.oid,h.oid,'EXECUTE')
+            AND NOT has_function_privilege(current_user,h.oid,'EXECUTE')
+            AND NOT EXISTS(SELECT 1 FROM aclexplode(COALESCE(h.proacl,acldefault('f',h.proowner))) acl
+                WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE')
+            AND EXISTS (SELECT 1 FROM pg_proc q
+                WHERE q.oid=to_regprocedure('public.trace_account_trust_status_acceptance_outcome(text,uuid,uuid)')
+                  AND q.prosecdef AND q.proowner=a.oid
+                  AND q.proconfig @> ARRAY['search_path=pg_catalog']::text[]
+                  AND has_function_privilege(a.oid,q.oid,'EXECUTE')
+                  AND NOT has_function_privilege(current_user,q.oid,'EXECUTE')
+                  AND NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(q.proacl,acldefault('f',q.proowner))) acl
+                      WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'))
+            AND NOT EXISTS (
+                SELECT 1 FROM (VALUES
+                    ('public.trace_device_upload_principals','account_trust_upload_alias_frontier'),
+                    ('public.device_keys','account_trust_upload_device_frontier'),
+                    ('public.trace_submissions','account_trust_upload_submission_frontier')
+                ) expected(relation_name,trigger_name)
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+                    WHERE t.tgrelid=to_regclass(expected.relation_name)
+                      AND t.tgname=expected.trigger_name AND t.tgenabled='O'
+                      AND t.tgfoid=to_regprocedure('public.trace_account_trust_advance_upload_frontiers()')
+                      AND p.prosecdef AND p.proowner=i.oid
+                      AND p.proconfig @> ARRAY['search_path=pg_catalog']::text[]))
             AND EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
                 WHERE t.tgrelid=to_regclass('public.trace_gate_decisions')
                 AND t.tgname='account_trust_gate_frontier' AND t.tgenabled='O'
@@ -909,7 +1043,9 @@ impl PgBackend {
             LEFT JOIN pg_class g ON g.oid=to_regclass('public.trace_account_trust_frontiers')
             LEFT JOIN pg_class l ON l.oid=to_regclass('public.trace_account_trust_dependency_locks')
             LEFT JOIN pg_roles i ON i.rolname='trace_account_trust_input_guard'
-            WHERE r.rolname=current_user"#, &[]).await.map_err(|_| database_refused())?.get(0);
+            LEFT JOIN pg_roles a ON a.rolname='trace_account_admission_guard'
+            LEFT JOIN pg_proc h ON h.oid=to_regprocedure('public.trace_account_trust_live_owned_principal(text,uuid,text)')
+            WHERE r.rolname=current_user"#, &[&client_upload_only]).await.map_err(|_| database_refused())?.get(0);
         Ok(ready == Some(true))
     }
 

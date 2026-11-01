@@ -1,19 +1,18 @@
 import Foundation
 
-/// Ron's two tiers (#1030 `ftux-model.ts`). Quick is the default; "Custom
-/// setup instead" switches. There is no chooser screen.
-public enum FirstRunTier: String, Codable, Equatable, Sendable {
-    case quick
-    case custom
-}
-
-/// One #1030 screen. Which of them a tier shows is `FirstRunNavigation`'s.
+/// One screen of the animated first run (Ron's 2026-10-21 canvas, built
+/// natively on the owner's request of 2026-10-22). The order is
+/// `FirstRunNavigation.steps`: Welcome, then the tools to watch, how traces
+/// may be used, what they could earn, Private AI, and signing in last.
+/// Ron's #1030 Folders and Rules screens are gone: Tools asks what Folders
+/// did, and its Customize opens the per-repo rules in place.
 public enum FirstRunStep: String, Codable, Equatable, Sendable {
-    case join
-    case folders
+    case welcome
     case tools
-    case rules
     case uses
+    case traces
+    case privateAI
+    case join
 }
 
 /// What the person answered on Join about an account.
@@ -25,25 +24,13 @@ public enum AccountAnswer: Codable, Equatable, Sendable {
     case watchOnly
     /// Sign in with near.ai after the daemon starts.
     case nearAI
-    /// Create passkey chosen on Join for later. Join no longer records it:
-    /// Create passkey starts the daemon and opens the sheets over Join
-    /// (`CommitPoint.passkeyOnJoin`). A state that holds it still opens them
-    /// once Folders or Tools started the daemon
-    /// (`FirstRunCall.openPasskeySheets`), and the choice is undoable.
-    case passkeyChosen
-    /// A passkey whose account Verify bound, or joined this Mac to (another
-    /// Mac had bound it), which enrolled this Mac (`account_bind`), with the
-    /// name the person gave it (empty when an existing passkey signed in, or
-    /// the bind answered `existing_account`).
-    /// A sign-in alone never records it: it holds no enrollment.
-    case passkey(name: String)
     /// The daemon was already enrolled when this first run began: an earlier
     /// first run joined and was quit before Start. An account it holds, so
     /// nothing is joined, signed in or created again.
     case enrolled
 }
 
-/// The sharing decision on Uses.
+/// The sharing decision on Uses, granted at Start on Join.
 public enum SharingPath: String, Codable, Equatable, Sendable {
     case askMe
     case automatic
@@ -87,7 +74,6 @@ public struct AddedFolder: Codable, Equatable, Sendable {
 /// `signedIn` and `nearAIEnrolled`. Those are facts the daemon holds, so navigation never
 /// clears them.
 public struct FirstRunState: Codable, Equatable, Sendable {
-    public var tier: FirstRunTier
     public var step: FirstRunStep
     /// The invite as pasted on Join. Kept through a failed start and a
     /// rejected lookup; only the person changes it.
@@ -101,9 +87,9 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// Folders added on Tools, each its own row. Set through `add(_:)` and
     /// answered through `answerAdded(path:watched:)`.
     public var addedFolders: [AddedFolder]
-    /// Rule per `project_id` (Custom only).
+    /// Rule per `project_id`, set under Customize on Tools.
     public var rules: [String: ProjectMode]
-    /// Chosen past sessions per `project_id` (Custom only).
+    /// Chosen past sessions per `project_id`, set under Customize on Tools.
     public var pastSelections: [String: Set<String>]
     public var scopes: Set<String>
     /// Writing it, to any value, clears `grantReady`: a new choice needs a
@@ -111,7 +97,13 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var sharing: SharingPath {
         didSet { grantReady = false }
     }
-    /// The Private AI switch (Custom only).
+    /// The person picked a Sharing choice on Uses. Neither is chosen for
+    /// them (owner, 2026-10-27): until one is, the radios show none and
+    /// Continue and Start stay off. `sharing` is only read once it is set.
+    public var sharingChosen: Bool
+    /// Whether setup turns Private AI on. The step lost its switch in
+    /// #1685, so the app never sets it; the plan still honours it
+    /// (`FirstRunPlan`) for a caller that does.
     public var privateAI: Bool
     /// The witness the disclosure showed, passed to `grant_automatic`.
     public var witnessSigningAddress: String?
@@ -138,19 +130,17 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// `sessionRoots` for how it is declared.
     public var notFound: Set<SourceKind>
     /// The person signed out on Join (#1030 rule 6) while the daemon held an
-    /// enrollment: this run's invite, a passkey Verify bound, or an earlier
-    /// first run's. Until the daemon confirms it unenrolled
+    /// enrollment: this run's invite, or an earlier first run's. Until the daemon confirms it unenrolled
     /// (`FirstRunRunner.unenrollAfterSignOut`) it may still hold one; this
     /// first run no longer treats it as an account
     /// (`holdsEnrolment` is false) and sends nothing that belongs to one --
     /// no scopes, no grant, no enrollment marker -- and an enrollment the
     /// daemon reports is not recorded again. A later enrollment (a new
-    /// invite enrolled, a passkey bound) clears it.
+    /// invite enrolled) clears it.
     public var signedOutOfEnrolment: Bool
 
     public init(
-        tier: FirstRunTier = .quick,
-        step: FirstRunStep = .join,
+        step: FirstRunStep = .welcome,
         invite: String = "",
         issuerHost: String? = nil,
         account: AccountAnswer = .none,
@@ -160,6 +150,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         pastSelections: [String: Set<String>] = [:],
         scopes: Set<String> = [],
         sharing: SharingPath = .askMe,
+        sharingChosen: Bool = false,
         privateAI: Bool = false,
         witnessSigningAddress: String? = nil,
         grantReady: Bool = false,
@@ -171,7 +162,6 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         notFound: Set<SourceKind> = [],
         signedOutOfEnrolment: Bool = false
     ) {
-        self.tier = tier
         self.step = step
         self.invite = invite
         self.issuerHost = issuerHost
@@ -182,6 +172,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.pastSelections = pastSelections
         self.scopes = scopes
         self.sharing = sharing
+        self.sharingChosen = sharingChosen
         self.privateAI = privateAI
         self.witnessSigningAddress = witnessSigningAddress
         self.grantReady = grantReady
@@ -194,11 +185,30 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.signedOutOfEnrolment = signedOutOfEnrolment
     }
 
-    /// Record what discovery found. A tool not on this Mac is not asked,
-    /// and Continue counts only the tools found here (spec rule 1, the
-    /// owner's reversal in Ron's review of #1235).
+    /// Record what discovery found. A tool not on this Mac is not asked
+    /// (spec rule 1, the owner's reversal in Ron's review of #1235): it
+    /// leaves the Tools ring. A found tool nobody has answered reads Not
+    /// used, since Tools gives each one a single check that starts unticked
+    /// (Ron, 2026-10-22); ticking it is the only thing that watches it.
     public mutating func recordDiscovery(_ candidates: [SourceCandidate]) {
         notFound = Set(candidates.filter { !$0.exists }.map(\.source))
+        for candidate in candidates where candidate.exists && !rowAnswer(candidate.source).isAnswered {
+            toolAnswers[candidate.source] = .off
+        }
+    }
+
+    /// Whether anything is watched: a tool's row, an added folder or the
+    /// exported traces, as the daemon would be told (`sessionRoots`). Tools
+    /// goes on only once something is (Ron, 2026-10-22).
+    public var watchesAnything: Bool {
+        let roots = sessionRoots
+        let watchesTool = SourceKind.allCases.contains {
+            if case .watch = roots[$0] { return true }
+            return false
+        }
+        if watchesTool { return true }
+        if case .watch = roots.trajectory { return true }
+        return false
     }
 
     /// The state with the required data use (`consent_options`' `always_on`
@@ -215,23 +225,22 @@ public struct FirstRunState: Codable, Equatable, Sendable {
 
     /// Whether the daemon holds an enrollment for this first run, which is
     /// what consent scopes, the Automatic grant and the enrollment's marker
-    /// need. An earlier first run's enrollment; a passkey Verify bound; or
-    /// near.ai once its invite enrolled, or once it enrolled this Mac with no
-    /// invite. An account answer alone -- near.ai chosen, a passkey chosen --
-    /// is not one, and nor is an enrollment the person signed out of
+    /// need. An earlier first run's enrollment, or near.ai once its invite
+    /// enrolled, or once it enrolled this Mac with no invite. An account
+    /// answer alone -- near.ai chosen -- is not one, and nor is an enrollment the person signed out of
     /// (`signedOutOfEnrolment`).
     public var holdsEnrolment: Bool {
         if signedOutOfEnrolment { return false }
         switch account {
-        case .enrolled, .passkey: return true
+        case .enrolled: return true
         case .nearAI: return enrolledInvite != nil || nearAIEnrolled
-        case .none, .watchOnly, .passkeyChosen: return false
+        case .none, .watchOnly: return false
         }
     }
 
     /// Whether the daemon may hold an enrollment, whatever this first run now
     /// treats as the account: one this run enrolled (an invite, near.ai's),
-    /// one an earlier run left or a passkey Verify bound, and one the person
+    /// one an earlier run left, and one the person
     /// signed out of on Join that the daemon has not yet unenrolled. Watching
     /// only is not offered while it does: its Start would act under that
     /// enrollment, whose scopes nobody chose here, and its marker cannot
@@ -239,8 +248,8 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var daemonHoldsEnrolment: Bool {
         if signedOutOfEnrolment || enrolledInvite != nil || nearAIEnrolled { return true }
         switch account {
-        case .enrolled, .passkey: return true
-        case .none, .watchOnly, .nearAI, .passkeyChosen: return false
+        case .enrolled: return true
+        case .none, .watchOnly, .nearAI: return false
         }
     }
 

@@ -392,12 +392,19 @@ pub(crate) fn pipeline_runtime_is_production_qualified(service: &PipelineService
 /// `drain_tenant_count` is the size of `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS`,
 /// the tenants the worker drains without routing their receipts (Zaki
 /// review 1, item 7): a count, never a tenant id.
+///
+/// `payout_rails` has one entry per payout rail, `trace_credit` included
+/// (payout spec section 4, "Fail-closed rules"): its id, mode, kill switch,
+/// rate epoch version label and whether it is qualified, from each rail's
+/// cached status. It never decides `status`: one rail not qualified makes
+/// neither the pipeline nor another rail unready.
 #[derive(Debug, Serialize)]
 pub(crate) struct PipelineReadinessResponse {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     drain_tenant_count: usize,
+    payout_rails: Vec<trace_commons_server::payout_worker::PayoutRailReadiness>,
 }
 
 /// Answers `GET /v1/pipeline/readiness`. Unauthenticated and registered in
@@ -409,6 +416,7 @@ pub(crate) async fn pipeline_readiness_handler(
     State(state): State<Arc<AppState>>,
 ) -> (StatusCode, Json<PipelineReadinessResponse>) {
     let drain_tenant_count = state.pipeline_drain_tenant_ids.len();
+    let payout_rails = state.payout_rails.readiness();
     if state.pipeline_service.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -416,6 +424,7 @@ pub(crate) async fn pipeline_readiness_handler(
                 status: "not_ready",
                 reason: Some("pipeline_runtime_absent"),
                 drain_tenant_count,
+                payout_rails,
             }),
         );
     }
@@ -429,6 +438,7 @@ pub(crate) async fn pipeline_readiness_handler(
                 status: "not_ready",
                 reason: Some("pipeline_worker_not_ready"),
                 drain_tenant_count,
+                payout_rails,
             }),
         );
     }
@@ -438,6 +448,7 @@ pub(crate) async fn pipeline_readiness_handler(
             status: "ready",
             reason: None,
             drain_tenant_count,
+            payout_rails,
         }),
     )
 }
