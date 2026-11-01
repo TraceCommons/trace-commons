@@ -884,12 +884,16 @@ fn added_dirs(cli_options: &[String], cwd: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Whether the folder `dir` holds anything at all. A folder that cannot be
-/// read counts as holding something, so the notice is shown rather than
-/// left out.
+/// Whether the folder `dir` holds anything but hidden files (a
+/// `.gitkeep`, a `.DS_Store`). A folder that cannot be read counts as
+/// holding something, so the notice is shown rather than left out.
 fn holds_an_entry(dir: &Path) -> bool {
     match std::fs::read_dir(dir) {
-        Ok(mut entries) => entries.next().is_some(),
+        Ok(entries) => entries.into_iter().any(|entry| {
+            entry.map_or(true, |entry| {
+                !entry.file_name().to_string_lossy().starts_with('.')
+            })
+        }),
         Err(e) => e.kind() != std::io::ErrorKind::NotFound,
     }
 }
@@ -1548,6 +1552,21 @@ mod tests {
             ),
             Ok(ProjectNotice::default()),
             "an empty folder holds no workflow"
+        );
+        let hidden = project(&[
+            (".claude/workflows/.gitkeep", ""),
+            (".claude/workflows/.DS_Store", ""),
+        ]);
+        assert_eq!(
+            project_model_check_in(
+                ToolId::Claude,
+                ConnectionKind::NearAi,
+                hidden.path(),
+                &[],
+                None
+            ),
+            Ok(ProjectNotice::default()),
+            "hidden files are not workflows"
         );
         // A parent folder's workflows count, as Claude Code reads them.
         let inner = dir.path().join("src");
