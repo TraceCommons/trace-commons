@@ -105,7 +105,7 @@ pub fn repo_key(cwd: &Path, harness: Harness) -> String {
 }
 
 /// Whether `id` can name a file: a session id or a [`repo_key`].
-fn safe_id(id: &str) -> bool {
+pub(super) fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 80
         && id
@@ -162,13 +162,46 @@ impl Store {
         self.write(REPOS, key, state)
     }
 
+    /// Whether `key` has a state file.
+    pub fn has_repo(&self, key: &str) -> bool {
+        safe_id(key)
+            && std::fs::symlink_metadata(self.root.join(REPOS).join(format!("{key}.json")))
+                .is_ok_and(|meta| meta.is_file())
+    }
+
     /// Read, change and write one folder's state under an exclusive lock
     /// on `repos/<key>.lock`, so two writers (a session ending, a Give
     /// back) never lose each other's change. Returns what `change`
-    /// returns; the state is written only when `change` says so.
+    /// returns; the state is written only when `change` says so. Waits
+    /// for the lock as long as it takes; the agent's hook uses
+    /// [`Store::try_update_repo`] instead, so it never blocks for long.
+    ///
+    /// The lock file stays beside the state file once made: it is empty,
+    /// mode 0600, and one per folder that was written.
     pub fn update_repo<T>(
         &self,
         key: &str,
+        change: impl FnOnce(&mut RepoState) -> (bool, T),
+    ) -> Result<T> {
+        self.locked_update(key, None, change)
+    }
+
+    /// [`Store::update_repo`], giving up after `wait` if another writer
+    /// holds the lock. Giving up writes nothing, so it only delays what a
+    /// session teaches; it never undoes another writer's change.
+    pub fn try_update_repo<T>(
+        &self,
+        key: &str,
+        wait: std::time::Duration,
+        change: impl FnOnce(&mut RepoState) -> (bool, T),
+    ) -> Result<T> {
+        self.locked_update(key, Some(wait), change)
+    }
+
+    fn locked_update<T>(
+        &self,
+        key: &str,
+        wait: Option<std::time::Duration>,
         change: impl FnOnce(&mut RepoState) -> (bool, T),
     ) -> Result<T> {
         anyhow::ensure!(safe_id(key), "not a usable economizer id");
@@ -187,7 +220,28 @@ impl Store {
             options.mode(0o600);
         }
         let file = options.open(&lock).context("opening the economizer lock")?;
-        file.lock().context("locking the economizer state")?;
+        match wait {
+            None => file.lock().context("locking the economizer state")?,
+            Some(wait) => {
+                let deadline = std::time::Instant::now() + wait;
+                loop {
+                    match file.try_lock() {
+                        Ok(()) => break,
+                        Err(std::fs::TryLockError::WouldBlock)
+                            if std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        Err(std::fs::TryLockError::WouldBlock) => {
+                            anyhow::bail!("the economizer state is busy")
+                        }
+                        Err(std::fs::TryLockError::Error(e)) => {
+                            return Err(e).context("locking the economizer state");
+                        }
+                    }
+                }
+            }
+        }
         let mut state = self.repo(key);
         let (write, out) = change(&mut state);
         if write {

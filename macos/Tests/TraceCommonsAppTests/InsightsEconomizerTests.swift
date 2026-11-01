@@ -45,6 +45,7 @@ final class InsightsEconomizerTests: XCTestCase {
         }
         let box = Box()
         let model = InsightsEconomizerModel(calls: .init(
+            served: { true },
             status: { DaemonData.EconomizerStatus(enabled: box.enabled, folders: [box.folder]) },
             // The daemon refuses to turn on: the switch stays off.
             setEnabled: { _ in DaemonData.EconomizerSwitch(enabled: box.enabled) },
@@ -73,6 +74,7 @@ final class InsightsEconomizerTests: XCTestCase {
         let box = Box()
         struct Refused: Error {}
         let model = InsightsEconomizerModel(calls: .init(
+            served: { true },
             status: {
                 box.reads += 1
                 // The read after the failed write fails too.
@@ -87,10 +89,60 @@ final class InsightsEconomizerTests: XCTestCase {
         XCTAssertNil(model.switchRefusal)
         XCTAssertFalse(model.failed)
         XCTAssertEqual(model.answer?.folders.first?.key, "repo-1")
+        // The page is kept, and marked as possibly out of date.
+        XCTAssertTrue(model.stale)
+    }
+
+    func testAFailedReadWhenTheTabOpensIsNotHiddenByAnEarlierAnswer() async {
+        final class Box: @unchecked Sendable { var up = true }
+        let box = Box()
+        struct Stopped: Error {}
+        let model = InsightsEconomizerModel(calls: .init(
+            served: { true },
+            status: {
+                guard box.up else { throw Stopped() }
+                return DaemonData.EconomizerStatus(enabled: true, folders: [InsightsEconomizerTests.folder])
+            },
+            setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
+            restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
+        await model.load()
+        XCTAssertNotNil(model.answer)
+        // The daemon stops; the next time the tab opens it says so.
+        box.up = false
+        await model.load()
+        XCTAssertTrue(model.failed)
+        XCTAssertNil(model.answer)
+        // It comes back.
+        box.up = true
+        await model.load()
+        XCTAssertFalse(model.failed)
+        XCTAssertFalse(model.stale)
+        XCTAssertNotNil(model.answer)
+    }
+
+    func testTheProbeHidesAndBringsBackTheTabWithoutReadingTheStore() async {
+        final class Box: @unchecked Sendable { var serves = false; var reads = 0 }
+        let box = Box()
+        let model = InsightsEconomizerModel(calls: .init(
+            served: { box.serves },
+            status: {
+                box.reads += 1
+                return DaemonData.EconomizerStatus(enabled: false)
+            },
+            setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
+            restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
+        await model.probe()
+        XCTAssertFalse(model.available)
+        // The daemon is upgraded while the app runs.
+        box.serves = true
+        await model.probe()
+        XCTAssertTrue(model.available)
+        XCTAssertEqual(box.reads, 0)
     }
 
     func testADaemonThatPredatesTheEconomizerHidesTheTab() async {
         let model = InsightsEconomizerModel(calls: .init(
+            served: { true },
             status: { throw DaemonDataError.daemon(code: "unknown_method", message: "unknown_method") },
             setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
             restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
@@ -98,6 +150,25 @@ final class InsightsEconomizerTests: XCTestCase {
         await model.load()
         XCTAssertTrue(model.notServed)
         XCTAssertFalse(model.available)
+    }
+
+    func testAnOlderReplyIsDroppedButACancelledNewerReadDropsNothing() async {
+        final class Box: @unchecked Sendable { var reads = 0 }
+        let box = Box()
+        let model = InsightsEconomizerModel(calls: .init(
+            served: { true },
+            status: {
+                box.reads += 1
+                if box.reads == 2 { throw CancellationError() }
+                return DaemonData.EconomizerStatus(enabled: true)
+            },
+            setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
+            restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
+        await model.load()
+        // The second read is cancelled: the first answer stands, nothing failed.
+        await model.load()
+        XCTAssertEqual(model.answer?.enabled, true)
+        XCTAssertFalse(model.failed)
     }
 
     func testWithoutADaemonTheTabIsUnavailable() async {

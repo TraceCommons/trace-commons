@@ -377,7 +377,7 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         let learned = DaemonData.EconomizerStatus(
             enabled: state != .empty, folders: state == .empty ? [] : [InsightsEconomizerTests.folder])
         let economizer = InsightsEconomizerModel(calls: .init(
-            status: { learned }, setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
+            served: { true }, status: { learned }, setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
             restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
         let view = InsightsView(storeSelection: .standard, storeCopy: copy, model: model, overviewModel: overview,
                                 initialTab: tab, subscriptionModel: subscriptions, benchmarks: benchmarks,

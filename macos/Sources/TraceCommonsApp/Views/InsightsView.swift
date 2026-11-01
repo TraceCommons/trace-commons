@@ -81,6 +81,7 @@ struct InsightsView: View {
         #endif
         let economizer: InsightsEconomizerModel.Calls? = daemon.map { client in
             InsightsEconomizerModel.Calls(
+                served: { try await client.economizerServed() },
                 status: { try await client.economizerStatus() },
                 setEnabled: { on in try await client.setEconomizer(on: on) },
                 restore: { harness, key in try await client.economizerRestore(harness: harness, key: key) })
@@ -283,9 +284,10 @@ struct InsightsView: View {
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
         .onAppear { showSampleWeekIfAsked() }
-        // One read up front, so a daemon that predates the economizer hides
-        // its tab before anyone opens it.
-        .task { if economizerModel.answer == nil { await economizerModel.load() } }
+        // Ask the daemon's methods up front, so a daemon that predates the
+        // economizer hides its tab before anyone opens it. Nothing is read
+        // from the store until the tab opens.
+        .task { await economizerModel.probe() }
         .onChange(of: economizerModel.available) { _, usable in
             if !usable, tab == .economizer { tab = .overview }
         }

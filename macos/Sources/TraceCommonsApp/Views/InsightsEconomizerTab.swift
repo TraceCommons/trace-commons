@@ -12,6 +12,9 @@ import TCShellCore
 @Observable
 final class InsightsEconomizerModel {
     struct Calls: Sendable {
+        /// Whether the daemon serves the economizer at all (its `hello`
+        /// methods), without reading what it learned.
+        let served: @Sendable () async throws -> Bool
         let status: @Sendable () async throws -> DaemonData.EconomizerStatus
         let setEnabled: @Sendable (Bool) async throws -> DaemonData.EconomizerSwitch
         let restore: @Sendable (String, String) async throws -> DaemonData.EconomizerRestored
@@ -20,8 +23,14 @@ final class InsightsEconomizerModel {
     private let calls: Calls?
     private(set) var answer: DaemonData.EconomizerStatus?
     private(set) var failed = false
+    /// The read after a switch or Give back failed, so `answer` is from
+    /// before it. The page keeps it and says details are unavailable
+    /// under the switch, until a read succeeds.
+    private(set) var stale = false
     /// The daemon predates the economizer (`unknown_method`): the tab is
-    /// hidden, since a tab that cannot be used is not drawn greyed.
+    /// hidden, since a tab that cannot be used is not drawn greyed. A
+    /// later probe or read that succeeds clears it, so a daemon upgraded
+    /// while the app runs brings the tab back.
     private(set) var notServed = false
     private(set) var busy = false
     /// Folder keys with a "Give back" in flight.
@@ -32,31 +41,56 @@ final class InsightsEconomizerModel {
     /// The request-failed words on a folder's card after its Give back
     /// failed, by folder key.
     private(set) var folderRefusals: [String: String] = [:]
-    /// The latest read; an earlier reply that lands after it is dropped.
-    private var generation = 0
+    /// Reads are numbered as they start; a reply older than one already
+    /// shown is dropped. A newer read that is cancelled drops nothing.
+    private var started = 0
+    private var shown = 0
 
     init(calls: Calls?) { self.calls = calls }
 
     /// Whether this daemon can answer at all.
     var available: Bool { calls != nil && !notServed }
 
-    func load() async {
+    /// Asks the daemon whether it serves the economizer, so the tab is
+    /// shown or hidden before anyone opens it, without reading the store.
+    func probe() async {
+        guard let calls else { return }
+        do {
+            notServed = !(try await calls.served())
+        } catch {
+            // An unreachable daemon says nothing about what it serves.
+        }
+    }
+
+    /// Reads what the economizer learned. A read the tab makes when it
+    /// opens that fails says the details are unavailable; the read after
+    /// a write (`afterWrite`) that fails keeps the page and marks it
+    /// stale instead, so a refusal or a confirmed switch is not wiped.
+    func load(afterWrite: Bool = false) async {
         guard let calls else { failed = true; return }
-        generation += 1
-        let mine = generation
+        started += 1
+        let mine = started
         do {
             let reply = try await calls.status()
-            guard mine == generation else { return }
+            guard mine > shown else { return }
+            shown = mine
             answer = reply
             failed = false
+            stale = false
+            notServed = false
         } catch is CancellationError {
             // Leaving the tab is not a failure.
         } catch {
-            guard mine == generation else { return }
+            guard mine > shown else { return }
+            shown = mine
             if (error as? DaemonDataError)?.isNotServed == true { notServed = true }
-            // A failed read after a write keeps what was on screen; only a
-            // first read that fails says the details are unavailable.
-            if answer == nil { failed = true }
+            if afterWrite, answer != nil {
+                stale = true
+            } else {
+                answer = nil
+                stale = false
+                failed = true
+            }
         }
     }
 
@@ -72,7 +106,7 @@ final class InsightsEconomizerModel {
         } catch {
             switchRefusal = MonitorWords.table?.requestFailed
         }
-        await load()
+        await load(afterWrite: true)
     }
 
     /// Gives back every tool left out in one folder, then reads again.
@@ -86,7 +120,7 @@ final class InsightsEconomizerModel {
         } catch {
             folderRefusals[folder.key] = MonitorWords.table?.requestFailed
         }
-        await load()
+        await load(afterWrite: true)
     }
 }
 
@@ -189,6 +223,10 @@ struct InsightsEconomizerTab: View {
             }
             if let refusal = model.switchRefusal {
                 GlassNotice(tone: .outside) { Text(refusal) }
+            }
+            // What is below may be from before the last change.
+            if model.stale {
+                Text(text("analytics_econ_unavailable")).insightsCaption()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

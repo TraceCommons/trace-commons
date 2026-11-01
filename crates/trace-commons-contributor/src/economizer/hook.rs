@@ -27,6 +27,10 @@ use super::store::{SessionState, Store};
 
 /// How long the hook waits for its input.
 pub const BUDGET: Duration = Duration::from_secs(3);
+/// How long the hook waits for a folder's state lock before giving up
+/// on this turn's write. Giving up only delays learning; the agent is
+/// never held at the end of a turn.
+const HOOK_LOCK_WAIT: Duration = Duration::from_millis(500);
 /// The largest input read.
 const MAX_INPUT: u64 = 4 * 1024 * 1024;
 
@@ -87,7 +91,7 @@ pub fn handle(
             if session.turn.ended_well() {
                 let calls = session.turn.calls;
                 store
-                    .update_repo(repo, |state| {
+                    .try_update_repo(repo, HOOK_LOCK_WAIT, |state| {
                         state.envelope.add(calls);
                         (true, ())
                     })
@@ -103,7 +107,7 @@ pub fn handle(
                 .filter(|state| state.repo == repo)?;
             let digest = short_digest("session", session_id);
             store
-                .update_repo(repo, |state| {
+                .try_update_repo(repo, HOOK_LOCK_WAIT, |state| {
                     state
                         .tools
                         .fold_session(harness, session.prompts, &session.used_tools);

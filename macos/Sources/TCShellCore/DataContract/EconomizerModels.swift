@@ -23,7 +23,8 @@ extension DaemonData {
 
     /// One tool's sessions in one folder.
     public struct EconomizerFolder: Codable, Equatable, Sendable, Identifiable {
-        /// The folder's last path component; never the path.
+        /// The folder's last path component, or its last few when two
+        /// folders for one tool share a name (home is `~`); never the path.
         public let folder: String
         /// `claude`, `codex` or `opencode`.
         public let harness: String

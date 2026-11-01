@@ -449,8 +449,10 @@ it leaves out with a Give back button, and the commands it tells the agent.
 It reads the daemon's `economizer_status`, and writes through
 `economizer_set_enabled` and `economizer_restore`
 ([IPC contract](contributor-daemon-ipc-v1_1.md)). No path crosses the
-socket: a row carries the folder's last path component and the store's
-digest key.
+socket: a row carries the folder's last path component (or its last few,
+when two folders for one tool share a name, with the home folder written
+`~`) and the store's digest key. The tab asks the daemon's `hello` whether
+it serves the economizer, and reads the store only when the tab opens.
 
 ## Native shell visibility and map
 

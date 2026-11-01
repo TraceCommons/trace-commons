@@ -319,6 +319,12 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("insights_submitted", params: params, as: DaemonData.InsightsSubmitted.self)
     }
 
+    public func economizerServed() async throws -> Bool {
+        // Asked each time: a call may reach a restarted or upgraded daemon.
+        struct Hello: Decodable, Sendable { let methods: [String] }
+        return try await call("hello", as: Hello.self).methods.contains("economizer_status")
+    }
+
     public func economizerStatus() async throws -> DaemonData.EconomizerStatus {
         try await call("economizer_status", as: DaemonData.EconomizerStatus.self)
     }

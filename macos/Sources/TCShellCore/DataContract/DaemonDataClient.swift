@@ -267,6 +267,9 @@ public protocol DaemonDataClient: Sendable {
     /// refuses it as `unknown_method`, and the Economizer tab says it is
     /// unavailable.
     func economizerStatus() async throws -> DaemonData.EconomizerStatus
+    /// Whether the daemon's `hello` advertises `economizer_status`: a cheap
+    /// check for showing the Economizer tab, which reads no folder state.
+    func economizerServed() async throws -> Bool
     /// `economizer_set_enabled`: the same switch as `near-ai economizer
     /// on|off`. Draw only the value the reply confirms.
     func setEconomizer(on: Bool) async throws -> DaemonData.EconomizerSwitch
@@ -358,6 +361,8 @@ extension DaemonDataClient {
     }
 
     /// Clients that predate the economizer have none to read or set.
+    public func economizerServed() async throws -> Bool { false }
+
     public func economizerStatus() async throws -> DaemonData.EconomizerStatus {
         throw DaemonDataError.notAvailableYet(method: "economizer_status")
     }

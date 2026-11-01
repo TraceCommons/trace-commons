@@ -16,7 +16,8 @@
 //! # What crosses the socket
 //!
 //! A folder's last path component (what managed session rows already
-//! show), the store's digest key, built-in tool names, counts, and the
+//! show), or its last few when two folders for one tool share a name,
+//! with the home folder as `~`; the store's digest key; built-in tool names, counts, and the
 //! program names and launcher prefixes the economizer tells the agent.
 //! Never a path.
 
