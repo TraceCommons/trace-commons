@@ -13,7 +13,7 @@ final class SharingDisclosuresTests: XCTestCase {
 
     private func onUses(_ sharing: SharingPath) -> FirstRunState {
         FirstRunState(
-            tier: .quick, step: .uses, account: .nearAI, scopes: scopes, sharing: sharing,
+            step: .join, account: .nearAI, scopes: scopes, sharing: sharing,
             daemonStarted: true, enrolledInvite: "invite")
     }
 
@@ -121,7 +121,6 @@ final class SharingDisclosuresTests: XCTestCase {
     /// watching only, it is shown directly, and Start then grants nothing.
     func test_privateAIOnWithoutAutomaticShowsTheWitnessDisclosure() throws {
         var askMe = onUses(.askMe)
-        askMe.tier = .custom
         askMe.privateAI = true
         XCTAssertEqual(UsesScreenLayout.startRoute(askMe), .discloseWitness)
         var watching = askMe
@@ -130,16 +129,13 @@ final class SharingDisclosuresTests: XCTestCase {
 
         // Automatic already shows the witness sheet, after the scrub sheet.
         var automatic = onUses(.automatic)
-        automatic.tier = .custom
         automatic.privateAI = true
         XCTAssertEqual(UsesScreenLayout.startRoute(automatic), .disclose)
 
-        // Private AI off, or not offered (Quick), changes nothing.
+        // Private AI off changes nothing. Every first run passes the Private
+        // AI step, so there is no first run without the switch.
         askMe.privateAI = false
         XCTAssertEqual(UsesScreenLayout.startRoute(askMe), .commit)
-        var quick = onUses(.askMe)
-        quick.privateAI = true
-        XCTAssertEqual(UsesScreenLayout.startRoute(quick), .commit)
 
         // The witness-only flow opens on the witness sheet and needs only it.
         var flow = SharingDisclosureFlow(witnessOnly: true)
@@ -148,11 +144,12 @@ final class SharingDisclosuresTests: XCTestCase {
         flow.acknowledgeWitness(shown: "0xwitness")
         XCTAssertEqual(flow.step, .done)
 
-        // The screen opens it, and its end starts without asking for a grant.
+        // Join's Start sharing opens it, and its end starts without asking
+        // for a grant.
         let uses = try String(
             contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
                 .deletingLastPathComponent().appendingPathComponent(
-                    "Sources/TraceCommonsApp/Views/FirstRun/UsesScreen.swift"), encoding: .utf8)
+                    "Sources/TraceCommonsApp/Views/FirstRun/JoinScreen.swift"), encoding: .utf8)
         XCTAssertTrue(uses.contains("case .discloseWitness:"))
         XCTAssertTrue(uses.contains("SharingDisclosureFlow(witnessOnly: true)"))
         XCTAssertTrue(uses.contains("if flow.witnessOnly"))

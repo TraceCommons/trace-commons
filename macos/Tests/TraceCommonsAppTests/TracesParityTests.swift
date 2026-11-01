@@ -70,8 +70,8 @@ final class TracesParityTests: XCTestCase {
         XCTAssertNotEqual(a.id, b.id)
     }
 
-    /// Severity per line: budget, witness and gate-held are waiting; the
-    /// label line carries the core's own severity.
+    /// The label line carries the core's own severity; a blocked
+    /// `daily_budget` from an older daemon adds no line of its own.
     func test_eachSafeguardCarriesItsSeverity() throws {
         let json = """
         {"health":{"last_error_label":"pii-filter-unavailable"},
@@ -82,8 +82,7 @@ final class TracesParityTests: XCTestCase {
         let label = HealthCopy.core(label: "pii-filter-unavailable", maxQueueEntries: nil)
         XCTAssertEqual(lines.first?.title, label.title)
         XCTAssertEqual(lines.first?.severity, label.severity)
-        XCTAssertEqual(lines.dropFirst().map(\.severity), [.waiting])
-        XCTAssertEqual(lines.dropFirst().first?.title, DailyBudgetCopy.title)
+        XCTAssertEqual(lines.count, 1)
     }
 
     /// The banners are popover notices over the Traces tab (owner,
@@ -241,13 +240,13 @@ final class TracesParityTests: XCTestCase {
         XCTAssertTrue(GlassSurfaceRulesTests.files.contains("Views/SessionSendDisclosureView.swift"))
     }
 
-    /// The private-inference tone onto a glass status, as the window's
-    /// Inference dot maps it: only clear is on.
+    /// The private-inference tone onto a glass status, the one rule every
+    /// Private AI dot draws (owner, 2026-10-29): only clear is on.
     func test_thePrivateInferenceToneMapsOntoAGlassStatus() {
         XCTAssertEqual(PrivateInferenceIndicator.status(.clear), .on)
-        XCTAssertEqual(PrivateInferenceIndicator.status(.held), .ask)
+        XCTAssertEqual(PrivateInferenceIndicator.status(.held), .off)
         XCTAssertEqual(PrivateInferenceIndicator.status(.attention), .ask)
-        XCTAssertEqual(PrivateInferenceIndicator.status(.refused), .ask)
+        XCTAssertEqual(PrivateInferenceIndicator.status(.refused), .outside)
         XCTAssertEqual(PrivateInferenceIndicator.status(.neutral), .off)
     }
 
@@ -502,6 +501,109 @@ final class TracesParityTests: XCTestCase {
                       "what turning it on exposes must stay in sight without Learn more")
         XCTAssertTrue(card.contains("Text(copy.offerAskedOnce)\n                    }\n                }\n                .glassType(GlassTokens.TypeScale.body)"),
                       "the paragraphs behind Learn more are drawn as the first two")
+    }
+
+    /// Owner, 2026-10-30: the Submit tip showed unreliably, and over the
+    /// Automatic switch, because it was the whole row's tooltip and the
+    /// switch inside has its own. The tip belongs to the Submit pill (or
+    /// the split button's action half) alone; no row, in the tab or in the
+    /// edge rail, carries a row-wide tooltip.
+    func test_theSubmitTipIsThePillsNotTheRows() throws {
+        let tree = try Self.text("Views/Monitor/TracesViews.swift")
+        let rail = try Self.text("Views/EdgeRail/EdgeRailView.swift")
+        let treeRows = Self.glassListRowChains(in: tree)
+        let railRows = Self.glassListRowChains(in: rail)
+        XCTAssertEqual(treeRows.count, 2, "the folder and session rows of the Traces tab")
+        XCTAssertEqual(railRows.count, 2, "the folder and session rows of the edge rail")
+        for (file, chains) in [("TracesViews.swift", treeRows), ("EdgeRailView.swift", railRows)] {
+            for chain in chains {
+                XCTAssertFalse(chain.contains(".help("), "a row-wide tooltip in \(file):\n\(chain)")
+                XCTAssertTrue(chain.contains("submitHelp:"), "a row in \(file) hands its tip to the pill:\n\(chain)")
+            }
+        }
+        // The split button's tip is its action half's, not the chevron's.
+        for (file, source) in [("TracesViews.swift", tree), ("EdgeRailView.swift", rail)] {
+            XCTAssertTrue(source.contains(".actionHelp("), "\(file): the split button's action carries the tip")
+        }
+        // The folder inspector's split button too: its tip is the action half's.
+        let inspector = try Self.text("Views/Monitor/ToolFolderInspectors.swift")
+        XCTAssertTrue(inspector.contains(".actionHelp(TracesTreeView.submitHelp("), "the inspector's action half carries the tip")
+        XCTAssertFalse(inspector.contains("}\n                    .help(TracesTreeView.submitHelp("),
+                       "a tooltip over the inspector's whole split button")
+        let controls = try Self.text("../TCDesign/Components/Controls.swift")
+        XCTAssertTrue(controls.contains(".helpIfAny(actionTip)"), "the split button's action half shows the tip")
+        XCTAssertTrue(controls.contains(".helpIfAny(menuLabel)"), "the chevron is named, not given the Submit tip")
+        let listRow = try Self.text("../TCDesign/Components/ListRow.swift")
+        XCTAssertTrue(listRow.contains(".helpIfAny(submitHelp)"), "GlassListRow puts the tip on its Submit pill, only when it has one")
+        XCTAssertFalse(listRow.contains(".help(submitHelp)"), "an empty tip is not a tooltip")
+        // The pill is often turned off, and a disabled button shows no
+        // tooltip, so the tip sits on a wrapper that is not disabled.
+        XCTAssertTrue(listRow.contains(".disabled(onSubmit == nil)") && listRow.contains("HStack(spacing: 0) {\n                    Button(submitTitle)"),
+                      "the tip's host is not the disabled button")
+        // VoiceOver keeps the tip, and the core's withheld sentence, on the folder row.
+        XCTAssertTrue(treeRows[0].contains(".accessibilityHint(help)"), "the folder row speaks its tip")
+    }
+
+    /// The text of each `GlassListRow(` call in `source`, from the call
+    /// through the end of its modifier chain: every `.modifier(...)` and
+    /// trailing closure that follows, however it is indented or wrapped.
+    static func glassListRowChains(in source: String) -> [String] {
+        let chars = Array(source)
+        var chains: [String] = []
+        var search = source.startIndex
+        while let hit = source.range(of: "GlassListRow(", range: search..<source.endIndex) {
+            search = hit.upperBound
+            // Skip the type's own declaration and mentions in comments.
+            let lineStart = source[..<hit.lowerBound].lastIndex(of: "\n").map { source.index(after: $0) } ?? source.startIndex
+            let prefix = source[lineStart..<hit.lowerBound].trimmingCharacters(in: .whitespaces)
+            if prefix.hasPrefix("//") || prefix.hasPrefix("struct") || prefix.hasPrefix("public struct") { continue }
+            var i = source.distance(from: source.startIndex, to: hit.upperBound) - 1
+            let start = source.distance(from: source.startIndex, to: hit.lowerBound)
+            // Consume a balanced (...) or {...} group starting at `i`.
+            func group(_ from: Int) -> Int {
+                var depth = 0
+                var k = from
+                while k < chars.count {
+                    let c = chars[k]
+                    if c == "/", k + 1 < chars.count, chars[k + 1] == "/" {
+                        while k < chars.count, chars[k] != "\n" { k += 1 }
+                        continue
+                    }
+                    if c == "\"" {
+                        k += 1
+                        while k < chars.count, chars[k] != "\"" { if chars[k] == "\\" { k += 1 }; k += 1 }
+                    } else if c == "(" || c == "{" {
+                        depth += 1
+                    } else if c == ")" || c == "}" {
+                        depth -= 1
+                        if depth == 0 { return k + 1 }
+                    }
+                    k += 1
+                }
+                return chars.count
+            }
+            i = group(i)
+            while true {
+                var k = i
+                while k < chars.count {
+                    if chars[k] == " " || chars[k] == "\n" { k += 1; continue }
+                    if chars[k] == "/", k + 1 < chars.count, chars[k + 1] == "/" {
+                        while k < chars.count, chars[k] != "\n" { k += 1 }
+                        continue
+                    }
+                    break
+                }
+                guard k < chars.count, chars[k] == "." else { break }
+                k += 1
+                while k < chars.count, chars[k].isLetter || chars[k].isNumber { k += 1 }
+                if k < chars.count, chars[k] == "(" { k = group(k) }
+                while k < chars.count, chars[k] == " " { k += 1 }
+                if k < chars.count, chars[k] == "{" { k = group(k) }
+                i = k
+            }
+            chains.append(String(chars[start..<i]))
+        }
+        return chains
     }
 
     /// The folder row offers Submit all only when the shared table offers

@@ -2,6 +2,11 @@
 //!
 //! Reads `~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`
 //! session files and maps them into the shared `SessionTranscript` model.
+//! Codex compresses older rollouts in place to `<same name>.jsonl.zst`.
+//! A compressed rollout is addressed by the plain path it replaced, read
+//! through a bounded decoder, and is otherwise the same session: discovered,
+//! offered and loaded like any other (owner decision 2026-10-29; see
+//! `compressed`).
 //! See `docs/superpowers/plans/` (Task 8) for the format facts and mapping
 //! rules; `Opaque` events (covering `event_msg`, `web_search_call`, and any
 //! unknown payload/record type) carry only a record-type marker, never a
@@ -9,7 +14,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -57,14 +62,23 @@ impl TraceSource for CodexSource {
     /// naming rule, shared with `collect_rollout_files`, so a file the walk
     /// would pass over cannot be addressed here.
     fn session_for_path(&self, path: &Path) -> Option<PathBuf> {
-        let path = real_file_within_root(&self.root, path)?;
+        // An address whose plain file Codex replaced is found through its
+        // compressed twin, which is held to the same root rule.
+        let path = real_file_within_root(&self.root, path).or_else(|| {
+            let file = super::compressed::on_disk(path)?;
+            real_file_within_root(&self.root, &file)
+        })?;
         // Stricter than the walk in one respect, deliberately:
         // `collect_rollout_files` reaches a symlinked *file* whose name
         // matches, because `DirEntry::file_type` only stops it descending
         // into symlinked directories. Refusing one here costs nothing --
         // the reconciliation sweep still finds it -- while keeping this
         // addressing surface uniform with the Claude Code one.
-        is_rollout_file_name(path.file_name()?.to_str()?).then_some(path)
+        //
+        // A compressed rollout answers as the plain address it replaced,
+        // the same `PathBuf` its `SessionRef` carries.
+        is_any_rollout_file_name(path.file_name()?.to_str()?)
+            .then(|| super::compressed::address_of(&path))
     }
 
     /// The ref for whichever rollout a changed path names.
@@ -74,18 +88,38 @@ impl TraceSource for CodexSource {
     /// every discovered ref with, so a scoped scan and a full sweep cannot
     /// disagree about a rollout's size or cwd. A rollout deleted between
     /// the event and this lookup is `Ok(None)`.
+    ///
+    /// An address whose plain file is gone resolves to its compressed twin,
+    /// so an event for either file describes the one session.
     fn session_at(&self, path: &Path) -> anyhow::Result<Option<SessionRef>> {
         let Some(address) = self.session_for_path(path) else {
             return Ok(None);
         };
+        let Some(file) = super::compressed::on_disk(&address)
+            .and_then(|file| real_file_within_root(&self.root, &file))
+        else {
+            return Ok(None);
+        };
         let mut ignored_skips = 0usize;
-        Ok(rollout_session_ref(address, Peek::Cwd, &mut ignored_skips))
+        Ok(rollout_session_ref(file, Peek::Cwd, &mut ignored_skips))
     }
 }
 
 /// The rollout naming rule, in one place: `rollout-<...>.jsonl`.
 pub(crate) fn is_rollout_file_name(file_name: &str) -> bool {
     file_name.starts_with("rollout-") && file_name.ends_with(".jsonl")
+}
+
+/// A rollout Codex compressed in place: `rollout-<...>.jsonl.zst`.
+pub(crate) fn is_compressed_rollout_file_name(file_name: &str) -> bool {
+    file_name
+        .strip_suffix(super::compressed::COMPRESSED_SUFFIX)
+        .is_some_and(is_rollout_file_name)
+}
+
+/// A rollout, plain or compressed: what discovery walks to.
+pub(crate) fn is_any_rollout_file_name(file_name: &str) -> bool {
+    is_rollout_file_name(file_name) || is_compressed_rollout_file_name(file_name)
 }
 
 /// Whether discovery may open a rollout to learn its cwd.
@@ -145,7 +179,14 @@ fn collect_rollout_files(
         let Some(file_name) = file_name.to_str() else {
             continue;
         };
-        if !is_rollout_file_name(file_name) {
+        if !is_any_rollout_file_name(file_name) {
+            continue;
+        }
+        // While both are on disk (Codex between writing the compressed
+        // file and removing the plain one) the session is the plain file's.
+        if is_compressed_rollout_file_name(file_name)
+            && std::fs::symlink_metadata(super::compressed::address_of(&path)).is_ok()
+        {
             continue;
         }
         if let Some(session) = rollout_session_ref(path, peek, skipped) {
@@ -183,6 +224,21 @@ fn rollout_session_ref(path: PathBuf, peek: Peek, skipped: &mut usize) -> Option
         Peek::Cwd => peek_cwd_memoized(&path, metadata.len(), started_at),
         Peek::Nothing => None,
     };
+    // A compressed rollout is described as the plain file it replaced:
+    // its address, the size it decompresses to and the last write Codex
+    // kept, so a session read or offered before Codex compressed it is
+    // unchanged after. The time is the group's, so nothing stats the
+    // address, which is no longer on disk.
+    let compressed = super::compressed::is_compressed(&path);
+    let (path, size_bytes, group_modified_at) = if compressed {
+        let Some(size) = decompressed_bytes_memoized(&path, metadata.len(), started_at) else {
+            *skipped += 1;
+            return None;
+        };
+        (super::compressed::address_of(&path), size, started_at)
+    } else {
+        (path, metadata.len(), None)
+    };
     // Derive the label from the cwd we just peeked, the same way
     // `load_session` does further down. Leaving this `None` meant every
     // Codex row in the picker rendered as `-`, so a contributor choosing
@@ -203,11 +259,12 @@ fn rollout_session_ref(path: PathBuf, peek: Peek, skipped: &mut usize) -> Option
         project,
         cwd,
         started_at,
-        size_bytes: metadata.len(),
+        size_bytes,
         // Codex rollouts are peer files: `collect_rollout_files` recurses
         // arbitrarily deep, but every match is its own session and no
-        // record links one to another. There is no group to describe.
-        group_modified_at: None,
+        // record links one to another. There is no group to describe; a
+        // compressed rollout carries its file's time here (above).
+        group_modified_at,
         group_member_count: 0,
     })
 }
@@ -235,8 +292,9 @@ fn rollout_session_ref(path: PathBuf, peek: Peek, skipped: &mut usize) -> Option
 /// said. Prefer `peek_cwd_memoized` from discovery; this is the uncached
 /// read behind it.
 fn peek_cwd(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
+    // Decompressed for a compressed rollout, and bounded like every read
+    // of one.
+    let mut reader = super::compressed::open_lines(path).ok()?;
     let mut buf = Vec::new();
     loop {
         buf.clear();
@@ -346,22 +404,51 @@ fn peek_cwd_memoized(
     cwd
 }
 
-/// The largest rollout this adapter will load, mirroring
-/// `claude_code::GROUP_RAW_BYTE_BUDGET` and set to the same 64 MB.
+/// What each compressed rollout decompresses to, memoized like `CWD_MEMO`
+/// while its file's size and mtime hold: discovery describes every
+/// compressed rollout on every tick.
+static DECOMPRESSED_MEMO: LazyLock<
+    Mutex<HashMap<PathBuf, (u64, Option<chrono::DateTime<chrono::Utc>>, u64)>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn decompressed_bytes_memoized(
+    path: &Path,
+    size_bytes: u64,
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<u64> {
+    if let Ok(memo) = DECOMPRESSED_MEMO.lock() {
+        if let Some((size, at, decompressed)) = memo.get(path) {
+            if *size == size_bytes && *at == modified_at {
+                return Some(*decompressed);
+            }
+        }
+    }
+    let decompressed = super::compressed::decompressed_bytes(path)?;
+    if let Ok(mut memo) = DECOMPRESSED_MEMO.lock() {
+        if memo.len() >= CWD_MEMO_CAP && !memo.contains_key(path) {
+            memo.clear();
+        }
+        memo.insert(path.to_path_buf(), (size_bytes, modified_at, decompressed));
+    }
+    Some(decompressed)
+}
+
+/// The largest rollout this adapter will load: [`super::MAX_SESSION_BYTES`],
+/// 512 MiB, the same figure as `claude_code::GROUP_RAW_BYTE_BUDGET` and the
+/// daemon's preview admission cap. For a compressed rollout it counts the
+/// bytes the rollout decompresses to.
 ///
 /// Streaming stopped the loader holding two copies of a file, but the events
 /// it builds are still proportional to what it parses, and a rollout has no
-/// upper bound: the machine this was measured on had a 385 MB one. The
-/// Claude adapter has bounded its equivalent since it was written; Codex
-/// bounding nothing was an asymmetry rather than a decision.
+/// upper bound: the owner's machine has had a 432 MB one in the last month.
 ///
 /// One number, not two, because these bound the same thing -- how much of
 /// one conversation may become resident on its way to being discarded.
 ///
-/// On the measured corpus this declines 10 of 3,066 rollouts (0.3%). It is a
-/// guard against pathology, not a filter: the median rollout is 541 KB and
-/// the 99th percentile is 40 MB.
-const ROLLOUT_BYTE_BUDGET: u64 = super::claude_code::GROUP_RAW_BYTE_BUDGET;
+/// It bounds what is read, not what can be sent: a rollout whose envelope
+/// comes out over `MAX_TRACE_ENVELOPE_BYTES` (256 MiB) is refused locally
+/// at approval as `envelope-too-large`.
+const ROLLOUT_BYTE_BUDGET: u64 = super::MAX_SESSION_BYTES;
 
 fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
     // Declined rather than truncated, and named rather than silent. A
@@ -374,6 +461,13 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
     // Typed, not a bare `bail!`, so a caller can tell this refusal apart
     // from the IO errors around it without matching on message text. The
     // rendered message is unchanged. See `source::SessionTooLarge`.
+    // A compressed rollout is loaded from its decoder, bounded by the same
+    // budget on the bytes it decompresses to.
+    if let Some(file) =
+        super::compressed::on_disk(path).filter(|file| super::compressed::is_compressed(file))
+    {
+        return load_compressed(&file, path);
+    }
     let declared = std::fs::metadata(path)?.len();
     if declared > ROLLOUT_BYTE_BUDGET {
         return Err(super::SessionTooLarge {
@@ -390,6 +484,39 @@ fn load_session(path: &Path) -> anyhow::Result<SessionTranscript> {
     // is unchanged -- see `SessionHasher`.
     let file = std::fs::File::open(path)?;
     parse_session_reader(BufReader::new(file), path)
+}
+
+/// `load_session` for a compressed rollout at `file`, addressed as
+/// `address`. Refused as `rollout-too-large` when its frame records more
+/// than the budget, and again if the stream decompresses past it (a header
+/// can be absent or wrong); the decoder's own bounds still apply.
+fn load_compressed(file: &Path, address: &Path) -> anyhow::Result<SessionTranscript> {
+    let too_large = |declared_bytes| super::SessionTooLarge {
+        label: "rollout-too-large",
+        declared_bytes,
+        budget_bytes: ROLLOUT_BYTE_BUDGET,
+    };
+    if let Some(declared) = super::compressed::declared_bytes(file) {
+        if declared > ROLLOUT_BYTE_BUDGET {
+            return Err(too_large(declared).into());
+        }
+    }
+    let mut decoder = super::compressed::BoundedDecoder::open(file)?;
+    let parsed = parse_session_reader(
+        BufReader::new((&mut decoder).take(ROLLOUT_BYTE_BUDGET + 1)),
+        address,
+    );
+    if decoder.produced() > ROLLOUT_BYTE_BUDGET
+        || decoder.failure() == Some(super::compressed::CompressedFailure::TooLarge)
+    {
+        // The decoder stops at the first bound, so the whole size is not
+        // known: at least what was decompressed, and past the budget.
+        return Err(too_large(decoder.produced().max(ROLLOUT_BYTE_BUDGET + 1)).into());
+    }
+    if decoder.failure().is_some() {
+        anyhow::bail!("rollout-undecodable");
+    }
+    parsed
 }
 
 /// Parse an explicitly supplied immutable snapshot without reopening its source.
@@ -725,6 +852,226 @@ mod tests {
             .parent()
             .expect("crates/ directory")
             .join("trace-commons-contributor/fixtures/codex")
+    }
+
+    fn rollout_bytes(cwd: &str) -> Vec<u8> {
+        format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"77777777-7777-4777-8777-777777777777\",\"cwd\":\"{cwd}\"}}}}\n\
+             {{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"hello\"}}]}}}}\n"
+        )
+        .into_bytes()
+    }
+
+    /// Codex compresses older rollouts in place (owner decision 2026-10-29:
+    /// they are offered too). A compressed rollout is the same session as
+    /// the plain file it replaced: the same address, size, last write,
+    /// cwd and content hash.
+    #[test]
+    fn a_compressed_rollout_is_the_session_its_plain_file_was() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let address = day.join("rollout-2026-08-20T09-00-00-bbb.jsonl");
+        let bytes = rollout_bytes("/w/proj");
+        std::fs::write(&address, &bytes).unwrap();
+        let source = CodexSource::new(root.path().to_path_buf());
+        let plain = source.discover().unwrap();
+        let plain_hash = source.load(&plain[0]).unwrap().session_hash;
+
+        // Compressed as Codex does: the plain file replaced, its last write kept.
+        let written = std::fs::metadata(&address).unwrap().modified().unwrap();
+        let compressed = day.join("rollout-2026-08-20T09-00-00-bbb.jsonl.zst");
+        std::fs::write(&compressed, zstd::bulk::compress(&bytes, 3).unwrap()).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&compressed)
+            .unwrap()
+            .set_modified(written)
+            .unwrap();
+        std::fs::remove_file(&address).unwrap();
+        std::fs::write(day.join("notes.jsonl.zst"), b"x").unwrap();
+
+        let found = source.discover().unwrap();
+        assert_eq!(found.len(), 1);
+        let session = &found[0];
+        assert_eq!(session.path, address, "addressed by the plain path");
+        assert_eq!(session.size_bytes, bytes.len() as u64, "decompressed size");
+        assert_eq!(
+            session.group_modified_at,
+            Some(chrono::DateTime::<chrono::Utc>::from(written))
+        );
+        assert_eq!(session.cwd.as_deref(), Some("/w/proj"));
+        assert_eq!(session.project.as_deref(), Some("proj"));
+        assert_eq!(source.session_for_path(&compressed), Some(address.clone()));
+        assert_eq!(source.session_for_path(&address), Some(address.clone()));
+        let at = source.session_at(&compressed).unwrap().unwrap();
+        assert_eq!(at.path, address);
+        assert_eq!(at.size_bytes, session.size_bytes);
+        let loaded = source.load(session).unwrap();
+        assert_eq!(loaded.session_hash, plain_hash, "the same content hash");
+        assert_eq!(loaded.cwd.as_deref(), Some("/w/proj"));
+    }
+
+    /// Between Codex writing the compressed file and removing the plain one,
+    /// the session is listed once, as the plain file.
+    #[test]
+    fn a_plain_twin_is_listed_and_its_compressed_copy_is_not() {
+        let root = tempfile::tempdir().unwrap();
+        let day = root.path().join("2026/08/20");
+        std::fs::create_dir_all(&day).unwrap();
+        let address = day.join("rollout-2026-08-20T09-00-00-ccc.jsonl");
+        std::fs::write(&address, rollout_bytes("/w/a")).unwrap();
+        std::fs::write(
+            day.join("rollout-2026-08-20T09-00-00-ccc.jsonl.zst"),
+            b"half written",
+        )
+        .unwrap();
+        let found = CodexSource::new(root.path().to_path_buf())
+            .discover()
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, address);
+        assert_eq!(
+            found[0].group_modified_at, None,
+            "a plain file's ref, as before"
+        );
+    }
+
+    /// `rollout_bytes` padded with newlines to `total` bytes, compressed
+    /// as a stream to `path`, so a rollout past the 512 MiB budget never
+    /// sits in the test's memory. `declare` records the size in the frame
+    /// header, as `zstd::bulk` and Codex's own writer do.
+    fn write_compressed_rollout(path: &Path, total: u64, declare: bool) {
+        use std::io::Write;
+        let head = rollout_bytes("/w/big");
+        let mut encoder =
+            zstd::stream::Encoder::new(std::fs::File::create(path).unwrap(), 1).unwrap();
+        encoder.include_contentsize(declare).unwrap();
+        if declare {
+            encoder.set_pledged_src_size(Some(total)).unwrap();
+        }
+        encoder.write_all(&head).unwrap();
+        let chunk = vec![b'\n'; 1 << 20];
+        let mut left = total - head.len() as u64;
+        while left > 0 {
+            let n = left.min(chunk.len() as u64) as usize;
+            encoder.write_all(&chunk[..n]).unwrap();
+            left -= n as u64;
+        }
+        encoder.finish().unwrap();
+    }
+
+    /// The 512 MiB load budget applies to what a compressed rollout
+    /// decompresses to, under the existing label: refused from the size its
+    /// frame records, and from the stream when the frame records none. (The
+    /// undeclared stream is all newlines, so the decoder's ratio bound ends
+    /// it first; the label is the same either way.)
+    #[test]
+    fn a_compressed_rollout_over_the_load_budget_is_rollout_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, declare) in [("rollout-a.jsonl", true), ("rollout-b.jsonl", false)] {
+            write_compressed_rollout(
+                &dir.path().join(format!("{name}.zst")),
+                ROLLOUT_BYTE_BUDGET + 1024,
+                declare,
+            );
+            let error = load_session(&dir.path().join(name)).unwrap_err();
+            let too_large = error
+                .downcast_ref::<crate::source::SessionTooLarge>()
+                .unwrap_or_else(|| panic!("{name}: {error}"));
+            assert_eq!(too_large.label, "rollout-too-large");
+            assert_eq!(too_large.budget_bytes, crate::source::MAX_SESSION_BYTES);
+            assert!(too_large.declared_bytes > ROLLOUT_BYTE_BUDGET, "{name}");
+            if declare {
+                assert_eq!(too_large.declared_bytes, ROLLOUT_BYTE_BUDGET + 1024);
+            }
+        }
+    }
+
+    /// A plain rollout over 512 MiB is refused from its size alone, under
+    /// the existing label, before a byte of it is read. The file is sparse,
+    /// so the test writes nothing.
+    #[test]
+    fn a_plain_rollout_over_the_load_budget_is_rollout_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-big.jsonl");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::source::MAX_SESSION_BYTES + 1).unwrap();
+        drop(file);
+        let error = load_session(&path).unwrap_err();
+        let too_large = error
+            .downcast_ref::<crate::source::SessionTooLarge>()
+            .unwrap_or_else(|| panic!("{error}"));
+        assert_eq!(too_large.label, "rollout-too-large");
+        assert_eq!(
+            too_large.declared_bytes,
+            crate::source::MAX_SESSION_BYTES + 1
+        );
+        assert_eq!(too_large.budget_bytes, crate::source::MAX_SESSION_BYTES);
+    }
+
+    /// A rollout over the old 64 MB budget now loads, plain and compressed.
+    /// About 100 MB, carried mostly by a few large tool outputs so a debug
+    /// build parses it quickly. The output is pseudo-random letters, because
+    /// a run of one byte compresses past the decoder's ratio bound and would
+    /// be refused as a zip bomb, which no real rollout resembles.
+    #[test]
+    fn a_rollout_over_the_old_64_mb_budget_loads() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let output: String = (0..4 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (b'a' + (state % 26) as u8) as char
+            })
+            .collect();
+        let mut body = rollout_bytes("/w/long");
+        let mut calls = 0;
+        while body.len() < 100_000_000 {
+            calls += 1;
+            body.extend_from_slice(
+                format!(
+                    "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call\",\"name\":\"shell\",\"call_id\":\"c{calls}\",\"arguments\":\"{{}}\"}}}}\n\
+                     {{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call_output\",\"call_id\":\"c{calls}\",\"output\":\"{output}\"}}}}\n"
+                )
+                .as_bytes(),
+            );
+        }
+        assert!(body.len() as u64 > 64 * 1024 * 1024);
+        assert!((body.len() as u64) < ROLLOUT_BYTE_BUDGET);
+        let plain = dir.path().join("rollout-plain.jsonl");
+        std::fs::write(&plain, &body).unwrap();
+        let loaded = load_session(&plain).expect("a 100 MB rollout loads");
+        assert_eq!(loaded.cwd.as_deref(), Some("/w/long"));
+        assert!(
+            loaded.events.len() > 2 * calls,
+            "every call and output mapped"
+        );
+
+        let mut encoder = zstd::stream::Encoder::new(
+            std::fs::File::create(dir.path().join("rollout-zst.jsonl.zst")).unwrap(),
+            1,
+        )
+        .unwrap();
+        encoder.write_all(&body).unwrap();
+        encoder.finish().unwrap();
+        let compressed = load_session(&dir.path().join("rollout-zst.jsonl"))
+            .expect("a 100 MB compressed rollout loads");
+        assert_eq!(compressed.session_hash, loaded.session_hash);
+        assert_eq!(compressed.events.len(), loaded.events.len());
+    }
+
+    /// A corrupt compressed rollout is refused, never loaded as empty.
+    #[test]
+    fn a_corrupt_compressed_rollout_does_not_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut compressed = zstd::bulk::compress(&rollout_bytes("/w/x"), 3).unwrap();
+        compressed.truncate(compressed.len() / 2);
+        std::fs::write(dir.path().join("rollout-c.jsonl.zst"), compressed).unwrap();
+        assert!(load_session(&dir.path().join("rollout-c.jsonl")).is_err());
     }
 
     /// A rollout is its own session, and nothing else in the tree is one.

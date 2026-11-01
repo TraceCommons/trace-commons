@@ -8,6 +8,7 @@
 
 import AppKit
 import Foundation
+import os
 import SwiftUI
 import TCBridge
 import TCShellCore
@@ -17,7 +18,7 @@ import XCTest
 @testable import TraceCommonsApp
 
 private final class FundingDaemon: DaemonCalling {
-    struct Call {
+    struct Call: Sendable {
         let method: String
         let params: String
     }
@@ -25,31 +26,30 @@ private final class FundingDaemon: DaemonCalling {
     private let condition = NSCondition()
     private let response: String
     private let entered: XCTestExpectation?
-    private var held: Bool
-    private var recorded: [Call] = []
-    private var expired = false
+    private struct State: Sendable {
+        var held: Bool
+        var recorded: [Call] = []
+        var expired = false
+    }
+    private let state: OSAllocatedUnfairLock<State>
 
     init(response: String, held: Bool = false, entered: XCTestExpectation? = nil) {
         self.response = response
-        self.held = held
+        state = OSAllocatedUnfairLock(initialState: State(held: held))
         self.entered = entered
     }
 
     var calls: [Call] {
-        condition.lock()
-        defer { condition.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     var timedOut: Bool {
-        condition.lock()
-        defer { condition.unlock() }
-        return expired
+        state.withLock { $0.expired }
     }
 
     func release() {
         condition.lock()
-        held = false
+        state.withLock { $0.held = false }
         condition.broadcast()
         condition.unlock()
     }
@@ -57,15 +57,15 @@ private final class FundingDaemon: DaemonCalling {
     func call(_ method: String, params paramsJSON: String) -> String {
         condition.lock()
         defer { condition.unlock() }
-        recorded.append(Call(method: method, params: paramsJSON))
+        state.withLock { $0.recorded.append(Call(method: method, params: paramsJSON)) }
         guard method == "near_ai_funding" else {
             return #"{"id":1,"error":{"code":"unavailable","message":"unexpected_test_method"}}"#
         }
         entered?.fulfill()
         let deadline = Date().addingTimeInterval(5)
-        while held {
-            if !condition.wait(until: deadline), held {
-                expired = true
+        while state.withLock({ $0.held }) {
+            if !condition.wait(until: deadline), state.withLock({ $0.held }) {
+                state.withLock { $0.expired = true }
                 return #"{"id":1,"error":{"code":"unavailable","message":"test_barrier_timeout"}}"#
             }
         }
@@ -81,38 +81,45 @@ private final class FundingDaemon: DaemonCalling {
 /// Queues one existing bounded daemon barrier per funding reply. A credential
 /// start is refused locally so the real model can publish a busy cycle safely.
 private final class FundingViewDaemon: DaemonCalling {
-    private let lock = NSLock()
-    private var replies: [FundingDaemon] = []
-    private var allReplies: [FundingDaemon] = []
-    private var recorded: [FundingDaemon.Call] = []
+    private struct State: Sendable {
+        var replies: [FundingDaemon] = []
+        var allReplies: [FundingDaemon] = []
+        var recorded: [FundingDaemon.Call] = []
+        var credentialStatusReply: String?
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     var calls: [FundingDaemon.Call] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
+    }
+
+    /// What `near_ai_credential_status` answers; nil keeps the synthetic refusal.
+    func answerCredentialStatus(_ response: String?) {
+        state.withLock { $0.credentialStatusReply = response }
     }
 
     func enqueue(_ response: String, held: Bool = false, entered: XCTestExpectation? = nil) -> FundingDaemon {
         let reply = FundingDaemon(response: response, held: held, entered: entered)
-        lock.lock()
-        replies.append(reply)
-        allReplies.append(reply)
-        lock.unlock()
+        state.withLock {
+            $0.replies.append(reply)
+            $0.allReplies.append(reply)
+        }
         return reply
     }
 
     func releaseAll() {
-        lock.lock()
-        let pending = allReplies
-        lock.unlock()
+        let pending = state.withLock { $0.allReplies }
         pending.forEach { $0.release() }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        recorded.append(.init(method: method, params: paramsJSON))
-        let reply = method == "near_ai_funding" && !replies.isEmpty ? replies.removeFirst() : nil
-        lock.unlock()
+        let (reply, credential) = state.withLock {
+            $0.recorded.append(.init(method: method, params: paramsJSON))
+            let reply = method == "near_ai_funding" && !$0.replies.isEmpty ? $0.replies.removeFirst() : nil
+            let credential = method == "near_ai_credential_status" ? $0.credentialStatusReply : nil
+            return (reply, credential)
+        }
+        if let credential { return credential }
         return reply?.call(method, params: paramsJSON)
             ?? #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"#
     }
@@ -130,6 +137,8 @@ private final class HostedFunding {
     private let copy: PrivateInferenceCopy
     var opened: [URL] = []
     var acceptOpen = true
+    /// The row's style: the Billing card, or the balance card's Add funds.
+    var style: FundingRow.Style = .card
 
     init() throws {
         _ = NSApplication.shared
@@ -141,7 +150,7 @@ private final class HostedFunding {
     }
 
     func show() {
-        hosting.rootView = AnyView(FundingRow(copy: copy).environmentObject(model)
+        hosting.rootView = AnyView(FundingRow(copy: copy, style: style).environmentObject(model)
             .environment(\.openURL, OpenURLAction { [weak self] url in
                 guard let self else { return .discarded }
                 self.opened.append(url)
@@ -177,7 +186,11 @@ private final class HostedFunding {
         // centred on its height (owner, 2026-10-10), inside the test's 24pt
         // padding and the card's own: this point falls inside the button.
         let bounds = hosting.bounds
-        let point = NSPoint(x: bounds.width - 24 - GlassTokens.Space.cardPaddingHorizontal - 30, y: bounds.height / 2)
+        // Add funds is the button alone, at its own size, which the test's
+        // fixed-width frame centres.
+        let point = style == .addFunds
+            ? NSPoint(x: bounds.width / 2, y: bounds.height / 2)
+            : NSPoint(x: bounds.width - 24 - GlassTokens.Space.cardPaddingHorizontal - 30, y: bounds.height / 2)
         XCTAssertNotNil(hosting.hitTest(hosting.convert(point, from: nil)))
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
@@ -193,6 +206,9 @@ private final class HostedFunding {
 final class FundingTests: XCTestCase {
     private let organization = "synthetic-org_42"
     private let revision = String(repeating: "0123456789abcdef", count: 4)
+    /// The dashboard the linked dylib names: production's or staging's.
+    private let origin = LinkedChannel.dashboardOrigin
+    private let host = LinkedChannel.dashboardHost
 
     private func ready() -> [String: Any] {
         [
@@ -200,7 +216,7 @@ final class FundingTests: XCTestCase {
             "organization_id": organization,
             "organization_name": "Synthetic organization",
             "connection_revision": revision,
-            "browser_url": "https://cloud.near.ai/dashboard/organizations/\(organization)/credits",
+            "browser_url": "\(origin)/dashboard/organizations/\(organization)/credits",
             "observed_at": "2026-09-09T12:00:00Z",
             "view": ["message": "Cloud organization: Synthetic organization"],
         ]
@@ -228,12 +244,27 @@ final class FundingTests: XCTestCase {
         XCTAssertEqual(status.destination?.browserURL?.absoluteString, ready()["browser_url"] as? String)
     }
 
+    /// Staging design 4.1: the dashboard origin is the dylib's, never a Swift
+    /// copy, so a staging build links to the staging dashboard.
+    func testTheDashboardOriginComesFromTheDylib() throws {
+        let dylib = try XCTUnwrap(BuildChannel.decode(fromJSON: TCBuildChannel.json()))
+        let destination = try expected()
+        XCTAssertEqual(
+            destination.browserURL?.absoluteString,
+            "\(dylib.nearAiDashboardOrigin)/dashboard/organizations/\(organization)/credits")
+        XCTAssertEqual(
+            destination.browserURL(dashboardOrigin: "https://dashboard.example.invalid")?.absoluteString,
+            "https://dashboard.example.invalid/dashboard/organizations/\(organization)/credits")
+        XCTAssertNil(destination.browserURL(dashboardOrigin: nil), "no dylib answer, no link")
+        XCTAssertNil(destination.browserURL(dashboardOrigin: ""))
+    }
+
     func testMalformedOrganizationIDsCannotProduceDestinations() throws {
         for id in ["", ".", "..", "org/other", "org?other", "org#other", "org%2fother",
                    "org name", "org\nname", "é", String(repeating: "a", count: 129)] {
             var value = ready()
             value["organization_id"] = id
-            value["browser_url"] = "https://cloud.near.ai/dashboard/organizations/\(id)/credits"
+            value["browser_url"] = "\(origin)/dashboard/organizations/\(id)/credits"
             XCTAssertNil(FundingDestination(organizationID: id, connectionRevision: revision))
             XCTAssertThrowsError(try decode(value), "Accepted malformed organization ID")
         }
@@ -253,13 +284,13 @@ final class FundingTests: XCTestCase {
     func testReadyRefusesEveryNonexactBrowserURL() throws {
         let path = "/dashboard/organizations/\(organization)/credits"
         for url in [
-            "http://cloud.near.ai\(path)", "https://cloud.near.ai:443\(path)",
-            "https://user:password@cloud.near.ai\(path)", "https://cloud.near.ai.evil.invalid\(path)",
-            "https://CLOUD.near.ai\(path)", "https://cloud.near.ai.\(path)",
-            "https://cloud.near.ai\(path)?action=pay", "https://cloud.near.ai\(path)#fragment",
-            "https://cloud.near.ai\(path)/", "//cloud.near.ai\(path)",
-            "https://cloud.near.ai/dashboard/organizations/other/credits",
-            "https://cloud.near.ai/dashboard/organizations/%73ynthetic-org_42/credits",
+            "http://\(host)\(path)", "\(origin):443\(path)",
+            "https://user:password@\(host)\(path)", "\(origin).evil.invalid\(path)",
+            "https://\(host.uppercased())\(path)", "\(origin).\(path)",
+            "\(origin)\(path)?action=pay", "\(origin)\(path)#fragment",
+            "\(origin)\(path)/", "//\(host)\(path)",
+            "\(origin)/dashboard/organizations/other/credits",
+            "\(origin)/dashboard/organizations/%73ynthetic-org_42/credits",
         ] {
             var value = ready()
             value["browser_url"] = url
@@ -373,6 +404,34 @@ final class FundingTests: XCTestCase {
         }
     }
 
+    /// The NEAR AI balance card's Add funds (owner, 2026-10-27): the same
+    /// bound read as Manage billing, then exactly the verified credits page.
+    @MainActor
+    func testHostedAddFundsOpensTheVerifiedCreditsPage() async throws {
+        let view = try HostedFunding()
+        view.style = .addFunds
+        defer { view.close() }
+        try await prime(view)
+        let entered = expectation(description: "Add funds reaches the daemon")
+        _ = view.daemon.enqueue(try response(ready()), entered: entered)
+        try await view.press()
+        await fulfillment(of: [entered], timeout: 2)
+        try assertLastFundingCall(view, bound: true)
+        try await view.draw()
+        XCTAssertEqual(view.opened.map(\.absoluteString), [try XCTUnwrap(expected().browserURL).absoluteString])
+    }
+
+    /// Add funds is offered only with a verified destination, and never in
+    /// place of a sign-in: signed out, the balance card's own Sign in is
+    /// the way forward, and an unread account has nowhere to send money.
+    func testAddFundsShowsOnlyWithAVerifiedDestinationAndNoSignInNeeded() throws {
+        let destination = try expected()
+        XCTAssertTrue(FundingRow.showsAddFunds(destination: destination, signInNeeded: false))
+        XCTAssertFalse(FundingRow.showsAddFunds(destination: destination, signInNeeded: true))
+        XCTAssertFalse(FundingRow.showsAddFunds(destination: nil, signInNeeded: false))
+        XCTAssertFalse(FundingRow.showsAddFunds(destination: nil, signInNeeded: true))
+    }
+
     @MainActor
     func testHostedManageRechecksBindingAndSuppressesDuplicateClicks() async throws {
         let view = try HostedFunding()
@@ -392,6 +451,39 @@ final class FundingTests: XCTestCase {
         XCTAssertEqual(view.opened.map(\.absoluteString), [try XCTUnwrap(expected().browserURL).absoluteString])
     }
 
+    /// Signed out, the billing card's button is the balance card's Sign in
+    /// (owner, 2026-10-24): pressing it runs the sign-in flow, not another
+    /// funding read ("Check account" cannot help without a login).
+    @MainActor
+    func testHostedSignedOutBillingButtonRunsTheSignInFlow() async throws {
+        let view = try HostedFunding()
+        defer { view.close() }
+        let entered = expectation(description: "Visible row reads its account")
+        _ = view.daemon.enqueue(
+            try response(["state": "no_session", "view": ["message": "Sign in to manage billing."]]),
+            entered: entered)
+        view.show()
+        await fulfillment(of: [entered], timeout: 2)
+        try await view.draw()
+        let fundingReads = view.daemon.calls.filter { $0.method == "near_ai_funding" }.count
+
+        try await view.press()
+        try await view.draw()
+        let deadline = Date().addingTimeInterval(3)
+        while !view.daemon.calls.contains(where: { $0.method == "near_ai_credential_start" }),
+              Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let methods = view.daemon.calls.map(\.method)
+        let start = try XCTUnwrap(methods.firstIndex(of: "near_ai_credential_start"),
+                                  "the flow starts the NEAR AI browser sign-in: \(methods)")
+        XCTAssertEqual(fundingReads, 1)
+        XCTAssertEqual(
+            methods[..<start].filter { $0 == "near_ai_funding" }.count, fundingReads,
+            "Check account must not run when signed out: \(methods)")
+    }
+
     @MainActor
     func testHostedManageRefusesChangedOrganizationOrRevisionAndRecovers() async throws {
         for field in ["organization_id", "connection_revision"] {
@@ -401,7 +493,7 @@ final class FundingTests: XCTestCase {
             var changed = ready()
             if field == "organization_id" {
                 changed[field] = "synthetic-other"
-                changed["browser_url"] = "https://cloud.near.ai/dashboard/organizations/synthetic-other/credits"
+                changed["browser_url"] = "\(origin)/dashboard/organizations/synthetic-other/credits"
             } else {
                 changed[field] = String(repeating: "b", count: 64)
             }
@@ -449,6 +541,41 @@ final class FundingTests: XCTestCase {
             try await click(view, reply: ready(), bound: true)
             XCTAssertEqual(view.opened.count, 1, "The replacement action must remain usable")
         }
+    }
+
+    /// A session-state change clears the row, and a visible row reads its
+    /// account again by itself instead of leaving the unavailable line up.
+    @MainActor
+    func testHostedSessionStateChangeReloadsTheVisibleRow() async throws {
+        let view = try HostedFunding()
+        defer { view.close() }
+        try await prime(view)
+        let fundingCalls = view.daemon.calls.filter { $0.method == "near_ai_funding" }.count
+        let entered = expectation(description: "The row reads again after the sign-in lands")
+        _ = view.daemon.enqueue(try response(ready()), entered: entered)
+        view.daemon.answerCredentialStatus(#"{"id":1,"result":{"state":"present","session_state":"present"}}"#)
+        view.model.refreshNearAiCredential()
+        await fulfillment(of: [entered], timeout: 2)
+        try await view.draw()
+        XCTAssertEqual(view.daemon.calls.filter { $0.method == "near_ai_funding" }.count, fundingCalls + 1)
+        try assertLastFundingCall(view, bound: false)
+        XCTAssertTrue(view.opened.isEmpty, "A reload must not open a browser")
+    }
+
+    /// The row reloads once a credential write finishes, not only when its
+    /// own button is pressed.
+    @MainActor
+    func testHostedRowReloadsWhenCredentialBusyReturnsToFalse() async throws {
+        let view = try HostedFunding()
+        defer { view.close() }
+        try await prime(view)
+        let entered = expectation(description: "The row reads again after the busy cycle")
+        _ = view.daemon.enqueue(try response(ready()), entered: entered)
+        let browser = await view.model.startNearAiCredential()
+        XCTAssertNil(browser)
+        await fulfillment(of: [entered], timeout: 2)
+        try await view.draw()
+        try assertLastFundingCall(view, bound: false)
     }
 
     @MainActor

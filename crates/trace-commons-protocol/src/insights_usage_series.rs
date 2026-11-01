@@ -132,6 +132,7 @@ pub enum ToolKind {
     Bash,
     Grep,
     Glob,
+    ApplyPatch,
     Other,
 }
 
@@ -150,6 +151,25 @@ impl ToolKind {
         }
     }
 
+    /// Codex spells its tools differently. Only the patch tool and the shell
+    /// tools are named (`shell_command` is the shell type a managed Codex
+    /// declares); every other Codex tool is `Other`.
+    pub fn from_codex_tool_name(name: &str) -> Self {
+        match name {
+            "apply_patch" => Self::ApplyPatch,
+            "exec" | "exec_command" | "shell" | "shell_command" => Self::Bash,
+            _ => Self::Other,
+        }
+    }
+
+    /// Whether the tool changes file content.
+    pub fn is_edit(self) -> bool {
+        matches!(
+            self,
+            Self::Edit | Self::Write | Self::MultiEdit | Self::NotebookEdit | Self::ApplyPatch
+        )
+    }
+
     fn domain_byte(self) -> u8 {
         match self {
             Self::Read => 1,
@@ -161,6 +181,7 @@ impl ToolKind {
             Self::Grep => 7,
             Self::Glob => 8,
             Self::Other => 9,
+            Self::ApplyPatch => 10,
         }
     }
 }
@@ -362,6 +383,7 @@ impl DigestKeyStore for InMemoryDigestKeyStore {
 const DOMAIN_MSG: &[u8] = b"trace-commons/insights/msg_key/v1\0";
 const DOMAIN_ARGS: &[u8] = b"trace-commons/insights/args_key/v1\0";
 const DOMAIN_PATH: &[u8] = b"trace-commons/insights/path_key/v1\0";
+const DOMAIN_EDIT_TEXT: &[u8] = b"trace-commons/insights/edit_text/v1\0";
 const DOMAIN_FINGERPRINT: &[u8] = b"trace-commons/insights/key_fingerprint/v1\0";
 const DOMAIN_SESSION: &[u8] = b"trace-commons/insights/session_key/v1\0";
 const DOMAIN_PROJECT: &[u8] = b"trace-commons/insights/project_digest/v1\0";
@@ -391,6 +413,12 @@ pub fn args_key(
         DOMAIN_ARGS,
         &[&[tool.domain_byte()], &canonical],
     ))
+}
+
+/// Keyed digest of an edit's old or new text. Held in memory during a scan
+/// (undone detection) and never stored.
+pub fn edit_text_key(key: &DigestKey, text: &str) -> KeyedDigest {
+    keyed(key, DOMAIN_EDIT_TEXT, &[text.as_bytes()])
 }
 
 /// Keyed digest of a file path after [`normalize_tool_path`].
@@ -573,6 +601,115 @@ mod tests {
         let rendered = format!("{:?}", key(0xab));
         assert!(!rendered.contains("ab"), "{rendered}");
         assert!(!rendered.contains("171"), "{rendered}");
+    }
+
+    #[test]
+    fn codex_tool_names_map_to_the_closed_list() {
+        assert_eq!(
+            ToolKind::from_codex_tool_name("apply_patch"),
+            ToolKind::ApplyPatch
+        );
+        // `shell_command` is the shell our managed Codex declares.
+        for shell in ["exec", "exec_command", "shell", "shell_command"] {
+            assert_eq!(
+                ToolKind::from_codex_tool_name(shell),
+                ToolKind::Bash,
+                "{shell}"
+            );
+        }
+        assert_eq!(ToolKind::from_codex_tool_name("Edit"), ToolKind::Other);
+        // Claude names are unchanged.
+        assert_eq!(ToolKind::from_tool_name("apply_patch"), ToolKind::Other);
+    }
+
+    #[test]
+    fn the_edit_set_is_the_four_claude_edit_tools_and_apply_patch() {
+        for edit in [
+            ToolKind::Edit,
+            ToolKind::Write,
+            ToolKind::MultiEdit,
+            ToolKind::NotebookEdit,
+            ToolKind::ApplyPatch,
+        ] {
+            assert!(edit.is_edit(), "{edit:?}");
+        }
+        for other in [
+            ToolKind::Read,
+            ToolKind::Bash,
+            ToolKind::Grep,
+            ToolKind::Glob,
+            ToolKind::Other,
+        ] {
+            assert!(!other.is_edit(), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn edit_text_keys_are_domain_separated_from_path_and_args_keys() {
+        let key = key(7);
+        let text = edit_text_key(&key, "same");
+        assert_ne!(text, path_key(&key, "same"));
+        assert_ne!(text, msg_key(&key, "same"));
+        assert_ne!(
+            text,
+            args_key(&key, ToolKind::ApplyPatch, &json!("same")).unwrap()
+        );
+        assert_eq!(text, edit_text_key(&key, "same"));
+        assert_ne!(text, edit_text_key(&self::key(8), "same"));
+        assert_ne!(text, edit_text_key(&key, "other"));
+    }
+
+    #[test]
+    fn existing_tool_kind_domain_bytes_are_unchanged() {
+        let key = key(5);
+        let input = json!({"a": "b"});
+        let pins = [
+            (
+                ToolKind::Read,
+                "63b026ae5f66fb963530db2a38b77600f06206ce10fbca5d2b085c351be7cec2",
+            ),
+            (
+                ToolKind::Edit,
+                "b7cd3a310928ce18bdadb2adebfab35a7127e9268c9ae8ea9c32af23c54c7878",
+            ),
+            (
+                ToolKind::Write,
+                "b48b3d2a4bb48a12503a9300adfe5dce771578d295d4add1a57a50c1844d2507",
+            ),
+            (
+                ToolKind::MultiEdit,
+                "e64954dcf685effd613fb9312e171bcea2797afe7340e6bec7e514e1a97d373b",
+            ),
+            (
+                ToolKind::NotebookEdit,
+                "e9eab1854ee070846b7d7875413cc9d2f753d5bb0e4696621098275133ae8201",
+            ),
+            (
+                ToolKind::Bash,
+                "8d03c877325721c942d26a1507ff97ee443eef7615473d714cae6f3e8bd4cb62",
+            ),
+            (
+                ToolKind::Grep,
+                "0101c5019cfbc3b55fad493541a71fe4cf58699eb9deb1311093304e1bff61f3",
+            ),
+            (
+                ToolKind::Glob,
+                "519a4eae5b21301088b04b74df8bbefc2ae5525fdb6cf35a301418f166c2ff63",
+            ),
+            (
+                ToolKind::Other,
+                "bb1c67aa1b22981e2abdb872ac3dafbb4f7d2fd5a0b2c07d4ce272b9cd446469",
+            ),
+        ];
+        for (tool, hex_pin) in pins {
+            let got = args_key(&key, tool, &input).unwrap();
+            assert_eq!(hex::encode(got.0), hex_pin, "{tool:?}");
+        }
+        assert_eq!(ToolKind::ApplyPatch.domain_byte(), 10);
+        assert_eq!(
+            serde_json::to_string(&ToolKind::ApplyPatch).unwrap(),
+            "\"apply_patch\""
+        );
     }
 
     #[test]

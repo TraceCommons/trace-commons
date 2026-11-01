@@ -60,6 +60,8 @@ impl SessionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_options: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -74,6 +76,33 @@ pub struct LaunchRequest {
     pub expected_generation: Generation,
     #[serde(default)]
     pub save_default: bool,
+    /// The launcher fell back to the default because NEAR AI no longer
+    /// lists the folder's saved model: the launch's other choices are
+    /// remembered, the saved model is kept. Absent means false. Read from a
+    /// request, never written: the registry keeps it on the entry, where a
+    /// daemon that predates it can skip it, and a shell sends it only when
+    /// the snapshot says `capabilities.keep_saved_model`.
+    #[serde(default, skip_serializing)]
+    pub keep_saved_model: bool,
+    /// The root row whose native conversation this launch continues, set
+    /// only by [`SessionRegistry::resume_request`]. Resuming a resumed row
+    /// names that row's root, so a chain always points at the first row
+    /// and the native id never drifts. Absent means a fresh conversation.
+    /// Read from a request, never written, like `keep_saved_model`: the
+    /// registry keeps it on the entry, so a daemon that predates it can
+    /// still open the registry. `managed_launch_prepare` refuses it.
+    #[serde(default, skip_serializing)]
+    pub resume_of: Option<Uuid>,
+    /// The model for the tool's background work (Claude Code's small, fast
+    /// model; OpenCode's title agent), or none for the tool's background
+    /// default. Only a NEAR AI session of Claude Code or OpenCode takes
+    /// one; the launcher replaces one less private than the main model
+    /// (`models::background_for`). Read from a request, never written: the
+    /// registry keeps it on the view, where a daemon that predates it skips
+    /// it, and a shell sends it only when the snapshot says
+    /// `capabilities.background_model`.
+    #[serde(default, skip_serializing)]
+    pub background_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +113,10 @@ pub struct SessionView {
     /// None for a session that names no model and has no proxy.
     #[serde(default)]
     pub model: Option<String>,
+    /// The background model the request named, for the launcher; none for
+    /// the tool's background default. Additive: absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_model: Option<String>,
     #[serde(default)]
     pub collect_traces: bool,
     #[serde(default)]
@@ -114,6 +147,17 @@ pub struct SessionView {
     /// account and folder are still there. Set by the daemon's snapshot.
     #[serde(default)]
     pub can_start_again: bool,
+    /// The session ended and its conversation can be continued in a new
+    /// session: every condition of `can_start_again`, and the tool's own
+    /// conversation id is known. Set by the daemon's snapshot.
+    #[serde(default)]
+    pub can_resume: bool,
+    /// For a resumed row: when its conversation's root row started, so a
+    /// shell can say "Continues 2:14 PM". Recorded when the row is
+    /// prepared, so it survives the root being dismissed. Absent for a
+    /// fresh row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -121,6 +165,17 @@ pub struct PreparedLaunch {
     pub session_id: Uuid,
     /// Only the first prepare returns a ticket. Repeated requests reconcile.
     pub ticket: Option<String>,
+}
+
+/// What [`SessionRegistry::check`] found a launch to be.
+enum Checked {
+    /// The session this request id already prepared.
+    Replayed(PreparedLaunch),
+    /// A new session, with the CLI options it would carry.
+    New {
+        cli_options_text: Option<String>,
+        cli_options: Vec<String>,
+    },
 }
 
 impl std::fmt::Debug for PreparedLaunch {
@@ -133,6 +188,9 @@ impl std::fmt::Debug for PreparedLaunch {
 
 #[derive(Serialize, Deserialize)]
 pub struct LaunchContext {
+    /// Saved argv captured when this launch was first prepared.
+    #[serde(default)]
+    pub cli_options: Vec<String>,
     pub session: SessionView,
     pub proof: String,
     /// The loopback port of a proxy the daemon hosts for this session. Set
@@ -151,6 +209,11 @@ pub struct LaunchContext {
     /// `route_port`. Additive: an older launcher ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_models: Option<Vec<super::models::ChatModel>>,
+    /// The root row whose conversation this session continues
+    /// ([`LaunchRequest::resume_of`]). The launcher derives the tool's own
+    /// conversation id from it. Additive: absent for a fresh conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_of: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +257,10 @@ where
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     #[serde(default)]
+    cli_options_text: Option<String>,
+    #[serde(default)]
+    cli_options: Vec<String>,
+    #[serde(default)]
     dismissed: bool,
     /// The daemon opened this session's terminal itself, from its own
     /// ticket check. A launch from the command line never sets it.
@@ -211,6 +278,17 @@ struct Entry {
     stop_requested: bool,
     view: SessionView,
     request: LaunchRequest,
+    /// `request.keep_saved_model`, stored here and copied back on open.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    keep_saved_model: bool,
+    /// `request.resume_of`, stored here and copied back on open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume_of: Option<Uuid>,
+    /// The daemon ended this row when it saw the tool exit while the
+    /// launcher was quiet ([`SessionRegistry::tool_exited`]). Cleared by
+    /// the launcher's final report, which is then taken as how it ended.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    ended_by_daemon: bool,
     ticket_hash: Option<String>,
     ticket_expires: DateTime<Utc>,
     proof_hash: Option<String>,
@@ -268,12 +346,19 @@ impl SessionRegistry {
                     lapsed(entry.view.connection)
                 };
             }
+            // A row with a collection plan this build can read is still
+            // collected by the daemon once its tool is gone
+            // (`collection_plan`); any other plan is removed by it.
             if entry.view.state == SessionState::Failed
                 && entry.view.collection == CollectionState::Pending
+                && super::collection_plan::read(store, entry.view.id).is_none()
             {
                 entry.view.collection = CollectionState::Failed;
             }
             entry.ticket_hash = None;
+            entry.request.keep_saved_model = entry.keep_saved_model;
+            entry.request.resume_of = entry.resume_of;
+            entry.request.background_model = entry.view.background_model.clone();
         }
         let launched = store
             .read_daemon_file(FIRST_LAUNCH_FILE)
@@ -356,6 +441,7 @@ impl SessionRegistry {
                 view.can_focus = owned && e.terminal.is_some();
                 view.can_stop = owned && !e.stop_requested;
                 view.can_start_again = false;
+                view.can_resume = false;
                 view
             })
             .collect())
@@ -442,10 +528,102 @@ impl SessionRegistry {
         if entry.request.purpose != LaunchPurpose::Coding {
             return Err(ManagedError::InvalidRequest);
         }
+        // A fallback launch's restart runs the same fallback, so it keeps
+        // the folder's saved model too. Starting a resumed row again starts
+        // a fresh conversation: only [`Self::resume_request`] continues one.
         Ok(LaunchRequest {
             request_id,
             save_default: false,
+            resume_of: None,
             ..entry.request.clone()
+        })
+    }
+
+    /// The launch request that continues an ended coding session's
+    /// conversation, under a new request id: the same launch, with
+    /// `resume_of` naming the conversation's root row. Trace collection is
+    /// the entry's own choice, never turned on: that would upload earlier
+    /// turns the person did not agree to share. Its account and folder are
+    /// checked by the caller.
+    pub fn resume_request(
+        &self,
+        id: Uuid,
+        request_id: Uuid,
+    ) -> Result<LaunchRequest, ManagedError> {
+        let again = self.start_again_request(id, request_id)?;
+        let entry = self
+            .data
+            .entries
+            .iter()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        let resumed = LaunchRequest {
+            resume_of: Some(entry.request.resume_of.unwrap_or(id)),
+            ..again
+        };
+        // A retry of a resume already prepared is that same session, even
+        // while it runs; any other resume waits until the conversation is
+        // free.
+        if self.replayed(&resumed).is_none() && self.resume_root(id).is_none() {
+            return Err(ManagedError::Conflict);
+        }
+        Ok(resumed)
+    }
+
+    /// The root row of `id`'s conversation: `id` itself, or the row it
+    /// resumed. None when either row is unknown, the root never started,
+    /// so it has no conversation to continue, or another row on the same
+    /// conversation still holds its profile: two tools writing one
+    /// conversation would interleave its transcript.
+    pub fn resume_root(&self, id: Uuid) -> Option<Uuid> {
+        let entry = self.data.entries.iter().find(|e| e.view.id == id)?;
+        let root = entry.request.resume_of.unwrap_or(id);
+        (self
+            .data
+            .entries
+            .iter()
+            .any(|e| e.view.id == root && e.proof_hash.is_some())
+            && !self.conversation_in_use(root))
+        .then_some(root)
+    }
+
+    /// [`Self::resume_root`] for every row at once, in one pass, for a
+    /// snapshot: each row whose conversation can be continued now, with
+    /// that conversation's root.
+    pub fn resume_roots(&self) -> std::collections::BTreeMap<Uuid, Uuid> {
+        let root_of = |e: &Entry| e.request.resume_of.unwrap_or(e.view.id);
+        let in_use: std::collections::BTreeSet<Uuid> = self
+            .data
+            .entries
+            .iter()
+            .filter(|e| e.view.state.holds_profile())
+            .map(root_of)
+            .collect();
+        let started: std::collections::BTreeSet<Uuid> = self
+            .data
+            .entries
+            .iter()
+            .filter(|e| e.proof_hash.is_some())
+            .map(|e| e.view.id)
+            .collect();
+        self.data
+            .entries
+            .iter()
+            .map(|e| (e.view.id, root_of(e)))
+            .filter(|(_, root)| started.contains(root) && !in_use.contains(root))
+            .collect()
+    }
+
+    /// The store this registry was opened on.
+    pub fn store(&self) -> &ConfigStore {
+        &self.store
+    }
+
+    /// Whether a row on the conversation `root` started (the root itself,
+    /// or a resume of it) still holds its profile.
+    fn conversation_in_use(&self, root: Uuid) -> bool {
+        self.data.entries.iter().any(|e| {
+            e.request.resume_of.unwrap_or(e.view.id) == root && e.view.state.holds_profile()
         })
     }
 
@@ -509,77 +687,40 @@ impl SessionRegistry {
             .any(|e| e.view.account_id == id && e.view.state.holds_profile())
     }
 
+    /// Whether [`Self::prepare`] would accept `request` and record a new
+    /// session for it, rather than refuse it or answer it as a replay.
+    /// Commits nothing.
+    pub fn would_prepare_new(&self, mut request: LaunchRequest, account: &AccountView) -> bool {
+        let Ok(cwd) = super::folder::canonical(&request.cwd) else {
+            return false;
+        };
+        request.cwd = cwd;
+        matches!(self.check(&request, account), Ok(Checked::New { .. }))
+    }
+
     pub fn prepare(
         &mut self,
-        request: LaunchRequest,
+        mut request: LaunchRequest,
         account: &AccountView,
     ) -> Result<PreparedLaunch, ManagedError> {
-        let named = request
-            .model
-            .as_deref()
-            .is_some_and(super::opencode::valid_model);
-        if request.tool == ToolId::Opencode {
-            // On the NEAR AI sign-in the session's proxy names its default
-            // model (`models::default_for`), so the request names none. A
-            // saved key needs a model OpenCode can be told.
-            let model_ok = match request.connection {
-                ConnectionKind::Subscription => false,
-                ConnectionKind::NearAiSignIn => request.model.is_none(),
-                ConnectionKind::ApiKey | ConnectionKind::NearAi => named,
-            };
-            if request.purpose != LaunchPurpose::Coding || !model_ok {
-                return Err(ManagedError::InvalidRequest);
-            }
-        } else {
-            // A model can be named only where a NEAR AI proxy serves it; its
-            // availability is checked when that proxy starts.
-            let model_ok = request.model.is_none()
-                || (named
-                    && request.purpose == LaunchPurpose::Coding
-                    && matches!(
-                        request.connection,
-                        ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
-                    ));
-            if !model_ok || request.collect_traces {
-                return Err(ManagedError::InvalidRequest);
-            }
-        }
-        if request.account_id != account.id
-            || request.tool != account.tool
-            || request.connection != account.connection
-        {
-            return Err(ManagedError::Conflict);
-        }
-        if let Some(entry) = self
-            .data
-            .entries
-            .iter()
-            .find(|e| e.request.request_id == request.request_id)
-        {
-            if entry.request != request {
-                return Err(ManagedError::Conflict);
-            }
-            return Ok(PreparedLaunch {
-                session_id: entry.view.id,
-                ticket: None,
-            });
-        }
-        if !request.cwd.is_absolute() || !request.cwd.is_dir() {
-            return Err(ManagedError::InvalidRequest);
-        }
-        if self.data.entries.iter().any(|e| {
-            e.view.account_id == account.id
-                && e.view.state.holds_profile()
-                && (request.purpose == LaunchPurpose::Login
-                    || e.view.purpose == LaunchPurpose::Login)
-        }) {
-            return Err(ManagedError::Conflict);
-        }
+        request.cwd = super::folder::canonical(&request.cwd)?;
+        let (cli_options_text, cli_options) = match self.check(&request, account)? {
+            Checked::Replayed(existing) => return Ok(existing),
+            Checked::New {
+                cli_options_text,
+                cli_options,
+            } => (cli_options_text, cli_options),
+        };
         let now = Utc::now();
         let ticket = secret();
         let id = Uuid::new_v4();
         let view = SessionView {
             model: request.model.clone(),
+            background_model: request.background_model.clone(),
+            // A resumed session's request carries its root's choice
+            // (`resume_request` copies it, and a prepare naming
+            // `resume_of` is refused), so a resume never turns collection
+            // on; one that collects stages the root's continued transcript.
             collect_traces: request.collect_traces,
             collection: if request.collect_traces {
                 CollectionState::Pending
@@ -605,13 +746,26 @@ impl SessionRegistry {
             can_focus: false,
             can_stop: false,
             can_start_again: false,
+            can_resume: false,
+            resumed_from: request.resume_of.and_then(|root| {
+                self.data
+                    .entries
+                    .iter()
+                    .find(|e| e.view.id == root)
+                    .map(|e| e.view.started_at)
+            }),
         };
         let entry = Entry {
+            cli_options_text,
+            cli_options,
             dismissed: false,
             launched: false,
             terminal: None,
             stop_requested: false,
             view,
+            keep_saved_model: request.keep_saved_model,
+            resume_of: request.resume_of,
+            ended_by_daemon: false,
             request,
             ticket_hash: Some(digest(&ticket)),
             ticket_expires: now + Duration::seconds(120),
@@ -627,6 +781,158 @@ impl SessionRegistry {
             session_id: id,
             ticket: Some(ticket),
         })
+    }
+
+    /// Every check [`Self::prepare`] makes on an already-canonical
+    /// `request`, and the CLI options a new session would carry.
+    fn check(
+        &self,
+        request: &LaunchRequest,
+        account: &AccountView,
+    ) -> Result<Checked, ManagedError> {
+        let named = request
+            .model
+            .as_deref()
+            .is_some_and(super::opencode::valid_model);
+        if request.tool == ToolId::Opencode {
+            // The NEAR AI sign-in can choose a model or use its proxy's
+            // default. A saved key needs a model OpenCode can be told.
+            let model_ok = match request.connection {
+                ConnectionKind::Subscription => false,
+                ConnectionKind::NearAiSignIn => request.model.is_none() || named,
+                ConnectionKind::ApiKey | ConnectionKind::NearAi => named,
+            };
+            if request.purpose != LaunchPurpose::Coding || !model_ok {
+                return Err(ManagedError::InvalidRequest);
+            }
+        } else {
+            // A model can be named only where a NEAR AI proxy serves it; its
+            // availability is checked when that proxy starts.
+            let model_ok = request.model.is_none()
+                || (named
+                    && request.purpose == LaunchPurpose::Coding
+                    && matches!(
+                        request.connection,
+                        ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
+                    ));
+            if !model_ok || (request.collect_traces && request.purpose != LaunchPurpose::Coding) {
+                return Err(ManagedError::InvalidRequest);
+            }
+        }
+        // A background model is named only where a NEAR AI proxy serves it,
+        // and only for a tool with a background slot; its tier is checked
+        // when the tool's configuration is built.
+        if let Some(background) = request.background_model.as_deref() {
+            let ok = super::opencode::valid_model(background)
+                && request.purpose == LaunchPurpose::Coding
+                && request.tool != ToolId::Codex
+                && matches!(
+                    request.connection,
+                    ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
+                );
+            if !ok {
+                return Err(ManagedError::InvalidRequest);
+            }
+        }
+        if request.account_id != account.id
+            || request.tool != account.tool
+            || request.connection != account.connection
+        {
+            return Err(ManagedError::Conflict);
+        }
+        if let Some(entry) = self
+            .data
+            .entries
+            .iter()
+            .find(|e| e.request.request_id == request.request_id)
+        {
+            if entry.request != *request {
+                return Err(ManagedError::Conflict);
+            }
+            return Ok(Checked::Replayed(PreparedLaunch {
+                session_id: entry.view.id,
+                ticket: None,
+            }));
+        }
+        if !request.cwd.is_absolute() || !request.cwd.is_dir() {
+            return Err(ManagedError::InvalidRequest);
+        }
+        if self.data.entries.iter().any(|e| {
+            e.view.account_id == account.id
+                && e.view.state.holds_profile()
+                && (request.purpose == LaunchPurpose::Login
+                    || e.view.purpose == LaunchPurpose::Login)
+        }) {
+            return Err(ManagedError::Conflict);
+        }
+        let cli_options_text = if request.purpose == LaunchPurpose::Coding {
+            Some(match request.cli_options.clone() {
+                Some(text) => text,
+                None => super::folder::lookup(&self.store, request.tool, &request.cwd)?.cli_options,
+            })
+        } else {
+            None
+        };
+        let cli_options = match cli_options_text.as_deref() {
+            Some(text) => super::options::parse(request.tool, text)?,
+            None => vec![],
+        };
+        // Refused here, before anything is recorded, so a shell sees why;
+        // the launcher checks again before the tool starts.
+        if request.purpose == LaunchPurpose::Coding {
+            super::profiles::project_model_check(
+                request.tool,
+                request.connection,
+                &request.cwd,
+                &cli_options,
+            )?;
+        }
+        Ok(Checked::New {
+            cli_options_text,
+            cli_options,
+        })
+    }
+
+    /// A failed preference write must not strand a ticket the caller never saw.
+    pub fn rollback_prepared(&mut self, id: Uuid) -> Result<(), ManagedError> {
+        let entry = self
+            .data
+            .entries
+            .iter()
+            .find(|entry| entry.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        if entry.view.state != SessionState::Starting
+            || entry.proof_hash.is_some()
+            || entry.launched
+        {
+            return Err(ManagedError::Conflict);
+        }
+        let mut next = self.data.clone();
+        next.entries.retain(|entry| entry.view.id != id);
+        self.commit(next)
+    }
+
+    pub fn folder_settings(&self, id: Uuid) -> Option<super::folder::FolderSettings> {
+        let entry = self.data.entries.iter().find(|entry| entry.view.id == id)?;
+        if entry.request.purpose != LaunchPurpose::Coding {
+            return None;
+        }
+        Some(super::folder::FolderSettings {
+            tool: entry.request.tool,
+            cwd: entry.request.cwd.clone(),
+            model: entry.request.model.clone(),
+            background_model: entry.request.background_model.clone(),
+            collect_traces: entry.request.collect_traces,
+            cli_options: entry.cli_options_text.clone()?,
+        })
+    }
+
+    /// Whether the launch asked to keep the folder's saved model.
+    pub fn keeps_saved_model(&self, id: Uuid) -> bool {
+        self.data
+            .entries
+            .iter()
+            .any(|entry| entry.view.id == id && entry.request.keep_saved_model)
     }
 
     pub fn validate_ticket(&self, session_id: Uuid, ticket: &str) -> Result<(), ManagedError> {
@@ -700,8 +1006,10 @@ impl SessionRegistry {
         entry.ticket_hash = None;
         entry.proof_hash = Some(digest(&proof));
         entry.last_seen = Utc::now();
+        let cli_options = entry.cli_options.clone();
         let session = entry.view.clone();
         let coding = entry.request.purpose == LaunchPurpose::Coding;
+        let resume_of = entry.request.resume_of;
         self.commit(next)?;
         // The launch has happened; failing to record it only shows the
         // first-launch explanation again, so it never fails the launch.
@@ -709,11 +1017,13 @@ impl SessionRegistry {
             let _ = self.record_launch();
         }
         Ok(LaunchContext {
+            cli_options,
             session,
             proof,
             route_port: None,
             route_model: None,
             route_models: None,
+            resume_of,
         })
     }
 
@@ -735,13 +1045,38 @@ impl SessionRegistry {
             let ended_by_daemon = entry.view.connection == ConnectionKind::NearAiSignIn
                 && entry.view.state == SessionState::Failed
                 && matches!(report.state, SessionState::Exited | SessionState::Failed);
-            return if ended_by_daemon
-                || (report.state == entry.view.state && report.exit_code == entry.view.exit_code)
+            // The daemon ended this row once it saw the tool exit: the
+            // launcher's final word is the first to say how, and is taken.
+            let first_word = entry.ended_by_daemon
+                && matches!(report.state, SessionState::Exited | SessionState::Failed);
+            if !(ended_by_daemon
+                || first_word
+                || (report.state == entry.view.state && report.exit_code == entry.view.exit_code))
             {
-                Ok(())
-            } else {
-                Err(ManagedError::Conflict)
-            };
+                return Err(ManagedError::Conflict);
+            }
+            let mut changed = false;
+            if first_word {
+                if report.state == SessionState::Exited && report.exit_code.is_none() {
+                    return Err(ManagedError::InvalidRequest);
+                }
+                entry.view.state = report.state;
+                entry.view.exit_code = report.exit_code;
+                entry.ended_by_daemon = false;
+                changed = true;
+            }
+            // Its collection result is still taken while the row waits for
+            // one: the launcher collected, and removed the collection plan
+            // the daemon would otherwise have collected from.
+            if let Some(collection @ (CollectionState::Collected | CollectionState::Failed)) =
+                report.collection
+            {
+                if entry.view.collect_traces && entry.view.collection == CollectionState::Pending {
+                    entry.view.collection = collection;
+                    changed = true;
+                }
+            }
+            return if changed { self.commit(next) } else { Ok(()) };
         }
         if report.state == SessionState::Starting {
             return Err(ManagedError::InvalidRequest);
@@ -793,6 +1128,78 @@ impl SessionRegistry {
         entry.view.state = report.state;
         entry.view.exit_code = report.exit_code;
         entry.last_seen = Utc::now();
+        self.commit(next)
+    }
+
+    /// What a collection plan's decision needs from row `id`.
+    pub fn collection_status(&self, id: Uuid) -> Option<super::collection_plan::RowStatus> {
+        self.data.entries.iter().find(|e| e.view.id == id).map(|e| {
+            super::collection_plan::RowStatus {
+                state: e.view.state,
+                collect_traces: e.view.collect_traces,
+                collection: e.view.collection,
+                tool: e.view.tool,
+                account_id: e.view.account_id,
+                resume_of: e.request.resume_of,
+            }
+        })
+    }
+
+    /// Record the result of collecting row `id` from its collection plan,
+    /// after its launcher went quiet and its tool exited. Only `Collected`
+    /// or `Failed`, only for a row that collects and is still pending, and
+    /// never while its launcher reports (the launcher collects then). The
+    /// row's state and exit code stay the launcher's: a launcher that comes
+    /// back still reports how the tool ended, and its report leaves this
+    /// result alone unless it carries one of its own.
+    pub fn record_collection(
+        &mut self,
+        id: Uuid,
+        collection: CollectionState,
+    ) -> Result<(), ManagedError> {
+        let mut next = self.data.clone();
+        let entry = next
+            .entries
+            .iter_mut()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        if !entry.view.collect_traces
+            || !matches!(
+                collection,
+                CollectionState::Collected | CollectionState::Failed
+            )
+        {
+            return Err(ManagedError::InvalidRequest);
+        }
+        if matches!(
+            entry.view.state,
+            SessionState::Starting | SessionState::Running
+        ) || entry.view.collection != CollectionState::Pending
+        {
+            return Err(ManagedError::Conflict);
+        }
+        entry.view.collection = collection;
+        self.commit(next)
+    }
+
+    /// The daemon saw row `id`'s tool exit while its launcher was quiet
+    /// (the row's lease lapsed, so it is unknown): the row has ended,
+    /// without an exit code from its tool, and no longer holds its
+    /// conversation. The launcher's final report, if one still comes, is
+    /// taken as how it ended. A row in any other state is left as it is:
+    /// a launcher that still reports says so itself.
+    pub fn tool_exited(&mut self, id: Uuid) -> Result<(), ManagedError> {
+        let mut next = self.data.clone();
+        let entry = next
+            .entries
+            .iter_mut()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        if entry.view.state != SessionState::Unknown {
+            return Ok(());
+        }
+        entry.view.state = SessionState::Failed;
+        entry.ended_by_daemon = true;
         self.commit(next)
     }
 
@@ -912,16 +1319,248 @@ mod tests {
     use super::*;
     use crate::managed::accounts::AccountStore;
 
-    /// OpenCode on the NEAR AI sign-in starts on the session proxy's
-    /// default model, so its request names none; one that names a model is
-    /// refused. A saved key still needs a valid model, and a subscription
-    /// is still refused.
+    /// #1754 review: a fallback launch's `keep_saved_model` is kept on the
+    /// registry entry, not in its stored request, so a daemon that predates
+    /// the field (its `LaunchRequest` refuses unknown fields) can still read
+    /// the registry. It survives a restart, a retry of the same request is
+    /// still one session, and Start again keeps it.
     #[test]
-    fn opencode_on_the_sign_in_carries_no_model_and_a_key_still_needs_one() {
+    fn keep_saved_model_survives_a_restart_and_start_again() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let sign_in = crate::managed::signin::entry(ToolId::Opencode).unwrap();
+        let request = LaunchRequest {
+            cli_options: None,
+            model: None,
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Opencode,
+            connection: ConnectionKind::NearAiSignIn,
+            account_id: sign_in.id,
+            cwd: home.path().to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+            keep_saved_model: true,
+            resume_of: None,
+            background_model: None,
+        };
+        let id = registry
+            .prepare(request.clone(), &sign_in)
+            .unwrap()
+            .session_id;
+        assert!(registry.keeps_saved_model(id));
+
+        let raw: serde_json::Value =
+            serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
+        let entry = &raw["entries"][0];
+        assert!(
+            entry["request"].get("keep_saved_model").is_none(),
+            "{entry}"
+        );
+        assert_eq!(entry["keep_saved_model"], true);
+
+        // A restart fails the unredeemed launch, which ends it.
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        assert!(registry.keeps_saved_model(id));
+        assert_eq!(
+            registry.prepare(request, &sign_in).unwrap().session_id,
+            id,
+            "a retry of the same request is the same session"
+        );
+        let again = registry.start_again_request(id, Uuid::new_v4()).unwrap();
+        assert!(again.keep_saved_model, "Start again keeps the saved model");
+        assert_eq!(again.model, None);
+        // A launch without the flag stores none.
+        let other = registry
+            .prepare(
+                LaunchRequest {
+                    keep_saved_model: false,
+                    background_model: None,
+                    ..again
+                },
+                &sign_in,
+            )
+            .unwrap()
+            .session_id;
+        assert!(!registry.keeps_saved_model(other));
+        let raw: serde_json::Value =
+            serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
+        assert!(raw["entries"][1].get("keep_saved_model").is_none());
+    }
+
+    /// A NEAR AI Claude Code launch whose project, or a folder its CLI
+    /// options add, chooses a model is refused before a session is
+    /// recorded, so a shell sees the refusal's own label (owner,
+    /// 2026-11-01), and nothing waits in the registry.
+    #[test]
+    fn a_project_that_chooses_a_model_is_refused_at_prepare() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("config")).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let sign_in = crate::managed::signin::entry(ToolId::Claude).unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        let request = |cli_options: Option<&str>| LaunchRequest {
+            cli_options: cli_options.map(str::to_string),
+            model: None,
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Claude,
+            connection: ConnectionKind::NearAiSignIn,
+            account_id: sign_in.id,
+            cwd: project.clone(),
+            expected_generation: Generation(0),
+            save_default: false,
+            keep_saved_model: false,
+            resume_of: None,
+            background_model: None,
+        };
+        let agent = "---\nname: a\nmodel: anthropic/claude-opus-5-5\n---\n";
+
+        let extra = home.path().join("extra");
+        std::fs::create_dir_all(extra.join(".claude/agents")).unwrap();
+        std::fs::write(extra.join(".claude/agents/a.md"), agent).unwrap();
+        let add_dir = format!(
+            "--add-dir {}",
+            crate::managed::options::quote(&extra.display().to_string())
+        );
+        assert!(!registry.would_prepare_new(request(Some(&add_dir)), &sign_in));
+        assert_eq!(
+            registry
+                .prepare(request(Some(&add_dir)), &sign_in)
+                .map(|p| p.session_id),
+            Err(ManagedError::ProjectChoosesModel)
+        );
+        // Without the added folder the project is fine.
+        assert!(registry.prepare(request(Some("")), &sign_in).is_ok());
+
+        std::fs::create_dir_all(project.join(".claude/commands")).unwrap();
+        std::fs::write(project.join(".claude/commands/c.md"), agent).unwrap();
+        assert_eq!(
+            registry
+                .prepare(request(Some("")), &sign_in)
+                .map(|p| p.session_id),
+            Err(ManagedError::ProjectChoosesModel)
+        );
+        assert_eq!(
+            registry.data.entries.len(),
+            1,
+            "no refused launch is recorded"
+        );
+    }
+
+    /// A launch's background model is kept on the session's view, which
+    /// its launcher reads and an older daemon skips, never on the stored
+    /// request; it survives a restart, a retry is still one session, Start
+    /// again keeps it, and the folder settings remember it. Codex and a
+    /// connection with no NEAR AI proxy take none.
+    #[test]
+    fn a_background_model_is_kept_on_the_view_and_remembered() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let sign_in = crate::managed::signin::entry(ToolId::Claude).unwrap();
+        let request = LaunchRequest {
+            cli_options: Some(String::new()),
+            model: Some("Qwen/Qwen3.8-27B".into()),
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: Uuid::new_v4(),
+            tool: ToolId::Claude,
+            connection: ConnectionKind::NearAiSignIn,
+            account_id: sign_in.id,
+            cwd: home.path().to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+            keep_saved_model: false,
+            resume_of: None,
+            background_model: Some("z-ai/glm-5.3-flash".into()),
+        };
+        let id = registry
+            .prepare(request.clone(), &sign_in)
+            .unwrap()
+            .session_id;
+        let raw: serde_json::Value =
+            serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
+        let entry = &raw["entries"][0];
+        assert!(
+            entry["request"].get("background_model").is_none(),
+            "{entry}"
+        );
+        assert_eq!(entry["view"]["background_model"], "z-ai/glm-5.3-flash");
+        assert_eq!(
+            registry
+                .folder_settings(id)
+                .unwrap()
+                .background_model
+                .as_deref(),
+            Some("z-ai/glm-5.3-flash")
+        );
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        assert_eq!(
+            registry
+                .prepare(request.clone(), &sign_in)
+                .unwrap()
+                .session_id,
+            id
+        );
+        let again = registry.start_again_request(id, Uuid::new_v4()).unwrap();
+        assert_eq!(
+            again.background_model.as_deref(),
+            Some("z-ai/glm-5.3-flash")
+        );
+        // A launch without one stores none.
+        let plain = registry
+            .prepare(
+                LaunchRequest {
+                    background_model: None,
+                    ..again.clone()
+                },
+                &sign_in,
+            )
+            .unwrap()
+            .session_id;
+        let raw: serde_json::Value =
+            serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
+        let plain = raw["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["view"]["id"] == serde_json::json!(plain))
+            .unwrap();
+        assert!(plain["view"].get("background_model").is_none());
+        // Codex, and Claude on a subscription, take none.
+        for (tool, connection) in [
+            (ToolId::Codex, ConnectionKind::NearAiSignIn),
+            (ToolId::Claude, ConnectionKind::Subscription),
+        ] {
+            let refused = LaunchRequest {
+                request_id: Uuid::new_v4(),
+                tool,
+                connection,
+                model: None,
+                ..request.clone()
+            };
+            assert_eq!(
+                registry.check(&refused, &sign_in).err(),
+                Some(ManagedError::InvalidRequest),
+                "{tool:?} {connection:?}"
+            );
+        }
+    }
+
+    /// OpenCode can use the sign-in proxy's default or select a valid model.
+    /// A saved key still needs a model; subscriptions remain unavailable.
+    #[test]
+    fn opencode_sign_in_can_choose_a_model_and_a_key_still_needs_one() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let mut registry = SessionRegistry::open(&store).unwrap();
         let request = |connection, account_id, model: Option<&str>| LaunchRequest {
+            cli_options: None,
             model: model.map(str::to_owned),
             collect_traces: false,
             purpose: LaunchPurpose::Coding,
@@ -932,12 +1571,15 @@ mod tests {
             cwd: home.path().to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
+            resume_of: None,
+            background_model: None,
         };
         let sign_in = crate::managed::signin::entry(ToolId::Opencode).unwrap();
         assert_eq!(
             registry
                 .prepare(
-                    request(ConnectionKind::NearAiSignIn, sign_in.id, Some("gpt-5")),
+                    request(ConnectionKind::NearAiSignIn, sign_in.id, Some("bad model")),
                     &sign_in
                 )
                 .err(),
@@ -996,6 +1638,7 @@ mod tests {
         model: Option<&str>,
     ) -> LaunchRequest {
         LaunchRequest {
+            cli_options: None,
             model: model.map(str::to_owned),
             collect_traces: false,
             purpose: LaunchPurpose::Coding,
@@ -1006,6 +1649,9 @@ mod tests {
             cwd: cwd.to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
+            resume_of: None,
+            background_model: None,
         }
     }
 
@@ -1188,6 +1834,7 @@ mod tests {
             .unwrap();
         let mut registry = SessionRegistry::open(&store).unwrap();
         let request = LaunchRequest {
+            cli_options: None,
             model: None,
             collect_traces: false,
             purpose: LaunchPurpose::Coding,
@@ -1198,6 +1845,9 @@ mod tests {
             cwd: home.path().to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
+            resume_of: None,
+            background_model: None,
         };
         let launch = registry.prepare(request, &account).unwrap();
         let mut value = serde_json::to_value(&registry.data).unwrap();
@@ -1223,6 +1873,7 @@ mod tests {
             .unwrap();
         let mut registry = SessionRegistry::open(&store).unwrap();
         let request = LaunchRequest {
+            cli_options: None,
             model: None,
             collect_traces: false,
             purpose: LaunchPurpose::Coding,
@@ -1233,6 +1884,9 @@ mod tests {
             cwd: home.path().to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
+            resume_of: None,
+            background_model: None,
         };
         let launch = registry.prepare(request.clone(), &account).unwrap();
         registry.data.entries[0].ticket_expires = Utc::now() - Duration::seconds(1);
@@ -1263,6 +1917,7 @@ mod tests {
 
     fn coding(account: &AccountView, cwd: &std::path::Path) -> LaunchRequest {
         LaunchRequest {
+            cli_options: None,
             model: None,
             collect_traces: false,
             purpose: LaunchPurpose::Coding,
@@ -1273,6 +1928,9 @@ mod tests {
             cwd: cwd.to_path_buf(),
             expected_generation: Generation(0),
             save_default: false,
+            keep_saved_model: false,
+            resume_of: None,
+            background_model: None,
         }
     }
 
@@ -1344,5 +2002,698 @@ mod tests {
         std::fs::remove_file(store.dir().join(FIRST_LAUNCH_FILE)).unwrap();
         assert!(SessionRegistry::open(&store).unwrap().has_launched());
         assert!(store.dir().join(FIRST_LAUNCH_FILE).is_file());
+    }
+    /// Prepare, start and end a coding session, collecting when it asked
+    /// to. Returns its id.
+    fn ended(
+        registry: &mut SessionRegistry,
+        request: LaunchRequest,
+        account: &AccountView,
+    ) -> Uuid {
+        let prepared = registry.prepare(request, account).unwrap();
+        let context = registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        registry
+            .report(LifecycleReport {
+                model: None,
+                collection: context
+                    .session
+                    .collect_traces
+                    .then_some(CollectionState::Collected),
+                session_id: prepared.session_id,
+                proof: context.proof,
+                state: SessionState::Exited,
+                process_id: None,
+                process_identity: None,
+                exit_code: Some(0),
+            })
+            .unwrap();
+        prepared.session_id
+    }
+
+    /// Resume continues the root row's conversation: the request names the
+    /// root, and resuming a resumed row names the same root, so the native
+    /// id never drifts. The root survives a restart, the launcher is told
+    /// it, and a retry of the same request is the same session.
+    #[test]
+    fn resume_request_names_the_root_and_a_chain_keeps_it() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let original = coding(&account, home.path());
+        let root = ended(&mut registry, original.clone(), &account);
+
+        let request_id = Uuid::new_v4();
+        let first = registry.resume_request(root, request_id).unwrap();
+        assert_eq!(first.resume_of, Some(root));
+        assert_eq!(first.request_id, request_id);
+        assert!(!first.save_default);
+        assert_eq!(
+            LaunchRequest {
+                request_id: original.request_id,
+                resume_of: None,
+                ..first.clone()
+            },
+            LaunchRequest {
+                cwd: crate::managed::folder::canonical(&original.cwd).unwrap(),
+                ..original
+            },
+            "the same launch, continuing the root"
+        );
+
+        let prepared = registry.prepare(first.clone(), &account).unwrap();
+        assert_eq!(
+            registry
+                .prepare(first.clone(), &account)
+                .unwrap()
+                .session_id,
+            prepared.session_id,
+            "a retry of the same request is the same session"
+        );
+        assert_eq!(
+            registry.replayed(&first).unwrap().session_id,
+            prepared.session_id
+        );
+        let context = registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(
+            context.resume_of,
+            Some(root),
+            "the launcher is told the root"
+        );
+        let resumed = prepared.session_id;
+        assert_ne!(resumed, root, "a resumed launch is a new row");
+        registry
+            .report(LifecycleReport {
+                model: None,
+                collection: None,
+                session_id: resumed,
+                proof: context.proof,
+                state: SessionState::Exited,
+                process_id: None,
+                process_identity: None,
+                exit_code: Some(0),
+            })
+            .unwrap();
+
+        let chained = registry.resume_request(resumed, Uuid::new_v4()).unwrap();
+        assert_eq!(chained.resume_of, Some(root), "a chain points at the root");
+
+        // Stored on the entry, not in the request, so a daemon that
+        // predates the field still opens the registry.
+        let raw: serde_json::Value =
+            serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
+        let entry = &raw["entries"][1];
+        assert!(entry["request"].get("resume_of").is_none(), "{entry}");
+        assert_eq!(entry["resume_of"], serde_json::json!(root));
+        assert!(raw["entries"][0].get("resume_of").is_none());
+
+        let reopened = SessionRegistry::open(&store).unwrap();
+        assert_eq!(
+            reopened
+                .resume_request(resumed, Uuid::new_v4())
+                .unwrap()
+                .resume_of,
+            Some(root)
+        );
+        assert_eq!(reopened.resume_root(resumed), Some(root));
+        assert_eq!(reopened.resume_root(root), Some(root));
+    }
+
+    /// Start again on a resumed row starts a fresh conversation; only
+    /// Resume continues the root's.
+    #[test]
+    fn starting_a_resumed_row_again_starts_a_fresh_conversation() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let root = ended(&mut registry, coding(&account, home.path()), &account);
+        let resume = registry.resume_request(root, Uuid::new_v4()).unwrap();
+        let resumed = ended(&mut registry, resume, &account);
+
+        let again = registry
+            .start_again_request(resumed, Uuid::new_v4())
+            .unwrap();
+        assert_eq!(again.resume_of, None, "a fresh conversation");
+        let prepared = registry.prepare(again, &account).unwrap();
+        let context = registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(context.resume_of, None);
+        assert_eq!(
+            registry
+                .views()
+                .unwrap()
+                .iter()
+                .find(|v| v.id == prepared.session_id)
+                .unwrap()
+                .resumed_from,
+            None
+        );
+        // Resume on the same row still continues the root.
+        assert_eq!(
+            registry
+                .resume_request(resumed, Uuid::new_v4())
+                .unwrap()
+                .resume_of,
+            Some(root)
+        );
+    }
+
+    /// One conversation runs in one session at a time: while a row on it
+    /// holds its profile, no other resume of it starts, from the root or
+    /// from any row of its chain. A retry of the running resume is still
+    /// that same session.
+    #[test]
+    fn a_conversation_is_resumed_by_one_session_at_a_time() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let root = ended(&mut registry, coding(&account, home.path()), &account);
+        let earlier = registry.resume_request(root, Uuid::new_v4()).unwrap();
+        let chained = ended(&mut registry, earlier, &account);
+
+        let first = registry.resume_request(root, Uuid::new_v4()).unwrap();
+        let prepared = registry.prepare(first.clone(), &account).unwrap();
+        for id in [root, chained] {
+            assert_eq!(registry.resume_root(id), None, "starting");
+            assert_eq!(
+                registry.resume_request(id, Uuid::new_v4()),
+                Err(ManagedError::Conflict)
+            );
+        }
+        // A snapshot's one pass agrees with the row-by-row answer.
+        let agrees = |registry: &SessionRegistry| {
+            let roots = registry.resume_roots();
+            for id in [root, chained, prepared.session_id] {
+                assert_eq!(roots.get(&id).copied(), registry.resume_root(id), "{id}");
+            }
+        };
+        agrees(&registry);
+        assert_eq!(
+            registry.resume_request(root, first.request_id),
+            Ok(first.clone()),
+            "a retry is the same request"
+        );
+        assert_eq!(
+            registry.replayed(&first).unwrap().session_id,
+            prepared.session_id
+        );
+        let context = registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let report = |state, exit_code: Option<i32>| LifecycleReport {
+            model: None,
+            collection: None,
+            session_id: prepared.session_id,
+            proof: context.proof.clone(),
+            state,
+            process_id: Some(42),
+            process_identity: Some("42:1".to_owned()),
+            exit_code,
+        };
+        registry
+            .report(report(SessionState::Running, None))
+            .unwrap();
+        assert_eq!(
+            registry.resume_request(chained, Uuid::new_v4()),
+            Err(ManagedError::Conflict),
+            "running"
+        );
+        // Starting the root again is a fresh conversation, so it may run.
+        assert!(registry.start_again_request(root, Uuid::new_v4()).is_ok());
+        registry
+            .report(report(SessionState::Exited, Some(0)))
+            .unwrap();
+        for id in [root, chained, prepared.session_id] {
+            assert_eq!(registry.resume_root(id), Some(root));
+            assert!(registry.resume_request(id, Uuid::new_v4()).is_ok());
+        }
+        agrees(&registry);
+    }
+
+    /// A resumed row says when its conversation's root row started; a
+    /// fresh row says nothing; a chain points at the root; and the marker
+    /// survives the root being dismissed and a restart.
+    #[test]
+    fn a_resumed_row_says_when_its_root_started() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let root = ended(&mut registry, coding(&account, home.path()), &account);
+        let views = registry.views().unwrap();
+        assert_eq!(views[0].resumed_from, None, "a fresh row");
+        let root_started = views[0].started_at;
+
+        let request = registry.resume_request(root, Uuid::new_v4()).unwrap();
+        let resumed = ended(&mut registry, request, &account);
+        let request = registry.resume_request(resumed, Uuid::new_v4()).unwrap();
+        let chained = ended(&mut registry, request, &account);
+
+        registry.dismiss(root).unwrap();
+        let reopened = SessionRegistry::open(&store).unwrap();
+        let mut reopened = reopened;
+        let views = reopened.views().unwrap();
+        let find = |id: Uuid| views.iter().find(|v| v.id == id).unwrap();
+        assert!(views.iter().all(|v| v.id != root), "the root is dismissed");
+        assert_eq!(find(resumed).resumed_from, Some(root_started));
+        assert_eq!(find(chained).resumed_from, Some(root_started));
+        let json = serde_json::to_value(find(resumed)).unwrap();
+        assert!(json["resumed_from"].is_string(), "{json}");
+    }
+
+    /// A row that still holds its profile, a sign-in row, and a row whose
+    /// tool never started (no conversation exists) cannot be resumed.
+    #[test]
+    fn resume_is_refused_while_running_for_a_login_and_without_a_conversation() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let account = accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+
+        let running = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        assert_eq!(
+            registry
+                .resume_request(running.session_id, Uuid::new_v4())
+                .err(),
+            Some(ManagedError::Conflict)
+        );
+        registry
+            .fail_unredeemed(running.session_id, running.ticket.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(registry.resume_root(running.session_id), None);
+        assert_eq!(
+            registry
+                .resume_request(running.session_id, Uuid::new_v4())
+                .err(),
+            Some(ManagedError::Conflict),
+            "a session that never started has no conversation"
+        );
+
+        let other = accounts
+            .add(ToolId::Codex, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let login = ended(
+            &mut registry,
+            LaunchRequest {
+                purpose: LaunchPurpose::Login,
+                ..coding(&other, home.path())
+            },
+            &other,
+        );
+        assert_eq!(
+            registry.resume_request(login, Uuid::new_v4()).err(),
+            Some(ManagedError::InvalidRequest)
+        );
+        assert_eq!(
+            registry
+                .resume_request(Uuid::new_v4(), Uuid::new_v4())
+                .err(),
+            Some(ManagedError::NotFound)
+        );
+    }
+
+    /// A resumed row inherits the root's collection choice and can never
+    /// turn it on: earlier turns would be uploaded without agreement. A
+    /// root that collected gives a resumed row that collects, reports its
+    /// own result, and passes the choice down a chain; one that did not
+    /// gives a row whose collection is off.
+    #[test]
+    fn resume_inherits_collect_traces_and_cannot_turn_it_on() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+
+        let off = ended(&mut registry, coding(&account, home.path()), &account);
+        let request = registry.resume_request(off, Uuid::new_v4()).unwrap();
+        assert!(!request.collect_traces);
+        let prepared = registry.prepare(request, &account).unwrap();
+        let context = registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        assert!(!context.session.collect_traces, "never turned on");
+        assert_eq!(context.session.collection, CollectionState::Off);
+        registry
+            .report(LifecycleReport {
+                model: None,
+                collection: None,
+                session_id: prepared.session_id,
+                proof: context.proof,
+                state: SessionState::Exited,
+                process_id: None,
+                process_identity: None,
+                exit_code: Some(0),
+            })
+            .unwrap();
+
+        let on = ended(
+            &mut registry,
+            LaunchRequest {
+                collect_traces: true,
+                ..coding(&account, home.path())
+            },
+            &account,
+        );
+        let request = registry.resume_request(on, Uuid::new_v4()).unwrap();
+        assert!(request.collect_traces, "the root's choice is kept");
+        let prepared = registry.prepare(request, &account).unwrap();
+        let context = registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        assert!(context.session.collect_traces, "inherited from the root");
+        assert_eq!(context.session.collection, CollectionState::Pending);
+        registry
+            .report(LifecycleReport {
+                model: None,
+                collection: Some(CollectionState::Collected),
+                session_id: prepared.session_id,
+                proof: context.proof,
+                state: SessionState::Exited,
+                process_id: None,
+                process_identity: None,
+                exit_code: Some(0),
+            })
+            .unwrap();
+        assert_eq!(
+            registry
+                .data
+                .entries
+                .iter()
+                .find(|e| e.view.id == prepared.session_id)
+                .unwrap()
+                .view
+                .collection,
+            CollectionState::Collected,
+            "a resumed row reports its own collection"
+        );
+        assert!(
+            registry
+                .resume_request(prepared.session_id, Uuid::new_v4())
+                .unwrap()
+                .collect_traces,
+            "a chain keeps the root's choice"
+        );
+    }
+
+    /// A quiet row whose tool the daemon saw exit has ended: it no longer
+    /// holds its conversation, so the conversation can be resumed. Its
+    /// launcher's late final report, live or from its exit receipt at the
+    /// next start, is still taken and says how the tool ended.
+    #[test]
+    fn a_quiet_row_whose_tool_exited_ends_and_frees_its_conversation() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(
+                LaunchRequest {
+                    collect_traces: true,
+                    ..coding(&account, home.path())
+                },
+                &account,
+            )
+            .unwrap();
+        let id = prepared.session_id;
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let report = |state, exit_code| LifecycleReport {
+            model: None,
+            collection: None,
+            session_id: id,
+            proof: context.proof.clone(),
+            state,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code,
+        };
+        registry
+            .report(report(SessionState::Running, None))
+            .unwrap();
+        registry.tool_exited(id).unwrap();
+        assert_eq!(
+            registry.collection_status(id).unwrap().state,
+            SessionState::Running,
+            "a launcher that still reports says how its tool ended"
+        );
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        assert_eq!(registry.resume_root(id), None, "unknown still holds it");
+        registry
+            .record_collection(id, CollectionState::Collected)
+            .unwrap();
+        registry.tool_exited(id).unwrap();
+        let status = registry.collection_status(id).unwrap();
+        assert_eq!(status.state, SessionState::Failed);
+        assert_eq!(status.collection, CollectionState::Collected);
+        assert_eq!(registry.resume_root(id), Some(id));
+
+        // The launcher's exit receipt, left on disk, does not stop the
+        // registry from opening, and its exit code is taken.
+        let late = report(SessionState::Exited, Some(0));
+        persist_exit(&store, &late).unwrap();
+        drop(registry);
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let status = registry.collection_status(id).unwrap();
+        assert_eq!(status.state, SessionState::Exited);
+        assert_eq!(status.collection, CollectionState::Collected);
+        assert_eq!(registry.resume_root(id), Some(id));
+        // Taken once: the same word again changes nothing; another is refused.
+        registry
+            .report(report(SessionState::Exited, Some(0)))
+            .unwrap();
+        assert_eq!(
+            registry.report(report(SessionState::Failed, None)),
+            Err(ManagedError::Conflict)
+        );
+    }
+
+    /// The daemon records a collection plan's result only for a quiet,
+    /// collecting, still pending row, and leaves the row's state to its
+    /// launcher, whose later report is still accepted. A plan keeps a
+    /// failed row's collection pending across a restart.
+    #[test]
+    fn a_plans_collection_is_recorded_only_for_a_quiet_pending_row() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(
+                LaunchRequest {
+                    collect_traces: true,
+                    ..coding(&account, home.path())
+                },
+                &account,
+            )
+            .unwrap();
+        let id = prepared.session_id;
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let report = |state, exit_code, collection| LifecycleReport {
+            model: None,
+            collection,
+            session_id: id,
+            proof: context.proof.clone(),
+            state,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code,
+        };
+        registry
+            .report(report(SessionState::Running, None, None))
+            .unwrap();
+        assert_eq!(
+            registry.record_collection(id, CollectionState::Collected),
+            Err(ManagedError::Conflict),
+            "never while the launcher reports"
+        );
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        let status = registry.collection_status(id).unwrap();
+        assert_eq!(status.state, SessionState::Unknown);
+        assert_eq!(status.collection, CollectionState::Pending);
+        assert_eq!(
+            registry.record_collection(id, CollectionState::Pending),
+            Err(ManagedError::InvalidRequest)
+        );
+        registry
+            .record_collection(id, CollectionState::Collected)
+            .unwrap();
+        assert_eq!(
+            registry.record_collection(id, CollectionState::Failed),
+            Err(ManagedError::Conflict),
+            "a result is final"
+        );
+        let status = registry.collection_status(id).unwrap();
+        assert_eq!(
+            status.state,
+            SessionState::Unknown,
+            "the state is the launcher's"
+        );
+        assert_eq!(status.collection, CollectionState::Collected);
+        // A launcher that lost the claim comes back and says how the tool ended.
+        registry
+            .report(report(SessionState::Exited, Some(129), None))
+            .unwrap();
+        let status = registry.collection_status(id).unwrap();
+        assert_eq!(status.state, SessionState::Exited);
+        assert_eq!(status.collection, CollectionState::Collected);
+
+        let off = ended(&mut registry, coding(&account, home.path()), &account);
+        assert_eq!(
+            registry.record_collection(off, CollectionState::Collected),
+            Err(ManagedError::InvalidRequest),
+            "never for a row that does not collect"
+        );
+        assert_eq!(
+            registry.record_collection(Uuid::new_v4(), CollectionState::Collected),
+            Err(ManagedError::NotFound)
+        );
+
+        // A sign-in row ends Failed when its daemon restarts. With a plan
+        // its collection stays pending for the daemon; without, it fails.
+        let sign_in = crate::managed::signin::entry(ToolId::Claude).unwrap();
+        let started = |registry: &mut SessionRegistry| {
+            let prepared = registry
+                .prepare(
+                    LaunchRequest {
+                        collect_traces: true,
+                        ..coding_with(ToolId::Claude, &sign_in, home.path(), None)
+                    },
+                    &sign_in,
+                )
+                .unwrap();
+            registry
+                .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            prepared.session_id
+        };
+        let planned = started(&mut registry);
+        let unplanned = started(&mut registry);
+        crate::managed::collection_plan::write(
+            &store,
+            &crate::managed::collection_plan::CollectionPlan {
+                schema_version: 1,
+                session_id: planned,
+                tool: ToolId::Claude,
+                account_id: sign_in.id,
+                resume_root: None,
+                cwd: home.path().to_path_buf(),
+                collect_traces: true,
+                created_at: Utc::now(),
+                native: None,
+                opencode: None,
+                process: crate::managed::collection_plan::ProcessIdentity {
+                    pid: 1,
+                    start_time: None,
+                },
+            },
+        )
+        .unwrap();
+        drop(registry);
+        let registry = SessionRegistry::open(&store).unwrap();
+        let planned = registry.collection_status(planned).unwrap();
+        assert_eq!(planned.state, SessionState::Failed);
+        assert_eq!(planned.collection, CollectionState::Pending);
+        let unplanned = registry.collection_status(unplanned).unwrap();
+        assert_eq!(unplanned.state, SessionState::Failed);
+        assert_eq!(unplanned.collection, CollectionState::Failed);
+    }
+
+    /// A sign-in row the daemon failed (its launcher went quiet) still
+    /// takes the collection result its launcher reports when it comes
+    /// back, while it waits for one; nothing else in that report changes it.
+    #[test]
+    fn a_late_launcher_still_reports_a_failed_sign_in_rows_collection() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let sign_in = crate::managed::signin::entry(ToolId::Claude).unwrap();
+        let prepared = registry
+            .prepare(
+                LaunchRequest {
+                    collect_traces: true,
+                    ..coding_with(ToolId::Claude, &sign_in, home.path(), None)
+                },
+                &sign_in,
+            )
+            .unwrap();
+        let id = prepared.session_id;
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        let status = registry.collection_status(id).unwrap();
+        assert_eq!(status.state, SessionState::Failed);
+        assert_eq!(status.collection, CollectionState::Pending);
+        let exited = |collection| LifecycleReport {
+            model: None,
+            collection,
+            session_id: id,
+            proof: context.proof.clone(),
+            state: SessionState::Exited,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code: Some(0),
+        };
+        registry.report(exited(None)).unwrap();
+        assert_eq!(
+            registry.collection_status(id).unwrap().collection,
+            CollectionState::Pending
+        );
+        registry
+            .report(exited(Some(CollectionState::Collected)))
+            .unwrap();
+        let status = registry.collection_status(id).unwrap();
+        assert_eq!(status.state, SessionState::Failed, "the state stays");
+        assert_eq!(status.collection, CollectionState::Collected);
+        registry
+            .report(exited(Some(CollectionState::Failed)))
+            .unwrap();
+        assert_eq!(
+            registry.collection_status(id).unwrap().collection,
+            CollectionState::Collected,
+            "a result is final"
+        );
     }
 }

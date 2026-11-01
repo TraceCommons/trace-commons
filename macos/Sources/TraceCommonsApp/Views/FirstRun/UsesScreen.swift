@@ -19,9 +19,22 @@ enum UsesScreenLayout {
         options.first(where: \.alwaysOn)
     }
 
-    /// The other data uses, inside the expander.
+    /// The three optional data uses, always shown independently.
     static func optionalScopes(_ options: [ConsentScope]) -> [ConsentScope] {
         options.filter { !$0.alwaysOn && $0.grantsDataUse }
+    }
+
+    /// The optional data uses as Uses lists them: the one that earns credit
+    /// (`uses.creditScope`) first, the rest in the daemon's order (owner,
+    /// 2026-10-27).
+    static func shownOptionalScopes(_ options: [ConsentScope], uses: FirstRunCopy.Uses) -> [ConsentScope] {
+        let optional = optionalScopes(options)
+        return optional.filter { $0.name == uses.creditScope } + optional.filter { $0.name != uses.creditScope }
+    }
+
+    /// The Always on line, naming the required use.
+    static func alwaysOnTitle(_ required: ConsentScope, uses: FirstRunCopy.Uses) -> String {
+        FirstRunCopy.fill(uses.alwaysOn, ["title": required.title])
     }
 
     /// Scopes that grant no data use (the public handle), beside them.
@@ -36,11 +49,10 @@ enum UsesScreenLayout {
         optionalScopes(options)
     }
 
-    /// The scope rows on screen, in order: the required use, the optional
-    /// uses while the group is open, then the handle, always.
+    /// Data uses shown on this screen; public attribution is in profile
+    /// settings. The retained argument accepts older callers.
     static func visibleScopes(_ options: [ConsentScope], optionalOpen: Bool) -> [ConsentScope] {
-        (requiredScope(options).map { [$0] } ?? []) + (optionalOpen ? expandedScopes(options) : [])
-            + handleScopes(options)
+        (requiredScope(options).map { [$0] } ?? []) + optionalScopes(options)
     }
 
     static func isTicked(_ scope: String, in state: FirstRunState) -> Bool {
@@ -53,23 +65,57 @@ enum UsesScreenLayout {
         return on == 0 ? .none : .some
     }
 
-    /// Ron's summary beside the expander, every placeholder filled.
-    static func optionalSummary(_ uses: FirstRunCopy.Uses, scopes: Set<String>, optional: [ConsentScope]) -> String {
-        let on = optional.filter { scopes.contains($0.name) }.count
-        let template: String
-        switch group(scopes, optional: optional) {
-        case .all: template = uses.optionalAllOn
-        case .none: template = uses.optionalAllOff
-        case .some: template = uses.optionalSomeOn
+    /// The two buttons above the optional uses (owner, 2026-10-27), of
+    /// equal weight so neither is the suggested answer. The uses start
+    /// unticked (R7); only the person's press of one, or of a box, changes
+    /// them.
+    enum Bulk: CaseIterable {
+        /// Every optional data use on. The handle grants no data use and
+        /// is not among them (`optionalScopes`).
+        case allowAll
+        /// Every optional data use off; the required use stays.
+        case onlyRequired
+
+        func title(_ uses: FirstRunCopy.Uses) -> String {
+            switch self {
+            case .allowAll: return uses.allowAll
+            case .onlyRequired: return uses.onlyRequired
+            }
         }
-        return FirstRunCopy.fill(template, ["count": String(optional.count), "selected": String(on)])
     }
 
-    /// Start: the required use known and an account Start can finish
-    /// (`FirstRunNavigation.canContinue`), the sharing line for the path
-    /// shown present (the fallback says Starting is disabled, so it is),
-    /// and no Start already running. The required use is not waited on:
-    /// it is always included (`includingRequired`).
+    /// The state after the person presses `bulk`. Nothing but the optional
+    /// data uses changes.
+    static func pressing(_ bulk: Bulk, _ state: FirstRunState, optional: [ConsentScope]) -> FirstRunState {
+        var pressed = state
+        let names = Set(optional.map(\.name))
+        switch bulk {
+        case .allowAll: pressed.scopes.formUnion(names)
+        case .onlyRequired: pressed.scopes.subtract(names)
+        }
+        return pressed
+    }
+
+    /// The Sharing radios' selection: none until the person picks one
+    /// (owner, 2026-10-27), then their pick.
+    static func sharingSelection(_ state: FirstRunState) -> SharingPath? {
+        state.sharingChosen ? state.sharing : nil
+    }
+
+    /// The person's pick of a Sharing choice.
+    static func choosingSharing(_ state: FirstRunState, _ path: SharingPath?) -> FirstRunState {
+        guard let path else { return state }
+        var chosen = state
+        chosen.sharing = path
+        chosen.sharingChosen = true
+        return chosen
+    }
+
+    /// Start sharing, on Join: the required use known and an account Start
+    /// can finish (`FirstRunNavigation.canContinue` on Join), the sharing
+    /// line for the path chosen present (the fallback says Starting is
+    /// disabled, so it is), and no Start already running. The required use
+    /// is not waited on: it is always included (`includingRequired`).
     static func canStart(
         _ state: FirstRunState, uses: FirstRunCopy.Uses, requiredScope: ConsentScope?, grant: AutomaticGrantCopy?,
         isCommitting: Bool
@@ -106,10 +152,13 @@ enum UsesScreenLayout {
         state.includingRequiredScope(required?.name)
     }
 
-    /// The path the screen shows: Automatic only for an account that can
-    /// choose it, so a watch-only state never reads Automatic's words.
+    /// The path Uses shows and Start's line is read for: the person's
+    /// choice. Automatic is offered before sign-in (Ron's 2026-10-21
+    /// canvas) and granted only at Start with an enrollment
+    /// (`FirstRunNavigation.canChooseAutomatic`); until then its line says
+    /// it turns on once the person signs in (`sharingOptions`).
     static func effectiveSharing(_ state: FirstRunState) -> SharingPath {
-        FirstRunNavigation.canChooseAutomatic(state) ? state.sharing : .askMe
+        state.sharing
     }
 
     /// The Sharing card's line: the first line of the core's words for the
@@ -123,14 +172,18 @@ enum UsesScreenLayout {
     ) -> String {
         if isLoading { return uses.sharingLoading }
         guard let grant, let split = split(path: path, grant: grant) else { return uses.sharingUnavailable }
-        return split.line
+        return path == .automatic ? (uses.automaticScope ?? split.line) : split.line
     }
 
     /// The rest of the path's words, behind the Sharing line's info button:
     /// Ask's detail; Automatic's detail, then the scrub's scope and
     /// limit. Nil whenever the line is a fallback.
-    static func sharingDetail(path: SharingPath, grant: AutomaticGrantCopy?) -> String? {
-        grant.flatMap { split(path: path, grant: $0)?.detail }
+    static func sharingDetail(path: SharingPath, grant: AutomaticGrantCopy?, uses: FirstRunCopy.Uses? = nil) -> String? {
+        guard let grant, let detail = split(path: path, grant: grant)?.detail else { return nil }
+        if path == .automatic, let scope = uses?.automaticScope, let scrub = grant.scrub {
+            return [scope, scrub.scope, scrub.limit].joined(separator: " ")
+        }
+        return detail
     }
 
     private static func split(path: SharingPath, grant: AutomaticGrantCopy) -> (line: String, detail: String)? {
@@ -153,21 +206,31 @@ enum UsesScreenLayout {
         FirstRunCopy.fill(uses.moreAbout, ["title": title])
     }
 
-    /// The picker's options, named by the contribution mode table (Ask,
-    /// Automatic), and Automatic only for an account that can choose it.
+    /// The Sharing radios, named by the contribution mode table (Ask,
+    /// Automatic), each with the first line of the core's words for it; and
+    /// under Automatic, while no enrollment is held, that it turns on once
+    /// the person signs in, the last step.
     static func sharingOptions(
-        for state: FirstRunState, modes: ContributionModeCopy?
-    ) -> [GlassPickerOption<SharingPath>] {
+        for state: FirstRunState, modes: ContributionModeCopy?, grant: AutomaticGrantCopy?, uses: FirstRunCopy.Uses
+    ) -> [GlassRadioOption<SharingPath?>] {
         FirstRunNavigation.sharingPaths(for: state).compactMap { path in
             let mode: ProjectMode = path == .automatic ? .autoUpload : .ask
-            guard let title = modes?.label(for: mode) else { return nil }
-            return GlassPickerOption(title, value: path, dot: path == .automatic ? .on : .ask)
+            guard let modeTitle = modes?.label(for: mode) else { return nil }
+            let title = path == .askMe ? (uses.askEachTime ?? modeTitle) : modeTitle
+            var lines = [grant.flatMap { split(path: path, grant: $0)?.line }].compactMap { $0 }
+            if path == .automatic, let scope = uses.automaticScope { lines = [scope] }
+            if path == .automatic, !FirstRunNavigation.canChooseAutomatic(state) {
+                lines.append(uses.automaticAfterSignIn)
+            }
+            return GlassRadioOption(title, value: path, sub: lines.isEmpty ? nil : lines.joined(separator: "\n"))
         }
     }
 
-    /// The Private AI card is Custom's (Ron's W-6); Quick has none.
-    static func showsPrivateAI(_ state: FirstRunState) -> Bool {
-        state.tier == .custom
+    /// The gate's label in the Uses graphic: the core's "You review" on Ask,
+    /// the mode table's Automatic on Automatic.
+    static func gateLabel(_ state: FirstRunState, uses: FirstRunCopy.Uses, modes: ContributionModeCopy?) -> String {
+        guard state.sharing == .automatic, let automatic = modes?.label(for: .autoUpload) else { return uses.youReview }
+        return automatic
     }
 
     /// The notice for the runner's failure on this screen, one for each
@@ -181,13 +244,14 @@ enum UsesScreenLayout {
         case .none: return nil
         case .grantRefused: return uses.sharingRefused
         case .scopesFailed: return uses.scopesFailed
+        case .sharingFailed: return uses.sharingSaveFailed ?? uses.rulesFailed
         case .rulesFailed: return uses.rulesFailed
         case .privateAIFailed: return privateAI?.writeUnconfirmed ?? uses.privateAiFailed
         // The marker was not written, so setup did not finish: its own
         // line, never the refused grant's "Setup finished".
         case .completeFailed: return uses.completeFailed
-        // Leaving the roots' failures, which never stop Start.
-        case .startFailed, .passkeyUnavailable, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
+        // Tools' and sign-in's failures, which never stop Start.
+        case .startFailed, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
             .nearAIEnrollFailed:
             return nil
         }
@@ -220,7 +284,8 @@ enum UsesScreenLayout {
     }
 }
 
-/// Start's two commits, apart from the view so a runner can drive them.
+/// Start sharing's two commits, on Join, apart from the view so a runner can
+/// drive them.
 /// Each returns the refusal still to be shown after a later Start.
 @MainActor
 enum UsesStart {
@@ -259,29 +324,307 @@ enum UsesStart {
     }
 }
 
-/// Ron's Uses screen (#1030 `uses-screen.tsx`, W-3 and W-6) in glass: how
-/// traces may be used, the Sharing decision, the Private AI switch on
-/// Custom, and Start. Automatic leads through `SharingDisclosureSheet`
-/// before the start commit.
+// MARK: - The graphic
+
+/// The Uses graphic's choreography (Ron's 2026-10-21 canvas, rulings through
+/// 2026-10-22), apart from the view so it can be tested: a soft orb travels
+/// a straight line from This Mac to the commons; on Ask it waits at the
+/// review gate while the gate fills a muted green and a white thumbs-up pops
+/// in with a small wag, on Automatic it passes straight through; each orb
+/// that arrives takes the next of five places on the ring round the N, and
+/// once full the ring clears and fills again.
+enum UsesFlowLayout {
+    static let lineStart: CGFloat = 270
+    static let lineEnd: CGFloat = 600
+    static let lineY: CGFloat = 46
+    static let height: CGFloat = 112
+
+    /// A loop's length and when it first starts, in seconds.
+    static func period(_ path: SharingPath) -> Double { path == .automatic ? 2.6 : 4.4 }
+    static func delay(_ path: SharingPath) -> Double { path == .automatic ? 0.6 : 1 }
+    /// Where in a loop an orb arrives at the commons.
+    static func arrival(_ path: SharingPath) -> Double { path == .automatic ? 0.92 : 0.93 }
+
+    /// How far through its loop the flow is, `elapsed` seconds after the
+    /// path was chosen; nil before the first loop.
+    static func loop(_ path: SharingPath, elapsed: Double) -> Double? {
+        let into = elapsed - delay(path)
+        guard into >= 0 else { return nil }
+        return (into / period(path)).truncatingRemainder(dividingBy: 1)
+    }
+
+    /// The orb: how far along the line (0 to 1) and how visible.
+    static func orb(_ path: SharingPath, loop t: Double) -> (along: Double, opacity: Double) {
+        switch path {
+        case .askMe:
+            let along = keyframes(t, [(0, 0), (0.32, 0.397), (0.64, 0.397), (0.71, 0.573), (0.93, 1), (1, 1)])
+            return (along, keyframes(t, [(0, 0), (0.05, 1), (0.93, 1), (1, 0)]))
+        case .automatic:
+            let along = keyframes(t, [(0, 0), (0.92, 1), (1, 1)])
+            return (along, keyframes(t, [(0, 0), (0.08, 1), (0.92, 1), (1, 0)]))
+        }
+    }
+
+    /// The gate: its green fill, and the thumbs-up's scale, turn (degrees)
+    /// and whiteness (0 dim, 1 bright white).
+    struct Gate: Equatable {
+        var fill: Double
+        var scale: Double
+        var turn: Double
+        var white: Double
+
+        static let rest = Gate(fill: 0, scale: 1, turn: 0, white: 0)
+    }
+
+    static func gate(_ path: SharingPath, loop t: Double) -> Gate {
+        switch path {
+        case .askMe:
+            return Gate(fill:
+                keyframes(t, [(0, 0), (0.33, 0), (0.37, 1), (0.6, 1), (0.68, 0), (1, 0)]),
+                scale: keyframes(t, [(0, 0.86), (0.33, 0.86), (0.36, 1.34), (0.4, 0.94), (0.44, 1.08), (0.48, 1.02), (0.6, 1.02), (0.68, 0.86), (1, 0.86)]),
+                turn: keyframes(t, [(0, 0), (0.33, 0), (0.36, -18), (0.4, 9), (0.44, -4), (0.48, 0), (1, 0)]),
+                white: keyframes(t, [(0, 0), (0.33, 0), (0.36, 1), (0.6, 1), (0.68, 0), (1, 0)]))
+        case .automatic:
+            return Gate(
+                fill: keyframes(t, [(0, 0), (0.39, 0), (0.42, 1), (0.54, 1), (0.62, 0), (1, 0)]),
+                scale: keyframes(t, [(0, 0.86), (0.39, 0.86), (0.42, 1.3), (0.45, 0.95), (0.48, 1.02), (0.54, 1.02), (0.62, 0.86), (1, 0.86)]),
+                turn: keyframes(t, [(0, 0), (0.39, 0), (0.42, -16), (0.45, 8), (0.48, 0), (1, 0)]),
+                white: keyframes(t, [(0, 0), (0.39, 0), (0.42, 1), (0.54, 1), (0.62, 0), (1, 0)]))
+        }
+    }
+
+    /// The commons' soft pulse as an orb arrives: its scale and opacity.
+    struct Pulse: Equatable {
+        var scale: Double
+        var opacity: Double
+
+        static let rest = Pulse(scale: 1, opacity: 0)
+    }
+
+    static func pulse(_ path: SharingPath, loop t: Double) -> Pulse {
+        let at = path == .automatic ? 0.9 : 0.92
+        let peak = path == .automatic ? 0.93 : 0.94
+        return Pulse(
+            scale: keyframes(t, [(0, 0.7), (at, 0.7), (peak, 0.75), (1, 1.45)]),
+            opacity: keyframes(t, [(0, 0), (at, 0), (peak, 0.9), (1, 0)]))
+    }
+
+    /// How many of the ring's five places are filled: one more at each
+    /// arrival, and once all five are, they clear 1.3 seconds later.
+    static func satellites(_ path: SharingPath, elapsed: Double) -> Int {
+        let first = delay(path) + period(path) * arrival(path)
+        guard elapsed >= first else { return 0 }
+        let since = elapsed - first
+        let index = Int(since / period(path))
+        let filled = index % 5 + 1
+        if filled == 5, since - Double(index) * period(path) >= 1.3 { return 0 }
+        return filled
+    }
+
+    /// Linear interpolation through `(time, value)` points.
+    static func keyframes(_ t: Double, _ points: [(Double, Double)]) -> Double {
+        guard let first = points.first else { return 0 }
+        if t <= first.0 { return first.1 }
+        for (a, b) in zip(points, points.dropFirst()) where t <= b.0 {
+            let span = b.0 - a.0
+            return span > 0 ? a.1 + (b.1 - a.1) * (t - a.0) / span : b.1
+        }
+        return points[points.count - 1].1
+    }
+}
+
+/// The Uses graphic: the watched tools folded into This Mac, a straight
+/// dashed line through the review gate to the commons, the N.
+struct UsesFlow: View {
+    let copy: FirstRunCopy
+    let state: FirstRunState
+    let watched: [SourceKind]
+    /// When the sharing path was last chosen: the loop restarts from it.
+    let since: Date
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        GlassAnimationTimeline(minimumInterval: 1.0 / 60, paused: reduceMotion) { date in
+            let elapsed = date.timeIntervalSince(since)
+            let path = state.sharing
+            let t = reduceMotion ? nil : UsesFlowLayout.loop(path, elapsed: elapsed)
+            GeometryReader { geometry in
+                let left = (geometry.size.width - FirstRunStageLayout.canvas.width) / 2
+                let y = UsesFlowLayout.lineY
+                ZStack {
+                    Path { line in
+                        line.move(to: CGPoint(x: left + UsesFlowLayout.lineStart, y: y))
+                        line.addLine(to: CGPoint(x: left + UsesFlowLayout.lineEnd, y: y))
+                    }
+                    .stroke(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 2, dash: [4, 6]))
+                    mac(at: CGPoint(x: left + 210, y: y))
+                    gate(at: CGPoint(x: left + 430, y: y), t: t, path: path)
+                    commons(at: CGPoint(x: left + 650, y: y), t: t, path: path, elapsed: elapsed)
+                    if let t {
+                        let orb = UsesFlowLayout.orb(path, loop: t)
+                        FirstRunOrb(diameter: 18)
+                            .opacity(orb.opacity)
+                            .position(
+                                x: left + UsesFlowLayout.lineStart
+                                    + (UsesFlowLayout.lineEnd - UsesFlowLayout.lineStart) * CGFloat(orb.along),
+                                y: y)
+                    }
+                    label(copy.uses.thisMac, at: CGPoint(x: left + 210, y: 101))
+                    label(UsesScreenLayout.gateLabel(state, uses: copy.uses, modes: ProjectModeWords.table), at: CGPoint(x: left + 430, y: 101))
+                    label(copy.uses.theCommons, at: CGPoint(x: left + 650, y: 101))
+                }
+            }
+        }
+        .frame(height: UsesFlowLayout.height)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func mac(at center: CGPoint) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(GlassTokens.Color.firstRunCard.color)
+                .frame(width: 112, height: 78)
+                .overlay(alignment: .bottom) {
+                    Capsule()
+                        .fill(GlassTokens.Color.firstRunRule.color)
+                        .frame(width: 44, height: 3)
+                        .padding(.bottom, 10)
+                }
+                .position(x: center.x, y: center.y)
+            ForEach(Array(watched.enumerated()), id: \.element) { index, kind in
+                let spread: CGFloat = watched.count > 3 ? 19 : 28
+                FirstRunToolFace(tool: kind.glassTool)
+                    .firstRunActor(FirstRunStageLayout.tileActor(kind))
+                    .frame(width: 24, height: 24)
+                    .position(x: center.x + (CGFloat(index) - CGFloat(watched.count - 1) / 2) * spread, y: center.y - 8)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func gate(at center: CGPoint, t: Double?, path: SharingPath) -> some View {
+        let look: UsesFlowLayout.Gate = t.map { UsesFlowLayout.gate(path, loop: $0) } ?? .rest
+        return ZStack {
+            Circle()
+                .fill(GlassTokens.Color.firstRunCardSolid.color)
+                .shadow(color: GlassTokens.Color.firstRunTileShadow.color, radius: 10, y: 8)
+            approval
+                .opacity(look.fill)
+            thumb(look)
+        }
+        .frame(width: 58, height: 58)
+        .position(center)
+        .accessibilityHidden(true)
+    }
+
+    /// The gate's green as a trace is approved: deeper toward the rim.
+    private var approval: some View {
+        Circle()
+            .fill(RadialGradient(
+                colors: [GlassTokens.Color.firstRunApprove.color, GlassTokens.Color.firstRunApproveDeep.color],
+                center: UnitPoint(x: 0.5, y: 0.38), startRadius: 0, endRadius: 30))
+    }
+
+    /// The thumbs-up: dim at rest, bright white as it pops in and wags.
+    private func thumb(_ look: UsesFlowLayout.Gate) -> some View {
+        let anchor = UnitPoint(x: 0.5, y: 0.6)
+        return ZStack {
+            Image(systemName: "hand.thumbsup")
+                .glassGlyph(22, weight: .regular)
+                .foregroundStyle(GlassColor.textSecondary)
+                .opacity(0.6 * (1 - look.white))
+            Image(systemName: "hand.thumbsup.fill")
+                .glassGlyph(22, weight: .regular)
+                .foregroundStyle(GlassTokens.Color.heroInk.color)
+                .opacity(look.white)
+        }
+        .scaleEffect(CGFloat(look.scale), anchor: anchor)
+        .rotationEffect(.degrees(look.turn), anchor: anchor)
+    }
+
+    private func commons(at center: CGPoint, t: Double?, path: SharingPath, elapsed: Double) -> some View {
+        let filled = reduceMotion ? 0 : UsesFlowLayout.satellites(path, elapsed: elapsed)
+        let pulse: UsesFlowLayout.Pulse = t.map { UsesFlowLayout.pulse(path, loop: $0) } ?? .rest
+        let turn: Double = reduceMotion ? 0 : (elapsed / 40).truncatingRemainder(dividingBy: 1) * 360
+        return ZStack {
+            commonsPulse(pulse)
+            satellites(filled)
+                .rotationEffect(.degrees(turn))
+            FirstRunHub()
+                .firstRunActor(FirstRunStageLayout.hubActor)
+                .frame(width: 52, height: 52)
+        }
+        .position(center)
+        .accessibilityHidden(true)
+    }
+
+    /// The commons' soft gradient ring of light as a trace arrives.
+    private func commonsPulse(_ pulse: UsesFlowLayout.Pulse) -> some View {
+        let beam = GlassTokens.Color.firstRunBeam
+        let ring = RadialGradient(
+            stops: [
+                .init(color: beam.opacity(0).color, location: 0.3),
+                .init(color: beam.opacity(0.6).color, location: 0.46),
+                .init(color: beam.opacity(0).color, location: 0.64),
+            ],
+            center: .center, startRadius: 0, endRadius: 60)
+        return Circle()
+            .fill(ring)
+            .frame(width: 120, height: 120)
+            .blur(radius: 3)
+            .scaleEffect(CGFloat(pulse.scale))
+            .opacity(pulse.opacity)
+    }
+
+    /// The ring round the N, each arrived trace a soft orb in its place.
+    private func satellites(_ filled: Int) -> some View {
+        ZStack {
+            Circle()
+                .strokeBorder(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+            ForEach(0..<5, id: \.self) { place in
+                satellite(place, filled: filled)
+            }
+        }
+        .frame(width: 92, height: 92)
+    }
+
+    private func satellite(_ place: Int, filled: Int) -> some View {
+        let at = FirstRunStageLayout.point(
+            CGPoint(x: 46, y: 46), radius: 46, degrees: FirstRunStageLayout.ringAngle(place, of: 5))
+        let shown = place < filled
+        return FirstRunOrb(diameter: 14)
+            .scaleEffect(shown ? 1 : 0)
+            .opacity(shown ? 1 : 0)
+            .animation(GlassMotion.expressive(reduceMotion, duration: 0.46), value: filled)
+            .position(at)
+    }
+
+    private func label(_ text: String, at point: CGPoint) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.caption.weight(.semibold))
+            .foregroundStyle(GlassColor.textSecondary)
+            .frame(width: 160)
+            .multilineTextAlignment(.center)
+            .position(point)
+    }
+}
+
+// MARK: - The screen
+
+/// Uses: how traces may be used and how they are shared, under the flow
+/// from This Mac through the review gate to the commons. Continue moves on;
+/// what is chosen here is sent at Start sharing, on Join.
 struct UsesScreen: View {
     @EnvironmentObject private var model: AppModel
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
 
-    @State private var optionalOpen = false
-    /// The Private AI card's "Learn more" was pressed.
-    @State private var privateAIMore = false
-    @State private var disclosure: SharingDisclosureFlow?
     /// The core's sharing words for this configuration, read once on
-    /// appear; nil disables Start. Start writes the configuration they
-    /// depend on, so they cannot change while this screen is up.
+    /// appear; nil shows the fallback line, and Start stays disabled.
     @State private var grant: AutomaticGrantCopy?
     @State private var grantRead = false
-    /// A refusal decided before a Start that then failed, shown after the
-    /// Start that succeeds.
-    @State private var pendingRefusal: FirstRunFailure?
-
-    private var privateAI: PrivateInferenceCopy? { model.privateInferenceCopy }
+    @State private var flowSince = Date()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let options = model.consentScopes
@@ -289,118 +632,143 @@ struct UsesScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            notice: UsesScreenLayout.notice(for: runner.failure, uses: copy.uses, privateAI: privateAI),
+            isCommitting: runner.isCommitting,
             footer: FirstRunFooter(
-                title: copy.uses.start,
-                isEnabled: UsesScreenLayout.canStart(
-                    runner.state, uses: copy.uses, requiredScope: required, grant: grant,
-                    isCommitting: runner.isCommitting),
-                busy: runner.isCommitting,
-                action: start)
+                title: copy.frame.continueButton,
+                isEnabled: FirstRunNavigation.canContinue(runner.state, candidates: [], requiredScope: required?.name),
+                action: { runner.state = FirstRunNavigation.next(runner.state) })
         ) {
+            UsesFlow(copy: copy, state: runner.state, watched: ToolsScreenLayout.watchedKinds(runner.state), since: flowSince)
+        } title: {
             FirstRunTitle(light: copy.uses.titleLight, bold: copy.uses.titleBold)
         } content: {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                usesCard(options: options, required: required)
-                sharingCard(grant: grant)
-                if UsesScreenLayout.showsPrivateAI(runner.state) {
-                    privateAICard
-                }
+            ScrollView {
+                list(options: options, required: required)
+                    .frame(maxWidth: 460, alignment: .leading)
+                    .firstRunCard()
+                    .frame(maxWidth: .infinity)
             }
+            .frame(maxWidth: 520)
+            .scrollBounceBehavior(.basedOnSize)
         }
         // The required use is in the state as soon as it is known, so the
         // state matches its ticked box; Start includes it again regardless.
         .onChange(of: required?.name, initial: true) { _, _ in includeRequired() }
+        .onChange(of: runner.state.sharing) { _, _ in flowSince = Date() }
         .task {
-            // `enroll` re-reads the route, not status; the grant's
-            // `connected` is read from status, so it is refreshed here.
             model.refreshStatus()
             model.refreshConsentOptions()
-            model.refreshWitness()
             if !grantRead {
                 grant = AutomaticGrantCopy.decode(
                     fromJSON: TCCoreCopy.automaticContributionCopyJSON(configDir: model.configDirectory))
                 grantRead = true
             }
         }
-        .glassModal(isPresented: Binding(get: { disclosure != nil }, set: { if !$0 { disclosure = nil } })) {
-            if let grant {
-                SharingDisclosureSheet(copy: copy, grant: grant, flow: $disclosure, onFinish: finish)
-                    .environmentObject(model)
+    }
+
+    private func list(options: [ConsentScope], required: ConsentScope?) -> some View {
+        let optional = UsesScreenLayout.optionalScopes(options)
+        return VStack(alignment: .leading, spacing: 0) {
+            // No credit paragraph (owner, 2026-10-28): "Required to earn
+            // credit." under Train coding models says it, and Traces notes
+            // when it is off.
+            if !optional.isEmpty {
+                HStack(spacing: GlassTokens.Space.s3) {
+                    // One style and one width for both: neither is the
+                    // suggested answer.
+                    ForEach(UsesScreenLayout.Bulk.allCases, id: \.self) { bulk in
+                        Button {
+                            runner.state = UsesScreenLayout.pressing(bulk, runner.state, optional: optional)
+                        } label: {
+                            Text(bulk.title(copy.uses)).frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(GlassButtonStyle(.secondary))
+                    }
+                }
+                .padding(.top, GlassTokens.Space.s3)
+                ForEach(UsesScreenLayout.shownOptionalScopes(options, uses: copy.uses)) { option in
+                    scopeRow(option)
+                }
             }
+            // The required use, one line under the choices (owner,
+            // 2026-10-28): every box above is a real choice, so Only
+            // required leaves them all empty. Its scope is behind the "i".
+            if let required {
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
+                    Text(UsesScreenLayout.alwaysOnTitle(required, uses: copy.uses))
+                        .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    infoButton(title: required.title, text: required.description)
+                }
+                .padding(.vertical, GlassTokens.Space.s3)
+            }
+            GlassHairline()
+                .padding(.top, GlassTokens.Space.s3)
+            HStack(spacing: GlassTokens.Space.s2) {
+                eyebrow(copy.uses.sharing)
+                if let detail = UsesScreenLayout.sharingDetail(path: runner.state.sharing, grant: grant, uses: copy.uses) {
+                    infoButton(title: copy.uses.sharing, text: detail)
+                }
+            }
+            if grantRead, grant == nil {
+                Text(copy.uses.sharingUnavailable)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+            }
+            GlassRadioGroup(
+                copy.uses.sharing,
+                selection: Binding(
+                    get: { UsesScreenLayout.sharingSelection(runner.state) },
+                    set: { runner.state = UsesScreenLayout.choosingSharing(runner.state, $0) }),
+                options: UsesScreenLayout.sharingOptions(
+                    for: runner.state, modes: ProjectModeWords.table, grant: grant, uses: copy.uses))
+                .padding(.bottom, GlassTokens.Space.s3)
         }
     }
 
-    // MARK: - Uses
+    private func eyebrow(_ text: String) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.eyebrow)
+            .foregroundStyle(GlassColor.textTertiary)
+            .padding(.top, GlassTokens.Space.s4)
+            .padding(.bottom, GlassTokens.Space.s2)
+    }
 
-    private func usesCard(options: [ConsentScope], required: ConsentScope?) -> some View {
-        let optional = UsesScreenLayout.optionalScopes(options)
-        return GlassEyebrowCard(copy.uses.eyebrow) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                if let required {
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        // Always included, so ticked and locked: the person
-                        // cannot untick it (owner, 2026-10-08).
-                        Toggle(required.title, isOn: .constant(true))
-                            .toggleStyle(GlassCheckboxStyle())
-                            .disabled(true)
-                        infoButton(title: required.title, text: required.description)
-                        // Ron's inline "required" in the on colour.
-                        Text(copy.uses.required)
+    /// Each permission names its use; its scope is the row's hover tooltip.
+    private func scopeRow(_ option: ConsentScope) -> some View {
+        // The description is behind the "i" beside the title (owner,
+        // 2026-10-28, replacing #1290's always-visible line to keep the box
+        // short). The button sits outside the checkbox, so pressing it never
+        // ticks the box.
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
+            Toggle(isOn: scope(option.name)) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                    Text(option.title).glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                    // The use that earns credit says so, in the required
+                    // use's inline style, no louder.
+                    if option.name == copy.uses.creditScope {
+                        Text(copy.uses.creditRequired)
                             .glassType(GlassTokens.TypeScale.mono)
                             .foregroundStyle(GlassTokens.Color.statusOnText.color)
                     }
                 }
-                if !optional.isEmpty {
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        // #1030: "All optional uses" is the box's name, not
-                        // a visible label; the expander says the rest.
-                        Toggle(sources: optional.map { scope($0.name) }, isOn: \.self) {
-                            Text(copy.uses.allOptional)
-                                .frame(width: 0, height: 0)
-                                .clipped()
-                        }
-                        .toggleStyle(GlassCheckboxStyle())
-                        .accessibilityLabel(copy.uses.allOptional)
-                        GlassExpander(
-                            UsesScreenLayout.optionalSummary(copy.uses, scopes: runner.state.scopes, optional: optional),
-                            isOpen: $optionalOpen)
-                    }
-                }
-                if optionalOpen {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                        ForEach(UsesScreenLayout.expandedScopes(options)) { option in
-                            scopeRow(option, options: options)
-                        }
-                    }
-                    .padding(.leading, GlassTokens.Space.s8)
-                }
-                // The handle: its own row after the group, always shown.
-                ForEach(UsesScreenLayout.handleScopes(options)) { option in
-                    scopeRow(option, options: options)
-                }
             }
-        }
-    }
-
-    /// A scope's box, then its description behind an info button right
-    /// after the title (owner, 2026-10-08). The description is the core
-    /// consent table's.
-    private func scopeRow(_ option: ConsentScope, options: [ConsentScope]) -> some View {
-        HStack(spacing: GlassTokens.Space.s4) {
-            Toggle(option.title, isOn: scope(option.name))
-                .toggleStyle(GlassCheckboxStyle())
+            .toggleStyle(GlassCheckboxStyle())
+            .fixedSize(horizontal: true, vertical: false)
             infoButton(title: option.title, text: option.description)
+            Spacer(minLength: 0)
         }
+        .padding(.vertical, GlassTokens.Space.s3)
     }
 
     private func infoButton(title: String, text: String) -> some View {
         GlassInfoButton(UsesScreenLayout.moreAbout(title, uses: copy.uses), text: text)
     }
 
-    /// One optional scope's box. The person's toggle is the only thing that
-    /// ticks an optional scope on this screen; the required one is always
-    /// included (`includeRequired`).
+    /// One optional scope's box. Each starts unticked; the person's toggle,
+    /// or their press of Allow all, is the only thing that ticks one. The required
+    /// one is always included (`includeRequired`).
     private func scope(_ name: String) -> Binding<Bool> {
         Binding(
             get: { runner.state.scopes.contains(name) },
@@ -413,125 +781,10 @@ struct UsesScreen: View {
             })
     }
 
-    // MARK: - Sharing
-
-    private func sharingCard(grant: AutomaticGrantCopy?) -> some View {
-        GlassCard {
-            HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                    Text(copy.uses.sharing)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    // The path's first line; the rest behind the info button.
-                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
-                        cardBody(
-                            UsesScreenLayout.sharingLine(
-                                copy.uses, path: UsesScreenLayout.effectiveSharing(runner.state), grant: grant,
-                                isLoading: !grantRead))
-                        if let detail = UsesScreenLayout.sharingDetail(
-                            path: UsesScreenLayout.effectiveSharing(runner.state), grant: grant)
-                        {
-                            infoButton(title: copy.uses.sharing, text: detail)
-                        }
-                    }
-                }
-                Spacer(minLength: 0)
-                GlassPicker(
-                    copy.uses.sharing,
-                    selection: Binding(
-                        get: { UsesScreenLayout.effectiveSharing(runner.state) },
-                        set: { if let path = $0 { runner.state.sharing = path } }),
-                    options: UsesScreenLayout.sharingOptions(for: runner.state, modes: ProjectModeWords.table),
-                    placeholder: copy.frame.choose)
-                .disabled(grant == nil)
-            }
-        }
-    }
-
-    // MARK: - Private AI
-
-    /// Worded by the Private AI copy; the switch stays off and disabled
-    /// until that copy is there, so nobody turns it on unread.
-    private var privateAICard: some View {
-        GlassCard {
-            HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
-                // #1030 `ftux-gap-2` between the paragraphs.
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    if let privateAI {
-                        Text(privateAI.destination)
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
-                            .foregroundStyle(GlassColor.textPrimary)
-                        // The offer's first two sentences; "Learn more"
-                        // discloses the rest in place (owner, 2026-10-08).
-                        cardBody(copy.privateAi.offerLead)
-                        if privateAIMore {
-                            cardBody(copy.privateAi.offerMore)
-                            cardBody(privateAI.offerExposure)
-                            cardBody(privateAI.offerNoRepoint)
-                        } else {
-                            Button(copy.privateAi.learnMore) { privateAIMore = true }
-                                .buttonStyle(GlassButtonStyle(.link))
-                        }
-                    } else {
-                        cardBody(copy.privateAi.unavailable)
-                    }
-                }
-                Spacer(minLength: 0)
-                Toggle(
-                    privateAI?.offerTitle ?? copy.privateAi.toggleLoading,
-                    isOn: Binding(
-                        get: { runner.state.privateAI && privateAI != nil },
-                        set: { runner.state.privateAI = $0 })
-                )
-                .toggleStyle(GlassToggleStyle(.settings, showsLabel: false))
-                .disabled(privateAI == nil)
-            }
-        }
-    }
-
-    // MARK: - Start
-
     /// Put the required use in the state, once it is known.
     private func includeRequired() {
         let included = UsesScreenLayout.includingRequired(
             runner.state, required: UsesScreenLayout.requiredScope(model.consentScopes))
         if included != runner.state { runner.state = included }
-    }
-
-    private func start() {
-        // What Start sends matches what is shown: the required use included.
-        includeRequired()
-        switch UsesScreenLayout.startRoute(runner.state) {
-        case .disclose:
-            disclosure = SharingDisclosureFlow()
-        case .discloseWitness:
-            disclosure = SharingDisclosureFlow(witnessOnly: true)
-        case .commit:
-            Task { pendingRefusal = await UsesStart.plainStart(runner: runner, pending: pendingRefusal) }
-        }
-    }
-
-    /// Both disclosures seen: the core decides the grant, then Start runs.
-    /// A not-ready answer finishes on Ask; its failure is shown after
-    /// the commit, which clears failures when it begins.
-    private func finish(_ flow: SharingDisclosureFlow) {
-        // The Private AI path saw the witness disclosure and asks for no
-        // grant: Start as on Ask.
-        if flow.witnessOnly {
-            Task { pendingRefusal = await UsesStart.plainStart(runner: runner, pending: pendingRefusal) }
-            return
-        }
-        let request = SharingDisclosureFlow.grantRequest(
-            flow.progress(connected: model.status.loggedIn, scopes: runner.state.scopes))
-        Task { pendingRefusal = await UsesStart.finish(runner: runner, request: request, pending: pendingRefusal) }
-    }
-
-    /// The Sharing and Private AI cards' words (#1030 `tc-label` in
-    /// secondary ink), not the tertiary caption.
-    private func cardBody(_ text: String) -> some View {
-        Text(text)
-            .glassType(GlassTokens.TypeScale.label.weight(.regular))
-            .foregroundStyle(GlassColor.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
     }
 }

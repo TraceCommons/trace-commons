@@ -1,0 +1,57 @@
+
+# --- The staging site itself (staging design 3.3, 5.3) ---------------------
+# Appended by deploy/staging-gcp/render-env.sh after the pilot's
+# Caddyfile.template, rendered with TC_PUBLIC_HOST=staging.tracecommons.ai,
+# which supplies the global options and the ingest and issuer sites. This
+# block serves two static files from ${TC_SITE_ROOT}, written by the
+# operator, and nothing else:
+#
+#   /.well-known/apple-app-site-association  the app-site association for the
+#       staging app (webcredentials only). Nothing uses it since passkeys
+#       were removed; application/json, no redirect.
+#   /near-ai-pins/current.json  the signed NEAR AI pin set the staging app
+#       fetches (channel::STAGING_PIN_URL). Public: measurements are public
+#       image identifiers and the signature is the trust.
+#
+# Everything else is 404.
+${TC_PUBLIC_HOST} {
+	encode gzip
+	root * ${TC_SITE_ROOT}
+	handle /.well-known/apple-app-site-association {
+		header Content-Type application/json
+		file_server
+	}
+	handle /near-ai-pins/current.json {
+		header Content-Type application/json
+		# A re-signed set must reach the app at its next fetch.
+		header Cache-Control no-cache
+		file_server
+	}
+	handle {
+		respond 404
+	}
+	log {
+		output file /var/log/caddy/site-access.log
+		format filter {
+			request>uri query {
+				replace code REDACTED
+				hash tenant_id
+				hash tenant_storage_ref
+				hash tenant
+			}
+			request>remote_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			request>client_ip ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			request>headers>X-Forwarded-For ip_mask {
+				ipv4 24
+				ipv6 48
+			}
+			wrap json
+		}
+	}
+}

@@ -24,6 +24,9 @@ struct FlowMapScene: Equatable {
             /// The Private AI destination tools connect to, drawn from the
             /// core's Private AI state.
             case destination(Lamp)
+            /// Another device linked to the same account (#1668, #1669),
+            /// beside this computer on the Traces map.
+            case device
         }
 
         /// The Private AI destination's state, from `tool_destinations
@@ -167,6 +170,10 @@ struct FlowMapScene: Equatable {
     var reveals: [FolderReveal] = []
     /// The Traces map's tool group (`ToolStack`); nil on the Private AI map.
     var stack: ToolStack?
+    /// Where the + that links another device sits (owner, 2026-10-27):
+    /// under the other devices' column, or under this computer; nil when
+    /// the map does not offer linking.
+    var addDevice: CGPoint?
     /// The design space this scene is laid out in: #1146's 580×760 by
     /// default, or one shaped like the pane (`space(for:)`).
     var space: CGSize = FlowMapScene.size
@@ -335,7 +342,7 @@ struct FlowMapScene: Equatable {
         var destinations: DaemonData.ToolDestinations?
 
         /// Whether anything at all can move to the commons now: the screen
-        /// is current, nothing is paused, held, voided or over budget, the
+        /// is current, nothing is paused, held or voided, the
         /// contributor is signed in, and the core names a route for
         /// sessions.
         var open: Bool {
@@ -343,7 +350,6 @@ struct FlowMapScene: Equatable {
             guard status.paused == false, status.loggedIn == true else { return false }
             guard let held = status.automaticContributionHeld?.heldSessions, held == 0 else { return false }
             guard let voids = status.grantVoids, voids.isEmpty else { return false }
-            guard status.dailyBudget?.blocked != true else { return false }
             guard let route = destinations.sessionsRoute, Self.routes.contains(route) else { return false }
             return true
         }
@@ -511,6 +517,102 @@ struct FlowMapScene: Equatable {
             path: folder.path, rule: folder.mode.map(ProjectCopy.modeChoiceLabel),
             waiting: folder.sessions.count, contributed: contributed)
             ?? pair(MonitorWords.waiting, folder.sessions.count)
+    }
+
+    // MARK: Other devices
+
+    /// Another device linked to this account, as the Devices section lists
+    /// it: its name there and its last-seen line. Nothing here says what it
+    /// watches or sends; those stay on that device.
+    struct OtherDevice: Equatable {
+        let id: String
+        let name: String
+        let detail: String
+        /// How many of its traces stand in the commons, as the server
+        /// counts them (#1676); nil when the server did not say.
+        var contributed: Int? = nil
+    }
+
+    /// How many other devices the map draws before counting the rest.
+    static let devicesShown = 4
+
+    /// The Devices section's list without this Mac (the computer the map is
+    /// drawn around), named and dated as that section does; a dash for a
+    /// device the server has not seen. An unread list is no devices.
+    /// `traces` says a count in the core's words; the card gains it as a
+    /// second line only when the server counted.
+    static func otherDevices(
+        _ listed: [AccountDevice]?, name: (AccountDevice) -> String, lastSeen: (AccountDevice) -> String?,
+        traces: (Int) -> String
+    ) -> [OtherDevice] {
+        (listed ?? []).filter { !$0.thisDevice }.map { device in
+            let seen = lastSeen(device) ?? "—"
+            let detail = device.contributedTraces.map { seen + "\n" + traces($0) } ?? seen
+            return OtherDevice(
+                id: device.deviceKeyId, name: name(device), detail: detail,
+                contributed: device.contributedTraces)
+        }
+    }
+
+    /// How far below this computer's point the first other device may sit:
+    /// past its deck and its name.
+    static let deviceClearance: CGFloat = 72
+
+    /// The other devices, in one column directly below this computer
+    /// (owner, 2026-10-27), with no line to the commons (owner, the same
+    /// day): the map's lines stay this computer's, whose sending it can
+    /// see. Past `devicesShown` the rest are counted as "+N" under the
+    /// column. A scene with no commons (the Private AI map) is returned as
+    /// it is.
+    /// With `offersLink`, the column ends in a + (`addDevice`) that starts
+    /// linking a server, even when there are no other devices yet.
+    func addingDevices(_ devices: [OtherDevice], offersLink: Bool = false) -> FlowMapScene {
+        guard !devices.isEmpty || offersLink, nodes.contains(where: { $0.id == "library" }),
+              let hub = nodes.first(where: { $0.id == "hub" }) else { return self }
+        var scene = self
+        let band = Self.band(space)
+        let shown = Array(devices.prefix(Self.devicesShown))
+        let more = devices.count - shown.count
+        let top = hub.at.y + Self.deviceClearance
+        let weights = Array(repeating: CGFloat(1), count: shown.count) + (more > 0 ? [0.6] : [])
+        // Stacked down from just under this computer, not centred: the
+        // column reads as hanging from it.
+        let room = max(band.upperBound - top, 1)
+        // The + counts as one more line, and when the column and the +
+        // would pass the band the lines close up rather than push the +
+        // under the legend and zoom row (Kristi's #1681 review).
+        let units = CGFloat(weights.count) + (offersLink ? 1 : 0)
+        let step = min(58, max(offersLink ? 24 : 40, room / max(units, 1)))
+        let radius: CGFloat = 12
+        for (index, device) in shown.enumerated() {
+            let point = CGPoint(x: hub.at.x, y: top + step * CGFloat(index))
+            scene.nodes.append(Node(
+                id: "device:\(device.id)", kind: .device, at: point, radius: radius,
+                label: device.name, detail: device.detail))
+        }
+        // What another device contributed stands in the same commons: the
+        // commons is lit once any device has something there, counted
+        // past the drawn ones too.
+        if devices.contains(where: { ($0.contributed ?? 0) > 0 }),
+           let index = scene.nodes.firstIndex(where: { $0.id == "library" }) {
+            let lit = scene.nodes[index]
+            scene.nodes[index] = Node(
+                id: lit.id, kind: .library(active: true), at: lit.at, radius: lit.radius,
+                label: lit.label, detail: lit.detail, dim: lit.dim, title: lit.title,
+                dashed: lit.dashed, ringed: lit.ringed, sublabel: lit.sublabel, waiting: lit.waiting)
+        }
+        if more > 0 {
+            scene.overflows.append(Overflow(
+                at: CGPoint(x: hub.at.x, y: top + step * CGFloat(shown.count) - step * 0.4), count: more))
+        }
+        if offersLink {
+            // Under the last device (and its "+N"), or where the first would
+            // hang; held inside the map.
+            let slot = CGFloat(shown.count) + (more > 0 ? 0.7 : 0)
+            let y = min(top + step * slot, band.upperBound)
+            scene.addDevice = CGPoint(x: hub.at.x, y: y)
+        }
+        return scene
     }
 
     // MARK: Private AI
@@ -724,7 +826,7 @@ struct FlowMapScene: Equatable {
     }
 
     /// A heading and a count the core may not have reported, set apart by
-    /// a spaced dot: "Worth a second look · 3", a dash in place of the count.
+    /// a spaced dot: "Sessions · 3", a dash in place of the count.
     static func dotPair(_ word: String, _ count: Int?) -> String {
         "\(word) · \(count.map(String.init) ?? "—")"
     }

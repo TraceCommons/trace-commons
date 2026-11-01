@@ -68,11 +68,8 @@ final class SummaryInspectorTests: XCTestCase {
         XCTAssertEqual(SummaryFacts.waiting(nil), "—")
 
         // Before the tree is read, nothing waiting is known: a dash, not 0.
-        XCTAssertEqual(SummaryFacts.secondLook(loaded: false, sessions: []), "—")
-        XCTAssertEqual(SummaryFacts.secondLook(loaded: true, sessions: []), "0")
         let held = try recordedEntry(["second_look": ["nothing-matched"]])
         let clear = try recordedEntry(["second_look": []])
-        XCTAssertEqual(SummaryFacts.secondLook(loaded: true, sessions: [held, clear]), "1")
         XCTAssertEqual(SummaryFacts.kept(loaded: false, sessions: [held]), "—")
         XCTAssertEqual(SummaryFacts.kept(loaded: true, sessions: [held, clear]), "2")
 
@@ -94,21 +91,6 @@ final class SummaryInspectorTests: XCTestCase {
             $0["all_time"] = ["submitted": 5, "accepted": 0, "quarantined": 0, "withdrawn": 0, "other": 0]
         }
         XCTAssertEqual(SummaryFacts.contributed(submittedOnly), "5", "waiting to be scored is contributed")
-
-        // No budget is no line (Ron's guard); a budget missing a count says
-        // a dash for it.
-        let unbudgeted = try recorded(DaemonData.Status.self, "status") { $0["daily_budget"] = NSNull() }
-        XCTAssertNil(SummaryFacts.uploads(unbudgeted))
-        XCTAssertNil(SummaryFacts.uploads(nil))
-        let budgeted = try XCTUnwrap(SummaryFacts.uploads(status))
-        XCTAssertEqual(budgeted.count, "4")
-        XCTAssertEqual(budgeted.max, "50")
-        let partial = try recorded(DaemonData.Status.self, "status") {
-            var budget = $0["daily_budget"] as? [String: Any] ?? [:]
-            budget["uploads_today"] = NSNull()
-            $0["daily_budget"] = budget
-        }
-        XCTAssertEqual(SummaryFacts.uploads(partial)?.count, "—")
 
         // The header's tool count is said only when the core said which
         // tools it reads; an unread one is left out, never "— of —".
@@ -291,39 +273,15 @@ final class SummaryInspectorTests: XCTestCase {
         XCTAssertTrue(view.contains("GlassNotice(tone: .outside, title: table.line(for: failure))"))
     }
 
-    /// The daily limit row is Ron's: uploads and megabytes left, and the
-    /// sessions the limit holds, in the core's words; not a repeat of the
-    /// Decisions line's uploads today.
-    func test_theDailyLimitRowSaysWhatIsLeft() throws {
+    /// The daily upload limit is retired: the safeguards panel draws only
+    /// inference routing, whatever an older daemon's `daily_budget` says.
+    func test_theSafeguardsPanelHasNoDailyLimitRow() throws {
         let copy = try XCTUnwrap(MonitorWords.table?.safeguards)
-        let words = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
         let status = try recorded(DaemonData.Status.self, "status") {
-            $0["daily_budget"] = [
-                "bytes_today": 0, "max_bytes_per_day": 0, "bytes_remaining": 3 * 1024 * 1024,
-                "uploads_today": 4, "max_uploads_per_day": 50, "uploads_remaining": 46,
-                "resets_at": NSNull(), "blocked": true, "blocked_entries": 2, "blocked_bytes": 10,
-            ]
+            $0["daily_budget"] = ["blocked": true, "blocked_entries": 2, "uploads_remaining": 46]
         }
         let rows = SummaryFacts.safeguardRows(status, copy: copy)
-        let limit = try XCTUnwrap(rows.first { $0.label == copy.dailyLimit })
-        XCTAssertEqual(limit.value, FirstRunCopy.fill(copy.remaining, ["uploads": "46", "megabytes": "3"]))
-        XCTAssertEqual(SummaryFacts.heldByLimit(status.dailyBudget, copy: copy),
-                       FirstRunCopy.fill(copy.heldByLimit, ["count": "2"]))
-        XCTAssertNotEqual(limit.value, FirstRunCopy.fill(words.summaryPanel.uploadsToday, ["count": "4", "max": "50"]))
-
-        // A part unsaid is a dash; nothing held, or a limit not reached,
-        // says no held line.
-        let partial = try recorded(DaemonData.Status.self, "status") {
-            $0["daily_budget"] = ["uploads_remaining": 46, "blocked": false, "blocked_entries": 0]
-        }
-        let partialRow = try XCTUnwrap(
-            SummaryFacts.safeguardRows(partial, copy: copy).first { $0.label == copy.dailyLimit })
-        XCTAssertEqual(partialRow.value, FirstRunCopy.fill(copy.remaining, ["uploads": "46", "megabytes": "—"]))
-        XCTAssertNil(SummaryFacts.heldByLimit(partial.dailyBudget, copy: copy))
-        let one = try recorded(DaemonData.Status.self, "status") {
-            $0["daily_budget"] = ["blocked": true, "blocked_entries": 1]
-        }
-        XCTAssertEqual(SummaryFacts.heldByLimit(one.dailyBudget, copy: copy), copy.heldByLimitOne)
+        XCTAssertEqual(rows.map(\.label), status.routing == nil ? [] : [copy.inferenceRouting])
     }
 
     /// The certificates held and why sessions stopped waiting are the

@@ -2,6 +2,11 @@
 //! arguments the shells deliver (K7, #1173), moved out of Tauri so every
 //! shell -- Tauri today, macOS over the C ABI -- parses identically.
 //!
+//! The scheme is the build channel's ([`crate::channel::URL_SCHEME`]): a
+//! staging build accepts only `tracecommons-staging://` and a production
+//! build only `tracecommons://` (staging design 4.5), so neither app acts
+//! on the other's invite or review link.
+//!
 //! [`parse_deep_link`] is a PURE function: it never opens a browser, never
 //! stores a pending link, and never acts on what it finds. A caller decides
 //! what the returned [`DeepLinkAction`] means. A link this module does not
@@ -17,7 +22,7 @@ use crate::commands::invite_from_deep_link;
 /// The link that opens the review queue. A digest notification's click is
 /// routed to it in-process by a shell that already holds this exact string,
 /// rather than round-tripping through the OS.
-pub const REVIEW_DEEP_LINK: &str = "tracecommons://review";
+pub const REVIEW_DEEP_LINK: &str = crate::channel::REVIEW_DEEP_LINK;
 
 /// The refusal label [`parse_deep_link`] returns for anything it does not
 /// recognise, including a malformed link. Stable: a shell may show this
@@ -50,7 +55,7 @@ pub fn parse_deep_link(url: &str) -> Result<DeepLinkAction, &'static str> {
     }
     if let Some(slug) = public_run_slug(url) {
         return Ok(DeepLinkAction::PublicRun {
-            url: format!("https://tracecommons.ai/runs/{slug}"),
+            url: format!("{}{slug}", crate::channel::PUBLIC_RUNS_PREFIX),
             slug,
         });
     }
@@ -67,8 +72,9 @@ pub fn parse_deep_link(url: &str) -> Result<DeepLinkAction, &'static str> {
 /// case-insensitively the way LaunchServices and the Windows shell both
 /// deliver it.
 pub fn is_tracecommons_deep_link(url: &str) -> bool {
-    url.get(..15)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("tracecommons://"))
+    let prefix = crate::channel::DEEP_LINK_PREFIX;
+    url.get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
 }
 
 /// Split a `tracecommons://` link into its authority (the part between `//`
@@ -81,7 +87,7 @@ fn deep_link_parts(url: &str) -> Option<(&str, &str)> {
     if !is_tracecommons_deep_link(url) {
         return None;
     }
-    let rest = &url[15..];
+    let rest = &url[crate::channel::DEEP_LINK_PREFIX.len()..];
     if rest
         .chars()
         .any(|character| character.is_control() || character.is_whitespace())
@@ -235,10 +241,80 @@ fn is_review_link(url: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// `link` with its `tracecommons:` scheme (in whatever case it was
+    /// written) moved to this build's channel scheme, so every case below
+    /// runs against the scheme the build accepts. A no-op on production.
+    fn in_channel(link: &str) -> String {
+        let suffix = &crate::channel::URL_SCHEME["tracecommons".len()..];
+        let mut out = String::with_capacity(link.len() + suffix.len());
+        let mut rest = link;
+        while let Some(at) = rest.to_ascii_lowercase().find("tracecommons:") {
+            out.push_str(&rest[..at + "tracecommons".len()]);
+            out.push_str(suffix);
+            rest = &rest[at + "tracecommons".len()..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn parse_in_channel(link: &str) -> Result<DeepLinkAction, &'static str> {
+        parse_deep_link(&in_channel(link))
+    }
+
+    /// A staging build registers `tracecommons-staging` (staging design
+    /// 4.5), so a production invite or review link never reaches it.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_refuses_the_production_scheme() {
+        let invite = "tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE";
+        for link in [
+            invite,
+            "tracecommons://review",
+            "TraceCommons://REVIEW",
+            "tracecommons://credential",
+            "tracecommons://run/repair-a-stalled-upload",
+        ] {
+            assert_eq!(parse_deep_link(link), Err(DEEP_LINK_INVALID), "{link}");
+        }
+        assert_eq!(crate::commands::invite_from_deep_link(invite), None);
+        assert_eq!(REVIEW_DEEP_LINK, "tracecommons-staging://review");
+        assert_eq!(
+            parse_deep_link("tracecommons-staging://review"),
+            Ok(DeepLinkAction::Navigate { path: "/waiting" })
+        );
+        assert_eq!(
+            crate::commands::invite_from_deep_link(
+                "tracecommons-staging://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE"
+            )
+            .as_deref(),
+            Some("https://issuer.example/onboard#CODE")
+        );
+    }
+
+    /// A production build accepts only `tracecommons`, never the staging
+    /// app's scheme.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_default_build_refuses_the_staging_scheme() {
+        let invite =
+            "tracecommons-staging://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE";
+        for link in [
+            invite,
+            "tracecommons-staging://review",
+            "TraceCommons-Staging://REVIEW",
+            "tracecommons-staging://credential",
+            "tracecommons-staging://run/repair-a-stalled-upload",
+        ] {
+            assert_eq!(parse_deep_link(link), Err(DEEP_LINK_INVALID), "{link}");
+        }
+        assert_eq!(crate::commands::invite_from_deep_link(invite), None);
+        assert_eq!(REVIEW_DEEP_LINK, "tracecommons://review");
+    }
+
     #[test]
     fn enroll_links_yield_their_invite() {
         assert_eq!(
-            parse_deep_link(
+            parse_in_channel(
                 "tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE"
             ),
             Ok(DeepLinkAction::Enroll {
@@ -246,7 +322,7 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_deep_link(
+            parse_in_channel(
                 "TraceCommons://ENROLL/?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE"
             ),
             Ok(DeepLinkAction::Enroll {
@@ -257,7 +333,7 @@ mod tests {
         // normalisation added a slash after the host that nothing in our
         // code wrote. Parsing via `Url` survives it.
         assert_eq!(
-            parse_deep_link(
+            parse_in_channel(
                 "tracecommons://enroll/?invite=https%3A%2F%2Fissuer.tracecommons.ai%2Fonboard%23VQWWPGYSG8Y4LTP6"
             ),
             Ok(DeepLinkAction::Enroll {
@@ -269,7 +345,7 @@ mod tests {
     #[test]
     fn an_empty_invite_value_is_refused() {
         assert_eq!(
-            parse_deep_link("tracecommons://enroll?invite="),
+            parse_in_channel("tracecommons://enroll?invite="),
             Err(DEEP_LINK_INVALID)
         );
     }
@@ -280,13 +356,13 @@ mod tests {
     #[test]
     fn an_invite_under_another_authority_or_without_a_code_is_refused() {
         assert_eq!(
-            parse_deep_link(
+            parse_in_channel(
                 "tracecommons://other?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE"
             ),
             Err(DEEP_LINK_INVALID)
         );
         assert_eq!(
-            parse_deep_link("tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard"),
+            parse_in_channel("tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard"),
             Err(DEEP_LINK_INVALID)
         );
     }
@@ -305,7 +381,7 @@ mod tests {
             "tracecommons://user@enroll?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
             "tracecommons://enroll:443?invite=https%3A%2F%2Fissuer.example%2Fonboard%23CODE",
         ] {
-            assert_eq!(parse_deep_link(arg), Err(DEEP_LINK_INVALID), "{arg:?}");
+            assert_eq!(parse_in_channel(arg), Err(DEEP_LINK_INVALID), "{arg:?}");
         }
     }
 
@@ -315,23 +391,29 @@ mod tests {
             "tracecommons://enroll?invite=https%3A%2F%2Fissuer.example%2F{}",
             "a".repeat(2100)
         );
-        assert_eq!(parse_deep_link(&huge), Err(DEEP_LINK_INVALID));
+        assert_eq!(parse_in_channel(&huge), Err(DEEP_LINK_INVALID));
     }
 
     #[test]
     fn public_run_links_yield_the_slug_and_a_built_url() {
         assert_eq!(
-            parse_deep_link("tracecommons://run/repair-a-stalled-upload"),
+            parse_in_channel("tracecommons://run/repair-a-stalled-upload"),
             Ok(DeepLinkAction::PublicRun {
                 slug: "repair-a-stalled-upload".to_owned(),
-                url: "https://tracecommons.ai/runs/repair-a-stalled-upload".to_owned(),
+                url: format!(
+                    "{}repair-a-stalled-upload",
+                    crate::channel::PUBLIC_RUNS_PREFIX
+                ),
             })
         );
         assert_eq!(
-            parse_deep_link("TraceCommons://run/repair-a-stalled-upload"),
+            parse_in_channel("TraceCommons://run/repair-a-stalled-upload"),
             Ok(DeepLinkAction::PublicRun {
                 slug: "repair-a-stalled-upload".to_owned(),
-                url: "https://tracecommons.ai/runs/repair-a-stalled-upload".to_owned(),
+                url: format!(
+                    "{}repair-a-stalled-upload",
+                    crate::channel::PUBLIC_RUNS_PREFIX
+                ),
             })
         );
     }
@@ -339,15 +421,15 @@ mod tests {
     #[test]
     fn public_run_slugs_reject_case_leading_dash_and_trailers() {
         assert_eq!(
-            parse_deep_link("tracecommons://run/-repair-a-stalled-upload"),
+            parse_in_channel("tracecommons://run/-repair-a-stalled-upload"),
             Err(DEEP_LINK_INVALID)
         );
         assert_eq!(
-            parse_deep_link("tracecommons://run/Repair-a-stalled-upload"),
+            parse_in_channel("tracecommons://run/Repair-a-stalled-upload"),
             Err(DEEP_LINK_INVALID)
         );
         assert_eq!(
-            parse_deep_link("tracecommons://run/repair-a-stalled-upload?next=evil"),
+            parse_in_channel("tracecommons://run/repair-a-stalled-upload?next=evil"),
             Err(DEEP_LINK_INVALID)
         );
     }
@@ -355,23 +437,23 @@ mod tests {
     #[test]
     fn credential_links_default_to_near_ai_or_name_their_provider() {
         assert_eq!(
-            parse_deep_link("tracecommons://credential"),
+            parse_in_channel("tracecommons://credential"),
             Ok(DeepLinkAction::Credential {
                 provider: "near_ai".to_owned()
             })
         );
         assert_eq!(
-            parse_deep_link("tracecommons://credential/near_ai"),
+            parse_in_channel("tracecommons://credential/near_ai"),
             Ok(DeepLinkAction::Credential {
                 provider: "near_ai".to_owned()
             })
         );
         assert_eq!(
-            parse_deep_link("tracecommons://credential/near_ai?token=secret"),
+            parse_in_channel("tracecommons://credential/near_ai?token=secret"),
             Err(DEEP_LINK_INVALID)
         );
         assert_eq!(
-            parse_deep_link("tracecommons://credential?token=secret"),
+            parse_in_channel("tracecommons://credential?token=secret"),
             Err(DEEP_LINK_INVALID)
         );
     }
@@ -379,15 +461,15 @@ mod tests {
     #[test]
     fn the_review_link_navigates_to_waiting() {
         assert_eq!(
-            parse_deep_link(REVIEW_DEEP_LINK),
+            parse_in_channel(REVIEW_DEEP_LINK),
             Ok(DeepLinkAction::Navigate { path: "/waiting" })
         );
         assert_eq!(
-            parse_deep_link("TraceCommons://REVIEW"),
+            parse_in_channel("TraceCommons://REVIEW"),
             Ok(DeepLinkAction::Navigate { path: "/waiting" })
         );
         assert_eq!(
-            parse_deep_link("tracecommons://review?next=/settings"),
+            parse_in_channel("tracecommons://review?next=/settings"),
             Err(DEEP_LINK_INVALID)
         );
     }
@@ -404,7 +486,7 @@ mod tests {
             "tracecommons:",
             "tracecommons:///",
         ] {
-            assert_eq!(parse_deep_link(arg), Err(DEEP_LINK_INVALID), "{arg}");
+            assert_eq!(parse_in_channel(arg), Err(DEEP_LINK_INVALID), "{arg}");
         }
     }
 
@@ -419,7 +501,7 @@ mod tests {
             "file:///etc/passwd",
             "data:text/html,review",
         ] {
-            assert_eq!(parse_deep_link(arg), Err(DEEP_LINK_INVALID), "{arg}");
+            assert_eq!(parse_in_channel(arg), Err(DEEP_LINK_INVALID), "{arg}");
         }
     }
 
@@ -434,7 +516,7 @@ mod tests {
             "tracecommons://evil.example/review",
             "tracecommons://REVIEW%00",
         ] {
-            assert_eq!(parse_deep_link(arg), Err(DEEP_LINK_INVALID), "{arg}");
+            assert_eq!(parse_in_channel(arg), Err(DEEP_LINK_INVALID), "{arg}");
         }
     }
 
@@ -443,15 +525,15 @@ mod tests {
     #[test]
     fn control_characters_and_whitespace_are_refused() {
         assert_eq!(
-            parse_deep_link("tracecommons://review\nextra"),
+            parse_in_channel("tracecommons://review\nextra"),
             Err(DEEP_LINK_INVALID)
         );
         assert_eq!(
-            parse_deep_link("tracecommons:// review"),
+            parse_in_channel("tracecommons:// review"),
             Err(DEEP_LINK_INVALID)
         );
         assert_eq!(
-            parse_deep_link("tracecommons://cre\u{7}dential"),
+            parse_in_channel("tracecommons://cre\u{7}dential"),
             Err(DEEP_LINK_INVALID)
         );
     }
@@ -461,9 +543,9 @@ mod tests {
     #[test]
     fn over_long_garbage_is_refused() {
         let garbage = format!("tracecommons://{}", "x".repeat(100_000));
-        assert_eq!(parse_deep_link(&garbage), Err(DEEP_LINK_INVALID));
+        assert_eq!(parse_in_channel(&garbage), Err(DEEP_LINK_INVALID));
         let garbage = "\u{0}".repeat(10_000);
-        assert_eq!(parse_deep_link(&garbage), Err(DEEP_LINK_INVALID));
+        assert_eq!(parse_in_channel(&garbage), Err(DEEP_LINK_INVALID));
     }
 
     #[test]

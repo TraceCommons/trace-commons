@@ -243,6 +243,16 @@ pub struct TraceUploadClaimIssuerConfig {
     /// Cutover flag from [`TRACE_COMMONS_INVITE_REGISTRY_AUTHORITATIVE_ENV`].
     /// `false` keeps `/v1/onboard` on the unchanged file-allowlist path.
     pub invite_registry_authoritative: bool,
+    /// The NEAR AI sign-up policy template
+    /// ([`crate::near_ai_signup_policy::NEAR_AI_SIGNUP_POLICY_TEMPLATE_ENV`],
+    /// the same value ingest provisions with). When set, a device-key claim
+    /// from a NEAR AI-provisioned device that has no contributor grant --
+    /// one provisioned before sign-up wrote grants -- first writes the grant
+    /// sign-up would have written, then takes its ceiling from it. Requires
+    /// `tenant_access_grant_db`; `build_state` refuses the pair otherwise.
+    /// `None` leaves such devices on the floor.
+    pub near_ai_signup_policy_template:
+        Option<crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
 }
 
 impl fmt::Debug for TraceUploadClaimIssuerConfig {
@@ -266,6 +276,13 @@ impl fmt::Debug for TraceUploadClaimIssuerConfig {
             .field(
                 "require_tenant_access_grants",
                 &self.require_tenant_access_grants,
+            )
+            .field(
+                "near_ai_signup_policy_template",
+                &self
+                    .near_ai_signup_policy_template
+                    .as_ref()
+                    .map(|template| template.policy_version().to_string()),
             )
             .field("shutdown_grace_seconds", &self.shutdown_grace_seconds)
             .field("request_timeout_seconds", &self.request_timeout_seconds)
@@ -425,6 +442,8 @@ impl TraceUploadClaimIssuerConfig {
             invite_admin_backend: None,
             invite_admin_registry: None,
             invite_registry_authoritative: false,
+            near_ai_signup_policy_template:
+                crate::near_ai_signup_policy::NearAiSignupPolicyTemplate::from_env()?,
         })
     }
 
@@ -432,6 +451,15 @@ impl TraceUploadClaimIssuerConfig {
         anyhow::ensure!(
             self.max_ttl_seconds > 0,
             "TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_MAX_TTL_SECONDS must be positive"
+        );
+        // A template the issuer cannot read grants with would be inert: the
+        // ceiling is never taken from a grant without the grant database, so
+        // NEAR AI devices would stay on the floor while the configuration
+        // says otherwise. Refuse the pair rather than run it.
+        anyhow::ensure!(
+            self.near_ai_signup_policy_template.is_none() || self.tenant_access_grant_db.is_some(),
+            "{} requires {TRACE_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB_ENV}=true",
+            crate::near_ai_signup_policy::NEAR_AI_SIGNUP_POLICY_TEMPLATE_ENV
         );
         let signing_private_key_pem =
             validate_eddsa_private_key_pem(&self.signing_private_key_pem)?;
@@ -515,6 +543,7 @@ impl TraceUploadClaimIssuerConfig {
             workload_public_key_pem,
             tenant_access_grant_db: self.tenant_access_grant_db.clone(),
             require_tenant_access_grants: self.require_tenant_access_grants,
+            near_ai_signup_policy_template: self.near_ai_signup_policy_template.clone(),
             allowlist_source,
             allowlist_max_stale: StdDuration::from_secs(self.allowlist_max_stale_seconds),
             onboarding_device_key_db: self.onboarding_device_key_db.clone(),
@@ -698,6 +727,8 @@ struct TraceUploadClaimIssuerState {
     workload_public_key_pem: String,
     tenant_access_grant_db: Option<Arc<dyn Database>>,
     require_tenant_access_grants: bool,
+    near_ai_signup_policy_template:
+        Option<crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     allowlist_source: Option<Arc<dyn AllowlistSource>>,
     allowlist_max_stale: StdDuration,
     onboarding_device_key_db: Option<Arc<dyn Database>>,
@@ -2006,9 +2037,7 @@ impl TraceUploadClaimIssuerState {
         if request.device_key_id != auth.device_key_id {
             return Err(IssuerError::bad_request("device key id mismatch"));
         }
-        if (Utc::now().timestamp() - request.issued_at).abs()
-            > DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS
-        {
+        if !device_invite_subject_is_fresh(Utc::now().timestamp(), request.issued_at) {
             return Err(IssuerError::bad_request(DEVICE_INVITE_SUBJECT_STALE));
         }
         let tenant_id =
@@ -2038,6 +2067,15 @@ impl TraceUploadClaimIssuerState {
             invite_subject_hash,
         })
     }
+}
+
+/// Whether `issued_at` sits within [`DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS`]
+/// of `now`, either way, bound included. The clock is a parameter so the
+/// bound is tested exactly rather than against a clock that moves while the
+/// request is in flight. `abs_diff`, because `issued_at` is the caller's: a
+/// subtraction overflows for one near `i64::MIN`.
+fn device_invite_subject_is_fresh(now: i64, issued_at: i64) -> bool {
+    now.abs_diff(issued_at) <= DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS.unsigned_abs()
 }
 
 impl TraceUploadClaimIssuerState {
@@ -2196,9 +2234,17 @@ impl TraceUploadClaimIssuerState {
     /// Ceiling for a device principal: parsed scopes from active contributor
     /// grants when a grant DB is configured and rows exist; otherwise the
     /// hardcoded pilot floor. PublicAttribution is always included.
+    ///
+    /// A device with no contributor grant gets one first when it is a NEAR AI
+    /// sign-up and the issuer has the sign-up policy template: the backfill
+    /// for accounts NEAR AI provisioned before sign-up wrote grants (owner
+    /// decision 2026-10-24). After it the grant exists, so it writes at most
+    /// once per device, and it never replaces a grant row, so a revoked grant
+    /// still leaves the floor.
     async fn resolve_device_scope_ceiling(
         &self,
         tenant_id: &str,
+        device_key_id: &str,
         grant_principal_ref: &str,
         now: DateTime<Utc>,
     ) -> Result<(Vec<ConsentScope>, Vec<TraceAllowedUse>), IssuerError> {
@@ -2211,25 +2257,32 @@ impl TraceUploadClaimIssuerState {
         let Some(db) = self.tenant_access_grant_db.as_ref() else {
             return Ok(hardcoded_floor());
         };
-        let grants = db
-            .list_active_trace_tenant_access_grants_for_principal(
-                tenant_id,
-                grant_principal_ref,
-                now,
-            )
-            .await
-            .map_err(|_| IssuerError::internal())?;
-        let matching_grants: Vec<&TraceTenantAccessGrantRecord> = grants
-            .iter()
-            .filter(|grant| grant.status == TraceTenantAccessGrantStatus::Active)
-            .filter(|grant| grant.role == TraceTenantAccessGrantRole::Contributor)
-            .collect();
+        let mut matching_grants =
+            active_contributor_grants(db.as_ref(), tenant_id, grant_principal_ref, now).await?;
+        if matching_grants.is_empty()
+            && let Some(template) = self.near_ai_signup_policy_template.as_ref()
+        {
+            let eligible = db
+                .backfill_near_ai_signup_device_grant(tenant_id, device_key_id, template, now)
+                .await
+                .map_err(|_| IssuerError::internal())?;
+            if eligible {
+                tracing::info!(
+                    device_key_id = %device_key_id,
+                    policy_version = %template.policy_version(),
+                    "NEAR AI sign-up contributor grant backfilled at claim time"
+                );
+                matching_grants =
+                    active_contributor_grants(db.as_ref(), tenant_id, grant_principal_ref, now)
+                        .await?;
+            }
+        }
         if matching_grants.is_empty() {
             return Ok(hardcoded_floor());
         }
         let mut scope_union: BTreeSet<ConsentScope> = BTreeSet::new();
         let mut use_union: BTreeSet<TraceAllowedUse> = BTreeSet::new();
-        for grant in matching_grants {
+        for grant in &matching_grants {
             if grant.allowed_consent_scopes.is_empty() {
                 scope_union.extend(device_key_allowed_consent_scopes());
             } else {
@@ -2298,7 +2351,7 @@ impl TraceUploadClaimIssuerState {
             subject.as_deref(),
         );
         let (ceiling_scopes, ceiling_uses) = self
-            .resolve_device_scope_ceiling(&tenant_id, &grant_principal_ref, now)
+            .resolve_device_scope_ceiling(&tenant_id, &device_key_id, &grant_principal_ref, now)
             .await?;
         let granted_scopes = intersect_requested_with_ceiling(
             &request.consent_scopes,
@@ -2310,19 +2363,27 @@ impl TraceUploadClaimIssuerState {
         let mut request = request;
         request.consent_scopes = granted_scopes.clone();
         request.allowed_uses = granted_uses.clone();
-        self.issue_claim_for_authorized_actor(
-            AuthorizedUploadClaimActor {
-                actor,
-                tenant_id,
-                grant_principal_ref,
-                allowed_consent_scopes: granted_scopes,
-                allowed_uses: granted_uses,
-                policy_label: None,
-            },
-            request,
-            now,
-        )
-        .await
+        let response = self
+            .issue_claim_for_authorized_actor(
+                AuthorizedUploadClaimActor {
+                    actor: actor.clone(),
+                    tenant_id: tenant_id.clone(),
+                    grant_principal_ref,
+                    allowed_consent_scopes: granted_scopes,
+                    allowed_uses: granted_uses,
+                    policy_label: None,
+                },
+                request,
+                now,
+            )
+            .await?;
+        // Keep financial ownership tied to the authenticated device, while
+        // preserving the claim principal as submission provenance. Never
+        // return a usable claim if its ownership association could not persist.
+        db.bind_device_upload_principal(&tenant_id, &device_key_id, &actor)
+            .await
+            .map_err(|_| IssuerError::internal())?;
+        Ok(response)
     }
 
     async fn issue_claim_for_device_jwt(
@@ -2355,7 +2416,12 @@ impl TraceUploadClaimIssuerState {
         let grant_principal_ref =
             crate::account_trust::device_principal_ref(&tenant_id, &auth.device_key_id);
         let (ceiling_scopes, ceiling_uses) = self
-            .resolve_device_scope_ceiling(&tenant_id, &grant_principal_ref, now)
+            .resolve_device_scope_ceiling(
+                &tenant_id,
+                &auth.device_key_id,
+                &grant_principal_ref,
+                now,
+            )
             .await?;
         let granted_scopes = intersect_requested_with_ceiling(
             &request.consent_scopes,
@@ -2367,19 +2433,24 @@ impl TraceUploadClaimIssuerState {
         let mut request = request;
         request.consent_scopes = granted_scopes.clone();
         request.allowed_uses = granted_uses.clone();
-        self.issue_claim_for_authorized_actor(
-            AuthorizedUploadClaimActor {
-                actor,
-                tenant_id: tenant_id.to_string(),
-                grant_principal_ref,
-                allowed_consent_scopes: granted_scopes,
-                allowed_uses: granted_uses,
-                policy_label: None,
-            },
-            request,
-            now,
-        )
-        .await
+        let response = self
+            .issue_claim_for_authorized_actor(
+                AuthorizedUploadClaimActor {
+                    actor: actor.clone(),
+                    tenant_id: tenant_id.to_string(),
+                    grant_principal_ref,
+                    allowed_consent_scopes: granted_scopes,
+                    allowed_uses: granted_uses,
+                    policy_label: None,
+                },
+                request,
+                now,
+            )
+            .await?;
+        db.bind_device_upload_principal(&tenant_id, &auth.device_key_id, &actor)
+            .await
+            .map_err(|_| IssuerError::internal())?;
+        Ok(response)
     }
 
     fn validate_upload_claim_request(
@@ -3219,6 +3290,24 @@ fn valid_device_key_id(value: &str) -> bool {
     })
 }
 
+/// Active `contributor` grants for a device principal.
+async fn active_contributor_grants(
+    db: &dyn Database,
+    tenant_id: &str,
+    grant_principal_ref: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<TraceTenantAccessGrantRecord>, IssuerError> {
+    let grants = db
+        .list_active_trace_tenant_access_grants_for_principal(tenant_id, grant_principal_ref, now)
+        .await
+        .map_err(|_| IssuerError::internal())?;
+    Ok(grants
+        .into_iter()
+        .filter(|grant| grant.status == TraceTenantAccessGrantStatus::Active)
+        .filter(|grant| grant.role == TraceTenantAccessGrantRole::Contributor)
+        .collect())
+}
+
 fn device_key_allowed_consent_scopes() -> Vec<ConsentScope> {
     vec![
         ConsentScope::DebuggingEvaluation,
@@ -3936,7 +4025,36 @@ mod tests {
             invite_admin_backend: None,
             invite_admin_registry: None,
             invite_registry_authoritative: false,
+            near_ai_signup_policy_template: None,
         }
+    }
+
+    /// A sign-up template without the grant database would never be read --
+    /// the ceiling only comes from a grant when the issuer can read grants --
+    /// so NEAR AI devices would stay on the floor while the configuration
+    /// claims otherwise. The issuer refuses to start in that state.
+    #[test]
+    fn a_sign_up_template_without_the_grant_database_refuses_to_start() {
+        let template = crate::near_ai_signup_policy::NearAiSignupPolicyTemplate::parse(
+            r#"{"policy_version":"v","allowed_consent_scopes":["model_training"],"allowed_uses":["model_training"]}"#,
+        )
+        .unwrap();
+        let mut config = test_config();
+        config.near_ai_signup_policy_template = Some(template);
+        let error = config
+            .build_state()
+            .err()
+            .expect("template without grant database must refuse")
+            .to_string();
+        assert!(
+            error.contains(crate::near_ai_signup_policy::NEAR_AI_SIGNUP_POLICY_TEMPLATE_ENV)
+                && error.contains(TRACE_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB_ENV),
+            "{error}"
+        );
+        assert!(
+            test_config().build_state().is_ok(),
+            "no template: unchanged"
+        );
     }
 
     fn workload_token(issuer: &str, audience: &str) -> String {
@@ -4904,6 +5022,7 @@ mod tests {
                 invite_admin_backend: self.invite_admin_backend.clone(),
                 invite_admin_registry: self.invite_admin_registry.clone(),
                 invite_registry_authoritative: self.invite_registry_authoritative,
+                near_ai_signup_policy_template: self.near_ai_signup_policy_template.clone(),
                 // The self-serve claim surfaces have their own hermetic tests in
                 // `near_legion_claim` and `celestine_sloth_claim`; these issuer
                 // tests build state without either.
@@ -5089,6 +5208,7 @@ mod tests {
         // redeem again after a config mistake.
         let config = TraceUploadClaimIssuerConfig {
             invite_registry_authoritative: true,
+            near_ai_signup_policy_template: None,
             ..test_config()
         };
         let (status, body) = post_onboard(config, onboard_request("INVOK001INVOK001")).await;
@@ -5902,6 +6022,7 @@ mod tests {
     use crate::trace_corpus_storage::*;
 
     struct StubDeviceKeyDb {
+        refuse_upload_binding: bool,
         device_keys: std::sync::RwLock<
             std::collections::HashMap<(String, String), crate::db::DeviceKeyRecord>,
         >,
@@ -5914,6 +6035,7 @@ mod tests {
     impl StubDeviceKeyDb {
         fn new() -> Self {
             Self {
+                refuse_upload_binding: false,
                 device_keys: std::sync::RwLock::new(std::collections::HashMap::new()),
                 grants: std::sync::RwLock::new(std::collections::HashMap::new()),
             }
@@ -6556,6 +6678,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::db::Database for StubDeviceKeyDb {
+        async fn bind_device_upload_principal(
+            &self,
+            _tenant_id: &str,
+            _device_key_id: &str,
+            _actor_ref: &str,
+        ) -> Result<(), DatabaseError> {
+            if self.refuse_upload_binding {
+                Err(DatabaseError::Pool("upload ownership unavailable".into()))
+            } else {
+                Ok(())
+            }
+        }
+
         async fn run_migrations(&self) -> Result<(), DatabaseError> {
             Ok(())
         }
@@ -6616,6 +6751,15 @@ mod tests {
         tenant_id: &str,
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value, String) {
+        post_signed_device_claim_with_binding(tenant_id, body, false, false).await
+    }
+
+    async fn post_signed_device_claim_with_binding(
+        tenant_id: &str,
+        body: serde_json::Value,
+        refuse_binding: bool,
+        device_jwt: bool,
+    ) -> (StatusCode, serde_json::Value, String) {
         use ring::signature::KeyPair;
         use std::sync::Arc;
         use trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes;
@@ -6629,7 +6773,9 @@ mod tests {
         let device_key_id = device_key_id_from_public_key_bytes(pk);
         let pk_b64 = base64::engine::general_purpose::STANDARD.encode(pk);
 
-        let stub = Arc::new(StubDeviceKeyDb::new());
+        let mut db = StubDeviceKeyDb::new();
+        db.refuse_upload_binding = refuse_binding;
+        let stub = Arc::new(db);
         stub.insert_test_device_key(
             tenant_id,
             &device_key_id,
@@ -6653,8 +6799,81 @@ mod tests {
         let sig = kp.sign(body_str.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.as_ref());
 
-        let (status, response) = post_device_claim(config, &device_key_id, &sig_b64, body).await;
+        let (status, response) = if device_jwt {
+            let mut header = Header::new(Algorithm::EdDSA);
+            header.kid = Some(device_key_id.clone());
+            let now = Utc::now();
+            let token = jsonwebtoken::encode(
+                &header,
+                &json!({"tenant_id": tenant_id, "aud": "trace-commons-upload",
+                    "iat": now.timestamp(), "exp": (now + Duration::minutes(5)).timestamp()}),
+                &EncodingKey::from_ed_der(pkcs8.as_ref()),
+            )
+            .unwrap();
+            let router = trace_upload_claim_issuer_router(config).unwrap();
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/trace-upload-claim")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::from(body_str))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        } else {
+            post_device_claim(config, &device_key_id, &sig_b64, body).await
+        };
         (status, response, device_key_id)
+    }
+
+    #[tokio::test]
+    async fn device_claim_refuses_token_when_upload_ownership_cannot_be_recorded() {
+        let tenant = "test-device-tenant";
+        for subject in [None, Some("sha256:subject")] {
+            let (status, body, _) = post_signed_device_claim_with_binding(
+                tenant,
+                device_claim_request_body(tenant, subject),
+                true,
+                false,
+            )
+            .await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(body.get("access_token").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn device_jwt_claim_refuses_token_when_upload_ownership_cannot_be_recorded() {
+        let tenant = "test-device-tenant";
+        let (status, body, _) = post_signed_device_claim_with_binding(
+            tenant,
+            device_claim_request_body(tenant, None),
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.get("access_token").is_none());
+    }
+
+    #[tokio::test]
+    async fn device_jwt_claim_succeeds_when_upload_ownership_is_recorded() {
+        let tenant = "test-device-tenant";
+        let (status, body, device) = post_signed_device_claim_with_binding(
+            tenant,
+            device_claim_request_body(tenant, None),
+            false,
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(decode_issued_claims(&body)["principal_ref"], device);
     }
 
     fn decode_issued_claims(body: &serde_json::Value) -> serde_json::Value {
@@ -7076,20 +7295,54 @@ mod tests {
             assert_eq!(error(&response), Some("device_not_invite_onboarded"));
         }
 
+        /// A minute past the bound either way. The route reads its clock
+        /// after the test does, and both truncate to whole seconds, so a body
+        /// one second past the bound can land on it and be served; the exact
+        /// bound is `the_skew_bound_is_inclusive_either_way`, on a fixed
+        /// clock.
         #[tokio::test]
         async fn a_stale_or_future_request_is_refused() {
             let d = device();
-            for issued_at in [Utc::now().timestamp() - 301, Utc::now().timestamp() + 301] {
+            let past_the_bound = DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS + 60;
+            for offset in [-past_the_bound, past_the_bound] {
                 let (status, response) = signed(
                     config_with(vec![record(&d, Some(INVITE), false)]),
                     &d,
-                    body(&d.id, issued_at),
+                    body(&d.id, Utc::now().timestamp() + offset),
                 )
                 .await;
                 assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
                 assert_eq!(
                     error(&response),
                     Some("device_invite_subject_request_stale")
+                );
+            }
+        }
+
+        #[test]
+        fn the_skew_bound_is_inclusive_either_way() {
+            let now = 1_800_000_000;
+            let bound = DEVICE_INVITE_SUBJECT_MAX_SKEW_SECONDS;
+            for issued_at in [now, now - bound, now + bound] {
+                assert!(
+                    device_invite_subject_is_fresh(now, issued_at),
+                    "{issued_at}"
+                );
+            }
+            // `now + i64::MIN` is 2^63 seconds back: `now - issued_at`
+            // overflows, which panics a debug build and wraps a release
+            // build to `i64::MIN`, whose `abs()` stays negative and so read
+            // as fresh.
+            for issued_at in [
+                now - bound - 1,
+                now + bound + 1,
+                i64::MIN,
+                i64::MAX,
+                now + i64::MIN,
+            ] {
+                assert!(
+                    !device_invite_subject_is_fresh(now, issued_at),
+                    "{issued_at}"
                 );
             }
         }

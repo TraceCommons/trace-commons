@@ -124,7 +124,7 @@ impl SummaryTotal {
 }
 
 impl SummaryView {
-    fn valid(&self, since: DateTime<Utc>) -> bool {
+    pub(crate) fn valid(&self, since: DateTime<Utc>) -> bool {
         if self.since != since
             || self.groups.len() > MAX_SUMMARY_GROUPS
             || !self.routed.valid()
@@ -273,6 +273,12 @@ struct Page {
     /// a price, and this crate's rule is that operational surfaces are
     /// hash-only or label-only.
     unreadable: usize,
+    /// How many rows the proxy sent that record a failed request (a
+    /// non-null `failure` code). They are not calls and are dropped, but they
+    /// were served, so they still count toward the page size and the cursor.
+    failed: usize,
+    /// The id of the last row the proxy served, failed or not, for paging.
+    last_served_id: Option<i64>,
 }
 
 impl Page {
@@ -282,7 +288,7 @@ impl Page {
     /// full page carrying one bad row reads as short and paging stops with
     /// the rest of the window unread.
     fn served(&self) -> usize {
-        self.rows.len() + self.unreadable
+        self.rows.len() + self.unreadable + self.failed
     }
 }
 
@@ -371,7 +377,7 @@ impl IronWireLedger {
     /// configuration, and weakening `Debug` to make it assertable would put
     /// it in every log line that ever formats a ledger. A `#[cfg(test)]`
     /// accessor is visible to the crate's own tests and to nothing shipped.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "near-ai-staging")))]
     #[must_use]
     pub(crate) fn token_for_test(&self) -> &str {
         &self.token
@@ -394,7 +400,7 @@ impl IronWireLedger {
     /// Test-only for the same reason as `token_for_test`: nothing shipped
     /// needs to read it back, and a test that asserts a ledger exists
     /// proves nothing about which proxy it will talk to.
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "near-ai-staging")))]
     #[must_use]
     pub(crate) fn port_for_test(&self) -> u16 {
         self.port
@@ -536,7 +542,7 @@ impl IronWireLedger {
             // Against what the proxy served, not what we could read: a full
             // page carrying a bad row must not read as the last one.
             let short = page.served() < PAGE_LIMIT;
-            let next = page.rows.last().and_then(|row| row.id);
+            let next = page.last_served_id;
             unreadable += page.unreadable;
             rows.extend(page.rows);
 
@@ -702,8 +708,18 @@ impl IronWireLedger {
         let mut page = Page {
             rows: Vec::with_capacity(view.exchanges.len()),
             unreadable: 0,
+            failed: 0,
+            last_served_id: None,
         };
         for row in view.exchanges {
+            page.last_served_id = row.get("id").and_then(serde_json::Value::as_i64);
+            // A request that failed inside the proxy carries a `failure`
+            // code. It is not a call. Absent or null on served rows and on
+            // proxies that predate the field.
+            if row.get("failure").is_some_and(|f| !f.is_null()) {
+                page.failed += 1;
+                continue;
+            }
             // Deliberately row by row. Deserializing `exchanges` as a unit
             // means a single row missing a required field -- `started_at`,
             // `facade`, `backend`, `rung`, `attempts`, `status` -- fails the
@@ -1147,6 +1163,29 @@ mod tests {
         let page =
             IronWireLedger::parse_page(br#"{"enabled":false}"#).expect("valid JSON is readable");
         assert!(page.rows.is_empty());
+    }
+
+    #[test]
+    fn failed_request_rows_are_dropped_and_older_payloads_are_unchanged() {
+        let page = IronWireLedger::parse_page(
+            br#"{"exchanges":[
+                {"id":1,"started_at":"2026-09-01T00:00:00Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1,"status":200,"failure":null},
+                {"id":2,"started_at":"2026-09-01T00:00:01Z","facade":"anthropic","backend":"none","rung":"none","attempts":0,"status":500,"failure":"panic"}
+            ]}"#,
+        )
+        .expect("readable");
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].id, Some(1));
+        // The dropped row was still served: paging keys off it.
+        assert_eq!(page.served(), 2);
+        assert_eq!(page.last_served_id, Some(2));
+
+        let old = IronWireLedger::parse_page(
+            br#"{"exchanges":[{"id":1,"started_at":"2026-09-01T00:00:00Z","facade":"anthropic","backend":"claude-sub","rung":"same_model","attempts":1,"status":503}]}"#,
+        )
+        .expect("readable");
+        assert_eq!(old.rows.len(), 1);
+        assert_eq!(old.served(), 1);
     }
 
     #[test]

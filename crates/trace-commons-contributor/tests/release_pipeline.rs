@@ -2290,16 +2290,11 @@ fn the_flatpak_vendor_set_matches_the_gtk_lockfile() {
     );
 }
 
-/// `cargo-deny-action` defaults `arguments` to `--all-features`, so the
-/// property that keeps the advisories job on the DEFAULT graph --
-/// `arguments: ''` -- is an override of that default, not a value whose
-/// absence would be obvious. A future edit that "cleans up" the empty
-/// string silently moves advisories onto the union graph, where six
-/// untriaged findings sit, and the job goes permanently red. The mirror
-/// property matters too: licences and sources must stay on
-/// `--all-features`, because a named feature list drifts (it already did --
-/// gcs-client, gcp-kms and near-attestation-collateral ship in production
-/// and went unchecked).
+/// Both deny jobs must check the union graph against the committed lockfile.
+/// A named feature list drifts (it already did -- gcs-client, gcp-kms and
+/// near-attestation-collateral ship in production and went unchecked).
+/// `--locked` prevents metadata resolution from silently changing the
+/// dependency versions being audited; it must accompany `--all-features`.
 ///
 /// Every assertion runs against `executable_text`, so a comment describing
 /// a step can neither satisfy nor defeat it, and each pinned value is
@@ -2318,8 +2313,8 @@ fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
          assertion here still passes"
     );
     assert!(
-        has_line(all_features, "arguments: --all-features"),
-        "cargo-deny-all-features must check the union graph: a named \
+        has_line(all_features, "arguments: --all-features --locked"),
+        "cargo-deny-all-features must check the locked union graph: a named \
          feature list has to track every deployable feature and did not"
     );
     assert!(
@@ -2334,8 +2329,8 @@ fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
         "cargo-deny-advisories must actually run cargo-deny-action"
     );
     assert!(
-        has_line(advisories, "arguments: --all-features"),
-        "cargo-deny-advisories must check the union graph. On the default \
+        has_line(advisories, "arguments: --all-features --locked"),
+        "cargo-deny-advisories must check the locked union graph. On the default \
          graph it said nothing about the features production ships -- \
          cloudbuild.yaml builds ingest with gcs-client, gcp-kms and \
          near-ai-scorer -- and that gap hid an unsound use-after-free in a \
@@ -2356,7 +2351,7 @@ fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
     // thing.
     for (name, job) in [
         ("cargo-deny-all-features", all_features),
-        ("cargo-deny-default-advisories", advisories),
+        ("cargo-deny-advisories", advisories),
     ] {
         assert!(
             !job.lines().any(|line| {

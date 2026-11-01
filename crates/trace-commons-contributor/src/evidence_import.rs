@@ -131,9 +131,16 @@ impl PreparedImport {
     ) -> Result<ImportPreview> {
         let raw =
             crate::envelope::build_import_preview_raw(&self.document.trace, &self.session_hash);
-        let envelope = crate::submit::checked_local_redaction(redactor, raw, false)
-            .await
-            .map_err(anyhow::Error::msg)?;
+        // A local import preview opens no state directory, so it is held to
+        // the production limit.
+        let envelope = crate::submit::checked_local_redaction(
+            redactor,
+            raw,
+            false,
+            crate::envelope::MAX_ENVELOPE_BYTES,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
         let artifact =
             serde_json::to_vec(&envelope).map_err(|_| anyhow!("import-preview-malformed"))?;
         Ok(ImportPreview {
@@ -358,11 +365,20 @@ mod tests {
             .await
             .unwrap()
             .envelope;
-        crate::submit::validate_local_envelope(&redactor, &clean).unwrap();
+        crate::submit::validate_local_envelope(
+            &redactor,
+            &clean,
+            crate::envelope::MAX_ENVELOPE_BYTES,
+        )
+        .unwrap();
         // Inject a post-redaction survivor, as the established submit test does.
         clean.events[0].redacted_content = Some("sk-ant-EXPOSEDsecret0123456789abcdefghij".into());
         assert_eq!(
-            crate::submit::validate_local_envelope(&redactor, &clean),
+            crate::submit::validate_local_envelope(
+                &redactor,
+                &clean,
+                crate::envelope::MAX_ENVELOPE_BYTES
+            ),
             Err("secret-leak-detected")
         );
     }

@@ -15,7 +15,8 @@
 //! the spec): an accepted submission with a provider-TEE attested final call
 //! qualifies without the gate and quality test, counts
 //! `attested_unit_weight` units toward a tier, and a tier may require a
-//! number of attested units.
+//! number of attested units. A policy may explicitly require a passed gate
+//! even for attested submissions; the default preserves the attestation bypass.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,6 +56,9 @@ pub struct GrowthPolicy {
     weekly_cap: u32,
     /// Units one attested qualified contribution counts toward a tier.
     attested_unit_weight: u32,
+    /// Whether attestation must also satisfy the allowlisted passed gate.
+    /// False preserves existing policies' attestation bypass.
+    require_gate_pass: bool,
     /// `None` runs the rule on gate pass alone: decision 2 of the spec lets
     /// the first shadow run do that while credit-quality V3 settles.
     q_min_micros: Option<i64>,
@@ -86,6 +90,9 @@ impl GrowthPolicy {
     pub fn attested_unit_weight(&self) -> u32 {
         self.attested_unit_weight
     }
+    pub fn require_gate_pass(&self) -> bool {
+        self.require_gate_pass
+    }
     /// `min(bounded_allowance * m_tier, allowance_ceiling)`. The top tier's
     /// product is checked at parse time, so no tier can overflow.
     pub fn effective_allowance(&self, tier: u32) -> i64 {
@@ -107,6 +114,8 @@ struct RawGrowth {
     weekly_cap: u32,
     #[serde(default)]
     attested_unit_weight: Option<u32>,
+    #[serde(default)]
+    require_gate_pass: bool,
     q_min_micros: Option<i64>,
     penalty_cooldown_seconds: i64,
     evaluation_max_age_seconds: i64,
@@ -230,6 +239,7 @@ pub fn parse_growth_policy(
         window_seconds: raw.window_seconds,
         weekly_cap: raw.weekly_cap,
         attested_unit_weight,
+        require_gate_pass: raw.require_gate_pass,
         q_min_micros: raw.q_min_micros,
         penalty_cooldown_seconds: raw.penalty_cooldown_seconds,
         evaluation_max_age_seconds: raw.evaluation_max_age_seconds,
@@ -317,10 +327,34 @@ pub fn evaluate(
     let penalty_active = latest_penalty
         .is_some_and(|at| as_of < at + chrono::Duration::seconds(policy.penalty_cooldown_seconds));
 
+    // Gate-required status evidence is authoritative about reviewer
+    // independence for the whole UUID. A legacy credit fact for that same
+    // submission cannot override a nonqualifying status classification.
+    // Existing policies continue to ignore the new status source entirely.
+    let status_exclusions: BTreeSet<Uuid> = if policy.require_gate_pass {
+        facts
+            .iter()
+            .filter(|fact| {
+                fact.source_kind == "accepted_submission_status"
+                    && matches!(
+                        fact.outcome.as_str(),
+                        "accepted_self_reviewed"
+                            | "accepted_approver_unknown"
+                            | "accepted_status_inactive"
+                    )
+            })
+            .map(|fact| fact.submission_id)
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+
     // Age: since the first acceptance. A floor, not a reward: it never decays.
     let first_accepted = facts
         .iter()
-        .filter(|f| f.source_kind == "accepted_submission" && f.outcome == "accepted")
+        .filter(|f| {
+            accepted_fact_qualifies(policy, f) && !status_exclusions.contains(&f.submission_id)
+        })
         .map(|f| f.occurred_at)
         .min();
     let age_seconds = first_accepted.map_or(0, |at| (as_of - at).num_seconds().max(0));
@@ -331,7 +365,8 @@ pub fn evaluate(
     let (mut netted_withdrawn, mut netted_revoked, mut netted_quarantined) = (0u32, 0u32, 0u32);
     let mut accepted: BTreeMap<Uuid, DateTime<Utc>> = BTreeMap::new();
     for fact in &facts {
-        if fact.source_kind == "accepted_submission" && fact.outcome == "accepted" {
+        if accepted_fact_qualifies(policy, fact) && !status_exclusions.contains(&fact.submission_id)
+        {
             let entry = accepted
                 .entry(fact.submission_id)
                 .or_insert(fact.occurred_at);
@@ -373,15 +408,16 @@ pub fn evaluate(
             None => {}
         }
         // A provider-TEE attested final call stands in for the gate and
-        // quality test; acceptance, netting, the penalty cutoff and
-        // first-in-cluster still apply.
+        // quality test unless the policy requires the passed gate too.
+        // Acceptance, netting, the penalty cutoff and first-in-cluster apply
+        // under either policy.
         let attested = facts
             .iter()
             .any(|f| f.submission_id == submission && attested_fact_qualifies(f));
         let gate_ok = facts
             .iter()
             .any(|f| f.submission_id == submission && gate_fact_qualifies(policy, f));
-        if !attested && !gate_ok {
+        if !gate_ok && (policy.require_gate_pass || !attested) {
             continue;
         }
         let week = crate::contributor_cap::epoch_index(accepted_at.timestamp(), WEEK_DAYS);
@@ -453,6 +489,12 @@ pub fn evaluate(
 /// The V126 fact: a v2 witness certificate whose final call ran in a provider
 /// TEE, matching the accepted artifact when recorded. A gateway receipt does
 /// not show which model ran and is never recorded as this outcome.
+fn accepted_fact_qualifies(policy: &GrowthPolicy, fact: &EvaluationFact) -> bool {
+    fact.outcome == "accepted"
+        && (fact.source_kind == "accepted_submission"
+            || (policy.require_gate_pass && fact.source_kind == "accepted_submission_status"))
+}
+
 fn attested_fact_qualifies(fact: &EvaluationFact) -> bool {
     fact.source_kind == "attested_submission"
         && fact.outcome == "attested_provider_tee"
@@ -798,6 +840,259 @@ mod tests {
                 .find(|f| f.source_kind == "gate_evaluation")
                 .unwrap()
         }
+    }
+
+    fn staging_upload_policy() -> GrowthPolicy {
+        let json =
+            include_str!("../../../deploy/staging-gcp/client-upload-trust-policy.json.template")
+                .replace("${TC_UPLOAD_TRUST_GATE_POLICY_VERSION}", "gate-v1")
+                .replace(
+                    "${TC_UPLOAD_TRUST_DEDUP_SIGNAL_VERSION}",
+                    "events.v2+simhash.v2",
+                );
+        parse_growth_policy(&json, &["staging-earned-upload-v1"]).unwrap()
+    }
+
+    #[test]
+    fn status_acceptance_is_opt_in_gate_qualified_and_counted_once_per_submission() {
+        let strict = staging_upload_policy();
+        let mut facts = Facts::new();
+        let submission = facts.qualified(1);
+        facts
+            .0
+            .iter_mut()
+            .find(|fact| fact.source_kind == "accepted_submission")
+            .unwrap()
+            .source_kind = "accepted_submission_status".into();
+        assert_eq!(
+            evaluate(&policy(), &facts.0, t(2)).units,
+            0,
+            "legacy policies never count a status-only acceptance"
+        );
+        assert_eq!(evaluate(&strict, &facts.0, t(2)).units, 1);
+        for outcome in ["accepted_self_reviewed", "accepted_approver_unknown"] {
+            facts
+                .0
+                .iter_mut()
+                .find(|fact| fact.source_kind == "accepted_submission_status")
+                .unwrap()
+                .outcome = outcome.into();
+            assert_eq!(
+                evaluate(&strict, &facts.0, t(2)).units,
+                0,
+                "a passed gate does not override reviewer independence: {outcome}"
+            );
+        }
+        facts
+            .0
+            .iter_mut()
+            .find(|fact| fact.source_kind == "accepted_submission_status")
+            .unwrap()
+            .outcome = "accepted".into();
+        facts.push("accepted_submission", submission, "accepted", t(1));
+        assert_eq!(
+            evaluate(&strict, &facts.0, t(2)).units,
+            1,
+            "credit and status sources for one UUID earn one unit"
+        );
+        for outcome in [
+            "accepted_self_reviewed",
+            "accepted_approver_unknown",
+            "accepted_status_inactive",
+        ] {
+            facts
+                .0
+                .iter_mut()
+                .find(|fact| fact.source_kind == "accepted_submission_status")
+                .unwrap()
+                .outcome = outcome.into();
+            assert_eq!(
+                evaluate(&strict, &facts.0, t(2)).units,
+                0,
+                "legacy accepted credit for the same UUID cannot override {outcome}"
+            );
+            assert_eq!(
+                evaluate(&policy(), &facts.0, t(2)).units,
+                1,
+                "default-false policies preserve their legacy credit source behavior"
+            );
+        }
+        facts
+            .0
+            .iter_mut()
+            .find(|fact| fact.source_kind == "accepted_submission_status")
+            .unwrap()
+            .outcome = "accepted".into();
+        facts
+            .0
+            .retain(|fact| fact.source_kind != "accepted_submission");
+        facts.last_gate().outcome = "evaluated_failed".into();
+        assert_eq!(evaluate(&strict, &facts.0, t(2)).units, 0);
+        facts.last_gate().outcome = "evaluated_passed".into();
+        for (kind, outcome) in [
+            ("submission_withdrawn", "withdrawn"),
+            ("submission_revoked", "revoked"),
+            ("submission_quarantined", "quarantined"),
+        ] {
+            let mut netted = facts.0.clone();
+            let mut adverse = Facts::new();
+            adverse.push(kind, submission, outcome, t(2));
+            netted.extend(adverse.0);
+            assert_eq!(evaluate(&strict, &netted, t(3)).units, 0, "{kind}");
+        }
+    }
+
+    #[test]
+    fn staging_upload_tiers_have_exact_boundaries_without_age_or_week_waits() {
+        let policy = staging_upload_policy();
+        assert!(policy.require_gate_pass());
+        assert_eq!(policy.attested_unit_weight(), 1);
+        assert!(policy.tiers().iter().all(|tier| tier.active_weeks == 0
+            && tier.age_seconds == 0
+            && tier.attested_units == 0));
+        for (units, tier, allowance) in [
+            (0, 0, 100),
+            (4, 0, 100),
+            (5, 1, 200),
+            (19, 1, 200),
+            (20, 2, 300),
+            (49, 2, 300),
+            (50, 3, 500),
+        ] {
+            let mut facts = Facts::new();
+            for _ in 0..units {
+                facts.qualified(1);
+            }
+            // Every contribution is from this instant and the same week.
+            let result = evaluate(&policy, &facts.0, t(1));
+            assert_eq!(result.units, units);
+            assert_eq!(result.age_seconds, 0);
+            assert_eq!(result.active_weeks, u32::from(units > 0));
+            assert_eq!(result.tier, tier, "{units} qualified traces");
+            assert_eq!(result.effective_allowance, allowance);
+        }
+    }
+
+    #[test]
+    fn staging_upload_trust_counts_existing_qualified_history_in_its_window() {
+        let policy = staging_upload_policy();
+        let mut facts = Facts::new();
+        for _ in 0..50 {
+            facts.qualified(1);
+        }
+        assert_eq!(evaluate(&policy, &facts.0, t(84)).tier, 3);
+        assert_eq!(
+            evaluate(&policy, &facts.0, t(85)).units,
+            0,
+            "history outside the 84-day window expires"
+        );
+    }
+
+    #[test]
+    fn staging_upload_trust_excludes_duplicates_reuploads_and_netted_traces() {
+        let policy = staging_upload_policy();
+        let mut facts = Facts::new();
+        for _ in 0..5 {
+            facts.qualified(1);
+        }
+        // Repeated facts for an existing submission do not earn extra units.
+        facts.0.extend(facts.0.clone());
+        assert_eq!(evaluate(&policy, &facts.0, t(1)).units, 5);
+        // A distinct re-upload in the same cluster cannot earn another unit.
+        let duplicate = facts.qualified(1);
+        facts.last_gate().first_in_cluster = Some(false);
+        facts.push(
+            "attested_submission",
+            duplicate,
+            "attested_provider_tee",
+            t(1),
+        );
+        facts.last_attested().first_in_cluster = Some(false);
+        assert_eq!(evaluate(&policy, &facts.0, t(1)).units, 5);
+        let submissions: Vec<_> = facts
+            .0
+            .iter()
+            .filter(|fact| fact.source_kind == "accepted_submission")
+            .take(3)
+            .map(|fact| fact.submission_id)
+            .collect();
+        for (submission, (kind, outcome)) in submissions.into_iter().zip([
+            ("submission_withdrawn", "withdrawn"),
+            ("submission_revoked", "revoked"),
+            ("submission_quarantined", "quarantined"),
+        ]) {
+            facts.push(kind, submission, outcome, t(1));
+        }
+        let result = evaluate(&policy, &facts.0, t(1));
+        assert_eq!((result.units, result.tier), (2, 0));
+        assert_eq!(
+            (
+                result.netted_withdrawn,
+                result.netted_revoked,
+                result.netted_quarantined
+            ),
+            (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn gate_required_upload_trust_never_accepts_attestation_as_a_gate_bypass() {
+        let policy = staging_upload_policy();
+        let mut facts = Facts::new();
+        let submission = facts.attested(1);
+        assert_eq!(evaluate(&policy, &facts.0, t(1)).units, 0, "no gate");
+        facts.push("gate_evaluation", submission, "evaluated_failed", t(1));
+        assert_eq!(evaluate(&policy, &facts.0, t(1)).units, 0, "failed gate");
+        facts.last_gate().outcome = "evaluated_passed".into();
+        facts.last_gate().evaluator_version = Some("other-gate".into());
+        assert_eq!(
+            evaluate(&policy, &facts.0, t(1)).units,
+            0,
+            "unlisted gate version"
+        );
+        facts.last_gate().evaluator_version = Some("gate-v1".into());
+        facts.last_gate().dedup_signal_version = Some("other-dedup".into());
+        assert_eq!(
+            evaluate(&policy, &facts.0, t(1)).units,
+            0,
+            "unlisted dedup version"
+        );
+        facts.last_gate().dedup_signal_version = Some("events.v2+simhash.v2".into());
+        facts.last_gate().first_in_cluster = Some(false);
+        assert_eq!(
+            evaluate(&policy, &facts.0, t(1)).units,
+            0,
+            "duplicate even with first-cluster attestation"
+        );
+        facts.last_gate().first_in_cluster = Some(true);
+        let result = evaluate(&policy, &facts.0, t(1));
+        assert_eq!(
+            (result.units, result.attested_units),
+            (1, 1),
+            "both pass, no bonus"
+        );
+    }
+
+    #[test]
+    fn requiring_gate_pass_defaults_to_false_for_existing_growth_policies() {
+        let legacy = policy();
+        assert!(!legacy.require_gate_pass());
+        let explicit = parse_growth_policy(
+            &with(growth(), "require_gate_pass", false.into()),
+            &["growth-test-v1"],
+        )
+        .unwrap();
+        assert_eq!(legacy, explicit);
+        let mut facts = Facts::new();
+        facts.attested(1);
+        assert_eq!(evaluate(&legacy, &facts.0, t(2)).units, 1);
+        assert!(
+            parse_growth_policy(
+                &with(growth(), "require_gate_pass", "true".into()),
+                &["growth-test-v1"]
+            )
+            .is_err()
+        );
     }
 
     // ---- parser -----------------------------------------------------------

@@ -158,8 +158,10 @@ fn native(_store: &ConfigStore) -> Result<CredentialStore<Arc<dyn SecretBackend>
         super::test_credential_store::TestFileBackend::for_store(_store),
     );
     #[cfg(all(not(test), not(feature = "test-credential-store")))]
-    let backend: Arc<dyn SecretBackend> =
-        Arc::new(super::os_secret_store::OsSecretBackend::commons().map_err(|_| unavailable())?);
+    let backend: Arc<dyn SecretBackend> = Arc::new(
+        super::os_secret_store::OsSecretBackend::commons(&crate::channel::KEYCHAIN)
+            .map_err(|_| unavailable())?,
+    );
     Ok(CredentialStore::new(backend))
 }
 
@@ -625,6 +627,22 @@ pub(crate) fn save_config(store: &ConfigStore, cfg: &ContributorConfig, body: &[
         ensure_current(store, &expected)?;
         write(store, &store.daemon_path("contributor.json"), body)
     }
+}
+
+/// Execute a local write only while the complete enrollment snapshot is still
+/// current. The callback must not take the credential commit lock again.
+pub(crate) fn with_current_config<T>(
+    store: &ConfigStore,
+    expected: &ContributorConfig,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let locks = coordination(store.dir())?;
+    let _commit = locks.commit.lock()?;
+    let current = store.load_config()?.ok_or_else(changed)?;
+    if serde_json::to_value(&current)? != serde_json::to_value(expected)? {
+        return Err(changed());
+    }
+    operation()
 }
 
 /// Cancel an in-flight enrollment without touching any existing credential.

@@ -1,4 +1,5 @@
 import Foundation
+import os
 import TCBridge
 @testable import TCShellCore
 import XCTest
@@ -49,10 +50,21 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // The managed-session terminal: the picker reads it from the
             // managed snapshot (`capabilities.terminal_current`), with the
             // installed choices beside it, and writes it with
-            // `set_managed_terminal`.
-            "managed_terminal",
+            // `set_managed_terminal`. Whether it was chosen is read the same
+            // way (`capabilities.terminal_chosen`).
+            "managed_terminal", "managed_terminal_chosen",
+            // Favorite models: the Launch sheet's picker reads them from
+            // `managed_model_catalogue`'s `favorites` and writes them with
+            // `managed_model_favorite_set`.
+            "managed_favorite_models",
         ]
-        return ["get_settings": settings, "set_settings": settings]
+        // Staging builds only: where the signed NEAR AI pin set stands, and
+        // the last attestation outcome under it (owner decision S16):
+        // labels no screen draws yet. A production daemon never sends them.
+        let status: Set<String> = [
+            "near_ai_pins", "near_ai_attestation",
+        ]
+        return ["get_settings": settings, "set_settings": settings, "status": status]
     }()
 
     private struct Owned: @unchecked Sendable {
@@ -148,14 +160,70 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         throw DaemonWaitTimedOut(what: "the watcher never queued the session")
     }
 
+    /// The Models card's answered shape, which the throwaway store above
+    /// never reaches (counting is off there): the daemon's own recorded
+    /// answer, and the sample's hand-written one, whose rejection rows
+    /// carry the person's kept shares (`kept_by_model`, each figure's
+    /// `kept`) that the recorded answer has only empty. A key the model
+    /// drops fails here, by path.
+    func testEveryModelAnswersKeyIsDeclared() throws {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("tests/fixtures/insights-analytics/insights_model_answers.json")
+        let recorded = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture))
+        assertDeclared(DaemonData.InsightsModelAnswers.self, recorded, method: "insights_model_answers")
+        var sample = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(SampleDaemonData.modelAnswersSample.utf8)) as? [String: Any])
+        sample["_sample"] = nil
+        assertDeclared(DaemonData.InsightsModelAnswers.self, sample, method: "insights_model_answers")
+        let paths = KeyRecorder.keyPaths(in: sample)
+        for path in ["rows[].kept_by_model", "rows[].leader.kept.kept_permille", "rows[].next.kept.thrown_away",
+                     "rows[].kept_by_model[][].partly_kept"] {
+            XCTAssertTrue(paths.contains(path), "the sample carries \(path)")
+        }
+    }
+
+    /// `insights_submitted` (product owner, 2026-10-29), from the daemon's
+    /// own recorded answer. A key the model drops fails here, by path.
+    func testEverySubmittedKeyIsDeclared() throws {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("tests/fixtures/insights-analytics/insights_submitted.json")
+        let recorded = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture))
+        assertDeclared(DaemonData.InsightsSubmitted.self, recorded, method: "insights_submitted")
+        let paths = KeyRecorder.keyPaths(in: recorded)
+        for path in ["by_model[].edits_denied_partial", "by_model[].usd_micros_known", "code.files.config",
+                     "traces[].unmatched_reason", "totals.by_status.withdrawn"] {
+            XCTAssertTrue(paths.contains(path), "the recorded answer carries \(path): \(paths)")
+        }
+    }
+
+    /// `insights_week`'s `near_ai_credit` (product owner, 2026-10-28),
+    /// which the throwaway store above never reaches: the daemon's own
+    /// recorded routed answer. A key the model drops fails here, by path.
+    func testEveryNearAiCreditKeyIsDeclared() throws {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("tests/fixtures/insights-analytics/insights_week_routed.json")
+        let recorded = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any])
+        let credit = try XCTUnwrap(recorded["near_ai_credit"] as? [String: Any])
+        assertDeclared(DaemonData.InsightsNearAiCredit.self, credit, method: "insights_week.near_ai_credit")
+        let paths = KeyRecorder.keyPaths(in: credit)
+        for path in ["week.by_folder[].key", "week.by_folder[].usd_micros", "week.by_model[].usd_micros_known",
+                     "last_31_days.calls_without_charge"] {
+            XCTAssertTrue(paths.contains(path), "the recorded answer carries \(path): \(paths)")
+        }
+    }
+
     func testEveryKeyTheDaemonSendsIsDeclared() throws {
         let daemon = try startDaemonWithOneSession()
-        var frames: [String] = []
-        let framesLock = NSLock()
+        let frames = OSAllocatedUnfairLock(initialState: [String]())
         let subscription = try XCTUnwrap(daemon.subscribe { json in
-            framesLock.lock()
-            frames.append(json)
-            framesLock.unlock()
+            frames.withLock { $0.append(json) }
         })
         defer { _ = daemon.unsubscribe(subscription) }
 
@@ -231,6 +299,12 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         assertDeclared(
             DaemonData.InferenceCallPage.self, try result(daemon, "inference_calls", ["limit": 25]),
             method: "inference_calls")
+        // A temp store runs no IronWire proxy, so the steps are unknown: no
+        // ledger answered, and no steps, never six empty ones.
+        let activity = try result(daemon, "inference_activity")
+        XCTAssertEqual((activity as? [String: Any])?["readable"] as? Bool, false)
+        XCTAssertEqual(((activity as? [String: Any])?["steps"] as? [Any])?.count, 0)
+        assertDeclared(DaemonData.InferenceActivity.self, activity, method: "inference_activity")
 
         // The Insights glance: on by default (owner decision D3, settled
         // 2026-10-09), which a temp store with no IronWire proxy answers as
@@ -251,6 +325,14 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         XCTAssertEqual((off as? [String: Any])?["enabled"] as? Bool, false)
         assertDeclared(DaemonData.InsightsGlance.self, off, method: "insights_glance")
 
+        // The Models card's answers: the counter pass is on by default
+        // (product owner, 2026-10-29), so the real daemon answers enabled.
+        // The answered shape is pinned by `InsightsModelAnswersWireTests`,
+        // from the daemon's own recorded answer.
+        let models = try result(daemon, "insights_model_answers")
+        XCTAssertEqual((models as? [String: Any])?["enabled"] as? Bool, true)
+        assertDeclared(DaemonData.InsightsModelAnswers.self, models, method: "insights_model_answers")
+
         // Approve last: it moves the entry out of the queue when it acts.
         assertDeclared(ApproveResponse.self, try result(daemon, "approve", ["entry_id": entryId]), method: "approve")
 
@@ -258,15 +340,11 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         // them. `preview_ready` is published from the scheduler's thread, so
         // give it a moment to land.
         for _ in 0..<100 {
-            framesLock.lock()
-            let seen = frames.contains { $0.contains(#""preview_ready""#) }
-            framesLock.unlock()
+            let seen = frames.withLock { $0.contains { $0.contains(#""preview_ready""#) } }
             if seen { break }
             Thread.sleep(forTimeInterval: 0.05)
         }
-        framesLock.lock()
-        let delivered = frames
-        framesLock.unlock()
+        let delivered = frames.withLock { $0 }
         for frame in delivered {
             let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(frame.utf8)) as? [String: Any])
             let name = try XCTUnwrap(object["event"] as? String)

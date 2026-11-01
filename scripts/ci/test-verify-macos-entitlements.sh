@@ -29,8 +29,6 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 bash -n "$VERIFY"
-python3 -m unittest discover -s "$ROOT/scripts/ci/tests" \
-  -p test_native_passkey_entitlements.py
 
 if grep -nE '(^|[^A-Za-z_/])macos/(TraceCommons-DeveloperID\.provisionprofile|entitlements\.plist)' \
   "$ROOT/macos/scripts/make-release-dmg.sh"; then
@@ -40,6 +38,7 @@ fi
 
 make_bundle() {
   local app="$1" bundle_id="${2:-ai.tracecommons.shell}" executable="${3:-TraceCommonsApp}"
+  local profile="${4:-TraceCommons-DeveloperID.provisionprofile}"
   mkdir -p "$app/Contents/MacOS"
   cp /usr/bin/true "$app/Contents/MacOS/$executable"
   cat > "$app/Contents/Info.plist" <<PLIST
@@ -53,8 +52,7 @@ make_bundle() {
 </dict>
 </plist>
 PLIST
-  cp "$ROOT/macos/TraceCommons-DeveloperID.provisionprofile" \
-    "$app/Contents/embedded.provisionprofile"
+  cp "$ROOT/macos/$profile" "$app/Contents/embedded.provisionprofile"
 }
 
 # Both apps must request the same access group: the contributor crate's
@@ -84,19 +82,6 @@ TC_VERIFY_STATIC_ONLY=1 bash "$VERIFY" "$GOOD"
 # (GROUPS) killed the script with exit 1 and no message at all.
 echo "=== fixture: entitled bundle, /bin/bash"
 TC_VERIFY_STATIC_ONLY=1 /bin/bash "$VERIFY" "$GOOD"
-
-NO_DOMAIN="$WORK/no-domain/Near.ai.app"
-make_bundle "$NO_DOMAIN"
-cp "$ROOT/macos/entitlements.plist" "$WORK/no-domain.plist"
-/usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.associated-domains' "$WORK/no-domain.plist"
-codesign --force --sign - --entitlements "$WORK/no-domain.plist" "$NO_DOMAIN"
-echo "=== fixture: native bundle missing signed Associated Domains must be refused"
-if OUT="$(TC_VERIFY_STATIC_ONLY=1 bash "$VERIFY" "$NO_DOMAIN" 2>&1)"; then
-  echo "FAIL: native fixture unexpectedly passed without Associated Domains"
-  exit 1
-fi
-printf '%s' "$OUT" | grep -q '^FAIL: native passkeys require exactly webcredentials:tracecommons.ai$' \
-  || { echo "FAIL: expected missing signed Associated Domains refusal"; exit 1; }
 
 echo "=== fixture: unentitled bundle must be refused"
 if OUT="$(TC_VERIFY_STATIC_ONLY=1 bash "$VERIFY" "$BARE" 2>&1)"; then
@@ -128,4 +113,28 @@ printf '%s' "$OUT" \
   | grep -qx 'FAIL: embedded profile is for KXSWJN7WY8.ai.tracecommons.shell, not KXSWJN7WY8.ai.tracecommons.desktop' \
   || { echo "FAIL: the refusal was not the profile/App ID mismatch"; exit 1; }
 
-echo "PASS: verify-macos-entitlements.sh passes the entitled fixture and refuses the bare and mismatched ones"
+# The staging app (staging design 4.2): its own App ID, profile and keychain
+# group. It passes with its own, and is refused carrying production's
+# entitlements, whose group it may not have.
+STAGING_BUNDLE=ai.tracecommons.shell.staging
+STAGING_PROFILE=TraceCommons-Staging-DeveloperID.provisionprofile
+STAGING="$WORK/staging/Near.ai Staging.app"
+make_bundle "$STAGING" "$STAGING_BUNDLE" TraceCommonsApp "$STAGING_PROFILE"
+codesign --force --sign - --entitlements "$ROOT/macos/entitlements-staging.plist" "$STAGING"
+echo "=== fixture: staging bundle with its own entitlements and profile"
+TC_VERIFY_STATIC_ONLY=1 bash "$VERIFY" "$STAGING"
+
+STAGING_AS_PROD="$WORK/staging-as-prod/Near.ai Staging.app"
+make_bundle "$STAGING_AS_PROD" "$STAGING_BUNDLE" TraceCommonsApp "$STAGING_PROFILE"
+codesign --force --sign - --entitlements "$ROOT/macos/entitlements.plist" "$STAGING_AS_PROD"
+echo "=== fixture: staging bundle signed with production entitlements must be refused"
+if OUT="$(TC_VERIFY_STATIC_ONLY=1 bash "$VERIFY" "$STAGING_AS_PROD" 2>&1)"; then
+  echo "$OUT"
+  echo "FAIL: the script passed a staging bundle carrying production's keychain group"
+  exit 1
+fi
+echo "$OUT"
+printf '%s' "$OUT" | grep -qx 'FAIL: keychain access group absent from keychain-access-groups' \
+  || { echo "FAIL: the refusal was not the keychain group"; exit 1; }
+
+echo "PASS: verify-macos-entitlements.sh passes the entitled fixtures and refuses the bare and mismatched ones"

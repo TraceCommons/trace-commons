@@ -22,7 +22,7 @@ import Foundation
 ///
 /// The network methods (C3, #1187) -- `inference_summary`,
 /// `inference_call_proof`, `model_spend`, `private_ai`, `mission_catalogue`,
-/// `invite_lookup`, `passkey_state`, `account_session_status` and
+/// `invite_lookup`, `account_session_status` and
 /// `activity_missions_catalogue` -- are hand-written below in the shapes the
 /// daemon serves, each reply marked `"_sample":"hand-written"`. They are
 /// synthetic, never pilot observations: K2's recorder runs a temp store with
@@ -52,6 +52,10 @@ import Foundation
 /// capture, before the write), but its drift test excludes them, since a
 /// fresh real capture can never equal a value it was deliberately edited
 /// away from.
+///
+/// `inference_activity` is hand-written for the same reason, and drawn
+/// against the clock: its steps end at the moment of the read, so the
+/// menu-bar item's Private AI bars show in a preview at any date.
 enum SampleDaemonData {
     typealias Sample = SampleDaemonClient.SampleSet
 
@@ -72,6 +76,8 @@ enum SampleDaemonData {
         case "keep": return recordedShared("keep")
         case "undo_keep": return recordedShared("undo_keep")
         case "set_project_mode": return recordedShared("set_project_mode")
+        // Hand-written, see above: `readable` needs a live IronWire proxy.
+        case "inference_activity": return inferenceActivity(set)
         // Network methods (C3, #1187): hand-written, see above.
         case "inference_summary": return inferenceSummary(set)
         case "inference_call_proof": return proofDetail(set)
@@ -79,11 +85,12 @@ enum SampleDaemonData {
         case "private_ai": return privateAI(set)
         case "mission_catalogue": return missionCatalogue
         case "invite_lookup": return inviteLookup
-        case "passkey_state": return passkeyState(set)
         case "account_session_status": return accountState(set)
         case "activity_missions_catalogue":
             guard set != .unknownCounts else { return nil }
             return activityMissionsCatalogue
+        // Insights feed T: hand-written, see `modelAnswers(_:)`.
+        case "insights_model_answers": return modelAnswers(set)
         default: return nil
         }
     }
@@ -224,6 +231,30 @@ enum SampleDaemonData {
         #"{"entry_id":"\#(entryId)","body_digest":"\#(bodyDigest)","envelope_digest":"sha256:sample-envelope","span_count":2,"spans":[{"label":"looks-like-email","byte_offset":1408,"byte_len":11},{"label":"looks-like-phone","byte_offset":2210,"byte_len":12}],"spans_truncated":false}"#
     }
 
+    // MARK: - inference_activity: hand-written, against the clock
+
+    /// Six four-hour steps ending at `now`, shaped as `activity_steps`
+    /// builds them (`daemon/inference_map.rs`), for the two sets with a
+    /// readable calls page; every other set's ledger has not answered.
+    static func inferenceActivity(_ set: Sample, now: Date = Date()) -> String {
+        let counts: [(calls: Int, verified: Int)]
+        switch set {
+        case .normalDay:
+            counts = [(2, 2), (1, 1), (13, 11), (19, 17), (9, 7), (16, 14)]
+        case .busyQueue:
+            counts = [(13, 11), (5, 4), (27, 22), (40, 36), (32, 27), (41, 35)]
+        default:
+            return #"{"_sample":"hand-written","readable":false,"window_hours":24,"step_hours":4,"steps":[]}"#
+        }
+        let formatter = ISO8601DateFormatter()
+        let first = now.addingTimeInterval(-24 * 3600)
+        let steps = counts.enumerated().map { index, step in
+            let start = formatter.string(from: first.addingTimeInterval(Double(index) * 4 * 3600))
+            return #"{"start":"\#(start)","calls":\#(step.calls),"verified":\#(step.verified)}"#
+        }
+        return #"{"_sample":"hand-written","readable":true,"window_hours":24,"step_hours":4,"steps":[\#(steps.joined(separator: ","))]}"#
+    }
+
     // MARK: - Network methods (C3, #1187): hand-written, marked per reply
 
     static func inferenceSummary(_ set: Sample) -> String {
@@ -260,17 +291,6 @@ enum SampleDaemonData {
     static let inviteLookup =
         #"{"_sample":"hand-written","valid":true,"issuer_display_name":"SAMPLE Pilot","credit_range":{"min":1,"max":5,"unit":"points_per_accepted_trace"}}"#
 
-    static func passkeyState(_ set: Sample) -> String {
-        switch set {
-        case .empty:
-            return #"{"_sample":"hand-written","state":"none","passkey_count":0,"remembered_name":null,"signed_in_name":null,"near_ai_connected":null}"#
-        case .unknownCounts:
-            return #"{"_sample":"hand-written","state":"unknown","passkey_count":null,"remembered_name":null,"signed_in_name":null,"near_ai_connected":null}"#
-        default:
-            return #"{"_sample":"hand-written","state":"bound","passkey_count":1,"remembered_name":"SAMPLE passkey","signed_in_name":"SAMPLE passkey","near_ai_connected":true}"#
-        }
-    }
-
     static func accountState(_ set: Sample) -> String {
         switch set {
         case .empty:
@@ -284,6 +304,91 @@ enum SampleDaemonData {
 
     static let activityMissionsCatalogue =
         #"{"_sample":"hand-written","catalogue":{"schema_version":1,"kind":"trace_activity","state":"unconfigured","policy_sha256":null,"policy":null,"rewards_enabled":false,"credit_points_pending":null,"credit_condition":"mission_credit_ledger_unavailable"},"disclosure":"SAMPLE: activity mission consent disclosure from the Rust core"}"#
+
+    // MARK: - Insights feed T: hand-written, marked per reply
+
+    /// `insights_model_answers` in the shape the daemon serves
+    /// (`daemon/insights_model_answers.rs`; its recorded answer is
+    /// `tests/fixtures/insights-analytics/insights_model_answers.json`). A
+    /// temp store holds too few traces to answer a row, so the answered
+    /// rows are written by hand: every state but `not_priced` on one card,
+    /// both bases, a NEAR AI charge beside the API-price figure, the
+    /// person's kept shares on two rejection rows, and traces left out. Off for a fresh install, unreadable where counts are
+    /// unknown. SAMPLE labels and figures, never a pilot observation.
+    static func modelAnswers(_ set: Sample) -> String {
+        switch set {
+        case .normalDay, .busyQueue:
+            return modelAnswersSample
+        case .unknownCounts:
+            return #"{"_sample":"hand-written","enabled":true,"feed":"counter_pass","readable":false,"reason":"store_unreadable"}"#
+        default:
+            return #"{"_sample":"hand-written","enabled":false,"feed":"counter_pass"}"#
+        }
+    }
+
+    static let modelAnswersSample = #"""
+        {"_sample":"hand-written","enabled":true,"feed":"counter_pass","readable":true,\#
+        "updated_at":"2026-10-21T09:12:00+00:00","window_start":"2026-07-22T09:12:30+00:00",\#
+        "window_end":"2026-10-21T09:12:30+00:00",\#
+        "pricing":{"basis":"api_list","tables":[{"table_id":"sha256:sample-anthropic-table","version":1}]},\#
+        "rows":[\#
+        {"question":"bug_fix_rejected","state":"answered","basis":"undone","edit_mode":null,\#
+        "leader":{"label":"claude-opus-4-7","sessions":31,"edits":412,"figure":{"kind":"rate_permille","value":42},\#
+        "interrupts_per_session_permille":180,"near_ai_charge":null,\#
+        "kept":{"labelled":10,"kept":7,"partly_kept":2,"thrown_away":1,"kept_permille":700}},\#
+        "next":{"label":"claude-sonnet-4-6","sessions":14,"edits":160,"figure":{"kind":"rate_permille","value":91},\#
+        "interrupts_per_session_permille":360,"near_ai_charge":null,\#
+        "kept":{"labelled":4,"kept":2,"partly_kept":0,"thrown_away":2,"kept_permille":500}},\#
+        "sessions_by_model":[["claude-opus-4-7",31],["claude-sonnet-4-6",14],["gpt-5.3-codex",3]],\#
+        "left_out":{"unknown_facts":2,"automated":4,"delegated":1,"capped":0,"routed":0,"reviewer":0,\#
+        "no_majority":1,"unpriced":0,"too_few_sessions":0,"too_few_edits":3,"mix_too_different":0},\#
+        "near_ai_charge":null,"kept_by_model":[\#
+        ["claude-opus-4-7",{"labelled":10,"kept":7,"partly_kept":2,"thrown_away":1,"kept_permille":700}],\#
+        ["claude-sonnet-4-6",{"labelled":4,"kept":2,"partly_kept":0,"thrown_away":2,"kept_permille":500}]]},\#
+        {"question":"refactor_rejected","state":"no_clear_difference","basis":"undone","edit_mode":null,\#
+        "leader":{"label":"claude-opus-4-7","sessions":9,"edits":120,"figure":{"kind":"rate_permille","value":30},\#
+        "interrupts_per_session_permille":110,"near_ai_charge":null},\#
+        "next":{"label":"claude-sonnet-4-6","sessions":7,"edits":64,"figure":{"kind":"rate_permille","value":38},\#
+        "interrupts_per_session_permille":290,"near_ai_charge":null},\#
+        "sessions_by_model":[["claude-opus-4-7",9],["claude-sonnet-4-6",7]],\#
+        "left_out":{"unknown_facts":2,"automated":4,"delegated":0,"capped":0,"routed":0,"reviewer":0,\#
+        "no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null},\#
+        {"question":"tests_rejected","state":"not_enough_sessions","basis":null,"edit_mode":null,\#
+        "leader":null,"next":null,"sessions_by_model":[["claude-opus-4-7",4],["gpt-5.3-codex",1]],\#
+        "left_out":{"unknown_facts":2,"automated":4,"delegated":0,"capped":0,"routed":0,"reviewer":0,\#
+        "no_majority":0,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null,\#
+        "kept_by_model":[["claude-opus-4-7",{"labelled":1,"kept":1,"partly_kept":0,"thrown_away":0,\#
+        "kept_permille":1000}]]},\#
+        {"question":"docs_cost","state":"answered","basis":null,"edit_mode":null,\#
+        "leader":{"label":"claude-sonnet-4-6","sessions":6,"edits":18,"figure":{"kind":"usd_micros","value":41200},\#
+        "interrupts_per_session_permille":0,"near_ai_charge":{"basis":"near_ai_ledger",\#
+        "median":{"kind":"usd_micros","value":25000},"routed_sessions":3,"charge_unknown":1}},\#
+        "next":{"label":"claude-opus-4-7","sessions":5,"edits":11,"figure":{"kind":"usd_micros","value":186500},\#
+        "interrupts_per_session_permille":200,"near_ai_charge":null},\#
+        "sessions_by_model":[["claude-sonnet-4-6",9],["claude-opus-4-7",5]],\#
+        "left_out":{"unknown_facts":2,"automated":4,"delegated":0,"capped":0,"routed":3,"reviewer":0,\#
+        "no_majority":0,"unpriced":1,"too_few_edits":0,"mix_too_different":0},\#
+        "near_ai_charge":{"basis":"near_ai_ledger","median":{"kind":"usd_micros","value":25000},\#
+        "routed_sessions":3,"charge_unknown":1}},\#
+        {"question":"rejected_across_tasks","state":"answered","basis":"rejected","edit_mode":null,\#
+        "leader":{"label":"claude-opus-4-7","sessions":44,"edits":596,"figure":{"kind":"rate_permille","value":51},\#
+        "interrupts_per_session_permille":160,"near_ai_charge":null},\#
+        "next":{"label":"claude-sonnet-4-6","sessions":23,"edits":242,"figure":{"kind":"rate_permille","value":87},\#
+        "interrupts_per_session_permille":310,"near_ai_charge":null},\#
+        "sessions_by_model":[["claude-opus-4-7",44],["claude-sonnet-4-6",23],["gpt-5.3-codex",4]],\#
+        "left_out":{"unknown_facts":2,"automated":4,"delegated":1,"capped":1,"routed":0,"reviewer":1,\#
+        "no_majority":1,"unpriced":0,"too_few_edits":0,"mix_too_different":4},"near_ai_charge":null},\#
+        {"question":"finish_time","state":"answered","basis":null,"edit_mode":"not_prompting",\#
+        "leader":{"label":"claude-sonnet-4-6","sessions":12,"edits":96,\#
+        "figure":{"kind":"finish_time","median_active_secs":312,"median_user_turns":3},\#
+        "interrupts_per_session_permille":null,"near_ai_charge":null},\#
+        "next":{"label":"claude-opus-4-7","sessions":19,"edits":233,\#
+        "figure":{"kind":"finish_time","median_active_secs":498,"median_user_turns":4},\#
+        "interrupts_per_session_permille":null,"near_ai_charge":null},\#
+        "sessions_by_model":[["claude-sonnet-4-6",21],["claude-opus-4-7",38]],\#
+        "left_out":{"unknown_facts":5,"automated":4,"delegated":0,"capped":1,"routed":0,"reviewer":1,\#
+        "no_majority":1,"unpriced":0,"too_few_edits":0,"mix_too_different":0},"near_ai_charge":null}]}
+        """#
 
     // MARK: - PROVISIONAL shapes the screens still read (no source)
 

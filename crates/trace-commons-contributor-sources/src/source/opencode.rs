@@ -1,7 +1,8 @@
 //! OpenCode local session and JSON export reader.
 //!
 //! Native SQLite sessions are read through `opencode_db`; exports support 1.18.29
-//! and 1.19.0. Neither source implies provider evidence or upload consent.
+//! and 1.19.0, plus the structurally validated v2 session-transfer envelope.
+//! Neither source implies provider evidence or upload consent.
 //! A declared directory contains `.json` exports directly (not recursively).
 
 use super::{
@@ -18,6 +19,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "opencode_v2.rs"]
+mod v2;
+
 pub const QUALIFIED_VERSION: &str = "1.18.29";
 const BYTE_BUDGET: u64 = 16 * 1024 * 1024;
 const RECORD_BUDGET: usize = 100_000;
@@ -33,8 +37,13 @@ pub struct UnsupportedExportVersion;
 
 #[derive(serde::Deserialize)]
 struct ExportHeader {
-    directory: String,
+    directory: Option<String>,
+    location: Option<ExportLocation>,
     time: ExportTime,
+}
+#[derive(serde::Deserialize)]
+struct ExportLocation {
+    directory: String,
 }
 #[derive(serde::Deserialize)]
 struct ExportTime {
@@ -141,7 +150,7 @@ impl OpenCodeSource {
             .as_ref()
             .and_then(|h| (h.time.created >= 0).then_some(h.time.created))
             .and_then(DateTime::from_timestamp_millis);
-        let cwd = header.map(|h| h.directory);
+        let cwd = header.and_then(|h| h.directory.or_else(|| h.location.map(|l| l.directory)));
         let project = cwd
             .as_deref()
             .and_then(|c| Path::new(c).file_name())
@@ -349,6 +358,9 @@ fn parse_export_with_record_budget(
     let doc: Value =
         serde_json::from_slice(bytes).map_err(|_| anyhow!("opencode_malformed_json"))?;
     let info = &doc["info"];
+    if info.get("version").is_none() && info.get("location").is_some() {
+        return v2::parse(&doc, bytes, record_budget);
+    }
     let session_id = id(info, "id")?;
     if ![QUALIFIED_VERSION, "1.19.0"].contains(&field(info, "version")?) {
         return Err(UnsupportedExportVersion.into());
@@ -840,5 +852,208 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+    const V2_FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/opencode/completed-2.1.4.json");
+
+    fn mutated_v2(change: impl FnOnce(&mut Value)) -> Result<SessionTranscript> {
+        let mut value: Value = serde_json::from_slice(V2_FIXTURE).unwrap();
+        change(&mut value);
+        parse_export(&serde_json::to_vec(&value).unwrap())
+    }
+
+    #[test]
+    fn v2_native_export_preserves_session_and_observed_messages_without_inventing_version() {
+        let t = parse_export(V2_FIXTURE).unwrap();
+        assert_eq!(
+            t.conversation_id.as_deref(),
+            Some("ses_12345678901234567890123456789012")
+        );
+        assert_eq!(
+            t.source_session.as_ref().unwrap().native_id,
+            t.conversation_id.as_deref().unwrap()
+        );
+        assert_eq!(t.agent_version, None);
+        assert_eq!(t.model.as_deref(), Some("trace-managed/fixture-model"));
+        assert_eq!(t.session_hash, session_hash(V2_FIXTURE));
+        assert_eq!(
+            t.events.iter().map(|e| &e.kind).collect::<Vec<_>>(),
+            vec![
+                &SessionEventKind::Opaque,
+                &SessionEventKind::User,
+                &SessionEventKind::Assistant,
+                &SessionEventKind::Opaque,
+            ]
+        );
+        assert_eq!(t.events[2].content.as_deref(), Some("Synthetic."));
+        assert!(t.events[2].structured.is_null());
+        assert!(t.routing.is_empty() && t.attested_call.is_none());
+    }
+
+    #[test]
+    fn v2_duplicate_reordered_and_unknown_records_refuse_without_content() {
+        for mutation in [
+            |v: &mut Value| v["messages"][1]["id"] = v["messages"][0]["id"].clone(),
+            |v: &mut Value| v["messages"][1]["time"]["created"] = 0.into(),
+            |v: &mut Value| v["messages"][1]["type"] = "secret_future_kind".into(),
+            |v: &mut Value| v["messages"][2]["content"][0]["type"] = "secret_future_part".into(),
+            |v: &mut Value| v["messages"][2]["model"]["id"] = Value::Null,
+            |v: &mut Value| v["info"]["location"]["directory"] = 1.into(),
+        ] {
+            let error = mutated_v2(mutation).unwrap_err().to_string();
+            assert!(!error.contains("secret"));
+        }
+    }
+
+    fn v2_tool_part() -> Value {
+        json!({"type":"tool","id":"call_synthetic","name":"bash",
+            "time":{"created":1792957307733_i64,"ran":1792957307734_i64,"completed":1792957307735_i64},
+            "state":{"status":"completed","input":{"command":"echo synthetic"},
+                "content":[{"type":"text","text":"synthetic"}]}})
+    }
+
+    #[test]
+    fn v2_tools_pair_native_calls_and_preserve_terminal_outcomes() {
+        let t = mutated_v2(|v| v["messages"][2]["content"] = json!([v2_tool_part()])).unwrap();
+        assert_eq!(t.events[2].kind, SessionEventKind::ToolCall);
+        assert_eq!(t.events[2].structured, json!({"command":"echo synthetic"}));
+        assert_eq!(t.events[2].tool_call_id.as_deref(), Some("call_synthetic"));
+        assert_eq!(t.events[3].tool_call_id, t.events[2].tool_call_id);
+        assert_eq!(t.events[3].content.as_deref(), Some("synthetic"));
+        assert_eq!(t.events[3].success, Some(true));
+        let failed = mutated_v2(|v| {
+            let mut tool = v2_tool_part();
+            tool["state"] = json!({"status":"error","input":{"command":"false"},
+                "error":{"type":"Tool.Error","message":"synthetic failure"}});
+            v["messages"][2]["content"] = json!([tool]);
+        })
+        .unwrap();
+        assert_eq!(failed.events[3].success, Some(false));
+        assert_eq!(
+            failed.events[3].content.as_deref(),
+            Some("synthetic failure")
+        );
+        assert!(
+            mutated_v2(|v| v["messages"][2]["content"] = json!([v2_tool_part(), v2_tool_part()]))
+                .is_err()
+        );
+        let running = mutated_v2(|v| {
+            let mut tool = v2_tool_part();
+            tool["state"]["status"] = "running".into();
+            tool["time"].as_object_mut().unwrap().remove("completed");
+            v["messages"][2]["content"] = json!([tool]);
+        })
+        .unwrap();
+        assert!(
+            !running
+                .events
+                .iter()
+                .any(|e| e.kind == SessionEventKind::ToolResult)
+        );
+    }
+
+    #[test]
+    fn v2_discovery_reads_nested_location_and_parts_remain_bounded() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("v2.json"), V2_FIXTURE).unwrap();
+        let source = OpenCodeSource::new(tmp.path().to_owned());
+        let r = source.discover().unwrap().remove(0);
+        let t = source.load(&r).unwrap();
+        assert_eq!(r.cwd, t.cwd);
+        assert_eq!(r.started_at, t.started_at);
+        let mut doc: Value = serde_json::from_slice(V2_FIXTURE).unwrap();
+        doc["messages"][2]["content"] = json!([v2_tool_part(), {"type":"text","text":"one"}, {"type":"text","text":"two"}, {"type":"text","text":"three"}, {"type":"text","text":"four"}]);
+        assert_eq!(
+            parse_export_with_record_budget(&serde_json::to_vec(&doc).unwrap(), 4)
+                .unwrap_err()
+                .to_string(),
+            "opencode_record_budget"
+        );
+    }
+    #[test]
+    fn v2_native_tool_export_matches_calls_and_results_and_never_opens_attachments() {
+        let bytes = include_bytes!("../../tests/fixtures/opencode/completed-tools-2.1.4.json");
+        let t = parse_export(bytes).unwrap();
+        let call = t
+            .events
+            .iter()
+            .find(|e| e.kind == SessionEventKind::ToolCall)
+            .unwrap();
+        let result = t
+            .events
+            .iter()
+            .find(|e| e.kind == SessionEventKind::ToolResult)
+            .unwrap();
+        assert_eq!(call.tool_name.as_deref(), Some("read"));
+        assert_eq!(call.tool_call_id.as_deref(), Some("call_synthetic_read"));
+        assert_eq!(call.tool_call_id, result.tool_call_id);
+        assert_eq!(result.success, Some(true));
+        assert!(
+            result
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("Synthetic local tool output.")
+        );
+        let files = mutated_v2(|v| {
+            v["messages"][1]["files"] =
+                json!([{"uri":"file:///secret/private","mime":"text/plain"}]);
+            let mut tool = v2_tool_part();
+            tool["state"]["content"] =
+                json!([{"type":"file","uri":"file:///secret/private","mime":"text/plain"}]);
+            v["messages"][2]["content"] = json!([tool]);
+        })
+        .unwrap();
+        assert!(!files.events.iter().any(|event| {
+            event.structured.to_string().contains("secret")
+                || event
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.contains("secret"))
+        }));
+        let result = files
+            .events
+            .iter()
+            .find(|e| e.kind == SessionEventKind::ToolResult)
+            .unwrap();
+        assert_eq!(result.success, Some(true));
+        assert!(result.content.is_none());
+    }
+
+    #[test]
+    fn v2_invalid_tool_shapes_and_times_refuse_and_streaming_is_opaque() {
+        for mutation in [
+            |t: &mut Value| t["time"]["completed"] = 0.into(),
+            |t: &mut Value| {
+                t["time"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("completed")
+                    .map(|_| ())
+                    .unwrap()
+            },
+            |t: &mut Value| t["state"]["status"] = "future".into(),
+            |t: &mut Value| t["state"]["input"] = "unparsed".into(),
+            |t: &mut Value| t["state"]["content"][0]["type"] = "future".into(),
+        ] {
+            assert!(
+                mutated_v2(|v| {
+                    let mut tool = v2_tool_part();
+                    mutation(&mut tool);
+                    v["messages"][2]["content"] = json!([tool]);
+                })
+                .is_err()
+            );
+        }
+        let t = mutated_v2(|v| {
+            let mut tool = v2_tool_part();
+            tool["state"] = json!({"status":"streaming","input":"{unfinished"});
+            tool["time"].as_object_mut().unwrap().remove("completed");
+            v["messages"][2]["content"] = json!([tool]);
+        })
+        .unwrap();
+        assert!(!t.events.iter().any(|e| matches!(
+            e.kind,
+            SessionEventKind::ToolCall | SessionEventKind::ToolResult
+        )));
     }
 }

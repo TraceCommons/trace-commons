@@ -21,10 +21,12 @@ old behaviour, because no application has shipped against `v1` yet. See
 
 **New in this revision (additive, no existing field or shape changed):**
 
-- `set_settings` now accepts `max_uploads_per_day` and `max_bytes_per_day`,
-  each validated against a fixed ceiling rather than left open (see
-  [`set_settings`](#set_settings)). Before this, the only way to raise either
-  cap was to stop the daemon and hand-edit `daemon-settings.json`.
+- The daily upload limit is retired. `set_settings` accepts
+  `max_uploads_per_day` and `max_bytes_per_day` and ignores them, so a
+  shell built while the limit existed can still save its other settings;
+  `get_settings` no longer returns them. `status.daily_budget` is no longer
+  sent (see [`daily_budget` (retired)](#daily_budget-retired)), and the health label
+  `daily-cap-reached` is never set.
 - `project_id` is an opaque, daemon-issued handle for a project. It appears
   on every queue entry (`list_pending`, the `snapshot` event) and on every
   `list_projects` row, and `set_project_mode` accepts it in place of
@@ -139,6 +141,12 @@ old behaviour, because no application has shipped against `v1` yet. See
   withdrawal; it does not move on a later poll that only re-confirms the same
   status. See
   ["Withdrawal dates on revoked rows (K12)"](#withdrawal-dates-on-revoked-rows-k12).
+- **Credit outcome on history rows.** `list_history` rows now carry
+  `credit_outcome_reason`, and a row's `credit_points_final` is now set for
+  every trace the server has decided: the award, or `0.0` with a reason
+  label when the trace was decided without one. A row with any final
+  figure is decided; `history_rollup.credit_pending` no longer counts it.
+  See ["Credit outcome on history rows"](#credit-outcome-on-history-rows).
 - **K15 (the native View menu's Group by and Sort by).** No field is added
   for this. Every Group by and Sort by option the native Traces tab needs
   is already answerable from `list_pending`'s entry fields, `list_projects`,
@@ -608,9 +616,15 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
-| `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `automated_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `near_ai_credit`, `work`, `usage_by_day[]`, `overview`, `patterns`, `history[]`, `recap_card_enabled`, `goals` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (on by default; product owner, 2026-10-29); see "`insights_week`" below |
+| `insights_sessions` | `before` (optional, a `next` cursor from an earlier page), `limit` (optional, 1 to 200, default 200) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `revision`, `truncated`, `next`, `sessions[]` of `{session_ref, source, started_at, turns, tokens, sparkline, folder, inferred_task, user_task, user_outcome, analyzable}` | additive; read-only, no network, dry-run local; the Sessions tab over feed T, gated like `insights_week`; see "`insights_sessions` and `insights_session_drill`" below |
 | `insights_session_drill` | `session_ref` (**required**), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `session` (the `session_drill` shape, `feed: "counter_pass"`) | additive; read-only, no network, dry-run local; see "`insights_sessions` and `insights_session_drill`" below |
+| `insights_session_label` | `session_ref` (**required**), `task` (optional: a task word, or `null` to clear), `outcome` (optional: an outcome word, or `null` to clear); at least one of the two | `enabled`, `feed`, and while enabled `readable`, then `session` (the row as `insights_sessions` lists it) | additive; writes only the daemon's labels file, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_session_label`" below |
+| `insights_analyze_session` | `session_ref` (**required**), `save` (optional bool, default `false`) | `enabled`, `feed`, and while enabled `readable`, then `analysis` (the core's `analyze` response: `type`, `insight`, `mutation_effects`) | additive; reads one watched session file, with `save` writes the standard Insights store, no network; refused in a dry-run daemon; gated on `insights_counter_pass`; see "`insights_analyze_session`" below |
+| `insights_model_answers` | none | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `pricing` (`{basis, tables[]}`), `rows[]` (six, one per question; the rejection rows carry `kept_by_model[]` and their figures `kept`) | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; see "`insights_model_answers`" below |
+| `insights_benchmarks` | `weeks` (optional: `4` or `13`, default `4`), `tool` (optional: `claude_code`, `codex`, or `null` for both), `population` (optional: `own`, the default, or `spawned` for Claude's sub-agent transcripts) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `window_start`, `window_end`, `weeks`, `tool`, `population`, `pricing` (`{basis, tables[]}`), `sessions`, `min_sessions`, `categories[]` (eight, one per kind of work), `left_out`, `delegated` | additive, except `left_out.delegated`, removed 2026-10-29 (now the top-level `delegated`); read-only, no network, dry-run local; gated on `insights_counter_pass`; list-price figures owner-approved 2026-10-29; see "`insights_benchmarks`" below |
+| `insights_submitted` | `weeks` (optional: `4`, `13`, or `null`/absent for all time), `tz` (optional UTC offset in seconds) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `weeks`, `window_start`, `window_end`, `pricing`, `totals`, `by_model`, `by_model_left_out`, `by_task`, `by_task_unknown`, `code`, `by_week`, `by_project`, `left_out`, `traces_total`, `traces[]` | additive; read-only, no network, dry-run local; gated on `insights_counter_pass`; every submitted trace joined to its counter row through the upload queue (product owner, 2026-10-29); see "`insights_submitted`" below |
+| `subscription_usage` | `refresh` (optional bool), `interactive` (optional bool; needs refresh), `provider` (optional `codex`/`claude`), `login` (optional local login ID; required for Claude Refresh) | versioned provider/login snapshots with current windows and banked reset inventory | display only; off answers without reading credentials. Explicit Refresh schedules bounded selected-login work and returns immediately; background ticks never acquire credentials. Each provider's `enabled` follows its setting: `subscription_usage_codex_enabled` and `subscription_usage_claude_on`, both on by default. See “Subscription usage” below. |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]`, `leaves_this_mac` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" and "`leaves_this_mac`" below |
@@ -621,11 +635,16 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_account_start` | `ingest_url`, `account_id` | `attempt_id`, `browser_url`, `status` | explicit wallet ceremony; keys and PKCE stay in daemon |
 | `near_account_status` | `attempt_id` | `attempt_id`, `status` | no account token or signing material |
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
-| `near_ai_credential_start` | `provider` (optional, default `near`) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
+| `near_ai_credential_start` | `provider` (optional; the build's `channel::NEAR_AI_SIGN_IN_PROVIDERS`: production `near`, `github`, `google`, default `near`; a `near-ai-staging` build `google` only, and `near` and `github` are refused) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
 | `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
 | `near_ai_credential_cancel` | `attempt_id` (optional) | `attempt_id`, `status` when named; `status` alone when not | stops this machine waiting on the browser; unnamed, it stops whatever sign-in is in flight and never echoes the id; `near_ai_credential_unknown` if a named id is not the current attempt, or if an unnamed cancel finds no sign-in in flight (none ever started, or the last one finished); a named cancel of the finished current attempt answers its terminal status and changes nothing |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
 | `near_ai_credential_migrate` | — | `migrated`, `state` | asynchronous only; macOS. Copies the sign-in an earlier build kept in the login keychain into the data-protection store under the same reference, and never deletes the legacy entry. The one read of the login keychain, so it may raise a password prompt, which is why only a contributor's action sends it. `migrated: false` means neither store held it, and the dangling reference was dropped (`state` becomes `absent`). A refused legacy read is an error and changes nothing. See "The credential state" below |
+| `referral_codes_list` | — | `codes[]` of `{code_id, code, state, created_at, referee_count, bonus_owed_nano_usd}`, `max_live_codes`, `live_codes`, `can_create`, `people_joined`, `bonus_owed_nano_usd`, `bonus_sent_nano_usd`, `bonus_waiting_nano_usd` | asynchronous only; account session (`account-session-required` without one). `code` is `TC-XXXXX-XXXXX`, or `null` when the commons cannot open it; `state` is `live`, `disabled`, `suspended` or `voided`. Amounts are whole nano-USD, never below zero. Referral spec section 6 |
+| `referral_codes_create` | — | `code_id`, `code`, `created_at` | asynchronous only; account session. Refusals keep the commons label: `referral_unavailable` (the program is not open), `referral_code_limit_reached`, `referral_account_ineligible`. Writes the label-only audit row `referral-code-created` |
+| `referral_codes_disable` | `code_id` (**required**, a UUID the list answered) | `code_id`, `state` | asynchronous only; account session. People who joined with the code keep earning its owner a bonus. `referral_code_not_found` for a code this account does not hold. Audit row `referral-code-disabled` |
+| `referral_apply` | `code` (**required**, as typed) | `outcome: "applied"`, `applied_at`, `earn_until` | asynchronous only; account session. Text that is not a code is refused here with `referral-code-invalid` and never sent; a code is sent only in canonical form. Every refusal by the commons is the one label `referral_not_applied`, whatever the reason. Audit row `referral-applied` |
+| `referral_status` | — | `applied`, `applied_at`, `applied_via` (`signup` or `later`), `earn_until`, `apply_until`, `can_apply` | asynchronous only; account session. The referee sees that a code is applied, never whose. `can_apply` is true while none is applied and `apply_until` has not passed |
 | `witness_preview_request` | `entry_id`, `raw_session_confirmed: true`; optional `outcome`, `correction` | `status: "ready"`, `summary` | awaits explicit remote review; saves and pins certified bytes without approval or upload |
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
@@ -640,14 +659,14 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
-| `list_projects` | — | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
+| `list_projects` | `include_found` (optional boolean) | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
 | `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrollment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
-| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
+| `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, `revoked_at`, and `credit_outcome_reason` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)", "Withdrawal dates on revoked rows (K12)" and "Credit outcome on history rows" below |
 | `history_rollup` | — | see below | now also carries `taken_back`, and a `withdrawn` bucket in each window |
-| `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
+| `commons_credit_summary` | — | `posture_state`, `commons_settlement`, `commons_settlement_explanation`, `commons_graded` (device route); `points_state`, `points_unknown_reason` (`account-session-required` when no account session could be used or renewed, else null), `commons_points_earned_this_period`, `commons_points_lifetime_earned`, `commons_pending_review`, `commons_currency_code`, `commons_currency_earned_this_period`, `commons_period_start`, `commons_period_end` (account route); `observed_at` | always succeeds; see "`commons_credit_summary`" below |
 | `history_detail` | `submission_id` | owned redacted outcome, correction, up to 24 evidence candidates, contributed versions, publication state, and an opaque local owner-scope digest | one account-authenticated request; each excerpt capped at 700 characters; native clients use the digest only to evict account-owned caches after sign-in changes |
 | `skill_candidate` | `submission_id` | candidate, correction, up to six evidence excerpts, default draft, manual control, evaluation contract, and optional replacement review id | reads the same account-owned redacted record as `history_detail`; no model call |
 | `skill_review` | `candidate_id`, `draft: {name, description, procedure}`, `replaces_review_id` (optional) | reviewed draft, complete `SKILL.md`, SHA-256, and source lineage | validates and freezes the exact skill locally; a changed prior review requires its id |
@@ -668,7 +687,11 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `managed_terminal` | updated settings | see "`set_settings`" below |
+| `get_setup_status` | empty object | versioned completion/readiness state, enrollment scope, saved data uses and available scope choices | read-only; no offline initialization or setup mutation |
+| `complete_setup` | `expected_scope` from `get_setup_status`; optional `scopes[]` of wire-name data uses | durable completion state for the same enrollment | agent-selected scopes use the existing validation/audit path; publishes `status_changed`; grants no automatic-upload permission |
+| `get_config_schema` | empty object | versioned settings-patch JSON Schema, effects and patch semantics | read-only; credentials and read-only settings are not settable properties |
+| `preview_settings` | partial object accepted by `set_settings` | versioned canonical before/after changes; redacted values remain hidden | read-only; validates without persistence or runtime effects |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -678,7 +701,9 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
 | `acknowledge_arming_rewordings` | `ids[]` (**required**) | `acknowledged: <count>` | records that the rewording notices with these ids were shown; see `arming_rewordings` below |
 | `acknowledge_near_ai_notice` | — | `acknowledged: true`, `reoffered: <count>` | clears the `near-ai-notice-not-acknowledged` health label and re-offers the sessions it had refused; see below |
-| `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
+| `near_ai_balance` | `fresh?` | `state`, `currency`, `scale`, `remaining_nanos`, `spend_limit_nanos`, `total_spent_nanos`, `total_requests`, `total_tokens`, `observed_at`, `change_24h_nanos`, `change_24h_text`, `received_total_nanos` | performs real network I/O; **always succeeds** and reports every way of not knowing as a named `state`; see "`near_ai_balance`" below |
+| `near_ai_spend_organizations` | `fresh?` | `state`, `organizations[]` (`id`, `name`, `role`, `current`), `current_organization_id`, `explicit`, `chosen`, `multiple`, `prompt`, `revoke_pending`, `view` | async only; performs real network I/O; **always succeeds**; see "Choosing the spending organization" below |
+| `near_ai_spend_organization_select` | `organization_id` (**required**) | `switched`, `revoke_pending`, `organization_id` | async only; performs real network I/O; mints a key in the chosen organization, moves Private AI onto it, then revokes the key it replaced; refusals are `near_ai_spend_org_*` labels; see "Choosing the spending organization" below |
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
@@ -687,12 +712,19 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
+| `managed_model_favorite_set` | `model` (**required**, a model id), `favorite` (**required**, boolean) | `favorites` (`[string]`, the stored list) | async only; stars or unstars one model for the Launch sheet's picker; writes `managed_favorite_models` through `set_settings`; see "Managed session model choice" below |
+| `managed_cli_model` | `tool` (**required**), `cli_options` (**required**, the session's CLI options text) | `model` (string or null) | local only, reads nothing from NEAR AI; the model the tool's own flag names in `cli_options` (Claude Code `--model`; Codex `-m`/`--model`), which the launcher runs instead of the picker's and weighs every secondary model against; options that do not parse name none. The macOS background picker reads `managed_model_catalogue`'s `background`/`background_sets` for this model |
+| `managed_cli_options_set` | `tool` (`claude`, `codex`, `opencode`), `options` (string) | `tool`, `options`, `revision` | validates and saves through `set_settings.managed_cli_options`; returns the current saved value and managed revision so older snapshots cannot undo an acknowledged save; invalid quoting or reserved flags return `managed-cli-options-invalid` |
+| `managed_folder_settings_get` | `tool`, `cwd` (existing absolute folder) | `tool`, `model`, `collect_traces`, `cli_options`, `remembered`, `revision`, `project_workflows` | canonical folder/agent preferences; falls back to global CLI options, default model and collection off; never selects an account. `project_workflows` (boolean; absent from an older daemon) says whether Claude Code would find workflows for this folder, in the folders the launch reads; always `false` for other tools. The macOS sheet shows the shared `project_workflows` line when it is `true` and the session is on NEAR AI |
+| `managed_folder_settings_reset` | `tool`, `cwd` | same as lookup | removes only this canonical folder/agent profile through the normal settings writer and returns effective defaults |
 | `set_notifications_enabled` | `on` (**required**, boolean) | `notifications_enabled` | "Notifications from Trace Commons", the master switch; writes `notifications_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
 | `shutdown` | — | `stopping: true` | |
 | `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
+| `model_training_consent_status` | — | `eligible_count`, `submission_ids[]` | performs real network I/O; see "Adding model training to sent traces" below |
+| `model_training_consent_grant` | `all_eligible: true`, or `submission_ids[]` (1 to 500) | `results[]` of `{submission_id, outcome, granted_at?, award, award_withheld_reason?}`, `remaining_eligible` | performs real network I/O; see "Adding model training to sent traces" below |
 | `inference_connection_offers` | — | `offers[]` of `{offer_id, revision, provider_id, disclosure_version, config_digest}` | account session; a read that selects nothing; see "Connecting inference" below |
 | `inference_connection_current` | — | `selection` (or `null`), `installed_on_this_device`, `pending_install`, `revocation_applied` | account session; applies an observed revocation on this device; see "Connecting inference" below |
 | `inference_connection_select` | `offer_id`, `provider_id`, `revision`, `config_digest`, `disclosure_version`, `confirmed: true` (all **required**, exactly as shown); `expected_current_version` (optional); `idempotency_key` (optional UUID) | `selected: true`, `connection_id`, `state_version`, `offer_id`, `revision`, `config_digest`, `disclosure_version`, `receipt_endpoint_offered`, `install_required: true`, `previous_witness_removed` | account session; installs nothing; see "Connecting inference" below |
@@ -716,18 +748,6 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "idle_sessions": { "count": 0, "tools": [], "threshold_days": 3 },
   "next_digest_at": null,
   "health": { "last_error_label": null, "since": null },
-  "daily_budget": {
-    "bytes_today": 204659969,
-    "max_bytes_per_day": 209715200,
-    "bytes_remaining": 5055231,
-    "uploads_today": 12,
-    "max_uploads_per_day": 50,
-    "uploads_remaining": 38,
-    "resets_at": "2026-08-22T00:00:00Z",
-    "blocked": true,
-    "blocked_entries": 14,
-    "blocked_bytes": 137283584
-  },
   "routing": { "state": "not_declared", "last_refresh_at": null },
   "grant_voids": [],
   "witness_capacity": { "waiting_sessions": 0, "next_retry_at": null },
@@ -809,36 +829,26 @@ nothing to say), it is that target, at or before now -- already due, the
 same reading `interval` gives when last-plus-interval is in the past.
 Otherwise it is the next occurrence of the configured local hour.
 
-#### `daily_budget`
+#### `daily_budget` (retired)
 
-Added in `trace_commons.daemon.v1_1` as an additive field. It reports the
-daily volume caps and, crucially, how much already-approved work they are
-holding back.
+Removed. The daemon has no daily upload limit, so nothing is counted
+per day, nothing approved is ever held for one, and `status` no longer
+carries the field. Every shell built while the limit existed decodes its
+absence and hides the lines that showed it. A new client must not expect
+it.
 
-It is deliberately **not** routed through `health`. The daemon does set
-`daily-cap-reached` when a cap refuses an upload, but that label sits at the
-bottom of the precedence order, so any other condition, including the full
-queue that prompted this field, occupies the single
-`health.last_error_label` slot and the cap becomes invisible. A client that
-only reads `health` therefore cannot tell a spent budget from a broken
-daemon. Read `daily_budget` independently of `health`.
+The daemon also stopped asking the server for an upload allowance
+(`GET /v1/account/upload-allowance`, which now always answers
+`{"allowance": null}`; see
+[the operator contract](operator/client-upload-allowance.md)).
 
-| field | meaning |
-| --- | --- |
-| `bytes_today` / `uploads_today` | consumed so far in the current UTC day |
-| `max_bytes_per_day` / `max_uploads_per_day` | the caps in force |
-| `bytes_remaining` / `uploads_remaining` | what is left, saturating at zero |
-| `resets_at` | the next UTC midnight, when the counters zero. Derived from the daemon's own day bucket, so a client may state it |
-| `blocked` | whether at least one approved entry cannot be uploaded before `resets_at` |
-| `blocked_entries` / `blocked_bytes` | how many, and their combined on-disk size |
-
-`blocked_entries` counts every approved entry that will not go out today,
-not only the ones that individually overflow the budget: the upload pass
-stops at the first entry that does not fit rather than skipping past it, so
-a small entry queued behind a large one waits as well.
-
-`blocked` is false when the budget is spent but nothing is approved and
-waiting. No contributor action is pending in that case.
+What still paces uploads: a local burst guard holds a daemon to at most 25
+upload attempts in any sixty seconds, under ingest's default per-principal
+submission rate. A pass that reaches it, like one the server turns away
+with `429`, leaves the entry approved with `reason_label`
+`rate-limited` and a `retry_after`, sets no health label, and stops the
+pass. Server admission still applies its own weekly account budget, which
+reports through `admission-limit-reached`.
 
 #### `witness_capacity`
 
@@ -864,7 +874,7 @@ the same pass that would need the witness is held until the same time
 without being sent, so a busy witness is asked once per pass, not once per
 session. There is no attempt limit: a busy witness never costs a session.
 
-It is beside `health` for the reason `daily_budget` is: the daemon also
+It is beside `health` because the daemon also
 sets `witness-saturated` in the health slot, set and retracted from the
 queue on every upload pass, but a higher-precedence label can mask it.
 Render the condition from this object. The words are
@@ -1202,8 +1212,8 @@ do not depend on history and still lead while history is stale.
 whenever any of these holds: `paused`; `consent_hold` is non-null; not
 `logged_in` (no live enrollment); suggestions switched off
 (`suggestions_enabled`, see `set_settings`). It is `unknown` while the daemon
-is unhealthy -- `health.last_error_label` is set or `daily_budget.blocked` is
-true -- because its view may not be current. **Decisions owed come first:**
+is unhealthy -- `health.last_error_label` is set -- because its view may not
+be current. **Decisions owed come first:**
 while `arming_suggestion` would return an offer, `review_backlog` is hidden
 (`none`), because "decide on these" beside "arm this folder" is two asks at
 once. The arming offer hides `idle_sessions` too.
@@ -1270,7 +1280,7 @@ decides where it draws, and it never replaces or hides a higher state.
 | `news` | Something new to look at, nothing to decide: a hollow ring in the badge's slot, below paused | `decisions_owed` is 0, every gate below is open, the history poll is fresh, and verdict news is waiting unacknowledged and its newest verdict is less than 72 hours old (DRAFT, owner decision 19) |
 | `ready` | Some of the decisions owed are idle sessions: a halo around the badge. The number is unchanged | `decisions_owed` is above 0, every gate below is open, `status.idle_sessions.count` is at least 1, `notify.idle_sessions` is on, and no in-app "Not now" for `idle_sessions` or `review_backlog` is in force |
 | `none` | Nothing is lit | otherwise, or a gate below is closed |
-| `unknown` | The daemon cannot say | the daemon is unhealthy (`health.last_error_label` set or `daily_budget.blocked`), or, with nothing owed, the history poll is stale (as for `state`) |
+| `unknown` | The daemon cannot say | the daemon is unhealthy (`health.last_error_label` set), or, with nothing owed, the history poll is stale (as for `state`) |
 
 - **Never both.** `news` needs `decisions_owed == 0` and `ready` needs it
   above 0, so the two cannot hold together. When a decision becomes owed the
@@ -1542,6 +1552,23 @@ overhead usually outweighs whatever redaction shortened. Measured example: a
 assumes `would_send_bytes < raw_session_bytes`; assert nothing about the
 direction, only that `would_send_bytes` is the number that governs consent.
 
+`reason_label` is present only when `would_send_bytes` is over the upload
+limit (`MAX_TRACE_ENVELOPE_BYTES`, 256 MiB), and its value is then always
+`envelope-too-large` -- the word `approve` refuses the entry under (see
+`approve`'s `skipped[].reason_label`). The preview says it up front so a
+contributor is not told only once they approve. It is a warning about the
+envelope this build produced, not a state change: the entry stays `pending`
+(no envelope that size is ever stored, so there is no pin), and the entry's
+own `entry.reason_label` is untouched until `approve` moves it to
+`refused`. Render it with the existing `envelope-too-large` copy
+("too large to send"). Absent, not `null`, when the envelope fits.
+Additive; a client that ignores it behaves exactly as before and learns at
+`approve` instead.
+
+```json
+{ "would_send_bytes": 600000000, "reason_label": "envelope-too-large", "...": "…" }
+```
+
 `preview` requires an entry currently in the queue (`bad_params` /
 `unknown-entry-id` otherwise) and a working privacy filter (`unavailable` /
 `preview-failed` on failure). Neither `redactions` nor `pii_labels_present`
@@ -1745,7 +1772,8 @@ with an object whose `state` is one of:
 `summary` also carries `scrub`, `marks`, `content_marks`, `unsure_spans`
 and `second_look`, describing that build (see "The scrub state and
 `second_look`" above). Beyond those, it carries exactly the fields
-`preview` returns -- `would_send_bytes`,
+`preview` returns -- `would_send_bytes`, `reason_label` (only when over the
+upload limit; see `preview`),
 `raw_session_bytes`, `event_count`, `opening_prompt`, `redactions`,
 `pii_labels_present`, `consent_scopes`, `residual_risk`, `envelope_digest`,
 `input_fingerprint`, `enrolled` -- with one deliberate omission: it does
@@ -1931,7 +1959,7 @@ with three waiting and one approved by hand loses three and still uploads
 one. A client MUST say so rather than let a contributor discover it.
 
 An unattended approval that was `uploading` at the moment of the change and
-did not complete -- the daily cap, a fail-closed precondition, a restart --
+did not complete -- a rate limit, a fail-closed precondition, a restart --
 returns to `approved`. It is not sent: the upload pass re-checks the
 project's mode before sending any unattended approval, refuses it as
 `"project-ignored"` if the project is now `ignore`, returns it to `pending`
@@ -2106,8 +2134,10 @@ trajectory's declaration).
 `project_id-invalid`; an id that resolves to no project the daemon knows --
 the usual known set plus every project a declared source lists now -- is
 `bad_params` / `project-id-unrecognized`. An unknown folder is refused, never
-answered with an empty list. `project_mode` is the folder's resolved rule
-(`notify_only`, `auto_upload` or `ignore`).
+answered with an empty list. `project_mode` is the folder's rule in force
+(`notify_only`, `auto_upload` or `ignore`), the same value as the folder's
+`list_projects` `mode`: under the include-existing grant a folder the grant
+will arm reads `auto_upload` (since 2026-10-29).
 
 Each row's `state`:
 
@@ -2823,10 +2853,43 @@ Every project the daemon knows about, in two kinds:
   seen a session for it and nobody has ruled on it. `mode` is the effective
   mode, which for an unruled project is the `notify_only` default.
 
+A session becomes "seen" only once it has queued, which waits for it to go
+quiet (30 minutes by default) across two passes, so a daemon started seconds
+ago lists none of the repos the person already works in. A caller that needs
+them now -- the macOS first run's Customize, which shows a rule per repo on
+the Tools step -- sends `include_found: true`: the daemon then also walks the
+declared sources as `list_past_sessions` does and adds a discovered row for
+every repo with a session on disk, its `session_count`, `last_session_at`
+and `tools` counted from that walk. The walk reads file listings and
+modification times, never a session's contents, and costs one pass over the
+roots, so the flag is for a screen that asks once, not a poll. Without it
+(the default) the listing is the configured and queued projects alone.
+`set_project_mode` accepts the `project_id` of such a row: an id it cannot
+place from policy and the queue is looked up in the same walk before it is
+refused with `project-id-unrecognized`.
+
 `mode` is the mode **in force**, which a contribution override can change;
 `folder_mode` is the folder's own mode, the one `set_project_mode` set and
 clearing the override returns it to. They differ only while an override is
 in force. See "The contribution override" below.
+
+Under the include-existing grant both report what the daemon will apply
+(since 2026-10-29): a folder the grant will arm on its next pass -- one set
+to `notify_only` before the grant, or one with no rule yet (a discovered or
+found row) -- reads `auto_upload` in `mode` and `folder_mode`, though no
+`auto_upload` rule is stored for it yet. Its sessions are approved
+unattended, so `notify_only` would misstate it, and a shell that only sends
+a pick differing from `mode` could not offer Ask on it. Picking
+`notify_only` there makes the folder an exception to the grant. A folder set
+to `ignore`, one set to `notify_only` after the grant, and the unknown bucket
+read as their own mode. With no grant, or a grant without
+`include_existing`, nothing changes. `status.contribution_mode` rolls up the
+same value, so it reads `auto_upload`, not `mixed`, when every folder will
+upload. Such a row, configured, discovered or found, also carries
+`automatic_disclosure` (`patterns_only` until its sessions earn more) and
+`from_now: false`, as an armed row does; so does a discovered or found row an
+"Auto contribute" override arms. No field is added; a client reads `mode` as
+before.
 
 An armed row also carries `from_now`: `true` when it was armed from now
 (`include_backlog: false`), so its backlog waits for the contributor, and
@@ -2866,6 +2929,18 @@ for that project already carries.
 `mode` is always the mode in force, not the stored value: the
 `unknown-project` bucket reports `notify_only` even if a hand-edited policy
 file says `auto_upload`, because the daemon refuses to act on that.
+
+#### `offerable_modes`
+
+The modes `set_project_mode` accepts for this row, in display order. The
+unknown-project bucket (`is_unresolved_bucket`) carries
+`["notify_only", "ignore"]`, since it can never be armed. Every other row
+carries `["notify_only", "auto_upload", "ignore"]`, under the
+include-existing grant too (see `grant_automatic` below): there a folder set
+to `notify_only` is an exception to the grant, as one set to `ignore` is.
+Until 2026-10-29 a row under that grant carried only
+`["auto_upload", "ignore"]` and `set_project_mode` refused `notify_only` with
+`automatic-sharing-requires-ignore`; both are gone.
 
 #### `unpurposed_traces` (K7)
 
@@ -3704,10 +3779,54 @@ That is what makes a re-grant after logout safe. Logout wipes the policy,
 including a project set to `ignore`; a re-grant records the disk again, so that
 project asks rather than being armed as new.
 
+**The include-existing grant.** `grant_automatic_including_existing` (or
+`grant_automatic` with `include_existing: true`) widens the grant to every
+watched folder's existing history. It is a fresh global choice: it clears any
+contribution override, drops per-folder arm-from-now holds, and arms every
+folder whose mode is `notify_only` on the next session the watcher sees there,
+including folders set to `notify_only` before the grant. A folder set to
+`ignore` is never armed. Neither is a folder set to `notify_only` **after**
+the grant (owner decision 2026-10-29): it is an exception to the grant, so it
+resolves to Ask, its sessions wait as `pending`, and every other folder stays
+automatic. "After" is by identity, not by clock: each fresh global choice
+(`grant_automatic`, and widening it to include existing history) gets a new
+grant generation, and a folder's mode change records the generation in force.
+A `notify_only` recorded under the current generation is an exception, so a
+clock stepped backwards or an exact tie cannot arm it, and a later
+include-existing grant supersedes the exception in the same way. A policy
+file written before generations existed has them derived once on load from
+the earlier rule (a mode change later than `granted_at`), so an upgrade arms
+no folder that was asking. A folder the grant armed and a void then returned to
+`notify_only` keeps asking too. Setting the folder back to `auto_upload`
+arms it with its backlog (`include_backlog: false` is refused with
+`automatic-sharing-includes-existing` under this grant), so what it held as
+`pending` is approved on the next pass. Adopting the contributor's chosen
+data uses (`adopt_chosen_scopes`, #1739) keeps the grant and its exceptions.
+
+`keep_folder_asks` (optional, only with `include_existing`; owner, 2026-10-30)
+says what happens to folders already set to `notify_only`. `true` keeps every
+one as an exception to this grant, however long before it was set, so they
+keep asking and every other folder is armed. `false` clears them, so every
+folder except `ignore` is armed and a later grant that keeps Ask marks does
+not bring them back. Absent keeps the rule above. Anything else is refused with
+`keep-folder-asks-invalid`.
+
 Widened terms void the grant itself as well as the projects it armed, with an
 `automatic-grant-voided` entry. `withdraw_automatic_grant` returns
 `{"withdrawn": bool}` and leaves the projects the grant armed as they are;
-each is withdrawn with `set_project_mode`. `automatic_grant` returns
+each is withdrawn with `set_project_mode`. With `return_folders_to_ask: true`
+(Settings' "Ask each time", #1753) it also puts every project the grant armed
+back to no rule of its own, which reads `notify_only`; a project the
+contributor set to `auto_upload` themselves, and every `ignore` and
+`notify_only`, is left as it is. A non-boolean is refused with
+`return-folders-to-ask-invalid`.
+
+A policy file written before #1753's fix that holds a `notify_only`
+contribution override (the macOS setup's "Ask each time" wrote one) is
+migrated once on load: every folder whose own mode is `auto_upload` is set to
+`notify_only`, the grant is withdrawn and the override cleared, so every folder
+keeps showing Ask and a folder set to `auto_upload` afterwards sends. An
+`ignore` override, and a file a current build wrote, are left alone. `automatic_grant` returns
 `{"granted": false}` when none is in force. None of the three returns a path
 or a count of them.
 
@@ -4018,8 +4137,9 @@ design asks for, plus two honest unknowns:
 
 **Attribution is approximate and must be described as such.** The proxy's
 ledger records a *facade* -- `anthropic`, `openai` -- not a tool id. Claude
-Code speaks Anthropic and Codex speaks OpenAI, so today a call separates them;
-two connected tools of the same family do not separate at all. `family` on a
+Code speaks Anthropic; Codex and OpenCode speak OpenAI. A call cannot be
+attributed to either when both OpenAI-family tools are connected. Two connected
+tools of the same family do not separate at all. `family` on a
 row is what makes attribution possible, and it is `null` for a
 catalog-described tool, whose facade nothing here knows.
 
@@ -4048,7 +4168,11 @@ time, which `plan_connect(id, port, catalog)` does not expose.
 }
 ```
 
-Writes nothing. `outcome` is one of:
+Writes nothing. OpenCode Connect uses async dispatch to qualify the installed major
+and read a bounded model list from the live proxy before preparing its provider
+and default-model edit. Merely listing tools does not launch the native CLI.
+
+`outcome` is one of:
 
 | `outcome` | meaning |
 |---|---|
@@ -4061,6 +4185,11 @@ Writes nothing. `outcome` is one of:
 
 `plan_id` is minted for `changes` and for nothing else, so "there is a plan id"
 and "the outcome is committable" are one question answered once.
+
+OpenCode may also return `unsupported_version` when the installed major cannot
+be qualified, or `models_unavailable` when the live proxy has no usable model
+list. Both are noncommittable and carry no plan id. Native bindings append
+outcome codes 47 and 48; older unknown outcomes remain noncommittable.
 
 **`occupied` is not an outcome.** A plan can carry changes *and* occupied slots
 at once -- the empty slots are filled and the full one is reported in the same
@@ -4112,9 +4241,10 @@ second edit to the same file, and on a file that did not exist before.
 
 ### The map and the Inference tab
 
-K8 of #1118, the client half. `tool_destinations` feeds the map and
-`inference_calls` feeds the Inference tab's routing table. Both are
-synchronous and local. They read state this daemon already holds -- the
+K8 of #1118, the client half. `tool_destinations` feeds the map,
+`inference_calls` feeds the Inference tab's routing table, and
+`inference_activity` feeds the menu-bar item's Private AI bars. All three
+are synchronous and local. They read state this daemon already holds -- the
 harness list, the private-inference state, the route `route_disclosure`
 reports, the source settings, the project policy and the local routing
 ledger -- and make no network call and read no body.
@@ -4339,6 +4469,37 @@ that wants fewer buckets maps them itself, and must keep `failed` distinct.
 `unrecorded`. It is never taken from the backend id, which is whatever the
 contributor named it.
 
+#### `inference_activity`
+
+```json
+{
+  "readable": true,
+  "window_hours": 24,
+  "step_hours": 4,
+  "steps": [
+    { "start": "2026-10-20T14:00:00+00:00", "calls": 37, "verified": 31 }
+  ]
+}
+```
+
+The menu-bar item's Private AI bars: the same 24-hour window as
+`inference_calls`, counted in `step_hours` steps. `steps` is oldest first,
+six of them, and the last ends at the moment of the read. `start` is when
+a step begins.
+
+- `calls` counts exactly the rows `inference_calls` lists (rows with a
+  ledger id), so the steps add up to the Inference tab's call count. A row
+  from just before the first step counts in the first, and one stamped after
+  the read (a proxy clock ahead of this one) in the last.
+- `verified` is how many of those carry the `verified` label. Only
+  `verified` is proof; a row with any other label, `outside` and
+  `unrecorded` included, counts in `calls` and not here.
+
+`readable: false`, with `steps: []`, means no ledger has answered, which is
+not evidence of no calls and must not be drawn as empty bars. No
+parameters; local and synchronous, and answered in a developer dry run.
+Counts and times only.
+
 #### What the ledger does not record (Z4)
 
 The table the design draws is work x model x calls x cost with a proof per
@@ -4461,8 +4622,8 @@ read-only: it reads the daemon's own counter store, never a session file,
 never the Insights service, and makes no network call, so it answers under
 the developer dry run too.
 
-**The pass.** Gated on the `insights_counter_pass` setting (owner decision
-D4, open; off by default). While it is on, each full watcher poll hands the
+**The pass.** Gated on the `insights_counter_pass` setting (on by default;
+product owner, 2026-10-29, settling owner decision D4). While it is on, each full watcher poll hands the
 Claude Code and Codex sessions it discovered to the pass, which reads a
 session only once it has been quiet for `quiescence_secs`, only when its size
 or last write changed since its row was made, and at most 16 files and 64 MB
@@ -4480,31 +4641,124 @@ that was running or waiting at an `unenroll` writes nothing afterwards and
 makes no new key. No event marks a pass's end: `insights_week` answers from
 whatever the last finished pass stored, with its `updated_at`.
 It is not tied to whether a session was offered, sent, kept or
-declined. A session in a folder that is Never, by its own rule or a global
+declined.
+
+Codex's compressed rollouts are sessions like any other (owner decision
+2026-10-29): Codex replaces an older `rollout-<...>.jsonl` with
+`rollout-<...>.jsonl.zst` of the same name and last write, and the Codex
+adapter discovers, offers, uploads and counts it under the plain path it
+replaced, with the size it decompresses to. So a session offered, sent,
+declined, kept or counted before Codex compressed it is the same session
+after, with the same content hash: not offered or sent again, and not
+re-read. While both files are on disk only the plain one is listed. The
+compressed file is streamed through a zstd decoder, never decompressed to
+memory whole or to a file; the 512 MiB load budget (`rollout-too-large`), the
+16 MB line limit below and the per-pass budget apply to the decompressed
+bytes. A file's output is also bounded at 512 MiB, and at 64 times the
+file's own size past 16 MiB, and a decoder window over 16 MiB is refused.
+In the counter pass, a compressed file that is corrupt, truncated or past a
+bound is stored as unknown, never as zero, and is not read again until it
+changes. `insights_analyze_session` reads plain files only, so a session
+whose file is compressed lists with `analyzable: false`.
+
+Beside the sessions a poll discovers, the pass reads sessions in NEAR AI
+managed profiles, which nothing offers, queues or uploads and
+`insights_analyze_session` does not find (each lists with `analyzable:
+false`): each profile's Claude Code `projects/` and Codex `sessions/` under
+the daemon's `managed-profiles/` folder, compressed rollouts included. A
+managed session is counted from its profile only: another copy of it the
+pass finds (the post-exit export, or one in a watched folder), named by its
+file name, is not read, and that copy's row is dropped once the profile's
+row exists. Its route joins as every row's does, by the session ID its
+transcript records.
+
+A session in a folder that is Never, by its own rule or a global
 Never contribution override (every folder while one is in force), is not
 read, and rows already stored for one are dropped by the next pass and left
-out of every answer at once. Claude Code rows are per turn; Codex rows are the change
-between the first and last counter only (owner decision D11, open). A Claude
-Code session with delegated transcripts is counted from its main file and
-marked `truncated` (partial coverage), never as complete. Each file is read
+out of every answer at once. Claude Code rows are per turn; Codex rows hold the change
+between the first and last counter, which every weekly figure reads, and a
+per-turn series beside it, which the Sessions list and drill read (owner
+decision D11, settled 2026-10-20). Each row also stores the session's facts
+(per-model counts and fixed labels, never a path, text or price) for the
+Models answers; a row made before them is read once more. A Claude
+Code session with delegated transcripts (its sub-agents', workflow ones
+included) is counted from its main file and marked `truncated` (partial
+coverage), never as complete. Its sub-agents' transcripts are read, after
+the person's own sessions and within the same per-poll budget, into rows of
+their own kept apart from the person's (at most 2,048, and 131,072 turns
+and tool calls, oldest evicted first), which only `insights_benchmarks`'
+`spawned` population reads. The main file holds only its own model calls
+(each sub-agent's calls are in its own transcript), so nothing is counted
+twice; a week's totals and spend stay the person's main files alone. Each file is read
 line by line, never held whole, so no file is skipped for its size, and
 what a read keeps is bounded by the per-session series caps, not the file
 (owner decision D4, settled 2026-10-20 for streaming and the per-poll
-budget). A file
-with one line over 16 MB, or one that cannot be read, is stored as unknown,
-never as zero. A row stored as unknown with no usage counters by a daemon
+budget). A line
+over 16 MB (an inlined image, say) is passed over unread: the rest of the
+session is counted and its row is marked partial (its series `truncated`,
+its facts `capped`). A file that cannot be read is stored as unknown, never
+as zero. A row stored as unknown with no usage counters by a daemon
 that skipped files over 16 MB is read once more after the upgrade, even when
 its file is unchanged.
 
 **The store.** One file in the daemon directory, capped at 2048 sessions,
 131072 turns and 131072 tool calls (oldest last write first), and limited to
-sessions written in the last 13 weeks, so it keeps the newest sessions. A
-session the caps evict is marked by its keyed digest and the size and last
-write its row was made from; the marks age out with the rows and are capped
-at 2048, oldest first, so the newest mark stays while any does. A session
-with no row is not read when its last write is no later than the newest
-mark, or, with the store at 2048 sessions, earlier than every row kept: the
-caps would evict it again. An evicted file is read again once it changes,
+sessions written in the last 13 weeks, so it keeps the newest sessions. The
+turn and tool-call caps count Claude Code's per-turn series only. Codex
+per-turn series have their own allowance (owner decision, 2026-10-20):
+196608 turns and 196608 tool calls across every Codex row. Past either,
+Codex rows lose their per-turn series and nothing else, automated sessions'
+first (nothing draws them), then the person's, each oldest first (last
+write, then the order they were counted): the row, its observed change, its dates
+and its facts stay, so the session still counts in every weekly figure. A
+trimmed row is not evicted and gets no mark, and it is not read again while
+its file is unchanged. `insights_sessions` and `insights_session_drill`
+answer it as a Codex row read before the per-turn reader: `turns` and
+`sparkline` are `null`, `tokens` is its observed change, and the drill's
+`series_unavailable` is `not_recorded`. `insights_model_answers` counts it
+in `left_out.unknown_facts`, never as zero turns. The allowance fits about 13
+weeks of heavy Codex use (measured: about 167000 stored turns and 161000
+tool calls), at most about 99 MB of the store file.
+
+Automated sessions (owner decision, 2026-10-20, option (b)) are kept apart
+from the contributor's own. A Codex session is automated when the first
+`session_meta` record in its transcript names a `source` object holding a
+`subagent` key: Codex writes that shape when it starts the thread itself
+(its automatic approvals reviewer, or a thread an agent spawned), and a
+plain label (`cli`, `vscode`, `exec`, `mcp`) otherwise. Only that shape is
+read, and a later `session_meta` does not change it: a thread an agent
+spawned carries a copy of its parent's after its own. A transcript with no
+`session_meta` or no `source`, `source: "unknown"`, and every Claude Code
+session are unknown, and unknown counts as the person's: no guess sets the
+contributor's work aside. `exec` and `mcp` sessions count as the person's,
+since a person can start either. Automated rows do not count toward the
+2048 sessions or the shared turn and tool-call caps; at most 1024 are kept
+beside them, the oldest evicted first within that allowance, and their
+Codex series stay under the Codex allowance above. The weekly token figures
+count them; past the allowance the oldest are gone from those figures (1024
+keeps two busy weeks of a heavy Codex user's automated sessions, so the
+current week and the one before stay whole). `insights_model_answers` leaves
+them out (`left_out.automated`), and `insights_week`'s `patterns` and
+`insights_sessions` leave them out with no switch to bring them back. A
+Codex row stored before the classification, or under an older facts
+version, is read once more, within the per-poll limits, even when its file
+is unchanged; facts version 2 re-reads every row once, so a spawned thread
+stored as unknown before this rule is automated after it.
+
+A session the caps evict is marked by its keyed digest and the size and last
+write its row was made from, and by which allowance evicted it; the marks
+age out with the rows and are capped, oldest first, at 2048 for the shared
+caps and 8192 for the automated allowance, so the newest mark stays while
+any does. A session with no row is not read when its last write is no later
+than the newest mark of the shared caps, or, with 2048 of the person's
+sessions stored, earlier than every one of them: the caps would evict it
+again. Automated marks do not bound other sessions, since a late-arriving
+session of the person's would otherwise be skipped; an automated session is
+not read again while its own mark matches its unchanged file. Marks written
+before the automated allowance bound nothing and are dropped at the next
+write, and while a row the pass finds still awaits its classification
+neither bound applies and an eviction of the person's is not marked, so a
+session of the person's that automated rows pushed out is read again. An evicted file is read again once it changes,
 since a write moves its last write past the mark. The limit: a session older
 than the newest mark is not read even when rows leave for another reason,
 such as a Never folder, until that mark ages out of the 13 weeks. Rows are
@@ -4524,7 +4778,21 @@ still finds is read once more for its session digest, even when its file is
 unchanged, within the same per-poll limits; a row whose session is no longer
 found keeps its counters and carries no session digest until it ages out.
 Any other schema reads as
-`store_unreadable` and the pass starts the store again. The digest key is the
+`store_unreadable` and the pass starts the store again.
+
+Downgrade: a row's `facts`, `facts_version`, `automation` and
+`automation_read`, an eviction mark's `automated`, a route tally's
+`charge` and its `by_hour`, and the store's `managed_folded` are left out of
+the file while they hold their defaults (no facts, version 0, automation
+unknown and not looked for, no allowance, no NEAR AI call, no managed route
+folded), so a row with none of them is written as a daemon before them wrote
+it. Every row this build reads sets `facts_version` and `automation_read`,
+though, and an older daemon refuses fields it does not know: a store this
+build has written reads as `store_unreadable` there, and that daemon starts
+the store again. Its rows are re-derived from the sessions still on disk;
+eviction marks, route tallies and their NEAR AI charges are gone, and a
+charge cannot be read again once the proxy ledger's 24 hours have passed.
+The digest key is the
 daemon's own, kept in the OS keychain (owner decision D16, open). `unenroll`
 removes the store, forgets the key, and turns `insights_counter_pass` off, so
 the next watcher tick does not rebuild the store under a new key.
@@ -4547,14 +4815,76 @@ hold the highest id and leave the window first; the start time keeps the
 calls left in that window from counting twice, and keeps the calls of a
 proxy ledger that started over from being lost, whether their ids are below
 the old highest or have climbed past it. Only Claude Code and Codex calls are
-folded, the two tools the counter pass counts. `cost_usd`, backend and model names
-are never read into it (owner decision D5, open), and no session ID is
-stored. Calls whose tokens are unknown are kept per bucket, so the answer
+folded, the two tools the counter pass counts. Backend names are never read
+into it, and no session ID is stored.
+
+The managed routes' ledgers (`<config>/managed-routes/<uuid>/ledger.sqlite`,
+the Private AI sessions started from the app) are folded too, with or
+without a shared proxy, from the snapshot the daemon already keeps of them.
+Each route numbers its calls on its own, so each keeps its own cursor (the
+same id and start time), stored by the route's UUID in `managed_folded`; a
+call is taken once by its route and id. Those ledgers keep their calls, so
+the whole of each is folded, not 24 hours of it. A route that is gone loses
+its cursor; while the routes cannot be read, the cursors are kept as they
+are.
+
+A call skipped for its session or tool (no session ID, or a tool feed T
+does not count, such as opencode through a managed route) adds no tally,
+but its NEAR AI charge is kept apart, by hour, as the store's
+`loose_charge` (product owner, 2026-10-28: money spent is counted whoever
+spent it). A call's charge is NEAR AI's when its proof label is through the
+NEAR AI route, or when it carries no label and its backend is `nearai`. A
+call the provider refused (HTTP 4xx or 5xx) with no `cost_usd` adds a known
+$0; any other call with no `cost_usd` makes its figures unknown. A store
+written before `loose_charge` (`loose_epoch` below 1) takes the calls its
+folds already passed once more, for the charge of those they skipped only.
+
+The tally also keeps the session's **NEAR AI charge** (owner decision D5,
+settled 2026-10-20). The ledger keeps a call for 24 hours only, so the
+charge is taken as the call is folded or not at all. For each call through
+the NEAR AI route (`verified`; `gateway_only`, `unattested`, `pending` or
+`unavailable`; `failed`), the ledger's `cost_usd` is added to the
+session's one charge: `{usd_micros, charged_calls, calls_without_charge}`,
+integer USD micros rounded to the nearest, with `overflowed: true` written
+only when the sum overflowed, and `served_model` written only while every
+call counted named the same served model, normalized as the Models answers
+normalize labels (lower case, a date stamp or `-latest` removed). A call
+that names no served model, or another one, leaves the charge with no
+`served_model` for good; the requested model is never read, since it is not
+who served the call. The served model is the one model name a tally keeps,
+and it is what the Models answers attribute a charge to a model by. With
+`LEDGER_MONEY_IN_INSIGHTS` held (owner decision D5) no charge is taken. A call with no `cost_usd`, or
+one that is not a finite, non-negative amount, is counted in
+`calls_without_charge` and makes that session's charge unknown, never zero;
+the charge is also kept by the clock hour each call started in (`by_hour`,
+unix hours, UTC, each `{calls, usd_micros}` with `calls_without_charge` and
+`overflowed` written only when set), so a window takes only the calls made
+in it; a charge written before hours were is read as one hour, its last
+call's;
+so does an overflow. `outside` calls add no charge (the proxy prices those
+whether or not anyone was billed), and neither do calls with no proof label
+(their route is unknown). A tally with no NEAR AI call writes no `charge`,
+and a tally written before charges loads with none. The store holds no list
+price: list prices are applied to stored tokens when an answer is built.
+The charge is the store's one money figure; `insights_model_answers` and
+`insights_week`'s `near_ai_credit` read it. Calls whose tokens are unknown are kept per bucket, so the answer
 can mark exactly the token figures they leave unknown. Nothing is folded, and neither the ledger nor the store is read for
 it, unless both `insights_ledger_feed` (on by default, owner decision D3,
-settled 2026-10-09) and `insights_counter_pass` are on. A tally goes when its session is dropped
-for a Never folder, or, once no stored row matches it, when its last call is
-more than 13 weeks old; at most 2048 are kept, oldest last call first.
+settled 2026-10-09) and `insights_counter_pass` are on. A session in a Never
+folder keeps no tally (owner decision D4): it is never read, so it has no
+row, and the counter pass names it from its file name instead (a Claude Code
+session file's stem; the UUID a Codex `rollout-<timestamp>-<uuid>` name ends
+with), without opening the file. The pass resolves the folder of every
+session whose tally no row matches, a session still being written included,
+and drops the tally of each one in a Never folder; under a global Never
+override it drops every tally. The daemon then keeps those sessions in
+memory, never on disk, and each fold drops their tallies before it writes.
+Calls folded before the first pass that sees the session (after a restart,
+or in the poll interval after it starts) are written until that pass, and
+gone after it. A tally also goes when its session is dropped for a Never
+folder, or, once no stored row matches it, when its last call is more than
+13 weeks old; at most 3072 are kept (one per stored session, the
+person's and the automated), oldest last call first.
 `unenroll` removes them with the store. The answer joins each row to its
 session's tally by that digest, at answer time and inside the daemon; see
 `routing` below.
@@ -4595,6 +4925,7 @@ sessions on disk. Otherwise:
   "readable": true,
   "updated_at": "2026-10-08T09:59:12+00:00",
   "sessions_stored": 214,
+  "automated_stored": 31,
   "iso_week": "2026-W41",
   "week_start": "2026-10-05",
   "comparable": false,
@@ -4615,13 +4946,22 @@ sessions on disk. Otherwise:
     ],
     "by_day": [
       { "date": "2026-10-05", "uncached": 1200, "cache_read": 402000,
-        "cache_write": 31000, "output": 9100 }
+        "cache_write": 31000, "output": 9100 },
+      { "date": "2026-10-06", "uncached": 1000, "cache_read": 590000,
+        "cache_write": 30000, "output": 19000 },
+      { "date": "2026-10-07", "uncached": 6800, "cache_read": 618000,
+        "cache_write": 110000, "output": 22120 },
+      { "date": "2026-10-08", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-09", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-10", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 },
+      { "date": "2026-10-11", "uncached": 0, "cache_read": 0, "cache_write": 0, "output": 0 }
     ],
     "codex_interval_tokens": null,
     "by_model": [ { "label": "claude-sonnet-4", "tokens": 1840220 } ],
     "sessions": [
       { "source": "claude_code", "tokens": 912000, "state": "known", "reasons": [],
         "cache_share": { "numerator": 801000, "denominator": 900000 },
+        "by_day": [0, 412000, 500000, 0, 0, 0, 0],
         "started_at": "2026-10-06T08:12:40+00:00",
         "routing": { "category": "mixed", "reasons": [],
                      "tokens": { "verified": 410200, "routed_unverified": 0,
@@ -4635,8 +4975,12 @@ sessions on disk. Otherwise:
 ```
 
 - `updated_at` is when a pass last finished in this daemon process, `null`
-  before the first one; `sessions_stored` is the rows held, outside Never
-  folders, in any week.
+  before the first one; `sessions_stored` is the person's rows held,
+  outside Never folders, in any week, the same count `insights_sessions`
+  answers, and `automated_stored` how many automated sessions are held
+  beside them (see "The store" above); together they are every row held. The token figures (`rollup`,
+  `overview`, `history[]`) count automated sessions, since they cost
+  tokens; `patterns` leaves them out.
 - `rollup` is the week's figures exactly as the shared engine computes them
   for feed T: Claude Code and Codex are separate lines in `sources` and are
   **never summed**; `tokens`, `cache_share` and `by_day` are `null` when no
@@ -4669,16 +5013,26 @@ sessions on disk. Otherwise:
   The rows come in the order the counter pass made them (within one pass,
   the most recently written file first; a re-read row moves to the end),
   never the store's own order, which follows a keyed digest of each path
-  and so means nothing. A row carries no reference, so a shell that draws
-  them knows each by its place, and the order is stable from one answer to
-  the next while no row is re-read. The Sessions tab lists the same rows,
-  each with an opaque reference, through `insights_sessions`.
+  and so means nothing. A row carries its Sessions row's short name as
+  `session_ref` (`t` and the order the pass made it in), for display only:
+  the Sessions methods take the reference `insights_sessions` lists, which
+  adds the store's tag, and refuse the short name. The order is stable from
+  one answer to the next while no row is re-read. The Sessions tab lists the
+  same rows, each with its opaque reference, through `insights_sessions`.
+- `rollup.sessions[].by_day` (additive) is a Claude Code session's tokens on
+  each local day of the week, seven integers, Monday first, counted from the
+  same turns as `rollup.by_day`, so on each day the sessions' amounts sum to
+  that day's four series. It is `null` for a Codex session (its deltas are
+  intervals, not days), for a session with no known figure, and from a
+  daemon that predates it; a shell then shows the session in no day, never
+  as zero. It carries amounts only, never a session ID, a digest, a path or
+  a model name.
 - `routing` is where the session's proxy calls went, from its route tally
   (above), or `null` on every row while `routing_available` is false.
   `category` is one of, first match wins, every label from the proxy's
   proof label and never a backend name: `unobserved` (no tally: older than
   the ledger's window before the feed was on, a tool that sent no session
-  ID, a managed launch, an older proxy or no proxy; never "outside"),
+  ID, an older proxy or no proxy; never "outside"),
   `unrecorded` (no call carries a proof label), `outside` (every labelled
   call `outside`; the only category that says the calls did not go through
   the route), `mixed` (labelled calls both outside and through the route),
@@ -4702,9 +5056,119 @@ sessions on disk. Otherwise:
   turned the `insights_ledger_feed` setting off; it is on by default,
   owner decision D3, settled 2026-10-09; checked
   first, and a tally folded while it was on is not shown) or `no_ledger`
-  (no proxy ledger is declared, so a stored tally may lack every call
-  since). When it is true, `routing_unavailable` is `null`. The answer reads
+  (no proxy ledger is declared and no managed route has a ledger, so a
+  stored tally may lack every call since). When it is true, `routing_unavailable` is `null`. The answer reads
   only the store, never the ledger.
+- `near_ai_credit` (additive, product owner 2026-10-28: Insights may show
+  money, overriding owner decision D5 for Insights) is where NEAR AI credit
+  went, from the route tallies' charges; `null` while
+  `routing_available` is false. `basis` is `near_ai_ledger`. `week` is the
+  week on screen, `today` today, `by_day[]` each of the last 7 local days
+  (oldest first, today last, each window also carrying its `date`,
+  `YYYY-MM-DD`) and `last_31_days` today and the 30 local days before it
+  (none of these moves with the week on screen), each from local midnight
+  to local midnight. Each window is `{from, to, usd_micros,
+  sessions, calls, calls_without_charge, tokens, usd_micros_known,
+  usd_partial, tokens_known, tokens_partial}`: the calls through the NEAR AI
+  route started in it (by clock hour), their sum in integer USD micros, the
+  sessions they came from (the `loose_charge` counts in every sum and in each
+  unknown group, as no session), the calls with no charge, and the calls'
+  tokens (uncached input, cache reads, cache writes and output, as feed L
+  counts them; `null` once any call's counters are unknown, and for hours
+  kept before tokens were; a call refused with HTTP 4xx or 5xx and no
+  counters adds 0). `usd_micros_known` and `tokens_known` (additive,
+  product owner 2026-10-28) are the same sums as far as they are known: the
+  calls that carried one, with `usd_partial` or `tokens_partial` true when
+  some calls did not, so the figure is a minimum ("at least"). They are
+  `null` (and the flag false) only when no call carried one; a window with
+  no call is a true 0. Groups carry the same four fields. `usd_micros` is
+  `null` when any call in it had no charge (or the sum overflowed), never
+  zero; a window with no call is a true 0. `week` also carries
+  `by_folder[]` and `by_model[]`, each `{key, usd_micros, sessions, calls,
+  calls_without_charge}`. `by_model[]`'s `key` is the served model, as the
+  ledger names it, lowercased, and a session is in each model group it had
+  a call in. `by_folder[]` is grouped by the session's stored row: `key` is the
+  folder's label as `list_projects` shows it (owner decision 2026-10-28, overriding D7 for
+  this view: a folder name is answered over this socket and shown on this
+  Mac only, never sent anywhere), and `null` when unknown (a session with
+  no row, no facts, or no folder the daemon knows, an Analyze snapshot
+  included). A group's `usd_micros` is `null` when any call in it had no
+  charge. Groups are ordered by known charge, largest first, then the
+  unknown ones; ties by key, `null` last. `week`'s `by_task[]` and
+  `by_tool[]` were removed (owner, 2026-10-29) with macOS Insights' By task
+  and By tool views, their only reader. A daemon that predates
+  `near_ai_credit` omits it; a shell reads that as no credit figure, never
+  as zero.
+- `usage_by_day[]` (additive, product owner 2026-10-28) is Claude Code and
+  Codex tokens on each of the last 7 local days, oldest first, today last,
+  each `{date, claude_code, codex}`; it does not move with the week on
+  screen. Claude Code's are the four series a day stacks in `rollup.by_day`;
+  Codex's come from `rollup.codex_by_day`, its per-turn series split by the
+  turns' dates. A day is `null` (unknown, never 0) when a session on it
+  could not be counted or split (a Codex session with no series, a trimmed
+  one, or an undated or uncounted turn); a week with no session of that tool
+  is a true 0. `rollup.codex_by_day` (additive) is the same split for the
+  week on screen, Monday first, `null` when the week has no Codex session.
+- `work` (additive; the product owner approved showing Claude Code and
+  Codex spend at API list prices on 2026-10-29) is the week's Claude Code
+  and Codex work: spend at published API list prices and edits.
+  NEAR AI money stays in `near_ai_credit`. `null` when the feed has no row
+  (no store, rows under another key, or every row in a Never folder).
+  `{basis: "api_list", tables[], prices_as_of, week, last_week, by_tool[],
+  by_model[], by_folder[], by_day[], last_week_by_day[]}`. `tables[]` is
+  `{table_id, version}` for every pricing table a priced turn in either
+  week used, as `insights_model_answers`' `pricing.tables`; `prices_as_of`
+  is the oldest of their fetch times (RFC 3339), `null` when no turn
+  priced. `week` and `last_week` are Totals: `{sessions, priced_sessions,
+  unpriced_sessions, near_ai_sessions, usd_micros_known, usd_partial,
+  cache_savings_usd_micros_known, edits_known, edits_undone_known, edits_denied_known,
+  edits_partial, edits_count_partial, edits_undone_partial,
+  edits_denied_partial}`. Spend is priced turn by turn from the stored
+  per-turn series, each turn on its own local day, so a session crossing
+  midnight or a week is split by its turns; Claude Code turns are the ones
+  the rollup counts, so a turn a resumed transcript repeats is priced once.
+  A session sent through NEAR AI is never list-priced here (owner decision
+  D5): sent wholly through the route (routed verified or unverified, or
+  check failed) it is left out of the spend and counted in
+  `near_ai_sessions` (additive; its charge is in `near_ai_credit`); sent
+  partly through it (mixed) it is unpriced. While routing is unavailable
+  no tally is read, and every session is list-priced as before. A resumed
+  Claude Code transcript's lines and edits count only beyond the
+  transcript it continues, in the week of its first new turn; when the
+  repeated part is not fully known they are partial, never doubled.
+  A session is unpriced when any of its turns in the scope is unpriced
+  (no known counters, no date, no usable label, no list price) or it has
+  no per-turn series (a Codex session read before the per-turn reader, or
+  trimmed by the Codex budget; an unknown row); `usd_partial` is true
+  when any session in the scope is unpriced, and `usd_micros_known` is
+  then the priced turns' sum, a minimum, never a fabricated 0.
+  `cache_savings_usd_micros_known` is, over priced turns, what their
+  cache-read tokens would have cost at the model's uncached-input rate
+  less what they cost at its cache-read rate. Edits (summed over each
+  model's facts: edit calls, undone, declined) are counted once per
+  session, in the week holding its first recorded activity; a session with
+  no facts, or an unknown count, sets the matching `*_partial`
+  (`edits_partial` is true
+  when any of `edits_count_partial`, `edits_undone_partial`,
+  `edits_denied_partial` is). Automated sessions are counted, as the
+  token figures count them. `last_week` (and `last_week_by_day[]`) is
+  `null` when the week before the one on screen is older than the store
+  keeps. `by_tool[]` is Totals plus `key` (`claude_code`, `codex`), only
+  the tools with a session in the week, in that order. `by_model[]` is
+  `{key, tool, sessions, tokens, usd_micros_known, usd_partial}` per
+  normalized model label (`insights_model_answers`' rule) and tool, the
+  sessions with a turn under it and those turns' known tokens, ordered by
+  `usd_micros_known` largest first, ties by key then tool; a turn with no
+  usable label is in no model and leaves the totals partial. `by_folder[]`
+  is Totals plus `key`, the folder's label as `rollup` and
+  `near_ai_credit` show it, `null` when unknown, ordered by known spend
+  largest first, ties by label, `null` last. `by_day[]` and
+  `last_week_by_day[]` are the 7 local days of the week on screen (and
+  the week before), Monday first, each `{date, usd_micros_known,
+  usd_partial}`; a day is partial when an unpriced turn is dated on it, or
+  an unpriced session's first activity in the week is. A daemon that
+  predates it omits it; a shell reads that as no spend figure, never as
+  zero.
 - `started_at`, `routing`, `routing_available` and `routing_unavailable`
   are additive: a daemon that predates them omits all four. A shell reads
   an absent `routing_available` as false and draws no route, and an absent
@@ -4731,7 +5195,8 @@ for a failed read:
   `patterns` operation returns (six weekly bars), with `feed:
   "counter_pass"`: `change` per card is filled only when both weeks are
   comparable, and a week below the floor draws a gap. Re-read files are
-  letters and extensions only.
+  letters and extensions only. Automated sessions are left out of it, with
+  no switch to bring them back.
 - `history[]` is one entry per kept week (13), oldest first, always ending at
   the week holding now whatever `iso_week` asked for. Each is
   `{"week_start", "comparable", "sessions", "tokens": {source: n},
@@ -4741,11 +5206,51 @@ for a failed read:
   `past_threshold` is `{"threshold", "sessions"}` (sessions whose context
   reached the contributor's `insights_context_threshold` that week) and
   `null` while that setting is unset. The shell passes `history` unchanged to
-  the in-process `comparisons` operation, which marks goals and picks the
-  lever and the weekly summary card: goals live in the Insights store, which
-  this daemon never reads.
+  the in-process `comparisons` operation, which picks the lever and the
+  weekly summary card. (It no longer marks goals: the threshold goals it
+  stored left Insights, product owner 2026-10-29.)
 - `recap_card_enabled` is the `insights_recap_card_enabled` setting, passed
   to `comparisons` with `history`.
+- `goals` is the goals the contributor set with the `/goal` slash command in
+  Claude and Codex whose last update falls in the week on screen (product
+  owner, 2026-10-29): `{"goals": [...], "met", "total", "by_tool":
+  {"claude_code"|"codex": {"met", "total"}}}`, a tool with no goal that week
+  absent from `by_tool`. Each goal, newest update first, is `{"tool":
+  "claude_code"|"codex", "status", "met", "tokens", "time_secs",
+  "iterations", "folder", "session_ref", "updated_at"}`:
+  - Codex's goals are read when the week is answered from
+    `goals_1.sqlite` in Codex's home (`$CODEX_HOME` when set and absolute,
+    else `~/.codex`), opened read-only and never created or written (opened
+    `immutable` only when no write-ahead log with content sits beside it).
+    Only `thread_id`, `status`, `tokens_used`, `time_used_seconds` and
+    `updated_at_ms` are selected, never `objective` or `goal_id`. A goal is
+    joined to the stored Codex row whose keyed session digest is its thread
+    ID's (the thread ID is the rollout's `session_meta` id), and is left out
+    when no row the Sessions list shows matches: a rollout aged out of the
+    store, archived, automated or in a Never folder. `status` is Codex's own
+    (`active`, `paused`, `blocked`, `usage_limited`, `budget_limited`,
+    `complete`, or `unknown` for a value this build does not know);
+    `iterations` is `null`. No database, no table, or one that cannot be
+    read is no Codex goals, never an error.
+  - Claude's goals are read by the counter pass from the transcript's
+    `attachment` records of type `goal_status` and stored on the session's
+    row: status, checks, tokens, time and time only. The record written when
+    a goal is set (`sentinel: true`) starts a goal; a later check continues
+    it while its condition is unchanged, compared by a digest held only
+    while the file is read, and a check with another condition starts a new
+    one. A goal's state is its latest record's: `open` while only the
+    sentinel is read, else `met` or `not_met`, with `iterations`,
+    `time_secs` (from `durationMs`) and `tokens` from that check. A session
+    keeps its latest 16 goals. Rows made before goals were kept are read
+    again once (`SESSION_FACTS_VERSION` 3).
+  - `met` is `true` for Codex `complete` and Claude `met`; every other
+    status counts as not met. `tokens`, `time_secs` and `iterations` are
+    `null` when the tool did not report them, never zero. `folder` and
+    `session_ref` are the session's as `insights_sessions` lists them, so
+    the reference opens `insights_session_drill`.
+  - A goal's text never crosses, is stored or is logged: not Codex's
+    `objective`, Claude's `condition` or `reason`, or the `/goal` command's
+    arguments.
 
 With the setting off none of these are present, as above.
 
@@ -4787,7 +5292,9 @@ Both are checked before the gate, so a bad param is refused whether counting
 is on or off.
 
 While enabled and readable it answers `updated_at`, `sessions_stored` (every
-row outside Never folders, never page-relative), `revision` (a whole number
+row outside Never folders, never page-relative; automated sessions are not
+listed, not counted here, and not found by `insights_session_drill`, with no
+switch to bring them back), `revision` (a whole number
 that moves only when a row is made; a pass that stores nothing leaves it,
 though `updated_at` moves on every pass), `truncated` (more rows
 follow this page), `next` (the cursor for the following page, or `null` at
@@ -4832,21 +5339,36 @@ whole range: a re-made row shows once, under its new reference and at its
 place, and a client that keeps the row on screen in view sees no jump.
 
 Each row is exactly
-`{"session_ref", "source", "started_at", "turns", "tokens", "sparkline", "folder"}`:
+`{"session_ref", "source", "started_at", "turns", "tokens", "sparkline", "folder",
+"inferred_task", "user_task", "user_outcome", "analyzable"}` (the last four
+are additive; a client that predates them ignores them):
 
-- `session_ref` is opaque: `t` and the order the pass made the row in. It is
-  never a digest or a path, and it changes when the session's file grows and
-  its row is made again, so a shell lists again rather than keeping it.
+- `session_ref` is opaque: `t` and the order the pass made the row in, then
+  `.` and the tag of the store it was answered from (the same number a `next`
+  cursor ends in), each part plain digits, for example `t12.3735928559`. It
+  is never a digest or a path, and it changes when the session's file grows
+  and its row is made again, so a shell lists again rather than keeping it.
+  A store begun again (an unreadable file, a new key, a clear) numbers its
+  rows from `t0` again; the tag is what keeps a reference answered before
+  from naming the session that now has its order. `insights_session_drill`,
+  `insights_session_label` and `insights_analyze_session` refuse a reference
+  from another store, or one without the tag, as `bad_params` /
+  `insights-session-unknown`, and the shell lists again. A shell compares
+  and sends it whole, and never parses it.
 - `source` is `claude_code` or `codex`.
 - `started_at` is the earliest recorded event, RFC 3339, or `null`.
-- `turns` is the Claude Code turn count; `null` for Codex, which records no
-  per-turn series (owner decision D11, open), and for an unreadable session.
+- `turns` is the turn count of the session's per-turn series; `null` for a
+  Codex row made before the per-turn reader (owner decision D11, settled
+  2026-10-20) and for an unreadable session.
 - `tokens` is the session's tokens as its drill's header counts them: for
   Claude Code the known turns' tokens together (uncached input, cache read,
-  cache write and output), for Codex the change between its first and last
-  token count. `null` when no counter is known, never 0.
+  cache write and output); for Codex always the change between its first
+  and last running token total, with or without a per-turn series, so a row
+  whose series the Codex allowance trims keeps the same figure and a series
+  with no known turn still shows it. `null` when no counter is known, never
+  0.
 - `sparkline` is the session's tokens per turn, folded for a row, or `null`
-  for Codex (no per-turn series) and for a session with no known turn:
+  for a Codex row with no per-turn series and for a session with no known turn:
   `{"points", "peak_tokens", "peak_turn"}`. `points` is at most 32 whole
   numbers, oldest first: one per turn when there are 32 turns or fewer;
   otherwise the turns are cut into 32 consecutive runs, as even as integer
@@ -4864,6 +5386,23 @@ Each row is exactly
   key; the label is matched at answer time and never stored, and no key or
   path crosses. A shell draws `null` with the core's
   `analytics_folder_unknown`.
+- `inferred_task` is the task the local rules infer from the row's stored
+  facts (`insights::task_classifier`, re-run when the facts were read under
+  older rules, as `insights_model_answers` reads them): `bug_fix`,
+  `refactor`, `tests`, `docs`, `other` or `no_edits`; `null` for a row with
+  no facts.
+- `user_task` is the task the person set with `insights_session_label`
+  (`bug_fix`, `refactor`, `tests`, `docs` or `other`), or `null` while they
+  have set none. A shell pre-fills its task control from `inferred_task`
+  and says which of the two it shows.
+- `user_outcome` is what the person said became of the work (`kept`,
+  `partly_kept` or `thrown_away`), or `null` while unset. Never inferred.
+- `analyzable` is whether `insights_analyze_session` can analyze the row's
+  file: `false` when the core's whole-file analysis refuses it as the pass
+  found it (larger than 16 MiB, or a Codex file that does not record exactly
+  one `session_meta`), so a shell does not offer Analyze & save on it. `true`
+  otherwise, including for a row made before this was looked for, whose
+  file is refused, if at all, when Analyze & save runs.
 
 `insights_session_drill` takes `session_ref` (**required**, from the list)
 and `tz` (optional, seconds east; the daemon's local offset when absent). It
@@ -4873,17 +5412,522 @@ computed by the same engine from the stored counters, with `feed:
 "counter_pass"` and `session_ref` echoed: the date and the span are the
 transcript's earliest and latest recorded events, by the rule a saved
 snapshot's time evidence uses, so the same bytes give the same drill. A
-Codex session has `series: null` and `series_unavailable: "not_recorded"`.
+Codex session read turn by turn draws its series as a Claude Code one does;
+one with no per-turn series (a saved snapshot, a row made before the
+per-turn reader, or one the Codex allowance trimmed) has `series: null` and
+`series_unavailable: "not_recorded"`. A Codex drill's `tokens` is the
+observed change either way (see `tokens` above); a series with unknown turns
+adds `some_turns_unknown` for the chart only.
 A missing or non-string `session_ref` is `bad_params` /
 `insights-session-ref-invalid`; one that names no listed row (never stored,
-made again since, or in a Never folder) is `bad_params` /
-`insights-session-unknown`; a malformed `tz` is `bad_params` /
+made again since, in a Never folder, or answered from a store since begun
+again) is `bad_params` / `insights-session-unknown`; a malformed `tz` is
+`bad_params` /
 `tz-invalid`.
 
 Each stored row keeps the earliest and latest recorded event for this. A row
 stored before they were kept is read once more, within the per-poll limits,
 even when its file is unchanged; until then its drill's date and span are
 `null`, never guessed.
+
+### Agent settings discovery and preview
+
+`get_config_schema` takes an empty object and returns
+`schema_version: "trace_commons.config_schema.v1"`, `patch_schema`, and
+`semantics`. `patch_schema` is a JSON Schema for the writable settings patch:
+types, enums, numeric bounds, examples and descriptions come from the running
+daemon. Platform-specific terminal identifiers and notification kinds reflect
+that build. `x-constraints` records contextual rules (for example, a trajectory
+source cannot watch the user's home directory); the existing settings parser
+remains authoritative. Credentials and read-only response fields are not
+writable properties. Nonempty or non-object parameters are refused as
+`bad_params` / `config-schema-params-must-be-empty`.
+
+`preview_settings` takes the same partial object as `set_settings` and validates
+it with the same parser, against a cloned in-memory snapshot. It returns:
+
+```json
+{
+  "schema_version": "trace_commons.settings_preview.v1",
+  "applied": false,
+  "changes": [
+    {"key": "quiescence_secs", "before": 1800, "after": 600, "redacted": false}
+  ]
+}
+```
+
+Each change names a canonical persisted field, including side effects such as
+`notify.verdicts_landed` clearing `verdicts_offer_pending`. An alias such as
+`claude_root` reports `claude_source`. Changes are detected before redaction,
+so replacing one hidden source path with another still produces a change;
+its before/after values are null and `redacted` is true. Null in a redacted
+change does **not** mean that the setting was cleared. Unchanged fields are
+omitted. A valid no-op returns an empty `changes` array; an empty patch is
+refused as `bad_params` / `no-known-setting-supplied`, just like `set_settings`.
+Invalid fields and values use the existing fixed settings error labels and
+never echo the submitted value.
+
+Preview writes no files, publishes no events, changes no settings or approval
+queue, and starts no services. It does not reserve a transaction: applying
+later through `set_settings` validates against the then-current state. Apply's
+runtime result (including private inference state) must be read separately
+from the saved setting. `get_settings` contains read-only and redacted fields;
+it is an inspection response, not a patch template.
+
+Both methods are advertised by `hello`, available through the existing C ABI
+call entrypoint, and allowed in developer dry-run mode because they are local
+reads. Older daemons report the existing unknown-method error; clients should
+request an app update rather than writing settings files directly. See the
+[agent CLI guide](agent-configuration.md) for the discover/inspect/preview/apply
+workflow and trace-estimate and project-policy discovery.
+
+### `insights_session_label`
+
+Additive (Insights PM request, 2026-10-21). Sets or clears the person's own
+labels on one listed row, so a terminal user labels a session in one click
+from the Sessions feed instead of choosing its file. Params:
+
+- `session_ref` (**required**): a reference `insights_sessions` listed. A
+  missing or non-string one is `bad_params` / `insights-session-ref-invalid`.
+- `task` (optional): `bug_fix`, `refactor`, `tests`, `docs` or `other` sets
+  it; `null` clears it, so the inferred task shows again; absent leaves it
+  as it is. `no_edits` is not a label.
+- `outcome` (optional): `kept`, `partly_kept` or `thrown_away` sets it;
+  `null` clears it; absent leaves it.
+
+Any other value of either, or neither given, is `bad_params` /
+`insights-session-label-invalid`. Params are checked before the gate. Gated
+as `insights_sessions` is: with `insights_counter_pass` off it answers
+`{"enabled": false, "feed": "counter_pass"}` and writes nothing, makes no key
+and opens no store; on, an unreadable key, store or folder rules answer
+`readable: false` with the fixed reason. A reference that names no listed
+row (never stored, made again since, automated, in a Never folder, or
+answered from a store since begun again) is `bad_params` /
+`insights-session-unknown`, and nothing is written; a labels
+file that cannot be written, or is not in the labels shape and so is never
+written over, is `unavailable` / `insights-session-label-write-failed`, and
+the label is as it was, in the file and in every later answer. Otherwise
+it answers `{"enabled": true, "feed": "counter_pass", "readable": true,
+"session"}`, where `session` is the row exactly as `insights_sessions` now
+lists it. Local in a dry-run daemon: it writes only the daemon's labels
+file, in its state directory.
+
+Where a label lives and when it goes:
+
+- In its own small file beside the counter store
+  (`insights-session-labels.json`), keyed by the row's keyed session digest
+  (the store's row key), never by the reference. A row made again when its
+  file grows gets a new `session_ref` and keeps its label. A label write
+  writes only that file, never the store.
+- The file is read by the fields a build knows: an unknown field, a later
+  task or outcome word, or a later schema name never makes it unreadable. A
+  label a build cannot read is answered as unset and kept as written, and a
+  change sets only the field it names.
+- It goes with its row: when the row ages out of the 13 kept weeks, when the
+  store's caps evict it, and when its folder is Never (no label is set on a
+  row in a Never folder; one whose folder becomes Never is hidden at once
+  and dropped at the next pass, and does not come back if the folder is
+  watched again). Unenroll removes the store and the labels file.
+- A store restart keeps it. The counter store is begun again whenever it
+  cannot be read (a damaged file, or one a later or earlier build wrote);
+  its rows come back from the sessions on disk a poll's budget at a time,
+  and until a pass leaves nothing for later, no label is dropped for a row
+  not yet back. A label whose row does not come back (its file gone) is
+  dropped then. A new counter key (its keychain entry gone) names every
+  session anew, so the labels made under the old one are removed.
+- It is never sent anywhere: it crosses only on this socket, on the Sessions
+  rows and as counts in `insights_model_answers`.
+
+### `insights_analyze_session`
+
+Additive (Insights PM decision, 2026-10-21: terminal users never see their
+session files, so Analyze no longer asks for one). Analyzes one listed row's
+session, and with `save` stores the result as a dated snapshot, exactly as
+the app's in-process `analyze` operation does on a file it was given.
+Params:
+
+- `session_ref` (**required**): a reference `insights_sessions` listed. A
+  missing or non-string one is `bad_params` / `insights-session-ref-invalid`.
+- `save` (optional): `true` saves the snapshot; `false`, `null` or absent
+  analyzes only. Anything else is `bad_params` /
+  `insights-analyze-save-invalid`.
+
+Params are checked before the gate. Gated as `insights_sessions` is: with
+`insights_counter_pass` off it answers `{"enabled": false, "feed":
+"counter_pass"}` and lists, matches and reads nothing; on, an unreadable key,
+store or folder rules answer `readable: false` with the fixed reason.
+
+What is read: the caller names a row, never a file or a store. The daemon
+lists the Claude Code and Codex sessions its own watched sources find now
+(the discovery a watcher poll runs) and matches the row to one of them by
+the keyed session digest the counter pass stored it under. Only that file
+is read, as `claude_code` or `codex` by the source that found it. Nothing
+reaches the network.
+
+- A reference that names no listed row (never stored, made again since its
+  file grew, automated, in a Never folder, or answered from a store since
+  begun again) is `bad_params` /
+  `insights-session-unknown`. So is a row whose folder's rule is Never now,
+  the contribution override included, though the pass has not yet dropped
+  it: that file is not read.
+- A row whose file is no longer where the watcher finds sessions (moved or
+  deleted since it was counted, or gone while it was read) is `unavailable`
+  / `insights-session-file-gone`.
+- A file the core's whole-file analysis refuses, so every attempt would
+  fail the same way, is `unavailable` with why, and is not read: larger
+  than 16 MiB (as the pass found it, or grown past it since) is
+  `insights-session-too-large`; a Codex file that does not record exactly
+  one `session_meta` (as the pass found it) is
+  `insights-session-not-one-session`; a file the analysis does not find or
+  read (a session in a NEAR AI managed profile, or a compressed Codex
+  rollout) is `insights-session-insights-only`. Such a row lists with `analyzable:
+  false`.
+- Any other analysis that fails is `unavailable` with the core's fixed
+  label, never a path.
+
+Otherwise it answers `{"enabled": true, "feed": "counter_pass", "readable":
+true, "analysis"}`, where `analysis` is the core's `analyze` response as the
+in-process call returns it: `type: "analyze"`, `insight` (the `LocalInsight`:
+derived observations and the source's SHA-256 digest, never its path) and
+`mutation_effects` (the episodes and comparison tasks a save invalidated;
+empty without `save`). With `save` the snapshot goes to the standard Insights store,
+the one the app reads when no `--insights-store` is given; the caller cannot
+name another directory. A saved `insight` also carries what a saved import
+carries and an unsaved one does not, each a keyed digest (HMAC-SHA-256 under
+that store's own digest key, made on first save, never under the counter
+key, and never the key itself): `session_identity` (`key_fingerprint`, and
+`session`, a keyed digest of the one session ID the transcript records;
+`null` when there is none or more than one) and, for Claude Code,
+`turn_series` (`key_fingerprint`, and per turn and tool call the keyed
+digests `msg_key`, `args_key` and `path_key` of a message ID, a tool call's
+arguments and a path, never the values). They cross only on this socket,
+as the in-process `analyze` answer returns them to the app. Refused in a
+dry-run daemon: a save writes the person's real Insights store, outside the
+daemon's state directory, and can make its digest key.
+
+### `insights_model_answers`
+
+Takes no params. The Models card's six answers over the stored sessions
+(feed T), computed by `insights::model_answers` at answer time from the
+facts and tokens each counter row holds. It is gated as `insights_week` and
+`insights_sessions` are: with `insights_counter_pass` off it answers
+`{"enabled": false, "feed": "counter_pass"}` without opening the store or
+making the key; on, an unreadable store, key or folder-rule read answers
+`readable: false` with its fixed reason (`store_unreadable`,
+`key_unavailable` or `policy_unreadable`), never empty rows.
+Sessions in a Never folder enter no answer. Read-only, no network, local in
+a dry-run daemon.
+
+While enabled and readable the answer is `{enabled, feed, readable,
+updated_at, window_start, window_end, pricing, rows}`:
+
+- `window_start`, `window_end`: RFC 3339. The window is the 13 weeks ending
+  now, whatever week another screen shows; a session older than that is not
+  counted even when its row is still stored.
+- `pricing`: `{basis: "api_list", tables: [{table_id, version}]}`. Cost is
+  priced at published API list prices when the answer is built; the store
+  holds tokens and facts, never a list price. `table_id` is the content
+  digest of a shipped price table, the one digest on this wire. The NEAR AI
+  charge is apart from this: see `near_ai_charge`.
+- `rows`: always six, in this order, each
+  `{question, state, basis, edit_mode, leader, next, sessions_by_model,
+  left_out, near_ai_charge}`:
+  - `question`: `bug_fix_rejected`, `refactor_rejected`, `tests_rejected`,
+    `docs_cost`, `rejected_across_tasks`, `finish_time`.
+  - `state`: `not_enough_sessions`, `not_priced`, `no_clear_difference` or
+    `answered`. With `no_clear_difference` both figures are present.
+  - `basis`: `rejected` or `undone` on the rejection questions, else `null`.
+  - `edit_mode`: `prompting` or `not_prompting` on `finish_time`, else
+    `null`. `unknown` is never compared.
+  - `leader`, `next`: `null`, or `{label, sessions, edits,
+    figure, interrupts_per_session_permille, near_ai_charge, kept}`. `label` is a
+    model label the session declared, not a verified serving identity.
+    `figure` is `{kind: "rate_permille", value}`, `{kind: "usd_micros",
+    value}` or `{kind: "finish_time", median_active_secs,
+    median_user_turns}`. On `docs_cost`, `figure` is at API list prices and
+    takes only sessions with no route tally. `near_ai_charge` is as on the
+    row, over only that model's Docs sessions whose route is
+    `routed_verified` and whose calls all named the model as served (with
+    it as the majority label); `null` on every other figure. A transcript
+    label may not name the model NEAR AI served, so a session declared as
+    one model and served another, or not verified, or whose calls named no
+    one served model, is counted on the row's `near_ai_charge` only, never
+    on a model's. `kept` is as in `kept_by_model`, for that model, on the
+    rejection rows; `null` on every other figure and when none of the
+    model's sessions has an outcome.
+  - `sessions_by_model`: `[[label, sessions], ...]`.
+  - `left_out`: counts of sessions left out of that question, per reason:
+    `unknown_facts`, `automated`, `delegated`, `capped`, `routed`,
+    `reviewer`, `no_majority`, `unpriced`, `too_few_sessions`,
+    `too_few_edits`, `mix_too_different`. `automated` counts the automated
+    sessions in the window (see "The store" above): compared on no row, and
+    counted on every row whatever their facts. A fact
+    that could not be read is left out and counted here, never read as zero.
+    `too_few_sessions` counts the sessions of a model's task-type cells
+    under the five-session floor (for `finish_time`, every session of a
+    cell with fewer than five finished; for `docs_cost`, the priced
+    sessions of a cell with fewer than five priced). Across task types two
+    models are compared over the types both qualify in; `mix_too_different`
+    counts the sessions of the qualifying cells of a model that can be
+    compared with no other, and those of `leader` and `next` outside the
+    types they share. Every session of `leader` and `next` is in their
+    figure or in one count here.
+  - `near_ai_charge`: on `docs_cost` only, what NEAR AI charged, from the
+    route tallies (see "Route tallies" above): `{basis: "near_ai_ledger",
+    median, routed_sessions, charge_unknown}`. `routed_sessions` counts the
+    Docs sessions in the window with at least one call through NEAR AI;
+    `charge_unknown` how many of them have an unknown charge. `median` is
+    `{kind: "usd_micros", value}`, the median charge per session over those
+    with a known charge (a session's charge is every NEAR AI call in it),
+    or `null` when fewer than five are known, the session floor every
+    figure is held to, so one session's exact charge never crosses as a
+    median: never zero for unknown. The row's figure counts every Docs
+    session sent through NEAR AI, whichever model served it. The whole field is
+    `null` on every other row, and on `docs_cost` when no session in the
+    window was sent through NEAR AI. It is never added to `figure`: a
+    session's charge and its list-price estimate never meet in one figure.
+  - `kept_by_model` (additive): on the rejection rows (`bug_fix_rejected`,
+    `refactor_rejected`, `tests_rejected`, `rejected_across_tasks`),
+    `[[label, {labelled, kept, partly_kept, thrown_away, kept_permille}],
+    ...]`, one entry per model with at least one session in the row the
+    person gave an outcome (`insights_session_label`), whatever the row's
+    `state`. It counts the row's sessions that are compared by route and
+    whose majority model is that label; `labelled` is their sum and
+    `kept_permille` is `kept / labelled`, rounded half-up (partly kept is not
+    kept). An acceptance signal beside the rate: it never moves a rate, an
+    order or a state. `[]` on `docs_cost` and `finish_time`, and when no
+    session has an outcome.
+
+The person's `user_task` (see `insights_session_label`) replaces the
+inferred task wherever the answers read one, so it decides which rows a
+session is on; a session inferred as `no_edits` that they label is on that
+task's rows.
+
+While `LEDGER_MONEY_IN_INSIGHTS` is held (owner decision D5), `docs_cost`
+is `not_priced` with `leader`, `next` and `near_ai_charge` `null` and
+`pricing.tables` empty, and no stored charge is read.
+
+Money crosses only on the `docs_cost` row, as `{kind: "usd_micros", value}`:
+in `figure` at API list prices, and in `near_ai_charge.median` as the NEAR
+AI charge, labelled by `basis: "near_ai_ledger"`. No other key or value
+carries money, and no session
+reference, path, folder name, backend or commit hash crosses. With the
+ledger feed off, or no proxy ledger declared, every session is treated as
+unobserved and no stored route tally is read. No label or field name is a
+ranking word.
+
+`insights_week` carries two money figures: `near_ai_credit`, the NEAR AI
+ledger's own charge (product owner, 2026-10-28), and `work`, Claude Code
+and Codex spend at published API list prices, priced from stored tokens
+when the answer is built (the product owner approved list-price figures
+on 2026-10-29). The store holds no list price.
+
+### `insights_benchmarks`
+
+Takes `weeks` (`4` or `13`, default `4`), `tool` (`claude_code`,
+`codex`, or `null` for both, the default) and `population` (`own`, the
+default, or `spawned`); absent and `null` read as the default, and any other
+value is refused with `bad_params` and the label `weeks_invalid`,
+`tool_invalid` or `population_invalid`. For each kind of work, how each model the
+person used did on their own sessions: Quality (share of its edits kept),
+Value (cost per session at API list prices) and Speed (active time per
+session), the two leading models on each, and one tip with evidence behind
+it. Computed by `insights::benchmarks` at answer time from the counter
+rows, gated and read exactly as `insights_model_answers` is (off answers
+`{"enabled": false, "feed": "counter_pass"}` without opening the store or
+making the key; an unreadable store, key or folder-rule read answers
+`readable: false` with its fixed reason; Never-folder sessions enter
+nothing). Read-only, no network, local in a dry-run daemon. The list-priced
+figures here are approved by the product owner (2026-10-29), as a
+comparison between models, not a bill.
+
+While enabled and readable the answer is `{enabled, feed, readable,
+updated_at, window_start, window_end, weeks, tool, population, pricing,
+sessions, min_sessions, categories, left_out, delegated}`:
+
+- `population`: the rows asked for, never both (product owner,
+  2026-10-29). `own` is the person's own sessions. `spawned` is the
+  transcripts Claude's sub-agents wrote (`<session>/subagents/*.jsonl`, and
+  `<session>/subagents/workflows/<run>/agent-*.jsonl` for a workflow's),
+  which the counter pass reads as rows of their own, apart from the
+  person's: they are in no other answer (no week total, spend, Sessions row,
+  Models answer, pattern or goal). The categories, qualification rules and
+  tips are the same, computed within the population only. A sub-agent has
+  no label of its own, and takes its parent session's route tally (the
+  proxy ledger names a call by the session ID, which a sub-agent shares).
+  Codex's spawned threads are not in it yet; they stay automated
+  (`left_out.automated`) in `own`.
+- `window_start`, `window_end`: RFC 3339, the `weeks` ending now. A session
+  is in the window by its latest dated turn, as in `insights_model_answers`.
+- `tool`: the filter asked for, or `null`. With a tool, sessions of the
+  other tool are not counted anywhere.
+- `pricing`: `{basis: "api_list", tables: [{table_id, version}]}`, the
+  shipped price tables the cost figures used.
+- `sessions`: every session of the tool in the window. Each is on exactly
+  one category or counted once in `left_out`, so the categories' `sessions`
+  and the `left_out` counts sum to it.
+- `min_sessions`: `5`, the sessions with a known figure a model needs before
+  it is compared in a category.
+- `categories`: always eight, in this order, by `key`: `bug_fix`,
+  `feature`, `refactor`, `tests`, `docs`, `understand`, `review`, `setup`.
+  A session's category is the person's own task label
+  (`insights_session_label`) when set, else its inferred task and shape:
+  `bug_fix`, `refactor`, `tests`, `docs` by name; `no_edits` is
+  `understand`; `other` is `setup` when config files are more than half of
+  the edited files, else `feature`. A label of `other` on a session with no
+  edits is `understand`. `review` is never inferred (the facts hold no
+  command text) and no label names it yet, so it is empty for now. Each
+  category is `{key, sessions, models, quality, value, speed, tip}`:
+  - `models`: `[{label, tool, sessions, kept_permille, usd_micros_median,
+    active_secs_median, kept_sessions, priced_sessions, timed_sessions}]`,
+    most sessions first. `label` is the normalized declared label serving
+    a strict majority of the session's turns, not a verified serving
+    identity; `tool` is `claude_code` or `codex`. `kept_permille` is
+    `(edits - undone - denied) / edits` over the model's sessions whose
+    edits and undone counts are known (an unknown `denied` reads as none
+    declined), rounded half-up; `null` when none is known or they made no
+    edit. `usd_micros_median` is the median API list-priced cost over the
+    sessions priced in full with no route tally; `active_secs_median` the
+    median active seconds over the sessions where that is known; each
+    `null` when it has no sample, never zero. A median of an even count is
+    the two middle values' mean, rounded half-up. `kept_sessions`,
+    `priced_sessions` and `timed_sessions` (additive) are each figure's
+    sample.
+  - `quality`, `value`, `speed`: `{leader: {label, tool, figure}, next:
+    {label, tool, figure}}`, or `null` when fewer than two models have at
+    least `min_sessions` sessions in that figure's sample. `figure` is
+    `kept_permille` (higher leads), `usd_micros_median` or
+    `active_secs_median` (lower leads); ties go to more sessions, then label
+    byte order.
+  - `tip`: `null`, or the first of these whose evidence holds:
+    - `{kind: "test_first", faster_permille, sessions_without, sessions,
+      sessions_with}` on `bug_fix`: sessions where a command failed before
+      the first edit and passed after it, against the rest, by median
+      active time; at least 3 sessions in each group and the test-first
+      median lower. `faster_permille` is how much lower, of the other
+      median; `sessions` is both groups.
+    - `{kind: "cheaper_same_quality", cheap, expensive,
+      cost_ratio_permille}`: a model whose kept share is within 30 permille
+      of the `quality` leader's, at no more than half its median cost (both
+      with `min_sessions` priced sessions); the cheapest such.
+    - `{kind: "fewer_undos", better, worse, ratio_permille}`: of the models
+      with `min_sessions` known kept counts and at least 30 edits, the
+      highest undone rate is at least twice the lowest nonzero one.
+- `left_out`: `{automated, no_facts, no_model, reviewer, unknown_task,
+  mixed_models, routed, capped}`, each a count of sessions, counted under
+  the first that holds: started by a tool; stored without facts; which
+  model served it is unknown; the Codex reviewer's; read as no edits while
+  a model's edits could not be seen; no model served a strict majority of
+  the turns; sent through a route whose label may not name the served model
+  (only with the ledger feed on and a ledger declared); the scan hit a cap.
+  (`delegated` was a reason here until 2026-10-29; it is now the count
+  below.)
+- `delegated`: of the sessions on a category, those that delegated to
+  Claude sub-agents. Each is counted on its own work (its own turns, edits,
+  model, cost and time), so its figures are partial; nothing of its
+  sub-agents' is added to them (they are the `spawned` population). Always
+  `0` for `spawned`.
+
+No session reference, path, folder name or backend crosses; the one digest
+is a price table's `table_id`. No NEAR AI charge is read.
+
+### `insights_submitted`
+
+Takes `weeks` (`4`, `13`, or `null` for all time; absent is all time) and
+`tz` (optional UTC offset in seconds, as `insights_week` takes it; the
+daemon's own offset when absent). Any other `weeks` is refused with
+`bad_params` and the label `weeks_invalid`, a bad `tz` with `tz-invalid`.
+Every trace the contributor has submitted, whatever became of it
+(accepted, quarantined, rejected, withdrawn or still pending), from the
+history cache, joined to what the counter pass stored about its session
+(product owner, 2026-10-29). Gated as `insights_benchmarks` is: off answers
+`{"enabled": false, "feed": "counter_pass"}` without opening the store or
+making the key; an unreadable store, key or folder-rule read answers
+`readable: false` with its fixed reason, and an unreadable history cache
+with `history_unreadable`. Read-only, no network, local in a dry-run daemon.
+
+**The join.** A history row's `session_hash` hashes the bytes uploaded,
+which the counter store does not keep. The upload queue entry the trace was
+uploaded from carries its `submission_id`, adapter and session file, and an
+`uploaded` entry is never expired or compacted, so the join outlives
+`queue_ttl_days`: history row, then queue entry by `submission_id` (else by
+`session_hash` and adapter), then the counter row stored under that
+adapter and file. Nothing is guessed: a submission with no queue entry
+(`no_queue_entry`), of an adapter the pass does not read
+(`source_not_read`), or whose row is gone, aged out of the store's 13
+weeks, evicted or not read yet (`no_session_row`), is unmatched, and it is
+still counted in every history figure. A row describes the session file as
+the pass last read it, so a session continued after upload holds more than
+was sent.
+
+A submission from a Never folder, by the history row's project id, its
+queue entry's folder or its row's folder, enters no figure; it is counted
+in `left_out.never_folder` only. There is no minimum anywhere: one
+submitted trace answers every part, with the counts behind each figure.
+
+While enabled and readable the answer is `{enabled, feed, readable,
+updated_at, weeks, window_start, window_end, pricing, totals, by_model,
+by_model_left_out, by_task, by_task_unknown, code, by_week, by_project,
+left_out, traces_total, traces}`:
+
+- `window_start`: RFC 3339, local midnight on the Monday `weeks` local weeks
+  back, this week included; `null` for all time. A submission is in the
+  window by its `submitted_at`. `window_end` is now.
+- `pricing`: `{basis: "api_list", tables: [{table_id, version}]}`.
+- Credit is in points as the history stores them, summed and rounded to
+  0.001. By History's rule a row with a final figure (0 included) adds it
+  to `credit_final` and nothing to `credit_pending`; a row with none adds
+  its pending figure.
+- A *tally* is `{submitted, accepted, credit_final, credit_pending,
+  matched}`.
+- `totals`: a tally plus `unmatched`, `by_status` (`accepted`, `pending`,
+  `quarantined`, `rejected`, `withdrawn`, `other`, each always present;
+  `pending` is the server's `submitted` or `processing`, `withdrawn` is any
+  row taken back here or on the web), `by_outcome_reason` (the server's
+  credit outcome label to its count, e.g. `policy_mismatch`,
+  `novelty_failed`, `duplicate`), and `unmatched_by_reason`
+  (`no_queue_entry`, `source_not_read`, `no_session_row`).
+- *Edit counts* are `edits_known`, `edits_kept_known`,
+  `edits_undone_known`, `edits_denied_known`, each beside its own
+  `*_partial`, then `lines_added_known`, `lines_removed_known` and
+  `lines_partial`. Kept is edits less undone and declined, per session; an
+  unknown declined count reads as none declined (as in Benchmarks), so a
+  session whose edits were never put to the person leaves
+  `edits_denied_partial` true but kept known. *Spend* is
+  `usd_micros_known`, `usd_partial`, `priced_sessions`,
+  `unpriced_sessions` and `near_ai_sessions`: API list prices over the
+  session's per-turn series; a session any of whose usage went through
+  NEAR AI (a route tally, with the ledger feed on) is not list-priced and
+  counts in `near_ai_sessions`.
+- `by_model`: matched sessions by the normalized declared label serving a
+  strict majority of the session's turns, most submitted first: `{label,
+  tool}`, a tally, spend, edit counts and `tasks` (task key to count).
+  `by_model_left_out`: `{unmatched, mixed_models, no_model}`.
+- `by_task`: always eight tallies, in Benchmarks' order and by its
+  `bench_category` rule (`bug_fix`, `feature`, `refactor`, `tests`,
+  `docs`, `understand`, `review`, `setup`), each with its `key`; the
+  person's own task label wins. `by_task_unknown`: the tally of submissions
+  with no task (unmatched, or stored without facts).
+- `code`: over matched sessions: `sessions`, `sessions_with_files`,
+  `files` (`{source, test, doc, config, total}`, distinct edited files per
+  extension class, summed), `files_partial`, edit counts and spend. Never a
+  path or a file name.
+- `by_week`: a tally per local week, `{week_start}` a `YYYY-MM-DD` Monday,
+  oldest first, every week from the window's first (all time: the earliest
+  submission's, at most 520 weeks) to this one, empty weeks included.
+- `by_project`: a tally per History project label, `{label}`, most
+  submitted first.
+- `traces_total` and `traces`: one row per submission, newest first, at most
+  500: `{submission_id, submitted_at, project_label, source, status,
+  credit_points_pending, credit_points_final, credit_outcome_reason,
+  matched, unmatched_reason, tool, model, mixed_models, task, files, edits,
+  edits_kept, edits_undone, edits_denied, usd_micros, near_ai}`.
+  `submission_id` is the reference History rows already carry; `source` is
+  the adapter name History shows; every session figure is `null` when
+  unmatched or unknown, never zero.
+
+No path, file name, session ID or hash, project key or id, prompt or
+command crosses; the one digest is a price table's `table_id`.
 
 ### `set_settings`
 
@@ -4898,9 +5942,10 @@ Takes a JSON object whose top-level keys must come from
 `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`,
 `menu_bar_mark_enabled`, `notify`,
 `verdicts_offer_pending`, `idle_offer_pending`,
-`max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`,
+`max_uploads_per_day` and `max_bytes_per_day` (retired: accepted and
+ignored, see below), `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
-`insights_recap_card_enabled`, `managed_terminal` --
+`insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -4981,6 +6026,53 @@ snapshot's `capabilities` carries `terminal_current` (the chosen id, or
 this computer; empty under Flatpak) and `terminal_destination` (the
 chosen app's name). A launch whose chosen app was not found is refused
 with `managed-terminal-not-found`.
+
+`managed_favorite_models` (object) stars or unstars NEAR AI models for the
+Launch sheet's model picker, merging like `notify`: `{"<model id>": true}`
+stars an id, `false` unstars it, and omitted ids stay. An id must be
+non-empty, at most 256 UTF-8 bytes, and free of whitespace and control
+characters; a value that is not a boolean, a bad id, or a patch that grows
+the list past 32 entries refuses the whole patch with `bad_params` /
+`settings-invalid-value`. A favorite NEAR AI stopped listing still counts
+toward the 32, but a removal is never refused for the bound.
+`set_settings` does not check that NEAR AI offers the id;
+`managed_model_favorite_set` does, and is what shells call. The settings
+answer carries the stored list as `managed_favorite_models` (`[string]`, in no
+particular order).
+
+`managed_cli_options` (object) updates saved CLI options for new managed coding
+sessions. Accepted keys are `claude`, `codex` and `opencode`, with string values.
+Omitted agents retain their current values; an empty string resets one agent.
+Each value is limited to 16384 UTF-8 bytes and validated with the managed launcher’s
+quote parser and reserved-option rules. Arguments are passed directly without
+shell evaluation. Invalid quoting or reserved overrides return the fixed
+`managed-cli-options-invalid` label; unknown agents and non-string values return
+`settings-invalid-value`. Preview uses identical validation without writing.
+The UI and `config schema/show/preview/apply` use this same persisted field.
+Existing sessions and sign-in commands are unaffected. Successful changes advance
+the managed snapshot revision and publish `managed_changed`.
+
+`managed_folder_settings` is a list of profiles keyed by canonical `cwd` and
+`tool` (`claude`, `codex`, `opencode`). Each supplied entry replaces that pair's
+`model` (string or null), `collect_traces` (boolean) and `cli_options` (string);
+omitted pairs retain their profiles. `reset: true` deletes only the named pair.
+The folder must be an existing absolute directory; symlinks resolve to the same
+profile. Account fields are refused. `config schema/show/preview/apply` and the
+native launch dialogs share this setting and validation.
+
+The managed snapshot advertises `capabilities.folder_settings: true`; older
+daemons omit it. New managed coding launches remember their prepared choices;
+replayed requests and sign-in commands do not change preferences. The optional
+`managed_launch_prepare.cli_options` selects an explicit folder override;
+an empty string is an explicit reset to no arguments. If omitted, a remembered
+folder override takes precedence over global agent CLI options. Model and
+collection choices are restored into the UI/CLI before preparation, retaining
+explicit launch overrides. A folder profile never chooses or changes an account.
+
+Trace collection opts in only this managed session after exit and feeds the
+existing review/contribution pipeline. It does not authorize an upload. Native
+agent logs remain local even when collection is off; ordinary watched source
+folders retain their existing policies.
 
 #### Notification settings
 
@@ -5087,9 +6179,9 @@ shell's own command layer clamping before the call ever reached
 same label-only `settings-invalid-value` the other numeric fields already
 use.
 
-Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`,
-`digest_interval_secs`, `max_uploads_per_day` and `max_bytes_per_day`, all in
-the unit `set_settings` itself stores and validates (seconds or bytes, never
+Every numeric field's exact bounds -- `quiescence_secs`, `approval_hold_secs`
+and `digest_interval_secs`, all in
+the unit `set_settings` itself stores and validates (seconds, never
 a shell's own minute/hour/megabyte control granularity) -- are available
 without guessing or hard-coding a second copy: the C ABI's
 `tc_settings_ranges_json` returns them as one JSON object, so a shell can
@@ -5320,8 +6412,9 @@ tool's layout matches. `trajectory_source` declares it:
   `watch` path that names no particular folder: a relative or empty path,
   the root, or the home directory itself.
 
-A file in the folder is read whole only up to the native adapters' 64 MB
-budget; a larger one is refused from its size alone and raises the
+A file in the folder is read whole only up to 64 MB, the budget of the
+adapters that parse a whole JSON document (the Claude Code and Codex
+adapters read up to 512 MiB); a larger one is refused from its size alone and raises the
 `session-too-large` health label. Discovery follows no symlinked entry.
 
 `get_settings` reports `trajectory_source_mode` (`unset`, `off` or `watch`)
@@ -5918,9 +7011,13 @@ decision is open.
 #### `insights_counter_pass`
 
 Additive; a daemon that predates it refuses it as `settings-unknown-field`,
-and `get_settings` from it omits it. Takes a boolean and defaults to `false`
-(owner decision D4, open), and a settings file written before the key existed
-loads it as `false`. It is the one gate on the Insights counter pass (feed T):
+and `get_settings` from it omits it. Takes a boolean and defaults to `true`
+(product owner, 2026-10-29: counting is on by default and always on, which
+settles owner decision D4). A settings file written before that change -- one
+without `insights_counter_pass_defaulted_on: true` -- is turned on once when
+loaded, whatever it held, and the marker is saved with it; after that a saved
+`false` stays off. A settings file written before the key existed loads it as
+`true`. The macOS shell no longer draws a switch for it. It is the one gate on the Insights counter pass (feed T):
 while it is `false` the watcher runs no pass, nothing is read for Insights,
 and `insights_week` answers `enabled: false` without opening the store or its
 key. Turning it off does not remove rows already stored; `unenroll` does,
@@ -6037,23 +7134,13 @@ sentence says the check only counts what was removed and does not check that
 the scrubbing was right: it is not a model or quality check (the
 connect-and-forget design's R1).
 
-`max_uploads_per_day` and `max_bytes_per_day` each take a positive integer,
-validated against a fixed ceiling (1,000 uploads; 5 GiB) rather than
-accepted as an open field. The cap exists to bound a runaway client -- an
-app that decided to upload everything should not be able to -- so making it
-freely settable to any value would give up exactly the protection it was
-added for. A value below the built-in default (50 uploads; 200 MiB) is
-accepted with no floor beyond non-zero: a contributor throttling their own
-uploads is legitimate and is not what the ceiling guards against. Zero is
-refused (`bad_params` / `settings-invalid-value`) rather than treated as
-"stop uploading" -- that state already exists and is spelled `pause`, which
-is visibly temporary in a way a cap of zero would not be. A value above
-either ceiling is refused the same way. Like the other numeric knobs, the
-new setting is read at each upload pass, so a change reaches an
-already-running daemon -- including one that reached its old cap with
-approved traces still waiting -- without a restart, and it is written to
-the persisted settings file in the same call, so the raised value survives
-one.
+`max_uploads_per_day` and `max_bytes_per_day` are retired with the daily
+upload limit. Either is accepted, whatever its value, and changes nothing,
+so a shell built while the limit existed can still save its other
+settings in the same call; an unknown key beside them is still refused.
+A request holding only these keys saves nothing and answers with the
+settings as they stand. `get_settings` no longer returns them, and a settings file that still
+holds them loads and drops them on the next save.
 
 ### History provenance (K7)
 
@@ -6194,6 +7281,44 @@ timestamp, so a `revoked` row had no date to show at all.
 `#[serde(default)]` on the wire, like every other field on this row, so a
 cached row written before this field existed still loads, reading `null`
 until the next poll re-observes the revocation and dates it.
+
+### Credit outcome on history rows
+
+Before this, the server's status read-back never set `credit_points_final`
+for a trace the gate decided, so every such row read as pending forever,
+whether it had earned an award or had been decided without one. The server
+now derives the final figure from the trace's ledger and its latest gate
+decision, and says why when there is no award. `list_history` rows
+(`HistoryRecord`) carry one more field:
+
+```json
+{
+  "submission_id": "…",
+  "...": "…existing fields unchanged…",
+  "credit_points_final": 0.0,
+  "credit_outcome_reason": "policy_mismatch"
+}
+```
+
+- **`credit_points_final`** -- `null` while the trace is still pending. A
+  number, `0.0` included, once it is decided: the award when the server's
+  ledger holds one, else `0.0`.
+- **`credit_outcome_reason`** -- present only beside a final `0.0` for a
+  trace decided without an award; absent (not `null`) otherwise, including
+  once a later award arrives (for example after the contributor adds a use
+  the award needed). One of the closed set in
+  `trace_commons_protocol::credit_outcome::CREDIT_OUTCOME_REASONS`:
+  `policy_mismatch`, `novelty_failed`, `perplexity_failed`, `duplicate`,
+  `submission_not_accepted`, `insufficient_coverage`, `credit_not_issued`,
+  `other`. A client treats a label it does not know as `other`, and shows
+  each one through the core's copy (`tc_public_run_copy`'s
+  `credit_outcome_labels`), never as the raw label.
+
+A row with any final figure is decided: `history_rollup.credit_final` sums
+it and `credit_pending` leaves out whatever pending figure the server still
+reports beside it, and the digest's pending credit does the same. An older
+server never sends the reason, and an older cache line without it still
+loads (`#[serde(default)]`).
 
 ### `history_rollup`
 
@@ -6423,8 +7548,7 @@ What is removed:
   remembered invite subject hash, and every stored approved envelope.
 
 What stays: receipts, history and the audit log, settings, folder rules,
-the queue, the NEAR AI notice marker, and the remembered passkeys (a passkey
-is not an enrollment).
+the queue, and the NEAR AI notice marker.
 
 Order: the credential references go first, with the credential generation
 advanced so an enrollment, sign-in or identity switch in flight cannot
@@ -6441,8 +7565,7 @@ Queued entries: every `approved`, unsent entry returns to `pending` with
 The sessions stay queued; no approval given under the old enrollment can be
 sent under a later one. A preview that finishes after `unenroll` pins
 nothing, because a pin now requires the envelope to name the enrollment in
-force. In-memory account-admission answers and passkey ceremonies are
-dropped.
+force. In-memory account-admission answers are dropped.
 
 Audit: appended first, label only: action `unenrolled`, `detail`
 `approvals_returned=<n>`. No tenant, account, key id or path. When nothing
@@ -6549,6 +7672,32 @@ shape rather than a bare number:
   seconds instead of a minute. A payment lands through the service's own
   webhook, which nothing here hears about, so this is what lets a client's
   next read show it. Forgetting the account ends the window.
+
+Three additive keys sit beside the figures, `null` in every state but
+`known` and `null` whenever there is nothing to say:
+
+- **`change_24h_nanos`**: what is left now minus what was left about a day
+  ago (the newest sample between 24 and 30 hours old), signed. It goes up
+  when credit arrives and down when Private AI spends. `null` with no sample
+  from about a day ago, or when `remaining_nanos` is `null` -- never `0` for
+  "not known".
+- **`change_24h_text`**: the same change as the core's finished line, e.g.
+  `+$3.20 in the last 24 hours`, floored like every amount here. `null` for
+  no change or a change under a cent, which a client does not say.
+- **`received_total_nanos`**: all NEAR AI credit counted as arriving in the
+  spending organization, from its incoming credit-transfer ledger
+  (`GET /v1/organizations/{org}/credit/transfers?direction=incoming`, an
+  owner-session read), each transfer once by id. `null` until one whole read
+  of the ledger has finished, including for a member who is not an owner of
+  the organization. A client that sees it rise since it last drew the
+  balance animates the arrival.
+
+The daemon reads the ledger and a balance sample every 30 minutes while a
+NEAR AI sign-in with a spending organization is kept, and publishes
+`near_ai_balance_changed` when it counts new credit. What it keeps
+(`near-ai-credit-arrivals.json`: the organization id, 48 hours of samples,
+the totals, recent transfer ids and times) is forgotten with the sign-in and
+reset when Private AI moves to another organization.
 - **`"fresh": true` skips that minute.** It is what a refresh button sends:
   the daemon asks the service again unless its figure is under five seconds
   old, so a double click is still one call. Any other value is an ordinary
@@ -6618,6 +7767,64 @@ There is no convention here to generalise from: read the contract for the
 field you are touching, and do not carry a habit across from another one.
 A field added later is a fourth answer to a fourth question, not a fourth
 instance of a pattern.
+
+### Choosing the spending organization
+
+Private AI spends from the organization its NEAR AI inference key was minted
+in. A NEAR AI account can belong to several organizations; the sign-in mints
+into the first active one (or, after a choice has been made, into the chosen
+one when the account still has it). These two methods let a contributor
+choose. Most accounts have one organization, and for them nothing changes.
+
+`near_ai_spend_organizations` lists the signed-in account's **active**
+organizations (`GET /v1/organizations?limit=100`, session-authenticated). It
+rides `near_ai_balance`'s lock, cached access token and single re-exchange, so
+it never races a balance read for the rotating refresh token, and like it it
+is cached for a minute (`fresh: true` goes back after five seconds).
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `listed`, or one of `near_ai_balance`'s not-known states (`no_session`, `session_expired`, `no_organization`, `unavailable`). Only `listed` carries organizations. |
+| `organizations[]` | `id`, `name` (control characters removed, at most 80 characters; the id when blank), `role` (`owner`, `admin`, `member`), `current` |
+| `current_organization_id` | the stored key's organization, or `null` with no key |
+| `explicit` | the contributor chose the current organization (the remembered choice equals the key's organization) |
+| `chosen` | a choice has been recorded for this sign-in, whatever the key's organization is now. Cleared only by forgetting the sign-in. |
+| `multiple` | `listed` with two or more organizations. An unknown count is never `true`: a page that does not carry every organization is refused as `unavailable`. |
+| `prompt` | `multiple`, a key, and not `chosen`: the Private AI screen asks the contributor to choose in Settings. Once anything is chosen it is never `true` again for this sign-in, even if a later sign-in mints elsewhere. |
+| `revoke_pending` | a key this install replaced could not be revoked yet; it is retried on each listing |
+| `view` | the words: `title`, `what`, `picker`, `switching`, `failed`, `session_expired`, `refused`, `revoke_pending`, `prompt_title`, `prompt_line` (names the current organization), `prompt_action`, `prompt_action_accessibility`. Draft wording. |
+
+`near_ai_spend_organization_select` switches. Its order keeps one working key
+at every step:
+
+1. Mint a key in the chosen organization (`GET /v1/organizations`,
+   `GET /v1/organizations/{id}/workspaces`,
+   `POST /v1/workspaces/{id}/api-keys`). A failure here changes nothing.
+2. Record the old and the new key as revocation candidates (ids only, in the
+   daemon file `near-ai-spend-org.json`).
+3. Wait for the new key to become usable (the service documents up to ten
+   seconds), then publish it beside the stored session and move the IronWire
+   proxy onto it. If publishing fails, the new key is revoked and the old one
+   stays.
+4. Revoke every recorded candidate that is not the active key
+   (`DELETE /v1/workspaces/{id}/api-keys/{key}`). The active key is never
+   revoked. A revoke that fails stays recorded, answers
+   `revoke_pending: true`, and is retried.
+
+Choosing the organization already in use mints nothing; it records the
+choice, which ends the prompt. The call takes about ten seconds when it
+switches.
+
+| Error message | Meaning |
+| --- | --- |
+| `near_ai_spend_org_invalid` (`bad_params`) | `organization_id` missing or not an id |
+| `near_ai_spend_org_no_session` | no NEAR AI sign-in on this machine |
+| `near_ai_spend_org_session_expired` | the sign-in was refused; sign in again |
+| `near_ai_spend_org_no_key` | signed in, but no inference key to replace |
+| `near_ai_spend_org_unknown` | the account is not an active member of that organization |
+| `near_ai_spend_org_refused` | NEAR AI refused a key there (for example, a role that may not create keys) |
+| `near_ai_spend_org_busy` | a sign-in is in flight, or too many replaced keys are still awaiting revocation |
+| `near_ai_spend_org_unavailable` | anything else; nothing changed |
 
 ### `commons_credit_summary`
 
@@ -6726,7 +7933,10 @@ it; publication consent remains separate from contribution and profile consent.
 
 Every authenticated account response may rotate the native session token,
 including an error response. The daemon persists that header before handling
-the route result. A committed publication or withdrawal remains successful if
+the route result, together with the session's new expiry from
+`x-trace-commons-session-expires-at` when the server sends one (a rotation
+extends a native session; see
+`docs/superpowers/plans/account-loopback-auth-report.md`). A committed publication or withdrawal remains successful if
 the credential store fails afterward; the response carries
 `commons_credential_storage_unavailable` so the app can show the required
 sign-in action.
@@ -7119,6 +8329,59 @@ account sign-in exists to route to. Acquiring an account session is separate
 work, tracked outside this document; nothing in this contract should be
 read as that flow already existing.
 
+### Adding model training to sent traces
+
+A trace sent without the `model_training` use ("Train coding models") has
+its scoring award withheld (`policy_mismatch`). The contributor can add that
+use to traces already sent, and those traces then earn the award
+(owner decisions 2026-10-28). Both methods relay
+`/v1/contributors/me/model-training-consent` on the device's status claim,
+the credential `submit::status` uses; neither needs an account session.
+
+- `model_training_consent_status` answers `eligible_count` (every eligible
+  trace) and `submission_ids` (the oldest 500 of them). A trace is eligible
+  when it is this contributor's (this device's principal, or its account's),
+  `accepted`, not withdrawn, revoked, purged or expired, and does not carry
+  `model_training`. Quarantined and still-processing traces are not
+  eligible.
+- `model_training_consent_grant` takes exactly one of `all_eligible: true`
+  or a non-empty `submission_ids` of at most 500 ids; anything else is
+  refused with `bad_params` and `selection-required` or
+  `submission_ids-invalid`. Nothing is preselected: a shell sends this only
+  after the person chooses. The answer is the server's, per trace:
+  - `outcome`: `granted` (added now), `already_granted` (a repeat, or sent
+    with the use), or `not_eligible` (nothing changed).
+  - `granted_at`: when the use was added, set by the server when it
+    accepted the grant, never earlier. Absent for a trace sent with it.
+  - `award`: `credited` (the withheld award is written, now or before),
+    `pending` (not scored yet, or the award could not be checked this time;
+    granting again retries), or `none` (no award follows: the trace did not
+    pass scoring, or its award was withheld for another reason, named in
+    `award_withheld_reason`).
+  - `remaining_eligible`: eligible traces left, for a contributor with more
+    than 500.
+
+  `all_eligible` asks the server again while traces remain (500 per call,
+  at most 20 calls), and the answer carries every call's results. A grant
+  asks the history poller to read statuses back at once.
+
+The grant is add-only: it adds the `model_training` consent scope and
+allowed use and removes nothing. Taking a use back is withdrawal. The trace
+is not scored again; only its withheld award is re-run, and it is paid,
+held and settled like any other award.
+
+Refusals carry `unavailable` and a fixed message, never a server body:
+
+| Message | Meaning |
+|---|---|
+| `model-training-not-permitted` | The device's grant ceiling, or the deployment's policy, does not include model training. Do not offer the grant. |
+| `model-training-consent-unavailable` | The server cannot record a grant, or predates the route. |
+| `model-training-consent-failed` | Anything else: no identity, a failed claim, transport, a server error. |
+| `not-logged-in` | No enrollment on this machine. |
+
+`model-training-consent-bad-selection` comes back with `bad_params` if the
+server refuses the selection.
+
 ### Connecting inference
 
 K12 of the connect-and-forget consent design
@@ -7323,7 +8586,8 @@ error string into `error.message`.
 | `set_private_ai` | `on`: boolean; `confirmed: true` when enabling | same as `private_ai` | Reuses existing async hosting lifecycle; wrapper new |
 | `mission_catalogue` | `limit?`: 1–50, default 20; `before?`: UUID | `kind`, `catalogue`, `disclosure` | Public skill-evaluation catalogue/client exist; IPC new |
 | `invite_lookup` | `code`: full invite URL | protocol `InviteLookupResponse` | Issuer lookup/client exist; IPC new |
-| Native passkey/account methods | see below | token-free replies below | Server routes exist; daemon and native adapter new |
+| `first_run_estimate` | none | protocol `FirstRunEstimate`: `usd_micros_per_accepted_trace?` (`{min, max}`), `{}` when the commons publishes none or cannot be reached | Anonymous `GET /v1/public/first-run-estimate` on the configured commons, or the channel's account origin before enrollment; the shell passes the range to `tc_first_run_estimate_line` and shows its answer |
+| Native account methods | see below | token-free replies below | Server routes exist; daemon and native adapter new |
 | `history_rollup` | none | existing optional `community` | Already implemented; authoritative standing surface |
 
 ### `inference_summary`
@@ -7524,151 +8788,46 @@ settled**, never a payment promise. C1's provisional `CreditRange.unit` comment
 not daily mission credit. Perform lookup for an explicit action, not on every
 keystroke. Display-name/range bounds must be validated before presentation.
 
-### Native passkey and account identity
+### Native account identity
 
-The C1 names in the approved [native passkey design](superpowers/specs/2026-09-28-native-passkey-identity-design.md)
-are authoritative. That design remains on the #1120 branch at this contract
-baseline; its proposed screen copy is **not approved** by this contract.
-The native app uses only Apple's platform passkey provider, while one Rust
-encoder creates the WebAuthn JSON. All raw byte fields below use canonical,
-unpadded base64url. The app receives no native bearer, NEAR AI token, device
-key, tenant identity or secret-store reference.
+Passkeys were removed on 2026-10-31: an account signs in through NEAR AI.
+The former `passkey_*`, `account_bind` and `account_binding` methods are gone
+and get the ordinary unknown-method answer. The app receives no native
+bearer, NEAR AI token, device key, tenant identity or secret-store reference.
 
 | Method | Parameters | Token-free result |
 |---|---|---|
-| `passkey_create_begin` | `label?`, `ingest_url?` | registration options below |
-| `passkey_create_complete` | `ceremony`, `credential_id`, `raw_client_data_json`, `raw_attestation_object` | `{binding_state}` |
-| `passkey_login_begin` | `ingest_url?` | assertion options below |
-| `passkey_login_complete` | `ceremony`, `credential_id`, `raw_client_data_json`, `raw_authenticator_data`, `signature`, `user_handle` | `{binding_state}` |
-| `passkey_add_begin` | `label?` | registration options below |
-| `passkey_add_complete` | same fields as create complete | `{binding_state}` |
-| `passkey_cancel` | `ceremony` | `{cancelled:true}` |
-| `account_bind` | none | `{outcome,binding_state}` |
-| `account_binding` | none | `{binding_state}` |
-| `passkey_state` | none | `{state,passkey_count,remembered_name,signed_in_name,near_ai_connected}` |
 | `account_sign_in` | `ingest_url?` | `{signed_in:true,expires_at}` |
-| `account_session_status` | none | `{state,signed_in,expires_at}` |
+| `account_session_status` | none | `{state,signed_in,expires_at,renewal,renewal_failure,sign_in}` |
 | `account_sign_out` | none | `{signed_out:true}` |
+| `near_ai_account_sign_in` | none | `{signed_in:true,expires_at}` |
 
-`label` is optional, at most 64 characters. A no-config create/login may name
-an `ingest_url` only when its canonical origin equals the compiled production
-API origin `https://ingest.tracecommons.ai`; omitting it selects that origin.
-A retained unconfigured session must satisfy the same trust root. Explicit
-operator configuration retains its host policy. Once a config or pre-enrollment
-session pins an origin, a caller cannot substitute another one. The native
-Swift adapter exposes no caller-supplied ingest URL. Begin stores the server ceremony privately and returns
-an opaque local `ceremony` handle pinned to action, origin, expiry and current
-credential/config lifecycle. Adding a passkey reloads the current token and
-permits ordinary rotation only within the same lifecycle and account. Complete
-consumes the ceremony once; cancel invalidates it.
-Sign-out, wipe or identity/config replacement invalidates stale finishes.
-Complete accepts no origin, account or tenant parameters.
+`account_session_status` never waits long for an account-session renewal on a
+NEAR AI account: past a two-second wait it answers `renewal:"renewing"` and the
+renewal finishes in the background. `renewal:"failed"` carries the class in
+`renewal_failure` (see the staging tester guide's renewal log table) while the
+10-minute retry wait holds, and for `device_key_revoked` for as long as the
+enrolled key is the refused one; otherwise both are null. `sign_in` is `"near_ai"`
+for a device enrolled in a `nearai-` tenant, whose Sign in again is
+`near_ai_account_sign_in`, and null otherwise. `near_ai_account_sign_in` runs
+the provisioning ceremony again with the retained NEAR AI login, ignoring the
+10-minute retry wait (but not a revoked key) and signing in a NEAR AI account whose session record was removed
+by sign-out; it refuses `near_ai_sign_in_required` when NEAR AI no longer
+accepts that login (the shell then signs in to NEAR AI and calls it again),
+`device_key_revoked` when the account unlinked this device (the commons
+never signs that key in again, so no ceremony runs; sign-out keeps the key,
+and only `unenroll` and a new enrollment, with a new key, recover),
+`near_ai_sign_in_not_near_ai_account`, `near_ai_sign_in_not_enrolled`,
+`commons_credential_storage_unavailable`, or
+`near_ai_sign_in_unavailable`. `near_ai_account_enroll` can refuse the same
+case as `near_ai_enroll_device_key_revoked`.
 
-SAMPLE create/add begin result:
-
-```json
-{
-  "ceremony": "SAMPLE-local-handle", "rp_id": "tracecommons.ai",
-  "challenge": "AQID", "user_id": "BAUG", "user_name": "SAMPLE passkey",
-  "user_display_name": "SAMPLE passkey", "attestation": "none",
-  "expires_in_secs": 180, "exclude_credentials": [],
-  "user_verification": "preferred", "authenticator_attachment": "platform",
-  "resident_key": "preferred", "algorithms": [-7]
-}
-```
-
-SAMPLE login begin result:
-
-```json
-{"ceremony":"SAMPLE-local-handle","rp_id":"tracecommons.ai","challenge":"AQID","expires_in_secs":180,"user_verification":"preferred","allowed_credentials":[]}
-```
-
-Verification/resident-key options are the validated server values
-`required|preferred|discouraged`, not permission for the app to downgrade them.
-`exclude_credentials` and login's `allowed_credentials` contain canonical
-credential IDs, with at most 128 entries per list. An empty login list selects
-a discoverable credential. `user_display_name` is the validated server display
-name, falling back to `user_name`; `attestation` preserves the validated server
-preference `none|direct|indirect`, defaulting to `none`. These three fields are
-additive to the original C3 begin options. Creation uses the platform provider
-and algorithms the adapter actually supports (ES256 `-7`).
-Refuse unsupported server options rather than silently weakening them.
-
-SAMPLE create/add complete request:
-
-```json
-{"ceremony":"SAMPLE-local-handle","credential_id":"AQID","raw_client_data_json":"BAUG","raw_attestation_object":"BwgJ"}
-```
-
-SAMPLE login complete request:
-
-```json
-{"ceremony":"SAMPLE-local-handle","credential_id":"AQID","raw_client_data_json":"BAUG","raw_authenticator_data":"BwgJ","signature":"CgsM","user_handle":"DQ4P"}
-```
-
-These bytes illustrate encoding only and are not valid credentials. SAMPLE
-complete result: `{"binding_state":"unbound"}`. Binding read values are
-`unbound|bound|closed|legacy`; `legacy` means no passkey-origin binding row,
-not proof of a NEAR AI connection. A signed-out binding read is unavailable,
-not `unbound`. `passkey_state.state` projects those labels, or `none` when
-signed out and `unknown` when unreadable. `near_ai_connected` is nullable
-unless an authenticated identity fact establishes it. Never infer connected
-status from a missing binding row.
-
-`passkey_count` and `remembered_name` are local facts, answered in every
-`state` including `none` and `unknown`: the passkeys **this Mac remembers**,
-not the account's passkeys on the server. The server cannot list an account's
-passkeys before authentication without telling anyone who asks whether the
-account exists, so the daemon keeps its own list (`remembered-passkeys.json`
-in the state directory, 0600): a record is written when a passkey is created,
-added, or used to sign in here, and holds the passkey's display name when this
-Mac learned one (the name it was given when created or added here, or the
-label the server returned for it at sign-in; see below), the SHA-256 of the account id (for matching a later sign-in;
-never sent over IPC), and when it was last used. No credential material, no
-token, no credential id. At most four records are kept, most recent first.
-`passkey_count` is how many; `0` means none remembered here, not that the
-account has none. `remembered_name` is the most recent record's name, or null
-when it has none (a passkey first used here by signing in whose login answer
-carried no label: it has none on the server, or the server predates
-`passkey_label`).
-
-A sign-in learns the passkey's name from the server. The commons'
-`POST /v1/account/native/passkey/login/finish` answer carries, beside the
-session, an optional `passkey_label`: the label the signed-in account gave the
-passkey that just authenticated, looked up by the tenant, account and
-credential id of the verified assertion (never from anything in the request),
-so it is only ever the authenticating account's own credential's label. It is
-absent, not null, when that passkey has no label or the label could not be
-read; an older server never sends it, and an older daemon ignores it. On a
-login the daemon records that label as the record's name, replacing any name
-it held; with no label (or one that fails the daemon's own name rules: blank,
-over 64 characters, or holding a control character) it keeps the name it
-already had. The label is not logged and is not forwarded over IPC except as
-`remembered_name`/`signed_in_name`. A login the daemon refuses (for example
-`account-enrollment-mismatch`, a session for another tenant or account than
-the one this Mac is enrolled under) records nothing, label included. Both are null when the list cannot be read. Signing out
-keeps the list, since a returning person after sign-out is who the first
-run's "Welcome back" greets; removing this Mac's contributor state (`wipe`,
-the CLI's `logout`) clears it. Added in v1.1 additively; older shells ignore
-`remembered_name`.
-
-`signed_in_name` is the name this Mac remembers for the **signed-in
-account's own record**, matched by the session's account id (hashed, as the
-record is), never the most recent record's: after a sign-in, the most recent
-record may belong to another account, and its name is not this one's. It is
-null when no account session is held or the session cannot be read, when
-this Mac has no record for that account, when that record has no name (a
-passkey first used here by signing in whose login answer carried no label), or when the list cannot be read. A
-local fact like the other two, it is answered in every `state`, including
-`unknown`. The first run reads it once a passkey sign-in has finished, to
-name the passkey on Join's card; it never reads `remembered_name` for that,
-since the person may have picked another account's passkey in the system
-sheet. Added in v1.1 additively; older shells ignore it, and a shell
-reading an older daemon finds it absent and shows no name.
-
-Native login is discoverable authentication: `user_handle` must contain the
-nonempty raw Apple user ID encoded as canonical base64url. A missing or empty
-handle is an incomplete credential and must not reach login completion.
+With no config, an `ingest_url` is accepted only when its canonical origin
+equals the compiled production API origin `https://ingest.tracecommons.ai`;
+omitting it selects that origin. A retained unconfigured session must satisfy
+the same trust root. Explicit operator configuration retains its host policy.
+Once a config or pre-enrollment session pins an origin, a caller cannot
+substitute another one.
 
 SAMPLE account status:
 
@@ -7682,62 +8841,13 @@ expiry. Raw account identifiers do not cross this status surface. It must not be
 a read. Status and sign-out support a pre-enrollment account without creating a
 fake config. `account_sign_in` reuses existing browser/PKCE machinery where
 its enrollment prerequisites hold; without real enrollment configuration it
-refuses with `unavailable` / `account-enrollment-required`. An unenrolled
-account uses the native passkey create/login path. Browser URL exposure is bounded to the live sign-in attempt and
-uses the existing URL validation/opening controls.
+refuses with `unavailable` / `account-enrollment-required`. Browser URL exposure is bounded to the live sign-in attempt and
+uses the existing URL validation/opening controls. Tokens, rotations and
+atomic device/config persistence stay in Rust/Keychain.
 
-`account_bind` reuses retained NEAR AI provisioning against the authenticated
-bind start/finish routes and the **bind-specific** proof preimage. SAMPLE
-result: `{"outcome":"bound","binding_state":"bound"}`. An
-`existing_account` outcome switches to the existing account and closes the
-unbound account; its passkey is not transferred (S6 fold is deferred).
-
-For a signed-in account whose `binding_state` is `bound` (another Mac bound
-it, and this Mac signed in with the same passkey), `account_bind` **enrolls
-this Mac into that account** through the same routes: SAMPLE result
-`{"outcome":"enrolled","binding_state":"bound"}`. The commons compares the
-near.ai login this Mac proves with the account the passkey session is signed
-in to -- the session's own account, never a request field -- inside the one
-transaction that would write the device key, and refuses before writing
-anything when they differ. That refusal is `unavailable` /
-`account-enrol-mismatch` (server: `409 {"error":"near_ai_account_mismatch"}`),
-one fixed label whether the login owns another account or none; the passkey
-session is left as it was, and the shell signs it out. A `bound` or
-`enrolled` result is persisted only if its tenant and account are the passkey
-session's (`account-enrollment-mismatch` otherwise). `legacy` (or any other
-state) is refused with `account-bind-refused` before the refresh token is
-spent.
-
-On a Mac that is **already enrolled**, `account_bind` sends no request and
-writes nothing. It answers `{"outcome":"already_enrolled","binding_state":"bound"}`
-when the enrollment it holds is the signed-in account's own: the session's
-tenant (decoded from its `tcn1_` token, as the sign-in's tenant check reads
-it) equals the enrollment config's `tenant_id`, **and** the session was signed
-in to a `bound` account (the `binding_state` stored with it at sign-in). This
-is the first run's Welcome back case: the enrollment is reported after P-7
-opened, and the person signs in with that account's passkey. Anything else
--- no session, another tenant, an `unbound` or `legacy` account, or a stored
-session without a `binding_state` -- is refused as before with
-`account-already-enrolled`. The config records a tenant and no account, so
-the check is a tenant match; it identifies one account because a binding row
-(and so a `bound` state) is only ever written for a passkey-origin account,
-each created alone in a freshly minted tenant, and it accepts nothing the
-sign-in's own tenant check had not already accepted when it kept the
-session. Recording the enrolled account at enrollment would make it
-account-precise; that is not done yet. Added in v1.1 additively: the macOS
-shell treats it exactly as `enrolled` (Verify for a `bound` account accepts
-either); a shell that does not know it reads an unknown outcome and fails
-closed (`account-bind-invalid`). Tokens,
-rotations and atomic device/config persistence stay in Rust/Keychain. Binding
-creates no folder/trace/body consent. Native login remains weak and native add
-keeps the existing first-strong-authenticator gate; adding another requires
-browser passkey step-up.
-
-The Associated Domains entitlement, approved profile bytes, deployed AASA and
-signed create/login origin check are **release gates**. Local/mock tests do
-not establish Apple origin behavior or satisfy the spec's S3 deployment gate.
-This contract approves no new screen copy, deployment, profile fabrication or
-relaxation of origin/CORS/CSP controls.
+A daemon from before the removal kept a list of the passkeys used on the Mac
+(`remembered-passkeys.json` in the state directory). A daemon after it
+deletes that file when it starts.
 
 ## Events
 
@@ -7754,6 +8864,7 @@ relaxation of origin/CORS/CSP controls.
 | `usage_changed` | additive: the poll tick's ledger read added at least one call while the `insights_ledger_feed` setting is on | `{}` -- see below |
 | `history_changed` | the daemon's history poll found verdicts that are new against its own high-water mark (nudge S4); never on the silent first poll; always followed by `status_changed` | `{newly_accepted, newly_held, newly_final}` -- counts from that poll alone; see below |
 | `settlement_estimate_changed` | additive: `status.settlement_estimate` changed as a reader draws it -- its rounded band, its "up to" form, or the table or pricing it came from -- or it appeared or went away (a fetch that cleared the table, the `settlement_estimate_enabled` switch turned off). A re-scan that moves only the unrounded total publishes nothing; always followed by `status_changed` | `{}` |
+| `near_ai_balance_changed` | additive: the daemon's credit poll counted NEAR AI credit that arrived in the organization Private AI spends from (see "`near_ai_balance`"). A client showing the balance reads it again | `{}` |
 | `reengage_due` | **opt-in**: the attention arbiter chose one standalone re-engagement notification this tick; sent only to a subscriber that named it in `subscribe`'s `accepts` | `{kind, title, body, actions: [{id, label}]}` -- see "Re-engagement notifications" below |
 
 `inference_call_added` is published where the daemon already reads IronWire's
@@ -7924,7 +9035,6 @@ nothing for an interval that is not whole hours.
 | `pii-filter-unavailable` | filter configured but unreachable | yes |
 | `claim-mint-failed` | issuer refused or failed | yes |
 | `ingest-unreachable` | upload failed after retries | yes |
-| `daily-cap-reached` | volume cap in force until the day rolls | yes |
 | `near-ai-notice-not-acknowledged` | first-use notice not delivered interactively | yes |
 | `privacy-filter-canary-failed` | canary self-test failed | yes |
 | `queue-full` | queue at its configured maximum | no |
@@ -7954,8 +9064,7 @@ listed highest first:
 8. `witness-saturated`
 9. `automatic-contribution-held`
 10. `admission-limit-reached`
-11. `daily-cap-reached`
-12. `session-too-large`
+11. `session-too-large`
 
 `session-too-large` sits last on purpose: every label above it describes the
 daemon, and this one describes a single file on disk. It must never mask an
@@ -7968,11 +9077,9 @@ permission or IO error -- does not raise it: that is expected to succeed on
 the next poll, and a flag a blip pins on a healthy daemon is one nobody will
 trust.
 
-Because `daily-cap-reached` is last, it is the label most often masked by
-another condition. That is why the daily caps are also reported in full on
-`status.daily_budget`, outside the precedence order described above. A client
-should render the budget condition from `daily_budget`, not by waiting for
-`daily-cap-reached` to reach the health slot.
+`daily-cap-reached` is retired with the daily upload limit: no daemon in
+this revision sets it, and the shells no longer map it. A shell attached to
+an older daemon that still sets it shows no message about the cap.
 
 Rationale: states the contributor can act on outrank states they can only
 wait out. An application should not attempt to infer or reconstruct this
@@ -8343,6 +9450,33 @@ focusable or stoppable.
   folder, `managed-not-found` for a removed account, and
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.
 
+When `managed_launch_prepare` or `managed_session_start_again` passes the
+checks that come before preparing, other than the tool's version, and would
+prepare a new session on `near_ai_signin`, the daemon first reads the
+sign-in's NEAR AI balance, waiting at most 5 seconds in all. A sign-out, or a
+switch to another NEAR AI key, during the wait is refused with
+`managed-near-ai-sign-in-required`. Otherwise, when the balance is known to be
+under $0.10 and a fresh read agrees with the cached one, the request is
+refused with `managed-near-ai-balance-too-low` and nothing is prepared. Then
+the request is handled as usual, with all its checks run again. A request
+those checks refuse, or a replay of one already prepared, reads no balance,
+except that the version is checked only after the read: a tool too old to
+launch, on a low balance, is refused for the balance first and for its version
+once funded. `managed-folder-settings-save-failed`, which comes after
+preparing, can also follow a read. An unknown, unreachable or no-limit balance
+lets the launch through. A saved `near_ai` key is not checked: its account's
+balance is not readable here.
+
+A coding launch of Claude Code on `near_ai` or `near_ai_signin` is refused
+with `managed-project-chooses-model`, and nothing is prepared, when its
+project chooses a model other than through an alias: a model variable in a
+project settings `env` block, `fallbackModel`, `advisorModel` or
+`modelOverrides`, or a `model` in an agent, command, routine or skill, in any
+folder Claude Code reads them from or in a folder the launch's CLI options add
+with `--add-dir`. The launcher checks again before the tool starts. A project
+with Claude Code workflows is not refused; the launcher prints the shared
+`project_workflows` line in the session's terminal before the tool starts.
+
 `managed_session_report` answers `{accepted: true, stop: bool}`; an older
 launcher reads only `accepted`.
 
@@ -8351,7 +9485,18 @@ launcher reads only `accepted`.
 `managed_launch_prepare` also accepts `model` for Claude Code and Codex on
 `near_ai` and `near_ai_signin`, as the session's default model; on
 `subscription` and `api_key` it is still refused (`managed-invalid-request`).
-Absent means the tool's default (see `docs/managed-sessions.md`). A model NEAR
+Absent means the tool's default (see `docs/managed-sessions.md`). It also
+accepts `keep_saved_model: boolean` (absent is false): the shell
+fell back to the default because NEAR AI no longer lists the folder's saved
+model, so the launch remembers its other folder choices but keeps the saved
+model. If the saved model cannot be read (the folder went away, say), the
+launch is refused with `managed-folder-settings-save-failed` rather than
+written over. `managed_session_start_again` of such a launch keeps it too.
+The field is not additive: `managed_launch_prepare` refuses unknown fields,
+so a shell sends it only when the managed snapshot advertises
+`capabilities.keep_saved_model: true` (an older daemon omits it). The session
+registry stores it on the entry, outside the stored request, so an older
+daemon can still read the registry. A model NEAR
 AI does not list as a chat model is refused when the proxy starts, with
 `managed-model-unavailable`: at `managed_launch_redeem` on the sign-in, in the
 launcher on a saved key.
@@ -8360,7 +9505,37 @@ launcher on a saved key.
   `{models: [{id, name?}], default: string | null}`: NEAR AI's chat models in
   its order, and the model `tool` gets when a launch names none. The catalogue
   is public; no key is read or sent. `managed-model-unavailable` when NEAR AI
-  cannot be read; `managed-invalid-request` for other parameters.
+  cannot be read; `managed-invalid-request` for other parameters. It also
+  carries `favorites` (`[string]`): the starred models NEAR AI offers `tool`,
+  in its order; and `unavailable_favorites` (`[string]`): the starred ids
+  NEAR AI no longer lists for any tool. A starred model it lists but `tool`
+  is never offered (Codex's refused models) is in neither. Nothing is pruned:
+  a model NEAR AI lists again is a favorite again. When NEAR AI cannot be
+  read the method fails, so nothing is ever marked unavailable for want of
+  a catalogue. An older daemon omits both fields, which read as none. Shells
+  list favorites after the default option and before the other models, do
+  not repeat them, never offer an unavailable favorite, and show each one
+  apart with a way to unstar it. A saved model the catalogue does not list
+  falls back to the default option, visibly, for that launch only: the
+  launch sends `keep_saved_model: true` and the folder keeps its saved
+  model. With no catalogue the model is kept; once the read has failed, the
+  launch is not held for it, and the daemon refuses an unlisted model as
+  above.
+- `managed_model_favorite_set {model, favorite}` (async only) stars
+  (`favorite: true`) or unstars one model and answers `{favorites: [string]}`,
+  the whole stored list in no particular order. Starring reads NEAR AI's chat
+  models first and refuses a model it does not list with
+  `managed-model-unavailable`, also the answer when NEAR AI cannot be read;
+  nothing is written. Unstarring reads nothing and accepts any string, so an
+  id an older or hand-edited settings file holds can always be removed.
+  Starring an empty or malformed id, a non-boolean `favorite`, any other
+  field, or starring a 33rd favorite is `managed-invalid-request`;
+  unstarring is never refused for the bound or the id's shape. A change to
+  the stored list publishes `status_changed` (unstarring an id that was not
+  stored publishes nothing), so every window re-reads `get_settings`
+  (`managed_favorite_models`). The list is
+  global, not per tool: one favorite shows in each tool's picker that offers
+  it. A developer dry run refuses it, as it does `managed_model_catalogue`.
 - Session views' `model` is the model the session starts on: the one named,
   or, once a NEAR AI proxy has started, the default it chose. The proxy is
   pinned to the NEAR AI backend only, so the tool may switch to any listed
@@ -8375,3 +9550,75 @@ launcher on a saved key.
   model) and `route_models` (`[{id, name?}]`, NEAR AI's chat models in its
   order, as the proxy read them). The launcher offers `route_models` in the
   tool's own model picker; without all three it does not start the tool.
+
+### `managed_tool_setup` — coding-tool installation and updates
+
+A local, explicit Terminal action, currently offered by native macOS when
+`managed_snapshot.capabilities.tool_setup` is true. Older daemons omit the
+optional capability and clients retain their official setup-guide links.
+
+Request parameters are exactly `tool: "claude" | "codex" | "opencode"` and
+`action: "install" | "update"`. Unknown fields are refused. Callers cannot
+supply shell commands, paths, environment overrides, accounts, credentials,
+profiles or session tickets. No sign-in is required.
+
+The service builds a fixed vendor command and hands it to the chosen terminal.
+The reply `{"opened":true}` acknowledges only that handoff, not installer
+completion. The app re-reads availability when it becomes active and on its
+normal managed-session poll. A failed handoff returns the existing managed
+error vocabulary; vendor failures remain visible in the terminal. No coding
+session or account is created, and installation does not start a tool login.
+
+Fresh installs use the official standalone installers for Claude Code, Codex,
+and OpenCode's current V2 installer. Existing OpenCode installations use their
+own updater rather than being replaced by the fresh-install command. Updates preserve recognized
+Homebrew casks/npm prefixes; native Claude uses `update`, Codex uses its official
+installer, and OpenCode uses its own `upgrade`. The handoff uses the same bounded
+AppleScript runner and selected Terminal/Ghostty/iTerm2 templates as managed
+sessions. The terminal stays open after the vendor command finishes. This does
+not change supported-version policy or auto-upgrade any tool on launch.
+
+Vendor references:
+
+- [Claude Code setup](https://code.claude.com/docs/en/setup)
+- [Codex CLI setup](https://developers.openai.com/codex/cli/)
+- [OpenCode setup](https://opencode.ai/v2/docs/)
+- [OpenCode upgrade command](https://dev.opencode.ai/docs/cli)
+
+## CLI setup completion
+
+`get_setup_status` and `complete_setup` support an agent that configures the
+app before opening its first-run UI. `near-ai config setup` reads the state;
+`near-ai config complete [--scopes CSV]` finishes setup. The CLI uses only the
+live daemon and sends back the expected enrollment scope from its initial read.
+An agent may make the data-use choice on the user's behalf through `--scopes`;
+no separate graphical confirmation is required. Omitting scopes preserves an
+already chosen set. See [agent configuration](agent-configuration.md#finish-setup-from-the-cli).
+
+The additive `status.setup_complete` boolean is a completion proof for the
+current enrollment. Source declarations, a usable enrollment and a recorded
+scope choice are required. Completion is bound to the tenant, ingest authority,
+device identity and local state directory. It survives a daemon restart but
+cannot finish another enrollment. Marker persistence precedes `status_changed`.
+Missing or invalid state does not produce a positive completion proof.
+
+Native shells accept this positive proof alongside their existing local
+completion marker. An absent field from an older daemon keeps the existing
+local behavior. Signed-out and undeclared-root gates still apply. Completing
+setup never arms a folder, grants automatic uploads, approves a trace or records
+an operating-system permission.
+
+
+## Subscription usage
+
+`subscription_usage` returns `schema_version: "trace_commons.subscription_usage.v1"` and supported provider/login snapshots. Codex and Claude are each controlled by a setting, both on by default: `subscription_usage_codex_enabled` and `subscription_usage_claude_on`. A provider whose setting is off reports `enabled: false` with no logins, so a client must handle `enabled: false` for Claude as well as Codex. The legacy `subscription_usage_claude_enabled` field is cleanup-only and does not control availability. Opening views and background ticks do not acquire credentials.
+
+A provider has `provider`, `enabled`, `refreshing`, and `logins`. Each login has a local `id`, label, default-profile flag, observation state/reason, capture time, stale marker, optional `refreshing`, windows, nullable banked inventory and nullable `source`: `"api"` for figures from a provider endpoint or native app-server, `"cli"` for Claude figures read off the Claude Code CLI's `/usage` screen, `null` with no reading. Older daemons omit `source`. Windows carry lane, label, optional positive `duration_mins`, optional usage and reset fields. Missing values remain unknown and reset expiry invalidates old allowance.
+
+`refresh:true` is explicit acquisition. For Claude it requires `provider:"claude"` and one known local `login`; unscoped refreshes cannot silently acquire Claude credentials. `interactive:true` requires Refresh and permits the expected macOS Keychain prompt for that selected profile. A request cannot transfer another login's interactive authority. Reads are serialized, and native OS workers retain their lease even if the caller times out or is cancelled.
+
+Claude uses fixed OAuth profile/usage endpoints, stable account/organization evidence and exact native credential scope. Its successful reason `captured_on_refresh` and stale/capture context mean point-in-time usage, not continuously tracked current identity. File metadata detects known changes; no Keychain API runs in the background. Known credential changes invalidate prior figures. A Refresh reads Claude Code's Keychain item with UI suppressed first; only `interactive:true` permits a second read that may show the dialog. The access token (never the refresh token) is kept in the app's own Keychain item and reused until expiry, a 401/403, or a change in the item's attribute revision, the account evidence or the login spec; unenroll and `subscription_usage_claude_on: false` delete it. When OAuth cannot produce a reading (`auth_missing`, `auth_expired`, `keychain_needs_permission`, `scope_missing`) and the request is `interactive:true`, the daemon runs the user's `claude` CLI under a pseudo-terminal in a private probe directory, reads `/usage` and kills it; the reason stays `captured_on_refresh` on success, and a failed or missing CLI reports the original OAuth reason. OAuth token renewal and cookies are not part of Claude acquisition.
+
+Codex remains file-backed and refuses native-running/ambiguous-process or unsupported-storage cases. Its successful native renewal still requires a matching final identity/revision witness. Both providers use bounded sanitized failures and in-memory snapshots, limited to 128 logins. No credential, filesystem path, raw provider account identifier or raw provider error crosses IPC.
+
+Unenroll and managed-registry binding changes invalidate pending generations and held readings. A late native permission result cannot continue to HTTP after cancellation. Claude remains available for a future explicit Refresh; the absence of a Commons enrollment does not turn its usage reader into a background action. See [subscription usage](operator/subscription-usage.md).

@@ -80,37 +80,6 @@ This is simpler but couples the credential to the privilege-bearing role. Do
 **not** add `BYPASSRLS` when doing this — the role must stay NOBYPASSRLS for the
 permissive policy to be the sole authorization for the cross-tenant read.
 
-## Passkey login also uses this same resolver role (Slice 2)
-
-The discoverable passkey login path (`POST /account/passkey/login/finish`) has
-the **same** unauthenticated credential-to-tenant bootstrap problem as redeem: it
-must map a globally-unique `credential_id` to its owning `tenant_id` while running
-with no tenant context, before any session exists. It uses the **same**
-`trace_login_resolver` role on the **same** separate resolver pool — there is **no
-extra login role to provision**. If you have already provisioned the resolver pool
-for redeem (above), passkey login works with no further role setup.
-
-The `V32__trace_webauthn_credentials.sql` migration extends the role:
-
-```sql
-GRANT SELECT (tenant_id, credential_id) ON trace_webauthn_credentials TO trace_login_resolver;
--- plus the role-scoped permissive policy trace_login_resolver_credential_read
---   (FOR SELECT TO trace_login_resolver USING (true))
-```
-
-This mirrors the `trace_login_links` grant exactly: a two-column SELECT plus a
-role-scoped permissive policy, with the role still `NOBYPASSRLS`. The column grant
-deliberately excludes every other column (e.g. `account_id`, `passkey`), so even
-under the permissive policy the resolver can read only `(tenant_id,
-credential_id)`. The owning-tenant's full credential row is loaded afterward on the
-runtime pool, under that tenant's normal RLS.
-
-**Fail-closed behavior:** if the resolver pool is unconfigured (or its connection
-fails), the passkey LOGIN path fails closed exactly like redeem — every assertion
-collapses to the uniform deny and no session is minted. Enrollment and management
-of passkeys run on the authenticated runtime pool and are unaffected; only the
-unauthenticated login bootstrap depends on the resolver pool.
-
 ## NEAR login also uses this same resolver role (Slice 3a)
 
 The discoverable login-with-NEAR path (`POST /account/near/login/finish`) has the
@@ -120,8 +89,8 @@ owning `tenant_id` while running with no tenant context, before any session exis
 It uses the **same** `trace_login_resolver` role on the **same** separate resolver
 pool — there is **no extra login role to provision**. If you have already
 provisioned the resolver pool for redeem (above), NEAR login works with no further
-role setup. The one role now gates all three unauthenticated bootstraps: passkey
-login, NEAR login, AND link redeem.
+role setup. The one role gates both unauthenticated bootstraps: NEAR login and link
+redeem.
 
 The `V33__trace_near_identities.sql` migration extends the role:
 
@@ -131,7 +100,7 @@ GRANT SELECT (tenant_id, public_key) ON trace_near_identities TO trace_login_res
 --   (FOR SELECT TO trace_login_resolver USING (true))
 ```
 
-This mirrors the `trace_login_links` and `trace_webauthn_credentials` grants
+This mirrors the `trace_login_links` grant
 exactly: a two-column SELECT plus a role-scoped permissive policy, with the role
 still `NOBYPASSRLS`. The column grant deliberately excludes every other column
 (e.g. `account_id`, `near_account_id`, `label`), so even under the permissive
@@ -140,7 +109,7 @@ full identity row is loaded afterward on the runtime pool, under that tenant's
 normal RLS.
 
 **Fail-closed behavior:** if the resolver pool is unconfigured (or its connection
-fails), the NEAR LOGIN path fails closed exactly like redeem and passkey login —
+fails), the NEAR LOGIN path fails closed exactly like redeem —
 every assertion collapses to the uniform deny and no session is minted. Enrollment
 and management of NEAR identities run on the authenticated runtime pool and are
 unaffected; only the unauthenticated login bootstrap depends on the resolver pool.
@@ -161,3 +130,9 @@ SELECT has_table_privilege('trace_login_resolver', 'trace_login_links', 'INSERT'
 A failed/missing resolver connection surfaces as redeem returning 400 with the
 session never establishing; check that the URL points at a role that (a) can
 log in and (b) is or inherits `trace_login_resolver`.
+
+## Passkeys removed (V144)
+
+Passkey login used this role for a `(tenant_id, credential_id)` read on
+`trace_webauthn_credentials`. V144 drops that table with its grant and
+policy, so the resolver keeps only its login-link and NEAR-identity reads.

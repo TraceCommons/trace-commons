@@ -41,26 +41,6 @@ const DEFAULT_GROWTH_MIN_NEW_BYTES: u64 = 65_536;
 /// repeatedly over the same text and dilute the contributor's own credit
 /// through server-side duplicate clustering.
 const DEFAULT_MAX_REUPLOADS: u32 = 3;
-const DEFAULT_MAX_UPLOADS_PER_DAY: u32 = 50;
-const DEFAULT_MAX_BYTES_PER_DAY: u64 = 209_715_200;
-/// The upper bound `set_settings` (and the C ABI's pre-start override) will
-/// accept for `max_uploads_per_day`. The cap exists to bound a runaway
-/// client -- an app that decides to upload everything should not be able
-/// to -- so it must stay a validated ceiling, not an open field. 20x the
-/// default comfortably covers a contributor running several agents across
-/// a very active day (a real machine needed 200/day, four times the
-/// default) while still being a real bound: a client that hit this would
-/// still be stopped well short of "everything, all day".
-const MAX_UPLOADS_PER_DAY_CEILING: u32 = 1_000;
-/// The upper bound for `max_bytes_per_day`, in bytes. Sized from real
-/// corpus data, not a guess: a machine with 81 Claude sessions (0.9 GB
-/// total, largest 93.6 MB) and 3,069 Codex sessions (10.8 GB total) still
-/// only produces a few GB of *accepted* envelopes on its most active day,
-/// since a single accepted envelope commonly runs several MB. 5 GiB is
-/// comfortably above that (and above the 2 GiB a contributor had already
-/// raised their own machine to by hand) while remaining a real ceiling on
-/// a client that decided to send everything at once.
-const MAX_BYTES_PER_DAY_CEILING: u64 = 5 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_QUEUE_ENTRIES: usize = 500;
 const DEFAULT_HISTORY_POLL_SECS: u64 = 1800;
 /// How often the public community roster is fetched. The server serves a
@@ -131,6 +111,10 @@ pub const DEFAULT_NOTIFY_WEEKLY_RECAP: bool = false;
 /// `notify.settlement_estimate` (N5). DRAFT, NEEDS APPROVAL: on by default,
 /// like the estimate switch it sits under.
 pub const DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE: bool = true;
+/// `notify.near_ai_credit` (N6): on, for a new install and an existing one
+/// alike -- the owner asked for this notification (2026-10-23). DRAFT,
+/// owner review.
+pub const DEFAULT_NOTIFY_NEAR_AI_CREDIT: bool = true;
 /// `notify.insights_tip` (N4). DRAFT, owner decision 25: Insights decides;
 /// the recommendation is off as a notification.
 pub const DEFAULT_NOTIFY_INSIGHTS_TIP: bool = false;
@@ -156,14 +140,6 @@ pub const APPROVAL_HOLD_SECS_MAX: u64 = 300;
 /// Mirrors a shell's hour-granularity control (1..=24 hours).
 pub const DIGEST_INTERVAL_SECS_MIN: u64 = 3_600;
 pub const DIGEST_INTERVAL_SECS_MAX: u64 = 86_400;
-/// The floor for `max_bytes_per_day`: non-zero, same as `max_uploads_per_day`
-/// -- a contributor throttling their own uploads down to almost nothing is
-/// self-throttling, not the runaway-client case the ceiling exists for, and
-/// is deliberately allowed (`a_cap_below_the_default_is_allowed_as_self_throttling`).
-/// Only `MAX_BYTES_PER_DAY_CEILING` is a real safety bound; a shell's own
-/// megabyte-granularity control is free to offer a coarser minimum than this.
-pub const MAX_BYTES_PER_DAY_MIN: u64 = 1;
-
 /// A validated numeric setting's bounds, in the unit `set_settings` itself
 /// stores and checks -- seconds or bytes, never the minutes, hours or
 /// megabytes a shell's control is scaled in. One definition, read by every
@@ -204,8 +180,36 @@ pub struct SettingsRanges {
     pub quiescence_secs: SettingRange,
     pub approval_hold_secs: SettingRange,
     pub digest_interval_secs: SettingRange,
-    pub max_uploads_per_day: SettingRange,
-    pub max_bytes_per_day: SettingRange,
+}
+
+impl SettingsRanges {
+    /// Each range with its key and its agent-facing description. Destructured
+    /// without `..`, so a range added to the struct does not compile until it
+    /// is listed here with its text.
+    pub(crate) fn described(&self) -> [(&'static str, SettingRange, &'static str); 3] {
+        let Self {
+            quiescence_secs,
+            approval_hold_secs,
+            digest_interval_secs,
+        } = *self;
+        [
+            (
+                "quiescence_secs",
+                quiescence_secs,
+                "Seconds without writes before a trace is considered finished.",
+            ),
+            (
+                "approval_hold_secs",
+                approval_hold_secs,
+                "Seconds before an approved upload can start; zero removes the undo hold.",
+            ),
+            (
+                "digest_interval_secs",
+                digest_interval_secs,
+                "Seconds between interval notifications.",
+            ),
+        ]
+    }
 }
 
 /// The ranges [`apply_settings_object`] validates every numeric setting
@@ -216,8 +220,6 @@ pub fn settings_ranges() -> SettingsRanges {
         quiescence_secs: SettingRange::new(QUIESCENCE_SECS_MIN, QUIESCENCE_SECS_MAX),
         approval_hold_secs: SettingRange::new(APPROVAL_HOLD_SECS_MIN, APPROVAL_HOLD_SECS_MAX),
         digest_interval_secs: SettingRange::new(DIGEST_INTERVAL_SECS_MIN, DIGEST_INTERVAL_SECS_MAX),
-        max_uploads_per_day: SettingRange::new(1, MAX_UPLOADS_PER_DAY_CEILING as u64),
-        max_bytes_per_day: SettingRange::new(MAX_BYTES_PER_DAY_MIN, MAX_BYTES_PER_DAY_CEILING),
     }
 }
 
@@ -429,8 +431,6 @@ pub struct DaemonSettings {
     pub growth_factor: f64,
     pub growth_min_new_bytes: u64,
     pub max_reuploads: u32,
-    pub max_uploads_per_day: u32,
-    pub max_bytes_per_day: u64,
     pub max_queue_entries: usize,
     pub history_poll_secs: u64,
     /// How often the public community roster is fetched. `#[serde(default)]`
@@ -661,10 +661,17 @@ pub struct DaemonSettings {
     /// Whether the watcher runs the Insights counter pass (feed T) over the
     /// sessions it finds, after quiescence, and `insights_week` answers from
     /// its store. Off, the pass never runs and nothing is read for Insights.
-    /// Starts as `insights::analytics_constants::COUNTER_PASS_DEFAULT_ON`,
-    /// owner decision D4, open.
+    /// Starts as `insights::analytics_constants::COUNTER_PASS_DEFAULT_ON`
+    /// (on; product owner, 2026-10-29).
     #[serde(default = "default_insights_counter_pass")]
     pub insights_counter_pass: bool,
+
+    /// Whether `insights_counter_pass` was turned on by the 2026-10-29
+    /// default change. A file saved before it lacks this and is turned on
+    /// once when loaded; after that a saved `false` (unenroll, or an agent
+    /// writing `set_settings`) stays off.
+    #[serde(default)]
+    pub insights_counter_pass_defaulted_on: bool,
 
     /// Whether the Insights window shows the weekly summary card on the first
     /// open after a week closes. The card's only on/off: there is no switch
@@ -674,6 +681,19 @@ pub struct DaemonSettings {
     /// decisions D1 and D4, open.
     #[serde(default = "default_insights_recap_card_enabled")]
     pub insights_recap_card_enabled: bool,
+
+    /// Whether Refresh may read native Codex subscription usage; display
+    /// only. On by default since 2026-10-27 (owner): like Claude, nothing is
+    /// read until Refresh. A saved `false` stays off; no migration.
+    #[serde(default = "default_subscription_usage_on")]
+    pub subscription_usage_codex_enabled: bool,
+    /// Whether Refresh may read Claude subscription usage. On by default; the
+    /// Settings switch turns it off (owner, 2026-10-27).
+    #[serde(default = "default_subscription_usage_on")]
+    pub subscription_usage_claude_on: bool,
+    /// Legacy cleanup flag; Claude usage no longer requires an opt-in.
+    #[serde(default)]
+    pub subscription_usage_claude_enabled: bool,
 
     /// Nudge: whether the app may show in-app suggestions -- the cards on
     /// Traces and History and the menu-bar panel row (`status.nudge`).
@@ -730,6 +750,28 @@ pub struct DaemonSettings {
     /// the default (see `managed::terminal::TerminalSetting`).
     #[serde(default)]
     pub managed_terminal: crate::managed::terminal::TerminalSetting,
+
+    /// Whether the person has chosen `managed_terminal` themselves. False
+    /// until a write names a terminal, which sets it; nothing clears it. A
+    /// shell asks for a terminal in the launch dialog while this is false
+    /// and more than one is installed. Not writable on its own.
+    #[serde(default)]
+    pub managed_terminal_chosen: bool,
+
+    /// NEAR AI model ids the person starred, which the Launch sheet's model
+    /// picker lists first (`managed_model_catalogue`'s `favorites`). Order
+    /// is not meaningful: shells show them in NEAR AI's order. Written only
+    /// through [`apply_settings_object`], which checks each id and bounds
+    /// the list ([`MAX_FAVORITE_MODELS`], [`MAX_FAVORITE_MODEL_ID_BYTES`]).
+    #[serde(default)]
+    pub managed_favorite_models: Vec<String>,
+
+    /// Per-agent argv text for new managed coding sessions. Omitted tools
+    /// keep their existing values during partial configuration updates.
+    #[serde(default)]
+    pub managed_cli_options: BTreeMap<crate::managed::ToolId, String>,
+    #[serde(default)]
+    pub managed_folder_settings: Vec<crate::managed::folder::FolderSettings>,
 
     /// Nudge: one switch per notification kind. Each governs both the
     /// sentence folded into a due digest and the standalone notification.
@@ -810,6 +852,9 @@ pub struct NotifyKinds {
     /// N5, the settlement estimate.
     #[serde(default = "default_notify_settlement_estimate")]
     pub settlement_estimate: bool,
+    /// N6, NEAR AI credit received.
+    #[serde(default = "default_notify_near_ai_credit")]
+    pub near_ai_credit: bool,
     /// Kind keys this build does not know, kept verbatim.
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
@@ -825,6 +870,7 @@ impl Default for NotifyKinds {
             weekly_recap: DEFAULT_NOTIFY_WEEKLY_RECAP,
             insights_tip: DEFAULT_NOTIFY_INSIGHTS_TIP,
             settlement_estimate: DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE,
+            near_ai_credit: DEFAULT_NOTIFY_NEAR_AI_CREDIT,
             other: BTreeMap::new(),
         }
     }
@@ -857,6 +903,7 @@ impl NotifyKinds {
             "weekly_recap" => Some(&mut self.weekly_recap),
             "insights_tip" => Some(&mut self.insights_tip),
             "settlement_estimate" => Some(&mut self.settlement_estimate),
+            "near_ai_credit" => Some(&mut self.near_ai_credit),
             _ => None,
         }
     }
@@ -869,6 +916,7 @@ impl NotifyKinds {
             "weekly_recap" => Some(&self.weekly_recap),
             "insights_tip" => Some(&self.insights_tip),
             "settlement_estimate" => Some(&self.settlement_estimate),
+            "near_ai_credit" => Some(&self.near_ai_credit),
             _ => None,
         }
     }
@@ -895,6 +943,10 @@ where
 
 fn default_notify_settlement_estimate() -> bool {
     DEFAULT_NOTIFY_SETTLEMENT_ESTIMATE
+}
+
+fn default_notify_near_ai_credit() -> bool {
+    DEFAULT_NOTIFY_NEAR_AI_CREDIT
 }
 
 fn default_notify_digest() -> bool {
@@ -1011,6 +1063,13 @@ pub enum IronWireDeclaration {
     Off,
 }
 
+/// Whether this build may talk to an IronWire on `port`: any port in
+/// production, only the staging IronWire's fixed port in staging.
+#[must_use]
+pub fn ironwire_port_in_channel(port: u16) -> bool {
+    crate::channel::IRONWIRE_CONTROL_PORT.is_none_or(|own| own == port)
+}
+
 /// The file the proxy writes its control-API token to, inside whichever
 /// directory [`ironwire_token_path`] resolves.
 pub const IRONWIRE_TOKEN_FILE: &str = "control.token";
@@ -1023,10 +1082,18 @@ pub const IRONWIRE_BODIES_SUBDIR: &str = "bodies";
 
 impl IronWireDeclaration {
     /// The port to read, or `None` when the proxy is off.
+    ///
+    /// Also `None` in a staging build for any port but the staging
+    /// IronWire's own ([`crate::channel::IRONWIRE_CONTROL_PORT`]): a
+    /// declaration naming production's proxy reads as no proxy at all, for
+    /// every reader at once (staging design 4.2, S10). Production has no
+    /// fixed port and reads whatever port was declared.
     #[must_use]
     pub fn port(&self) -> Option<u16> {
         match self {
-            IronWireDeclaration::Watch { port, .. } => Some(*port),
+            IronWireDeclaration::Watch { port, .. } => {
+                ironwire_port_in_channel(*port).then_some(*port)
+            }
             IronWireDeclaration::Off => None,
         }
     }
@@ -1072,7 +1139,19 @@ pub(crate) fn ironwire_token_path_with(
     pointer: Option<&super::ironwire_pointer::IronWirePointer>,
 ) -> Option<PathBuf> {
     if let Some(declared) = declared {
-        return Some(declared.join(IRONWIRE_TOKEN_FILE));
+        let token = declared.join(IRONWIRE_TOKEN_FILE);
+        // A staging build reads no token outside its own IronWire home, so a
+        // folder declared in settings cannot reach production's (staging
+        // design 4.2, S10). Canonicalized on both sides, so neither `..` nor
+        // a symlink walks out; a token that is not there resolves nothing,
+        // which is the same "no proxy" state a missing token already is.
+        if crate::channel::near_ai_staging() {
+            return super::ironwire_pointer::confine_token_path(
+                &token,
+                ironwire_default_token_dir()?.as_path(),
+            );
+        }
+        return Some(token);
     }
     // The pointer names a *file*, not a directory, and is used as written.
     // A running daemon's own statement of where it put its token is better
@@ -1129,9 +1208,10 @@ pub(crate) fn ironwire_token_path_with(
 /// sentence cannot name one folder while this function reads another.
 #[must_use]
 pub fn ironwire_default_token_dir() -> Option<PathBuf> {
-    std::env::var_os("IRONWIRE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(super::ironwire_pointer::POINTER_DIR)))
+    // The channel's home: a staging build never names production's folder.
+    // One resolver, so an empty variable means "unset" here exactly as it
+    // does for the home the embedded proxy runs out of.
+    super::private_inference::ironwire_home()
 }
 
 /// Build a routing ledger for a declaration, or nothing.
@@ -1257,6 +1337,10 @@ fn default_insights_counter_pass() -> bool {
     crate::insights::analytics_constants::COUNTER_PASS_DEFAULT_ON
 }
 
+fn default_subscription_usage_on() -> bool {
+    true
+}
+
 fn default_insights_recap_card_enabled() -> bool {
     crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON
 }
@@ -1294,8 +1378,6 @@ impl Default for DaemonSettings {
             growth_factor: DEFAULT_GROWTH_FACTOR,
             growth_min_new_bytes: DEFAULT_GROWTH_MIN_NEW_BYTES,
             max_reuploads: DEFAULT_MAX_REUPLOADS,
-            max_uploads_per_day: DEFAULT_MAX_UPLOADS_PER_DAY,
-            max_bytes_per_day: DEFAULT_MAX_BYTES_PER_DAY,
             max_queue_entries: DEFAULT_MAX_QUEUE_ENTRIES,
             history_poll_secs: DEFAULT_HISTORY_POLL_SECS,
             community_poll_secs: DEFAULT_COMMUNITY_POLL_SECS,
@@ -1323,7 +1405,11 @@ impl Default for DaemonSettings {
             insights_ledger_feed: default_insights_ledger_feed(),
             insights_context_threshold: None,
             insights_counter_pass: default_insights_counter_pass(),
+            insights_counter_pass_defaulted_on: true,
             insights_recap_card_enabled: default_insights_recap_card_enabled(),
+            subscription_usage_codex_enabled: default_subscription_usage_on(),
+            subscription_usage_claude_on: default_subscription_usage_on(),
+            subscription_usage_claude_enabled: false,
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
             suggestions_enabled: DEFAULT_SUGGESTIONS_ENABLED,
@@ -1332,6 +1418,10 @@ impl Default for DaemonSettings {
             notifications_enabled: DEFAULT_NOTIFICATIONS_ENABLED,
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
             managed_terminal: Default::default(),
+            managed_terminal_chosen: false,
+            managed_favorite_models: Vec::new(),
+            managed_cli_options: Default::default(),
+            managed_folder_settings: Default::default(),
             notify: NotifyKinds::default(),
             verdicts_offer_pending: false,
             idle_offer_pending: false,
@@ -1423,6 +1513,10 @@ impl DaemonSettings {
             .get("scrub_check")
             .is_none_or(serde_json::Value::is_null);
         settings.apply_notify_upgrade(&stored);
+        if !settings.insights_counter_pass_defaulted_on {
+            settings.insights_counter_pass = true;
+            settings.insights_counter_pass_defaulted_on = true;
+        }
         settings.absorb_legacy_roots();
         settings.validate_digest_schedule();
         for field in settings.clamp_numeric_ranges() {
@@ -1534,6 +1628,7 @@ impl DaemonSettings {
             verdicts_landed: self.notify.verdicts_landed,
             weekly_recap: self.notify.weekly_recap,
             settlement_estimate: self.notify.settlement_estimate,
+            near_ai_credit: self.notify.near_ai_credit,
             renderer,
         }
     }
@@ -1607,7 +1702,7 @@ impl DaemonSettings {
     /// refreshes it on a schedule, which is a separate, reviewed piece of
     /// work; see [`crate::source::SourceRoots::with_routing`].
     pub fn source_roots(&self, store: &ConfigStore) -> crate::source::SourceRoots {
-        crate::source::SourceRoots::new()
+        let mut roots = crate::source::SourceRoots::new()
             .with_managed_opencode(store.dir().join(crate::managed::opencode::STAGING))
             .declare(
                 crate::source::SOURCE_CLAUDE_CODE,
@@ -1624,7 +1719,21 @@ impl DaemonSettings {
             .with_trajectory(crate::source::TrajectorySelection::Auto {
                 working_dir: None,
                 staging_dir: Some(store.dir().join(crate::source::TRAJECTORY_STAGING_SUBDIR)),
-            })
+            });
+        // Only explicit post-exit exports join discovery. Private account
+        // profiles also contain opted-out sessions and must never be scanned.
+        for (tool, source) in [
+            (
+                crate::managed::ToolId::Claude,
+                crate::source::SOURCE_CLAUDE_CODE,
+            ),
+            (crate::managed::ToolId::Codex, crate::source::SOURCE_CODEX),
+        ] {
+            for path in crate::managed::native_collection::roots(store, tool) {
+                roots = roots.with_managed_native_root(source, path);
+            }
+        }
+        roots
     }
 
     /// The "keychain" block of the private-AI credential status (the
@@ -1722,15 +1831,28 @@ pub const ERR_SETTINGS_NOT_OBJECT: &str = "settings-not-object";
 /// recognize.
 pub const ERR_SETTINGS_UNKNOWN_FIELD: &str = "settings-unknown-field";
 /// A recognized key held a value of the wrong JSON type (or, for
-/// `claude_root`/`codex_root`, a JSON type other than string/null), or --
-/// for `max_uploads_per_day`/`max_bytes_per_day` -- a value of the right
-/// type but out of the accepted range (zero, or above the validated
-/// ceiling; see `MAX_UPLOADS_PER_DAY_CEILING` and
-/// `MAX_BYTES_PER_DAY_CEILING`). One fixed label covers both failure
+/// `claude_root`/`codex_root`, a JSON type other than string/null), or a
+/// value of the right type but outside its [`SettingRange`]. One fixed label
+/// covers both failure
 /// shapes deliberately: the point of the label is that it never carries
 /// the caller's value, and "wrong type" vs. "right type, wrong range" is
 /// not a distinction a fail-closed caller needs to branch on.
 pub const ERR_SETTINGS_INVALID_VALUE: &str = "settings-invalid-value";
+
+/// The most favorite models one settings file keeps.
+pub const MAX_FAVORITE_MODELS: usize = 32;
+/// The longest favorite model id, in UTF-8 bytes. NEAR AI's ids are a
+/// fraction of this.
+pub const MAX_FAVORITE_MODEL_ID_BYTES: usize = 256;
+
+/// Whether `id` can be a favorite model id: non-empty, bounded, and free of
+/// whitespace and control characters. Says nothing about whether NEAR AI
+/// offers it; `managed_model_favorite_set` checks that against the catalogue.
+pub fn valid_favorite_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_FAVORITE_MODEL_ID_BYTES
+        && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+}
 /// A `notify` object named a kind this build does not know. A fixed label:
 /// the caller's key never enters it.
 pub const ERR_SETTINGS_UNKNOWN_NOTIFY_KIND: &str = "settings-unknown-notify-kind";
@@ -1794,6 +1916,11 @@ pub fn gemini_declared(settings: &DaemonSettings) -> bool {
     settings.gemini_source.is_some()
 }
 
+/// A settings key retired with the daily upload limit.
+fn is_retired_key(key: &str) -> bool {
+    matches!(key, "max_uploads_per_day" | "max_bytes_per_day")
+}
+
 /// Apply a partial settings object -- the shape `tc_call(handle,
 /// "set_settings", ...)` takes over the socket, and the shape
 /// `tc_daemon_start_with_settings` takes over the C ABI before the daemon's
@@ -1816,23 +1943,21 @@ pub fn gemini_declared(settings: &DaemonSettings) -> bool {
 /// caller-supplied text. The values themselves (which is where a
 /// filesystem path lives) never cross into an error string.
 ///
-/// Returns whether anything was applied. An empty object (or one holding
-/// only keys whose values happen to match the current setting) still
-/// reports `true` for any key present and accepted -- this always applies
-/// every key it accepts, so `Ok(false)` only ever means "the object had no
-/// keys at all". Callers that require at least one recognized field (as
-/// `set_settings` does, to catch an empty or accidental call) check that
-/// themselves; `tc_daemon_start_with_settings` does not, since "nothing to
-/// override" is its documented no-op case.
+/// Returns whether anything was applied. A key whose value happens to match
+/// the current setting still reports `true` -- this always applies every
+/// live key it accepts. `Ok(false)` means no live key was present, which is
+/// one of two cases:
 ///
-/// `max_uploads_per_day` and `max_bytes_per_day` are validated against a
-/// fixed ceiling (`MAX_UPLOADS_PER_DAY_CEILING`, `MAX_BYTES_PER_DAY_CEILING`)
-/// rather than accepted as an open field: the cap exists to bound a runaway
-/// client, and an unbounded setter would give that protection up entirely.
-/// A value below the current default is accepted with no floor beyond
-/// non-zero -- throttling one's own uploads is not a safety concern -- but
-/// zero and anything above the ceiling are refused with the same
-/// `ERR_SETTINGS_INVALID_VALUE` label the other typed fields use.
+/// - the object had no keys at all, which `set_settings` and the agent
+///   preview refuse as `no-known-setting-supplied` (an empty or accidental
+///   call), and `tc_daemon_start_with_settings` treats as its documented
+///   "nothing to override" no-op;
+/// - every key was a retired one (below), which every caller treats as
+///   accepted with nothing to change: no save, no error.
+///
+/// `max_uploads_per_day` and `max_bytes_per_day` are retired: accepted,
+/// whatever the value, and ignored. The daemon has no daily upload limit,
+/// and a shell built while it had one may still send them.
 pub fn apply_settings_object(
     settings: &mut DaemonSettings,
     params: &serde_json::Value,
@@ -1840,6 +1965,13 @@ pub fn apply_settings_object(
     let obj = params.as_object().ok_or(ERR_SETTINGS_NOT_OBJECT)?;
     let mut changed = false;
     for (key, value) in obj {
+        // Retired with the daily upload limit. Accepted, whatever the value,
+        // and ignored, so a shell built while the limit existed can still
+        // save its other settings. Outside the marked region below: the
+        // agent schema and the IPC doc's key lists name settable keys only.
+        if is_retired_key(key) {
+            continue;
+        }
         // SET-SETTINGS-KEYS-BEGIN
         //
         // `docs/contributor-daemon-ipc-v1_1.md` lists these keys twice, and
@@ -1875,23 +2007,6 @@ pub fn apply_settings_object(
             }
             "local_notifications" => {
                 settings.local_notifications = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
-            }
-            // Both caps take a validated ceiling, not an open field: the
-            // cap exists to bound a runaway client, and a freely settable
-            // value would give up exactly the protection it was added for.
-            // A value below the default IS allowed -- a contributor
-            // throttling their own uploads is a legitimate thing to want
-            // and is not a safety concern -- but zero is refused rather
-            // than accepted as "no uploads": that state already exists and
-            // is spelled `pause`, which (unlike a cap of zero) is visibly
-            // temporary and does not fight the health-label machinery that
-            // treats a reached cap as a `CapReached`/health-label
-            // condition on every single upload attempt.
-            "max_uploads_per_day" => {
-                settings.max_uploads_per_day = parse_max_uploads_per_day(value)?;
-            }
-            "max_bytes_per_day" => {
-                settings.max_bytes_per_day = parse_max_bytes_per_day(value)?;
             }
             // The path spellings. A string declares "watch this"; null
             // clears the declaration back to never-asked, which is what the
@@ -2011,13 +2126,65 @@ pub fn apply_settings_object(
             // The terminal app managed sessions open in. One of this
             // platform's fixed ids; anything else, `null` included, is refused,
             // never read as an app name or a command. Also reachable as
-            // `set_managed_terminal`, which writes through here.
+            // `set_managed_terminal`, which writes through here. A write is
+            // the person's choice, so it also marks the terminal chosen.
             "managed_terminal" => {
                 settings.managed_terminal = value
                     .as_str()
                     .and_then(crate::managed::terminal::TerminalApp::parse)
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?
                     .into();
+                settings.managed_terminal_chosen = true;
+            }
+            // Favorite models merge like `notify`: `{"<id>": true}` stars an
+            // id, `false` unstars it, omitted ids stay. One bad entry, or a
+            // patch that grows the list past the bound, refuses the whole
+            // patch. A removal is never refused for the bound, so a person
+            // can always tidy a full list, nor for the id's shape: removing
+            // an exact stored string is always safe, and an older or
+            // hand-edited file may hold one the star check refuses. Also
+            // reachable as
+            // `managed_model_favorite_set`, which writes through here.
+            "managed_favorite_models" => {
+                let entries = value.as_object().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                let mut candidate = settings.managed_favorite_models.clone();
+                for (id, on) in entries {
+                    let on = on.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                    if on && !valid_favorite_model_id(id) {
+                        return Err(ERR_SETTINGS_INVALID_VALUE);
+                    }
+                    if !on {
+                        candidate.retain(|kept| kept != id);
+                    }
+                }
+                for (id, on) in entries {
+                    if on.as_bool() == Some(true) && !candidate.contains(id) {
+                        candidate.push(id.clone());
+                    }
+                }
+                if candidate.len() > MAX_FAVORITE_MODELS
+                    && candidate.len() > settings.managed_favorite_models.len()
+                {
+                    return Err(ERR_SETTINGS_INVALID_VALUE);
+                }
+                settings.managed_favorite_models = candidate;
+            }
+            "managed_folder_settings" => {
+                crate::managed::folder::apply_patch(settings, value)?;
+            }
+            "managed_cli_options" => {
+                let options = value.as_object().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                let mut candidate = settings.managed_cli_options.clone();
+                for (tool, text) in options {
+                    let tool: crate::managed::ToolId =
+                        serde_json::from_value(serde_json::json!(tool))
+                            .map_err(|_| ERR_SETTINGS_INVALID_VALUE)?;
+                    let text = text.as_str().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+                    crate::managed::options::parse(tool, text)
+                        .map_err(|_| "managed-cli-options-invalid")?;
+                    candidate.insert(tool, text.to_owned());
+                }
+                settings.managed_cli_options = candidate;
             }
             // A partial object of kind switches; see `apply_notify_object`.
             // Also reachable as `set_notify_kind`.
@@ -2046,7 +2213,25 @@ pub fn apply_settings_object(
                 settings.insights_ledger_feed =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
-            // Insights feed T (owner decision D4, open). Off by default.
+            // Current provider allowances; each reader has its own switch,
+            // on by default, and reads only on Refresh.
+            "subscription_usage_codex_enabled" => {
+                settings.subscription_usage_codex_enabled =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            "subscription_usage_claude_on" => {
+                settings.subscription_usage_claude_on =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            "subscription_usage_claude_enabled" => {
+                // Keep false available to clear earlier preferences, but never
+                // revive an obsolete opt-in flag; explicit Refresh controls the read.
+                if value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)? {
+                    return Err(ERR_SETTINGS_INVALID_VALUE);
+                }
+                settings.subscription_usage_claude_enabled = false;
+            }
+            // Insights feed T. On by default (product owner, 2026-10-29).
             "insights_counter_pass" => {
                 settings.insights_counter_pass =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
@@ -2130,23 +2315,6 @@ fn parse_ranged_u64(
     } else {
         Err(ERR_SETTINGS_INVALID_VALUE)
     }
-}
-
-/// `max_uploads_per_day`: a `u32` in `settings_ranges().max_uploads_per_day`.
-/// Zero is refused -- see the call site's doc for why a cap of zero is not
-/// this method's way to stop uploads.
-fn parse_max_uploads_per_day(value: &serde_json::Value) -> std::result::Result<u32, &'static str> {
-    let range = SettingRange::new(1, MAX_UPLOADS_PER_DAY_CEILING as u64);
-    Ok(parse_ranged_u64(value, range)? as u32)
-}
-
-/// `max_bytes_per_day`: a `u64` in `settings_ranges().max_bytes_per_day` --
-/// at least `MAX_BYTES_PER_DAY_MIN` (the smallest amount a shell's
-/// megabyte-granularity control can express) and at most
-/// `MAX_BYTES_PER_DAY_CEILING`.
-fn parse_max_bytes_per_day(value: &serde_json::Value) -> std::result::Result<u64, &'static str> {
-    let range = SettingRange::new(MAX_BYTES_PER_DAY_MIN, MAX_BYTES_PER_DAY_CEILING);
-    parse_ranged_u64(value, range)
 }
 
 /// `null` clears the override (falls back to the conventional per-user
@@ -2295,6 +2463,86 @@ fn parse_digest_schedule(
 mod tests {
     use super::*;
     use crate::config::tests_support::temp_store;
+
+    /// A settings file from a build that had a daily upload limit still
+    /// loads, and the next save drops the limit's keys: nothing reads them.
+    #[test]
+    fn a_settings_file_with_the_retired_daily_limits_loads_and_drops_them() {
+        let (_dir, store) = temp_store();
+        let mut legacy = serde_json::to_value(DaemonSettings::default()).unwrap();
+        legacy["max_uploads_per_day"] = 7.into();
+        legacy["max_bytes_per_day"] = 1_024.into();
+        legacy["max_uploads_per_day_explicit"] = true.into();
+        legacy["max_bytes_per_day_explicit"] = serde_json::Value::Null;
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+        let settings = DaemonSettings::load(&store).expect("a legacy settings file loads");
+        settings.save(&store).unwrap();
+        let stored: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store.daemon_path(DAEMON_SETTINGS_FILE)).unwrap(),
+        )
+        .unwrap();
+        for key in [
+            "max_uploads_per_day",
+            "max_bytes_per_day",
+            "max_uploads_per_day_explicit",
+            "max_bytes_per_day_explicit",
+        ] {
+            assert!(stored.get(key).is_none(), "{key}: {stored}");
+        }
+    }
+
+    /// A shell built while the daily limit existed may still send its two
+    /// keys. They are accepted, whatever the value, and change nothing, so
+    /// the rest of that shell's save still lands. Alone they apply nothing,
+    /// so nothing is saved for them.
+    #[test]
+    fn the_retired_daily_limit_keys_are_accepted_and_ignored() {
+        let mut s = DaemonSettings::default();
+        let before = serde_json::to_value(&s).unwrap();
+        for params in [
+            serde_json::json!({"max_uploads_per_day": 200}),
+            serde_json::json!({"max_bytes_per_day": 0}),
+            serde_json::json!({"max_bytes_per_day": "lots"}),
+            serde_json::json!({"max_uploads_per_day": null, "max_bytes_per_day": null}),
+        ] {
+            assert_eq!(
+                apply_settings_object(&mut s, &params),
+                Ok(false),
+                "{params}"
+            );
+        }
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({})),
+            Ok(false)
+        );
+        assert_eq!(serde_json::to_value(&s).unwrap(), before);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"max_uploads_per_day": 100, "quiescence_secs": 60}),
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.quiescence_secs, 60);
+        // An unknown key beside a retired one is still refused outright.
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"max_uploads_per_day": 100, "nonsense": 1}),
+            ),
+            Err(ERR_SETTINGS_UNKNOWN_FIELD)
+        );
+        for key in ["max_uploads_per_day_explicit", "max_bytes_per_day_explicit"] {
+            let mut params = serde_json::Map::new();
+            params.insert(key.to_owned(), false.into());
+            assert_eq!(
+                apply_settings_object(&mut s, &params.into()),
+                Err(ERR_SETTINGS_UNKNOWN_FIELD)
+            );
+        }
+    }
 
     fn credential() -> NearAiInferenceCredential {
         NearAiInferenceCredential {
@@ -2745,6 +2993,7 @@ mod tests {
     ///
     /// Asserts *which* token the ledger was built with. "A ledger was built"
     /// would pass under either precedence and prove nothing.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_declared_token_directory_wins_over_the_environment() {
         let declared = token_dir_holding("token-from-settings");
@@ -2767,6 +3016,7 @@ mod tests {
 
     /// The CLI case. `IRONWIRE_HOME` stays supported so an install that
     /// already relies on it keeps working.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn the_environment_is_still_honoured_when_no_path_is_declared() {
         let environment = token_dir_holding("token-from-environment");
@@ -2828,6 +3078,7 @@ mod tests {
 
     /// And where the directory comes from: the SAME home the token resolved
     /// in, never a second configured path that could disagree with it.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn the_bodies_directory_is_derived_from_the_declared_proxy_home() {
         let home = token_dir_holding("token");
@@ -3108,12 +3359,21 @@ mod tests {
         use crate::managed::terminal::{TerminalApp, TerminalSetting};
         let mut s = DaemonSettings::default();
         assert_eq!(s.managed_terminal, TerminalSetting::default());
+        assert!(!s.managed_terminal_chosen);
+        for bad in [
+            serde_json::json!({"managed_terminal_chosen": true}),
+            serde_json::json!({"managed_terminal": "Ghostty"}),
+        ] {
+            assert!(apply_settings_object(&mut s, &bad).is_err(), "{bad}");
+            assert!(!s.managed_terminal_chosen, "{bad}");
+        }
         for app in TerminalApp::offered().iter().rev() {
             assert_eq!(
                 apply_settings_object(&mut s, &serde_json::json!({"managed_terminal": app.id()})),
                 Ok(true)
             );
             assert_eq!(s.managed_terminal, TerminalSetting::from(*app));
+            assert!(s.managed_terminal_chosen);
         }
         let mut bad = vec![
             serde_json::json!({"managed_terminal": "Ghostty"}),
@@ -3145,7 +3405,8 @@ mod tests {
             stored["managed_terminal"],
             TerminalSetting::default().app().unwrap().id()
         );
-        stored["managed_terminal"] = serde_json::json!("wezterm");
+        assert_eq!(stored["managed_terminal_chosen"], false);
+        stored["managed_terminal"] = serde_json::json!("hyper");
         store
             .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&stored).unwrap())
             .unwrap();
@@ -3155,6 +3416,178 @@ mod tests {
         assert_eq!(
             DaemonSettings::load(&store).unwrap().managed_terminal,
             TerminalSetting::Unrecognized
+        );
+    }
+
+    /// A stored id that would fail the star check (from an older or
+    /// hand-edited file) is still removed by `false`: removing an exact
+    /// stored string is always safe, and the entry must not hold one of the
+    /// 32 places for good (#1754 review). Starring it stays refused.
+    #[test]
+    fn a_malformed_stored_favorite_can_be_unstarred() {
+        let long = "m".repeat(MAX_FAVORITE_MODEL_ID_BYTES + 1);
+        for bad in ["a one", "a/\u{0007}", "", long.as_str()] {
+            let mut s = DaemonSettings {
+                managed_favorite_models: vec!["a/one".into(), bad.into()],
+                ..DaemonSettings::default()
+            };
+            assert_eq!(
+                apply_settings_object(
+                    &mut s,
+                    &serde_json::json!({"managed_favorite_models": { bad: true }})
+                ),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{bad:?}"
+            );
+            assert_eq!(
+                apply_settings_object(
+                    &mut s,
+                    &serde_json::json!({"managed_favorite_models": { bad: false }})
+                ),
+                Ok(true),
+                "{bad:?}"
+            );
+            assert_eq!(s.managed_favorite_models, ["a/one"], "{bad:?}");
+        }
+    }
+
+    /// Favorite models merge like `notify`: `true` stars an id, `false`
+    /// unstars it, omitted ids stay. Every id is checked, the whole patch is
+    /// refused on one bad entry, and the list is bounded. A file written
+    /// before the key existed loads with none.
+    #[test]
+    fn favorite_models_merge_and_refuse_bad_ids() {
+        let mut s = DaemonSettings::default();
+        assert!(s.managed_favorite_models.is_empty());
+        let patch =
+            |entries: serde_json::Value| serde_json::json!({ "managed_favorite_models": entries });
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &patch(serde_json::json!({"b/two": true, "a/one": true}))
+            ),
+            Ok(true)
+        );
+        // Starring again and unstarring an absent id change nothing.
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &patch(serde_json::json!({"a/one": true, "c/three": false}))
+            ),
+            Ok(true)
+        );
+        let mut starred = s.managed_favorite_models.clone();
+        starred.sort();
+        assert_eq!(starred, ["a/one", "b/two"]);
+        assert_eq!(
+            apply_settings_object(&mut s, &patch(serde_json::json!({"b/two": false}))),
+            Ok(true)
+        );
+        assert_eq!(s.managed_favorite_models, ["a/one"]);
+
+        let long = "m".repeat(MAX_FAVORITE_MODEL_ID_BYTES + 1);
+        for bad in [
+            serde_json::json!(["a/one"]),
+            serde_json::json!("a/one"),
+            serde_json::json!(null),
+            serde_json::json!({"a/one": 1}),
+            serde_json::json!({"a/one": null}),
+            serde_json::json!({"": true}),
+            serde_json::json!({" a/one": true}),
+            serde_json::json!({"a one": true}),
+            serde_json::json!({"a/one\n": true}),
+            serde_json::json!({"a/\u{0007}": true}),
+            serde_json::json!({ long.clone(): true }),
+            // One bad entry refuses the good one beside it.
+            serde_json::json!({"z/ok": true, "": true}),
+        ] {
+            let mut candidate = s.clone();
+            assert_eq!(
+                apply_settings_object(&mut candidate, &patch(bad.clone())),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{bad}"
+            );
+            assert_eq!(candidate.managed_favorite_models, ["a/one"], "{bad}");
+        }
+
+        let mut full = DaemonSettings::default();
+        let many: serde_json::Map<_, _> = (0..MAX_FAVORITE_MODELS)
+            .map(|n| (format!("m/{n}"), serde_json::json!(true)))
+            .collect();
+        assert_eq!(
+            apply_settings_object(&mut full, &patch(serde_json::Value::Object(many))),
+            Ok(true)
+        );
+        assert_eq!(full.managed_favorite_models.len(), MAX_FAVORITE_MODELS);
+        assert_eq!(
+            apply_settings_object(
+                &mut full.clone(),
+                &patch(serde_json::json!({"m/extra": true}))
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        // At the bound, one out and one in within the same patch is fine.
+        assert_eq!(
+            apply_settings_object(
+                &mut full,
+                &patch(serde_json::json!({"m/0": false, "m/extra": true}))
+            ),
+            Ok(true)
+        );
+        assert_eq!(full.managed_favorite_models.len(), MAX_FAVORITE_MODELS);
+
+        // A list already past the bound (only a hand-edited file holds one)
+        // can always shrink, never grow.
+        let mut over = DaemonSettings {
+            managed_favorite_models: (0..MAX_FAVORITE_MODELS + 8)
+                .map(|n| format!("m/{n}"))
+                .collect(),
+            ..DaemonSettings::default()
+        };
+        assert_eq!(
+            apply_settings_object(&mut over, &patch(serde_json::json!({"m/0": false}))),
+            Ok(true)
+        );
+        assert_eq!(over.managed_favorite_models.len(), MAX_FAVORITE_MODELS + 7);
+        assert_eq!(
+            apply_settings_object(
+                &mut over.clone(),
+                &patch(serde_json::json!({"m/1": false, "m/new": true, "m/newer": true}))
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        // Swapping one for one keeps it the same length: allowed.
+        assert_eq!(
+            apply_settings_object(
+                &mut over,
+                &patch(serde_json::json!({"m/1": false, "m/new": true}))
+            ),
+            Ok(true)
+        );
+        assert_eq!(over.managed_favorite_models.len(), MAX_FAVORITE_MODELS + 7);
+
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let mut stored = serde_json::to_value(DaemonSettings::default()).unwrap();
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("managed_favorite_models");
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, &serde_json::to_vec(&stored).unwrap())
+            .unwrap();
+        assert!(
+            DaemonSettings::load(&store)
+                .unwrap()
+                .managed_favorite_models
+                .is_empty()
+        );
+        s.save(&store).unwrap();
+        assert_eq!(
+            DaemonSettings::load(&store)
+                .unwrap()
+                .managed_favorite_models,
+            ["a/one"]
         );
     }
 
@@ -3322,31 +3755,129 @@ mod tests {
         assert!(s.insights_ledger_feed);
     }
 
-    /// The Insights counter pass (feed T, owner decision D4, open) starts
-    /// off, an older settings file loads it off, and it takes a boolean only.
+    /// The Insights counter pass (feed T) starts on (product owner,
+    /// 2026-10-29, settling owner decision D4), a file that never had the
+    /// field loads it on, and it takes a boolean only.
     #[test]
-    fn the_insights_counter_pass_starts_off_and_takes_a_boolean() {
-        assert!(!DaemonSettings::default().insights_counter_pass);
+    fn the_insights_counter_pass_starts_on_and_takes_a_boolean() {
+        assert!(DaemonSettings::default().insights_counter_pass);
         let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
         assert_eq!(
             v.get("insights_counter_pass"),
-            Some(&serde_json::json!(false))
+            Some(&serde_json::json!(true))
         );
         v.as_object_mut().unwrap().remove("insights_counter_pass");
         let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
-        assert!(!settings.insights_counter_pass);
+        assert!(settings.insights_counter_pass);
 
         let mut s = DaemonSettings::default();
         assert_eq!(
-            apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": true})),
+            apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": false})),
             Ok(true)
         );
-        assert!(s.insights_counter_pass);
+        assert!(!s.insights_counter_pass);
         assert_eq!(
             apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": 1})),
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
+        assert!(!s.insights_counter_pass);
+    }
+
+    /// A fresh install starts counting, with the one-time marker already
+    /// set, so nothing is migrated later.
+    #[test]
+    fn a_fresh_default_counts_with_the_marker_set() {
+        let s = DaemonSettings::default();
         assert!(s.insights_counter_pass);
+        assert!(s.insights_counter_pass_defaulted_on);
+        let (_d, store) = temp_store();
+        let loaded = DaemonSettings::load(&store).expect("no file loads the defaults");
+        assert!(loaded.insights_counter_pass);
+        assert!(loaded.insights_counter_pass_defaulted_on);
+    }
+
+    /// A file saved before the 2026-10-29 default change, with counting
+    /// off and no marker, loads on, once, with the marker set.
+    #[test]
+    fn an_older_file_with_counting_off_loads_on_once() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("insights_counter_pass_defaulted_on");
+        v["insights_counter_pass"] = serde_json::json!(false);
+        store
+            .write_daemon_file(DAEMON_SETTINGS_FILE, v.to_string().as_bytes())
+            .unwrap();
+
+        let loaded = DaemonSettings::load(&store).expect("an older file loads");
+        assert!(loaded.insights_counter_pass);
+        assert!(loaded.insights_counter_pass_defaulted_on);
+    }
+
+    /// Once the marker is set, a saved `false` (unenroll turns counting off)
+    /// stays off across loads.
+    #[test]
+    fn a_saved_off_after_the_marker_stays_off() {
+        let (_d, store) = temp_store();
+        let s = DaemonSettings {
+            insights_counter_pass: false,
+            ..DaemonSettings::default()
+        };
+        s.save(&store).unwrap();
+        let loaded = DaemonSettings::load(&store).expect("a saved file loads");
+        assert!(!loaded.insights_counter_pass);
+        assert!(loaded.insights_counter_pass_defaulted_on);
+        let again = DaemonSettings::load(&store).expect("a saved file loads");
+        assert!(!again.insights_counter_pass);
+    }
+
+    /// Codex usage reading starts on (owner, 2026-10-27), like Claude: it
+    /// reads credentials only on Refresh. A file that never had the field
+    /// loads it on, a saved `false` stays off, and turning it off sticks.
+    #[test]
+    fn codex_subscription_usage_starts_on_and_a_saved_off_stays_off() {
+        assert!(DaemonSettings::default().subscription_usage_codex_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("subscription_usage_codex_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v.clone()).expect("settings load");
+        assert!(settings.subscription_usage_codex_enabled);
+        v.as_object_mut().unwrap().insert(
+            "subscription_usage_codex_enabled".into(),
+            serde_json::json!(false),
+        );
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.subscription_usage_codex_enabled);
+    }
+
+    /// Claude has its own switch, on by default, and an older file loads it on.
+    #[test]
+    fn claude_subscription_usage_has_a_switch_that_starts_on() {
+        assert!(DaemonSettings::default().subscription_usage_claude_on);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("subscription_usage_claude_on");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(settings.subscription_usage_claude_on);
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"subscription_usage_claude_on": false})
+            ),
+            Ok(true)
+        );
+        assert!(!s.subscription_usage_claude_on);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"subscription_usage_claude_on": "on"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
     }
 
     /// The weekly summary card starts as its constant says (owner decisions
@@ -3833,6 +4364,7 @@ mod tests {
     ///
     /// Asserts *which* token is resolved. "A path came back" would pass
     /// under either precedence and prove nothing.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_declared_directory_wins_over_the_pointer() {
         let declared = token_dir_holding("token-from-settings");
@@ -3846,6 +4378,78 @@ mod tests {
             std::fs::read_to_string(&path).unwrap().trim(),
             "token-from-settings",
         );
+    }
+
+    /// A staging build reads no IronWire outside its own home (staging
+    /// design 4.2, S10). A folder declared in settings is the one path the
+    /// pointer and home rules do not cover, so a declaration naming
+    /// production's folder, or production's port, must read nothing: not
+    /// its token, not its ledger, not its bodies. A folder inside the
+    /// staging home, on the staging port, still reads.
+    #[cfg(feature = "near-ai-staging")]
+    #[test]
+    fn a_staging_build_refuses_a_declared_production_ironwire_folder() {
+        let staging_home = token_dir_holding("token-from-staging");
+        let production = token_dir_holding("token-from-production");
+        let _at = IronWireAt::home(staging_home.path());
+        let staging_port = crate::channel::IRONWIRE_CONTROL_PORT.expect("staging binds a port");
+
+        assert_eq!(
+            ironwire_token_path_with(Some(production.path()), None),
+            None
+        );
+        let declared_production = IronWireDeclaration::Watch {
+            port: staging_port,
+            token_dir: Some(production.path().to_path_buf()),
+        };
+        assert!(ironwire_ledger_for(Some(&declared_production)).is_none());
+        assert!(attested_bodies_dir_for(Some(&declared_production), true).is_none());
+
+        // A path that only walks out of the home through `..` is outside it.
+        let escape = staging_home
+            .path()
+            .join("..")
+            .join(production.path().file_name().expect("a name"));
+        assert_eq!(ironwire_token_path_with(Some(&escape), None), None);
+
+        // Production's port is refused even with the staging folder.
+        let production_port = IronWireDeclaration::Watch {
+            port: 8463,
+            token_dir: Some(staging_home.path().to_path_buf()),
+        };
+        assert_eq!(production_port.port(), None);
+        assert!(ironwire_ledger_for(Some(&production_port)).is_none());
+
+        // The staging home itself, on the staging port, still reads.
+        let own = IronWireDeclaration::Watch {
+            port: staging_port,
+            token_dir: Some(staging_home.path().to_path_buf()),
+        };
+        assert_eq!(own.port(), Some(staging_port));
+        let path = ironwire_token_path_with(own.token_dir(), None).expect("its own home resolves");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().trim(),
+            "token-from-staging",
+        );
+        assert!(ironwire_ledger_for(Some(&own)).is_some());
+    }
+
+    /// Production keeps reading any declared folder on any declared port.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[test]
+    fn a_production_build_reads_any_declared_ironwire_folder_and_port() {
+        let home = token_dir_holding("token-from-home");
+        let declared = token_dir_holding("token-from-settings");
+        let _at = IronWireAt::home(home.path());
+        assert_eq!(
+            ironwire_token_path_with(Some(declared.path()), None),
+            Some(declared.path().join(IRONWIRE_TOKEN_FILE)),
+        );
+        let elsewhere = IronWireDeclaration::Watch {
+            port: 9000,
+            token_dir: Some(declared.path().to_path_buf()),
+        };
+        assert_eq!(elsewhere.port(), Some(9000));
     }
 
     /// The running daemon's own statement of fact beats an environment
@@ -3929,6 +4533,7 @@ mod tests {
 
     /// End to end through the real entry point, which reads the pointer off
     /// disk. Asserts the token the ledger was actually built with.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_discovered_token_builds_a_reader_for_a_declaration_that_named_no_directory() {
         let d = tempfile::tempdir().expect("tempdir");
@@ -3956,6 +4561,7 @@ mod tests {
     /// crashed daemon naming a live-but-unrelated port would otherwise send
     /// every read somewhere the contributor never named, with settings and
     /// the probe both still agreeing on the declared port.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn a_pointer_port_never_overrides_a_declared_port() {
         let d = tempfile::tempdir().expect("tempdir");
@@ -4111,6 +4717,92 @@ mod tests {
                 .iter()
                 .any(|s| s.name() == crate::source::SOURCE_GEMINI_CLI)
         );
+    }
+
+    #[test]
+    fn private_native_profiles_require_explicit_per_session_collection() {
+        use crate::managed::{ConnectionKind, ToolId, accounts::AccountStore, signin};
+        let (_dir, store) = temp_store();
+        let mut accounts = AccountStore::open(&store).unwrap();
+        let saved = accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Claude")
+            .unwrap();
+        let settings = DaemonSettings {
+            claude_source: Some(SourceDeclaration::Watch {
+                path: store.dir().join("ordinary-claude"),
+            }),
+            codex_source: Some(SourceDeclaration::Watch {
+                path: store.dir().join("ordinary-codex"),
+            }),
+            ..Default::default()
+        };
+        let before = settings.source_roots(&store).source_identities();
+        for (tool, id, suffix) in [
+            (ToolId::Claude, saved.id, "projects"),
+            (
+                ToolId::Claude,
+                signin::account_id(ToolId::Claude).unwrap(),
+                "projects",
+            ),
+            (
+                ToolId::Codex,
+                signin::account_id(ToolId::Codex).unwrap(),
+                "sessions",
+            ),
+        ] {
+            std::fs::create_dir_all(
+                store
+                    .dir()
+                    .join("managed-profiles")
+                    .join(id.to_string())
+                    .join(suffix),
+            )
+            .unwrap();
+            assert!(crate::managed::native_collection::roots(&store, tool).is_empty());
+        }
+        assert_eq!(
+            before,
+            settings.source_roots(&store).source_identities(),
+            "account profiles include opted-out sessions and must never join passive discovery"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_native_roots_refuse_symlinked_profile_components() {
+        use crate::managed::{ConnectionKind, ToolId, accounts::AccountStore};
+        for linked_component in 0..3 {
+            let (_dir, store) = temp_store();
+            let account = AccountStore::open(&store)
+                .unwrap()
+                .add(ToolId::Claude, ConnectionKind::Subscription, "Claude")
+                .unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let components = [
+                "managed-profiles".to_owned(),
+                account.id.to_string(),
+                "projects".to_owned(),
+            ];
+            let mut path = store.dir().to_path_buf();
+            for (index, component) in components.iter().enumerate() {
+                path.push(component);
+                if index == linked_component {
+                    std::os::unix::fs::symlink(external.path(), &path).unwrap();
+                } else {
+                    std::fs::create_dir_all(&path).unwrap();
+                }
+            }
+            let settings = DaemonSettings {
+                claude_source: Some(SourceDeclaration::Watch {
+                    path: store.dir().join("declared"),
+                }),
+                ..Default::default()
+            };
+            let identities = settings.source_roots(&store).source_identities();
+            assert!(
+                !identities[crate::source::SOURCE_CLAUDE_CODE].contains(&account.id.to_string())
+            );
+        }
     }
 
     /// The declarations reach `all_sources` as a map, so an adapter added
@@ -4564,9 +5256,7 @@ mod tests {
 
     /// The exported ranges are not a second, hand-maintained copy of the
     /// bounds `apply_settings_object` enforces -- they are read from the
-    /// same constants, so this just pins the shape and the two upload/byte
-    /// caps' floors at 1 (self-throttling is allowed; see
-    /// `a_cap_below_the_default_is_allowed_as_self_throttling`).
+    /// same constants, so this just pins the shape.
     #[test]
     fn exported_ranges_match_the_constants_set_settings_enforces() {
         let ranges = settings_ranges();
@@ -4575,11 +5265,6 @@ mod tests {
         assert_eq!(
             ranges.digest_interval_secs,
             SettingRange::new(3_600, 86_400)
-        );
-        assert_eq!(ranges.max_uploads_per_day, SettingRange::new(1, 1_000));
-        assert_eq!(
-            ranges.max_bytes_per_day,
-            SettingRange::new(1, 5 * 1024 * 1024 * 1024)
         );
     }
 
@@ -4801,149 +5486,6 @@ mod tests {
         }
     }
 
-    // --- Runtime-settable daily caps (issue #371) --------------------------
-
-    #[test]
-    fn a_valid_cap_change_is_accepted_persisted_and_observed_by_the_next_cap_check() {
-        use crate::daemon::state::DaemonState;
-        use crate::daemon::uploader::cap_check;
-
-        let (_d, store) = temp_store();
-        let mut s = DaemonSettings::default();
-        assert_eq!(s.max_uploads_per_day, DEFAULT_MAX_UPLOADS_PER_DAY);
-        assert_eq!(s.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
-
-        // A state that has already exhausted the *default* budget: the
-        // real-world trigger for this feature was exactly this shape --
-        // approved traces waiting with nothing left in the old budget.
-        let mut st = DaemonState::new();
-        st.uploads_today = DEFAULT_MAX_UPLOADS_PER_DAY;
-        st.bytes_today = DEFAULT_MAX_BYTES_PER_DAY;
-        assert!(
-            !cap_check(&st, 1, &s),
-            "sanity: the default budget really is exhausted"
-        );
-
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({
-                    "max_uploads_per_day": 200,
-                    "max_bytes_per_day": 2_147_483_648u64,
-                }),
-            ),
-            Ok(true)
-        );
-        assert_eq!(s.max_uploads_per_day, 200);
-        assert_eq!(s.max_bytes_per_day, 2_147_483_648);
-
-        // Persisted: a restart must not revert what was just raised.
-        s.save(&store).unwrap();
-        let reloaded = DaemonSettings::load(&store).unwrap();
-        assert_eq!(reloaded.max_uploads_per_day, 200);
-        assert_eq!(reloaded.max_bytes_per_day, 2_147_483_648);
-
-        // Observed: the same state, held against the *reloaded* settings
-        // (standing in for the live `Mutex<DaemonSettings>` a running
-        // uploader reads each tick), now has room again.
-        assert!(
-            cap_check(&st, 1, &reloaded),
-            "raising the cap must be visible to the very next cap check, \
-             with no restart required"
-        );
-    }
-
-    #[test]
-    fn max_uploads_per_day_above_the_ceiling_is_rejected() {
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_uploads_per_day": MAX_UPLOADS_PER_DAY_CEILING + 1}),
-            ),
-            Err(ERR_SETTINGS_INVALID_VALUE)
-        );
-        assert_eq!(
-            s.max_uploads_per_day, DEFAULT_MAX_UPLOADS_PER_DAY,
-            "a rejected value changes nothing"
-        );
-        // The ceiling itself is accepted -- it is a ceiling, not an
-        // exclusive bound.
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_uploads_per_day": MAX_UPLOADS_PER_DAY_CEILING}),
-            ),
-            Ok(true)
-        );
-        assert_eq!(s.max_uploads_per_day, MAX_UPLOADS_PER_DAY_CEILING);
-    }
-
-    #[test]
-    fn max_bytes_per_day_above_the_ceiling_is_rejected() {
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_bytes_per_day": MAX_BYTES_PER_DAY_CEILING + 1}),
-            ),
-            Err(ERR_SETTINGS_INVALID_VALUE)
-        );
-        assert_eq!(s.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_bytes_per_day": MAX_BYTES_PER_DAY_CEILING}),
-            ),
-            Ok(true)
-        );
-        assert_eq!(s.max_bytes_per_day, MAX_BYTES_PER_DAY_CEILING);
-    }
-
-    #[test]
-    fn a_daily_cap_of_zero_is_rejected_not_treated_as_pause() {
-        // Zero would silently overlap with `pause`, which is a different,
-        // visibly-temporary state. It is refused like any other
-        // out-of-range value.
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(&mut s, &serde_json::json!({"max_uploads_per_day": 0})),
-            Err(ERR_SETTINGS_INVALID_VALUE)
-        );
-        assert_eq!(
-            apply_settings_object(&mut s, &serde_json::json!({"max_bytes_per_day": 0})),
-            Err(ERR_SETTINGS_INVALID_VALUE)
-        );
-    }
-
-    #[test]
-    fn a_cap_below_the_default_is_allowed_as_self_throttling() {
-        // A contributor throttling their own uploads is legitimate and is
-        // not the safety concern the ceiling exists for.
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_uploads_per_day": 1, "max_bytes_per_day": 1}),
-            ),
-            Ok(true)
-        );
-        assert_eq!(s.max_uploads_per_day, 1);
-        assert_eq!(s.max_bytes_per_day, 1);
-    }
-
-    #[test]
-    fn an_unknown_key_alongside_a_valid_cap_is_still_rejected_outright() {
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(
-                &mut s,
-                &serde_json::json!({"max_uploads_per_day": 100, "nonsense": 1}),
-            ),
-            Err(ERR_SETTINGS_UNKNOWN_FIELD)
-        );
-    }
-
     #[test]
     fn digest_schedule_defaults_to_interval() {
         assert_eq!(
@@ -5048,16 +5590,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn wrong_type_for_a_cap_is_rejected_and_changes_nothing() {
-        let mut s = DaemonSettings::default();
-        assert_eq!(
-            apply_settings_object(&mut s, &serde_json::json!({"max_bytes_per_day": "lots"})),
-            Err(ERR_SETTINGS_INVALID_VALUE)
-        );
-        assert_eq!(s.max_bytes_per_day, DEFAULT_MAX_BYTES_PER_DAY);
-    }
-
     /// Every key `apply_settings_object` accepts is documented, in both
     /// places the IPC doc lists them.
     ///
@@ -5117,5 +5649,24 @@ mod tests {
                  `set_settings` section of docs/contributor-daemon-ipc-v1_1.md"
             );
         }
+    }
+    #[test]
+    fn subscription_usage_claude_legacy_preference_is_cleanup_only() {
+        let mut settings = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"subscription_usage_claude_enabled":true})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!settings.subscription_usage_claude_enabled);
+        settings.subscription_usage_claude_enabled = true;
+        apply_settings_object(
+            &mut settings,
+            &serde_json::json!({"subscription_usage_claude_enabled":false}),
+        )
+        .unwrap();
+        assert!(!settings.subscription_usage_claude_enabled);
     }
 }

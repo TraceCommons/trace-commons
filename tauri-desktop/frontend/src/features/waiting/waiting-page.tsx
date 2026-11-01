@@ -83,7 +83,6 @@ export function WaitingPage({ status }: { status: CoreStatus | null }) {
       {status && (
         <QueueStatusPanel
           health={status.daemon.health}
-          budget={status.daemon.daily_budget}
           routing={status.daemon.routing}
           witnessCapacity={status.daemon.witness_capacity}
           gateHeld={status.daemon.automatic_contribution_held}

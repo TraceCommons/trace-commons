@@ -57,7 +57,7 @@ final class ShellNoticesPlacementTests: XCTestCase {
             ("LegacyMigrationMoveControls", [
                 "Button(offer.action) { Task { await model.migrateLegacyInvite(invite: invite) } }",
                 "Button(offer.dismiss, action: onDismiss)",
-                "Button(offer.passkeyCancel) { model.cancelLegacyMigrationPasskey() }",
+                "Button(offer.nearAILoginCancel) { model.cancelLegacyMigrationNearAILogin() }",
             ]),
             ("GrantVoidNoticeCard", ["Button(action, action: onRearm)", acknowledge]),
             ("ArmingRewordedNoticeCard", ["Button(action, action: onAskFirst)", acknowledge]),

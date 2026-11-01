@@ -38,7 +38,7 @@
 //!
 //! The network methods (C3, #1187: `inference_summary`,
 //! `inference_call_proof`, `model_spend`, `private_ai`, `mission_catalogue`,
-//! `invite_lookup`, `passkey_state`, `account_session_status`,
+//! `invite_lookup`, `account_session_status`,
 //! `activity_missions_catalogue`) are not recorded here: they answer from
 //! the network, and this recorder's temp store has none behind it. They stay
 //! hand-written in `SampleDaemonData.swift` in the shapes the daemon
@@ -355,6 +355,7 @@ fn sample_history_records() -> Vec<HistoryRecord> {
         consent_scopes: vec!["debugging_evaluation".into()],
         credit_points_pending: pending,
         credit_points_final: final_,
+        credit_outcome_reason: None,
         explanations: Vec::new(),
         last_refreshed_at: Some(now - chrono::Duration::hours(1)),
         withdrawn_at: withdrawn.then(|| now - chrono::Duration::days(age_days - 1)),
@@ -515,8 +516,8 @@ fn enroll(store: &ConfigStore) {
 /// The home directory every recording sees, in place of the real one.
 ///
 /// The harness, IronWire and source probes all resolve the home through the
-/// environment (`dirs::home_dir`, `$HOME`, `$IRONWIRE_HOME`), not through
-/// the store, so a temp store alone records the machine it runs on: its
+/// environment (`dirs::home_dir`, `$HOME`, `$XDG_CONFIG_HOME`, `$IRONWIRE_HOME`),
+/// not through the store, so a temp store alone records the machine it runs on: its
 /// username in `config_path`, and whichever tools it has installed and
 /// credentialed. This points all of them at one fake home, seeded with an
 /// installed Claude Code, Codex and OpenCode and no IronWire, before any daemon
@@ -560,6 +561,8 @@ fn sample_home() -> &'static SampleHome {
         // binary reads the environment (see the doc above).
         unsafe {
             std::env::set_var("HOME", &fake);
+            // OpenCode honors XDG_CONFIG_HOME before HOME; isolate inherited values too.
+            std::env::set_var("XDG_CONFIG_HOME", fake.join(".config"));
             std::env::set_var("IRONWIRE_HOME", fake.join(".ironwire"));
         }
         SampleHome { fake, real }
@@ -1154,12 +1157,9 @@ fn override_touched_keys(key: &str) -> Option<&'static [&'static str]> {
             "idle_sessions",
             "_sample",
         ]),
-        "normalDay/status" | "busyQueue/status" => Some(&[
-            "private_inference_state",
-            "routing",
-            "daily_budget",
-            "_sample",
-        ]),
+        "normalDay/status" | "busyQueue/status" => {
+            Some(&["private_inference_state", "routing", "_sample"])
+        }
         "normalDay/harness_list" | "busyQueue/harness_list" => Some(&[
             "harnesses",
             "activity",
@@ -1230,29 +1230,9 @@ fn apply_hand_written_overrides(all: &mut BTreeMap<String, Value>) {
                 json!({"state": "rows_seen", "derived": true,
                        "last_refresh_at": VOLATILE_TIMESTAMP_PLACEHOLDER, "unreadable_rows": 0}),
             );
-            if let Some(Value::Object(budget)) = status.get_mut("daily_budget") {
-                let max_bytes = budget
-                    .get("max_bytes_per_day")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                let max_uploads = budget
-                    .get("max_uploads_per_day")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                budget.insert("bytes_today".into(), json!(1_048_576));
-                budget.insert(
-                    "bytes_remaining".into(),
-                    json!(max_bytes.saturating_sub(1_048_576)),
-                );
-                budget.insert("uploads_today".into(), json!(4));
-                budget.insert(
-                    "uploads_remaining".into(),
-                    json!(max_uploads.saturating_sub(4)),
-                );
-            }
             status.insert(
                 "_sample".into(),
-                json!("private AI, routing and budget need a live IronWire"),
+                json!("private AI and routing need a live IronWire"),
             );
         }
         if let Some(Value::Object(list)) = all.get_mut(&format!("{set}/harness_list")) {
@@ -1405,6 +1385,14 @@ async fn drift_sample_data_matches_the_real_daemon() {
         let mut committed: Value =
             serde_json::from_str(&committed_text).unwrap_or_else(|e| panic!("{key}: {e}"));
         let mut actual = actual.clone();
+        // The samples are a default build's. A staging build's status adds
+        // its signed-pin and attestation labels, which a default build
+        // never sends.
+        #[cfg(feature = "near-ai-staging")]
+        if let Value::Object(map) = &mut actual {
+            map.remove("near_ai_pins");
+            map.remove("near_ai_attestation");
+        }
         for k in touched.unwrap_or(&[]) {
             for side in [&mut committed, &mut actual] {
                 if let Value::Object(map) = side {

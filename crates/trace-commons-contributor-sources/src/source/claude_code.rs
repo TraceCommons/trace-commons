@@ -59,15 +59,16 @@ use super::{
     real_file_within_root, session_hash,
 };
 
-/// The most raw bytes one merged group may hash and load.
+/// The most raw bytes one merged group may hash and load:
+/// [`super::MAX_SESSION_BYTES`], 512 MiB, shared with the Codex adapter and
+/// the daemon's preview admission cap.
 ///
-/// `MAX_TRACE_ENVELOPE_BYTES` is 16 MB *after* redaction and mapping, and
-/// the one measurement on record is 42 MB of raw session producing a 2.8 MB
-/// envelope -- roughly 15:1. Trusting that ratio would put the ceiling near
-/// 240 MB; it is a single observation, so this stays well under a quarter of
-/// it. Being conservative here is cheap and the failure it prevents is not:
-/// a group that overruns the envelope cap is refused as a whole, losing the
-/// entire conversation rather than a tail of it.
+/// It bounds what is read, not what can be sent. `MAX_TRACE_ENVELOPE_BYTES`
+/// is 256 MiB *after* redaction and mapping; at the measured median of
+/// about 3.4 raw bytes per envelope byte a group rarely builds an envelope
+/// over it. One that does is previewed with that warning, then refused
+/// locally at approval as `envelope-too-large`, as a whole. This budget no longer tries
+/// to keep groups under the envelope cap; it bounds the daemon's memory.
 ///
 /// When a group exceeds this, `load` drops its largest members until it
 /// fits. That decision is made in `load` -- never at send time -- so the
@@ -83,7 +84,7 @@ use super::{
 /// that grows between that stat and its read can overshoot by the amount it
 /// grew; the hash covers exactly the bytes that were read either way, so the
 /// consent invariant is untouched.
-pub const GROUP_RAW_BYTE_BUDGET: u64 = 64_000_000;
+pub const GROUP_RAW_BYTE_BUDGET: u64 = super::MAX_SESSION_BYTES;
 
 /// How far into a member file `peek_session_id` reads looking for a
 /// `sessionId`. Claude Code writes it on the first record; a bounded head
@@ -150,7 +151,7 @@ struct GroupMember {
 pub struct ClaudeCodeSource {
     root: PathBuf,
     /// The raw byte budget applied when merging a group, so a test can
-    /// exercise the drop path without writing 64 MB to disk. Production
+    /// exercise the drop path without writing 512 MiB to disk. Production
     /// always uses `GROUP_RAW_BYTE_BUDGET`.
     group_budget: u64,
 }
@@ -161,6 +162,80 @@ impl ClaudeCodeSource {
             root,
             group_budget: GROUP_RAW_BYTE_BUDGET,
         }
+    }
+
+    /// The exact conversation assigned by the managed launcher, including only
+    /// the delegated transcripts accepted by the ordinary group reader. This
+    /// deliberately never infers ownership from cwd, timestamps or new files.
+    pub fn managed_session_paths(&self, expected_id: &str) -> anyhow::Result<Vec<PathBuf>> {
+        let id = uuid::Uuid::parse_str(expected_id)
+            .map_err(|_| anyhow::anyhow!("managed Claude session identity invalid"))?;
+        anyhow::ensure!(
+            id.to_string() == expected_id,
+            "managed Claude session identity invalid"
+        );
+        let root_metadata = std::fs::symlink_metadata(&self.root)?;
+        anyhow::ensure!(
+            root_metadata.is_dir() && !root_metadata.file_type().is_symlink(),
+            "managed Claude transcript root invalid"
+        );
+        let name = format!("{expected_id}.jsonl");
+        let mut parent = None;
+        for entry in std::fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let candidate = entry.path().join(&name);
+            let metadata = match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            anyhow::ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "managed Claude transcript binding invalid"
+            );
+            let candidate = real_file_within_root(&self.root, &candidate)
+                .ok_or_else(|| anyhow::anyhow!("managed Claude transcript binding invalid"))?;
+            anyhow::ensure!(
+                parent.is_none(),
+                "managed Claude transcript binding ambiguous"
+            );
+            parent = Some(candidate);
+        }
+        let parent = parent.ok_or_else(|| anyhow::anyhow!("managed Claude transcript missing"))?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&parent)?
+            .take(self.group_budget.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= self.group_budget,
+            "managed Claude transcript exceeds budget"
+        );
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| anyhow::anyhow!("managed Claude transcript identity unreadable"))?;
+        let mut identified = false;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let record: Value = serde_json::from_str(line)
+                .map_err(|_| anyhow::anyhow!("managed Claude transcript identity unreadable"))?;
+            if let Some(recorded) = record.get("sessionId") {
+                anyhow::ensure!(
+                    recorded.as_str() == Some(expected_id),
+                    "managed Claude transcript identity disagrees"
+                );
+                identified = true;
+            }
+        }
+        anyhow::ensure!(identified, "managed Claude transcript identity missing");
+        let (members, _) = group_members_for(&parent);
+        let mut paths = vec![parent];
+        for member in members {
+            if let Some(path) = real_file_within_root(&self.root, &member.path) {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
     }
 
     #[cfg(test)]
@@ -211,6 +286,9 @@ impl TraceSource for ClaudeCodeSource {
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             return None;
         }
+        if in_usage_probe_project(&self.root, &path) {
+            return None;
+        }
         if let Some(parent) = parent_session_for_member(&path) {
             // The parent must itself be a real session file under the root.
             // A `subagents/` directory whose `<uuid>.jsonl` is missing is an
@@ -255,6 +333,35 @@ impl TraceSource for ClaudeCodeSource {
     }
 }
 
+/// The working-directory name of the Trace Commons app's own Claude usage
+/// probe. The app runs `claude` there, on a user-pressed Refresh, only to
+/// read the `/usage` screen. That session is not the contributor's work and
+/// must never be discovered, offered or uploaded, so every project directory
+/// Claude Code derives from this cwd is skipped here, in discovery and on the
+/// file-event path alike. The probe also runs with transcripts turned off and
+/// deletes anything it leaves; this is the backstop.
+pub const CLAUDE_USAGE_PROBE_DIR: &str = "tc-claude-usage-probe";
+
+/// Whether `name` is the project directory Claude Code derives from the
+/// probe's cwd. Claude Code turns every character outside `[0-9A-Za-z]` into
+/// `-`, so the probe's absolute path always ends `-tc-claude-usage-probe`.
+/// The probe refuses to run from a path long enough for Claude Code to
+/// truncate that suffix. Metadata only: no file is opened.
+fn is_usage_probe_project(name: &std::ffi::OsStr) -> bool {
+    name.to_str().is_some_and(|name| {
+        name.strip_suffix(CLAUDE_USAGE_PROBE_DIR)
+            .is_some_and(|head| head.ends_with('-'))
+    })
+}
+
+/// Whether `path` lies in the probe's project directory under `root`.
+fn in_usage_probe_project(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .is_some_and(|first| is_usage_probe_project(first.as_os_str()))
+}
+
 /// Whether discovery may open a session file to learn its cwd.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Peek {
@@ -284,7 +391,7 @@ impl ClaudeCodeSource {
                     continue;
                 }
             };
-            if !is_dir {
+            if !is_dir || is_usage_probe_project(&project_dir.file_name()) {
                 continue;
             }
             let discovery_project = discovery_project_label(&project_dir.file_name());
@@ -558,10 +665,29 @@ fn group_members_for(parent: &Path) -> (Vec<GroupMember>, usize) {
         Ok(md) if md.is_dir() => {}
         _ => return (members, excluded),
     }
-    let Ok(entries) = std::fs::read_dir(&subagents_dir) else {
+    let session_uuid = stem.to_string_lossy().into_owned();
+    let (found, skipped) = validated_members_in(&subagents_dir, &session_uuid, |_| true);
+    members.extend(found);
+    excluded += skipped;
+    members.sort_by_key(|m| file_name_bytes(&m.path));
+    (members, excluded)
+}
+
+/// The validated transcripts directly inside `dir` (one level, no descent):
+/// regular `.jsonl` files whose name `accept` takes, refusing symlinks,
+/// whose `sessionId` is `session_uuid` or absent; plus a count of the
+/// entries excluded. Unsorted. The membership rule `group_members_for`
+/// states, shared so the spawned-transcript listing cannot drift from it.
+fn validated_members_in(
+    dir: &Path,
+    session_uuid: &str,
+    accept: impl Fn(&Path) -> bool,
+) -> (Vec<GroupMember>, usize) {
+    let mut members = Vec::new();
+    let mut excluded = 0usize;
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return (members, excluded);
     };
-    let session_uuid = stem.to_string_lossy().into_owned();
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
@@ -571,7 +697,7 @@ fn group_members_for(parent: &Path) -> (Vec<GroupMember>, usize) {
             }
         };
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") || !accept(&path) {
             continue;
         }
         // Refuse symlinks, for the same reason and by the same test as the
@@ -615,9 +741,90 @@ fn group_members_for(parent: &Path) -> (Vec<GroupMember>, usize) {
             modified_at,
         });
     }
-    members.sort_by_key(|m| file_name_bytes(&m.path));
     (members, excluded)
 }
+
+/// How a spawned transcript was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SpawnedKind {
+    /// A sub-agent the session delegated to:
+    /// `<session-uuid>/subagents/<name>.jsonl`.
+    Agent,
+    /// A sub-agent a workflow the session ran started:
+    /// `<session-uuid>/subagents/workflows/<run>/agent-*.jsonl`.
+    Workflow,
+}
+
+/// One transcript a Claude session spawned, as found on disk. Never read
+/// here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedTranscript {
+    pub path: PathBuf,
+    pub kind: SpawnedKind,
+    pub size_bytes: u64,
+    pub modified_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Every transcript the top-level session file `parent` spawned: its
+/// delegated sub-agents (`subagents/*.jsonl`, the members
+/// `group_members_for` finds) and its workflows' sub-agents
+/// (`subagents/workflows/<run>/agent-*.jsonl`, not group members), by the
+/// same rules: symlinks refused, a `sessionId` other than the parent's
+/// excluded, absence included. Sub-agents first, then workflow ones, each
+/// by raw path bytes.
+///
+/// For Insights only (the counter pass reads each as its own sub-agent
+/// row). The upload group is `group_members_for`'s and is not widened by
+/// this: a workflow's sub-agents are not uploaded with the session.
+pub fn spawned_transcripts_for(parent: &Path) -> Vec<SpawnedTranscript> {
+    let mut out = Vec::new();
+    let (Some(stem), Some(subagents_dir)) = (parent.file_stem(), subagents_dir_for(parent)) else {
+        return out;
+    };
+    let real_dir = |dir: &Path| std::fs::symlink_metadata(dir).is_ok_and(|md| md.is_dir());
+    if !real_dir(&subagents_dir) {
+        return out;
+    }
+    let session_uuid = stem.to_string_lossy().into_owned();
+    let mut push = |found: Vec<GroupMember>, kind: SpawnedKind| {
+        let mut found = found;
+        found.sort_by(|a, b| {
+            a.path
+                .as_os_str()
+                .as_encoded_bytes()
+                .cmp(b.path.as_os_str().as_encoded_bytes())
+        });
+        out.extend(found.into_iter().map(|m| SpawnedTranscript {
+            path: m.path,
+            kind,
+            size_bytes: m.size_bytes,
+            modified_at: m.modified_at,
+        }));
+    };
+    let (agents, _) = validated_members_in(&subagents_dir, &session_uuid, |_| true);
+    push(agents, SpawnedKind::Agent);
+    let workflows = subagents_dir.join(WORKFLOWS_DIR_NAME);
+    let mut runs = Vec::new();
+    if real_dir(&workflows) {
+        if let Ok(entries) = std::fs::read_dir(&workflows) {
+            for entry in entries.flatten() {
+                // `DirEntry::file_type` does not follow a symlink.
+                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                    let (found, _) = validated_members_in(&entry.path(), &session_uuid, |path| {
+                        path.file_name()
+                            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"agent-"))
+                    });
+                    runs.extend(found);
+                }
+            }
+        }
+    }
+    push(runs, SpawnedKind::Workflow);
+    out
+}
+
+/// The directory under `subagents/` a workflow's runs are written into.
+const WORKFLOWS_DIR_NAME: &str = "workflows";
 
 /// A path's file name as raw bytes, for an ordering that cannot depend on
 /// locale or Unicode normalization.
@@ -1500,6 +1707,131 @@ mod tests {
     use crate::source::{SessionEventKind, TraceSource};
     use std::path::PathBuf;
 
+    fn managed_fixture_parent(
+        root: &Path,
+        project: &str,
+        id: &str,
+        recorded_id: Option<&str>,
+    ) -> PathBuf {
+        let project = root.join(project);
+        std::fs::create_dir_all(&project).unwrap();
+        let parent = project.join(format!("{id}.jsonl"));
+        let mut record = json!({"type":"user","cwd":"/same/project","message":{"role":"user","content":"managed prompt"}});
+        if let Some(recorded_id) = recorded_id {
+            record["sessionId"] = recorded_id.into();
+        }
+        std::fs::write(&parent, format!("{record}\n")).unwrap();
+        parent
+    }
+
+    #[test]
+    fn managed_paths_bind_one_concurrent_parent_and_only_its_validated_children() {
+        let root = tempfile::tempdir().unwrap();
+        let own = "11111111-1111-4111-8111-111111111111";
+        let other = "22222222-2222-4222-8222-222222222222";
+        let parent = managed_fixture_parent(root.path(), "same-project", own, Some(own));
+        let unrelated = managed_fixture_parent(root.path(), "same-project", other, Some(other));
+        let members = parent.parent().unwrap().join(own).join("subagents");
+        std::fs::create_dir_all(&members).unwrap();
+        let child = members.join("agent-owned.jsonl");
+        std::fs::write(&child, format!("{{\"type\":\"user\",\"sessionId\":\"{own}\",\"message\":{{\"role\":\"user\",\"content\":\"delegated\"}}}}\n")).unwrap();
+        let foreign = members.join("agent-foreign.jsonl");
+        std::fs::write(&foreign, format!("{{\"sessionId\":\"{other}\"}}\n")).unwrap();
+        let source = ClaudeCodeSource::new(root.path().into());
+        assert_eq!(
+            source.managed_session_paths(own).unwrap(),
+            [parent.clone(), child]
+        );
+        assert_eq!(source.managed_session_paths(other).unwrap(), [unrelated]);
+        assert_eq!(
+            source
+                .load(
+                    &source
+                        .discover()
+                        .unwrap()
+                        .into_iter()
+                        .find(|session| session.path == parent)
+                        .unwrap()
+                )
+                .unwrap()
+                .source_session
+                .unwrap()
+                .native_id,
+            own
+        );
+    }
+
+    #[test]
+    fn managed_paths_refuse_missing_mismatched_and_ambiguous_parent_bindings() {
+        let own = "11111111-1111-4111-8111-111111111111";
+        let other = "22222222-2222-4222-8222-222222222222";
+        let root = tempfile::tempdir().unwrap();
+        let source = ClaudeCodeSource::new(root.path().into());
+        assert!(source.managed_session_paths(own).is_err());
+        assert!(source.managed_session_paths("../not-a-uuid").is_err());
+        let parent = managed_fixture_parent(root.path(), "project-a", own, None);
+        assert!(source.managed_session_paths(own).is_err());
+        managed_fixture_parent(root.path(), "project-a", own, Some(other));
+        assert!(source.managed_session_paths(own).is_err());
+        managed_fixture_parent(root.path(), "project-a", own, Some(own));
+        use std::io::Write;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&parent)
+                .unwrap(),
+            "{{\"sessionId\":\"{other}\"}}"
+        )
+        .unwrap();
+        assert!(source.managed_session_paths(own).is_err());
+        managed_fixture_parent(root.path(), "project-a", own, Some(own));
+        managed_fixture_parent(root.path(), "project-b", own, Some(own));
+        assert!(source.managed_session_paths(own).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_paths_refuse_symlinked_root_project_parent_and_children() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("projects");
+        std::fs::create_dir(&root).unwrap();
+        let own = "11111111-1111-4111-8111-111111111111";
+        let parent = managed_fixture_parent(&root, "project", own, Some(own));
+        let source = ClaudeCodeSource::new(root.clone());
+        let linked_root = home.path().join("linked-root");
+        symlink(&root, &linked_root).unwrap();
+        assert!(
+            ClaudeCodeSource::new(linked_root)
+                .managed_session_paths(own)
+                .is_err()
+        );
+        let members = parent.parent().unwrap().join(own).join("subagents");
+        std::fs::create_dir_all(&members).unwrap();
+        symlink(&parent, members.join("agent-link.jsonl")).unwrap();
+        assert_eq!(
+            source.managed_session_paths(own).unwrap().as_slice(),
+            std::slice::from_ref(&parent)
+        );
+        let linked_parent = parent.with_extension("original");
+        std::fs::rename(&parent, &linked_parent).unwrap();
+        symlink(&linked_parent, &parent).unwrap();
+        assert!(source.managed_session_paths(own).is_err());
+        let outside = tempfile::tempdir().unwrap();
+        managed_fixture_parent(outside.path(), "project", own, Some(own));
+        let second_root = tempfile::tempdir().unwrap();
+        symlink(
+            outside.path().join("project"),
+            second_root.path().join("project"),
+        )
+        .unwrap();
+        assert!(
+            ClaudeCodeSource::new(second_root.path().into())
+                .managed_session_paths(own)
+                .is_err()
+        );
+    }
+
     fn fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1555,6 +1887,65 @@ mod tests {
                 "no path in the error"
             );
         }
+    }
+
+    #[test]
+    fn the_apps_usage_probe_session_is_never_discovered() {
+        let root = tempfile::tempdir().unwrap();
+        let line = "{\"type\":\"user\",\"cwd\":\"/x\",\"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n";
+        let real = root.path().join("-Users-testuser-code-myproj");
+        let probe = root
+            .path()
+            .join("-private-var-folders-ab-T-tc-claude-usage-probe");
+        for dir in [&real, &probe] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("11111111-1111-1111-1111-111111111111.jsonl"), line).unwrap();
+        }
+        let source = ClaudeCodeSource::new(root.path().into());
+        let found = source.discover().unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].path.starts_with(&real));
+        assert!(
+            source
+                .discover_unopened()
+                .unwrap()
+                .iter()
+                .all(|r| r.path.starts_with(&real))
+        );
+
+        // The file-event path refuses it too, as does a subagent under it.
+        let probe_session = probe.join("11111111-1111-1111-1111-111111111111.jsonl");
+        assert_eq!(source.session_for_path(&probe_session), None);
+        assert!(source.session_at(&probe_session).unwrap().is_none());
+        let member = probe
+            .join("11111111-1111-1111-1111-111111111111")
+            .join("subagents");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(member.join("agent-a.jsonl"), line).unwrap();
+        assert_eq!(source.session_for_path(&member.join("agent-a.jsonl")), None);
+        assert!(
+            source
+                .session_for_path(&real.join("11111111-1111-1111-1111-111111111111.jsonl"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn only_the_exact_probe_suffix_is_excluded() {
+        use std::ffi::OsStr;
+        assert!(is_usage_probe_project(OsStr::new(
+            "-tmp-tc-claude-usage-probe"
+        )));
+        assert!(!is_usage_probe_project(OsStr::new("tc-claude-usage-probe")));
+        assert!(!is_usage_probe_project(OsStr::new(
+            "-tmp-xtc-claude-usage-probe-2"
+        )));
+        assert!(!is_usage_probe_project(OsStr::new(
+            "-tmp-mytc-claude-usage-probex"
+        )));
+        assert!(!is_usage_probe_project(OsStr::new(
+            "-Users-me-code-claude-usage-probe"
+        )));
     }
 
     #[test]
@@ -2070,6 +2461,165 @@ mod tests {
             }
         }
         (root, parent)
+    }
+
+    /// A group over the old 64 MB budget now loads whole: a 100 MB parent
+    /// keeps its delegated transcript, which the old budget would have
+    /// dropped to fit, and discovery sizes the ref as the whole group.
+    #[test]
+    fn a_group_over_the_old_64_mb_budget_loads_whole() {
+        use std::io::Write;
+        let (root, parent) = group_fixture(&[("agent-a.jsonl", "delegated")]);
+        let session = "22222222-2222-2222-2222-222222222222";
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let turn: String = (0..4 * 1024 * 1024)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (b'a' + (state % 26) as u8) as char
+            })
+            .collect();
+        let line = record(session, &turn);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&parent)
+            .unwrap();
+        let mut written = 0usize;
+        while written < 100_000_000 {
+            file.write_all(line.as_bytes()).unwrap();
+            written += line.len();
+        }
+        drop(file);
+
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        let found = source.discover().unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].size_bytes > 64 * 1024 * 1024);
+        assert!(found[0].size_bytes < super::super::MAX_SESSION_BYTES);
+        let t = source.load(&found[0]).expect("a 100 MB group loads");
+        assert_eq!(t.subagent_count, 1);
+        assert_eq!(t.subagents_dropped, 0, "nothing is trimmed to fit");
+        assert!(
+            t.events
+                .iter()
+                .any(|e| e.content.as_deref() == Some("delegated"))
+        );
+    }
+
+    /// Places a workflow sub-agent transcript, and the workflow's journal,
+    /// under `parent`'s `subagents/workflows/<run>/`.
+    fn add_workflow_member(parent: &Path, run: &str, name: &str, session: &str) -> PathBuf {
+        let dir = subagents_dir_for(parent)
+            .unwrap()
+            .join("workflows")
+            .join(run);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("journal.jsonl"), "{}\n").unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, record(session, "workflow turn")).unwrap();
+        path
+    }
+
+    #[test]
+    fn spawned_transcripts_include_workflow_sub_agents_that_the_group_leaves_out() {
+        let session = "22222222-2222-2222-2222-222222222222";
+        let (_root, parent) = group_fixture(&[("agent-a.jsonl", "a"), ("agent-b.jsonl", "b")]);
+        let workflow = add_workflow_member(&parent, "run-1", "agent-w.jsonl", session);
+        // Another session's transcript planted in this one's workflows.
+        add_workflow_member(
+            &parent,
+            "run-2",
+            "agent-x.jsonl",
+            "33333333-3333-3333-3333-333333333333",
+        );
+
+        // The upload group is unchanged: flat members only.
+        let (members, excluded) = group_members_for(&parent);
+        assert_eq!(members.len(), 2);
+        assert_eq!(excluded, 0);
+
+        let spawned = spawned_transcripts_for(&parent);
+        let kinds: Vec<(SpawnedKind, String)> = spawned
+            .iter()
+            .map(|t| {
+                (
+                    t.kind,
+                    t.path.file_name().unwrap().to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (SpawnedKind::Agent, "agent-a.jsonl".to_string()),
+                (SpawnedKind::Agent, "agent-b.jsonl".to_string()),
+                (SpawnedKind::Workflow, "agent-w.jsonl".to_string()),
+            ]
+        );
+        let w = spawned.iter().find(|t| t.path == workflow).unwrap();
+        assert_eq!(w.size_bytes, std::fs::metadata(&workflow).unwrap().len());
+        assert!(w.modified_at.is_some());
+    }
+
+    /// Uploads are untouched by Insights reading workflow sub-agents: a
+    /// `workflows/` directory changes neither the discovered ref (size,
+    /// member count) nor the loaded group's hash, so queue entry and
+    /// submission ids, and any approval keyed on them, stay the same.
+    #[test]
+    fn a_workflow_directory_changes_neither_the_offered_group_nor_its_hash() {
+        let session = "22222222-2222-2222-2222-222222222222";
+        let (root, parent) = group_fixture(&[("agent-a.jsonl", "a")]);
+        let source = ClaudeCodeSource::new(root.path().to_path_buf());
+        let before = source.discover().unwrap();
+        let hash_before = load_group(&parent, GROUP_RAW_BYTE_BUDGET)
+            .unwrap()
+            .session_hash;
+        // Keep the parent's mtime from moving the ref.
+        add_workflow_member(&parent, "run-1", "agent-w.jsonl", session);
+        let after = source.discover().unwrap();
+        let hash_after = load_group(&parent, GROUP_RAW_BYTE_BUDGET)
+            .unwrap()
+            .session_hash;
+        assert_eq!(before.len(), 1);
+        assert_eq!(after.len(), 1, "a workflow transcript is never its own ref");
+        assert_eq!(after[0].group_member_count, before[0].group_member_count);
+        assert_eq!(after[0].size_bytes, before[0].size_bytes);
+        assert_eq!(after[0].path, before[0].path);
+        assert_eq!(hash_after, hash_before);
+        assert_eq!(spawned_transcripts_for(&parent).len(), 2);
+    }
+
+    #[test]
+    fn spawned_transcripts_of_a_session_with_none_are_empty() {
+        let (_root, parent) = group_fixture(&[]);
+        assert!(spawned_transcripts_for(&parent).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawned_transcripts_refuse_symlinks() {
+        use std::os::unix::fs::symlink;
+        let session = "22222222-2222-2222-2222-222222222222";
+        let (_root, parent) = group_fixture(&[("agent-a.jsonl", "a")]);
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("agent-o.jsonl"), record(session, "o")).unwrap();
+        let workflows = subagents_dir_for(&parent).unwrap().join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        // A symlinked run directory, and a symlinked transcript.
+        symlink(outside.path(), workflows.join("run-link")).unwrap();
+        let run = workflows.join("run-1");
+        std::fs::create_dir_all(&run).unwrap();
+        symlink(
+            outside.path().join("agent-o.jsonl"),
+            run.join("agent-l.jsonl"),
+        )
+        .unwrap();
+        let names: Vec<String> = spawned_transcripts_for(&parent)
+            .iter()
+            .map(|t| t.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["agent-a.jsonl".to_string()]);
     }
 
     #[test]

@@ -194,8 +194,18 @@ public static class InsightsAnalyticsWords
         share is null ? Dash(copy) : ((share.Permille + 5) / 10).ToString(CultureInfo.CurrentCulture);
 
     public static string CoverageLine(Func<string, string?> copy, AnalyticsCoverage coverage) =>
-        Fill(Text(copy, "analytics_coverage_line"), ("k", Count(coverage.Known)), ("n", Count(coverage.Sessions)),
-            ("p", Count(coverage.Partial)), ("u", Count(coverage.Unknown)));
+        Fill(Text(copy, "analytics_coverage_line"), ("n", Count(coverage.Sessions)));
+
+    /// <summary>What is known of the traces: one sentence per count that is not 0 (full details, some
+    /// missing, none), or null with none. This shell has no "i", so it is a note under the count.</summary>
+    public static string? CoverageInfo(Func<string, string?> copy, AnalyticsCoverage coverage)
+    {
+        var sentences = new List<string>();
+        if (coverage.Known > 0) sentences.Add(Fill(Text(copy, "analytics_coverage_info_known"), ("k", Count(coverage.Known))));
+        if (coverage.Partial > 0) sentences.Add(Fill(Text(copy, "analytics_coverage_info_partial"), ("p", Count(coverage.Partial))));
+        if (coverage.Unknown > 0) sentences.Add(Fill(Text(copy, "analytics_coverage_info_unknown"), ("u", Count(coverage.Unknown))));
+        return sentences.Count == 0 ? null : string.Join(" ", sentences);
+    }
 
     /// <summary>Which feed is showing. Feed S also says that weeks are not compared.</summary>
     public static IReadOnlyList<string> FeedLines(Func<string, string?> copy, string feed) => feed switch {

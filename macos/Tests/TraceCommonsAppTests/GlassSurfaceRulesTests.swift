@@ -35,7 +35,6 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/FirstRun/RulesScreen.swift",
         "Views/FirstRun/UsesScreen.swift",
         "Views/FirstRun/SharingDisclosures.swift",
-        "Views/FirstRun/PasskeySheets.swift",
         "Views/OnboardingCoordinatorView.swift",
         "Views/Monitor/FirstRunViews.swift",
         "Views/ComputeView.swift",
@@ -62,12 +61,6 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/MonitorWindowView.swift",
         "Views/Monitor/FirstRunViews.swift",
         "Views/InsightsView.swift",
-        "Views/InsightsSummaryView.swift",
-        "Views/InsightsEpisodesView.swift",
-        "Views/InsightCardsView.swift",
-        "Views/InsightEvidenceView.swift",
-        "Views/ComparisonTasksView.swift",
-        "Views/ComparisonSpecificationsView.swift",
         "Views/MissionDraftsView.swift",
         // Ron's inspector host and its prompts (#1146, Task 3 of #1241).
         "Views/Monitor/TracesInspectorHost.swift",
@@ -85,6 +78,12 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/Monitor/SettingsModal.swift",
         // Every notice as a popover over its tab (owner, 2026-10-19).
         "Views/Monitor/MonitorNotices.swift",
+        // The animated first run (Ron's 2026-10-21 canvas): its stage and
+        // the steps it added.
+        "Views/FirstRun/FirstRunStage.swift",
+        "Views/FirstRun/WelcomeScreen.swift",
+        "Views/FirstRun/TracesScreen.swift",
+        "Views/FirstRun/PrivateAIScreen.swift",
     ]
 
     static func text(_ rel: String) throws -> String {

@@ -1093,7 +1093,10 @@ Settings are written in Swift (`MainWindowView.Section.subtitle`) and leave
 with the shipping window (plan Phase 4 Task 11). Compute's and Private AI's
 are core copy (`ComputeCopy.subtitle`, `PrivateInferenceCopy.subtitle`),
 but nothing outside `MainWindowView` draws them. Whether any of these
-sentences returns in the monitor, from the core, is open.
+sentences returns in the monitor, from the core, is open, except Private
+AI's: the owner put `PrivateInferenceCopy.subtitle` back under the Status
+row of the Private AI inspector summary on 2026-10-27 (#1674). The main
+pane still draws none.
 
 **Keyboard shortcuts.** `main`'s ⌘1–⌘7 select `MainWindowView`'s seven
 sidebar destinations, and the monitor window has no tab shortcuts. Whether

@@ -1,0 +1,23 @@
+[Unit]
+Description=Renew the staging earned-upload-trust worker credential
+After=network-online.target trace-commons-upload-claim-issuer.service
+Wants=network-online.target
+ConditionPathExists=/etc/tracecommons/client-upload-trust.env
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /usr/local/sbin/tc-staging-upload-trust-rotate
+TimeoutStartSec=300
+UMask=0077
+RuntimeDirectory=tc-upload-trust-rotation
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/etc/tracecommons /run/tc-upload-trust-rotation
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

@@ -677,7 +677,7 @@ public class PrivateInferenceTests
     [InlineData(
         "MainViewModel.cs.txt",
         "// --- The offer to answer model calls on this computer",
-        "// --- The daily-budget banner")]
+        "// Approved sessions held because the privacy witness is busy.")]
     [InlineData(
         "ContributorSettingsViewModel.cs.txt",
         "// Answering model calls on this computer. The switch, the exposure",

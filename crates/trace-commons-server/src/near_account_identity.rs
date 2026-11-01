@@ -204,6 +204,20 @@ impl NearAccountIndexPepper {
         format!("sha256:{}", hex::encode(self.login_index(subject_id)))
     }
 
+    /// `HMAC-SHA256(pepper, domain || framed(fields...))` as `sha256:` + hex,
+    /// each field length-prefixed. For the payout labels in
+    /// `payout_recipient_seal`, each of which brings its own domain, so none
+    /// can equal a wallet or login anchor.
+    fn keyed_label(&self, domain: &[u8], fields: &[&[u8]]) -> String {
+        let mut ctx = hmac::Context::with_key(&self.key);
+        ctx.update(domain);
+        for field in fields {
+            ctx.update(&(field.len() as u64).to_le_bytes());
+            ctx.update(field);
+        }
+        format!("sha256:{}", hex::encode(ctx.sign().as_ref()))
+    }
+
     /// The blind index as stored in `trace_near_account_anchors.anchor_hash`.
     ///
     /// The `sha256:` prefix is retained deliberately. The value is an
@@ -352,6 +366,31 @@ impl NearAccountIdentity {
         let dek = generate_dek();
         let wrapped_dek = self.kek.wrap_dek(&dek, &Self::context(&index_label))?;
         let ciphertext = aead_encrypt_with_dek(&dek, subject_id.as_bytes())?;
+        Ok(SealedNearAccountName {
+            schema_version: SEALED_NEAR_ACCOUNT_NAME_SCHEMA_V1.into(),
+            wrapped_dek,
+            ciphertext_base64: STANDARD.encode(ciphertext),
+        })
+    }
+
+    /// A keyed label under a caller's own `domain` (payout recipients,
+    /// subjects and link handles). The domain keeps it apart from
+    /// [`Self::index_label`] and [`Self::login_index_label`].
+    pub(crate) fn keyed_label(&self, domain: &[u8], fields: &[&[u8]]) -> String {
+        self.pepper.keyed_label(domain, fields)
+    }
+
+    /// Seal `plaintext` bound to `index_label`, which the caller derived
+    /// under its own domain with [`Self::keyed_label`]. [`Self::open`] with
+    /// the same label recovers it; under any other label the unwrap fails.
+    pub(crate) fn seal_bound_to(
+        &self,
+        index_label: &str,
+        plaintext: &str,
+    ) -> anyhow::Result<SealedNearAccountName> {
+        let dek = generate_dek();
+        let wrapped_dek = self.kek.wrap_dek(&dek, &Self::context(index_label))?;
+        let ciphertext = aead_encrypt_with_dek(&dek, plaintext.as_bytes())?;
         Ok(SealedNearAccountName {
             schema_version: SEALED_NEAR_ACCOUNT_NAME_SCHEMA_V1.into(),
             wrapped_dek,

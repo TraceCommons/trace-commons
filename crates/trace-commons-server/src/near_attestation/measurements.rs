@@ -271,7 +271,12 @@ mod tests {
         // Not a gate -- reporting only. On an honest endpoint there is nothing
         // to report, which is what makes a non-empty result meaningful.
         let v = verified();
-        let anomalies = json_claim_anomalies(&fixture_report().unverified_json_measurements(), &v);
+        let anomalies = json_claim_anomalies(
+            &fixture_report()
+                .unverified_json_measurements()
+                .expect("the fixture claims its registers"),
+            &v,
+        );
         assert!(anomalies.is_empty(), "{anomalies:?}");
     }
 
@@ -281,7 +286,9 @@ mod tests {
         // surfacing. It must not be able to affect whether the quote is
         // accepted, which is the whole reason pinning consumes VerifiedQuote.
         let v = verified();
-        let mut claim = fixture_report().unverified_json_measurements();
+        let mut claim = fixture_report()
+            .unverified_json_measurements()
+            .expect("the fixture claims its registers");
         claim.rtmr1 = "c".repeat(96);
         assert_ne!(claim.rtmr1, v.rtmr[1], "the lie must actually differ");
 
@@ -319,7 +326,9 @@ mod tests {
             "the field must be in ALL, or this test proves nothing"
         );
         let v = verified();
-        let mut claim = fixture_report().unverified_json_measurements();
+        let mut claim = fixture_report()
+            .unverified_json_measurements()
+            .expect("the fixture claims its registers");
         claim.mrtd = "1".repeat(96);
         claim.rtmr0 = "2".repeat(96);
         claim.rtmr1 = "3".repeat(96);
@@ -417,7 +426,9 @@ mod tests {
         // stopped at the first disagreement, or that read the wrong register
         // from the claim, would still pass the single-lie test above.
         let v = verified();
-        let mut claim = fixture_report().unverified_json_measurements();
+        let mut claim = fixture_report()
+            .unverified_json_measurements()
+            .expect("the fixture claims its registers");
         claim.mrtd = "d".repeat(96);
         claim.rtmr3 = "e".repeat(96);
 

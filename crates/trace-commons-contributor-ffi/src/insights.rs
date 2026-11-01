@@ -51,11 +51,11 @@ pub extern "C" fn tc_insights_copy_json() -> *mut c_char {
 /// session's series is `null` with `series_unavailable: "not_recorded"`. An
 /// unknown snapshot is `insights_not_found`. No path, digest or what-if.
 /// Feed T comparisons: `{"type":"comparisons","counter_weeks":[...],
-/// "week_start":"2026-10-05","tz":3600,"recap_card_enabled":true}` marks each
-/// goal over the daemon's `insights_week` `history`, passed through
-/// unchanged, and returns the lever of the week and the weekly summary card;
-/// without `counter_weeks` nothing is compared. `goal_set` (`goal`, optional
-/// `id`), `goal_delete` (`id`), `lever_feedback` (`kind`, `week_start`,
+/// "week_start":"2026-10-05","tz":3600,"recap_card_enabled":true}` reads the
+/// daemon's `insights_week` `history`, passed through unchanged, and returns
+/// the lever of the week and the weekly summary card; without
+/// `counter_weeks` nothing is compared. Goals are the daemon's
+/// (`insights_week`'s `goals`). `lever_feedback` (`kind`, `week_start`,
 /// optional `action`: `not_useful` or `reenable`) and `recap_opened`
 /// (`week_start`) store rule IDs and Monday dates only. `lever_card`
 /// (`enabled`) is the Settings switch for the lever's card; on, it turns
@@ -517,25 +517,23 @@ mod tests {
     }
 
     #[test]
-    fn goals_and_comparisons_cross_the_abi() {
+    fn comparisons_cross_the_abi_and_threshold_goals_are_gone() {
         let temp = tempfile::tempdir().unwrap();
         let store = temp.path().join("insights");
         let compared = json_call(&store, serde_json::json!({"type":"comparisons","tz":0})).unwrap();
         assert_eq!(compared["type"], "comparisons");
         assert_eq!(compared["comparisons"]["feed"], "saved");
         assert!(!store.exists());
-        let set = json_call(
-            &store,
-            serde_json::json!({"type":"goal_set","goal":{"kind":"repeated_reads_under","tokens":50000}}),
-        )
-        .unwrap();
-        let id = set["state"]["goals"][0]["id"].clone();
-        let compared = json_call(&store, serde_json::json!({"type":"comparisons","tz":0})).unwrap();
-        assert_eq!(compared["comparisons"]["goals"][0]["id"], id);
-        assert_eq!(
-            compared["comparisons"]["goals"][0]["unavailable"],
-            "needs_counter_pass"
-        );
+        assert!(compared["comparisons"].get("goals").is_none());
+        for retired in [
+            serde_json::json!({"type":"goal_set","goal":{"kind":"weekly_tokens_under","source":"claude_code","tokens":50000}}),
+            serde_json::json!({"type":"goal_delete","id":"goal-1"}),
+        ] {
+            assert_eq!(
+                json_call(&store, retired).unwrap_err(),
+                "insights-request-invalid"
+            );
+        }
         assert_eq!(
             json_call(
                 &store,
@@ -544,8 +542,6 @@ mod tests {
             .unwrap_err(),
             "insights_week_invalid"
         );
-        let deleted = json_call(&store, serde_json::json!({"type":"goal_delete","id":id})).unwrap();
-        assert_eq!(deleted["state"]["goals"], serde_json::json!([]));
     }
 
     #[test]

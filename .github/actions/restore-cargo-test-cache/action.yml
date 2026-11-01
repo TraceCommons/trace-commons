@@ -1,0 +1,69 @@
+name: Restore a cargo test job's target cache
+description: >-
+  Restores `target` and the cargo registry for one of the `cargo test`
+  jobs, under a key built here and nowhere else, and warns when nothing at
+  all was restored. Pair it with ./.github/actions/trim-cargo-cache and an
+  actions/cache/save@v5 step keyed on this action's `cache-primary-key`
+  output, run on a push to main only.
+#
+# Why one action. `cargo test (default features)`, `staging channel tests`
+# and `wallet SDK and production CSP` each restore a cache. Written out per
+# job, the key was three hand copies of one string, and a copy that drifted
+# would restore nothing and rebuild cold while still looking green -- the
+# trim action's header records that "a key that nothing restores looks
+# exactly like success". Here the key's shape is written once, and an empty
+# restore is a visible warning on the run.
+#
+# Keys. `Linux-<key-prefix>-<Cargo.lock hash>`, falling back to the newest
+# `Linux-<key-prefix>-` entry and then, when `fallback-prefix` is set, to the
+# newest `Linux-<fallback-prefix>-` entry. The split jobs fall back to
+# `cargo-test-default`, whose third-party graph they mostly share, so a
+# split job whose own cache was evicted still starts warm.
+#
+# A cold start is not an error: a new Cargo.lock on a branch, or an
+# eviction, legitimately restores nothing. So this warns rather than fails.
+inputs:
+  key-prefix:
+    description: The job's own cache key prefix, e.g. `cargo-test-default`.
+    required: true
+  fallback-prefix:
+    description: Another job's key prefix to fall back to. Optional.
+    required: false
+    default: ''
+outputs:
+  cache-hit:
+    description: Whether the exact primary key was restored.
+    value: ${{ steps.restore.outputs.cache-hit }}
+  cache-primary-key:
+    description: The primary key; what the job's save step saves under.
+    value: ${{ steps.restore.outputs.cache-primary-key }}
+  cache-matched-key:
+    description: The key actually restored, empty when nothing was.
+    value: ${{ steps.restore.outputs.cache-matched-key }}
+runs:
+  using: composite
+  steps:
+    - id: restore
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: ${{ runner.os }}-${{ inputs.key-prefix }}-${{ hashFiles('**/Cargo.lock') }}
+        # actions/cache drops empty lines, so an unset fallback adds nothing.
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.key-prefix }}-
+          ${{ inputs.fallback-prefix != '' && format('{0}-{1}-', runner.os, inputs.fallback-prefix) || '' }}
+    - name: Report what was restored
+      shell: bash
+      env:
+        MATCHED: ${{ steps.restore.outputs.cache-matched-key }}
+        PRIMARY: ${{ steps.restore.outputs.cache-primary-key }}
+      run: |
+        if [ -z "$MATCHED" ]; then
+          echo "::warning title=cargo cache::No cache restored for ${PRIMARY}; this run builds cold."
+        else
+          echo "Restored ${MATCHED} (primary key ${PRIMARY})"
+        fi

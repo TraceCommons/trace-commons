@@ -120,6 +120,12 @@ pub(crate) fn record_change_after_migration(dir: &std::path::Path) {
     record_change(dir);
 }
 
+/// A switch of spending organization published a new key. Same ordering rule
+/// as [`record_change`]: called only after the settings document is written.
+pub(crate) fn record_credential_change(dir: &std::path::Path) {
+    record_change(dir);
+}
+
 #[cfg(test)]
 pub(crate) fn record_change_for_test(dir: &std::path::Path) {
     record_change(dir);
@@ -197,7 +203,7 @@ fn ceremony_runtime() -> Result<&'static tokio::runtime::Runtime> {
 /// It is unique per attempt because the service answers `409` on a duplicate
 /// name within a workspace, and a contributor who re-runs the ceremony after
 /// losing a key must not be blocked by the name of the one they lost.
-fn key_name(attempt_id: &str) -> String {
+pub(super) fn key_name(attempt_id: &str) -> String {
     let suffix: String = attempt_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -216,6 +222,11 @@ enum BrowserSignIn {
 
 impl BrowserSignIn {
     async fn prepare(api: &CloudApi, provider: &str) -> Result<(String, Self)> {
+        // Only what this build offers (`channel::NEAR_AI_SIGN_IN_PROVIDERS`):
+        // a staging build has no NEAR wallet ceremony to begin.
+        if !crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&provider) {
+            bail!("near_ai_credential_provider_unknown")
+        }
         if provider == "near" {
             let (url, listener) = near_wallet_loopback::bind().await?;
             return Ok((url, Self::Near(listener)));
@@ -325,8 +336,19 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
                 sign_in.finish(&api, |session, expires_at, user_agent| async move {
                     // A fresh client, on this runtime: never a connection pool
                     // attached to the reactor the caller may already have dropped.
+                    // A remembered spending organization is preferred when the
+                    // account still has it, so signing in again lands where the
+                    // contributor chose. The listing is the one the mint already
+                    // makes: no extra call, and no new way for a sign-in to fail.
+                    let preferred = ConfigStore::open(finished_dir.to_path_buf())
+                        .ok()
+                        .and_then(|store| super::spend_org::chosen_organization(&store));
+                    let choice = match preferred.as_deref() {
+                        Some(preferred) => super::api::OrganizationChoice::Prefer(preferred),
+                        None => super::api::OrganizationChoice::FirstActive,
+                    };
                     let minted = api_ref
-                        .mint_inference_key(&session, &key_name(finished_id))
+                        .mint_inference_key_in(&session, &key_name(finished_id), choice)
                         .await?;
                     // The session is kept, not dropped. Inference does not need it --
                     // the key above is non-expiring and self-sufficient -- but the
@@ -622,6 +644,12 @@ pub fn forget(store: &ConfigStore) -> Result<bool> {
 pub(super) fn forget_locked(store: &ConfigStore) -> Result<bool> {
     cancel_locked(store.dir(), None);
     let had = crate::daemon::cloud_credential_lifecycle::forget_locked(store)?;
+    // The spending-organization record goes with the session it needs.
+    super::spend_org::clear_locked(store);
+    // And so does what was kept about its credit.
+    super::arrivals::clear_locked(store);
+    // And the payout org names read with it.
+    crate::daemon::payout_link::clear_org_names_locked(store);
     if had {
         // Reconciliation also adopts the session. Only an inference-key
         // change advances the proxy generation there.
@@ -653,7 +681,7 @@ mod tests {
         // the whole document back, so a read-modify-write that read the wrong
         // copy would revert it.
         let mut settings = DaemonSettings::load_with_cloud_credentials(&store).unwrap();
-        settings.max_uploads_per_day = 7;
+        settings.max_reuploads = 7;
         settings.save_for_test(&store).unwrap();
 
         persist(
@@ -664,7 +692,7 @@ mod tests {
         )
         .unwrap();
         let stored = DaemonSettings::load_with_cloud_credentials(&store).unwrap();
-        assert_eq!(stored.max_uploads_per_day, 7);
+        assert_eq!(stored.max_reuploads, 7);
         let credential = stored.near_ai_inference.unwrap();
         assert_eq!(credential.key, "sk-minted-secret");
         assert_eq!(credential.key_id, "key-1");
@@ -712,7 +740,7 @@ mod tests {
     #[tokio::test]
     async fn a_caller_that_cannot_name_the_attempt_can_still_cancel_it() {
         let (dir, store) = temp_store();
-        let started = begin(&store, "github").await.unwrap();
+        let started = begin(&store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
         assert_eq!(attempt_status(dir.path()), Some("waiting_for_browser"));
 
@@ -733,7 +761,7 @@ mod tests {
     #[tokio::test]
     async fn naming_an_attempt_this_directory_is_not_running_is_still_refused() {
         let (dir, store) = temp_store();
-        let started = begin(&store, "github").await.unwrap();
+        let started = begin(&store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
 
         assert!(cancel(dir.path(), Some("some-other-attempt")).is_none());
@@ -764,7 +792,7 @@ mod tests {
     #[tokio::test]
     async fn an_unnamed_cancel_after_the_attempt_finished_finds_nothing() {
         let (dir, store) = temp_store();
-        let started = begin(&store, "github").await.unwrap();
+        let started = begin(&store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
         assert_eq!(
             cancel(dir.path(), Some(&attempt_id)).map(|s| s.status),
@@ -786,13 +814,17 @@ mod tests {
     #[tokio::test]
     async fn one_ceremony_at_a_time_per_directory_and_a_cancel_frees_it() {
         let (dir, store) = temp_store();
-        let started = begin(&store, "github").await.unwrap();
+        let started = begin(&store, "google").await.unwrap();
         let attempt_id = started["attempt_id"].as_str().unwrap().to_string();
         assert_eq!(started["status"], "waiting_for_browser");
 
         // The URL sends the browser at the pinned service and names a
         // loopback callback this process is already listening on.
         let url = reqwest::Url::parse(started["browser_url"].as_str().unwrap()).unwrap();
+        let pinned =
+            reqwest::Url::parse(crate::daemon::nearai_credential::api::CLOUD_API_ORIGIN).unwrap();
+        assert_eq!(url.host_str(), pinned.host_str());
+        #[cfg(not(feature = "near-ai-staging"))]
         assert_eq!(url.host_str(), Some("cloud-api.near.ai"));
         let callback = url
             .query_pairs()
@@ -816,7 +848,7 @@ mod tests {
         // A second attempt in the same directory is refused rather than
         // evicting the first, whose listener is still holding a port.
         assert_eq!(
-            begin(&store, "github").await.unwrap_err().to_string(),
+            begin(&store, "google").await.unwrap_err().to_string(),
             "near_ai_credential_busy"
         );
 
@@ -834,7 +866,7 @@ mod tests {
             "cancelled"
         );
         // And now, and only now, another may begin.
-        assert!(begin(&store, "github").await.is_ok());
+        assert!(begin(&store, "google").await.is_ok());
     }
 
     /// The wallet branch has its own transport; unsupported OAuth names still
@@ -851,7 +883,7 @@ mod tests {
         );
         assert!(status(dir.path(), None).is_none());
         // A refused attempt must not leave the directory looking busy.
-        assert!(begin(&store, "github").await.is_ok());
+        assert!(begin(&store, "google").await.is_ok());
         cancel(
             dir.path(),
             status(dir.path(), None)
@@ -859,6 +891,21 @@ mod tests {
                 .as_deref()
                 .or(Some("")),
         );
+    }
+
+    /// The channel gate sits in the ceremony, not only in the IPC handler,
+    /// so no caller in a staging build can begin the NEAR wallet sign-in.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_staging_ceremony_refuses_the_near_wallet_and_github() {
+        let (dir, store) = temp_store();
+        for provider in ["near", "github"] {
+            assert_eq!(
+                begin(&store, provider).await.unwrap_err().to_string(),
+                "near_ai_credential_provider_unknown"
+            );
+            assert!(status(dir.path(), None).is_none());
+        }
     }
 
     #[test]
@@ -878,6 +925,9 @@ mod tests {
         }
     }
 
+    /// A staging build begins no NEAR wallet ceremony
+    /// (`a_staging_ceremony_refuses_the_near_wallet`).
+    #[cfg(not(feature = "near-ai-staging"))]
     #[tokio::test]
     async fn near_wallet_start_binds_before_open_and_cancel_releases_the_listener() {
         let (dir, store) = temp_store();
@@ -893,7 +943,7 @@ mod tests {
         assert_eq!(url.fragment().unwrap().len(), 43);
         let address = ("127.0.0.1", url.port().unwrap());
         assert!(tokio::net::TcpListener::bind(address).await.is_err());
-        assert!(begin(&store, "github").await.is_err());
+        assert!(begin(&store, "google").await.is_err());
         assert!(store.load_config().unwrap().is_none());
         assert_eq!(cancel(dir.path(), Some(id)).unwrap().status, "cancelled");
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -958,7 +1008,7 @@ mod tests {
         crate::daemon::cloud_credential_test_support::install_backend(&store, backend.clone());
         let releaser = tokio::spawn(async move { released.store(true, Ordering::SeqCst) });
 
-        let error = begin(&store, "github").await.unwrap_err();
+        let error = begin(&store, "google").await.unwrap_err();
         releaser.await.unwrap();
 
         assert_eq!(error.to_string(), "near_ai_credential_storage_unentitled");

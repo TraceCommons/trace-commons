@@ -15,7 +15,7 @@ import TCShellCore
 /// else. It used to carry Contribute, Not this one, the verdict and the
 /// correction too, which made two approve controls for one session.
 ///
-/// Ron's order, top to bottom: the eyebrow, title and description, the
+/// Top to bottom: the title and scope disclosure, the
 /// gate statement, what would be sent against what is on disk, the
 /// per-session send disclosure, the native review (Prepare admission, and
 /// Request witness review whenever the session supports one -- up front,
@@ -144,7 +144,7 @@ struct PreviewSheet: View {
 
     /// The core's other Close, for a sheet whose Look-inside table did not
     /// decode: the footer's one control is never drawn without a name.
-    private static let fallbackClose = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.passkey.close
+    private static let fallbackClose = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.close
 
     /// Close in the core's words: the Look-inside table's, else the other.
     private var closeWord: String? { words?.close ?? Self.fallbackClose }
@@ -270,26 +270,21 @@ struct PreviewSheet: View {
 
     // MARK: - Chrome
 
-    /// Ron's head of the inspector: what this is, the gate statement, the
-    /// sizes, the send disclosure, and the native review actions. In a
-    /// modal it opens the body (#1146 `preview-inspector.tsx`): the LOOK
-    /// INSIDE eyebrow, then Ron's description again under the modal's.
+    /// One title and scope disclosure, followed by the gate, sizes and
+    /// review actions. In a modal, its header supplies the title and scope.
     private var header: some View {
-        VStack(alignment: .leading, spacing: inModal ? GlassTokens.Space.s8 : GlassTokens.Space.s4) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             if let words {
-                Text(words.eyebrow)
-                    .glassType(GlassTokens.TypeScale.eyebrow)
-                    .foregroundStyle(GlassColor.textTertiary)
                 // In a modal the modal draws the title (`PreviewModal`).
                 if !inModal {
                     Text(words.title)
                         .glassType(GlassTokens.TypeScale.title)
                         .foregroundStyle(GlassColor.textPrimary)
+                    Text(words.description)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Text(words.description)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             gateStatement
             if let summary {
@@ -861,10 +856,6 @@ struct SearchTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
-            Text("Search this trace for anything you need to be sure isn't in it.")
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textPrimary)
-
             HStack(spacing: GlassTokens.Space.s4) {
                 searchField
                 Button("Search", action: commit)
@@ -913,7 +904,7 @@ struct SearchTab: View {
     /// neither of which a still image was ever going to show.
     @ViewBuilder
     private var searchField: some View {
-        let prompt = "Client name, hostname, anything"
+        let prompt = "Search trace"
         if CaptureMode.isRendering {
             Text(needle.isEmpty ? prompt : needle)
                 .glassType(GlassTokens.TypeScale.label.weight(.regular))
@@ -931,11 +922,14 @@ struct SearchTab: View {
 
     @ViewBuilder
     private var resultSummary: some View {
-        if !searched || needle.isEmpty {
-            Text("Type to search. Nothing is sent while you look.")
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textSecondary)
-        } else if offsets == nil {
+        if searched && !needle.isEmpty {
+            searchResult
+        }
+    }
+
+    @ViewBuilder
+    private var searchResult: some View {
+        if offsets == nil {
             Text("The search couldn't run on this trace.")
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)

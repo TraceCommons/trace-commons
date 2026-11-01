@@ -43,6 +43,8 @@ final class LiveDaemonClientTests: XCTestCase {
             ("inference_calls", #"{"limit":25}"#, { _ = try await client.inferenceCalls(limit: 25, cursor: nil) }),
             ("inference_calls", #"{"cursor":"c2","limit":25}"#,
              { _ = try await client.inferenceCalls(limit: 25, cursor: "c2") }),
+            ("inference_activity", "{}", { _ = try await client.inferenceActivity() }),
+            ("insights_model_answers", "{}", { _ = try await client.insightsModelAnswers() }),
         ]
         for (method, params, call) in expected {
             let before = transport.calls.count
@@ -330,6 +332,7 @@ final class LiveDaemonClientTests: XCTestCase {
                 _ = try await client.commonsCreditSummary()
                 _ = try await client.toolDestinations()
                 _ = try await client.inferenceCalls(limit: 10, cursor: nil)
+                _ = try await client.insightsModelAnswers()
             } catch {
                 XCTFail("\(set): \(error)")
             }
@@ -408,12 +411,11 @@ final class LiveDaemonClientTests: XCTestCase {
         _ = try await client.setNetworkPrivateAI(on: false, consent: DaemonData.PrivateAIConsent(acknowledging: shown))
         _ = try await client.networkMissionCatalogue(limit: 1, before: nil)
         _ = try await client.lookupInvite(code: "c")
-        _ = try await client.passkeyState()
         _ = try await client.accountState()
         _ = try await client.activityMissionsCatalogue()
         XCTAssertEqual(transport.calls.map(\.method), [
             "inference_summary", "inference_call_proof", "model_spend", "private_ai", "set_private_ai",
-            "mission_catalogue", "invite_lookup", "passkey_state", "account_session_status",
+            "mission_catalogue", "invite_lookup", "account_session_status",
             "activity_missions_catalogue",
         ])
         XCTAssertEqual(transport.calls.filter { !$0.onQueue }.map(\.method), [])

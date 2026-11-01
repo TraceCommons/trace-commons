@@ -10,9 +10,9 @@ enum ToolAnswer: Hashable {
     case dontUse
 }
 
-/// The tool row's decisions, apart from the view so they can be tested.
-/// Every write goes through `FirstRunState.answer(_:_:)`, which keeps one
-/// answer per kind.
+/// A tool row's decisions, which Tools' checks follow, apart from the view
+/// so they can be tested. Every write goes through `FirstRunState.answer(_:_:)`,
+/// which keeps one answer per kind.
 enum ToolAnswerRowLayout {
     /// A path under the home folder as `~/...` (#1030's tool row); any
     /// other path as it is.
@@ -21,46 +21,9 @@ enum ToolAnswerRowLayout {
         return "~" + path.dropFirst(home.count)
     }
 
-    /// Whether the row asks at all. A tool not on this Mac is not asked
-    /// (spec rule 1, the owner's reversal in Ron's review of #1235); a
-    /// missing one the state already watches -- a restored state -- still
-    /// asks, so the picker can show the answer Continue counts.
-    static func asks(_ candidate: SourceCandidate, in state: FirstRunState) -> Bool {
-        if candidate.exists { return true }
-        if case .watch = state.rowAnswer(candidate.source) { return true }
-        return false
-    }
-
-    /// The answers a row offers: both on a row that asks, none otherwise.
-    static func options(for candidate: SourceCandidate, in state: FirstRunState) -> [ToolAnswer] {
-        asks(candidate, in: state) ? [.watch, .dontUse] : []
-    }
-
-    /// Ron's folder button sits on a row that asks.
-    static func offersFolderChoice(_ candidate: SourceCandidate, in state: FirstRunState) -> Bool {
-        asks(candidate, in: state)
-    }
-
-    /// "Install" sits on a row that does not ask, and only when the core
-    /// gave the tool an install page (Ron's `tool.installUrl ? ... : null`).
-    /// Not for a tool known to be installed: that row offers "Choose
-    /// folder" instead. `installed` is nil where the core does not detect
-    /// the tool's executable.
-    static func offersGetTool(_ candidate: SourceCandidate, installURL: URL?, installed: Bool? = nil, in state: FirstRunState) -> Bool {
-        !asks(candidate, in: state) && installURL != nil && installed != true
-    }
-
-    /// An installed tool whose folder was not found keeps its row, with
-    /// "Choose folder" where Watch / Not used would be and no caption (Ron's
-    /// review of #1419, 2026-10-15). Once a folder is chosen the row asks.
-    static func offersChooseFolder(_ candidate: SourceCandidate, installed: Bool?, in state: FirstRunState) -> Bool {
-        !asks(candidate, in: state) && installed == true
-    }
-
     /// What the row shows as answered: the row's own answer, never a folder
     /// added for the same tool, which has a row of its own (Ron's review of
-    /// #1235, item 3). The picker can show it because `options(for:in:)`
-    /// offers every answer this can return.
+    /// #1235, item 3).
     static func answer(in state: FirstRunState, for candidate: SourceCandidate) -> ToolAnswer? {
         switch state.rowAnswer(candidate.source) {
         case .undecided: return nil
@@ -99,133 +62,5 @@ enum ToolAnswerRowLayout {
     /// Fill the core's `{tool}` placeholder with the tool's name.
     static func fill(_ template: String, tool: SourceKind) -> String {
         FirstRunCopy.fill(template, ["tool": tool.displayName])
-    }
-}
-
-/// Ron's tool row (#1030 `tool-row.tsx`) in glass: the tool's tile, name
-/// and the folder it would watch, then the answer, in one row. Every string
-/// is the core's.
-///
-/// `meta` is an optional caption under the path (`ToolsScreenLayout.meta`).
-/// `installURL` names where "Install" leads; with none there is no
-/// button. `installed` is the core's executable discovery for the tool,
-/// nil where it has none.
-struct ToolAnswerRow: View {
-    let copy: FirstRunCopy.Folders
-    /// What the picker reads while unanswered: the core's "Choose…".
-    let choose: String
-    let candidate: SourceCandidate
-    /// "Added by you" for a folder the person gave; nil otherwise. Session
-    /// counts and discovery's evidence line are not shown here (owner,
-    /// 2026-10-08).
-    let meta: String?
-    @Binding var state: FirstRunState
-    var installURL: URL? = nil
-    var installed: Bool? = nil
-
-    @State private var chosenFolder: String?
-
-    var body: some View {
-        // One row (owner, 2026-10-08): the answer sits beside the tile and
-        // the name, centred on them, so the card is one line high.
-        GlassCard {
-            HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
-                GlassToolTile(.tool(candidate.source.glassTool), large: true)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(candidate.source.displayName)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .lineLimit(1)
-                    // #1030 `ftux-ellipsis`: the path home-relative, cut at
-                    // its end.
-                    Text(ToolAnswerRowLayout.homeRelative(ToolAnswerRowLayout.shownPath(in: state, for: candidate)))
-                        .glassType(GlassTokens.TypeScale.mono)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .help(ToolAnswerRowLayout.shownPath(in: state, for: candidate))
-                    if let meta {
-                        Text(meta)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .lineLimit(1)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                if ToolAnswerRowLayout.asks(candidate, in: state) {
-                    GlassPicker(
-                        ToolAnswerRowLayout.fill(copy.watchQuestion, tool: candidate.source),
-                        selection: answer,
-                        options: options,
-                        placeholder: choose
-                    )
-                    .fixedSize()
-                    if ToolAnswerRowLayout.offersFolderChoice(candidate, in: state) {
-                        GlassFolderButton(ToolAnswerRowLayout.fill(copy.chooseFolder, tool: candidate.source)) {
-                            if let path = FolderPanel.choose() {
-                                let selectedPath = SourceFolderSelection.path(
-                                    for: candidate.source, chosenFolder: path)
-                                chosenFolder = selectedPath
-                                ToolAnswerRowLayout.choose(folder: selectedPath, for: candidate, in: &state)
-                            }
-                        }
-                        .fixedSize()
-                    }
-                } else if ToolAnswerRowLayout.offersChooseFolder(candidate, installed: installed, in: state) {
-                    // Installed, no folder found: "Choose folder" where the
-                    // picker would be, and no caption (Ron, 2026-10-15).
-                    Button {
-                        if let path = FolderPanel.choose() {
-                            let selectedPath = SourceFolderSelection.path(
-                                for: candidate.source, chosenFolder: path)
-                            chosenFolder = selectedPath
-                            ToolAnswerRowLayout.choose(folder: selectedPath, for: candidate, in: &state)
-                        }
-                    } label: {
-                        Label(copy.chooseToolFolder, systemImage: "folder")
-                    }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .fixedSize()
-                    .help(ToolAnswerRowLayout.fill(copy.chooseToolFolderAccessibility, tool: candidate.source))
-                    .accessibilityLabel(ToolAnswerRowLayout.fill(copy.chooseToolFolderAccessibility, tool: candidate.source))
-                } else if ToolAnswerRowLayout.offersGetTool(candidate, installURL: installURL, installed: installed, in: state),
-                    let installURL
-                {
-                    // Not on this Mac: not asked, and no line of its own
-                    // (owner, 2026-10-08); "Install" only with an install
-                    // page.
-                    Button {
-                        NSWorkspace.shared.open(installURL)
-                    } label: {
-                        Label(
-                            ToolAnswerRowLayout.fill(copy.getTool, tool: candidate.source),
-                            systemImage: "arrow.down.to.line")
-                    }
-                    // Neutral, not coloured: the folder picker's glass pill
-                    // (owner, 2026-10-08).
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .fixedSize()
-                    .help(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
-                    // The label is "Install"; VoiceOver names the tool.
-                    .accessibilityLabel(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
-                }
-            }
-        }
-    }
-
-    private var answer: Binding<ToolAnswer?> {
-        Binding(
-            get: { ToolAnswerRowLayout.answer(in: state, for: candidate) },
-            set: { ToolAnswerRowLayout.select($0, for: candidate, in: &state, chosenFolder: chosenFolder) }
-        )
-    }
-
-    private var options: [GlassPickerOption<ToolAnswer>] {
-        ToolAnswerRowLayout.options(for: candidate, in: state).map { option in
-            switch option {
-            case .watch: return GlassPickerOption(copy.watch, value: .watch, dot: .on)
-            case .dontUse: return GlassPickerOption(copy.dontUse, value: .dontUse, dot: .off)
-            }
-        }
     }
 }

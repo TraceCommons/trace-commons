@@ -15,11 +15,33 @@ struct GeneralSection: View {
     /// The Traces map's rocket and station (`TracesMapStyle`); the map
     /// reads the same key, so it changes at once.
     @AppStorage(TracesMapStyle.key) private var mapRocket = true
+    /// Home's promotion card (owner, 2026-10-27): off, it never shows.
+    /// Home reads the same key, so it changes at once.
+    @AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true
 
     var body: some View {
         appearanceCard
         edgeRailCard
         mapStyleCard
+        promotionsCard
+    }
+
+    /// Whether Home shows promotions, such as a new model on NEAR AI
+    /// (owner, 2026-10-27). The Insights card is not one.
+    @ViewBuilder
+    private var promotionsCard: some View {
+        if let words = MonitorWords.table?.homeHistory {
+            GlassEyebrowCard(words.promotionsTitle) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Toggle(words.promotionsToggle, isOn: $promotionsOn)
+                        .toggleStyle(GlassToggleStyle(.settings))
+                    Text(words.promotionsCaption)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
     }
 
     /// The Traces map's style (owner, 2026-10-19): on, the rocket and space
@@ -40,8 +62,7 @@ struct GeneralSection: View {
         }
     }
 
-    /// The edge rail, under the Desktop eyebrow the Startup section's system
-    /// integrations card uses.
+    /// The edge rail and its discovery tutorial.
     @ViewBuilder
     private var edgeRailCard: some View {
         if let rail = MonitorWords.table?.edgeRail {

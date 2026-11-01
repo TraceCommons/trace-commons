@@ -800,7 +800,7 @@ impl App {
                 // Both halves of "does this device need onboarding" are the
                 // daemon's to answer, so the question is asked here rather
                 // than at window construction, where neither is known yet.
-                onboarding::present_if_needed(app, status.logged_in, status.tenant_id.as_deref());
+                onboarding::present_if_needed(app, &status);
                 *app.status.borrow_mut() = Some(status);
                 queue::render_badge(app);
             }
@@ -1415,20 +1415,16 @@ impl App {
 
     fn render_health(self: &Rc<Self>, status: &Status) {
         // Independent conditions, and the banner shows each. The health slot
-        // carries one label at a time by design, and `daily-cap-reached` is
-        // last in its precedence order -- so a spent upload budget behind a
-        // full queue was reported by neither, and the window looked simply
-        // broken. The budget and witness lines are therefore drawn from
-        // their own status objects rather than waiting for the label; see
-        // `Status::health_banner_lines`.
+        // carries one label at a time by design, so the witness line is
+        // drawn from its own status object rather than waiting for the
+        // label; see `Status::health_banner_lines`.
         let lines = status.health_banner_lines();
         if lines.is_empty() {
             self.health_banner.set_visible(false);
             return;
         }
         self.health_label.set_text(&lines.join("\n\n"));
-        // The action belongs to the health label; a spent budget has none,
-        // because there is nothing for a contributor to do about it.
+        // The action belongs to the health label.
         match status
             .health
             .last_error_label
@@ -2134,16 +2130,16 @@ mod card_preview_tests {
         let value = serde_json::json!({
             "entry_id": "e2",
             "state": "too_large",
-            "raw_session_bytes": 385_875_968u64,
-            "limit_bytes": 67_108_864u64,
+            "raw_session_bytes": 629_145_600u64,
+            "limit_bytes": 536_870_912u64,
         });
         match parse_preview_outcome(&value) {
             Some(CardOutcome::TooLarge {
                 raw_session_bytes,
                 limit_bytes,
             }) => {
-                assert_eq!(raw_session_bytes, 385_875_968);
-                assert_eq!(limit_bytes, 67_108_864);
+                assert_eq!(raw_session_bytes, 629_145_600);
+                assert_eq!(limit_bytes, 536_870_912);
             }
             other => panic!(
                 "expected TooLarge, got a different outcome: {}",

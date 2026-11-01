@@ -9,7 +9,7 @@ use std::{collections::BTreeSet, time::Duration};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
 use serde::de::DeserializeOwned;
 use trace_commons_protocol::{
-    ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+    ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
     activity_missions::{
         ActivityCatalogue, ActivityProgress, MAX_PREDICATE_TITLE_CHARS, MAX_PREDICATE_VALUES,
     },
@@ -26,7 +26,7 @@ const CREDENTIAL_UNAVAILABLE: &str = "commons_credential_storage_unavailable";
 
 struct Call<T> {
     result: Result<T, ()>,
-    rotated_token: Option<String>,
+    rotated_token: Option<crate::account_auth::RotatedToken>,
 }
 
 fn empty_params(req: &Request) -> bool {
@@ -68,7 +68,14 @@ pub(super) async fn handle_status(shared: &DaemonShared, req: &Request) -> Respo
     let Ok(Some(config)) = shared.store.load_config() else {
         return Response::err(req.id, ERR_UNAVAILABLE, UNAVAILABLE);
     };
-    let session = match account_session(shared) {
+    // An expired session on a NEAR AI-provisioned account is renewed first.
+    // The validation reload below never renews: it must see the session
+    // this call was made with.
+    // A status read: renewed in the background, waited for briefly.
+    let session = match super::account_session_renewal::account_session_for_read(shared)
+        .await
+        .map(|(session, _)| session)
+    {
         Ok(Some(session)) => session,
         Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
         Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, CREDENTIAL_UNAVAILABLE),
@@ -278,6 +285,14 @@ async fn fetch<T: DeserializeOwned>(
     {
         return failed();
     }
+    let rotated_token = crate::account_auth::RotatedToken::from_headers(
+        rotated_token,
+        response
+            .headers()
+            .get(ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+    );
     let refused = || Call {
         result: Err(()),
         rotated_token: rotated_token.clone(),

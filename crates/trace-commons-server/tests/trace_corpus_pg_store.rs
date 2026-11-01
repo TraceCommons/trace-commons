@@ -412,6 +412,117 @@ async fn tenant_query_one(
     row
 }
 
+/// The hourly-ceiling window read: scoped to the tenant or to a principal
+/// set, limited to rows after `since`, counted no further than `limit`, and
+/// reporting whether the uploaded id already has a row.
+#[tokio::test]
+async fn pg_store_recent_submission_window_is_scoped_bounded_and_windowed() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    backend.run_migrations().await.expect("run migrations");
+
+    let tenant_id = format!("pg-hourly-window-{}", Uuid::new_v4());
+    let now = Utc::now().trunc_subsecs(0);
+    // Two of principal a's, one of b's inside the hour; one of a's outside.
+    let rows = [
+        ("principal:a", now - chrono::Duration::minutes(50)),
+        ("principal:a", now - chrono::Duration::minutes(10)),
+        ("principal:b", now - chrono::Duration::minutes(5)),
+        ("principal:a", now - chrono::Duration::minutes(90)),
+    ];
+    let mut ids = Vec::new();
+    for (principal, received_at) in rows {
+        let submission_id = Uuid::new_v4();
+        let mut submission = sample_submission(&tenant_id, submission_id);
+        submission.auth_principal_ref = principal.to_string();
+        backend
+            .upsert_trace_submission(submission)
+            .await
+            .expect("insert submission");
+        tenant_query_one(
+            &backend,
+            &tenant_id,
+            "UPDATE trace_submissions SET received_at = $3
+              WHERE tenant_id = $1 AND submission_id = $2 RETURNING submission_id",
+            &[&tenant_id, &submission_id, &received_at],
+        )
+        .await;
+        ids.push(submission_id);
+    }
+    let since = now - chrono::Duration::hours(1);
+    let fresh = Uuid::new_v4();
+    let a = vec!["principal:a".to_string()];
+
+    let whole = backend
+        .recent_trace_submission_window(&tenant_id, None, fresh, since, 10)
+        .await
+        .expect("whole-tenant window");
+    assert_eq!(whole.counted, 3, "the row outside the hour is not counted");
+    assert_eq!(
+        whole.oldest_counted_at,
+        Some(now - chrono::Duration::minutes(50))
+    );
+    assert!(!whole.submission_known);
+
+    let only_a = backend
+        .recent_trace_submission_window(&tenant_id, Some(&a), fresh, since, 10)
+        .await
+        .expect("principal window");
+    assert_eq!(only_a.counted, 2, "only principal a's rows in the hour");
+
+    let bounded = backend
+        .recent_trace_submission_window(&tenant_id, None, fresh, since, 1)
+        .await
+        .expect("bounded window");
+    assert_eq!(bounded.counted, 1, "counting stops at the limit");
+    assert_eq!(
+        bounded.oldest_counted_at,
+        Some(now - chrono::Duration::minutes(5)),
+        "the limit keeps the newest rows"
+    );
+
+    let known = backend
+        .recent_trace_submission_window(&tenant_id, Some(&a), ids[3], since, 10)
+        .await
+        .expect("known-id window");
+    assert!(
+        known.submission_known,
+        "an id with a row is known whatever its age"
+    );
+    let others_id = backend
+        .recent_trace_submission_window(&tenant_id, Some(&a), ids[2], since, 10)
+        .await
+        .expect("another principal's id");
+    assert!(
+        !others_id.submission_known,
+        "another principal's id is not known to a principal-scoped window"
+    );
+    let others_id_whole = backend
+        .recent_trace_submission_window(&tenant_id, None, ids[2], since, 10)
+        .await
+        .expect("a whole-tenant window");
+    assert!(
+        others_id_whole.submission_known,
+        "a whole-tenant window knows every principal's id"
+    );
+
+    let other = backend
+        .recent_trace_submission_window(
+            &format!("pg-hourly-window-other-{}", Uuid::new_v4()),
+            None,
+            ids[0],
+            since,
+            10,
+        )
+        .await
+        .expect("another tenant's window");
+    assert_eq!(other.counted, 0, "another tenant sees none of these rows");
+    assert!(!other.submission_known);
+
+    cleanup_tenant(&backend, &tenant_id).await;
+}
+
 #[tokio::test]
 async fn pg_store_rolls_back_export_manifest_mirror_when_item_ref_is_invalid() {
     let Some(backend) = postgres_backend().await else {

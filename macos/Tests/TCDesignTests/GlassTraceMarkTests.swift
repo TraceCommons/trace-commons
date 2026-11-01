@@ -7,6 +7,7 @@ import XCTest
 /// The Trace mark's live-trace variant (Claude Design 1c).
 final class GlassTraceMarkTests: XCTestCase {
     /// Every join parses, and the mark stays inside its 200-unit square.
+    @MainActor
     func testTheMarkParsesAndFitsItsSquare() throws {
         let joins = try XCTUnwrap(GlassTraceMark.joinPaths)
         XCTAssertEqual(joins.count, GlassTraceMark.joins.count)
@@ -16,6 +17,7 @@ final class GlassTraceMarkTests: XCTestCase {
 
     /// The 3 by 3 lattice: five visited nodes, the current step last, and
     /// four unvisited ones, never the same point twice.
+    @MainActor
     func testTheLatticeHasNineNodes() {
         XCTAssertEqual(GlassTraceMark.visited.count, 5)
         XCTAssertEqual(GlassTraceMark.unvisited.count, 4)

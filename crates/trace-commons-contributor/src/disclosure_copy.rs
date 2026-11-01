@@ -203,10 +203,7 @@ mod tests {
             let name = scope["name"].as_str().expect("a name");
             assert_eq!(titles[name], scope["title"], "{name}");
         }
-        assert_eq!(
-            titles["debugging_evaluation"],
-            "Finding bugs and measuring agents"
-        );
+        assert_eq!(titles["debugging_evaluation"], "Debugging and evaluation");
     }
 
     /// K6: an armed project's failure line reaches the shell from the core.

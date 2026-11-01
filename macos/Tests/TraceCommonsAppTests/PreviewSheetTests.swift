@@ -91,7 +91,7 @@ final class PreviewSheetTests: XCTestCase {
         // With no Close word, Escape still closes, from an unseen control.
         XCTAssertTrue(sheet.contains("if closeWord == nil {\n                Button(\"\") { close() }\n"
                                      + "                    .keyboardShortcut(.cancelAction)\n"))
-        XCTAssertTrue(sheet.contains("TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.passkey.close"),
+        XCTAssertTrue(sheet.contains("TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.close"),
                       "the fallback Close is the core's word too")
         XCTAssertTrue(footer.contains(".keyboardShortcut(.cancelAction)"), "Escape closes the sheet")
         XCTAssertFalse(footer.contains(".keyboardShortcut(.defaultAction)"))
@@ -101,8 +101,8 @@ final class PreviewSheetTests: XCTestCase {
     /// Raised in a modal (#1146 `PreviewInspector`, P29), the preview has
     /// one header: the modal's title, Ron's description as its subtitle,
     /// and the close button. The sheet draws no title, rules or footer of
-    /// its own there; its body opens with the LOOK INSIDE eyebrow, and the
-    /// modal's footer is Close.
+    /// its own there; scope is disclosed once and the modal's footer is Close.
+    @MainActor
     func test_inAModalThereIsOneHeaderWithAClose() throws {
         let sheet = Self.code(try Self.sheet())
         let modal = try Self.declaration("struct PreviewModal: View {", in: sheet)
@@ -115,9 +115,8 @@ final class PreviewSheetTests: XCTestCase {
         XCTAssertTrue(sheet.contains("if !inModal {\n                Divider().overlay(GlassColor.hairline)\n                footer"),
                       "the sheet draws its own footer in a modal")
         let header = try Self.declaration("private var header: some View {", in: sheet)
-        let eyebrow = try XCTUnwrap(header.range(of: "Text(words.eyebrow)"))
-        let title = try XCTUnwrap(header.range(of: "if !inModal {\n                    Text(words.title)"))
-        XCTAssertLessThan(eyebrow.lowerBound, title.lowerBound, "the eyebrow is drawn only outside a modal")
+        XCTAssertFalse(header.contains("Text(words.eyebrow)"))
+        XCTAssertTrue(header.contains("if !inModal {\n                    Text(words.title)"))
         XCTAssertEqual(PreviewSheet.modalSubtitle, Self.words?.description)
         XCTAssertEqual(PreviewSheet.modalClose, Self.words?.close)
     }
@@ -209,6 +208,7 @@ final class PreviewSheetTests: XCTestCase {
     /// `cannot_show_title`). The literal is only the fallback for a table
     /// that did not decode, verbatim the core's, so the notice is never
     /// drawn without a title (the `HealthCopy.onHoldFallback` precedent).
+    @MainActor
     func test_theCannotShowSentenceIsTheCores() throws {
         let sheet = Self.code(try Self.sheet())
         let cannotShow = try Self.declaration("private static var cannotShow: String {", in: sheet)

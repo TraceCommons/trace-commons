@@ -35,6 +35,30 @@
 //! that moved refuses with `harness-config-changed` and the shell plans
 //! again.
 //!
+//! # Claude Code's file is located here, and it is the default login's
+//!
+//! For Claude Code the harness finds the settings file itself rather than
+//! asking `ironwire_agents::tools`, and works out the edit with that crate's
+//! `claude_settings` functions: the same parse, the same three rules, the
+//! same backup on commit. Two reasons, and both are about which file.
+//!
+//! The file is always the default login's `~/.claude/settings.json`,
+//! whatever `CLAUDE_CONFIG_DIR` this daemon inherited. The plain URL a
+//! connect writes is served by the default login's credential; following
+//! the variable would point another login's Claude Code at that token, one
+//! account's requests on another's subscription. IronWire #64 made this
+//! change upstream on purpose, and this module keeps it. A Claude Code run
+//! under `CLAUDE_CONFIG_DIR` is a login of its own, declared with
+//! `config_dir` and connected with `ironwire connect claude --config-dir`;
+//! see `docs/multi-subscription-routing.md`.
+//!
+//! And the directory must be replaceable in tests. Upstream resolves it with
+//! `dirs::home_dir()`, which on Windows reads the profile folder from the
+//! shell and ignores `USERPROFILE`, so no environment variable keeps a test
+//! off the real file. [`claude_default_dir`] is that seam: upstream's own
+//! `claude_settings::default_dir` in a build, and in tests a per-thread
+//! directory that is absent unless a test sets one.
+//!
 //! # Nothing from inside the contributor's file is logged or returned
 //!
 //! `changes` and `occupied` are IronWire's own words about slots and values,
@@ -49,13 +73,15 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use ironwire_agents::tools;
+use ironwire_agents::{claude_settings, endpoint, tools};
 use ironwire_catalog::schema::{AgentEntry, Catalog, ConfigLocation};
 use uuid::Uuid;
 
 use crate::harness_state::{
     self, HarnessAction, HarnessEvidence, HarnessState, PlanOutcome, built_in_family,
 };
+
+mod opencode;
 
 /// How long the window looked at for "has a call actually arrived".
 ///
@@ -121,12 +147,216 @@ pub const ERR_NO_DESTINATION: &str = "harness-no-destination";
 /// no business asking about. See `DaemonShared::destination_credentialed`.
 pub const ERR_NO_CREDENTIAL: &str = "harness-no-credential";
 
+/// The id both upstream and the wire give Claude Code.
+const CLAUDE: &str = "claude";
+
+/// The directory Claude Code's default login keeps its settings in.
+///
+/// In a build, upstream's own answer: `~/.claude`, and never this process's
+/// `CLAUDE_CONFIG_DIR` -- see the module docs for why. In tests, the
+/// directory the running test set, or none: a test that forgot to set one
+/// reaches no file, rather than the real profile.
+fn claude_default_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        TEST_CLAUDE_DIR.with(|dir| dir.borrow().clone())
+    }
+    #[cfg(not(test))]
+    {
+        claude_settings::default_dir()
+    }
+}
+
+/// The default login's Claude Code settings file.
+fn claude_settings_file() -> Option<PathBuf> {
+    claude_default_dir().map(|dir| claude_settings::path_in(&dir))
+}
+
+/// A file's contents, or the empty string when it is absent or not UTF-8.
+///
+/// Upstream's own reading, kept identical because `ClaudeEdit` is compared
+/// against it at commit exactly as `tools::Planned` is. The UTF-8 half of
+/// that is why [`plan`] refuses an undecodable file before getting here.
+fn read_or_empty(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// An edit to Claude Code's settings, worked out here and not by
+/// `tools::plan_connect_with`, whose `Planned` cannot be given a path.
+///
+/// The fields and the commit mirror `tools::Planned` and `tools::commit`:
+/// the contents to write and the contents they were worked out against, a
+/// re-read before the write, and one backup of the file as it first was.
+struct ClaudeEdit {
+    path: PathBuf,
+    changes: Vec<String>,
+    occupied: Vec<(String, String)>,
+    existing: String,
+    contents: String,
+}
+
+impl ClaudeEdit {
+    /// Work out a connect (`Some(port)`) or a disconnect (`None`).
+    ///
+    /// A connect declines IronWire's status line, as every connect here does
+    /// -- see [`plan`].
+    fn plan(port: Option<u16>) -> Result<Self, PlanOutcome> {
+        let path = claude_settings_file().ok_or(PlanOutcome::NoConfigPath)?;
+        let existing = read_or_empty(&path);
+        let edit = match port {
+            Some(port) => claude_settings::connect(
+                &existing,
+                None,
+                Some(&endpoint::anthropic_url(port, None)),
+            ),
+            None => claude_settings::disconnect(&existing),
+        }
+        .map_err(|_| PlanOutcome::Unparseable)?;
+        Ok(Self {
+            path,
+            changes: edit.changes,
+            occupied: edit
+                .occupied
+                .into_iter()
+                .map(|o| (o.slot.to_string(), o.current))
+                .collect(),
+            existing,
+            contents: edit.contents,
+        })
+    }
+
+    /// `tools::commit_if_unchanged`, for this edit.
+    fn commit_if_unchanged(&self) -> Result<Option<PathBuf>, tools::CommitError> {
+        if read_or_empty(&self.path) != self.existing {
+            return Err(tools::CommitError::Changed);
+        }
+        self.commit().map_err(tools::CommitError::Io)
+    }
+
+    /// `tools::commit`, for this edit: the directory made if need be, the
+    /// first backup kept and never replaced, then the write.
+    fn commit(&self) -> std::io::Result<Option<PathBuf>> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let backup = if self.existing.is_empty() {
+            None
+        } else {
+            let extension = self
+                .path
+                .extension()
+                .map_or_else(|| "bak".to_string(), |e| e.to_string_lossy().to_string());
+            let backup = self
+                .path
+                .with_extension(format!("{extension}.ironwire-backup"));
+            if backup.exists() {
+                None
+            } else {
+                std::fs::write(&backup, &self.existing)?;
+                Some(backup)
+            }
+        };
+        std::fs::write(&self.path, &self.contents)?;
+        Ok(backup)
+    }
+}
+
+/// An edit held between the preview and the commit: upstream's for every
+/// tool but Claude Code, this module's for Claude Code.
+enum Edit {
+    Upstream(tools::Planned),
+    Claude(ClaudeEdit),
+    OpenCode(opencode::OpenCodeEdit),
+}
+
+impl Edit {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Upstream(planned) => &planned.path,
+            Self::Claude(edit) => &edit.path,
+            Self::OpenCode(edit) => &edit.path,
+        }
+    }
+
+    fn changes(&self) -> &[String] {
+        match self {
+            Self::Upstream(planned) => &planned.changes,
+            Self::Claude(edit) => &edit.changes,
+            Self::OpenCode(edit) => &edit.changes,
+        }
+    }
+
+    fn occupied(&self) -> &[(String, String)] {
+        match self {
+            Self::Upstream(planned) => &planned.occupied,
+            Self::Claude(edit) => &edit.occupied,
+            Self::OpenCode(edit) => &edit.occupied,
+        }
+    }
+
+    fn is_noop(&self) -> bool {
+        self.changes().is_empty()
+    }
+
+    fn commit_if_unchanged(&self) -> Result<Option<PathBuf>, tools::CommitError> {
+        match self {
+            Self::Upstream(planned) => tools::commit_if_unchanged(planned),
+            Self::Claude(edit) => edit.commit_if_unchanged(),
+            Self::OpenCode(edit) => edit.commit_if_unchanged(),
+        }
+    }
+}
+
+/// Every tool upstream lists, with Claude Code's row read from the file
+/// [`claude_settings_file`] names rather than the one upstream found.
+///
+/// `installed` and `wired` are worked out the way upstream works them out
+/// for its own row: a config directory that exists or `claude` on `PATH`,
+/// and a base URL in the file that points at a local IronWire.
+fn tools_now(catalog: &Catalog) -> Vec<tools::Tool> {
+    let mut found = tools::all(catalog);
+    for tool in found.iter_mut().filter(|t| t.id == CLAUDE) {
+        let path = claude_settings_file();
+        let contents = path.as_deref().map(read_or_empty).unwrap_or_default();
+        tool.installed = path
+            .as_deref()
+            .and_then(Path::parent)
+            .is_some_and(Path::exists)
+            || tools::on_path(CLAUDE);
+        tool.wired = claude_settings::is_wired(&contents);
+        tool.config_path = path;
+    }
+    // The same filesystem-only executable resolution managed sessions use
+    // also finds app-installed tools outside a GUI daemon's inherited PATH.
+    #[cfg(not(test))]
+    for tool in &mut found {
+        let id = match tool.id.as_str() {
+            "claude" => Some(crate::managed::ToolId::Claude),
+            "codex" => Some(crate::managed::ToolId::Codex),
+            _ => None,
+        };
+        if let Some(id) = id {
+            tool.installed |= crate::managed::profiles::find_native(id).is_ok();
+        }
+    }
+    found.push(opencode::tool());
+    found
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The Claude Code default login's directory, for the current test
+    /// thread. Set only by the tests' `ClaudeConfigAt`.
+    static TEST_CLAUDE_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// An edit that has been worked out and not made.
 struct HeldPlan {
     id: Uuid,
     tool_id: String,
     action: HarnessAction,
-    planned: tools::Planned,
+    planned: Edit,
     /// SHA-256 of the config file as it was when the plan was worked out, or
     /// `None` when the file did not exist. Compared again before the write.
     digest: Option<String>,
@@ -213,6 +443,16 @@ fn points_at_our_port(path: Option<&PathBuf>, port: Option<u16>) -> bool {
     std::fs::read_to_string(path)
         .map(|text| text.contains(&format!("127.0.0.1:{port}")))
         .unwrap_or(false)
+}
+
+fn connected_here(tool: &tools::Tool, port: Option<u16>) -> bool {
+    if tool.id == opencode::ID {
+        tool.config_path
+            .as_deref()
+            .is_some_and(|path| opencode::connected(path, port))
+    } else {
+        tool.wired && points_at_our_port(tool.config_path.as_ref(), port)
+    }
 }
 
 /// One tool, as the wire describes it.
@@ -310,7 +550,7 @@ pub fn list(
     activity: &FamilyActivity,
     destination_port: Option<u16>,
 ) -> Vec<HarnessRow> {
-    let found = tools::all(catalog);
+    let found = tools_now(catalog);
 
     // Which families more than one *connected* tool speaks. Counted over the
     // connected ones only: an installed-but-not-connected Codex cannot have
@@ -320,7 +560,7 @@ pub fn list(
         // Ours, not merely wired: a tool pointed at somebody else's local
         // proxy did not make the call and must not blur the attribution of
         // one that did.
-        if !(tool.wired && points_at_our_port(tool.config_path.as_ref(), destination_port)) {
+        if !connected_here(tool, destination_port) {
             continue;
         }
         let Some(family) = built_in_family(&tool.id) else {
@@ -345,8 +585,7 @@ pub fn list(
                     .any(|(name, count)| *name == f && *count > 1)
             });
             let saw_call = family.is_some_and(|f| activity.last_call_for(f).is_some());
-            let ours =
-                tool.wired && points_at_our_port(tool.config_path.as_ref(), destination_port);
+            let ours = connected_here(&tool, destination_port);
             let state = harness_state::harness_state(HarnessEvidence {
                 connected: ours,
                 activity_readable: activity.readable,
@@ -417,7 +656,19 @@ pub fn plan(
     port: Option<u16>,
     credentialed: bool,
 ) -> Result<PlanView, &'static str> {
-    let rows = tools::all(catalog);
+    plan_with_opencode(store, catalog, tool_id, action, port, credentialed, None)
+}
+
+fn plan_with_opencode(
+    store: &PlanStore,
+    catalog: &Catalog,
+    tool_id: &str,
+    action: HarnessAction,
+    port: Option<u16>,
+    credentialed: bool,
+    opencode_context: Option<&opencode::Context>,
+) -> Result<PlanView, &'static str> {
+    let rows = tools_now(catalog);
     let Some(row) = rows.iter().find(|t| t.id == tool_id) else {
         return Err(ERR_UNKNOWN_HARNESS);
     };
@@ -493,67 +744,100 @@ pub fn plan(
     // Reading it ourselves is the whole fix: `fs::read_to_string` fails where
     // upstream's `.ok()` discards the error, and a path that exists but will
     // not decode is refused with the outcome the copy already describes.
-    if let Some(path) = row.config_path.as_ref()
+    // OpenCode's editor validates file type and bounded UTF-8 itself. The
+    // legacy reader here would defeat that bound or block on a FIFO first.
+    if tool_id != opencode::ID
+        && let Some(path) = row.config_path.as_ref()
         && path.exists()
         && std::fs::read_to_string(path).is_err()
     {
         return Ok(refuse(PlanOutcome::Unparseable));
     }
 
-    let planned = match action {
-        HarnessAction::Connect => {
-            let Some(port) = port else {
-                return Err(ERR_NO_DESTINATION);
-            };
-            // Never offer IronWire's status line. It would run
-            // `<this executable> statusline`, and this program has no such
-            // subcommand, so Claude Code would show a blank status line.
-            // Declining also removes one an earlier connect installed, and
-            // leaves one the contributor wrote alone -- but only on a file
-            // that reaches this line, which a tool already connected to us
-            // does not: it is refused as `Noop` above. The file an earlier
-            // connect left is that state, and `repair_claude_status_line`
-            // is what cleans it up.
-            tools::plan_connect_with(
-                tool_id,
-                port,
-                catalog,
-                tools::ConnectOptions::default().with_status_line(tools::StatusLine::Decline),
-            )
-        }
-        HarnessAction::Disconnect => tools::plan_disconnect(tool_id, catalog),
-    };
-
-    let planned = match planned {
-        Ok(planned) => planned,
-        Err(tools::Error::UnknownTool(_)) => return Err(ERR_UNKNOWN_HARNESS),
-        Err(tools::Error::NoPath(_)) => return Ok(refuse(PlanOutcome::NoConfigPath)),
-        // Upstream #39 split the former `Error::Edit(String)` into distinct
-        // variants, so the two answers this daemon needs are now carried by
-        // the type rather than recovered by matching on the front of a
-        // sentence. The prefix match that used to live here is gone: it read
-        // prose that upstream is free to reword, and rewording it would have
-        // silently turned every unusable catalog entry into "unparseable".
+    let planned = if tool_id == CLAUDE {
+        // Located and worked out here -- see the module docs.
         //
-        // Nothing from the variants crosses this line. Each one carries the
-        // file it read and the parser's own words, and neither is ours to
-        // publish: `PlanOutcome` is the whole vocabulary a shell gets, and the
-        // path is already reported separately as `PlanView::path`.
-        Err(tools::Error::UnusableEntry { .. }) => return Ok(refuse(PlanOutcome::EntryUnusable)),
-        // `Jsonc` is a file we refused to rewrite, which is exactly what
-        // `Unparseable` means to a contributor: nothing was decided and the
-        // file needs a person. Upstream distinguishes it because its
-        // remediation differs, and a distinct outcome would be worth having --
-        // but it would be a new label on the IPC wire, in the FFI enum, and in
-        // four shells' copy, which is a change to make deliberately and not as
-        // a side effect of advancing a pin.
-        Err(tools::Error::Unparseable { .. } | tools::Error::Jsonc { .. }) => {
-            return Ok(refuse(PlanOutcome::Unparseable));
+        // Never offer IronWire's status line. It would run
+        // `<this executable> statusline`, and this program has no such
+        // subcommand, so Claude Code would show a blank status line.
+        // `ClaudeEdit::plan` declines it: that also removes one an earlier
+        // connect installed, and leaves one the contributor wrote alone --
+        // but only on a file that reaches this line, which a tool already
+        // connected to us does not: it is refused as `Noop` above. The file
+        // an earlier connect left is that state, and
+        // `repair_claude_status_line` is what cleans it up.
+        let port = match action {
+            HarnessAction::Connect => Some(port.ok_or(ERR_NO_DESTINATION)?),
+            HarnessAction::Disconnect => None,
+        };
+        match ClaudeEdit::plan(port) {
+            Ok(edit) => Edit::Claude(edit),
+            Err(outcome) => return Ok(refuse(outcome)),
         }
+    } else if tool_id == opencode::ID {
+        if matches!(action, HarnessAction::Connect) && opencode_context.is_none() {
+            return Ok(refuse(PlanOutcome::ModelsUnavailable));
+        }
+        let port = matches!(action, HarnessAction::Connect)
+            .then_some(port)
+            .flatten();
+        match opencode::OpenCodeEdit::plan(port, opencode_context) {
+            Ok(edit) => Edit::OpenCode(edit),
+            Err(outcome) => return Ok(refuse(outcome)),
+        }
+    } else {
+        let planned = match action {
+            HarnessAction::Connect => {
+                let Some(port) = port else {
+                    return Err(ERR_NO_DESTINATION);
+                };
+                // Declined here too, for the reason the Claude Code arm
+                // gives. No other tool has a status-line slot today, so this
+                // only matters if one gains one.
+                tools::plan_connect_with(
+                    tool_id,
+                    port,
+                    catalog,
+                    tools::ConnectOptions::default().with_status_line(tools::StatusLine::Decline),
+                )
+            }
+            HarnessAction::Disconnect => tools::plan_disconnect(tool_id, catalog),
+        };
+
+        let planned = match planned {
+            Ok(planned) => planned,
+            Err(tools::Error::UnknownTool(_)) => return Err(ERR_UNKNOWN_HARNESS),
+            Err(tools::Error::NoPath(_)) => return Ok(refuse(PlanOutcome::NoConfigPath)),
+            // Upstream #39 split the former `Error::Edit(String)` into distinct
+            // variants, so the two answers this daemon needs are now carried by
+            // the type rather than recovered by matching on the front of a
+            // sentence. The prefix match that used to live here is gone: it read
+            // prose that upstream is free to reword, and rewording it would have
+            // silently turned every unusable catalog entry into "unparseable".
+            //
+            // Nothing from the variants crosses this line. Each one carries the
+            // file it read and the parser's own words, and neither is ours to
+            // publish: `PlanOutcome` is the whole vocabulary a shell gets, and the
+            // path is already reported separately as `PlanView::path`.
+            Err(tools::Error::UnusableEntry { .. }) => {
+                return Ok(refuse(PlanOutcome::EntryUnusable));
+            }
+            // `Jsonc` is a file we refused to rewrite, which is exactly what
+            // `Unparseable` means to a contributor: nothing was decided and the
+            // file needs a person. Upstream distinguishes it because its
+            // remediation differs, and a distinct outcome would be worth having --
+            // but it would be a new label on the IPC wire, in the FFI enum, and in
+            // four shells' copy, which is a change to make deliberately and not as
+            // a side effect of advancing a pin.
+            Err(tools::Error::Unparseable { .. } | tools::Error::Jsonc { .. }) => {
+                return Ok(refuse(PlanOutcome::Unparseable));
+            }
+        };
+        Edit::Upstream(planned)
     };
 
-    let occupied = planned.occupied.clone();
-    let path = planned.path.clone();
+    let occupied = planned.occupied().to_vec();
+    let path = planned.path().to_path_buf();
     if planned.is_noop() {
         // A distinct outcome, not an empty preview. Occupied slots still
         // ride along: "nothing to change, and here is the slot somebody else
@@ -576,14 +860,20 @@ pub fn plan(
         action,
         outcome: PlanOutcome::Changes,
         path: Some(path.clone()),
-        changes: planned.changes.clone(),
+        changes: planned.changes().to_vec(),
         occupied,
     };
     store.insert(HeldPlan {
         id,
         tool_id: tool_id.to_string(),
         action,
-        digest: config_digest(&path),
+        // OpenCode keeps bounded exact preimages for BOTH files internally.
+        // Do not re-read its config with the legacy unbounded digest helper.
+        digest: if matches!(&planned, Edit::OpenCode(_)) {
+            None
+        } else {
+            config_digest(&path)
+        },
         planned,
         minted: Instant::now(),
     });
@@ -615,7 +905,9 @@ pub struct CommitView {
 /// [`ERR_COMMIT_FAILED`] when the write itself failed.
 pub fn commit(store: &PlanStore, plan_id: Uuid) -> Result<CommitView, &'static str> {
     let held = store.take(plan_id).ok_or(ERR_PLAN_UNKNOWN)?;
-    if config_digest(&held.planned.path) != held.digest {
+    if !matches!(&held.planned, Edit::OpenCode(_))
+        && config_digest(held.planned.path()) != held.digest
+    {
         return Err(ERR_CONFIG_CHANGED);
     }
 
@@ -634,14 +926,17 @@ pub fn commit(store: &PlanStore, plan_id: Uuid) -> Result<CommitView, &'static s
     // and the commit being overwritten wholesale, with no backup, because
     // `existing` was empty. Dropping our check to adopt theirs would trade a
     // real defence for a narrower race.
-    let backup_path = tools::commit_if_unchanged(&held.planned).map_err(|error| match error {
-        tools::CommitError::Changed => ERR_CONFIG_CHANGED,
-        tools::CommitError::Io(_) => ERR_COMMIT_FAILED,
-    })?;
+    let backup_path = held
+        .planned
+        .commit_if_unchanged()
+        .map_err(|error| match error {
+            tools::CommitError::Changed => ERR_CONFIG_CHANGED,
+            tools::CommitError::Io(_) => ERR_COMMIT_FAILED,
+        })?;
     Ok(CommitView {
         tool_id: held.tool_id,
         action: held.action,
-        path: held.planned.path.clone(),
+        path: held.planned.path().to_path_buf(),
         backup_path,
     })
 }
@@ -679,9 +974,10 @@ pub fn commit(store: &PlanStore, plan_id: Uuid) -> Result<CommitView, &'static s
 /// contributor declared and runs themselves -- see
 /// [`repair_stale_status_line`].
 ///
-/// The write goes through `tools::commit_if_unchanged`, the same as a
-/// committed plan, so the first edit keeps a backup and a file that changed
-/// since it was read is not overwritten.
+/// The file is the default login's, located by [`claude_settings_file`] as
+/// [`plan`] locates it, and the write goes through the same
+/// `commit_if_unchanged` as a committed plan, so the first edit keeps a
+/// backup and a file that changed since it was read is not overwritten.
 ///
 /// Returns whether a status line was removed.
 ///
@@ -689,19 +985,11 @@ pub fn commit(store: &PlanStore, plan_id: Uuid) -> Result<CommitView, &'static s
 ///
 /// [`ERR_CONFIG_CHANGED`] when the file moved between the read and the
 /// write; [`ERR_COMMIT_FAILED`] when the write itself failed.
-pub fn repair_claude_status_line(
-    catalog: &Catalog,
-    port: Option<u16>,
-) -> Result<bool, &'static str> {
-    const TOOL: &str = "claude";
+pub fn repair_claude_status_line(port: Option<u16>) -> Result<bool, &'static str> {
     let Some(port) = port else {
         return Ok(false);
     };
-    let Some(path) = tools::all(catalog)
-        .into_iter()
-        .find(|t| t.id == TOOL)
-        .and_then(|t| t.config_path)
-    else {
+    let Some(path) = claude_settings_file() else {
         return Ok(false);
     };
     // Absent, unreadable or not UTF-8: not ours to touch, the same rule
@@ -736,21 +1024,18 @@ pub fn repair_claude_status_line(
         return Ok(false);
     }
 
-    let Ok(planned) = tools::plan_connect_with(
-        TOOL,
-        port,
-        catalog,
-        tools::ConnectOptions::default().with_status_line(tools::StatusLine::Decline),
-    ) else {
+    let Ok(planned) = ClaudeEdit::plan(Some(port)) else {
         return Ok(false);
     };
     // Fail closed: the one change this may make is the status line's
     // removal. Anything more -- a second change, or a slot reported as
     // occupied -- is a connect, and a connect is shown before it is made.
-    if planned.changes.len() != 1 || !planned.occupied.is_empty() || !planned.skipped.is_empty() {
+    // (Upstream's `skipped` is always empty for Claude Code, which is not a
+    // catalog entry, so `ClaudeEdit` does not carry it.)
+    if planned.changes.len() != 1 || !planned.occupied.is_empty() || planned.path != path {
         return Ok(false);
     }
-    tools::commit_if_unchanged(&planned).map_err(|error| match error {
+    planned.commit_if_unchanged().map_err(|error| match error {
         tools::CommitError::Changed => ERR_CONFIG_CHANGED,
         tools::CommitError::Io(_) => ERR_COMMIT_FAILED,
     })?;
@@ -796,7 +1081,7 @@ pub(crate) fn repair_stale_status_line(shared: &DaemonShared, dry_run: bool) -> 
     if dry_run || shared.dev_dry_run {
         return false;
     }
-    match repair_claude_status_line(&catalog(), shared.hosted_destination_port()) {
+    match repair_claude_status_line(shared.hosted_destination_port()) {
         Ok(true) => {
             tracing::info!(
                 harness = "claude",
@@ -1067,11 +1352,10 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
                 // The vendor this tool answers at by default, from the same
                 // fixed table `source::discovery` draws its rows'
                 // `answers_at` from -- see `source::vendor_label`. Derived
-                // from `family` rather than a second lookup by `id`, so the
-                // two surfaces cannot name a family and its vendor
-                // differently. `None` for a catalog-described tool, which
-                // has no family and therefore no claimed default either.
-                "answers_at": row.family.and_then(crate::source::vendor_label),
+                // from `family` for tools with a fixed native vendor.
+                // OpenCode's OpenAI-compatible wire protocol says nothing
+                // about the vendor selected in its own settings.
+                "answers_at": if row.id == opencode::ID { None } else { row.family.and_then(crate::source::vendor_label) },
                 "state": row.state.label(),
                 // The time that makes "answering" mean something. Present
                 // only where the family belongs to this tool alone; a shared
@@ -1139,6 +1423,67 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
 
 /// `harness_plan`: work out one tool's edit and write nothing.
 pub fn handle_plan(shared: &DaemonShared, req: &Request) -> Response {
+    handle_plan_with_opencode(shared, req, None)
+}
+
+/// OpenCode needs the serving proxy's actual model list before a persistent
+/// default can be selected. Every transport uses the async dispatcher; the
+/// synchronous fallback refuses that connect rather than inventing a model.
+pub async fn handle_plan_async(shared: &DaemonShared, req: &Request) -> Response {
+    if req.params.get("id").and_then(serde_json::Value::as_str) != Some(opencode::ID)
+        || req.params.get("action").and_then(serde_json::Value::as_str) != Some("connect")
+    {
+        return handle_plan(shared, req);
+    }
+    if !shared.destination_credentialed() {
+        return handle_plan(shared, req);
+    }
+    let Some(port) = shared.destination_port() else {
+        return handle_plan(shared, req);
+    };
+    let major = match tokio::task::spawn_blocking(opencode::native_major).await {
+        Ok(Ok(major)) => major,
+        Ok(Err(error)) => return opencode_refusal(req, version_refusal(error)),
+        Err(_) => return opencode_refusal(req, PlanOutcome::UnsupportedVersion),
+    };
+    let models = match opencode::live_models(port).await {
+        Ok(models) => models,
+        Err(_) => return opencode_refusal(req, PlanOutcome::ModelsUnavailable),
+    };
+    // Do not preview a different destination if it changed during the probe.
+    if shared.destination_port() != Some(port) || !shared.destination_credentialed() {
+        return Response::err(req.id, ERR_UNAVAILABLE, ERR_NO_DESTINATION);
+    }
+    handle_plan_with_opencode(shared, req, Some(&opencode::Context { major, models }))
+}
+
+/// Why a connect stops at the version probe: a missing executable is not
+/// installed, whatever its config folder says (#1664's review: it read
+/// "unsupported version"); any other failure is a version it cannot use.
+fn version_refusal(error: &str) -> PlanOutcome {
+    if error == opencode::ERR_NO_EXECUTABLE {
+        PlanOutcome::NotInstalled
+    } else {
+        PlanOutcome::UnsupportedVersion
+    }
+}
+
+fn opencode_refusal(req: &Request, outcome: PlanOutcome) -> Response {
+    Response::ok(
+        req.id,
+        serde_json::json!({
+            "id": opencode::ID, "action": "connect", "outcome": outcome.label(),
+            "plan_id": null, "path": path_value(opencode::tool().config_path.as_deref()),
+            "changes": [], "occupied": [],
+        }),
+    )
+}
+
+fn handle_plan_with_opencode(
+    shared: &DaemonShared,
+    req: &Request,
+    context: Option<&opencode::Context>,
+) -> Response {
     let Some(id) = req.params.get("id").and_then(serde_json::Value::as_str) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "id-required");
     };
@@ -1151,13 +1496,14 @@ pub fn handle_plan(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_BAD_PARAMS, "action-invalid");
     };
 
-    match plan(
+    match plan_with_opencode(
         &shared.harness_plans,
         &catalog(),
         id,
         action,
         shared.destination_port(),
         shared.destination_credentialed(),
+        context,
     ) {
         Ok(view) => Response::ok(
             req.id,
@@ -1218,42 +1564,96 @@ pub fn handle_commit(shared: &DaemonShared, req: &Request) -> Response {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// A connect whose OpenCode executable is gone says not installed, not
+    /// unsupported version; every other probe failure stays a version
+    /// refusal.
+    #[test]
+    fn a_missing_opencode_executable_is_not_installed() {
+        assert_eq!(
+            version_refusal(opencode::ERR_NO_EXECUTABLE),
+            PlanOutcome::NotInstalled
+        );
+        assert_eq!(
+            version_refusal(opencode::ERR_VERSION),
+            PlanOutcome::UnsupportedVersion
+        );
+    }
     use std::sync::{Mutex as StdMutex, MutexGuard, PoisonError};
 
-    /// Serializes the tests that point Claude Code's config somewhere.
+    /// Points this test thread's Claude Code default login at `dir`, through
+    /// [`TEST_CLAUDE_DIR`], and takes it away again on drop.
     ///
-    /// `CLAUDE_CONFIG_DIR` is process-wide, and these tests both read and
-    /// write the file it names. The pattern is `ironwire_pointer`'s: one
-    /// lock, restored on drop, so a panicking test cannot leave the variable
-    /// set for whatever runs next.
-    static CLAUDE_CONFIG_LOCK: StdMutex<()> = StdMutex::new(());
-
+    /// Per thread, not per process: nothing here touches `HOME`,
+    /// `USERPROFILE` or `CLAUDE_CONFIG_DIR`, so concurrent tests cannot see
+    /// each other's directory, and none needs a lock. A test that sets none
+    /// gets no Claude Code file at all -- never the real one, on any
+    /// platform. That matters most on Windows, where `dirs::home_dir` reads
+    /// the profile folder from the shell and ignores `USERPROFILE`, so
+    /// redirecting the environment there redirects nothing.
     struct ClaudeConfigAt {
-        _lock: MutexGuard<'static, ()>,
-        previous: Option<std::ffi::OsString>,
+        previous: Option<PathBuf>,
     }
 
     impl ClaudeConfigAt {
         fn at(dir: &Path) -> Self {
-            let lock = CLAUDE_CONFIG_LOCK
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
-            unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", dir) };
-            Self {
-                _lock: lock,
-                previous,
-            }
+            let previous = TEST_CLAUDE_DIR.with(|d| d.replace(Some(dir.to_path_buf())));
+            Self { previous }
         }
     }
 
     impl Drop for ClaudeConfigAt {
         fn drop(&mut self) {
-            match self.previous.take() {
-                Some(v) => unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", v) },
-                None => unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") },
-            }
+            let previous = self.previous.take();
+            TEST_CLAUDE_DIR.with(|d| d.replace(previous));
         }
+    }
+
+    /// The plan, the list and the repair all address the file under the
+    /// directory a test set, never the one under the real home.
+    ///
+    /// Before this, the harness asked `ironwire_agents::tools` for the file,
+    /// which resolves `dirs::home_dir()`. A test could steer that only through
+    /// the environment, and on Windows not even then, so the connect, the
+    /// disconnect and the repair tests committed edits to the contributor's
+    /// own `%USERPROFILE%\.claude\settings.json`.
+    #[test]
+    fn the_claude_code_file_is_the_one_under_the_test_directory() {
+        let (dir, _guard, path) = claude_config("{}");
+        let view = plan_claude(&PlanStore::default(), HarnessAction::Connect);
+        assert_eq!(view.path.as_deref(), Some(path.as_path()));
+        let row = list(&Catalog::default(), &FamilyActivity::default(), Some(8463))
+            .into_iter()
+            .find(|row| row.id == "claude")
+            .expect("claude is listed");
+        assert_eq!(row.config_path.as_deref(), Some(path.as_path()));
+        assert!(path.starts_with(dir.path()));
+    }
+
+    /// With no directory set, a test has no Claude Code file: nothing is
+    /// planned against, listed from or repaired in a real profile.
+    #[test]
+    fn a_test_that_sets_no_directory_reaches_no_claude_code_file() {
+        // The outcome itself depends on the machine -- `NoConfigPath` where
+        // `claude` is on `PATH`, `NotInstalled` where it is not -- so only
+        // what holds on both is asserted: no file, and no permission to
+        // write one.
+        let view = plan_claude(&PlanStore::default(), HarnessAction::Connect);
+        assert!(
+            matches!(
+                view.outcome,
+                PlanOutcome::NoConfigPath | PlanOutcome::NotInstalled
+            ),
+            "{view:?}"
+        );
+        assert_eq!(view.path, None);
+        assert_eq!(view.plan_id, None);
+        let row = list(&Catalog::default(), &FamilyActivity::default(), Some(8463))
+            .into_iter()
+            .find(|row| row.id == "claude")
+            .expect("claude is listed");
+        assert_eq!(row.config_path, None);
+        assert_eq!(repair_claude_status_line(Some(8463)), Ok(false));
     }
 
     /// A temp directory standing in for Claude Code's config directory,
@@ -1501,10 +1901,7 @@ mod tests {
     #[test]
     fn repair_removes_the_status_line_the_old_connect_installed() {
         let (_dir, _guard, path) = claude_config(OLD_CONNECT_SETTINGS);
-        assert_eq!(
-            repair_claude_status_line(&Catalog::default(), Some(8463)),
-            Ok(true)
-        );
+        assert_eq!(repair_claude_status_line(Some(8463)), Ok(true));
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                 .expect("settings stay valid JSON");
@@ -1520,10 +1917,7 @@ mod tests {
         // Once repaired the file is connected and has nothing left to
         // remove, so a second pass is a no-op.
         let repaired = std::fs::read_to_string(&path).expect("read");
-        assert_eq!(
-            repair_claude_status_line(&Catalog::default(), Some(8463)),
-            Ok(false)
-        );
+        assert_eq!(repair_claude_status_line(Some(8463)), Ok(false));
         assert_eq!(std::fs::read_to_string(&path).expect("read"), repaired);
     }
 
@@ -1531,10 +1925,7 @@ mod tests {
     /// neither reports a removal nor touches a byte of the file.
     fn assert_repair_leaves_alone(body: &str, port: Option<u16>) {
         let (_dir, _guard, path) = claude_config(body);
-        assert_eq!(
-            repair_claude_status_line(&Catalog::default(), port),
-            Ok(false)
-        );
+        assert_eq!(repair_claude_status_line(port), Ok(false));
         assert_eq!(std::fs::read_to_string(&path).expect("read"), body);
     }
 
@@ -1590,10 +1981,7 @@ mod tests {
             .flat_map(u16::to_le_bytes)
             .collect();
         std::fs::write(&path, &utf16).expect("write");
-        assert_eq!(
-            repair_claude_status_line(&Catalog::default(), Some(8463)),
-            Ok(false)
-        );
+        assert_eq!(repair_claude_status_line(Some(8463)), Ok(false));
         assert_eq!(std::fs::read(&path).expect("read"), utf16);
     }
 
@@ -1661,6 +2049,7 @@ mod tests {
 
     /// A proxy the contributor declared and runs themselves is not this
     /// daemon's to sweep after, even on the same port.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[test]
     fn the_daemon_does_not_repair_against_a_declared_proxy() {
         let shared = daemon_shared();
@@ -1698,18 +2087,91 @@ mod tests {
     fn repair_with_no_settings_file_creates_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = ClaudeConfigAt::at(dir.path());
-        assert_eq!(
-            repair_claude_status_line(&Catalog::default(), Some(8463)),
-            Ok(false)
-        );
+        assert_eq!(repair_claude_status_line(Some(8463)), Ok(false));
         assert!(!dir.path().join("settings.json").exists());
     }
 
     /// Serializes the tests that point Codex's config somewhere.
     ///
-    /// `CODEX_HOME` is process-wide, exactly as `CLAUDE_CONFIG_DIR` is, and
-    /// the same pattern applies for the same reason.
+    /// `CODEX_HOME` is process-wide, and these tests both read and write the
+    /// file it names. One lock, restored on drop, so a panicking test cannot
+    /// leave the variable set for whatever runs next. Codex, unlike Claude
+    /// Code, is still located by upstream, which follows `CODEX_HOME` as
+    /// Codex itself does.
     static CODEX_HOME_LOCK: StdMutex<()> = StdMutex::new(());
+
+    /// Serializes the one test that sets `CLAUDE_CONFIG_DIR`, for the same
+    /// reason as [`CODEX_HOME_LOCK`].
+    static CLAUDE_CONFIG_DIR_LOCK: StdMutex<()> = StdMutex::new(());
+
+    /// Claude Code's row, connect and repair address the default login's
+    /// file whatever `CLAUDE_CONFIG_DIR` the daemon inherited.
+    ///
+    /// The plain URL a connect writes is served by the default login's
+    /// credential. Following the variable would put that URL in another
+    /// login's settings, and that Claude Code's requests would then be served
+    /// on the default login's token: one account's calls on another's
+    /// subscription. IronWire #64 stopped following it upstream for exactly
+    /// that reason, and this is the Trace Commons side of the same rule. The
+    /// other login is connected from a terminal with
+    /// `ironwire connect claude --config-dir`, as a login of its own.
+    ///
+    /// The other login's file is made to look connected to us, with the
+    /// status line an old connect left, so that each of the three would act
+    /// on it if it were the one being read.
+    #[test]
+    fn claude_code_is_connected_in_the_default_login_whatever_claude_config_dir_says() {
+        let _env = CLAUDE_CONFIG_DIR_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let other = tempfile::tempdir().expect("tempdir");
+        let other_file = other.path().join("settings.json");
+        std::fs::write(&other_file, OLD_CONNECT_SETTINGS).expect("write");
+        let (_dir, _guard, default_file) = claude_config("{}");
+
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", v) },
+                    None => unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") },
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("CLAUDE_CONFIG_DIR"));
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", other.path()) };
+
+        // The row is the default login's file, and that file is not connected.
+        let row = list(&Catalog::default(), &FamilyActivity::default(), Some(8463))
+            .into_iter()
+            .find(|row| row.id == "claude")
+            .expect("claude is listed");
+        assert_eq!(row.config_path.as_deref(), Some(default_file.as_path()));
+        assert!(!row.connected && !row.wired, "{row:?}");
+
+        // The repair leaves the other login's old status line where it is.
+        assert_eq!(repair_claude_status_line(Some(8463)), Ok(false));
+
+        // The connect plans and writes the default login's file.
+        let store = PlanStore::default();
+        let view = plan_claude(&store, HarnessAction::Connect);
+        assert_eq!(view.path.as_deref(), Some(default_file.as_path()));
+        commit(&store, view.plan_id.expect("a connect plans")).expect("commit");
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&default_file).expect("read"))
+                .expect("json");
+        assert_eq!(
+            written["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:8463/anthropic"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&other_file).expect("read"),
+            OLD_CONNECT_SETTINGS,
+            "another login's settings are never touched"
+        );
+        assert!(!other.path().join("settings.json.ironwire-backup").exists());
+    }
 
     struct CodexHomeAt {
         _lock: MutexGuard<'static, ()>,
@@ -2009,12 +2471,31 @@ mod tests {
     /// With no catalog the list is the two built-in tools, and every row is
     /// still a full row -- installed or not.
     #[test]
-    fn the_list_degrades_to_the_two_built_in_tools() {
+    fn the_list_includes_the_three_built_in_tools() {
         let rows = list(&Catalog::default(), &FamilyActivity::default(), Some(8463));
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec!["claude", "codex"]);
+        assert_eq!(ids, vec!["claude", "codex", "opencode"]);
         assert_eq!(rows[0].family, Some("anthropic"));
         assert_eq!(rows[1].family, Some("openai"));
+        assert_eq!(rows[2].family, Some("openai"));
+    }
+
+    #[test]
+    fn opencodes_protocol_family_does_not_claim_a_default_vendor_on_the_wire() {
+        let shared = daemon_shared();
+        let request = Request {
+            id: 1,
+            method: "harness_list".into(),
+            params: serde_json::json!({}),
+        };
+        let response = handle_list(&shared, &request);
+        let result = response.result.expect("list result");
+        let rows = result["harnesses"].as_array().unwrap();
+        let opencode = rows.iter().find(|row| row["id"] == "opencode").unwrap();
+        assert_eq!(opencode["family"], "openai");
+        assert!(opencode["answers_at"].is_null());
+        let codex = rows.iter().find(|row| row["id"] == "codex").unwrap();
+        assert_eq!(codex["answers_at"], "OpenAI");
     }
 
     /// Every row carries a state, and with no readable ledger a connected
@@ -2064,10 +2545,9 @@ mod tests {
     /// these happens to be installed.
     #[test]
     fn a_connect_with_no_destination_is_refused_by_name() {
-        // Pin the config directory, and take the lock with it. Without this
-        // the test reads whatever `CLAUDE_CONFIG_DIR` a concurrent test has
-        // set: point it at an already-wired file and the connect is
-        // unavailable, so the refusal never gets as far as the port.
+        // Give Claude Code an unwired file of this test's own. Without one
+        // its row has no file at all, and a refusal that depended on the
+        // file's state would go untested here.
         let (_dir, _guard, _path) = claude_config("{}");
         let store = PlanStore::default();
         let catalog = Catalog::default();
@@ -2106,10 +2586,9 @@ mod tests {
     /// machine running the test.
     #[test]
     fn a_connect_with_no_credential_is_refused_by_name() {
-        // Same reason as the no-destination test: pin the config directory so
-        // a concurrent test cannot leave `CLAUDE_CONFIG_DIR` naming an
-        // already-wired file, which would make the connect unavailable and
-        // the refusal under test never happen.
+        // Same reason as the no-destination test: an unwired file of this
+        // test's own, so the connect is available and the refusal under test
+        // is the one that happens.
         let (_dir, _guard, _path) = claude_config("{}");
         let store = PlanStore::default();
         let catalog = Catalog::default();

@@ -31,7 +31,7 @@ enum PrivateInferenceCopyFixture {
     /// Every required key, with a placeholder value naming the key it came
     /// from, so an assertion that reads the wrong field says which one.
     static let complete = """
-        {"destination":"DESTINATION","subtitle":"SUBTITLE",
+        {"destination":"DESTINATION","subtitle":"SUBTITLE","subtitle_credit":"SUBTITLE-CREDIT",
          "offer_title":"T","offer_what":"WHAT","offer_exposure":"EXPOSURE","offer_exposure_short":"EXPOSURE SHORT","offer_learn_more":"MORE",
          "offer_no_repoint":"NO-REPOINT","offer_accept":"ACCEPT",
          "offer_decline":"DECLINE","offer_asked_once":"ONCE",
@@ -129,6 +129,7 @@ enum PrivateInferenceCopyFixture {
          "funding_title":"FUNDING-TITLE",
          "funding_what":"FUNDING-WHAT",
          "funding_manage":"FUNDING-MANAGE",
+         "balance_add_funds":"BALANCE-ADD-FUNDS",
          "funding_refresh":"FUNDING-REFRESH",
          "funding_unavailable":"FUNDING-UNAVAILABLE",
          "balance_what":"BALANCE-WHAT",

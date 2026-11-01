@@ -24,7 +24,7 @@ public enum GlassColor {
 }
 
 /// Status is carried by a dot and a label, never by a fill.
-public enum GlassStatus: Sendable, Equatable {
+public enum GlassStatus: Sendable, Hashable {
     case on, ask, off, outside, shared, kept, inference
 
     public var rgba: GlassRGBA {
@@ -188,21 +188,39 @@ public enum GlassTier: Sendable, Equatable {
         }
     }
 
+    /// What this tier is to the views it holds (`GlassGround`): nil for a
+    /// control, which holds only its own label.
+    var ground: GlassGround? {
+        switch self {
+        case .pane: .pane
+        case .card, .cardQuiet, .well, .nodeCard: .card
+        case .popover, .menu: .menu
+        case .control, .controlSelected: nil
+        }
+    }
+
     /// The fill. A pane is the native material (R3, D4): Liquid Glass on
     /// macOS 26, the HUD material on 14–25, the opaque base under Reduce
     /// Transparency. Everything inside a pane is painted: never glass on
-    /// glass.
+    /// glass. A control takes the fill that stands out from its ground, and
+    /// a card on a card the nested card's (owner, 2026-10-22).
     @ViewBuilder
-    func fill(in shape: RoundedRectangle) -> some View {
+    func fill(in shape: RoundedRectangle, on ground: GlassGround = .pane) -> some View {
         switch self {
         case .pane:
             GlassPaneFill(radius: shape.cornerSize.width)
+        case .card where ground == .card, .cardQuiet where ground == .card:
+            shape.fill(GlassTokens.Color.cardNested.color)
         case .card:
             shape.fill(GlassTokens.Gradient.cardFill.linear)
         case .cardQuiet:
             shape.fill(GlassTokens.Gradient.cardFillQuiet.linear)
         case .well:
             shape.fill(GlassTokens.Color.wellFill.color)
+        case .control where ground == .menu:
+            shape.fill(GlassTokens.Color.controlOnMenu.color)
+        case .control where ground == .selection:
+            shape.fill(GlassTokens.Color.controlOnSelection.color)
         case .control:
             shape.fill(GlassTokens.Gradient.controlFill.linear)
         case .controlSelected:
@@ -215,6 +233,41 @@ public enum GlassTier: Sendable, Equatable {
             shape.fill(GlassTokens.Color.nodeCardFill.color)
         }
     }
+}
+
+// MARK: - Ground
+
+/// What a control or card sits on (owner, 2026-10-22: the flat theme's
+/// fills, which read on a pane, all but vanished on a menu, on a card under
+/// a card and on a selected row, and with no edges in the flat theme the
+/// fill is all that sets them apart). Each tier tells the views it holds
+/// what it is (`GlassTier.ground`), a selected list row says it is the
+/// selection, and a control or card takes the fill, hover and ink that
+/// stand out from its ground.
+public enum GlassGround: Sendable, Equatable {
+    case pane, card, menu, selection
+
+    /// A control's label ink on this ground: the selected row's own ink on
+    /// a selection, the text colour elsewhere.
+    public var controlInk: GlassRGBA {
+        self == .selection ? GlassTokens.Color.textOnAccent : GlassTokens.Color.textPrimary
+    }
+
+    /// The hover fill a tier takes on this ground: a control's hover
+    /// follows its fill onto a menu or a selection. Any other hover is the
+    /// caller's own and stays.
+    public func hover(_ hover: GlassRGBA, tier: GlassTier) -> GlassRGBA {
+        guard tier == .control, hover == GlassTokens.Color.controlHover else { return hover }
+        switch self {
+        case .menu: return GlassTokens.Color.controlOnMenuHover
+        case .selection: return GlassTokens.Color.controlOnSelectionHover
+        case .pane, .card: return hover
+        }
+    }
+}
+
+public extension EnvironmentValues {
+    @Entry var glassGround: GlassGround = .pane
 }
 
 public extension View {
@@ -250,18 +303,22 @@ private struct GlassTierModifier: ViewModifier {
     @State private var hovering = false
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.glassGround) private var ground
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius ?? tier.radius, style: .continuous)
+        let hover = hover.map { ground.hover($0, tier: tier) }
         let fill = GlassTierFill.choose(hover: hover, hovering: hovering, enabled: isEnabled)
         // Clip the content and fill first; the edge's drop shadows fall
         // outside the shape and must not be clipped with them. Every tier
         // draws its edge, a pane on Liquid Glass too, as #1146's `.tc-pane`
         // keeps `--tc-pane-edge` over native glass (owner ruling, 2026-10-07).
         return content
+            // What this tier is to what it holds; a control leaves it be.
+            .environment(\.glassGround, tier.ground ?? ground)
             .background {
                 ZStack {
-                    tier.fill(in: shape).opacity(fill == .tier ? 1 : 0)
+                    tier.fill(in: shape, on: ground).opacity(fill == .tier ? 1 : 0)
                     if let hover {
                         shape.fill(hover.color).opacity(fill == .tier ? 0 : 1)
                     }

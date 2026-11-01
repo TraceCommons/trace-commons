@@ -12,17 +12,24 @@
 # doing that only for one architecture and shipping it as if it covered both
 # would sail through signing, notarization and Gatekeeper, then simply fail
 # to launch on whichever architecture got left out.
+#
+# TC_CHANNEL (unset means production) picks macos/channels/<channel>.env: the
+# bundle's name, identity and icon, and the cargo features the dylib and the
+# bundled CLI are built with. See channel.sh.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 PACKAGE_DIR="$PWD"
 REPO_ROOT="$(cd .. && pwd)"
+# shellcheck source=channel.sh
+. ./scripts/channel.sh
+load_channel
 CONFIG="${1:-debug}"
 # A dev bundle gets an obviously-not-a-release version. The release path
 # passes the tag's version explicitly; see release-apps.yml.
 SHORT_VERSION="${2:-0.0.0-dev}"
 BUILD_VERSION="${3:-1}"
-APP="$PACKAGE_DIR/.build/Near.ai.app"
+APP="$PACKAGE_DIR/.build/$TC_BUNDLE_NAME.app"
 DYLIB_NAME="libtrace_commons_contributor_ffi.dylib"
 
 RUST_TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
@@ -35,6 +42,16 @@ CARGO_BUILD_ARGS=()
 if [ "$CONFIG" = "release" ]; then
   CARGO_PROFILE_DIR="release"
   CARGO_BUILD_ARGS+=(--release)
+fi
+# The channel's features, opaque here, one value per build below:
+# production adds none.
+FFI_FEATURE_ARGS=()
+if [ -n "$TC_FFI_CARGO_FEATURES" ]; then
+  FFI_FEATURE_ARGS+=(--features "$TC_FFI_CARGO_FEATURES")
+fi
+CLI_FEATURE_ARGS=()
+if [ -n "$TC_CLI_CARGO_FEATURES" ]; then
+  CLI_FEATURE_ARGS+=(--features "$TC_CLI_CARGO_FEATURES")
 fi
 
 # A staging directory for the lipo'd universal dylib. TC_FFI_LIB_DIR already
@@ -64,9 +81,11 @@ DYLIB_PATHS=()
 NEAR_AI_PATHS=()
 for target in "${RUST_TARGETS[@]}"; do
   (cd "$REPO_ROOT" && cargo build ${CARGO_BUILD_ARGS[@]+"${CARGO_BUILD_ARGS[@]}"} \
+    ${FFI_FEATURE_ARGS[@]+"${FFI_FEATURE_ARGS[@]}"} \
     --target "$target" -p trace-commons-contributor-ffi)
   DYLIB_PATHS+=("$REPO_ROOT/target/$target/$CARGO_PROFILE_DIR/$DYLIB_NAME")
   (cd "$REPO_ROOT" && cargo build ${CARGO_BUILD_ARGS[@]+"${CARGO_BUILD_ARGS[@]}"} \
+    ${CLI_FEATURE_ARGS[@]+"${CLI_FEATURE_ARGS[@]}"} \
     --target "$target" -p trace-commons-contributor --bin near-ai)
   NEAR_AI_PATHS+=("$REPO_ROOT/target/$target/$CARGO_PROFILE_DIR/near-ai")
 done
@@ -124,18 +143,13 @@ done
 # the icon slice -- an LSUIElement app never shows an icon, so nobody noticed
 # there was none to show.
 #
-# This is the Icon Composer .icon route: it writes both Assets.car, which is
-# what macOS 26 draws and what carries the Liquid Glass treatment, and
-# AppIcon.icns as the legacy fallback. scripts/info-plist.sh declares
-# CFBundleIconName for the former and CFBundleIconFile for the latter, which
-# is the pair actool's own partial Info.plist emits.
-#
-# scripts/make-icons.sh is the earlier, flat .icns-only route. It is kept
-# because it produces the full ten-representation ladder that iconutil wants
-# and this one produces four, so it is the thing to fall back to if the .icon
-# route ever has to be backed out. It is not wired into this build.
-./scripts/make-icon-document.sh "$REPO_ROOT/assets/mark" \
-  "$APP/Contents/Resources"
+# The channel's Icon Composer document (macos/icons/) is compiled into both
+# Assets.car, which is what macOS draws and what carries the Liquid Glass
+# treatment, and AppIcon.icns as the legacy fallback. scripts/info-plist.sh
+# declares CFBundleIconName for the former and CFBundleIconFile for the
+# latter, which is the pair actool's own partial Info.plist emits.
+./scripts/make-icon-document.sh "$REPO_ROOT/$TC_ICON_SOURCE" \
+  "$APP/Contents/Resources" "$TC_CHANNEL"
 
 # cargo stamps the dylib with an absolute install name under target/. Repoint
 # it inside the bundle so the app does not depend on this checkout's path.
@@ -221,5 +235,8 @@ fi
 echo "--- verifying the final bundle is universal"
 verify_universal "app executable" "$APP/Contents/MacOS/TraceCommonsApp"
 verify_universal "embedded dylib" "$APP/Contents/Frameworks/$DYLIB_NAME"
+
+echo "--- verifying the bundle's channel"
+assert_bundle_channel "$APP"
 
 echo "built $APP"

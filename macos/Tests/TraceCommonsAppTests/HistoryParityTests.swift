@@ -494,8 +494,8 @@ final class HistoryParityTests: XCTestCase {
         for needle in [
             "case .signIn: if let words { HistorySignInControl(words: words) }",
             "case .checkingAccount: if let words { Text(words.checkingAccount)",
-            "Button(model.accountSigningIn ? words.waitingForSignIn : words.signInToWithdraw) "
-                + "{ Task { await model.signInToWithdraw() } }",
+            "Button(label) { Task { await model.signInToWithdraw() } }",
+            "model.canRestartNearAiBrowserSignIn",
             "if model.accountSigningIn { Text(words.completeSignIn)",
         ] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
@@ -696,7 +696,8 @@ final class HistoryParityTests: XCTestCase {
         let end = try XCTUnwrap(home[start.upperBound...].range(of: "\n}\n"))
         let stats = Self.flat(String(home[start.lowerBound..<end.lowerBound]))
         for needle in [
-            "HomeStatTile(label: HomeFormat.creditPendingWord, value: HomeFormat.pendingFigure(rollup?.creditPending, credit: credit))",
+            "let creditTile = HomeFormat.creditTile(final: rollup?.creditFinal, pending: rollup?.creditPending, accepted: rollup?.allTime?.accepted, credit: credit)",
+            "HomeStatTile(label: HomeFormat.creditPendingWord, value: creditTile.value, detail: creditTile.detail)",
             "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))",
             "HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))",
         ] {
@@ -733,14 +734,15 @@ final class HistoryParityTests: XCTestCase {
         // Ron's headings and project groups, in the core's words.
         let flat = Self.flat(home)
         for needle in [
-            "Text(words.historyDescription)", "Text(words?.submissions ?? MonitorWords.history)",
-            "Text(words.contributionHistory)", "Text(words.project)",
+            "Text(words?.submissions ?? MonitorWords.history)", "Text(words.project)",
             "Text(words?.records(group.count) ?? \"\\(group.count)\")", "Text(words.readingHistory)",
             ".accessibilityLabel(words?.filterLabel ?? MonitorWords.history)",
             "Text(words.status(word))", "Text(words.credit(figure))", "Text(HomeFormat.rowMeta(row))",
         ] {
             XCTAssertTrue(flat.contains(needle), "HomeViews.swift lacks \(needle)")
         }
+        XCTAssertFalse(home.contains("Text(words.historyDescription)"))
+        XCTAssertFalse(home.contains("Text(words.contributionHistory)"))
         // The filter wraps; it is no longer a strip that scrolls sideways.
         XCTAssertFalse(home.contains("ScrollView(.horizontal)"))
         XCTAssertTrue(home.contains("HistoryFilterFlow(spacing: GlassTokens.Space.s2)"))
@@ -749,6 +751,7 @@ final class HistoryParityTests: XCTestCase {
     /// Ron's inspector auto-open: opening a History row selects it and opens
     /// the inspector, which shows the row while History is shown and the
     /// Traces selection's card otherwise. Clearing it closes nothing.
+    @MainActor
     func test_openingAHistoryRowOpensTheInspectorOnIt() throws {
         var selected = ""
         var shows = false

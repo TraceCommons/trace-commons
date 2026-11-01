@@ -36,6 +36,7 @@ final class EdgeRailGeometryTests: XCTestCase {
 
     /// A rail tile follows the control tiers' spec: the selection's label is
     /// `textOnSelected`, as on a segmented tab, and an idle tile's is primary.
+    @MainActor
     func testARailTileTakesTheSelectionInk() {
         XCTAssertEqual(GlassRailTile<EmptyView>.ink(selected: true), GlassTokens.Color.textOnSelected)
         XCTAssertEqual(GlassRailTile<EmptyView>.ink(selected: false), GlassTokens.Color.textPrimary)

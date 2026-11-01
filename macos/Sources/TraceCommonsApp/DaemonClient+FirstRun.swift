@@ -34,17 +34,41 @@ extension DaemonClient {
 // MARK: - Flow 1 grant and invite lookup
 
 extension DaemonClient {
-    /// `grant_automatic`, after the contributor pressed the grant button.
+    /// The include-existing grant, after the contributor pressed Start.
+    /// Its distinct method name makes older daemons refuse before mutation.
     /// `witnessSigningAddress` is the witness the disclosure screen showed,
     /// from `Flow1GrantRequest`; nil is sent as JSON null, never omitted,
-    /// because the daemon refuses a request that does not say.
-    func grantAutomatic(witnessSigningAddress: String?) throws -> AutomaticGrant {
+    /// because the daemon refuses a request that does not say. Finishing
+    /// onboarding explicitly includes eligible history from watched folders;
+    /// other grant callers keep their existing from-now semantics.
+    ///
+    /// `keepFolderAsks`: a folder already set to Ask keeps asking (owner,
+    /// 2026-10-30, and #1753's ruling that a folder's own rule always wins);
+    /// false makes every folder but a Never one Automatic.
+    func grantAutomatic(witnessSigningAddress: String?, keepFolderAsks: Bool = true) throws -> AutomaticGrant {
         let witness: Any = witnessSigningAddress ?? NSNull()
-        return try call(
-            "grant_automatic",
-            params: ["confirmed": true, "witness_signing_address": witness],
+        let grant = try call(
+            "grant_automatic_including_existing",
+            params: ["confirmed": true, "witness_signing_address": witness, "include_existing": true,
+                     "keep_folder_asks": keepFolderAsks],
             as: AutomaticGrant.self
         )
+        guard !grant.granted || grant.includeExisting == true else {
+            throw Failure(code: "unavailable", message: "automatic-existing-traces-unsupported")
+        }
+        return grant
+    }
+
+    /// `automatic_grant`: whether the standing Automatic grant is in force,
+    /// for Settings' sharing choice.
+    func automaticGrant() throws -> AutomaticGrant {
+        try call("automatic_grant", as: AutomaticGrant.self)
+    }
+
+    /// `first_run_estimate`: the commons' dollar estimate per accepted
+    /// trace, or no range. Always answers once the daemon runs.
+    func firstRunEstimate() throws -> DaemonData.FirstRunEstimate {
+        try call("first_run_estimate", as: DaemonData.FirstRunEstimate.self)
     }
 
     /// `invite_lookup`: the issuer and pay range an invite names. The whole
