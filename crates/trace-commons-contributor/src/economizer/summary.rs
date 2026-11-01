@@ -10,7 +10,7 @@
 //! path itself.
 
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::Harness;
@@ -129,26 +129,37 @@ pub fn summarize_in(
             [home.to_path_buf(), resolved]
         })
         .collect();
-    let mut seen = BTreeSet::new();
-    let mut rows = Vec::new();
+    // One spelling per folder: a folder named more than once (through a
+    // link, say) keeps the spelling under home, else the first in path
+    // order, so its label is the same whatever order it was named in.
+    // Labelled from the path as recorded when it is under home, so a
+    // project symlinked out of home keeps its `~`; otherwise from the
+    // resolved path, when that is under home (a folder recorded under a
+    // symlinked spelling of home).
+    let under_home = |p: &Path| homes.iter().any(|home| p.starts_with(home));
+    let mut chosen: BTreeMap<String, (Harness, PathBuf)> = BTreeMap::new();
     for (harness, path) in folders {
         let key = repo_key(&path, harness);
-        if !seen.insert(key.clone()) {
-            continue;
+        let path = label_path(path, &homes);
+        match chosen.get(&key) {
+            Some((_, kept))
+                if (under_home(kept), std::cmp::Reverse(kept))
+                    >= (under_home(&path), std::cmp::Reverse(&path)) => {}
+            _ => {
+                chosen.insert(key, (harness, path));
+            }
         }
-        // Labelled from the path as recorded when it is under home, so a
-        // project symlinked out of home keeps its `~`. Otherwise from the
-        // resolved path, when that is under home (a folder recorded under
-        // a symlinked spelling of home). `repo_key` resolved it already.
-        let resolved = label_path(path, &homes);
+    }
+    let mut rows = Vec::new();
+    for (key, (harness, path)) in chosen {
         let row = FolderSummary::of(
-            label(&resolved, 0, &homes),
+            label(&path, 0, &homes),
             harness,
             key.clone(),
             &store.repo(&key),
         );
         if row.learned_anything() {
-            rows.push((row, resolved));
+            rows.push((row, path));
         }
     }
     // Lengthen colliding labels, one parent at a time, until they differ

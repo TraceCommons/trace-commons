@@ -156,6 +156,47 @@ final class InsightsEconomizerTests: XCTestCase {
         XCTAssertTrue(model.stale)
     }
 
+    func testASwitchConfirmedWithNoPageShownStillDropsAnEarlierRead() async {
+        // Read 1 fails, so no page is shown. Read 2 began before the switch
+        // and answers "off"; read 3, after the switch, answers "on".
+        final class Gates: @unchecked Sendable {
+            var early: CheckedContinuation<Void, Never>?
+            var after: CheckedContinuation<Void, Never>?
+            var reads = 0
+        }
+        let gates = Gates()
+        struct Stopped: Error {}
+        let model = InsightsEconomizerModel(calls: .init(
+            served: { true },
+            status: {
+                gates.reads += 1
+                switch gates.reads {
+                case 1: throw Stopped()
+                case 2:
+                    await withCheckedContinuation { gates.early = $0 }
+                    return DaemonData.EconomizerStatus(enabled: false)
+                default:
+                    await withCheckedContinuation { gates.after = $0 }
+                    return DaemonData.EconomizerStatus(enabled: true)
+                }
+            },
+            setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
+            restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
+        await model.load()
+        XCTAssertNil(model.answer)
+        let early = Task { await model.load() }
+        while gates.early == nil { await Task.yield() }
+        let switching = Task { await model.setEnabled(true) }
+        while gates.after == nil { await Task.yield() }
+        // The read begun before the switch lands: it is dropped.
+        gates.early?.resume()
+        await early.value
+        XCTAssertNil(model.answer)
+        gates.after?.resume()
+        await switching.value
+        XCTAssertEqual(model.answer?.enabled, true)
+    }
+
     func testAFailedReadWhenTheTabOpensIsNotHiddenByAnEarlierAnswer() async {
         final class Box: @unchecked Sendable { var up = true }
         let box = Box()

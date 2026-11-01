@@ -1607,6 +1607,29 @@ fn labels_grow_until_they_differ_and_never_name_the_home_folder() {
         .collect();
         linked_out.sort();
         assert_eq!(linked_out, ["x/work/api", "~/work/api"]);
+
+        // Named both through the link and directly, a folder keeps the
+        // spelling under home, whatever the order.
+        let direct = outside.join("api");
+        for order in [
+            [linked_api.clone(), direct.clone()],
+            [direct.clone(), linked_api.clone()],
+        ] {
+            let mut labels: Vec<String> = summarize_in(
+                &store,
+                order
+                    .into_iter()
+                    .chain([other_work.clone()])
+                    .map(|path| (Harness::Claude, path)),
+                Some(&home),
+            )
+            .folders
+            .into_iter()
+            .map(|row| row.folder)
+            .collect();
+            labels.sort();
+            assert_eq!(labels, ["x/work/api", "~/work/api"]);
+        }
     }
 }
 
