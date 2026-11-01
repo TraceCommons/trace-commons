@@ -652,6 +652,12 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::Accounts { action } => {
             crate::managed::cli::accounts(&store, action, cli.json).await
         }
+        Command::Sessions {
+            action: crate::managed::cli::SessionCommand::Resume { session_id },
+        } => {
+            let code = crate::managed::cli::resume(&store, session_id).await?;
+            std::process::exit(code);
+        }
         Command::Sessions { action } => crate::managed::cli::sessions(&store, action, cli.json),
         Command::ManagedSessionBind { .. } => {
             unreachable!("binding recorder handled before config resolution")
@@ -979,6 +985,31 @@ mod tests {
             std::iter::once("trace-commons-contributor").chain(args.iter().copied()),
         )
         .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    /// `sessions resume <session-id>` names the session to continue; the
+    /// id is required and must be one.
+    #[test]
+    fn sessions_resume_takes_a_session_id() {
+        let id = uuid::Uuid::new_v4();
+        match parse(&["sessions", "resume", &id.to_string()]).command {
+            Command::Sessions {
+                action: crate::managed::cli::SessionCommand::Resume { session_id },
+            } => assert_eq!(session_id, id),
+            _ => panic!("not sessions resume"),
+        }
+        for args in [
+            &["sessions", "resume"][..],
+            &["sessions", "resume", "previous"],
+        ] {
+            assert!(
+                Cli::try_parse_from(
+                    std::iter::once("trace-commons-contributor").chain(args.iter().copied())
+                )
+                .is_err(),
+                "{args:?}"
+            );
+        }
     }
 
     /// `daemon project` takes `--from-now` and still takes

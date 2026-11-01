@@ -142,6 +142,11 @@ async fn run_native(
     {
         return Err(ManagedError::SignInRequired.into());
     }
+    let resume = if login {
+        None
+    } else {
+        resume_for(store, row.tool, context.resume_of)?
+    };
     let mut command = profiles.command(
         &account,
         &native,
@@ -152,21 +157,21 @@ async fn run_native(
         },
         &row.cwd,
     )?;
+    command.args(leading_args(row.tool, resume));
     if !login && row.tool != super::ToolId::Opencode {
         command.args(&context.cli_options);
     }
     if !login && row.tool == super::ToolId::Claude {
-        command.arg("--session-id").arg(row.id.to_string());
+        command.args(claude_session_args(row.id, resume));
     }
     let mut route = None;
     // Removed when this function returns, however it returns.
     let mut codex_catalog: Option<super::codex::CatalogFile> = None;
     let opencode = if row.tool == super::ToolId::Opencode {
-        let session =
-            super::opencode::OpenCodeSession::new(store, &account, &native, row.id, &row.cwd)?;
+        // Every connection below runs on this session, seeded only when new.
+        let session = opencode_session(store, &account, &native, row, resume)?;
         // A saved key names its model; the sign-in's proxy names a default.
         let model = || row.model.as_deref().ok_or(ManagedError::InvalidRequest);
-        session.prepare()?;
         match row.connection {
             ConnectionKind::Subscription => {
                 return Err(ManagedError::InvalidRequest.into());
@@ -298,34 +303,36 @@ async fn run_native(
         _ = signals.break_signal.recv() => return Err(ManagedError::LaunchUnknown.into()),
         _ = tokio::task::yield_now() => {},
     }
-    #[cfg(not(any(unix, windows)))]
-    let _ = signals;
-    #[cfg(unix)]
-    let mut shutdown_at: Option<std::time::Instant> = None;
-    let mut native_collection = if row.collect_traces && !login && opencode.is_none() {
-        Some(super::native_collection::NativeCollection::snapshot(
+    // After every other argument, so a hook the person passed is seen.
+    let codex_binding = if row.tool == super::ToolId::Codex && !login && resume.is_none() {
+        codex_binding(
+            store,
+            row,
+            login,
+            resume,
+            profiles.native_version(&account, &native).ok().flatten(),
+            &mut command,
+        )
+    } else {
+        None
+    };
+    // Staged under this row's id. A resumed row (collecting only because its
+    // root did) stages the root's continued conversation file.
+    let native_collection = if row.collect_traces && !login && opencode.is_none() {
+        let collection = super::native_collection::NativeCollection::snapshot(
             store,
             row.tool,
             row.account_id,
             row.id,
-        )?)
+            codex_binding,
+        )?;
+        Some(match resume {
+            Some(resume) => collection.continuing(resume.root),
+            None => collection,
+        })
     } else {
         None
     };
-    if row.tool == super::ToolId::Codex
-        && native_collection.is_some()
-        && profiles
-            .native_version(&account, &native)
-            .ok()
-            .flatten()
-            .is_some_and(|version| version.0 == 0 && version >= (0, 164, 0))
-    {
-        if let Some(capture) = native_collection.as_mut() {
-            // Unavailable tracking must not block the native session or loosen
-            // hook trust. Missing receipts fail only collection after exit.
-            let _ = capture.configure_codex(&mut command);
-        }
-    }
     clear_parent_session(&mut command);
     #[cfg(unix)]
     let command = with_open_files_floor(command);
@@ -334,15 +341,32 @@ async fn run_native(
         .spawn()?;
     *spawned = true;
     let pid = child.id().ok_or(ManagedError::LaunchUnknown)?;
-    let mut system = sysinfo::System::new();
-    system.refresh_processes(
-        sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
-        true,
-    );
-    let identity = system
-        .process(sysinfo::Pid::from_u32(pid))
-        .map(|p| format!("{}:{}", pid, p.start_time()))
+    let process = super::collection_plan::ProcessIdentity::of(pid);
+    let identity = process
+        .label()
         .unwrap_or_else(|| format!("{}:{}", pid, uuid::Uuid::new_v4()));
+    // Written before the first report, so a launcher that dies from here on
+    // leaves the daemon what it needs to collect once the tool is gone. A
+    // plan that cannot be written leaves collection to this launcher alone.
+    let plan_written = row.collect_traces
+        && !login
+        && super::collection_plan::write(
+            store,
+            &super::collection_plan::CollectionPlan {
+                schema_version: 1,
+                session_id: row.id,
+                tool: row.tool,
+                account_id: row.account_id,
+                resume_root: resume.map(|resume| resume.root),
+                cwd: row.cwd.clone(),
+                collect_traces: true,
+                created_at: chrono::Utc::now(),
+                native: native_collection.as_ref().map(|c| c.plan()),
+                opencode: opencode.as_ref().map(|s| s.plan()),
+                process,
+            },
+        )
+        .is_ok();
     // A proxy this launcher started tells the daemon the default model,
     // so the row can show it.
     let default_model = route
@@ -358,88 +382,62 @@ async fn run_native(
         process_identity: Some(identity.clone()),
         exit_code,
     };
-    let mut answer: anyhow::Result<Value> = call(
+    let answer: anyhow::Result<Value> = call(
         store,
         "managed_session_report",
         json!(report(SessionState::Running, None)),
     );
-    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
-    let status = loop {
-        // The daemon asked for a stop: this process owns the child, so it
-        // signals it exactly as a terminal's own SIGTERM would, and the
-        // escalation below kills it if it has not exited in time.
-        #[cfg(unix)]
-        if stop_asked(&answer) && shutdown_at.is_none() {
-            forward_signal(pid, &identity, sysinfo::Signal::Term);
-            shutdown_at = Some(std::time::Instant::now());
-        }
-        #[cfg(windows)]
-        if stop_asked(&answer) {
-            let _ = child.start_kill();
-        }
-        answer = Ok(Value::Null);
-        #[cfg(unix)]
-        tokio::select! {
-            status = child.wait() => break status?,
-            _ = signals.interrupt.recv() => {},
-            _ = signals.hangup.recv() => { forward_signal(pid, &identity, sysinfo::Signal::Hangup); shutdown_at.get_or_insert_with(std::time::Instant::now); },
-            _ = signals.terminate.recv() => { forward_signal(pid, &identity, sysinfo::Signal::Term); shutdown_at.get_or_insert_with(std::time::Instant::now); },
-            _ = heartbeat.tick() => {
-                if shutdown_at.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(5)) { let _ = child.start_kill(); }
-                answer = call(store, "managed_session_report", json!(report(SessionState::Running, None)));
-            },
-        }
-        #[cfg(windows)]
-        tokio::select! {
-            status = child.wait() => break status?,
-            _ = signals.interrupt.recv() => {},
-            _ = signals.break_signal.recv() => {},
-            _ = heartbeat.tick() => { answer = call(store, "managed_session_report", json!(report(SessionState::Running, None))); },
-        }
-        #[cfg(not(any(unix, windows)))]
-        tokio::select! {
-            status = child.wait() => break status?,
-            _ = heartbeat.tick() => { let _: anyhow::Result<Value> = call(store, "managed_session_report", json!(report(SessionState::Running, None))); },
-        }
-    };
-    #[cfg(unix)]
-    let code = {
-        use std::os::unix::process::ExitStatusExt;
-        status
-            .code()
-            .unwrap_or_else(|| 128 + status.signal().unwrap_or(1))
-    };
-    #[cfg(not(unix))]
-    let code = status.code().unwrap_or(1);
+    let status = wait_for_tool(&mut child, pid, &identity, signals, answer, || {
+        call(
+            store,
+            "managed_session_report",
+            json!(report(SessionState::Running, None)),
+        )
+    })
+    .await?;
+    let code = exit_code(status);
     let mut receipt = report(SessionState::Exited, Some(code));
+    // The terminal may be gone by now (a closed window is how a hangup
+    // arrives), so nothing below may fail on a write to it.
+    let claim = claim_collection(store, row.id, plan_written);
     if row.collect_traces {
-        let collected = match opencode.as_ref() {
-            Some(session) => session.collect(store),
-            None => native_collection
-                .as_ref()
-                .ok_or(ManagedError::InvalidRequest)?
-                .collect(store),
-        };
-        receipt.collection = Some(match collected {
-            Ok(()) => super::sessions::CollectionState::Collected,
-            Err(_) => {
-                eprintln!(
-                    "The session exited, but its trace could not be collected. The local session is preserved."
-                );
-                super::sessions::CollectionState::Failed
+        receipt.collection = match claim {
+            Claim::Collect => {
+                let collected = match opencode.as_ref() {
+                    Some(session) => session.collect_as(store, row.id),
+                    None => native_collection
+                        .as_ref()
+                        .ok_or(ManagedError::InvalidRequest)?
+                        .collect(store),
+                };
+                Some(match collected {
+                    Ok(()) => super::sessions::CollectionState::Collected,
+                    Err(_) => {
+                        best_effort_stderr(
+                            "The session exited, but its trace could not be collected. The local session is preserved.",
+                        );
+                        super::sessions::CollectionState::Failed
+                    }
+                })
             }
-        });
+            // The daemon collected, or is collecting, this row.
+            Claim::Taken => None,
+            Claim::Unavailable => Some(super::sessions::CollectionState::Failed),
+        };
     }
     let persisted = super::sessions::persist_exit(store, &receipt);
     let final_report: anyhow::Result<Value> = call(store, "managed_session_report", json!(receipt));
     if final_report.is_ok() {
         super::sessions::clear_exit(store, row.id);
     }
+    if finishes_plan(plan_written, claim) {
+        super::collection_plan::finish(store, row.id);
+    }
     if final_report.is_err() && persisted.is_err() {
-        eprintln!(
+        best_effort_stderr(&format!(
             "Native session exited; {} status is unknown until the daemon reconnects.",
             crate::brand::APP_NAME
-        );
+        ));
     }
     if let Some(route) = route {
         route.shutdown().await;
@@ -453,6 +451,113 @@ async fn run_native(
         );
     }
     Ok(code)
+}
+
+/// The conversation a launch continues ([`LaunchContext::resume_of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Resume {
+    /// The root row, whose id is Claude Code's and OpenCode's conversation.
+    root: uuid::Uuid,
+    /// Codex's own thread id, which the root's binding recorded. Codex only.
+    codex_thread: Option<uuid::Uuid>,
+}
+
+/// The conversation `resume_of` names for `tool`, or none for a fresh one.
+/// Codex reads the thread id its root's binding recorded and never prepares
+/// that binding again; without one there is nothing to resume.
+fn resume_for(
+    store: &ConfigStore,
+    tool: super::ToolId,
+    resume_of: Option<uuid::Uuid>,
+) -> Result<Option<Resume>, ManagedError> {
+    let Some(root) = resume_of else {
+        return Ok(None);
+    };
+    let codex_thread = if tool == super::ToolId::Codex {
+        Some(
+            super::session_binding::read(store, root)
+                .ok_or(ManagedError::NotFound)?
+                .session_id,
+        )
+    } else {
+        None
+    };
+    Ok(Some(Resume { root, codex_thread }))
+}
+
+/// Arguments straight after the tool's executable, before any option:
+/// Codex continues a conversation through `resume <thread id>`, which takes
+/// the same options and `-c` overrides as a fresh launch.
+fn leading_args(tool: super::ToolId, resume: Option<Resume>) -> Vec<String> {
+    match (tool, resume) {
+        (
+            super::ToolId::Codex,
+            Some(Resume {
+                codex_thread: Some(thread),
+                ..
+            }),
+        ) => vec!["resume".to_owned(), thread.to_string()],
+        _ => vec![],
+    }
+}
+
+/// Claude Code's conversation, after the options: the row's own id for a
+/// fresh one, or `--resume <root>` to continue the root's (and no
+/// `--session-id`, which would start another).
+fn claude_session_args(id: uuid::Uuid, resume: Option<Resume>) -> [String; 2] {
+    match resume {
+        Some(resume) => ["--resume".to_owned(), resume.root.to_string()],
+        None => ["--session-id".to_owned(), id.to_string()],
+    }
+}
+
+/// OpenCode's session for this launch. A resumed one is the root row's:
+/// the same per-session profile and `ses_<root>` id, and never seeded
+/// again. OpenCode 2.1.4 answers a re-import of an existing id with
+/// "Session already exists" and changes nothing; v1 is unverified. Skipping
+/// import depends on neither. A new one is the row's own, seeded through
+/// import. Collection stages under the row's id either way.
+fn opencode_session(
+    store: &ConfigStore,
+    account: &AccountView,
+    native: &std::path::Path,
+    row: &super::sessions::SessionView,
+    resume: Option<Resume>,
+) -> Result<super::opencode::OpenCodeSession, ManagedError> {
+    let id = resume.map_or(row.id, |resume| resume.root);
+    let session = super::opencode::OpenCodeSession::new(store, account, native, id, &row.cwd)?;
+    if resume.is_none() {
+        session.prepare()?;
+    }
+    Ok(session)
+}
+
+/// Prepare and install this Codex coding launch's SessionStart binding,
+/// which records Codex's own thread id so the conversation can be resumed,
+/// whether or not the launch collects. Trace collection reads the same
+/// records. None for a sign-in, a resumed conversation (its root's binding
+/// holds the id), a Codex before 0.164, or a refusal (the person passed
+/// their own CLI hooks): the launch goes on, and that row cannot be
+/// resumed. Unavailable tracking never blocks a session or loosens hook
+/// trust.
+fn codex_binding(
+    store: &ConfigStore,
+    row: &super::sessions::SessionView,
+    login: bool,
+    resume: Option<Resume>,
+    version: Option<(u32, u32, u32)>,
+    command: &mut std::process::Command,
+) -> Option<super::session_binding::CodexBinding> {
+    if row.tool != super::ToolId::Codex
+        || login
+        || resume.is_some()
+        || !version.is_some_and(|version| version.0 == 0 && version >= (0, 164, 0))
+    {
+        return None;
+    }
+    let binding = super::session_binding::prepare(store, row.id).ok()?;
+    binding.configure(command).ok()?;
+    Some(binding)
 }
 
 /// The daemon-hosted proxy a sign-in session runs on: its loopback port,
@@ -679,7 +784,146 @@ fn forward_signal(pid: u32, identity: &str, signal: sysinfo::Signal) {
     }
 }
 
-struct TerminalSignals {
+/// Write `line` to stderr if it is still there. `eprintln!` panics when
+/// it is not, which after a terminal closed would end the launcher before
+/// its final report.
+fn best_effort_stderr(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
+/// The tool's exit code; one killed by a signal exits 128 + that signal,
+/// as a shell reports it.
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status
+            .code()
+            .unwrap_or_else(|| 128 + status.signal().unwrap_or(1))
+    }
+    #[cfg(not(unix))]
+    {
+        status.code().unwrap_or(1)
+    }
+}
+
+/// Whether this launcher collects its row after the tool exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// It does: it took the claim, or wrote no plan the daemon could act on.
+    Collect,
+    /// The daemon claimed the row first, so it collects.
+    Taken,
+    /// The claim could not be read or taken; nobody collects.
+    Unavailable,
+}
+
+/// Whether this launcher removes its row's plan and claim once its tool
+/// exited: whenever it collected under its own claim, which then has a
+/// final result, even when neither its report nor its exit receipt could
+/// be written. A plan left behind with this launcher's claim would read to
+/// the daemon as a holder that died mid-collection, and be recorded as
+/// failed though the trace was staged; without one, the row's collection
+/// stays unknown until this launcher's result reaches the daemon.
+fn finishes_plan(plan_written: bool, claim: Claim) -> bool {
+    plan_written && claim == Claim::Collect
+}
+
+fn claim_collection(store: &ConfigStore, id: uuid::Uuid, plan_written: bool) -> Claim {
+    if !plan_written {
+        return Claim::Collect;
+    }
+    match super::collection_plan::claim(
+        store,
+        id,
+        &super::collection_plan::ProcessIdentity::current(),
+    ) {
+        Ok(true) => Claim::Collect,
+        Ok(false) => Claim::Taken,
+        Err(_) => Claim::Unavailable,
+    }
+}
+
+/// Wait for the tool to exit, reporting it running every 5 seconds, and
+/// pass on what would end it. `answer` is the daemon's reply to the first
+/// running report; `heartbeat` sends the next one.
+///
+/// Unix: a hangup (terminal window closed) or a terminate (logout, `kill`)
+/// is forwarded to the tool, which gets 5 seconds before it is killed;
+/// either way this keeps waiting, so the caller still collects and reports.
+/// An interrupt is not forwarded: Ctrl-C at the terminal already reaches
+/// the tool, which shares this process's foreground process group, and a
+/// second copy would read as a double Ctrl-C. The tool is deliberately not
+/// given its own process group: it reads the terminal, and a background
+/// group would be stopped by SIGTTIN. The kernel delivers a terminal's
+/// hangup to both; the forwarded copy is checked against the tool's start
+/// time, so it never reaches a reused pid.
+///
+/// Windows is unchanged: Ctrl-C and Ctrl-Break reach the tool through the
+/// console and are only absorbed here, and a stop the daemon asks for kills
+/// it. Closing a console window is not handled.
+pub async fn wait_for_tool(
+    child: &mut tokio::process::Child,
+    pid: u32,
+    identity: &str,
+    signals: &mut TerminalSignals,
+    mut answer: anyhow::Result<Value>,
+    mut heartbeat: impl FnMut() -> anyhow::Result<Value>,
+) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(not(any(unix, windows)))]
+    let _ = (pid, identity, &signals);
+    #[cfg(windows)]
+    let _ = (pid, identity);
+    #[cfg(unix)]
+    let mut shutdown_at: Option<std::time::Instant> = None;
+    let mut ticks = tokio::time::interval(std::time::Duration::from_secs(5));
+    // The first tick is immediate; the caller already sent the first report.
+    ticks.tick().await;
+    loop {
+        // The daemon asked for a stop: this process owns the child, so it
+        // signals it exactly as a terminal's own SIGTERM would, and the
+        // escalation below kills it if it has not exited in time.
+        #[cfg(unix)]
+        if stop_asked(&answer) && shutdown_at.is_none() {
+            forward_signal(pid, identity, sysinfo::Signal::Term);
+            shutdown_at = Some(std::time::Instant::now());
+        }
+        #[cfg(windows)]
+        if stop_asked(&answer) {
+            let _ = child.start_kill();
+        }
+        answer = Ok(Value::Null);
+        #[cfg(unix)]
+        tokio::select! {
+            status = child.wait() => return status,
+            _ = signals.interrupt.recv() => {},
+            _ = signals.hangup.recv() => { forward_signal(pid, identity, sysinfo::Signal::Hangup); shutdown_at.get_or_insert_with(std::time::Instant::now); },
+            _ = signals.terminate.recv() => { forward_signal(pid, identity, sysinfo::Signal::Term); shutdown_at.get_or_insert_with(std::time::Instant::now); },
+            _ = ticks.tick() => {
+                if shutdown_at.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(5)) { let _ = child.start_kill(); }
+                answer = heartbeat();
+            },
+        }
+        #[cfg(windows)]
+        tokio::select! {
+            status = child.wait() => return status,
+            _ = signals.interrupt.recv() => {},
+            _ = signals.break_signal.recv() => {},
+            _ = ticks.tick() => { answer = heartbeat(); },
+        }
+        #[cfg(not(any(unix, windows)))]
+        tokio::select! {
+            status = child.wait() => return status,
+            _ = ticks.tick() => { let _ = heartbeat(); },
+        }
+    }
+}
+
+/// The launcher's handlers for what a terminal sends, registered before a
+/// launch ticket is redeemed so a closed terminal never kills the launcher
+/// and leaves its tool unreported.
+pub struct TerminalSignals {
     #[cfg(windows)]
     interrupt: tokio::signal::windows::CtrlC,
     #[cfg(windows)]
@@ -692,7 +936,7 @@ struct TerminalSignals {
     terminate: tokio::signal::unix::Signal,
 }
 impl TerminalSignals {
-    fn new() -> std::io::Result<Self> {
+    pub fn new() -> std::io::Result<Self> {
         Ok(Self {
             #[cfg(windows)]
             interrupt: tokio::signal::windows::ctrl_c()?,
@@ -722,6 +966,18 @@ mod tests {
         ManagedError, ToolId, models::ChatModel, sessions::LaunchContext, signin,
     };
     use serde_json::json;
+
+    /// The launcher removes its plan whenever it collected under its own
+    /// claim, whether or not its result reached the daemon; never a plan
+    /// the daemon claimed, or one whose claim could not be taken.
+    #[test]
+    fn the_launcher_finishes_only_a_plan_it_collected_under_its_own_claim() {
+        use super::{Claim, finishes_plan};
+        assert!(finishes_plan(true, Claim::Collect));
+        assert!(!finishes_plan(true, Claim::Taken));
+        assert!(!finishes_plan(true, Claim::Unavailable));
+        assert!(!finishes_plan(false, Claim::Collect));
+    }
 
     fn env_of(command: &std::process::Command, name: &str) -> Option<Option<String>> {
         command
@@ -1311,5 +1567,260 @@ mod tests {
         let out = with_open_files_floor(command).output().unwrap();
         let printed = std::fs::canonicalize(String::from_utf8(out.stdout).unwrap().trim()).unwrap();
         assert_eq!(printed, std::fs::canonicalize(dir.path()).unwrap());
+    }
+    /// A row as the launcher receives it, for `tool` in `cwd`.
+    fn row(
+        tool: &str,
+        cwd: &std::path::Path,
+        collect_traces: bool,
+    ) -> crate::managed::sessions::SessionView {
+        serde_json::from_value(json!({
+            "id": uuid::Uuid::new_v4(), "tool": tool, "connection": "subscription",
+            "account_id": uuid::Uuid::new_v4(), "account_label": "Personal",
+            "selection_generation": 0, "project_label": "p", "cwd": cwd,
+            "started_at": "2026-10-31T00:00:00Z", "state": "starting",
+            "exit_code": null, "can_focus": false, "collect_traces": collect_traces,
+        }))
+        .unwrap()
+    }
+
+    /// Claude Code continues the root's conversation with `--resume
+    /// <root>`, and is never also given `--session-id`; a fresh launch is
+    /// named by its own row id. Nothing goes before Claude's options.
+    #[test]
+    fn claude_resumes_the_root_and_never_names_a_new_session() {
+        use super::{Resume, claude_session_args, leading_args};
+        let id = uuid::Uuid::new_v4();
+        let root = uuid::Uuid::new_v4();
+        let resume = Some(Resume {
+            root,
+            codex_thread: None,
+        });
+        let resumed = claude_session_args(id, resume);
+        assert_eq!(resumed, ["--resume".to_owned(), root.to_string()]);
+        assert!(!resumed.contains(&"--session-id".to_owned()));
+        assert!(!resumed.contains(&id.to_string()));
+        assert_eq!(
+            claude_session_args(id, None),
+            ["--session-id".to_owned(), id.to_string()]
+        );
+        assert!(leading_args(ToolId::Claude, resume).is_empty());
+        assert!(leading_args(ToolId::Opencode, resume).is_empty());
+        assert!(leading_args(ToolId::Codex, None).is_empty());
+    }
+
+    /// Codex continues with `resume <thread id>` straight after the
+    /// executable, read from the root's binding, and keeps the launch's
+    /// profile isolation and `-c` overrides after it. Without a recorded
+    /// thread there is nothing to resume.
+    #[cfg(unix)]
+    #[test]
+    fn codex_resumes_the_recorded_thread_with_the_isolation_overrides() {
+        use super::{NativeAction, leading_args, resume_for};
+        use crate::managed::{
+            AccountId, AccountView, AuthState, ConnectionKind, profiles::NativeProfiles,
+            session_binding,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("state")).unwrap();
+        let cwd = home.path().join("project");
+        std::fs::create_dir(&cwd).unwrap();
+        let native = home.path().join("codex");
+        std::fs::write(&native, b"#!/bin/sh\nexit 1\n").unwrap();
+        let account = AccountView {
+            id: AccountId(uuid::Uuid::new_v4()),
+            tool: ToolId::Codex,
+            connection: ConnectionKind::Subscription,
+            label: "Work".into(),
+            auth_state: AuthState::Ready,
+            verified_at: None,
+        };
+        let root = uuid::Uuid::new_v4();
+        assert_eq!(
+            resume_for(&store, ToolId::Codex, Some(root)).err(),
+            Some(ManagedError::NotFound),
+            "no binding, nothing to resume"
+        );
+        let binding = session_binding::prepare(&store, root).unwrap();
+        let thread = uuid::Uuid::new_v4();
+        let transcript = std::fs::canonicalize(home.path())
+            .unwrap()
+            .join("rollout.jsonl");
+        std::fs::write(&transcript, b"{}\n").unwrap();
+        let nonce = std::fs::read_to_string(binding.directory().join("nonce")).unwrap();
+        session_binding::record(
+            binding.directory(),
+            &nonce,
+            std::io::Cursor::new(
+                serde_json::to_vec(&json!({
+                    "session_id": thread, "transcript_path": transcript,
+                    "hook_event_name": "SessionStart",
+                }))
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let resume = resume_for(&store, ToolId::Codex, Some(root)).unwrap();
+        assert_eq!(resume.unwrap().codex_thread, Some(thread));
+        assert_eq!(resume_for(&store, ToolId::Codex, None).unwrap(), None);
+
+        let profiles = NativeProfiles::new(&store);
+        let mut command = profiles
+            .command(&account, &native, NativeAction::Run, &cwd)
+            .unwrap();
+        command.args(leading_args(ToolId::Codex, resume));
+        command.args(["--model", "custom"]);
+        near_ai_route(
+            &mut command,
+            ToolId::Codex,
+            4321,
+            "deepseek-ai/DeepSeek-V3.1",
+            &listed(),
+            Some(&home.path().join("catalog.json")),
+        )
+        .unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[..2], ["resume".to_owned(), thread.to_string()]);
+        assert_eq!(args[2..4], ["--model".to_owned(), "custom".to_owned()]);
+        assert!(args.contains(&"model_provider=\"near_ai_managed\"".to_owned()));
+        assert!(args.contains(&"web_search=\"disabled\"".to_owned()));
+        assert_eq!(
+            env_of(&command, "CODEX_HOME"),
+            Some(Some(
+                profiles
+                    .profile_root(account.id)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            ))
+        );
+    }
+
+    /// Every Codex coding launch records its thread id, collected or not,
+    /// so it can be resumed. A resumed launch reads its root's binding and
+    /// never prepares one; a sign-in and a Codex before 0.164 get none.
+    #[cfg(unix)]
+    #[test]
+    fn codex_binding_is_configured_when_collection_is_off() {
+        use super::{Resume, codex_binding};
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("state")).unwrap();
+        let version = Some((0, 166, 0));
+        let fresh = row("codex", home.path(), false);
+        assert!(!fresh.collect_traces);
+        let mut command = std::process::Command::new("codex");
+        let binding = codex_binding(&store, &fresh, false, None, version, &mut command)
+            .expect("bound without collection");
+        assert!(binding.directory().ends_with(fresh.id.to_string()));
+        assert!(
+            command
+                .get_args()
+                .any(|arg| { arg.to_string_lossy().starts_with("hooks.SessionStart=") })
+        );
+        drop(binding);
+        assert!(
+            store
+                .dir()
+                .join(crate::managed::session_binding::DIRECTORY)
+                .join(fresh.id.to_string())
+                .is_dir(),
+            "the binding outlives the launch"
+        );
+
+        let resumed = row("codex", home.path(), false);
+        let mut command = std::process::Command::new("codex");
+        let resume = Some(Resume {
+            root: fresh.id,
+            codex_thread: Some(uuid::Uuid::new_v4()),
+        });
+        assert!(codex_binding(&store, &resumed, false, resume, version, &mut command).is_none());
+        assert_eq!(command.get_args().count(), 0);
+        assert!(
+            !store
+                .dir()
+                .join(crate::managed::session_binding::DIRECTORY)
+                .join(resumed.id.to_string())
+                .exists()
+        );
+        for (login, version) in [
+            (true, Some((0, 166, 0))),
+            (false, Some((0, 163, 0))),
+            (false, None),
+        ] {
+            let other = row("codex", home.path(), false);
+            let mut command = std::process::Command::new("codex");
+            assert!(codex_binding(&store, &other, login, None, version, &mut command).is_none());
+            assert_eq!(command.get_args().count(), 0);
+        }
+        let claude = row("claude", home.path(), false);
+        let mut command = std::process::Command::new("claude");
+        assert!(codex_binding(&store, &claude, false, None, version, &mut command).is_none());
+    }
+
+    /// A resumed OpenCode session reuses the root's per-session profile and
+    /// `ses_<root>` id, and is never seeded through import again.
+    #[cfg(unix)]
+    #[test]
+    fn opencode_resumes_the_roots_session_without_importing() {
+        use super::{Resume, opencode_session};
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("state")).unwrap();
+        let log = home.path().join("calls.log");
+        let native = home.path().join("opencode");
+        std::fs::write(
+            &native,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\n[ \"$1\" = --version ] || exit 1\necho '1.19.0'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let account = signin::entry(ToolId::Opencode).unwrap();
+        let resumed = row("opencode", home.path(), false);
+        let root = uuid::Uuid::new_v4();
+        let session = opencode_session(
+            &store,
+            &account,
+            &native,
+            &resumed,
+            Some(Resume {
+                root,
+                codex_thread: None,
+            }),
+        )
+        .unwrap();
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(!calls.contains("import"), "{calls}");
+        let command = session
+            .command_with_models(
+                "deepseek-ai/DeepSeek-V3.1",
+                &listed(),
+                "http://127.0.0.1:4321/openai/v1",
+                "managed-local-session",
+            )
+            .unwrap();
+        let args: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args.iter().position(|a| a == "--session").unwrap();
+        assert_eq!(args[at + 1], format!("ses_{}", root.simple()));
+        assert!(!args.contains(&format!("ses_{}", resumed.id.simple())));
+        let profile = crate::managed::profiles::NativeProfiles::new(&store)
+            .profile_root(account.id)
+            .unwrap()
+            .join(root.to_string());
+        assert_eq!(
+            env_of(&command, "HOME"),
+            Some(Some(profile.to_string_lossy().into_owned())),
+            "the root's per-session profile"
+        );
     }
 }

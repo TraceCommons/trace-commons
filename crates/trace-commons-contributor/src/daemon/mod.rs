@@ -649,6 +649,8 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
             _ = managed_lease_tick.tick() => {
                 managed::sweep(shared, Utc::now()).await;
+                // Detached: a collection is recorded when it finishes.
+                drop(managed::collect_abandoned(shared, Utc::now()));
             }
             _ = shared.upload_due_changed.notified() => {
                 if let Some(at) = shared.upload_due() {

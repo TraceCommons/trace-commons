@@ -243,3 +243,94 @@ fn installed_codex_exec_help_accepts_binding_configuration() {
         );
     }
 }
+
+/// A resume reads the conversation an earlier launch recorded, without
+/// preparing its binding again (that is a conflict). Only exactly one
+/// record whose transcript is still there names a conversation.
+#[test]
+fn a_resume_reads_the_recorded_conversation_and_never_prepares_it_again() {
+    let home = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(home.path().into()).unwrap();
+    let id = Uuid::new_v4();
+    assert_eq!(session_binding::read(&store, id), None, "no binding");
+    let binding = session_binding::prepare(&store, id).unwrap();
+    assert_eq!(session_binding::read(&store, id), None, "no record");
+
+    let native_id = Uuid::new_v4();
+    let path = std::fs::canonicalize(home.path())
+        .unwrap()
+        .join("rollout.jsonl");
+    std::fs::write(&path, b"{}\n").unwrap();
+    session_binding::record(
+        binding.directory(),
+        &nonce(&binding),
+        Cursor::new(input(native_id, &path)),
+    )
+    .unwrap();
+    let read = session_binding::read(&store, id).unwrap();
+    assert_eq!(read.session_id, native_id);
+    assert_eq!(read.transcript_path, path);
+    assert!(matches!(
+        session_binding::prepare(&store, id),
+        Err(ManagedError::Conflict)
+    ));
+    assert_eq!(
+        session_binding::read(&store, id),
+        Some(read),
+        "reading changes nothing"
+    );
+
+    // A second conversation in one launch is ambiguous.
+    let other = std::fs::canonicalize(home.path())
+        .unwrap()
+        .join("other.jsonl");
+    std::fs::write(&other, b"{}\n").unwrap();
+    session_binding::record(
+        binding.directory(),
+        &nonce(&binding),
+        Cursor::new(input(Uuid::new_v4(), &other)),
+    )
+    .unwrap();
+    assert_eq!(session_binding::read(&store, id), None);
+    std::fs::remove_file(&other).unwrap();
+    assert_eq!(
+        session_binding::read(&store, id),
+        None,
+        "a record whose transcript is gone is invalid"
+    );
+}
+
+/// The daemon collects a row whose launcher is gone by opening that row's
+/// binding again: it reads the same records, under the same checks.
+#[test]
+fn a_binding_reopened_for_collection_reads_the_same_records() {
+    let home = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(home.path().into()).unwrap();
+    let row = Uuid::new_v4();
+    let binding = session_binding::prepare(&store, row).unwrap();
+    let native_id = Uuid::new_v4();
+    let path = std::fs::canonicalize(home.path())
+        .unwrap()
+        .join("rollout.jsonl");
+    std::fs::write(&path, b"{}\n").unwrap();
+    session_binding::record(
+        binding.directory(),
+        &nonce(&binding),
+        Cursor::new(input(native_id, &path)),
+    )
+    .unwrap();
+    let reopened = session_binding::reopen(&store, row).unwrap();
+    assert_eq!(reopened.directory(), binding.directory());
+    assert_eq!(reopened.records().unwrap(), binding.records().unwrap());
+    assert!(session_binding::reopen(&store, Uuid::new_v4()).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(binding.directory(), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert!(
+            session_binding::reopen(&store, row).is_err(),
+            "a directory others can read is not the launch's"
+        );
+    }
+}

@@ -6332,7 +6332,7 @@ fn the_first_run_copy_crosses_the_abi() {
     assert_eq!(value["frame"]["quick_setup"], "Quick setup");
 }
 
-/// #1407: Show, Stop and Start again reach the daemon through the same
+/// #1407: Show, Stop, Start again and Resume reach the daemon through the same
 /// `tc_call` as every managed method, and each fails closed on a session
 /// the daemon never opened: a refusal label, never a signal or a window.
 #[test]
@@ -6353,6 +6353,10 @@ fn managed_session_actions_cross_tc_call_and_refuse_an_unknown_session() {
         ),
         (
             "managed_session_start_again",
+            format!(r#"{{"session_id":"{session}","request_id":"{session}"}}"#),
+        ),
+        (
+            "managed_session_resume",
             format!(r#"{{"session_id":"{session}","request_id":"{session}"}}"#),
         ),
     ] {

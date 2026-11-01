@@ -1533,6 +1533,7 @@ impl ConfigStore {
             crate::managed::opencode::STAGING,
             crate::managed::native_collection::STAGING,
             crate::managed::session_binding::DIRECTORY,
+            crate::managed::collection_plan::DIRECTORY,
         ] {
             let staged = self.dir.join(directory);
             match std::fs::symlink_metadata(&staged) {
@@ -2330,12 +2331,16 @@ mod tests {
         let native_staged = store.dir.join(crate::managed::native_collection::STAGING);
         std::fs::create_dir(&native_staged).unwrap();
         std::fs::write(native_staged.join("trace.jsonl"), b"private").unwrap();
+        let plans = store.dir.join(crate::managed::collection_plan::DIRECTORY);
+        std::fs::create_dir(&plans).unwrap();
+        std::fs::write(plans.join("plan.json"), b"private").unwrap();
         let profile = store.dir.join("managed-profiles");
         std::fs::create_dir(&profile).unwrap();
         std::fs::write(profile.join("native-session"), b"original").unwrap();
         store.wipe().unwrap();
         assert!(!staged.exists());
         assert!(!native_staged.exists());
+        assert!(!plans.exists());
         assert_eq!(
             std::fs::read(profile.join("native-session")).unwrap(),
             b"original"

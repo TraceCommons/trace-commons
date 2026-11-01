@@ -47,6 +47,24 @@
 //! - `start_again` "Start again" -- an ended row's glass button, before
 //!   `dismiss` as a link.
 //!
+//! Resuming a session (design agreed 2026-10-31,
+//! `docs/superpowers/specs/2026-10-31-managed-session-resume-design.md`):
+//! - `resume` "Resume" -- an ended row's primary button when the row says
+//!   `can_resume` and the snapshot says `capabilities.terminal_launch`,
+//!   before `start_again` and `dismiss`. It continues the session's
+//!   conversation in a new session.
+//! - `copy_resume_command` "Copy resume command" -- an item in the row's
+//!   menu when it says `can_resume`. Copies the command line that resumes
+//!   the session from any terminal.
+//! - `resumed` "Resumed" -- a small secondary label on the status line of a
+//!   row that continues an earlier session (the row says `resumed_from`).
+//!   `resumed_from` "Continues {time}" -- the same label with the root
+//!   row's start time; shells fill `{time}` with it, formatted as they
+//!   format a row's own time.
+//! - `copied` "Copied" -- the "Copy resume command" link's text for about
+//!   two seconds after it copies, then it reverts. An in-place label
+//!   change, not a notice.
+//!
 //! Installing a coding tool. Approved 2026-10-15 (#1419 review):
 //! - `tools_title` "Coding tools", above the install block shown when no
 //!   coding tool is installed.
@@ -255,7 +273,12 @@ pub fn copy() -> serde_json::Value {
             "stop": "Stop",
             "stop_question": "Stop this session?",
             "stop_description": "{tool} stops what it's doing in {folder}.",
-            "start_again": "Start again"
+            "start_again": "Start again",
+            "resume": "Resume",
+            "copy_resume_command": "Copy resume command",
+            "resumed": "Resumed",
+            "resumed_from": "Continues {time}",
+            "copied": "Copied"
     }"#).expect("static managed copy is valid JSON")
 }
 
@@ -353,6 +376,11 @@ mod tests {
             "{tool} stops what it's doing in {folder}."
         );
         assert_eq!(copy["start_again"], "Start again");
+        assert_eq!(copy["resume"], "Resume");
+        assert_eq!(copy["copy_resume_command"], "Copy resume command");
+        assert_eq!(copy["resumed"], "Resumed");
+        assert_eq!(copy["resumed_from"], "Continues {time}");
+        assert_eq!(copy["copied"], "Copied");
         assert_eq!(copy["cancel"], "Cancel");
         assert_eq!(copy["dismiss"], "Dismiss");
     }

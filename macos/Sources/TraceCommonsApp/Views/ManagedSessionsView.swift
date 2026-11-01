@@ -278,6 +278,10 @@ struct ManagedSessionsSection: View {
         if let code = session.exitCode {
             meta.append(model.managedText("exit_code").replacingOccurrences(of: "{code}", with: String(code)))
         }
+        if let marker = ManagedSurface.resumedMarker(
+            session, resumed: model.managedText("resumed"), resumedFrom: model.managedText("resumed_from")) {
+            meta.append(marker)
+        }
         let row = HStack(spacing: GlassTokens.Space.s4) {
             GlassToolTile(.tool(ManagedWords.glassTool(session.tool)))
             VStack(alignment: .leading, spacing: 1) {
@@ -666,7 +670,8 @@ struct ManagedRemoveSheet: View {
 // MARK: - Session row actions (#1407)
 
 /// A session row's trailing actions (Ron, #1407): a running row's menu with
-/// Show and Stop; an ended row's Start again, then Dismiss as a link. What
+/// Show and Stop; an ended row's Resume (Start again moves into the menu
+/// beside it) or else Start again, then Dismiss as a link. What
 /// the daemon cannot do is left out, never drawn disabled.
 struct ManagedSessionActions: View {
     let session: ManagedSession
@@ -674,11 +679,26 @@ struct ManagedSessionActions: View {
     @Binding var menuFor: String?
     let onStop: () -> Void
     @EnvironmentObject private var model: AppModel
+    /// The copy link reads "Copied" for about two seconds after it copies.
+    @State private var copied = false
+    @State private var copyToken = 0
 
     var body: some View {
-        let actions = ManagedSurface.sessionActions(session, terminalLaunch: model.managedSnapshot?.capabilities.terminalLaunch == true)
-        if actions.contains(.show) || actions.contains(.stop) {
-            menu(actions)
+        let terminalLaunch = model.managedSnapshot?.capabilities.terminalLaunch == true
+        let resumeCapable = model.managedSnapshot?.capabilities.resume == true
+        let actions = ManagedSurface.rowButtons(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable)
+        let menuItems = ManagedSurface.rowMenuItems(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable)
+        if !menuItems.isEmpty {
+            menu(menuItems)
+        }
+        if actions.contains(.resume) {
+            Button { resume() } label: {
+                Text(model.managedText("resume")).lineLimit(1)
+            }
+            .buttonStyle(GlassButtonStyle(.primary, small: true))
+            .accessibilityLabel(model.managedText("resume") + " " + session.projectLabel)
+            .fixedSize()
+            .disabled(model.managedBusy)
         }
         if actions.contains(.startAgain) {
             Button { startAgain() } label: {
@@ -687,6 +707,12 @@ struct ManagedSessionActions: View {
             .buttonStyle(GlassButtonStyle(.glass, small: true))
             .fixedSize()
             .disabled(model.managedBusy)
+        }
+        if copiesResumeCommand {
+            Button(copied ? model.managedText("copied") : model.managedText("copy_resume_command")) { copyResumeCommand() }
+                .buttonStyle(GlassButtonStyle(.link))
+                .accessibilityLabel((copied ? model.managedText("copied") : model.managedText("copy_resume_command")) + " " + session.projectLabel)
+                .fixedSize()
         }
         if actions.contains(.dismiss) {
             Button(model.managedText("dismiss")) {
@@ -716,9 +742,48 @@ struct ManagedSessionActions: View {
                             DispatchQueue.main.async { onStop() }
                         }
                     }
+                    if actions.contains(.startAgain) {
+                        GlassMenuItem(model.managedText("start_again")) {
+                            menuFor = nil
+                            startAgain()
+                        }
+                    }
                 }
                 .disabled(model.managedBusy)
             }
+    }
+
+    /// An ended row the daemon can resume offers the command for a terminal,
+    /// once the app knows its config directory.
+    private var copiesResumeCommand: Bool {
+        session.canResume && !session.holdsAccount && !model.configDirectory.isEmpty
+    }
+
+    /// The conversation continues; the terminal opens as for any launch.
+    private func resume() {
+        model.managedAction(
+            "managed_session_resume",
+            params: ManagedSurface.resumeParams(sessionID: session.id, requestID: UUID().uuidString),
+            openTerminal: true)
+    }
+
+    private func copyResumeCommand() {
+        let binary = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/near-ai").path
+        let line = ManagedSurface.resumeCommandLine(
+            binaryPath: binary, configDirectory: model.configDirectory, sessionID: session.id)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(line, forType: .string)
+        // The link says "Copied" in place for about two seconds, then
+        // reverts. No toast or banner; VoiceOver hears the new word.
+        copyToken += 1
+        let token = copyToken
+        copied = true
+        NSAccessibility.post(
+            element: NSApp as Any, notification: .announcementRequested,
+            userInfo: [.announcement: model.managedText("copied"), .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            if copyToken == token { copied = false }
+        }
     }
 
     /// Same tool, account and folder, with no folder chooser; the terminal

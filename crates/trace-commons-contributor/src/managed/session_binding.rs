@@ -48,6 +48,20 @@ pub fn prepare(store: &ConfigStore, id: Uuid) -> Result<CodexBinding, ManagedErr
     Ok(CodexBinding { directory, nonce })
 }
 
+/// The binding `prepare` made for launch `id`, opened again to read its
+/// records, for collecting from a collection plan after the launcher is
+/// gone. Reads its nonce from the directory, so `records` still checks it.
+pub fn reopen(store: &ConfigStore, id: Uuid) -> Result<CodexBinding, ManagedError> {
+    let directory = std::fs::canonicalize(store.dir())
+        .map_err(|_| ManagedError::StorageUnavailable)?
+        .join(DIRECTORY)
+        .join(id.to_string());
+    validate_directory(&directory)?;
+    let nonce = String::from_utf8(read_regular(&directory.join(NONCE_FILE), 128)?)
+        .map_err(|_| ManagedError::InvalidRequest)?;
+    Ok(CodexBinding { directory, nonce })
+}
+
 impl CodexBinding {
     pub fn directory(&self) -> &Path {
         &self.directory
@@ -87,30 +101,56 @@ impl CodexBinding {
         if read_regular(&self.directory.join(NONCE_FILE), 128)? != self.nonce.as_bytes() {
             return Err(ManagedError::InvalidRequest);
         }
-        let mut records = Vec::new();
-        for entry in
-            std::fs::read_dir(&self.directory).map_err(|_| ManagedError::StorageUnavailable)?
-        {
-            let path = entry.map_err(|_| ManagedError::StorageUnavailable)?.path();
-            if path.extension().is_none_or(|extension| extension != "json") {
-                continue;
-            }
-            let id = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .and_then(|value| Uuid::parse_str(value).ok())
-                .ok_or(ManagedError::InvalidRequest)?;
-            let record: BoundSession = serde_json::from_slice(&read_regular(&path, MAX_DOCUMENT)?)
-                .map_err(|_| ManagedError::InvalidRequest)?;
-            if record.session_id != id {
-                return Err(ManagedError::InvalidRequest);
-            }
-            validate_transcript(&record.transcript_path)?;
-            records.push(record);
-        }
-        records.sort_by_key(|record| record.session_id);
-        Ok(records)
+        read_records(&self.directory)
     }
+}
+
+/// The Codex conversation an earlier launch `id` recorded, for resuming
+/// it (and for collecting a resumed row's continuation of it): its binding directory holds exactly one valid record, whose
+/// transcript is still there. None otherwise: no binding (the hook was
+/// refused, or the launch predates it), no record (the tool never
+/// started), or more than one conversation, where a guess could continue
+/// the wrong one. Reads only; the binding is never prepared again.
+pub fn read(store: &ConfigStore, id: Uuid) -> Option<BoundSession> {
+    let directory = std::fs::canonicalize(store.dir())
+        .ok()?
+        .join(DIRECTORY)
+        .join(id.to_string());
+    validate_directory(&directory).ok()?;
+    // The launch's nonce is not known here; its file marks a directory
+    // `prepare` made.
+    read_regular(&directory.join(NONCE_FILE), 128).ok()?;
+    let mut records = read_records(&directory).ok()?;
+    if records.len() != 1 {
+        return None;
+    }
+    records.pop()
+}
+
+/// Every record in an already validated binding directory, each named by
+/// its session id and naming a transcript that is a regular file.
+fn read_records(directory: &Path) -> Result<Vec<BoundSession>, ManagedError> {
+    let mut records = Vec::new();
+    for entry in std::fs::read_dir(directory).map_err(|_| ManagedError::StorageUnavailable)? {
+        let path = entry.map_err(|_| ManagedError::StorageUnavailable)?.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let id = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or(ManagedError::InvalidRequest)?;
+        let record: BoundSession = serde_json::from_slice(&read_regular(&path, MAX_DOCUMENT)?)
+            .map_err(|_| ManagedError::InvalidRequest)?;
+        if record.session_id != id {
+            return Err(ManagedError::InvalidRequest);
+        }
+        validate_transcript(&record.transcript_path)?;
+        records.push(record);
+    }
+    records.sort_by_key(|record| record.session_id);
+    Ok(records)
 }
 
 fn hook_key() -> Result<&'static str, ManagedError> {

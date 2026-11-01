@@ -113,7 +113,7 @@ final class ManagedSessionsRenderTests: XCTestCase {
     }
 
     /// #1407: a running row the daemon can show and stop, a running row it
-    /// cannot, an ended row that can start again, and the stop
+    /// cannot, an ended row that can resume and start again, and the stop
     /// confirmation, rendered off screen.
     @MainActor
     func testSessionRowActionsAndStopConfirmationRender() throws {
@@ -132,12 +132,20 @@ final class ManagedSessionsRenderTests: XCTestCase {
         ended["state"] = "exited"
         ended["exit_code"] = 0
         ended["can_start_again"] = true
+        ended["can_resume"] = true
+        ended["resumed_from"] = "2026-10-14T09:30:00.123456789Z"
+        var capabilities = try XCTUnwrap(value["capabilities"] as? [String: Any])
+        capabilities["resume"] = true
+        value["capabilities"] = capabilities
         sessions = [owned, cli, ended]
         value["sessions"] = sessions
         let model = AppModel()
         model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
         let rows = try XCTUnwrap(model.managedSnapshot?.sessions)
-        XCTAssertEqual(rows.map { ManagedSurface.sessionActions($0, terminalLaunch: true) }, [[.show, .stop], [], [.startAgain, .dismiss]])
+        XCTAssertEqual(rows.map { ManagedSurface.sessionActions($0, terminalLaunch: true, resumeCapable: model.managedSnapshot?.capabilities.resume == true) }, [[.show, .stop], [], [.resume, .startAgain, .dismiss]])
+        XCTAssertEqual(ManagedSurface.rowButtons(rows[2], terminalLaunch: true, resumeCapable: true), [.resume, .dismiss])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(rows[2], terminalLaunch: true, resumeCapable: true), [.startAgain])
+        XCTAssertNotNil(rows[2].resumedFrom)
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }

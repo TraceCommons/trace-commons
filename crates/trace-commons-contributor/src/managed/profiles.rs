@@ -79,6 +79,17 @@ impl NativeProfiles {
         roots
     }
 
+    /// The account's profile directory when it is already there, creating
+    /// nothing: for checks that must not leave a directory behind.
+    pub fn existing_profile_root(&self, id: AccountId) -> Option<PathBuf> {
+        let real_dir = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+        };
+        let path = self.root.join(id.to_string());
+        (real_dir(&self.root) && real_dir(&path)).then_some(path)
+    }
+
     pub fn profile_root(&self, id: AccountId) -> Result<PathBuf, ManagedError> {
         private_directory(&self.root)?;
         let path = self.root.join(id.to_string());

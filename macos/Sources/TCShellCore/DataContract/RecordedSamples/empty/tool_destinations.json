@@ -236,7 +236,12 @@
     "stop": "Stop",
     "stop_question": "Stop this session?",
     "stop_description": "{tool} stops what it's doing in {folder}.",
-    "start_again": "Start again"
+    "start_again": "Start again",
+    "resume": "Resume",
+    "copy_resume_command": "Copy resume command",
+    "resumed": "Resumed",
+    "resumed_from": "Continues {time}",
+    "copied": "Copied"
   },
   "ledger_readable": false,
   "observed_destinations": [],

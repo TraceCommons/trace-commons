@@ -87,6 +87,12 @@ pub enum AccountCommand {
 #[derive(Subcommand)]
 pub enum SessionCommand {
     List,
+    /// Continue an ended session's conversation in this terminal, as a new
+    /// session with the same account, folder and options.
+    Resume {
+        /// The session's id, as `sessions list` shows it.
+        session_id: Uuid,
+    },
 }
 
 #[derive(Deserialize)]
@@ -322,6 +328,7 @@ pub async fn launch(store: &ConfigStore, args: LaunchArgs) -> anyhow::Result<i32
         expected_generation,
         save_default: false,
         keep_saved_model: false,
+        resume_of: None,
     };
     let prepared: PreparedLaunch = call(store, "managed_launch_prepare", json!(request))?;
     super::supervisor::redeem_and_run(store, prepared).await
@@ -464,11 +471,28 @@ async fn login(
 
 pub fn sessions(
     store: &ConfigStore,
-    _command: SessionCommand,
+    command: SessionCommand,
     json_output: bool,
 ) -> anyhow::Result<()> {
+    if let SessionCommand::Resume { .. } = command {
+        // Runs a tool: `resume`, from the async entry point.
+        return Err(ManagedError::InvalidRequest.into());
+    }
     let snapshot: Value = call(store, "managed_snapshot", json!({}))?;
     print_value(snapshot["sessions"].clone(), json_output)
+}
+
+/// Continue the conversation of the ended session `session_id` in this
+/// terminal: the daemon prepares a new session that resumes it, with the
+/// checks Start again makes, and this process runs the tool as `launch`
+/// does. Returns the tool's exit code.
+pub async fn resume(store: &ConfigStore, session_id: Uuid) -> anyhow::Result<i32> {
+    let prepared: PreparedLaunch = call(
+        store,
+        "managed_session_resume",
+        json!({"session_id":session_id,"request_id":Uuid::new_v4()}),
+    )?;
+    super::supervisor::redeem_and_run(store, prepared).await
 }
 
 #[cfg(test)]

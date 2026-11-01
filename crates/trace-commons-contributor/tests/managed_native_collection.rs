@@ -31,7 +31,8 @@ async fn opted_in_native_trace_reaches_review_even_when_automatic_discovery_is_o
     let root = NativeProfiles::new(&store).profile_root(account).unwrap();
     let old = claude(&root, Uuid::new_v4());
     let managed_id = Uuid::new_v4();
-    let capture = NativeCollection::snapshot(&store, ToolId::Claude, account, managed_id).unwrap();
+    let capture =
+        NativeCollection::snapshot(&store, ToolId::Claude, account, managed_id, None).unwrap();
     let current = claude(&root, managed_id);
     capture.collect(&store).unwrap();
     assert!(old.exists());
@@ -358,8 +359,10 @@ fn overlapping_claude_collections_keep_exact_ids_and_exclude_foreign_optout_in_s
     let first_id = Uuid::new_v4();
     let second_id = Uuid::new_v4();
     let foreign_id = Uuid::new_v4();
-    let first = NativeCollection::snapshot(&store, ToolId::Claude, account, first_id).unwrap();
-    let second = NativeCollection::snapshot(&store, ToolId::Claude, account, second_id).unwrap();
+    let first =
+        NativeCollection::snapshot(&store, ToolId::Claude, account, first_id, None).unwrap();
+    let second =
+        NativeCollection::snapshot(&store, ToolId::Claude, account, second_id, None).unwrap();
     let foreign = claude(&root, foreign_id);
     let a = claude(&root, first_id);
     let b = claude(&root, second_id);
@@ -382,7 +385,7 @@ fn claude_filename_and_parent_metadata_must_match_the_assigned_id() {
     let account = AccountId(Uuid::new_v4());
     let root = NativeProfiles::new(&store).profile_root(account).unwrap();
     let id = Uuid::new_v4();
-    let capture = NativeCollection::snapshot(&store, ToolId::Claude, account, id).unwrap();
+    let capture = NativeCollection::snapshot(&store, ToolId::Claude, account, id, None).unwrap();
     let unrelated = claude(&root, Uuid::new_v4());
     let assigned = unrelated.with_file_name(format!("{id}.jsonl"));
     std::fs::rename(unrelated, &assigned).unwrap();
@@ -445,8 +448,8 @@ fn overlapping_codex_collections_use_start_receipts_and_exclude_foreign_optout()
     let a_id = Uuid::new_v4();
     let b_id = Uuid::new_v4();
     let foreign_id = Uuid::new_v4();
-    let mut a = NativeCollection::snapshot(&store, ToolId::Codex, account, Uuid::new_v4()).unwrap();
-    let mut b = NativeCollection::snapshot(&store, ToolId::Codex, account, Uuid::new_v4()).unwrap();
+    let mut a = codex_capture(&store, account);
+    let mut b = codex_capture(&store, account);
     let foreign = codex(&root, foreign_id, foreign_id);
     let first = codex(&root, a_id, a_id);
     let second = codex(&root, b_id, b_id);
@@ -483,8 +486,7 @@ fn codex_missing_preexisting_and_mismatched_bindings_fail_collection_without_swe
         } else {
             None
         };
-        let mut capture =
-            NativeCollection::snapshot(&store, ToolId::Codex, account, Uuid::new_v4()).unwrap();
+        let mut capture = codex_capture(&store, account);
         let path = preexisting.unwrap_or_else(|| {
             let target = if mode == "outside_profile" {
                 dir.path().join("outside")
@@ -530,8 +532,7 @@ fn unsupported_codex_binding_refuses_collection_and_preserves_launch_arguments()
     let store = ConfigStore::open(dir.path().join("state")).unwrap();
     let account = AccountId(Uuid::new_v4());
     let root = NativeProfiles::new(&store).profile_root(account).unwrap();
-    let mut capture =
-        NativeCollection::snapshot(&store, ToolId::Codex, account, Uuid::new_v4()).unwrap();
+    let mut capture = codex_capture(&store, account);
     let native_id = Uuid::new_v4();
     let transcript = codex(&root, native_id, native_id);
     let mut command = Command::new("codex");
@@ -552,4 +553,223 @@ fn unsupported_codex_binding_refuses_collection_and_preserves_launch_arguments()
     assert!(capture.collect(&store).is_err());
     assert!(transcript.exists());
     assert!(staged_ids(&store, SOURCE_CODEX).is_empty());
+}
+
+/// A Codex collection holding the binding a launcher prepares for every
+/// Codex launch.
+fn codex_capture(store: &ConfigStore, account: AccountId) -> NativeCollection {
+    let id = Uuid::new_v4();
+    NativeCollection::snapshot(
+        store,
+        ToolId::Codex,
+        account,
+        id,
+        trace_commons_contributor::managed::session_binding::prepare(store, id).ok(),
+    )
+    .unwrap()
+}
+
+/// The staged copy a resumed row `row` published for Claude conversation
+/// `native`, if any.
+fn staged_claude(store: &ConfigStore, row: Uuid, native: Uuid) -> Option<std::path::PathBuf> {
+    let path = store
+        .dir()
+        .join(trace_commons_contributor::managed::native_collection::STAGING)
+        .join("claude")
+        .join(row.to_string())
+        .join("-Users-test-project")
+        .join(format!("{native}.jsonl"));
+    path.is_file().then_some(path)
+}
+
+/// Append one more Claude turn, recorded under `native`.
+fn claude_turn(path: &std::path::Path, native: Uuid) {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(file, r#"{{"type":"user","message":{{"role":"user","content":"Now run the suite"}},"cwd":"/Users/test/project","timestamp":"2026-08-08T11:00:00Z","version":"2.0.1","sessionId":"{native}","uuid":"u2"}}"#).unwrap();
+}
+
+/// A resumed Claude row keeps appending to its root's transcript. It stages
+/// that one pre-existing file, whole and as it is now, under its own row
+/// id, so the root's earlier staged copy is untouched. Every other file
+/// that was there before the launch stays private.
+#[test]
+fn resumed_claude_row_stages_the_continued_root_transcript_under_its_own_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let account = AccountId(Uuid::new_v4());
+    let root = NativeProfiles::new(&store).profile_root(account).unwrap();
+    let root_id = Uuid::new_v4();
+    let first = NativeCollection::snapshot(&store, ToolId::Claude, account, root_id, None).unwrap();
+    let transcript = claude(&root, root_id);
+    first.collect(&store).unwrap();
+    let earlier = std::fs::read(staged_claude(&store, root_id, root_id).unwrap()).unwrap();
+
+    let foreign = claude(&root, Uuid::new_v4());
+    let resumed = Uuid::new_v4();
+    let capture = NativeCollection::snapshot(&store, ToolId::Claude, account, resumed, None)
+        .unwrap()
+        .continuing(root_id);
+    claude_turn(&transcript, root_id);
+    capture.collect(&store).unwrap();
+
+    let staged = staged_claude(&store, resumed, root_id).expect("staged under the new row");
+    assert_eq!(
+        std::fs::read(&staged).unwrap(),
+        std::fs::read(&transcript).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(staged_claude(&store, root_id, root_id).unwrap()).unwrap(),
+        earlier,
+        "the root's staged copy is not overwritten"
+    );
+    assert_eq!(
+        staged_ids(&store, SOURCE_CLAUDE_CODE),
+        vec![root_id.to_string(), root_id.to_string()],
+        "both rows carry the root's identity; nothing foreign is staged"
+    );
+    assert!(foreign.exists() && transcript.exists());
+}
+
+/// A resumed Claude row whose root transcript is gone at exit fails
+/// collection and stages nothing; the local profile is left as it is.
+#[test]
+fn resumed_claude_row_without_its_root_transcript_fails_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let account = AccountId(Uuid::new_v4());
+    let root = NativeProfiles::new(&store).profile_root(account).unwrap();
+    let root_id = Uuid::new_v4();
+    let transcript = claude(&root, root_id);
+    let foreign = claude(&root, Uuid::new_v4());
+    let resumed = Uuid::new_v4();
+    let capture = NativeCollection::snapshot(&store, ToolId::Claude, account, resumed, None)
+        .unwrap()
+        .continuing(root_id);
+    std::fs::remove_file(&transcript).unwrap();
+    assert!(capture.collect(&store).is_err());
+    assert!(foreign.exists());
+    assert!(staged_ids(&store, SOURCE_CLAUDE_CODE).is_empty());
+    assert!(
+        trace_commons_contributor::managed::native_collection::roots(&store, ToolId::Claude)
+            .is_empty()
+    );
+}
+
+/// Without the root's own launch, a fresh row still refuses a transcript
+/// that existed before it started: only a resumed row may take its root's.
+#[test]
+fn a_fresh_row_still_refuses_a_preexisting_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let account = AccountId(Uuid::new_v4());
+    let root = NativeProfiles::new(&store).profile_root(account).unwrap();
+    let id = Uuid::new_v4();
+    let transcript = claude(&root, id);
+    let capture = NativeCollection::snapshot(&store, ToolId::Claude, account, id, None).unwrap();
+    claude_turn(&transcript, id);
+    assert!(capture.collect(&store).is_err());
+    assert!(staged_ids(&store, SOURCE_CLAUDE_CODE).is_empty());
+}
+
+/// Append one more line to a Codex rollout, so it is modified.
+fn codex_turn(path: &std::path::Path) {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(file, r#"{{"type":"response_item","timestamp":"2026-07-01T11:00:00Z","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"Now run the suite"}}]}}}}"#).unwrap();
+}
+
+/// The root launch of a Codex conversation: its binding records `thread`,
+/// whose rollout is created in the profile. Returns the root row id and the
+/// rollout.
+#[cfg(unix)]
+fn codex_root(
+    store: &ConfigStore,
+    account: AccountId,
+    root: &std::path::Path,
+    thread: Uuid,
+) -> (Uuid, std::path::PathBuf) {
+    let id = Uuid::new_v4();
+    let mut capture = NativeCollection::snapshot(
+        store,
+        ToolId::Codex,
+        account,
+        id,
+        trace_commons_contributor::managed::session_binding::prepare(store, id).ok(),
+    )
+    .unwrap();
+    let rollout = codex(root, thread, thread);
+    record_codex_start(&mut capture, thread, &rollout);
+    capture.collect(store).unwrap();
+    (id, rollout)
+}
+
+/// A resumed Codex row has no binding of its own: it stages the rollout its
+/// root's binding recorded, as it is now, under its own row id. A foreign
+/// rollout that was there before stays private.
+#[cfg(unix)]
+#[test]
+fn resumed_codex_row_stages_the_root_bindings_transcript_under_its_own_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let account = AccountId(Uuid::new_v4());
+    let root = NativeProfiles::new(&store).profile_root(account).unwrap();
+    let thread = Uuid::new_v4();
+    let (root_id, rollout) = codex_root(&store, account, &root, thread);
+    let foreign = codex(&root, Uuid::new_v4(), Uuid::new_v4());
+
+    let resumed = Uuid::new_v4();
+    let capture = NativeCollection::snapshot(&store, ToolId::Codex, account, resumed, None)
+        .unwrap()
+        .continuing(root_id);
+    codex_turn(&rollout);
+    capture.collect(&store).unwrap();
+
+    let staged = store
+        .dir()
+        .join(trace_commons_contributor::managed::native_collection::STAGING)
+        .join("codex")
+        .join(resumed.to_string())
+        .join("day")
+        .join(rollout.file_name().unwrap());
+    assert_eq!(
+        std::fs::read(&staged).unwrap(),
+        std::fs::read(&rollout).unwrap()
+    );
+    assert_eq!(
+        staged_ids(&store, SOURCE_CODEX),
+        vec![thread.to_string(), thread.to_string()],
+        "the root's and the resumed row's copies, nothing foreign"
+    );
+    assert!(foreign.exists() && rollout.exists());
+}
+
+/// A resumed Codex row whose root rollout is gone at exit fails collection
+/// and stages nothing.
+#[cfg(unix)]
+#[test]
+fn resumed_codex_row_without_its_root_transcript_fails_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let account = AccountId(Uuid::new_v4());
+    let root = NativeProfiles::new(&store).profile_root(account).unwrap();
+    let thread = Uuid::new_v4();
+    let (root_id, rollout) = codex_root(&store, account, &root, thread);
+    let resumed = Uuid::new_v4();
+    let capture = NativeCollection::snapshot(&store, ToolId::Codex, account, resumed, None)
+        .unwrap()
+        .continuing(root_id);
+    std::fs::remove_file(&rollout).unwrap();
+    assert!(capture.collect(&store).is_err());
+    assert_eq!(
+        trace_commons_contributor::managed::native_collection::roots(&store, ToolId::Codex),
+        vec![
+            store
+                .dir()
+                .join(trace_commons_contributor::managed::native_collection::STAGING)
+                .join("codex")
+                .join(root_id.to_string())
+        ],
+        "only the root's earlier copy"
+    );
 }

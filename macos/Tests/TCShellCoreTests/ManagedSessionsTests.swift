@@ -231,8 +231,10 @@ final class ManagedSessionsTests: XCTestCase {
 
     // MARK: #1407 row actions
 
-    private func session(_ state: String, focus: Bool = false, stop: Bool = false, again: Bool = false, startedAt: String? = nil) throws -> ManagedSession {
+    private func session(_ state: String, focus: Bool = false, stop: Bool = false, again: Bool = false, resume: Bool? = nil, startedAt: String? = nil, resumedFrom: String? = nil) throws -> ManagedSession {
         var json = #"{"id":"s","tool":"claude","connection":"subscription","account_id":"a","account_label":"Work","project_label":"Project","cwd":"/tmp","state":"\#(state)","purpose":"coding","can_focus":\#(focus),"can_stop":\#(stop),"can_start_again":\#(again)"#
+        if let resume { json += #","can_resume":\#(resume)"# }
+        if let resumedFrom { json += #","resumed_from":"\#(resumedFrom)""# }
         if let startedAt { json += #","started_at":"\#(startedAt)""# }
         return try JSONDecoder().decode(ManagedSession.self, from: Data((json + "}").utf8))
     }
@@ -293,6 +295,77 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(params.count, 2)
         XCTAssertEqual(params["session_id"] as? String, "s")
         XCTAssertEqual(params["request_id"] as? String, "r")
+    }
+
+    func testResumeFlagAndCapabilityDecodeAndDefaultToFalse() throws {
+        XCTAssertTrue(try session("exited", resume: true).canResume)
+        XCTAssertFalse(try session("exited", resume: false).canResume)
+        XCTAssertFalse(try session("exited").canResume)
+        let present = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"resume":true}}"#.utf8))
+        XCTAssertEqual(present.capabilities.resume, true)
+        let absent = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true}}"#.utf8))
+        XCTAssertNil(absent.capabilities.resume)
+    }
+
+    func testRowButtonsAndMenuSplitWhenResumeIsOffered() throws {
+        let both = try session("exited", again: true, resume: true)
+        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: true), [.resume, .dismiss])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true), [.startAgain])
+        // Without Resume, Start again stays the glass button and the menu is empty.
+        let again = try session("exited", again: true)
+        XCTAssertEqual(ManagedSurface.rowButtons(again, terminalLaunch: true, resumeCapable: true), [.startAgain, .dismiss])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(again, terminalLaunch: true, resumeCapable: true), [])
+        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: false), [.startAgain, .dismiss])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true), [])
+        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: false, resumeCapable: true), [.dismiss])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: false, resumeCapable: true), [])
+        // Resume without Start again: Resume and Dismiss, an empty menu.
+        let resumeOnly = try session("exited", resume: true)
+        XCTAssertEqual(ManagedSurface.rowButtons(resumeOnly, terminalLaunch: true, resumeCapable: true), [.resume, .dismiss])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(resumeOnly, terminalLaunch: true, resumeCapable: true), [])
+        // A running row keeps Show and Stop in the menu and draws no buttons.
+        let running = try session("running", focus: true, stop: true)
+        XCTAssertEqual(ManagedSurface.rowButtons(running, terminalLaunch: true, resumeCapable: true), [])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(running, terminalLaunch: true, resumeCapable: true), [.show, .stop])
+    }
+
+    func testResumedFromDecodesAndFormatsTheMarker() throws {
+        XCTAssertNil(try session("exited").resumedFrom)
+        XCTAssertNil(try session("exited", resumedFrom: "not a time").resumedFrom)
+        let row = try session("exited", resumedFrom: "2026-10-14T09:30:00.123456789Z")
+        XCTAssertNotNil(row.resumedFrom)
+        XCTAssertEqual(
+            ManagedSurface.resumedMarker(row, resumed: "Resumed", resumedFrom: "Continues {time}", relative: { _ in "2:14 PM" }),
+            "Resumed \u{00B7} Continues 2:14 PM")
+        XCTAssertNil(ManagedSurface.resumedMarker(try session("exited"), resumed: "Resumed", resumedFrom: "Continues {time}"))
+    }
+
+    func testEndedRowOffersResumeFirstOnlyWhenEverythingAllowsIt() throws {
+        let row = try session("exited", again: true, resume: true)
+        XCTAssertEqual(ManagedSurface.sessionActions(row, terminalLaunch: true, resumeCapable: true), [.resume, .startAgain, .dismiss])
+        // An older daemon without the capability, or no terminal, or no flag.
+        XCTAssertEqual(ManagedSurface.sessionActions(row, terminalLaunch: true, resumeCapable: false), [.startAgain, .dismiss])
+        XCTAssertEqual(ManagedSurface.sessionActions(row, terminalLaunch: true), [.startAgain, .dismiss])
+        XCTAssertEqual(ManagedSurface.sessionActions(row, terminalLaunch: false, resumeCapable: true), [.dismiss])
+        XCTAssertEqual(ManagedSurface.sessionActions(try session("failed", again: true), terminalLaunch: true, resumeCapable: true), [.startAgain, .dismiss])
+        XCTAssertEqual(ManagedSurface.sessionActions(try session("exited", resume: true), terminalLaunch: true, resumeCapable: true), [.resume, .dismiss])
+        XCTAssertEqual(ManagedSurface.sessionActions(try session("running", focus: true, resume: true), terminalLaunch: true, resumeCapable: true), [.show])
+    }
+
+    func testResumeNamesOnlyTheRowAndARequest() {
+        let params = ManagedSurface.resumeParams(sessionID: "s", requestID: "r")
+        XCTAssertEqual(params.count, 2)
+        XCTAssertEqual(params["session_id"] as? String, "s")
+        XCTAssertEqual(params["request_id"] as? String, "r")
+    }
+
+    func testResumeCommandLineQuotesPathsWithSpaces() {
+        XCTAssertEqual(
+            ManagedSurface.resumeCommandLine(binaryPath: "/Applications/Near.ai.app/Contents/MacOS/near-ai", configDirectory: "/Users/me/Library/Application Support/Near.ai", sessionID: "0f1e"),
+            "/Applications/Near.ai.app/Contents/MacOS/near-ai --config-dir '/Users/me/Library/Application Support/Near.ai' sessions resume 0f1e")
+        XCTAssertEqual(ManagedSurface.shellQuoted("it's here"), #"'it'\''s here'"#)
+        XCTAssertEqual(ManagedSurface.shellQuoted(""), "''")
+        XCTAssertEqual(ManagedSurface.shellQuoted("a$b"), "'a$b'")
     }
 
     /// The start time ends the caption line, in the app's relative format.
