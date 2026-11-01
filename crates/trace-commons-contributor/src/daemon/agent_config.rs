@@ -5,20 +5,33 @@ use serde_json::{Map, Value, json};
 
 use super::settings::{self, DaemonSettings};
 
+/// The agent-facing description of each ranged setting, by name. `None` for
+/// a key with none, which `every_ranged_setting_has_its_own_description`
+/// refuses for every key `settings_ranges` reports.
+fn range_description(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "quiescence_secs" => "Seconds without writes before a trace is considered finished.",
+        "approval_hold_secs" => {
+            "Seconds before an approved upload can start; zero removes the undo hold."
+        }
+        "digest_interval_secs" => "Seconds between interval notifications.",
+        _ => return None,
+    })
+}
+
 pub(crate) fn schema() -> Value {
     let mut properties = Map::new();
     let ranges =
         serde_json::to_value(settings::settings_ranges()).expect("settings ranges serialize");
     for (key, bounds) in ranges.as_object().expect("settings ranges object") {
-        properties.insert(key.clone(), json!({
-            "type":"integer", "minimum":bounds["min"], "maximum":bounds["max"],
-            "description": match key.as_str() {
-                "quiescence_secs" => "Seconds without writes before a trace is considered finished.",
-                "approval_hold_secs" => "Seconds before an approved upload can start; zero removes the undo hold.",
-                _ => "Seconds between interval notifications.",
-            },
-            "examples":[bounds["min"]]
-        }));
+        properties.insert(
+            key.clone(),
+            json!({
+                "type":"integer", "minimum":bounds["min"], "maximum":bounds["max"],
+                "description": range_description(key).unwrap_or_default(),
+                "examples":[bounds["min"]]
+            }),
+        );
     }
     for (key, description) in [
         (
@@ -485,6 +498,19 @@ mod tests {
             "sk-sensitive-sentinel"
         );
         assert!(preview(&settings, &json!({"near_ai_inference":null})).is_err());
+    }
+
+    /// Each ranged setting is described by name, so a range added later
+    /// cannot borrow another key's description.
+    #[test]
+    fn every_ranged_setting_has_its_own_description() {
+        let ranges = serde_json::to_value(settings::settings_ranges()).unwrap();
+        let keys: Vec<&String> = ranges.as_object().unwrap().keys().collect();
+        assert!(!keys.is_empty());
+        for key in keys {
+            assert!(range_description(key).is_some(), "{key}");
+        }
+        assert_eq!(range_description("max_bytes_per_day"), None);
     }
 
     /// The daily upload limit is retired: nothing advertises it to an

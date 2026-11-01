@@ -1886,6 +1886,20 @@ pub fn gemini_declared(settings: &DaemonSettings) -> bool {
     settings.gemini_source.is_some()
 }
 
+/// A settings key retired with the daily upload limit.
+fn is_retired_key(key: &str) -> bool {
+    matches!(key, "max_uploads_per_day" | "max_bytes_per_day")
+}
+
+/// Whether `params` is a non-empty object holding nothing but retired keys,
+/// such as an older shell's daily-limit control sends. There is nothing to
+/// apply or save; `set_settings` answers with the settings as they stand.
+pub fn carries_only_retired_keys(params: &serde_json::Value) -> bool {
+    params
+        .as_object()
+        .is_some_and(|obj| !obj.is_empty() && obj.keys().all(|key| is_retired_key(key)))
+}
+
 /// Apply a partial settings object -- the shape `tc_call(handle,
 /// "set_settings", ...)` takes over the socket, and the shape
 /// `tc_daemon_start_with_settings` takes over the C ABI before the daemon's
@@ -1919,7 +1933,8 @@ pub fn gemini_declared(settings: &DaemonSettings) -> bool {
 ///
 /// `max_uploads_per_day` and `max_bytes_per_day` are accepted and ignored:
 /// the daemon has no daily upload limit, and a shell built while it had one
-/// may still send them.
+/// may still send them. They apply nothing, so an object holding only them
+/// returns `Ok(false)`; see [`carries_only_retired_keys`].
 pub fn apply_settings_object(
     settings: &mut DaemonSettings,
     params: &serde_json::Value,
@@ -1931,8 +1946,7 @@ pub fn apply_settings_object(
         // and ignored, so a shell built while the limit existed can still
         // save its other settings. Outside the marked region below: the
         // agent schema and the IPC doc's key lists name settable keys only.
-        if matches!(key.as_str(), "max_uploads_per_day" | "max_bytes_per_day") {
-            changed = true;
+        if is_retired_key(key) {
             continue;
         }
         // SET-SETTINGS-KEYS-BEGIN
@@ -2458,7 +2472,8 @@ mod tests {
 
     /// A shell built while the daily limit existed may still send its two
     /// keys. They are accepted, whatever the value, and change nothing, so
-    /// the rest of that shell's save still lands.
+    /// the rest of that shell's save still lands. Alone they apply nothing,
+    /// so nothing is saved for them.
     #[test]
     fn the_retired_daily_limit_keys_are_accepted_and_ignored() {
         let mut s = DaemonSettings::default();
@@ -2469,8 +2484,17 @@ mod tests {
             serde_json::json!({"max_bytes_per_day": "lots"}),
             serde_json::json!({"max_uploads_per_day": null, "max_bytes_per_day": null}),
         ] {
-            assert_eq!(apply_settings_object(&mut s, &params), Ok(true), "{params}");
+            assert_eq!(
+                apply_settings_object(&mut s, &params),
+                Ok(false),
+                "{params}"
+            );
+            assert!(carries_only_retired_keys(&params), "{params}");
         }
+        assert!(!carries_only_retired_keys(&serde_json::json!({})));
+        assert!(!carries_only_retired_keys(
+            &serde_json::json!({"max_uploads_per_day": 100, "quiescence_secs": 60})
+        ));
         assert_eq!(serde_json::to_value(&s).unwrap(), before);
         assert_eq!(
             apply_settings_object(

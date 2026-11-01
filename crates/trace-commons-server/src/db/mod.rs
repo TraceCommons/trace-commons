@@ -2086,10 +2086,11 @@ pub struct RedeemedSession {
 
 /// Outcome of a successful [`Database::validate_session`] lookup. Carries the
 /// durable account id and the `auth_credential_id` recorded on the session row
-/// (the NEAR access key that authenticated a NEAR session, the device key of a
-/// native device session, the WebAuthn credential id of a session minted before
-/// passkeys were removed, or `None` for a device-link session). The credential
-/// id is a public identifier, never key material.
+/// (the NEAR access key that authenticated a NEAR session, the WebAuthn
+/// credential id of a session minted before passkeys were removed, or `None`
+/// otherwise, which covers device-link and native sessions; a keyed native
+/// session names its device in `device_key_id`). The credential id is a public
+/// identifier, never key material.
 #[derive(Debug, Clone)]
 pub struct ValidatedSession {
     pub account_id: uuid::Uuid,

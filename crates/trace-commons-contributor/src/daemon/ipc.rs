@@ -6620,6 +6620,14 @@ fn handle_set_notify_kind(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 pub(super) fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
+    // An older shell's daily-limit control sends only the retired keys.
+    // Nothing would change, so nothing is saved or rebuilt; the reply is the
+    // settings as they stand, as a successful save would return them.
+    if super::settings::carries_only_retired_keys(&req.params) {
+        let mut value = redacted_settings(&shared.settings.lock().expect("settings lock"));
+        add_admission_setting(shared, &mut value);
+        return Response::ok(req.id, value);
+    }
     // Read before the commit lock, and policy and the queue are taken again
     // below only after it is released. `unenroll` holds policy and the queue
     // while it takes the commit lock, so holding commit while waiting for
@@ -16841,6 +16849,19 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&*s.settings.lock().unwrap()).unwrap(),
             before
+        );
+        // Nothing changed, so nothing was saved, and the reply is the
+        // settings as they stand.
+        assert!(
+            !s.store
+                .dir()
+                .join(crate::config::DAEMON_SETTINGS_FILE)
+                .exists(),
+            "a request holding only retired keys must not write the settings file"
+        );
+        assert_eq!(
+            r.result.as_ref().unwrap()["quiescence_secs"],
+            serde_json::json!(s.settings.lock().unwrap().quiescence_secs)
         );
         let got = handle_request(&s, &req("get_settings", serde_json::json!({})))
             .result

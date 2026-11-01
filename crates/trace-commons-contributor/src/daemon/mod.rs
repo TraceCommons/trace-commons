@@ -1236,7 +1236,15 @@ async fn drain_approved(
                 state: &mut state,
                 health: &mut health,
             };
-            let result = up.upload_entry(source, &session_ref, &entry, now).await;
+            // When this entry's turn came, not when the pass started: the
+            // burst window is stamped and checked with it, and a pass that
+            // sends many sessions runs for a while.
+            let entry_now = now
+                + chrono::Duration::from_std(tick_started.elapsed())
+                    .expect("daemon pass elapsed time fits chrono duration");
+            let result = up
+                .upload_entry(source, &session_ref, &entry, entry_now)
+                .await;
             // Copied back on the failure path too: the uploader sets the
             // fail-closed health label (canary, notice, identity) right
             // before it returns `Err`, and that label is what suspends
@@ -1550,6 +1558,26 @@ async fn drain_approved(
                 );
                 rate_limited = true;
             }
+            uploader::UploadDecision::Paced { retry_after_secs } => {
+                // This daemon's own burst guard, before anything was sent.
+                // Kept and stopped like a server `429`, but not counted as
+                // an attempt: the witness and classifier backoffs grow with
+                // `attempts`, and nothing was tried.
+                let observed_at = now
+                    + chrono::Duration::from_std(tick_started.elapsed())
+                        .expect("daemon pass elapsed time fits chrono duration");
+                let wait = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
+                q.defer_without_attempt(
+                    entry.entry_id,
+                    observed_at + chrono::Duration::seconds(i64::from(wait)),
+                );
+                q.set_state(
+                    entry.entry_id,
+                    queue::QueueState::Approved,
+                    Some(crate::submit::REASON_RATE_LIMITED.to_string()),
+                );
+                rate_limited = true;
+            }
         }
         changed = true;
         if rate_limited || outage {
@@ -1757,8 +1785,11 @@ fn transient_upload_retry_delay(failures: u32) -> chrono::Duration {
 /// shares a window with the one before it, and for the CLI. The cap alone
 /// cannot guarantee the server's window -- an operator can lower the limit
 /// -- so a rate-limit refusal also ends the pass
-/// ([`uploader::UploadDecision::RateLimited`]).
+/// ([`uploader::UploadDecision::RateLimited`]). The daemon's own burst
+/// window ([`uploader::BURST_MAX_UPLOADS`]) paces it across passes; this cap
+/// stays at or under it.
 const MAX_UPLOADS_PER_PASS: usize = 20;
+const _: () = assert!(MAX_UPLOADS_PER_PASS <= uploader::BURST_MAX_UPLOADS);
 
 /// One minute, doubling per failed attempt and capped at one hour.
 fn transient_redaction_retry_delay(attempts: u32) -> chrono::Duration {
@@ -4263,6 +4294,41 @@ mod tests {
         );
     }
 
+    /// The daemon's own burst guard pausing an upload is not an attempt:
+    /// nothing was sent, so the entry's `attempts`, which the witness and
+    /// classifier backoffs grow with, stays where it was. It keeps its
+    /// approval and waits out the window like a server `429`.
+    #[tokio::test]
+    async fn a_local_burst_pause_is_not_counted_as_an_attempt() {
+        let h = TransientRetryHarness::new().await;
+        let now = TransientRetryHarness::now();
+        {
+            let mut state = h.shared.state.lock().unwrap();
+            for _ in 0..uploader::BURST_MAX_UPLOADS {
+                state.recent_upload_attempts.push_back(now);
+            }
+        }
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+
+        let held = h.entry();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(held.attempts, 0, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(crate::submit::REASON_RATE_LIMITED)
+        );
+        let due = held.retry_after.expect("a retry time");
+        assert!(due > now, "{due}");
+        // The window's wait, rounded up to a whole second.
+        assert!(
+            due <= now + pass_took + uploader::BURST_WINDOW + chrono::Duration::seconds(1),
+            "{due}"
+        );
+    }
+
     /// A hint past the cap is clamped rather than parking the session.
     #[tokio::test]
     async fn a_rate_limit_hint_is_capped() {
@@ -4306,8 +4372,13 @@ mod tests {
                 .iter()
                 .all(|e| e.state == queue::QueueState::Approved)
         );
-        // Below the server's default of 30 a minute.
-        const { assert!(MAX_UPLOADS_PER_PASS < 30) };
+        // Below the server's default rate.
+        const {
+            assert!(
+                MAX_UPLOADS_PER_PASS
+                    < trace_commons_protocol::submit_rate::SUBMIT_PER_PRINCIPAL_LIMIT as usize
+            )
+        };
 
         let now = TransientRetryHarness::now();
         h.pass(now).await;

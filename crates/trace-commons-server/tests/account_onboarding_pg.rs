@@ -2155,7 +2155,8 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
     let caller_session = unkeyed("native", "revoked-again-caller").await;
     let browser_session = unkeyed("web", "revoked-again-browser").await;
     // A native session that names a credential (only a passkey sign-in, before
-    // V144, minted one) is not the device's.
+    // V144, minted one) whose credential row is gone, so V144's join missed it.
+    // Nothing tells it apart from the device's own, so it ends with the device.
     let passkey_native_session = session_hash("revoked-again-passkey-native");
     admin
         .execute(
@@ -2201,9 +2202,9 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
             removed: true,
             sessions_revoked: 1,
             grants_revoked: 1,
-            unattributed_sessions_revoked: 1,
+            unattributed_sessions_revoked: 2,
         },
-        "the unkeyed native session ends with the device; the caller's own and \
+        "the unkeyed native sessions end with the device; the caller's own and \
          the browser session do not, and the expired grant is not counted"
     );
     for (token, live, what) in [
@@ -2216,8 +2217,8 @@ async fn a_revoked_device_is_refused_by_name_and_signs_in_again_with_a_new_key()
         ),
         (
             &passkey_native_session,
-            true,
-            "a native session that names a credential is not a device's",
+            false,
+            "a native session left over from a passkey sign-in ends too",
         ),
     ] {
         assert_eq!(
