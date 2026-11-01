@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod cli;
 pub mod codex;
+pub mod codex_hooks;
 pub mod collection_plan;
 pub mod folder;
 pub mod models;

@@ -4,7 +4,6 @@
 use super::{ManagedError, profiles::private_directory};
 use crate::config::ConfigStore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -67,33 +66,21 @@ impl CodexBinding {
         &self.directory
     }
 
+    /// The SessionStart hook that records this launch's Codex thread.
+    pub fn hook(&self) -> Result<super::codex_hooks::Hook, ManagedError> {
+        let executable = std::env::current_exe().map_err(|_| ManagedError::StorageUnavailable)?;
+        Ok(super::codex_hooks::Hook {
+            event: "SessionStart",
+            command: hook_command(&executable, &self.directory, &self.nonce)?,
+            timeout: HOOK_TIMEOUT,
+        })
+    }
+
     /// CLI-origin hook arrays cannot be silently replaced. File-based user and
     /// project hooks remain separate sources in Codex's hook discovery engine.
     /// The caller can continue launching without collection when this refuses.
     pub fn configure(&self, command: &mut Command) -> Result<(), ManagedError> {
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_str().ok_or(ManagedError::InvalidRequest))
-            .collect::<Result<Vec<_>, _>>()?;
-        if args.contains(&"--") || has_cli_hooks(&args)? {
-            return Err(ManagedError::InvalidRequest);
-        }
-        let executable = std::env::current_exe().map_err(|_| ManagedError::StorageUnavailable)?;
-        let line = hook_command(&executable, &self.directory, &self.nonce)?;
-        let quoted = toml::Value::String(line.clone()).to_string();
-        let declaration = format!(
-            "hooks.SessionStart=[{{hooks=[{{type=\"command\",command={quoted},timeout={HOOK_TIMEOUT}}}]}}]"
-        );
-        // A TOML table's display is not an inline value. Serialize the tiny
-        // state map explicitly so the CLI parses the source key as one key.
-        let key = toml::Value::String(hook_key()?.to_string()).to_string();
-        let hash = toml::Value::String(hook_hash(&line)?).to_string();
-        let approval = format!("hooks.state={{{key}={{trusted_hash={hash}}}}}");
-        command.args(["-c", &declaration, "-c", &approval]);
-        // Codex 0.164's daemon_startup::config_exclusion forces an embedded
-        // server for these hook overrides. No TUI-only flag is needed, so
-        // subcommands such as `exec` retain their supported CLI arguments.
-        Ok(())
+        super::codex_hooks::configure(command, &[self.hook()?])
     }
 
     pub fn records(&self) -> Result<Vec<BoundSession>, ManagedError> {
@@ -151,54 +138,6 @@ fn read_records(directory: &Path) -> Result<Vec<BoundSession>, ManagedError> {
     }
     records.sort_by_key(|record| record.session_id);
     Ok(records)
-}
-
-fn hook_key() -> Result<&'static str, ManagedError> {
-    // Only Unix's synthetic SessionFlags origin has been verified against the
-    // native hook engine. Unknown origins must disable collection, not trust a
-    // guessed handler or prevent the native session from launching.
-    #[cfg(unix)]
-    {
-        Ok("/<session-flags>/config.toml:session_start:0:0")
-    }
-    #[cfg(not(unix))]
-    {
-        Err(ManagedError::InvalidRequest)
-    }
-}
-
-fn hook_hash(command: &str) -> Result<String, ManagedError> {
-    // Codex 0.164 normalizes optional fields away and includes the effective
-    // timeout and async flag, then hashes sorted compact JSON derived from TOML.
-    let mut identity = serde_json::json!({"event_name":"session_start","hooks":[{"type":"command","command":command,"timeout":HOOK_TIMEOUT,"async":false}]});
-    identity.sort_all_objects();
-    let bytes = serde_json::to_vec(&identity).map_err(|_| ManagedError::InvalidRequest)?;
-    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
-}
-
-fn has_cli_hooks(args: &[&str]) -> Result<bool, ManagedError> {
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        let config = if matches!(*arg, "-c" | "--config") {
-            Some(*args.next().ok_or(ManagedError::InvalidRequest)?)
-        } else if let Some(value) = arg.strip_prefix("--config=") {
-            Some(value)
-        } else if arg.starts_with("-c") && !arg.starts_with("--") {
-            Some(&arg[2..])
-        } else {
-            None
-        };
-        if let Some(config) = config {
-            let (key, _) = config.split_once('=').ok_or(ManagedError::InvalidRequest)?;
-            let key: toml::Table = format!("{key}=0")
-                .parse()
-                .map_err(|_| ManagedError::InvalidRequest)?;
-            if key.contains_key("hooks") {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
 }
 
 fn hook_command(executable: &Path, directory: &Path, nonce: &str) -> Result<String, ManagedError> {

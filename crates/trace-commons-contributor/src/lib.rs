@@ -24,6 +24,7 @@ pub mod daemon;
 pub mod deep_link;
 pub mod disclosure;
 pub mod disclosure_copy;
+pub mod economizer;
 pub mod envelope;
 pub mod external_url;
 pub mod first_run_copy;
