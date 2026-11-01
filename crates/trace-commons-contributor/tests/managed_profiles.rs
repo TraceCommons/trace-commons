@@ -217,3 +217,49 @@ fn unsupported_native_logout_cannot_touch_credentials() {
         b"keep"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn opencode_launcher_detects_supported_major_versions() {
+    use std::os::unix::fs::PermissionsExt;
+    use trace_commons_contributor::managed::ManagedError;
+
+    let home = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(home.path().join("state")).unwrap();
+    let mut accounts = AccountStore::open(&store).unwrap();
+    let account = accounts
+        .add(ToolId::Opencode, ConnectionKind::ApiKey, "Work")
+        .unwrap();
+    let profiles = NativeProfiles::new(&store);
+    let native = home.path().join("opencode");
+    for (version, expected) in [
+        ("1.19.0", Some((1, 19, 0))),
+        ("opencode 1.19.4", Some((1, 19, 4))),
+        ("opencode v2.1.4", Some((2, 1, 4))),
+        ("2.0.0", Some((2, 0, 0))),
+        ("unknown", None),
+        ("1.19.3-beta", None),
+        ("opencode v3.0.0", None),
+    ] {
+        // The version probe must not pass a version-specific flag first.
+        std::fs::write(
+            &native,
+            format!("#!/bin/sh\n[ \"$1\" = --version ] || exit 42\necho '{version}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = profiles.verify_version(&account, &native);
+        assert_eq!(result.is_ok(), expected.is_some(), "{version}: {result:?}");
+        if let Some(expected) = expected {
+            assert_eq!(
+                profiles.native_version(&account, &native).unwrap(),
+                Some(expected)
+            );
+        }
+    }
+    std::fs::write(&native, "#!/bin/sh\nexit 1\n").unwrap();
+    assert!(matches!(
+        profiles.verify_version(&account, &native),
+        Err(ManagedError::UnsupportedVersion)
+    ));
+}

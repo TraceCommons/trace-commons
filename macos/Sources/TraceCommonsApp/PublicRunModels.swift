@@ -143,6 +143,12 @@ struct PublicRunCopy: Decodable, Equatable {
     /// `history_copy::STATUS_LABELS`: the one table every shell reads. Read
     /// it through `historyStatusLabel(for:)`.
     let historyStatusLabels: [PublicRunValueLabel]
+    /// Why a decided trace earned no credit, the core's
+    /// `history_copy::CREDIT_OUTCOME_LABELS`. Read it through
+    /// `creditOutcomeLabel(for:)`.
+    let creditOutcomeLabels: [PublicRunValueLabel]
+    /// The core's words for a reason not in `creditOutcomeLabels`.
+    let creditOutcomeUnavailable: String
     let permittedUseChoices: [PublicRunValueLabel]
     let reusePermissions: [PublicRunReuseChoice]
 
@@ -169,6 +175,12 @@ struct PublicRunCopy: Decodable, Equatable {
     /// (`ContributionStatusPresentation`).
     func historyStatusLabel(for value: String) -> String {
         historyStatusLabels.first { $0.value == value }?.label ?? contributionStatusUnavailable
+    }
+
+    /// The core's words for a no-credit reason label; a label the core does
+    /// not name reads `creditOutcomeUnavailable`, never the raw label.
+    func creditOutcomeLabel(for value: String) -> String {
+        creditOutcomeLabels.first { $0.value == value }?.label ?? creditOutcomeUnavailable
     }
 
     func permittedUseLabel(for value: String) -> String {

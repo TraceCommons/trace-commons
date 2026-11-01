@@ -22,8 +22,10 @@
 
 pub mod account_admission;
 pub mod account_onboarding;
+pub(crate) mod account_session_renewal;
 pub mod activity_missions;
 pub mod admission_setup;
+pub(crate) mod agent_config;
 pub mod approved_envelope;
 pub mod arming_wording;
 pub mod attached;
@@ -40,6 +42,10 @@ pub(crate) mod cloud_credential_test_support;
 pub mod commons_credit;
 pub mod community;
 pub mod contribution_eligibility;
+pub mod device_codes;
+pub mod diagnostics_log;
+pub mod model_training_consent;
+pub(crate) mod setup_completion;
 /// Moved to the platform crate, which the Insights crate shares; re-exported
 /// here at its old path.
 pub(crate) mod credential_store {
@@ -53,15 +59,23 @@ pub mod health;
 pub mod history;
 pub mod inference_connection;
 pub mod inference_map;
+pub mod insights_analyze;
+pub mod insights_benchmarks;
+mod insights_codex_goals;
+pub(crate) mod insights_credit;
 pub mod insights_glance;
+pub mod insights_model_answers;
 pub(crate) mod insights_route_tally;
 pub mod insights_sessions;
+pub mod insights_submitted;
 pub mod insights_week;
+mod insights_week_work;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;
 pub(crate) mod legacy_migration;
 pub mod managed;
+pub(crate) mod managed_history;
 pub mod mission_catalogue;
 pub mod mission_matching;
 pub mod native_flow;
@@ -82,6 +96,7 @@ pub(crate) mod os_secret_store {
     pub(crate) use trace_commons_contributor_platform::os_secret_store::*;
 }
 pub mod past_sessions;
+pub mod payout_link;
 pub mod policy;
 pub mod preview;
 pub mod preview_scheduler;
@@ -90,7 +105,7 @@ pub mod profile;
 pub mod project_key;
 pub mod public_run;
 pub mod queue;
-pub mod remembered_passkeys;
+pub mod referral;
 pub mod second_look;
 pub mod settings;
 pub mod settlement_estimate;
@@ -98,6 +113,7 @@ pub mod settlement_scan;
 pub mod skill_loop;
 pub mod state;
 pub mod stored_cloud_credentials;
+pub(crate) mod subscription_usage;
 #[cfg(test)]
 pub(crate) mod test_paths;
 #[cfg(test)]
@@ -440,6 +456,7 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         // through the synchronous IPC path would be spawned onto the
         // throwaway runtime that path builds, and would die with it.
         shared.adopt_runtime();
+        shared.adopt_self();
         // The two transports are the same protocol over different plumbing: a
         // unix socket guarded by its 0700 state directory, or a Windows named
         // pipe guarded by its DACL. See `win_pipe` for why the Windows side
@@ -582,6 +599,9 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     // the lease plus one of these ticks.
     let mut managed_lease_tick = tokio::time::interval(std::time::Duration::from_secs(15));
     managed_lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // At most one abandoned-collection pass at a time; a slow one is not
+    // started again until it finished.
+    let mut collection_pass: Option<tokio::task::JoinHandle<()>> = None;
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
     // The published estimate table's fetch schedule (OWNER DECISION E11).
     // A local of this loop, so nothing that answers a request can reach it.
@@ -593,6 +613,13 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     let mut mission_slot_schedule = activity_missions::MissionSlotSchedule::default();
     let mut sigterm = signal_stream();
     let shutdown_signal = Arc::clone(&shared.shutdown_signal);
+    // A person's approval asks for an upload pass when its hold ends
+    // (`DaemonShared::request_upload_at`), so a trace they just sent goes
+    // out then rather than up to a poll interval later. The pass is the
+    // ordinary tick, brought forward: the same scan and the same gates.
+    let upload_wake = tokio::time::sleep(std::time::Duration::ZERO);
+    tokio::pin!(upload_wake);
+    let mut upload_wake_armed = false;
 
     loop {
         // Checked at the top as well as after the select, so a request that
@@ -625,6 +652,29 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
             _ = managed_lease_tick.tick() => {
                 managed::sweep(shared, Utc::now()).await;
+                // Detached: a collection is recorded when it finishes.
+                if collection_pass.as_ref().is_none_or(|pass| pass.is_finished()) {
+                    let shared = Arc::clone(shared);
+                    collection_pass = Some(tokio::spawn(async move {
+                        managed::collect_abandoned(&shared, Utc::now()).await;
+                    }));
+                }
+            }
+            _ = shared.upload_due_changed.notified() => {
+                if let Some(at) = shared.upload_due() {
+                    upload_wake.as_mut().reset(upload_wake_deadline(at, Utc::now()));
+                    upload_wake_armed = true;
+                }
+            }
+            _ = &mut upload_wake, if upload_wake_armed => {
+                upload_wake_armed = false;
+                if shared.take_upload_due(Utc::now()) {
+                    ticker.reset_immediately();
+                } else if let Some(at) = shared.upload_due() {
+                    // Woken a little early by the clock; wait out the rest.
+                    upload_wake.as_mut().reset(upload_wake_deadline(at, Utc::now()));
+                    upload_wake_armed = true;
+                }
             }
             _ = ticker.tick() => {
                 let tick_started = std::time::Instant::now();
@@ -659,6 +709,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // Skipped, and any earlier answer dropped, in a dry run and
                 // when nothing is armed.
                 account_admission::refresh(shared, now, dry_run).await;
+                // No usable session: renew an expired one off the pass, so
+                // R3 can lift at the next pass. Not awaited.
+                if shared.account_admission.take_session_missing() {
+                    let _ = account_session_renewal::renew_off_pass(shared);
+                }
                 if watcher::tick(shared, now).await.is_err() {
                     tracing::warn!(pass = "watch", "daemon pass failed");
                 }
@@ -667,6 +722,11 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 // holds up this tick; it reads and sends nothing but local
                 // files, so pause and dry-run do not hold it back.
                 let _ = settlement_estimate::tick(shared, now);
+                subscription_usage::tick(shared, now);
+                // NEAR AI credit arriving, and a balance sample for the
+                // 24-hour change: on its own schedule, a no-op without a
+                // NEAR AI sign-in. Reads only; sends nothing about traces.
+                nearai_credential::arrivals::poll(shared, now).await;
                 expire_and_digest(shared, now);
                 // Everything above is read-only bookkeeping; uploading is
                 // what dry-run withholds.
@@ -719,6 +779,20 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
         }
     }
 }
+
+/// When to wake for an upload pass asked for at `at`: just after it, by the
+/// monotonic clock. The margin keeps the pass from landing a hair before the
+/// hold deadline, where `QueueEntry::hold_active` would still skip the entry.
+fn upload_wake_deadline(
+    at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> tokio::time::Instant {
+    let wait = (at - now).to_std().unwrap_or(std::time::Duration::ZERO);
+    tokio::time::Instant::now() + wait + UPLOAD_WAKE_MARGIN
+}
+
+/// See [`upload_wake_deadline`].
+const UPLOAD_WAKE_MARGIN: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Once the NEAR AI notice is acknowledged, by any route, undo what its gate
 /// did while it was closed: clear the gate's health label and re-offer every
@@ -803,6 +877,15 @@ async fn drain_approved(
     now: chrono::DateTime<Utc>,
     tick_started: std::time::Instant,
 ) -> Result<()> {
+    // The time now, as this pass reckons it: its start plus the monotonic
+    // time since, but never behind the wall clock. `Instant` does not advance
+    // while the machine sleeps, so a pass that slept mid-call would otherwise
+    // date a burst stamp or a retry deadline in the past.
+    let observed_at = || {
+        (now + chrono::Duration::from_std(tick_started.elapsed())
+            .expect("daemon pass elapsed time fits chrono duration"))
+        .max(Utc::now())
+    };
     // Read off the queue before anything can return early: every pass sees
     // the whole queue, so every pass can say whether sessions are still
     // waiting on the witness, including one that sends nothing because all
@@ -977,6 +1060,7 @@ async fn drain_approved(
                 && !held_ids.contains(&e.entry_id)
         })
         .collect();
+    let approved = send_order(approved);
     if approved.is_empty() {
         // Re-check enrollment when the queue is empty, so a stale not-logged-in
         // condition gets retracted if the contributor has logged back in.
@@ -1082,6 +1166,8 @@ async fn drain_approved(
     // Whether ingest or the issuer was unavailable for an entry this pass
     // (#1358). Ends the pass the same way.
     let mut outage = false;
+    // Listed on first use; see `PassSessions`.
+    let mut pass_sessions: Option<PassSessions> = None;
 
     for entry in approved {
         if claimed_this_pass >= MAX_UPLOADS_PER_PASS {
@@ -1137,11 +1223,17 @@ async fn drain_approved(
         }
 
         // Re-resolve the session through its own adapter, so the uploader can
-        // re-read and re-hash the file before sending anything.
-        // `find_session` re-scans every source (`source.discover()`), the
-        // same blocking, non-yielding pass `watcher::tick` runs -- see
-        // `run_blocking`'s doc.
-        let Some((source, session_ref)) = run_blocking(|| find_session(&sources, &entry)) else {
+        // re-read and re-hash the file before sending anything. The listing
+        // is taken once, by the first entry that needs it, and shared by the
+        // rest of the pass (`PassSessions`). It is the same blocking,
+        // non-yielding scan `watcher::tick` runs -- see `run_blocking`'s doc.
+        if pass_sessions.is_none() {
+            pass_sessions = Some(run_blocking(|| PassSessions::list(&sources)));
+        }
+        let found = pass_sessions
+            .as_ref()
+            .and_then(|listed| listed.find(&sources, &entry));
+        let Some((source, session_ref)) = found else {
             let mut q = shared.queue.lock().expect("queue lock");
             q.set_state(
                 entry.entry_id,
@@ -1163,7 +1255,13 @@ async fn drain_approved(
                 state: &mut state,
                 health: &mut health,
             };
-            let result = up.upload_entry(source, &session_ref, &entry, now).await;
+            // When this entry's turn came, not when the pass started: the
+            // burst window is checked against it, and a pass that sends many
+            // sessions runs for a while.
+            let entry_now = observed_at();
+            let result = up
+                .upload_entry(source, &session_ref, &entry, entry_now)
+                .await;
             // Copied back on the failure path too: the uploader sets the
             // fail-closed health label (canary, notice, identity) right
             // before it returns `Err`, and that label is what suspends
@@ -1213,6 +1311,17 @@ async fn drain_approved(
         {
             cancel_account_admission_on_refusal(shared, reason_label);
         }
+        // The file moved since the pass listed it, so its listing is stale
+        // too: the superseding entry's size and last write come from a fresh
+        // one, taken before the queue lock, as they did before the listing
+        // was shared. Rare -- only a session that grew after approval.
+        let session_ref = if matches!(decision, uploader::UploadDecision::Superseded { .. }) {
+            run_blocking(|| find_session(&sources, &entry))
+                .map(|(_, fresh)| fresh)
+                .unwrap_or(session_ref)
+        } else {
+            session_ref
+        };
         let mut q = shared.queue.lock().expect("queue lock");
         match decision {
             uploader::UploadDecision::Uploaded {
@@ -1367,9 +1476,7 @@ async fn drain_approved(
                     // `now` was sampled at tick start. Classifier retries may
                     // take longer than our backoff, so include monotonic time
                     // spent in this pass before scheduling the next attempt.
-                    let observed_at = now
-                        + chrono::Duration::from_std(tick_started.elapsed())
-                            .expect("daemon pass elapsed time fits chrono duration");
+                    let observed_at = observed_at();
                     q.record_attempt(
                         entry.entry_id,
                         Some(observed_at + transient_redaction_retry_delay(attempt)),
@@ -1386,8 +1493,10 @@ async fn drain_approved(
                     // approval, and with it every guard a retry re-runs,
                     // until the budget is spent; then it ends `Failed`
                     // under the same label, which reads as what it is.
-                    let failures = q.record_transient_upload_failure(entry.entry_id);
-                    if failures >= MAX_TRANSIENT_UPLOAD_FAILURES {
+                    let observed_at = observed_at();
+                    let (failures, run_started) =
+                        q.record_transient_upload_failure(entry.entry_id, observed_at);
+                    if transient_upload_budget_spent(failures, run_started, observed_at) {
                         q.record_attempt(entry.entry_id, None);
                         q.set_state(
                             entry.entry_id,
@@ -1395,12 +1504,16 @@ async fn drain_approved(
                             Some(reason_label),
                         );
                     } else {
-                        let observed_at = now
-                            + chrono::Duration::from_std(tick_started.elapsed())
-                                .expect("daemon pass elapsed time fits chrono duration");
                         q.record_attempt(
                             entry.entry_id,
-                            Some(observed_at + transient_upload_retry_delay(failures)),
+                            Some(
+                                observed_at
+                                    + transient_upload_retry_wait(
+                                        failures,
+                                        ctx.last_unavailable_retry_after(),
+                                        crate::retry_jitter::random_u64(),
+                                    ),
+                            ),
                         );
                         q.set_state(
                             entry.entry_id,
@@ -1430,9 +1543,7 @@ async fn drain_approved(
                     .get(entry.entry_id)
                     .map(|e| e.attempts.saturating_add(1))
                     .unwrap_or(1);
-                let observed_at = now
-                    + chrono::Duration::from_std(tick_started.elapsed())
-                        .expect("daemon pass elapsed time fits chrono duration");
+                let observed_at = observed_at();
                 let until = observed_at + witness_capacity_retry_delay(retry_after_secs, attempt);
                 q.record_attempt(
                     entry.entry_id,
@@ -1445,30 +1556,40 @@ async fn drain_approved(
                 );
                 witness_busy_until = Some((until, retry_after_secs));
             }
-            uploader::UploadDecision::RateLimited { retry_after_secs } => {
+            decision @ (uploader::UploadDecision::RateLimited { retry_after_secs }
+            | uploader::UploadDecision::Paced { retry_after_secs }) => {
                 // Sending too fast is not a verdict on the session: it keeps
-                // its approval, with the attempt recorded, and is not
-                // claimable again until the server's wait has passed. No
-                // per-session attempt limit, for the reason the witness
-                // capacity retry has none.
-                let observed_at = now
-                    + chrono::Duration::from_std(tick_started.elapsed())
-                        .expect("daemon pass elapsed time fits chrono duration");
-                let wait = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
-                q.record_attempt(
-                    entry.entry_id,
-                    Some(observed_at + chrono::Duration::seconds(i64::from(wait))),
-                );
+                // its approval and is not claimable again until the wait has
+                // passed. No per-session attempt limit, for the reason the
+                // witness capacity retry has none. A server `429` records an
+                // attempt; this daemon's own burst guard (`Paced`) does not,
+                // since it sent nothing, and the witness and classifier
+                // backoffs grow with `attempts`.
+                let hint = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
+                // A server `429` hint is a floor with a random extra on top,
+                // so contributors told the same wait do not return together.
+                // The daemon's own pacing is exact: it is not a herd.
+                let wait = if matches!(decision, uploader::UploadDecision::Paced { .. }) {
+                    hint
+                } else {
+                    crate::retry_jitter::hint_with_extra_secs(
+                        hint,
+                        crate::submit::RATE_LIMIT_MAX_RETRY_SECS,
+                        crate::retry_jitter::random_u64(),
+                    )
+                };
+                let retry_at = observed_at() + chrono::Duration::seconds(i64::from(wait));
+                if matches!(decision, uploader::UploadDecision::Paced { .. }) {
+                    q.defer_without_attempt(entry.entry_id, retry_at);
+                } else {
+                    q.record_attempt(entry.entry_id, Some(retry_at));
+                }
                 q.set_state(
                     entry.entry_id,
                     queue::QueueState::Approved,
                     Some(crate::submit::REASON_RATE_LIMITED.to_string()),
                 );
                 rate_limited = true;
-            }
-            uploader::UploadDecision::CapReached => {
-                // Leave it approved: the cap lifts when the day rolls over.
-                break;
             }
         }
         changed = true;
@@ -1482,7 +1603,7 @@ async fn drain_approved(
 
     // Nothing may be left claimed. Every entry that reached a decision above
     // already has a terminal state; anything still `Uploading` is one this
-    // pass broke out on (a daily cap, a fail-closed precondition), and
+    // pass broke out on (a rate limit, a fail-closed precondition), and
     // `Uploading` is a state nothing else would ever move it out of.
     {
         let mut q = shared.queue.lock().expect("queue lock");
@@ -1509,18 +1630,6 @@ async fn drain_approved(
     }
     if uploaded_this_pass {
         note_uploads(shared, now)?;
-    }
-
-    // An exhausted budget is the one outcome of this pass that changes
-    // nothing in the queue -- every affected entry stays `Approved` -- so
-    // `changed` is false and the loop above publishes nothing. Without
-    // this, a client that only redraws on an event sat on a stale status
-    // while the very condition it needed to show had just been decided.
-    // Published unconditionally rather than on a transition, because this
-    // pass holds no memory of the previous one; it is one event per poll
-    // interval at worst, and `status` is idempotent.
-    if shared.daily_budget(now).blocked() {
-        shared.publish(ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
     }
 
     // After the queue is final for this pass: a successful upload clears the
@@ -1635,12 +1744,41 @@ fn witness_capacity_jitter(entry_id: uuid::Uuid, retry_after_secs: u32) -> chron
 const MAX_TRANSIENT_REDACTION_FAILURES: u32 = 24;
 
 /// Uploads in a row that may reach no verdict for a passing reason
-/// ([`transient_upload_kind`]) before the entry ends `Failed`. With
-/// [`transient_upload_retry_delay`] that is about six hours of retrying,
-/// well past a deploy's four or five minutes, and bounded so a server that
-/// never comes back does not re-run the privacy scan on the session for
-/// ever.
+/// ([`transient_upload_kind`]) before the entry may end `Failed`. It ends
+/// only once the run is also [`transient_upload_give_up_horizon`] old (see
+/// [`transient_upload_budget_spent`]).
 const MAX_TRANSIENT_UPLOAD_FAILURES: u32 = 12;
+
+/// How long a run of transient upload failures must last before the entry
+/// may end `Failed`: the unjittered schedule, every wait of
+/// [`transient_upload_retry_delay`] from the first failure to the last one
+/// counted, 21,780 s or about six hours. Well past a deploy's four or five
+/// minutes, and bounded so a server that never comes back does not re-run
+/// the privacy scan on the session for ever.
+fn transient_upload_give_up_horizon() -> chrono::Duration {
+    (1..MAX_TRANSIENT_UPLOAD_FAILURES)
+        .map(transient_upload_retry_delay)
+        .fold(chrono::Duration::zero(), |total, wait| total + wait)
+}
+
+/// Whether a run of `failures` transient upload failures, the first at
+/// `run_started`, has spent its budget at `now`.
+///
+/// Both the count and the horizon must be reached. The waits are jittered
+/// ([`transient_upload_retry_wait`]), so twelve failures can come in about
+/// three hours; the horizon keeps the entry approved through the outage the
+/// unjittered schedule survived, retrying at the capped wait meanwhile. The
+/// count keeps a machine that slept through most of an outage from giving
+/// up on its first try after waking. A run with no recorded start never
+/// gives up; the caller stamps one on every failure, so that cannot last.
+fn transient_upload_budget_spent(
+    failures: u32,
+    run_started: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    failures >= MAX_TRANSIENT_UPLOAD_FAILURES
+        && run_started.is_some_and(|started| now - started >= transient_upload_give_up_horizon())
+}
 
 /// Why an upload reached no verdict for a reason that clears on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1679,6 +1817,33 @@ fn transient_upload_retry_delay(failures: u32) -> chrono::Duration {
     chrono::Duration::seconds((60_i64 * (1_i64 << exponent)).min(3_600))
 }
 
+/// The wait until the next pass retries an entry after its `failures`-th
+/// upload in a row that reached no verdict.
+///
+/// The scheduled backoff ([`transient_upload_retry_delay`]) gets equal
+/// jitter (between half and the whole of it, so the cap of an hour holds), so
+/// every daemon refused by the same restart does not return on the same
+/// minute. If ingest answered `503` with a `Retry-After` (`server_hint`), the
+/// wait is never shorter than that hint (with the usual random extra on top,
+/// see [`crate::retry_jitter::hint_with_extra_secs`]).
+fn transient_upload_retry_wait(
+    failures: u32,
+    server_hint: Option<u32>,
+    random: u64,
+) -> chrono::Duration {
+    let scheduled = transient_upload_retry_delay(failures).num_seconds().max(0) as u64;
+    let mut wait = crate::retry_jitter::equal_jitter_secs(scheduled, random);
+    if let Some(hint) = server_hint {
+        let hinted = crate::retry_jitter::hint_with_extra_secs(
+            hint,
+            crate::submit::RATE_LIMIT_MAX_RETRY_SECS,
+            random.rotate_left(17),
+        );
+        wait = wait.max(u64::from(hinted));
+    }
+    chrono::Duration::seconds(wait as i64)
+}
+
 /// Most sessions one upload pass puts on the wire.
 ///
 /// Ingest limits each principal to 30 uploads per 60 s window by default
@@ -1689,8 +1854,11 @@ fn transient_upload_retry_delay(failures: u32) -> chrono::Duration {
 /// shares a window with the one before it, and for the CLI. The cap alone
 /// cannot guarantee the server's window -- an operator can lower the limit
 /// -- so a rate-limit refusal also ends the pass
-/// ([`uploader::UploadDecision::RateLimited`]).
+/// ([`uploader::UploadDecision::RateLimited`]). The daemon's own burst
+/// window ([`uploader::BURST_MAX_UPLOADS`]) paces it across passes; this cap
+/// stays at or under it.
 const MAX_UPLOADS_PER_PASS: usize = 20;
+const _: () = assert!(MAX_UPLOADS_PER_PASS <= uploader::BURST_MAX_UPLOADS);
 
 /// One minute, doubling per failed attempt and capped at one hour.
 fn transient_redaction_retry_delay(attempts: u32) -> chrono::Duration {
@@ -1788,7 +1956,7 @@ pub async fn drain_approved_for_test(
 pub fn credential_store_self_check() -> i32 {
     use credential_store::{CredentialError, CredentialReference, CredentialStore};
 
-    let backend = match os_secret_store::OsSecretBackend::new() {
+    let backend = match os_secret_store::OsSecretBackend::new(&crate::channel::KEYCHAIN) {
         Ok(backend) => backend,
         Err(CredentialError::Unentitled) => return 1,
         Err(_) => return 2,
@@ -1797,6 +1965,87 @@ pub fn credential_store_self_check() -> i32 {
         Err(CredentialError::Unentitled) => 1,
         Err(CredentialError::NoEntry) | Ok(_) => 0,
         Err(_) => 2,
+    }
+}
+
+/// The order one upload pass sends its approved entries in: every entry a
+/// person approved before any a folder's standing Automatic approved.
+/// Person approvals retain queue order; Automatic sends oldest traces first.
+///
+/// A pass sends at most `MAX_UPLOADS_PER_PASS`. Switching a folder to
+/// Automatic approves its whole backlog (#1473), and in plain queue order a
+/// trace the contributor sent by hand waited behind all of it, at that many
+/// per poll. The contributor is waiting on theirs; the backlog is not.
+fn send_order(mut approved: Vec<queue::QueueEntry>) -> Vec<queue::QueueEntry> {
+    let age = |entry: &queue::QueueEntry| {
+        // Match discovery's conversation start where available. The durable
+        // source-write time survives re-offers; the observation is a fallback
+        // for queue files written before that provenance was recorded.
+        entry
+            .shape
+            .as_ref()
+            .and_then(|shape| shape.started_at)
+            .or(entry.last_modified_at)
+            .or(entry.observed_modified_at)
+    };
+    approved.sort_by(|left, right| {
+        left.approved_unattended
+            .cmp(&right.approved_unattended)
+            .then_with(|| {
+                if !left.approved_unattended {
+                    // Stable sort preserves the person's existing queue order.
+                    return std::cmp::Ordering::Equal;
+                }
+                let left_age = age(left);
+                let right_age = age(right);
+                (left_age.is_none(), left_age, left.entry_id).cmp(&(
+                    right_age.is_none(),
+                    right_age,
+                    right.entry_id,
+                ))
+            })
+    });
+    approved
+}
+
+/// Every source's sessions, listed once per upload pass and looked up by
+/// path for each entry the pass sends.
+///
+/// Each listing opens every session file to read its header, and the pass
+/// used to take one per entry, so a pass of twenty sends listed the disk
+/// twenty times. A listing can be a pass old by the time a later entry is
+/// sent; that is safe because the uploader re-reads and re-hashes the file
+/// before anything goes out and re-asks when the bytes moved.
+struct PassSessions {
+    /// For each path, the index of the first source that listed it and its
+    /// reference, matching [`find_session`]'s first-match rule.
+    by_path: std::collections::HashMap<std::path::PathBuf, (usize, crate::source::SessionRef)>,
+}
+
+impl PassSessions {
+    fn list(sources: &[Box<dyn crate::source::TraceSource>]) -> Self {
+        let mut by_path = std::collections::HashMap::new();
+        for (index, source) in sources.iter().enumerate() {
+            let Ok(refs) = source.discover() else {
+                continue;
+            };
+            for r in refs {
+                by_path.entry(r.path.clone()).or_insert((index, r));
+            }
+        }
+        Self { by_path }
+    }
+
+    fn find<'a>(
+        &self,
+        sources: &'a [Box<dyn crate::source::TraceSource>],
+        entry: &queue::QueueEntry,
+    ) -> Option<(
+        &'a dyn crate::source::TraceSource,
+        crate::source::SessionRef,
+    )> {
+        let (index, r) = self.by_path.get(&entry.path)?;
+        Some((sources[*index].as_ref(), r.clone()))
     }
 }
 
@@ -2355,6 +2604,7 @@ mod tests {
                 consent_scopes: vec![],
                 credit_points_pending: 1.0,
                 credit_points_final: None,
+                credit_outcome_reason: None,
                 explanations: vec![],
                 last_refreshed_at: Some(at(0)),
                 withdrawn_at: None,
@@ -2788,12 +3038,9 @@ mod tests {
                 }),
             ))
             .await;
+            // Refused at once, and never a port another test can be handed.
             let ingest = if ingest_unreachable {
-                // Bound and released, so nothing answers on it.
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let addr = listener.local_addr().unwrap();
-                drop(listener);
-                format!("http://{addr}")
+                format!("http://{}", crate::config::tests_support::refusing_addr())
             } else {
                 ingest
             };
@@ -4108,10 +4355,107 @@ mod tests {
             Some(crate::submit::REASON_RATE_LIMITED)
         );
         let due = held.retry_after.expect("a retry time");
+        // The window is the floor; the random extra on top is at most a fifth
+        // of it (at least 5 s, at most 30 s).
         let window = i64::from(crate::submit::RATE_LIMIT_DEFAULT_RETRY_SECS);
+        let extra = (window / 5).clamp(5, 30);
         assert!(
             due >= now + chrono::Duration::seconds(window)
-                && due <= now + pass_took + chrono::Duration::seconds(window),
+                && due <= now + pass_took + chrono::Duration::seconds(window + extra),
+            "{due}"
+        );
+    }
+
+    /// Only a send that reached ingest takes a slot in the burst window: a
+    /// local classifier failure stops before the send and leaves it empty,
+    /// and the upload that follows takes exactly one.
+    #[tokio::test]
+    async fn only_a_send_to_ingest_is_counted_in_the_burst_window() {
+        let h = TransientRetryHarness::new().await;
+        h.classifier_status.store(500, Ordering::SeqCst);
+        h.pass(TransientRetryHarness::now()).await;
+        assert_eq!(
+            h.entry().reason_label.as_deref(),
+            Some("privacy-filter-transient")
+        );
+        assert!(
+            h.shared
+                .state
+                .lock()
+                .unwrap()
+                .recent_upload_attempts
+                .is_empty()
+        );
+
+        h.classifier_status.store(0, Ordering::SeqCst);
+        let retry = h.entry().retry_after.unwrap();
+        h.pass(retry).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.shared.state.lock().unwrap().recent_upload_attempts.len(),
+            1
+        );
+    }
+
+    /// The burst window and the pause's deadline follow the wall clock, not
+    /// the pass's start plus monotonic time, which stops while the machine
+    /// sleeps. Here the pass is handed a start long past: the window, full
+    /// in real time, still pauses the upload, and the entry is held until a
+    /// real-time deadline.
+    #[tokio::test]
+    async fn the_burst_pause_follows_the_wall_clock() {
+        let h = TransientRetryHarness::new().await;
+        {
+            let mut state = h.shared.state.lock().unwrap();
+            for _ in 0..uploader::BURST_MAX_UPLOADS {
+                state.recent_upload_attempts.push_back(Utc::now());
+            }
+        }
+        let long_ago = at("2020-01-01T00:00:00Z");
+        h.pass(long_ago).await;
+        let held = h.entry();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(crate::submit::REASON_RATE_LIMITED)
+        );
+        assert!(
+            held.retry_after.expect("a retry time") > Utc::now(),
+            "{held:?}"
+        );
+    }
+
+    /// The daemon's own burst guard pausing an upload is not an attempt:
+    /// nothing was sent, so the entry's `attempts`, which the witness and
+    /// classifier backoffs grow with, stays where it was. It keeps its
+    /// approval and waits out the window like a server `429`.
+    #[tokio::test]
+    async fn a_local_burst_pause_is_not_counted_as_an_attempt() {
+        let h = TransientRetryHarness::new().await;
+        let now = TransientRetryHarness::now();
+        {
+            let mut state = h.shared.state.lock().unwrap();
+            for _ in 0..uploader::BURST_MAX_UPLOADS {
+                state.recent_upload_attempts.push_back(now);
+            }
+        }
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+
+        let held = h.entry();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(held.attempts, 0, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(crate::submit::REASON_RATE_LIMITED)
+        );
+        let due = held.retry_after.expect("a retry time");
+        assert!(due > now, "{due}");
+        // The window's wait, rounded up to a whole second.
+        assert!(
+            due <= now + pass_took + uploader::BURST_WINDOW + chrono::Duration::seconds(1),
             "{due}"
         );
     }
@@ -4159,8 +4503,13 @@ mod tests {
                 .iter()
                 .all(|e| e.state == queue::QueueState::Approved)
         );
-        // Below the server's default of 30 a minute.
-        const { assert!(MAX_UPLOADS_PER_PASS < 30) };
+        // Below the server's default rate.
+        const {
+            assert!(
+                MAX_UPLOADS_PER_PASS
+                    < trace_commons_protocol::submit_rate::SUBMIT_PER_PRINCIPAL_LIMIT as usize
+            )
+        };
 
         let now = TransientRetryHarness::now();
         h.pass(now).await;
@@ -4174,20 +4523,221 @@ mod tests {
         );
     }
 
+    /// A trace the contributor sent by hand goes in the first pass, ahead of
+    /// a backlog a folder's Automatic approved, though it sits last in the
+    /// queue and the backlog alone fills the pass.
+    #[tokio::test]
+    async fn a_person_approval_is_sent_before_an_unattended_backlog() {
+        let h = TransientRetryHarness::new().await;
+        for index in 0..MAX_UPLOADS_PER_PASS {
+            h.add_session(
+                &format!("{index:08x}-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                &format!("backlog session {index}, then mail alice.smith@example.org"),
+            )
+            .await;
+        }
+        let entries = h.entries();
+        assert_eq!(entries.len(), MAX_UPLOADS_PER_PASS + 1);
+        assert!(entries.iter().all(|e| e.approved_unattended));
+        // The last in queue order, approved by a person instead: the hold is
+        // left off (`approved_at` stays `None`) so only the order is tested.
+        let mine = entries.last().unwrap().entry_id;
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            q.entry_mut_for_test(mine).unwrap().approved_unattended = false;
+        }
+
+        h.pass(TransientRetryHarness::now()).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), MAX_UPLOADS_PER_PASS);
+        let after = h.entries();
+        let state_of = |id| after.iter().find(|e| e.entry_id == id).unwrap().state;
+        assert_eq!(state_of(mine), queue::QueueState::Uploaded);
+        assert_eq!(
+            after
+                .iter()
+                .filter(|e| e.state == queue::QueueState::Approved)
+                .count(),
+            1,
+            "one backlog entry left for the next pass"
+        );
+    }
+
+    /// The queue may discover a recent trace before an older history item.
+    /// The upload cap must choose from the chronological order, not discard
+    /// the older tail before sorting the first twenty candidates.
+    #[tokio::test]
+    async fn automatic_backlog_sends_older_sessions_before_applying_the_pass_cap() {
+        let h = TransientRetryHarness::new().await;
+        for index in 0..MAX_UPLOADS_PER_PASS {
+            h.add_session(
+                &format!("{index:08x}-dddd-4ddd-8ddd-dddddddddddd"),
+                &format!("backfill session {index}, then mail alice.smith@example.org"),
+            )
+            .await;
+        }
+        let entries = h.entries();
+        assert_eq!(entries.len(), MAX_UPLOADS_PER_PASS + 1);
+        let newest = entries[0].entry_id;
+        let oldest = entries.last().unwrap().entry_id;
+        {
+            let mut q = h.shared.queue.lock().unwrap();
+            for (index, entry) in entries.iter().enumerate() {
+                q.entry_mut_for_test(entry.entry_id).unwrap().shape = Some(queue::SessionShape {
+                    started_at: Some(
+                        at("2026-08-08T10:00:00Z") - chrono::Duration::days(index as i64),
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+        h.pass(TransientRetryHarness::now()).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), MAX_UPLOADS_PER_PASS);
+        let after = h.entries();
+        let state_of = |id| {
+            after
+                .iter()
+                .find(|entry| entry.entry_id == id)
+                .unwrap()
+                .state
+        };
+        assert_eq!(state_of(oldest), queue::QueueState::Uploaded);
+        assert_eq!(state_of(newest), queue::QueueState::Approved);
+    }
+
+    #[test]
+    fn send_order_uses_source_age_with_stable_manual_priority_and_unknowns_last() {
+        let entry = |id: u128,
+                     unattended: bool,
+                     started: Option<chrono::DateTime<Utc>>,
+                     modified,
+                     observed| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(id),
+            approved_unattended: unattended,
+            shape: started.map(|started_at| queue::SessionShape {
+                started_at: Some(started_at),
+                ..Default::default()
+            }),
+            last_modified_at: modified,
+            observed_modified_at: observed,
+            ..Default::default()
+        };
+        let old = at("2026-01-01T00:00:00Z");
+        let middle = at("2026-02-01T00:00:00Z");
+        let recent = at("2026-03-01T00:00:00Z");
+        let ordered = send_order(vec![
+            entry(1, true, Some(recent), Some(old), None),
+            entry(9, false, Some(recent), None, None),
+            entry(7, true, None, None, None),
+            entry(5, true, Some(old), None, None),
+            entry(8, false, Some(old), None, None),
+            entry(4, true, None, Some(middle), Some(old)),
+            entry(3, true, Some(old), None, None),
+            entry(2, true, None, None, None),
+            entry(6, true, None, None, Some(middle)),
+        ]);
+        let ids: Vec<_> = ordered
+            .iter()
+            .map(|entry| entry.entry_id.as_u128())
+            .collect();
+        assert_eq!(ids, vec![9, 8, 3, 5, 4, 6, 1, 2, 7]);
+    }
+
+    /// Person approvals first, each group in queue order.
+    #[test]
+    fn send_order_puts_person_approvals_first_and_keeps_queue_order() {
+        let entry = |n: u128, unattended: bool| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(n),
+            approved_unattended: unattended,
+            ..Default::default()
+        };
+        let ordered = send_order(vec![
+            entry(1, true),
+            entry(2, false),
+            entry(3, true),
+            entry(4, false),
+        ]);
+        let ids: Vec<u128> = ordered.iter().map(|e| e.entry_id.as_u128()).collect();
+        assert_eq!(ids, vec![2, 4, 1, 3]);
+    }
+
+    /// One listing answers every entry of a pass the way a fresh
+    /// `find_session` would, and a path no source lists is not found.
+    #[tokio::test]
+    async fn one_listing_per_pass_finds_what_find_session_finds() {
+        let h = TransientRetryHarness::new().await;
+        h.add_session(
+            "00000001-cccc-4ccc-8ccc-cccccccccccc",
+            "second session, then mail alice.smith@example.org",
+        )
+        .await;
+        let roots = h.shared.source_roots_with_routing();
+        let sources = crate::source::all_sources(&roots);
+        let listed = PassSessions::list(&sources);
+        let entries = h.entries();
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            let (shared_source, shared_ref) = listed.find(&sources, entry).expect("listed");
+            let (fresh_source, fresh_ref) = find_session(&sources, entry).expect("found");
+            assert_eq!(shared_source.name(), fresh_source.name());
+            assert_eq!(shared_ref.path, fresh_ref.path);
+            assert_eq!(shared_ref.size_bytes, fresh_ref.size_bytes);
+        }
+        let mut gone = entries[0].clone();
+        gone.path = h.session_path.with_file_name("not-a-session.jsonl");
+        assert!(listed.find(&sources, &gone).is_none());
+    }
+
+    /// The unreachable ingest address is one no other test can be handed.
+    /// A port bound and released went back to the pool, and a server
+    /// another test bound to port 0 could take it and answer: the upload
+    /// then failed as `http-failure` instead of `ingest-unreachable` (Linux
+    /// CI, #1759). Below 1024 is outside every platform's ephemeral range,
+    /// and the connection is refused outright rather than left to time out.
+    #[tokio::test]
+    async fn the_unreachable_ingest_is_a_port_no_test_is_handed() {
+        let h = TransientRetryHarness::with_ingest_unreachable().await;
+        let cfg = h.shared.store.load_config().unwrap().unwrap();
+        let addr: std::net::SocketAddr = cfg
+            .ingest_url
+            .trim_start_matches("http://")
+            .parse()
+            .unwrap();
+        assert!(addr.port() < 1024, "{addr} is in the ephemeral range");
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        .expect("refused, not left to time out");
+        assert_eq!(
+            refused.unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionRefused
+        );
+    }
+
     /// Ingest down altogether: the in-call retries run out on transport
     /// errors, and the session is kept rather than lost.
     #[tokio::test]
     async fn a_transport_failure_keeps_the_session_approved() {
         let h = TransientRetryHarness::with_ingest_unreachable().await;
         let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
         h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
         let held = h.entry();
         assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
         assert_eq!(
             held.reason_label.as_deref(),
             Some(health::LABEL_INGEST_UNREACHABLE)
         );
-        assert!(held.retry_after.expect("a retry time") >= now + chrono::Duration::seconds(60));
+        // The first failure's minute, with equal jitter: between half of it
+        // and all of it.
+        let due = held.retry_after.expect("a retry time");
+        assert!(due >= now + chrono::Duration::seconds(30), "{due}");
+        assert!(
+            due <= now + pass_took + chrono::Duration::seconds(60),
+            "{due}"
+        );
     }
 
     /// The issuer briefly unreachable is the same kind of pause.
@@ -4325,6 +4875,121 @@ mod tests {
             h.last_error_label.as_deref(),
             Some(health::LABEL_INGEST_UNREACHABLE)
         );
+    }
+
+    /// The outage backoff is jittered between half and the whole of the
+    /// scheduled wait (so the one-hour cap holds), and a server's
+    /// `Retry-After` is a floor on it.
+    #[test]
+    fn transient_upload_retry_wait_is_jittered_and_honours_a_server_hint() {
+        for failures in 1..=12_u32 {
+            let scheduled = transient_upload_retry_delay(failures).num_seconds();
+            let mut distinct = std::collections::BTreeSet::new();
+            for i in 0..400_u64 {
+                // Spread across the whole 64-bit range, as the real source is.
+                let r = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let wait = transient_upload_retry_wait(failures, None, r).num_seconds();
+                assert!(
+                    wait >= scheduled / 2 && wait <= scheduled,
+                    "{failures}: {wait}"
+                );
+                assert!(wait <= 3_600);
+                distinct.insert(wait);
+            }
+            assert!(distinct.len() > 1, "failure {failures} did not spread");
+        }
+        for r in 0..400_u64 {
+            let wait = transient_upload_retry_wait(1, Some(300), r).num_seconds();
+            assert!(wait >= 300, "a 300 s hint came back as {wait}");
+            assert!(wait <= 300 + 60, "{wait}");
+        }
+        // A hint above the client's cap is bounded by it.
+        let capped = transient_upload_retry_wait(1, Some(u32::MAX), 7).num_seconds();
+        assert_eq!(capped, i64::from(crate::submit::RATE_LIMIT_MAX_RETRY_SECS));
+    }
+
+    /// The give-up horizon is the old unjittered schedule: every wait from
+    /// the first failure to the last one counted, summed (#1805 review).
+    #[test]
+    fn transient_upload_give_up_horizon_is_the_unjittered_schedule() {
+        let total: i64 = (1..MAX_TRANSIENT_UPLOAD_FAILURES)
+            .map(|f| transient_upload_retry_delay(f).num_seconds())
+            .sum();
+        assert_eq!(total, 21_780);
+        assert_eq!(transient_upload_give_up_horizon().num_seconds(), total);
+    }
+
+    /// Jitter must never shorten how long an entry survives an outage. With
+    /// every wait drawn at its shortest, twelve failures arrive after about
+    /// three hours; the entry still keeps its approval until the old
+    /// six-hour schedule has run out.
+    #[test]
+    fn jitter_never_shortens_the_transient_upload_give_up_horizon() {
+        let started = chrono::DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let horizon = transient_upload_give_up_horizon();
+        // Draw each wait at the bottom of its range: the shortest outage
+        // that reaches the count.
+        let mut now = started;
+        for failures in 1..MAX_TRANSIENT_UPLOAD_FAILURES {
+            assert!(!transient_upload_budget_spent(failures, Some(started), now));
+            let shortest = transient_upload_retry_wait(failures, None, 0);
+            assert_eq!(
+                shortest.num_seconds(),
+                transient_upload_retry_delay(failures).num_seconds() / 2
+            );
+            now += shortest;
+        }
+        assert!(
+            now - started < horizon,
+            "the shortest run is under the horizon"
+        );
+        assert!(
+            !transient_upload_budget_spent(MAX_TRANSIENT_UPLOAD_FAILURES, Some(started), now),
+            "twelve fast failures inside the horizon must not give up"
+        );
+        // It keeps going, past the count, until the horizon is reached.
+        let just_short = started + horizon - chrono::Duration::seconds(1);
+        assert!(!transient_upload_budget_spent(
+            MAX_TRANSIENT_UPLOAD_FAILURES + 5,
+            Some(started),
+            just_short
+        ));
+        assert!(transient_upload_budget_spent(
+            MAX_TRANSIENT_UPLOAD_FAILURES + 5,
+            Some(started),
+            started + horizon
+        ));
+    }
+
+    /// Time alone is not enough either: a machine asleep through most of an
+    /// outage wakes past the horizon, and must still make the full count of
+    /// attempts before it gives up.
+    #[test]
+    fn a_transient_upload_run_gives_up_only_with_both_the_count_and_the_horizon() {
+        let started = chrono::DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let long_after = started + chrono::Duration::days(2);
+        for failures in 1..MAX_TRANSIENT_UPLOAD_FAILURES {
+            assert!(
+                !transient_upload_budget_spent(failures, Some(started), long_after),
+                "{failures} failures after a long sleep"
+            );
+        }
+        assert!(transient_upload_budget_spent(
+            MAX_TRANSIENT_UPLOAD_FAILURES,
+            Some(started),
+            long_after
+        ));
+        // A run with no start recorded (an entry from before the start was
+        // kept) never gives up on the count alone.
+        assert!(!transient_upload_budget_spent(
+            MAX_TRANSIENT_UPLOAD_FAILURES + 50,
+            None,
+            long_after
+        ));
     }
 
     #[test]

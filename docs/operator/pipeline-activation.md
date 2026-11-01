@@ -3026,7 +3026,10 @@ below). With payout disabled, nothing is submitted to NEAR.
 - Payout takes only a `trace_credit` leg that is `complete` and has the
   `near` payout rail and a settlement batch. The state of the run does not
   matter. A compatibility bundle's
-  `NoveltyUtility` leg has no batch, so it is never paid, as on `main`.
+  `NoveltyUtility` leg has no batch, so it is never paid. `main` settles
+  the `NoveltyUtility` events its own gate writes, but not this leg: its
+  settlement takes only the `novelty_utility:` `external_ref` its gate
+  writes.
   Other instruments never use the NEAR outbox.
 - Score records a leg's payout state when it adds the leg. A run scored
   while payout was disabled has payout `disabled` and is never paid, even
@@ -3072,7 +3075,7 @@ below). With payout disabled, nothing is submitted to NEAR.
   | `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_SUBMIT_LIMIT`, `..._SCHEDULER_CONFIRM_LIMIT` | not applied | They bound `main`'s rows for each tick. The pipeline pass takes at most 32 legs of a tenant and runs again when it processed 32. No setting bounds its submits or its confirmations. |
   | `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN` | not applied | It is `main`'s preview. The pipeline's dry run is the mode `dry_run` of `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`. |
   | `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH` | refuses an enabled payout on an adapter without a credential | As `main` refuses to start its NEAR adapters without their bearer tokens, whatever the mode: `near_payout_adapter_auth_missing`. The runtime must hold the same flag (`pipeline_runtime_near_payout_controls_mismatch`). |
-  | Credit holds (`credit_holds`) | applied at Settle, to settled legs only | A held principal's leg that settles into a batch (the minimal family's `accepted` event) is `held` and is not settled, as `main` leaves held accounts out of its batches and payouts. The `accepted` event is not one of `main`'s settlement-eligible event types (benchmark conversion, regression catch, training utility, ranking utility); the pipeline batches that leg itself. A compatibility run's `NoveltyUtility` leg ignores holds and writes its ledger row, as `main` writes `NoveltyUtility` credit regardless of holds; that event never settles or pays. |
+  | Credit holds (`credit_holds`) | applied at Settle, to settled legs only | A held principal's leg that settles into a batch (the minimal family's `accepted` event) is `held` and is not settled, as `main` leaves held accounts out of its batches and payouts. The `accepted` event is not one of `main`'s settlement-eligible event types (benchmark conversion, regression catch, training utility, ranking utility); the pipeline batches that leg itself. A compatibility run's `NoveltyUtility` leg ignores holds and writes its ledger row, as `main` writes `NoveltyUtility` credit regardless of holds; the pipeline's leg never settles or pays (`main` settles only the `NoveltyUtility` events its own gate writes, and leaves held accounts out of those batches). |
   | Ranking calibration gates (`TRACE_COMMONS_RANKING_*`) | not applicable | They apply only to `RankingUtility` events; a pipeline leg writes an `accepted` event. |
 
 - A contributor is paid as `main` pays them. A principal linked to an
@@ -3375,6 +3378,13 @@ leg waits for an operator to reconcile it against the adapter's records by
 | The pipeline's issuer must be configured (with the list set and no issuer, the row above withholds first). The tenant's authority must exist, and so must its policy when the authority requires one. The policy comes from the runtime's authority provider, the source the receipt uses. | `credit_check_error` |
 | The submission's allowed uses must include `model_training`, and its consent scopes and `model_training` must be inside the tenant policy's allowlists. The default consent scope (debugging and evaluation) does not allow model training, so its credit is withheld, as on `main`. | `policy_mismatch` |
 
+A contributor can add `model_training` to traces already sent
+(`/v1/contributors/me/model-training-consent`, V141; see
+`docs/trace-commons.md`). A run that has not reached Settle reads the new
+uses there, so its leg can pay. A leg that already completed withheld as
+`policy_mismatch` stays withheld: the grant re-runs only `main`'s withheld
+gate award and does not re-open a completed pipeline leg.
+
 `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is a canonical hashed
 principal ref (`principal_sha256:` and 64 hexadecimal characters), the same
 form the central-issuer list takes; ingest refuses to start with any other
@@ -3420,7 +3430,7 @@ upload must wait for a worker dispatch first.
 
 Its pending points are 0 when its Trace Credit leg will not be paid:
 forfeited, failed, withheld by one of `main`'s credit checks, or a
-`NoveltyUtility` leg that `main` never settles.
+compatibility `NoveltyUtility` leg, which nothing settles.
 
 `main`'s gate evaluate route (`POST /v1/workers/gate/evaluate`) refuses a
 submission that has a pipeline run with `409` `pipeline_run_owns_submission`,

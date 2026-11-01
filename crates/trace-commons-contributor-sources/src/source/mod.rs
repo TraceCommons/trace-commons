@@ -12,8 +12,10 @@ use sha2::{Digest, Sha256};
 pub mod claude_code;
 pub mod cline;
 pub mod codex;
+pub mod compressed;
 pub mod discovery;
 pub mod gemini_cli;
+mod multi_root;
 pub mod opencode;
 pub(crate) mod opencode_db;
 pub mod trajectory;
@@ -45,6 +47,69 @@ pub struct SessionTooLarge {
     pub label: &'static str,
     pub declared_bytes: u64,
     pub budget_bytes: u64,
+}
+
+/// The largest session, in raw bytes, the contributor reads, offers and
+/// previews: 512 MiB. One number for the Claude Code group budget
+/// (`claude_code::GROUP_RAW_BYTE_BUDGET`), the Codex rollout budget, the
+/// bytes a compressed rollout may decompress to
+/// (`compressed::MAX_DECOMPRESSED_BYTES`), and the daemon's preview
+/// admission cap (`MAX_PREVIEW_SESSION_BYTES`), so a session one of them
+/// admits is never refused by another for its size. For a `.zst` rollout it
+/// counts decompressed bytes, never the file's own size.
+///
+/// Owner decision 2026-10-29, raised from 64 MB. The long agent sessions
+/// are among the most valuable, and on the owner's machine over 28 days two
+/// Claude Code sessions (largest 186 MB) and four Codex rollouts (largest
+/// 432 MB) were over the old figure; over all time 14 Codex rollouts were
+/// over 64 MB and 3 over 256 MB.
+///
+/// This bounds what is read, not what is sent. `MAX_TRACE_ENVELOPE_BYTES`
+/// (256 MiB after redaction, raised from 16 MB on 2026-10-29) still refuses
+/// an over-cap envelope locally, at approval, as `envelope-too-large`, and
+/// the preview says so up front. At the measured median of about 3.4 raw
+/// bytes per envelope byte, a session this size almost always builds an
+/// envelope under that cap; the envelope cap decides whether it can be
+/// sent.
+///
+/// Memory: measured on synthetic sessions in a release build, a preview's
+/// peak resident set is about 3 times the session's raw bytes -- 1.2 to
+/// 1.5 GB for a 450 MB Claude Code session or Codex rollout, plain or
+/// compressed. The daemon runs two previews at once, so two sessions near
+/// this cap in flight together can reach about 3 GB (see
+/// `daemon::preview_scheduler::PREVIEW_WORKERS`).
+pub const MAX_SESSION_BYTES: u64 = 512 * 1024 * 1024;
+
+/// The budget for adapters that parse a session as one JSON document
+/// (`gemini_cli`, `cline`, `trajectory`): 64 MB, the figure every adapter
+/// shared before [`MAX_SESSION_BYTES`] was raised.
+///
+/// Kept apart on purpose. These adapters cannot stream: they read the
+/// whole file and build a `serde_json::Value` tree of it, which costs
+/// several times the file in memory, and trajectory auto-discovery parses
+/// files that never claimed to be sessions. The raise was decided for the
+/// Claude Code and Codex sessions measured above, and nothing measured any
+/// of these sources near the old limit.
+pub const DOCUMENT_SESSION_BYTE_BUDGET: u64 = 64_000_000;
+
+#[cfg(test)]
+mod session_cap_tests {
+    /// One number, so the adapters and the decoder cannot drift apart. The
+    /// daemon's preview admission cap is pinned to it in
+    /// `daemon_ipc_contract.rs`.
+    #[test]
+    fn the_session_cap_is_512_mib_and_shared() {
+        assert_eq!(super::MAX_SESSION_BYTES, 536_870_912);
+        assert_eq!(
+            super::claude_code::GROUP_RAW_BYTE_BUDGET,
+            super::MAX_SESSION_BYTES
+        );
+        assert_eq!(
+            super::compressed::MAX_DECOMPRESSED_BYTES,
+            super::MAX_SESSION_BYTES
+        );
+        assert_eq!(super::DOCUMENT_SESSION_BYTE_BUDGET, 64_000_000);
+    }
 }
 
 /// This machine's home directory, or an empty path when the platform will
@@ -820,8 +885,9 @@ impl SourceDeclaration {
 /// whole point:
 ///
 /// - `Some(Watch { path })` -- watch that directory.
-/// - `Some(Off)` -- the contributor said they do not use this agent. **No
-///   source is constructed and there is no fallback.** This is the state
+/// - `Some(Off)` -- no automatic discovery for this agent, with no
+///   conventional-root fallback. Separately opted-in managed exports remain
+///   eligible for the ordinary review pipeline. This is the state
 ///   that previously did not exist, and its absence is what made "I don't
 ///   use Codex" indistinguishable from "nobody has asked yet" and therefore
 ///   equal to watching the real `~/.codex`.
@@ -830,6 +896,8 @@ impl SourceDeclaration {
 #[derive(Clone, Default)]
 pub struct SourceRoots {
     managed_opencode: Option<PathBuf>,
+    managed_native: BTreeMap<&'static str, Vec<PathBuf>>,
+    additional_native: BTreeMap<&'static str, Vec<PathBuf>>,
     declared: BTreeMap<&'static str, SourceDeclaration>,
     trajectory: TrajectorySelection,
     /// A routing overlay to attach to every adapter these roots build.
@@ -862,6 +930,30 @@ impl std::fmt::Debug for SourceRoots {
 }
 
 impl SourceRoots {
+    /// Add a launched native profile's transcript directory under the same
+    /// per-tool declaration. Off remains authoritative; this grants no upload
+    /// permission and does not enable proxy body capture.
+    pub fn with_additional_native_root(mut self, name: &'static str, root: PathBuf) -> Self {
+        if matches!(name, SOURCE_CLAUDE_CODE | SOURCE_CODEX) {
+            let paths = self.additional_native.entry(name).or_default();
+            paths.push(root);
+            paths.sort();
+            paths.dedup();
+        }
+        self
+    }
+
+    /// Explicit per-session exports do not enable broad native discovery.
+    pub fn with_managed_native_root(mut self, name: &'static str, root: PathBuf) -> Self {
+        if matches!(name, SOURCE_CLAUDE_CODE | SOURCE_CODEX) && root.is_dir() {
+            let paths = self.managed_native.entry(name).or_default();
+            paths.push(root);
+            paths.sort();
+            paths.dedup();
+        }
+        self
+    }
+
     /// Only exports explicitly requested at managed launch enter this folder.
     pub fn with_managed_opencode(mut self, root: PathBuf) -> Self {
         if root.is_dir() {
@@ -887,15 +979,21 @@ impl SourceRoots {
                 },
             };
             if let Some(root) = root {
-                out.insert(spec.name, root.to_string_lossy().to_string());
+                let mut identity = root.to_string_lossy().to_string();
+                if let Some(additional) = self.additional_native.get(spec.name) {
+                    identity.push_str(&format!(" additional:{additional:?}"));
+                }
+                out.insert(spec.name, identity);
             }
         }
-        if let Some(managed) = &self.managed_opencode
-            && !matches!(
-                self.declared.get(SOURCE_OPENCODE),
-                Some(SourceDeclaration::Off)
-            )
-        {
+        for (name, paths) in &self.managed_native {
+            for path in paths {
+                out.entry(name)
+                    .or_default()
+                    .push_str(&format!(" managed:{}", path.to_string_lossy()));
+            }
+        }
+        if let Some(managed) = &self.managed_opencode {
             let identity = out.entry(SOURCE_OPENCODE).or_default();
             identity.push_str(&format!(" managed:{}", managed.to_string_lossy()));
         }
@@ -1060,9 +1158,7 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
     let mut sources: Vec<Box<dyn TraceSource>> = Vec::new();
 
     for spec in NATIVE_SOURCES {
-        if spec.name == SOURCE_OPENCODE
-            && !matches!(roots.declared.get(spec.name), Some(SourceDeclaration::Off))
-        {
+        if spec.name == SOURCE_OPENCODE {
             if let Some(managed) = &roots.managed_opencode {
                 let source = match roots.declared.get(spec.name) {
                     Some(SourceDeclaration::Watch { path }) => {
@@ -1074,17 +1170,32 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
                 continue;
             }
         }
-        match roots.declared.get(spec.name) {
-            Some(SourceDeclaration::Off) => {}
-            Some(SourceDeclaration::Watch { path }) => sources.push((spec.build)(path.clone())),
+        let primary = match roots.declared.get(spec.name) {
+            Some(SourceDeclaration::Off) => None,
+            Some(SourceDeclaration::Watch { path }) => Some(path.clone()),
             None => match spec.undeclared {
-                Undeclared::Conventional => {
-                    if let Some(root) = spec.conventional_root {
-                        sources.push((spec.build)(root()));
-                    }
-                }
-                Undeclared::Nothing => {}
+                Undeclared::Conventional => spec.conventional_root.map(|root| root()),
+                Undeclared::Nothing => None,
             },
+        };
+        let mut paths = primary.into_iter().collect::<Vec<_>>();
+        if !paths.is_empty() {
+            if let Some(additional) = roots.additional_native.get(spec.name) {
+                paths.extend(additional.iter().cloned());
+            }
+        }
+        if let Some(managed) = roots.managed_native.get(spec.name) {
+            paths.extend(managed.iter().cloned());
+        }
+        paths.sort();
+        paths.dedup();
+        match paths.len() {
+            0 => {}
+            1 => sources.push((spec.build)(paths.remove(0))),
+            _ => sources.push(Box::new(multi_root::MultiRootSource::new(
+                spec.name,
+                paths.into_iter().map(spec.build).collect(),
+            ))),
         }
     }
 
@@ -1133,6 +1244,57 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn additional_native_roots_share_one_adapter_and_keep_off_authoritative() {
+        for name in [SOURCE_CLAUDE_CODE, SOURCE_CODEX] {
+            let dir = tempfile::tempdir().unwrap();
+            let primary = dir.path().join("primary");
+            let managed = dir.path().join("managed");
+            for root in [&primary, &managed] {
+                let folder = root.join("project");
+                std::fs::create_dir_all(&folder).unwrap();
+                let file = if name == SOURCE_CODEX {
+                    "rollout-native.jsonl"
+                } else {
+                    "native.jsonl"
+                };
+                std::fs::write(folder.join(file), "{\"type\":\"user\",\"cwd\":\"/project\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n").unwrap();
+            }
+            let roots = SourceRoots::new()
+                .declare(name, Some(SourceDeclaration::Watch { path: primary }))
+                .with_additional_native_root(name, managed.clone());
+            let sources = all_sources(&roots);
+            let selected: Vec<_> = sources
+                .iter()
+                .filter(|source| source.name() == name)
+                .collect();
+            assert_eq!(selected.len(), 1);
+            let source = selected[0];
+            let found = source.discover().unwrap();
+            assert_eq!(found.len(), 2);
+            assert_eq!(source.discover_unopened().unwrap().len(), 2);
+            for session in found {
+                assert_eq!(
+                    source.session_for_path(&session.path),
+                    Some(session.path.clone())
+                );
+                assert_eq!(
+                    source.session_at(&session.path).unwrap().unwrap().path,
+                    session.path
+                );
+                assert_eq!(source.load(&session).unwrap().source, name);
+            }
+            let without = SourceRoots::new().declare(name, roots.declared.get(name).cloned());
+            assert_ne!(
+                roots.source_identities().get(name),
+                without.source_identities().get(name)
+            );
+            let off = roots.declare(name, Some(SourceDeclaration::Off));
+            assert!(!all_sources(&off).iter().any(|source| source.name() == name));
+            assert!(!off.source_identities().contains_key(name));
+        }
+    }
 
     /// The streaming hash and the whole-file hash must agree.
     ///

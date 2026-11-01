@@ -385,7 +385,7 @@ fn has_trajectory_suffix(path: &Path) -> bool {
 /// guess about an unrelated file that happened to be sitting in a
 /// directory, and a guess must not be able to pull an arbitrarily large
 /// file into memory.
-const AUTO_PARSE_BUDGET: u64 = super::claude_code::GROUP_RAW_BYTE_BUDGET;
+const AUTO_PARSE_BUDGET: u64 = super::DOCUMENT_SESSION_BYTE_BUDGET;
 
 /// Whether a file auto-discovery found really is a trajectory.
 ///
@@ -576,14 +576,15 @@ impl TraceSource for TrajectorySource {
     }
 }
 
-/// The largest trajectory file `load` reads, from any scope: the native
-/// adapters' budget. A declared folder is read on every poll, so a file it
+/// The largest trajectory file `load` reads, from any scope: the budget of
+/// the adapters that parse one whole JSON document
+/// ([`super::DOCUMENT_SESSION_BYTE_BUDGET`]), not the 512 MiB streaming cap. A declared folder is read on every poll, so a file it
 /// holds must not be able to pull an arbitrarily large file into memory
 /// each pass; over the budget it is refused from its size alone with
 /// [`crate::source::SessionTooLarge`], which the watcher reports as the
 /// too-large health label. The CLI's `--trajectory FILE` is bounded by the
 /// same figure.
-pub(crate) const LOAD_BYTE_BUDGET: u64 = super::claude_code::GROUP_RAW_BYTE_BUDGET;
+pub(crate) const LOAD_BYTE_BUDGET: u64 = super::DOCUMENT_SESSION_BYTE_BUDGET;
 
 /// [`TrajectorySource::load`] under `budget` bytes.
 fn load_within(r: &SessionRef, budget: u64) -> anyhow::Result<SessionTranscript> {
@@ -1303,7 +1304,7 @@ mod tests {
         assert_eq!(too_large.budget_bytes, 1024);
         assert_eq!(
             LOAD_BYTE_BUDGET,
-            crate::source::claude_code::GROUP_RAW_BYTE_BUDGET
+            crate::source::DOCUMENT_SESSION_BYTE_BUDGET
         );
     }
 

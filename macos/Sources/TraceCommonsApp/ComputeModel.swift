@@ -10,11 +10,14 @@ import TCShellCore
 final class ComputeModel {
     private(set) var snapshot: ComputeSnapshot?
     private(set) var failureLabel: String?
+    /// The startup sentence when the bundle and the dylib disagree on the
+    /// channel: the compute pane says what the daemon's pane says.
+    private(set) var refusalSentence: String?
     private(set) var busy = false
     private(set) var quitWasRefused = false
     let copy = ComputeCopy.decode(TCCompute.copyJSON() ?? "")
     private var started = false
-    private var requestedDirectory: String?
+    private(set) var requestedDirectory: String?
     private var stopping = false
     private var closed = false
     @ObservationIgnored private var monitor: Task<Void, Never>?
@@ -28,7 +31,26 @@ final class ComputeModel {
     func noteQuitRefused() { quitWasRefused = true }
 
     func start() async {
-        do { await start(configDirectory: try StateDirectory.resolveCompute().path) }
+        await start(plistChannel: BuildChannelGate.plistChannel)
+    }
+
+    /// `start()` with the bundle's `TCChannel` given, so a test can show a
+    /// mismatch refusing without a bundle. Compute opens the same state
+    /// directory the daemon does, so a bundle that disagrees with the dylib,
+    /// or names no channel, refuses here with the startup sentence and opens
+    /// nothing (staging design, 4.3).
+    func start(plistChannel: String?) async {
+        let channel: BuildChannel
+        switch BuildChannelGate.verdict(plistChannel: plistChannel) {
+        case .agreed(let agreed):
+            channel = agreed
+        case .refused(let sentence):
+            snapshot = nil
+            failureLabel = "channel-mismatch"
+            refusalSentence = sentence
+            return
+        }
+        do { await start(configDirectory: try StateDirectory.resolveCompute(channel: channel, overrideCheck: DaemonHost.overrideCheck).path) }
         catch { fail(error) }
     }
 
@@ -143,6 +165,7 @@ final class ComputeModel {
         }
         if snapshot != value { snapshot = value }
         failureLabel = nil
+        refusalSentence = nil
     }
 
     private func startResourceObservation() async {
@@ -169,6 +192,7 @@ final class ComputeModel {
 
     private func fail(_ error: Error) {
         snapshot = nil
+        refusalSentence = nil
         if case TCCompute.Failure.refused(let label) = error {
             failureLabel = label
         } else {

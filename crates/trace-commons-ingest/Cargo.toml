@@ -38,7 +38,7 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "timeout"] }
 trace-commons-attestation = { path = "../trace-commons-attestation", features = ["receipt"] }
 trace-commons-build-info = { path = "../trace-commons-build-info" }
 trace-commons-gate-api = { path = "../trace-commons-gate-api" }
@@ -49,7 +49,6 @@ trace-commons-server = { path = "../trace-commons-server" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
-webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
 zeroize = "1"
 
 [features]
@@ -60,6 +59,9 @@ local-gpu-models = ["trace-commons-server/local-gpu-models", "trace-commons-gate
 local-gpu-models-cuda = ["local-gpu-models", "trace-commons-server/local-gpu-models-cuda", "trace-commons-gate-enclave/local-gpu-models-cuda"]
 near-ai-scorer = ["trace-commons-server/near-ai-scorer", "trace-commons-gate-enclave/near-ai-scorer"]
 near-attestation-collateral = ["trace-commons-server/near-attestation-collateral", "trace-commons-attestation/collateral-client"]
+# NEAR AI staging host for introspection and payout; see the server crate's
+# feature of the same name. Never in a release build.
+near-ai-staging = ["trace-commons-server/near-ai-staging"]
 
 # The service at src/bin/trace-commons-ingest.rs remains a library module;
 # only this thin entry point is a binary.
@@ -68,8 +70,9 @@ name = "trace-commons-ingest"
 path = "src/bin/trace_commons_ingest_main.rs"
 
 [dev-dependencies]
+# Paused-clock tests (`tokio::time::pause`/`advance`). This used to arrive
+# through the removed WebAuthn test dependency.
+tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 trace-commons-contributor = { path = "../trace-commons-contributor" }
 wiremock = "0.6"
-# Software passkeys for end-to-end enrollment/login tests, never shipped.
-webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = ["softpasskey"] }

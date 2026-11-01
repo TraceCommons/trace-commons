@@ -2,13 +2,13 @@ import SwiftUI
 import TCDesign
 import TCShellCore
 
-/// First run in the glass system (R12 of #1173): Ron's first run (#1030)
-/// over the painted scene.
+/// First run in the glass system (R12 of #1173): the animated first run
+/// (Ron's 2026-10-21 canvas) filling the window.
 ///
-/// The steps are `OnboardingCoordinatorView`'s, the same host the shipping
-/// window uses: the same daemon calls, in the same order. Each step draws
-/// its own pane and step progress (`FirstRunFrame`), so this view draws
-/// only the scene and sizes the pane.
+/// The steps are `OnboardingCoordinatorView`'s, the same host the Private AI
+/// tab uses for its Tools step: the same daemon calls, in the same order.
+/// The coordinator draws the scene, the step thread and each step, so this
+/// view only hosts it.
 ///
 /// It is the onboarding gate (R15), through
 /// `OnboardingNavigation.hostsFirstRun` with this window's own `entered`:
@@ -25,32 +25,21 @@ struct FirstRunWindowView: View {
     @State private var entered = false
 
     var body: some View {
-        ZStack {
-            // #1146's painted scene: only behind the first-run pane.
-            RadialGradient(
-                colors: [GlassTokens.Color.sceneWarm.color, GlassTokens.Color.sceneBase.color],
-                center: .top, startRadius: 40, endRadius: 900)
-                .ignoresSafeArea()
+        ZStack(alignment: .top) {
+            FirstRunBackdrop()
             if OnboardingNavigation.hostsFirstRun(
                 startup: model.startup, requiresOnboarding: model.requiresOnboarding, entered: entered)
             {
-                VStack(spacing: GlassTokens.Space.s6) {
-                    // A void or a gate hold can arrive while someone is
-                    // still setting up, and is told here too, above the
-                    // step's own pane.
-                    ShellNotices()
-                    // Start writes its marker (the tenant's, or watching
-                    // only's) itself; the window closes when it took
-                    // (`requiresOnboarding` turns false, below).
-                    OnboardingCoordinatorView(onComplete: {})
-                        .onAppear { entered = true }
-                }
-                // Bounded by the window, not grown to the step: each step's
-                // cards scroll in the frame's ScrollView, which a pane sized
-                // to its step would let run past the window's bottom edge (a
-                // Uses step with many scopes), out of reach.
-                .frame(width: FirstRunProgress.paneWidth)
-                .padding(.vertical, GlassTokens.Space.paneGap * 3)
+                // Start writes its marker (the tenant's, or watching only's)
+                // itself; the window closes when it took (`requiresOnboarding`
+                // turns false, below).
+                OnboardingCoordinatorView(onComplete: {})
+                    .onAppear { entered = true }
+                // A void or a gate hold can arrive while someone is still
+                // setting up, and is told here too, over the step.
+                ShellNotices()
+                    .frame(width: FirstRunProgress.noticeWidth)
+                    .padding(.top, 52)
             } else if model.requiresOnboarding {
                 // The legacy startup notice left with the legacy window
                 // (R15); this says the startup as the Inference tab does: a
@@ -66,10 +55,24 @@ struct FirstRunWindowView: View {
                         EmptyView()
                     }
                 }
-                .frame(width: FirstRunProgress.paneWidth)
+                .frame(width: FirstRunProgress.noticeWidth)
+                .frame(maxHeight: .infinity)
             }
         }
-        .frame(minWidth: FirstRunProgress.paneWidth + 80, minHeight: 640)
+        // A staging build's label (spec S7, 4.8), as on the Monitor, over
+        // every state of this window: sign-in is where a tester most needs
+        // to tell staging from production. Production has none. It sits at
+        // the left of the top row beside the window's buttons, where the
+        // Monitor puts it, so it stays clear of the step thread the stage
+        // draws across the top centre.
+        .overlay(alignment: .topLeading) {
+            if let label = BuildChannelGate.windowLabel {
+                GlassTag(label)
+                    .padding(.top, GlassTokens.Space.s3)
+                    .padding(.leading, FirstRunProgress.windowButtonsWidth)
+            }
+        }
+        .frame(minWidth: FirstRunProgress.minimumSize.width, minHeight: FirstRunProgress.minimumSize.height)
         // A screen's modals and confirmations cover the whole window.
         .glassModalHost()
         // A folder's tile mark, in the core's words.
@@ -113,9 +116,14 @@ struct StartupRefusedBanner: View {
     }
 }
 
-/// The first-run pane's size.
+/// The first-run window's sizes.
 enum FirstRunProgress {
-    /// Ron's FTUX width (#1030 spec, Design system table: one padded pane
-    /// at 450px).
-    static let paneWidth: CGFloat = 450
+    /// The smallest window the stage lays out in without scaling down.
+    static let minimumSize = CGSize(width: 760, height: 640)
+    /// The width the window's close, minimize and zoom buttons take at the
+    /// top left, which the staging label starts past.
+    static let windowButtonsWidth: CGFloat = 80
+    /// The width of the startup notice and of the shell's notices over a
+    /// step: Ron's #1030 pane width.
+    static let noticeWidth: CGFloat = 450
 }

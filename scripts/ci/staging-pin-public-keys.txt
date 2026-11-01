@@ -1,0 +1,12 @@
+# Staging NEAR AI pin-signing public keys (staging design 5.4, 5.7).
+#
+# scripts/ci/assert-no-staging-markers.sh refuses a release binary that
+# contains any key listed here, in raw, hex or base64 form. One Ed25519
+# public key per line, as 64 hex characters; `#` comments and blank lines
+# are ignored, and any other line fails the scan.
+#
+# Keep a retired key listed after a rotation. Public keys only; the
+# private key never enters the repository.
+#
+# Generated 2026-10-22, key id f4325194de2624f3:
+153e60b61f65bd5f2829d0f2378a3cc17058a06eaa868eb12eb35bf103e1e586

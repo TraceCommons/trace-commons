@@ -13,16 +13,17 @@ use anyhow::{Context, Result, anyhow};
 use uuid::Uuid;
 
 /// Write `body` to `path` atomically (temp file in the same dir, then
-/// rename), setting 0600 permissions on unix.
+/// rename), setting 0600 permissions on unix. A failure after the temp file
+/// exists removes it, so nothing is left beside `path`.
 pub fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
         .context("destination path has no file name")?
         .to_string_lossy();
     let tmp_path = dir.join(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
-    {
+    let tmp = {
         #[cfg(unix)]
-        let mut tmp = {
+        let tmp = {
             use std::os::unix::fs::OpenOptionsExt;
             std::fs::OpenOptions::new()
                 .write(true)
@@ -32,12 +33,20 @@ pub fn write_atomic_0600(dir: &Path, path: &Path, body: &[u8]) -> Result<()> {
                 .with_context(|| format!("creating temp file {}", tmp_path.display()))?
         };
         #[cfg(not(unix))]
-        let mut tmp = std::fs::File::create(&tmp_path)
+        let tmp = std::fs::File::create(&tmp_path)
             .with_context(|| format!("creating temp file {}", tmp_path.display()))?;
+        tmp
+    };
+    let written = (|| {
+        let mut tmp = tmp;
         tmp.write_all(body)
             .with_context(|| format!("writing temp file {}", tmp_path.display()))?;
         tmp.sync_all()
-            .with_context(|| format!("syncing temp file {}", tmp_path.display()))?;
+            .with_context(|| format!("syncing temp file {}", tmp_path.display()))
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
     }
     if let Err(e) = durable_rename(&tmp_path, path) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -105,6 +114,125 @@ fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     unreachable!("the last attempt returns")
+}
+
+/// Create a scratch file in `dir` for capturing a child process's output:
+/// readable and writable, and gone once its last handle closes.
+///
+/// On Windows the file is named `.capture-<uuid>.tmp` and stays listed in
+/// `dir` until its last handle closes. It is opened shared with no other
+/// opener, marked temporary and deleted on close: the flags
+/// `tempfile::tempfile()` uses on Windows, with a different name. On Linux
+/// it is opened with `O_TMPFILE` where the file system supports that, so it
+/// never has a name, as `tempfile::tempfile()` does. Elsewhere on unix (and
+/// where `O_TMPFILE` is refused) it is created owner-only and its name
+/// removed at once. In that fallback the name is visible briefly, and stays
+/// if the process dies between the create and the removal, or if the
+/// removal fails (which is then reported as an error).
+///
+/// `tempfile` names come from `fastrand`, which is not seeded from the OS,
+/// and it retries only when the name already exists. On Windows a name
+/// whose file is still pending deletion fails with ERROR_ACCESS_DENIED
+/// instead, which it does not retry; parallel daemons on CI hit that a few
+/// times in a hundred runs. A v4 UUID name, from the OS random source, does
+/// not collide. A denial can still come from elsewhere (a filter driver, or
+/// a pending-delete name this code did not make), so up to
+/// [`CAPTURE_ATTEMPTS`] tries are made, each under a fresh name.
+pub fn create_capture_file(dir: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(target_os = "linux")]
+    if let Some(file) = open_anonymous_capture_file(dir) {
+        return Ok(file);
+    }
+    create_capture_file_with(|| capture_path(dir))
+}
+
+/// `O_TMPFILE` in `dir`, or `None` when the kernel, file system or target
+/// does not offer it. Spelled per-ABI, as `open_import_file` spells its
+/// flags, because `libc` is not a dependency of this crate; an ABI not
+/// listed uses the named fallback rather than a guessed constant.
+#[cfg(target_os = "linux")]
+fn open_anonymous_capture_file(dir: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // __O_TMPFILE | O_DIRECTORY.
+    let o_tmpfile = if cfg!(target_arch = "x86_64") {
+        0o20000000 | 0o200000
+    } else if cfg!(target_arch = "aarch64") {
+        0o20000000 | 0o40000
+    } else {
+        return None;
+    };
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(o_tmpfile)
+        .open(dir)
+        .ok()
+}
+
+/// How many names [`create_capture_file`] tries before it gives up.
+pub const CAPTURE_ATTEMPTS: u32 = 3;
+
+fn create_capture_file_with(
+    mut next_path: impl FnMut() -> std::path::PathBuf,
+) -> std::io::Result<std::fs::File> {
+    let mut attempt = 1;
+    loop {
+        match open_capture_file(&next_path()) {
+            Err(error) if attempt < CAPTURE_ATTEMPTS && capture_retryable(&error) => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
+/// A name already taken, or (on Windows) ERROR_ACCESS_DENIED, which is
+/// what a create at a pending-delete name returns. Neither says anything
+/// about the next, freshly named attempt.
+fn capture_retryable(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::AlreadyExists
+        || (cfg!(windows) && error.raw_os_error() == Some(5))
+}
+
+fn capture_path(dir: &Path) -> std::path::PathBuf {
+    dir.join(format!(".capture-{}.tmp", Uuid::new_v4().simple()))
+}
+
+#[cfg(windows)]
+fn open_capture_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_DELETE_ON_CLOSE,
+    };
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .custom_flags(FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn open_capture_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    // A failed removal leaves the file listed under its name; it is
+    // reported rather than handed back as an anonymous capture.
+    std::fs::remove_file(path)?;
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_capture_file(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
 }
 
 /// Open a selected file for reading without following a final symlink or
@@ -175,7 +303,6 @@ pub fn open_import_file(path: &std::path::Path) -> Result<std::fs::File> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(windows)]
     use super::*;
 
     #[cfg(windows)]
@@ -251,6 +378,156 @@ mod tests {
             0,
             "a non-transient Windows error must not enter the retry loop"
         );
+    }
+
+    /// A fresh name per attempt: a taken name is retried under the next
+    /// one, and the attempts stop at the bound.
+    #[test]
+    fn capture_file_retries_a_taken_name_under_a_fresh_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let taken = dir.path().join("taken");
+        std::fs::write(&taken, b"").unwrap();
+        let fresh = dir.path().join("fresh");
+        let mut names = vec![fresh, taken.clone()];
+        create_capture_file_with(|| names.pop().unwrap()).unwrap();
+        assert!(names.is_empty(), "the second name was never tried");
+
+        let mut tries = 0;
+        let refused = create_capture_file_with(|| {
+            tries += 1;
+            taken.clone()
+        })
+        .unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(tries, CAPTURE_ATTEMPTS);
+    }
+
+    /// Which errors earn another attempt, independent of the volume's
+    /// delete semantics: a taken name everywhere, and raw OS error 5
+    /// (ERROR_ACCESS_DENIED) on Windows only, where it is what a
+    /// pending-delete name returns. On unix 5 is EIO and is not retried.
+    #[test]
+    fn capture_retryable_classifies_errors() {
+        assert!(capture_retryable(&std::io::Error::from(
+            std::io::ErrorKind::AlreadyExists
+        )));
+        assert_eq!(
+            capture_retryable(&std::io::Error::from_raw_os_error(5)),
+            cfg!(windows)
+        );
+        assert!(!capture_retryable(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+    }
+
+    /// A failure that a new name cannot fix is returned at once.
+    #[test]
+    fn capture_file_does_not_retry_a_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let mut tries = 0;
+        let refused = create_capture_file_with(|| {
+            tries += 1;
+            capture_path(&missing)
+        })
+        .unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(tries, 1);
+    }
+
+    /// A capture file can be written through a clone (as a child's
+    /// stdout is), read back after a rewind, and leaves nothing in `dir`
+    /// once closed. On Windows it is listed under a v4 UUID name while held
+    /// and nothing else can open it; on unix it has no name at all.
+    #[test]
+    fn capture_file_round_trips_and_leaves_nothing_behind() {
+        use std::io::{Read, Seek};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = create_capture_file(dir.path()).unwrap();
+        let mut clone = file.try_clone().unwrap();
+        clone.write_all(b"captured").unwrap();
+        file.rewind().unwrap();
+        let mut read = String::new();
+        file.read_to_string(&mut read).unwrap();
+        assert_eq!(read, "captured");
+
+        let listed: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        if cfg!(windows) {
+            assert_eq!(listed.len(), 1, "{listed:?}");
+            let name = listed[0].file_name().unwrap().to_str().unwrap();
+            // `.capture-` + 32 hex digits of a v4 UUID + `.tmp`. A regression
+            // to tempfile's fastrand names (`.tmpXXXXXX`) fails here.
+            let id = name
+                .strip_prefix(".capture-")
+                .and_then(|rest| rest.strip_suffix(".tmp"))
+                .unwrap_or_else(|| panic!("unexpected capture name {name}"));
+            assert_eq!(Uuid::parse_str(id).unwrap().get_version_num(), 4, "{name}");
+            assert!(std::fs::File::open(&listed[0]).is_err());
+        } else {
+            assert!(listed.is_empty(), "{listed:?}");
+        }
+
+        drop(file);
+        drop(clone);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// The mechanism behind the managed-session flake: on Windows a create
+    /// at a name whose file is still pending deletion fails with
+    /// ERROR_ACCESS_DENIED (5), not ERROR_FILE_EXISTS, so a creator that
+    /// retries only "already exists" gives up. A capture file retries it
+    /// under a fresh name. Where the volume deletes with POSIX semantics
+    /// the name is released at once and there is nothing to retry; the
+    /// test then checks only that the create succeeds.
+    #[cfg(windows)]
+    #[test]
+    fn capture_file_retries_a_delete_pending_name() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let pending = capture_path(dir.path());
+        let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+        let deleting = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .share_mode(share)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(&pending)
+            .unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(share)
+            .open(&pending)
+            .unwrap();
+        // Closing the delete-on-close handle while another stays open
+        // leaves the name pending deletion, on volumes that delete that way.
+        drop(deleting);
+
+        let fresh = capture_path(dir.path());
+        let mut names = vec![fresh, pending.clone()];
+        let file = create_capture_file_with(|| names.pop().unwrap()).unwrap();
+        if names.is_empty() {
+            // The pending name was refused and the fresh one used. Confirm
+            // the refusal was error 5, the case tempfile does not retry.
+            let refused = open_capture_file(&pending).unwrap_err();
+            assert_eq!(refused.raw_os_error(), Some(5), "{refused:?}");
+        } else {
+            eprintln!(
+                "pending-delete name released at once; the error-5 retry was not exercised \
+                 here (capture_retryable_classifies_errors covers the classification)"
+            );
+        }
+        drop(file);
+        drop(holder);
+        assert!(!pending.exists());
     }
 
     #[cfg(windows)]

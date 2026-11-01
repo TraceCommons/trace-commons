@@ -2,15 +2,19 @@ import Foundation
 
 // MARK: - Deep link
 
-/// Parses `tracecommons://enroll?invite=<percent-encoded-invite-url>`.
+/// Parses `<scheme>://enroll?invite=<percent-encoded-invite-url>`, where
+/// `<scheme>` is the agreed build channel's URL scheme from the dylib
+/// (`tracecommons` in production; staging design, section 4.5). Swift holds
+/// no copy of it, and with no agreed channel every link is dropped.
 ///
 /// Mail clients cannot be made to open an arbitrary `https://` link in this
 /// app, so an invite email carries the app's own URL scheme instead, with
 /// the real invite link (an issuer URL, not this app's) folded into the
 /// `invite` query parameter.
 enum DeepLink {
-    static func inviteURL(from url: URL) -> String? {
-        guard url.scheme?.lowercased() == "tracecommons",
+    static func inviteURL(from url: URL, scheme: String?) -> String? {
+        guard let scheme, !scheme.isEmpty,
+              url.scheme?.lowercased() == scheme,
               url.host?.lowercased() == "enroll",
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else { return nil }

@@ -446,6 +446,24 @@ pub const MARK_TOOLTIP_SETTLEMENT: &str = "Estimate ready";
 /// The estimate's info popover, in plain words (owner, 2026-10-19: the
 /// first wording read as too technical). DRAFT, NEEDS APPROVAL.
 pub const SETTLEMENT_ESTIMATE_EXPLAINER: &str = "This is a guess worked out on your Mac from how big your traces are and what's in them. Nothing was sent to make it, and the price comes from Trace Commons' published rates. The real amount is set once a trace is scored, and a guess for one trace is rougher than the total.";
+// ---------------------------------------------------------------------
+// NEAR AI credit received. `{amount}` is a dollar figure from
+// `private_inference_copy::format_amount`. DRAFT, awaiting owner review
+// (the notification itself was asked for on 2026-10-23; its words were not
+// yet approved).
+// ---------------------------------------------------------------------
+
+/// The notification's title. DRAFT.
+pub const NOTIFY_NEAR_AI_CREDIT_TITLE: &str = "NEAR AI credit received";
+/// The notification's body. DRAFT.
+pub const NOTIFY_NEAR_AI_CREDIT_BODY: &str = "{amount} of NEAR AI credit arrived in your account.";
+/// The notification's action: opens Private AI, where the balance is. DRAFT.
+pub const NOTIFY_NEAR_AI_CREDIT_ACTION_VIEW: &str = "View balance";
+/// The notification's dismissal; it sends nothing. DRAFT.
+pub const NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW: &str = "Not now";
+/// The Settings switch for it. DRAFT.
+pub const SETTING_NOTIFY_NEAR_AI_CREDIT: &str = "When NEAR AI credit arrives";
+
 /// The Settings switch.
 pub const SETTING_SETTLEMENT_ESTIMATE: &str = "Estimate what traces on this Mac are worth";
 /// The Settings switch's help.
@@ -701,6 +719,20 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
         SETTLEMENT_ESTIMATE_EXPLAINER,
     ),
     ("SETTING_SETTLEMENT_ESTIMATE", SETTING_SETTLEMENT_ESTIMATE),
+    ("NOTIFY_NEAR_AI_CREDIT_TITLE", NOTIFY_NEAR_AI_CREDIT_TITLE),
+    ("NOTIFY_NEAR_AI_CREDIT_BODY", NOTIFY_NEAR_AI_CREDIT_BODY),
+    (
+        "NOTIFY_NEAR_AI_CREDIT_ACTION_VIEW",
+        NOTIFY_NEAR_AI_CREDIT_ACTION_VIEW,
+    ),
+    (
+        "NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW",
+        NOTIFY_NEAR_AI_CREDIT_ACTION_NOT_NOW,
+    ),
+    (
+        "SETTING_NOTIFY_NEAR_AI_CREDIT",
+        SETTING_NOTIFY_NEAR_AI_CREDIT,
+    ),
     (
         "SETTING_SETTLEMENT_ESTIMATE_HELP",
         SETTING_SETTLEMENT_ESTIMATE_HELP,

@@ -64,10 +64,12 @@ jobs:
       # Seconds, no build. The contributor crate's `test-credential-store`
       # feature swaps the OS keychain for a plaintext file and must only ever
       # be on under `cargo test`; this refuses any release/packaging workflow,
-      # build script or shipped manifest that could turn it on. The self-test
+      # build script or shipped manifest that could turn it on. The same
+      # script refuses the FFI crate's `test-keep-panic-messages` feature,
+      # which drops the daemon's location-only panic hook. The self-test
       # seeds each violation and requires a refusal, so the check cannot rot
       # into one that always passes.
-      - name: No shipped build enables the test credential store
+      - name: No shipped build enables a test-only feature
         run: |
           scripts/ci/check-release-credential-store.sh check
           scripts/ci/check-release-credential-store.sh self-test
@@ -90,6 +92,41 @@ jobs:
         run: |
           scripts/ci/check-judgement-compose-readback.sh check
           scripts/ci/check-judgement-compose-readback.sh self-test
+      # Seconds, no build. `near-ai-staging` switches the compiled-in NEAR AI
+      # host (server, ingest and the contributor daemon) to NEAR AI staging,
+      # for the payout staging run only. This refuses any release, packaging
+      # or deploy file or shipped manifest that could turn it on; the
+      # self-test seeds each violation and requires a refusal.
+      - name: No shipped build enables the NEAR AI staging host
+        run: |
+          scripts/ci/check-release-staging-feature.sh check
+          scripts/ci/check-release-staging-feature.sh self-test
+      # Seconds, no build. The macOS Info.plist per bundle channel: a
+      # production plist byte-identical to the one before the channel files,
+      # a staging plist with only staging identity and feed.
+      - name: macOS Info.plist per bundle channel
+        run: scripts/ci/test-macos-channel-plist.sh
+      # Seconds, no build. The release workflows scan the shipped dylib and
+      # CLI for the staging pin verifier; the self-test seeds each marker
+      # into a scratch binary and requires a refusal.
+      - name: No release binary carries the staging pin verifier
+        run: scripts/ci/assert-no-staging-markers.sh self-test
+      # Seconds. The Sparkle appcast generator for both channels, with a
+      # stub sign_update: production's appcast unchanged, staging's own
+      # title and pre-release version.
+      - name: Sparkle appcast for each channel
+        run: scripts/ci/test-generate-appcast.sh
+      # Seconds, no build, no network. The server deploy files: the pilot
+      # templates and deploy.sh unchanged by the staging parameters, and the
+      # staging render (deploy/staging-gcp/render-env.sh) with dummy secrets.
+      - name: Pilot and staging server deploy files
+        run: scripts/ci/test-deploy-render.sh
+      # Seconds, no build, no network. The staging database backup and its
+      # restore check against stub pg_dump, pg_restore, psql and gcloud: run
+      # as postgres, dump and counts in one snapshot, mode 0600, sidecar
+      # uploaded last, and a row-count mismatch fails.
+      - name: Staging database backup and restore check
+        run: scripts/ci/test-staging-db-backup.sh
 
       - name: Offline network recording privacy projections
         run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py
@@ -123,13 +160,25 @@ jobs:
         admission_test_tokens
         admission_test_account_trust
         admission_test_account_trust_growth
+        admission_test_upload_trust_plan_ci
+        admission_test_upload_trust_scheduler_ci
+        admission_test_upload_trust_upgrade_ci
         admission_test_account_trust_live
         admission_test_account_trust_route
         admission_test_witness_evidence
         admission_test_source_sessions
+        admission_test_upload_ownership
+        admission_test_credit_hold_ownership
         admission_test_activity_missions
+        admission_test_model_training_consent
         admission_test_inference_connection
         admission_test_inference_connection_route
+        admission_test_payout_rails
+        admission_test_payout_pass
+        admission_test_referral_rewards
+        admission_test_referral_codes
+        admission_test_referral_bonus
+        admission_test_referral_stream
         admission_test_walletv2
         admission_test_legacy_invite_link
         admission_test_device_invite_subject
@@ -137,7 +186,7 @@ jobs:
         admission_test_pipeline_http
         admission_test_pipeline_compat
         admission_test_pipeline_parity
-        admission_test_unbound_reaper
+        admission_test_starter
         pipeline_test_upgrade
     # The tests in this repository that touch PostgreSQL do not run anywhere.
     # Each skips or is `#[ignore]`d without an environment variable, no job sets
@@ -275,6 +324,25 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_growth_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_GROWTH_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_growth
+      - name: bounded upload-trust frontier query plans
+        run: cargo test -p trace-commons-server --test upload_trust_frontier_plan_pg
+        env:
+          TRACE_COMMONS_UPLOAD_TRUST_PLAN_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_plan_ci
+      - name: deployed upload-trust migration upgrade
+        run: cargo test -p trace-commons-server --lib v137_invalidates_already_enabled_pre_migration_applied_generations_once -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_UPLOAD_TRUST_PG_UPGRADE_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_upgrade_ci
+      - name: independent upload-trust scheduler and least privilege
+        run: cargo test -p trace-commons-ingest --lib client_upload_trust_scheduler_pg_tests -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_CLIENT_UPLOAD_TRUST_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_trust_scheduler_ci
+      # NEAR AI starter advance, first slice (V131): write-once plausibility
+      # features, the account read's filters, the ingest runtime's grants,
+      # and the dry-run report over the earned-trust enumeration seam.
+      - name: starter_plausibility_pg
+        run: cargo test -p trace-commons-server --test starter_plausibility_pg
+        env:
+          TRACE_COMMONS_STARTER_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_starter
       # Earned account trust, live (V126): the attested_submission fact, the
       # guard's witness column grants, and a tiered-v1 admission policy whose
       # applied evaluation raises the allowance and falls back to the base
@@ -284,13 +352,6 @@ jobs:
         run: cargo test -p trace-commons-server --test account_trust_live_pg
         env:
           TRACE_COMMONS_ACCOUNT_TRUST_LIVE_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_live
-      # V101: the unbound-account reaper, run as a login holding only
-      # trace_unbound_account_reaper, with a control that a superuser-owned
-      # function would fail.
-      - name: unbound_account_reaper_pg
-        run: cargo test -p trace-commons-server --test unbound_account_reaper_pg
-        env:
-          TRACE_COMMONS_UNBOUND_REAPER_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_unbound_reaper
       - name: account invite HTTP session and authority guards
         run: cargo test -p trace-commons-ingest --lib account_invite_route_requires_session_and_rejects_cross_site_cookie -- --test-threads=1
         env:
@@ -313,6 +374,58 @@ jobs:
         run: cargo test -p trace-commons-server --test inference_connection_pg
         env:
           TRACE_COMMONS_INFERENCE_CONNECTION_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_inference_connection
+      # V142: the referral tables. Forced RLS, one referrer per account, one
+      # code index across tenants, the self-referral check, the resolver's
+      # narrow cross-tenant read, append-only bonus and audit rows, and the
+      # referral payout stream, each refusal checked as trace_ingest_runtime.
+      - name: referral_rewards_pg
+        run: cargo test --locked -p trace-commons-server --test referral_rewards_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_rewards
+      # The referral code store: five live codes per account, the code index
+      # across tenants, listing with referee counts and bonus totals, and
+      # applying a code with every check of spec section 3 in order, the
+      # refusal rate limit and the two-tenant apply, as a real LOGIN role
+      # with the resolver role granted INHERIT FALSE.
+      - name: referral_codes_pg
+        run: cargo test --locked -p trace-commons-server --test referral_codes_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_codes
+      # The referral bonus pass: a tenth of each referee credit written in the
+      # referrer's tenant once, its window and reversals, the referrer-gone
+      # void, the referral-stream holds, code scoring and suspension, the
+      # dry_run trip, and voids taking back only unsent bonus, as
+      # trace_ingest_runtime.
+      - name: referral_bonus_pg
+        run: cargo test --locked -p trace-commons-server --test referral_bonus_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_bonus
+      # The payout rail tables (V132): forced RLS, the one-link-per-state and
+      # one-pending-line indexes, NUMERIC(39,0) amounts, and the runtime,
+      # enumerator and config-writer grants, each exercised as a real LOGIN
+      # role the suite provisions, never this job's superuser.
+      - name: payout_rails_pg
+        run: cargo test -p trace-commons-server --test payout_rails_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_rails
+      # The per-rail payout pass (payout spec sections 3, 4 and 7): exactly
+      # once across a crash on the cumulative and the keyed rail, one rail's
+      # stop or halt never reaching another, a credential refusal changing no
+      # row, closing by reads, relinks and netting. Against a loopback mock of
+      # cloud-api #1271 and the keyed test rail, as a real LOGIN role.
+      - name: payout_pass_pg
+        run: cargo test -p trace-commons-server --test payout_pass_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_payout_pass
+      # The referral payout stream (V142 lines and links): the second
+      # program per link, one pending line per stream, per-stream crash
+      # recovery, close with both totals, referral-only holds and ceiling,
+      # and the referral mode. Bonus rows seeded by the migrator; the pass
+      # runs as a real LOGIN role against the #1271 loopback mock.
+      - name: referral_stream_pg
+        run: cargo test --locked -p trace-commons-server --test referral_stream_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_referral_stream
       - name: inference connection HTTP session selection
         run: cargo test -p trace-commons-ingest --lib inference_connection_requires_explicit_account_session_selection -- --test-threads=1
         env:
@@ -397,6 +510,14 @@ jobs:
         run: cargo test -p trace-commons-server --test trace_session_withdrawal_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_source_sessions
+      - name: upload_principal_ownership_pg
+        run: cargo test -p trace-commons-server --test upload_principal_ownership_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_upload_ownership
+      - name: credit_hold_ownership_pg
+        run: cargo test -p trace-commons-server --lib credit_hold_ownership::tests
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_credit_hold_ownership
       # Activity progress uses the owner URL only to migrate and seed fixtures.
       # Its account-history SELECT grants stay in this fresh test database;
       # the reader SET ROLEs to trace_ingest_runtime and asserts NOBYPASSRLS,
@@ -405,6 +526,13 @@ jobs:
         run: cargo test --locked -p trace-commons-server --test activity_missions_pg -- --nocapture
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_activity_missions
+      # V141: the model-training grant's eligibility read, add-only write and
+      # withheld-award lookup, run as trace_ingest_runtime (NOBYPASSRLS) on
+      # the migration's own grants.
+      - name: model_training_consent_pg
+        run: cargo test --locked -p trace-commons-server --test model_training_consent_pg
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_model_training_consent
       # The R1 measurement script (scripts/operator/r1-pipeline-measurement.sql)
       # run through the real psql against a current and a pre-V76 schema. The
       # suite creates and drops databases of its own, so the xact_commit guard
@@ -476,7 +604,7 @@ jobs:
       - name: versioned pipeline parity with legacy
         run: |
           set -euo pipefail
-          cargo test -p trace-commons-ingest --lib legacy_and_pipeline_tenants_match_under_equivalent_configuration 2>&1 | tee pipeline-parity.log
+          cargo test -p trace-commons-ingest --lib legacy_and_pipeline_tenants_match_except_pinned_differences 2>&1 | tee pipeline-parity.log
           grep -q 'test result: ok. 1 passed; 0 failed' pipeline-parity.log
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_pipeline_parity
@@ -827,6 +955,118 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  ingest-bin-postgres-near-ai-staging:
+    name: trace-commons-ingest tests, whole bin, near-ai-staging, against PostgreSQL
+    # Not a required status check. `near-ai-staging` compiles a different
+    # ingest: the refusal of the wallet ceremony, NEAR AI sign-up without the
+    # admission ledger, and the boot check that refuses a production NEAR AI
+    # host compile only under the feature, and the account and bind suites
+    # must admit a new NEAR AI login there with no invite (staging spec S12). Every other job builds
+    # the ingest without it, so before this job none of that ran anywhere in
+    # CI. Everything else is
+    # `ingest-bin-postgres`: the same service, roles, single thread and
+    # xact_commit floors, on its own database and cache.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: trace
+          POSTGRES_PASSWORD: trace
+          POSTGRES_DB: postgres
+          # Same reason as `ingest-bin-postgres`.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - id: cargo-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-ingest-bin-near-ai-staging-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            pg-ingest-bin-near-ai-staging-${{ runner.os }}-
+      # The same database name rule and login-resolver roles as
+      # `ingest-bin-postgres`.
+      - name: Create the database and the login-resolver roles
+        run: |
+          set -euo pipefail
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace admission_test_ingest_bin_staging
+          PGPASSWORD=trace psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U trace postgres <<'SQL'
+          CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
+          CREATE ROLE tc_login_resolver_login LOGIN NOBYPASSRLS;
+          GRANT trace_login_resolver TO tc_login_resolver_login;
+          SQL
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install a Secret Service provider for credential tests
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
+      # The built binary refuses a NEAR AI host from the other channel at
+      # boot. A filter that matches nothing passes with "0 passed", so the
+      # step requires at least one.
+      - name: ingest boot channel check (near-ai-staging)
+        run: |
+          set -euo pipefail
+          cargo test --locked -p trace-commons-ingest --features near-ai-staging --test near_ai_host_coherence_boot 2>&1 | tee staging-boot-tests.log
+          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' staging-boot-tests.log
+      - name: trace-commons-ingest, every test, one thread (near-ai-staging)
+        run: |
+          set -euo pipefail
+          # bash, not sh: the run is piped to tee, and only pipefail keeps a
+          # failing cargo from reading as tee's success.
+          dbus-run-session -- bash -euo pipefail -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked -p trace-commons-ingest --features near-ai-staging --lib -- --test-threads=1 2>&1 | tee staging-lib-tests.log
+          '
+          # The tests that hold the staging rules must have run, not been
+          # filtered or compiled out: open sign-up, sign-up and the first
+          # upload without the admission ledger, and the wallet refusal.
+          grep -q 'open_sign_up::a_new_near_ai_login_gets_an_account_with_no_invite ... ok' staging-lib-tests.log
+          grep -q 'open_sign_up::a_staging_build_signs_up_without_the_admission_ledger ... ok' staging-lib-tests.log
+          grep -q 'open_sign_up::a_staging_build_admits_the_first_upload_without_the_admission_ledger ... ok' staging-lib-tests.log
+          grep -q 'a_staging_build_never_offers_wallet_provisioning ... ok' staging-lib-tests.log
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin_staging
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin_staging
+      # The guard of `ingest-bin-postgres`, with the same floors.
+      - name: Refuse a run that executed nothing
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for pair in admission_test_ingest_bin_staging:1000 admission_test_ingest_bin_staging_pilot:2000; do
+            db=${pair%%:*}
+            floor=${pair##*:}
+            n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                  -c "SELECT xact_commit FROM pg_stat_database WHERE datname='$db';")
+            echo "$db committed ${n:-0} transactions (floor $floor)"
+            if [ "${n:-0}" -lt "$floor" ]; then
+              echo "::error::$db shows no real activity; the PostgreSQL tests skipped instead of running"
+              fail=1
+            fi
+          done
+          exit $fail
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   pipeline-qualification:
     # Not a required status check (owner decision P4-D17): it runs on every
     # pull request and in the merge queue, and it blocks nothing until the
@@ -986,6 +1226,16 @@ jobs:
       # style/perf lints are the only ones suppressed from the default
       # clippy gate; everything else fails the build under -D warnings.
       - run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
+      # The staging channel (`near-ai-staging`) compiles different values and
+      # tests than the default build; lint that build too.
+      - run: cargo clippy -p trace-commons-contributor -p trace-commons-contributor-ffi --all-targets --features trace-commons-contributor/near-ai-staging -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
+      # The server and ingest under the same feature: the wallet refusal,
+      # sign-up without the admission ledger and the boot channel check
+      # compile only there.
+      - run: cargo clippy -p trace-commons-server -p trace-commons-ingest --all-targets --features trace-commons-ingest/near-ai-staging -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
+      # The signed pin-set verifier (`staging_pins`), which only the
+      # attestation crate's own `near-ai-staging` feature compiles.
+      - run: cargo clippy -p trace-commons-attestation --all-targets --features near-ai-staging -- -D warnings -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
@@ -1020,6 +1270,8 @@ jobs:
       # A manifest change must not silently re-resolve reviewed Git dependencies.
       - run: cargo check --locked -p trace-commons-server -p trace-commons-ingest --bins
       - run: cargo check --locked -p trace-commons-contributor
+      - run: cargo check --locked -p trace-commons-contributor -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging
+      - run: cargo check --locked -p trace-commons-server -p trace-commons-ingest --bins --features trace-commons-ingest/near-ai-staging
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache
@@ -1428,20 +1680,14 @@ jobs:
       - uses: actions/checkout@v6
       - name: Verify native wallet browser state transitions
         run: node scripts/ci/test-near-wallet-browser.cjs
-      - name: Verify the browser step-up page script
-        run: node scripts/ci/test-step-up-page.cjs
       - uses: dtolnay/rust-toolchain@stable
+      # Before the cache restore: these jobs restore a large `target` and
+      # compile on top of it; see the action for what it deletes and why.
+      - uses: ./.github/actions/free-runner-disk
       - id: cargo-cache
-        uses: actions/cache/restore@v5
+        uses: ./.github/actions/restore-cargo-test-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-test-default-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-default-
+          key-prefix: cargo-test-default
       # Whole workspace, not a hand-maintained crate list. Naming crates
       # individually meant trace-commons-protocol (45 tests, including the
       # redaction and secret-detection suites) and trace-commons-operator-client
@@ -1450,13 +1696,6 @@ jobs:
       - uses: ./.github/actions/apt-update-ubuntu-only
       - name: Install a Secret Service provider for credential tests
         run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
-      - name: Install the pinned wallet browser test runtime
-        run: |
-          npm install --prefix "$RUNNER_TEMP/trace-commons-wallet-ci" \
-            --ignore-scripts --omit=optional --no-audit --no-fund --save-exact \
-            playwright@1.63.0 playwright-core@1.63.0
-          node "$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright/cli.js" \
-            install --with-deps chromium
       - name: Run workspace tests with Secret Service
         run: |
           dbus-run-session -- sh -eu -c '
@@ -1470,6 +1709,115 @@ jobs:
             cargo test -p trace-commons-contributor-platform --lib real_os_round_trip_removes_only_its_synthetic_entry -- --ignored
             cargo test -p trace-commons-contributor-platform --lib real_commons_os_round_trip -- --ignored
           '
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # Split out of cargo-test-default, which had grown past its 30-minute
+  # timeout: each of these builds its own feature set or package selection,
+  # so in that job each one recompiled crates the workspace run had already
+  # built. Both are required status checks (owner decision, 2026-10-30), as
+  # the steps were while they ran inside cargo-test-default; keep their
+  # `name:` values stable, since branch protection matches on them.
+  cargo-test-staging-channel:
+    name: staging channel tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # Before the cache restore: these jobs restore a large `target` and
+      # compile on top of it; see the action for what it deletes and why.
+      - uses: ./.github/actions/free-runner-disk
+      # Its own cache, saved on main below: this job's package and feature
+      # selection resolves some third-party crates (the tokio/hyper/zbus
+      # chain) with different features from the workspace run, and those
+      # are not in cargo-test-default's cache. Falls back to that cache,
+      # whose graph it otherwise shares, when its own is missing.
+      - id: cargo-cache
+        uses: ./.github/actions/restore-cargo-test-cache
+        with:
+          key-prefix: cargo-test-staging-channel
+          fallback-prefix: cargo-test-default
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install a Secret Service provider for credential tests
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
+      # The staging channel's half of the channel checks: its host and
+      # identity scan, the production deny-list digests, its refusals of
+      # production hosts, its entitlements, its IronWire key gate and its
+      # refusal of a state directory override naming production's directory
+      # (`config::tests::` and `channel_hosts`), with the preflight suite run
+      # as staging; its URL scheme, its own IronWire home with no production
+      # pointer and no declared production folder or port, its --version
+      # channel, its window label (`a_staging_channel_shows_the_label`, and
+      # the FFI `build_channel` suite, whose label check is the staging half
+      # of a test the default build runs as production), the FFI suite as
+      # staging, the daemon's signed pin source (`proof_attestor`, the status
+      # pin label and its reconcile twin), the attestation crate's signed
+      # pin-set verifier, whose unit tests no other crate's run reaches, and
+      # the server's pin re-sign tool (`trace-commons-staging-pins`), which
+      # requires the feature. None of them is compiled into the
+      # `cargo test (default features)` build.
+      - name: Staging channel tests
+        run: |
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --test channel_hosts --test credential_store_isolation --test preflight --test version_channel
+            cargo test --locked -p trace-commons-contributor --features near-ai-staging --lib -- other_channel the_config_dir_help the_default_inbox private_inference config::tests:: deep_link invite_tests ironwire_pointer discover ironwire_folder a_staging_probe_of a_staging_channel_shows_the_label proof_attestor pin_refusal reconcile_never_fetches_the_signed_pins
+            cargo test --locked -p trace-commons-contributor-ffi --features trace-commons-contributor/near-ai-staging --test abi --test build_channel
+            cargo test --locked -p trace-commons-attestation --features near-ai-staging
+            cargo test --locked -p trace-commons-server --features near-ai-staging --bin trace-commons-staging-pins --test staging_pins_tool
+          '
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  cargo-test-wallet-sdk-csp:
+    name: wallet SDK and production CSP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      # Before the cache restore: these jobs restore a large `target` and
+      # compile on top of it; see the action for what it deletes and why.
+      - uses: ./.github/actions/free-runner-disk
+      # Its own cache, saved on main below: this job's package and feature
+      # selection resolves some third-party crates (the tokio/hyper/zbus
+      # chain) with different features from the workspace run, and those
+      # are not in cargo-test-default's cache. Falls back to that cache,
+      # whose graph it otherwise shares, when its own is missing.
+      - id: cargo-cache
+        uses: ./.github/actions/restore-cargo-test-cache
+        with:
+          key-prefix: cargo-test-wallet-sdk-csp
+          fallback-prefix: cargo-test-default
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install the pinned wallet browser test runtime
+        run: |
+          npm install --prefix "$RUNNER_TEMP/trace-commons-wallet-ci" \
+            --ignore-scripts --omit=optional --no-audit --no-fund --save-exact \
+            playwright@1.63.0 playwright-core@1.63.0
+          node "$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright/cli.js" \
+            install --with-deps chromium
       - name: Verify the real wallet SDK and production CSP
         run: |
           export TC_PLAYWRIGHT_MODULE="$RUNNER_TEMP/trace-commons-wallet-ci/node_modules/playwright"
@@ -1579,22 +1927,6 @@ jobs:
       # See docs/operator/operator-binaries.md.
       - name: Run operator-binaries smoke
         run: bash scripts/operator/operator-smoke.sh
-
-  # scripts/check-aasa.sh, the smoke test for the apple-app-site-association
-  # file (Z2 S4 of #1118), against local stand-ins for the origin and Apple's
-  # CDN. The file itself is built and served by
-  # TraceCommons/trace-commons-community. Not a required check.
-  check-aasa-script:
-    name: check-aasa.sh tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      # Node 24, the current LTS. curl and jq are on the image.
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-      - run: node --test scripts/ci/test-check-aasa.mjs
 
   privacy-filter-shim-tests:
     name: privacy-filter shim tests

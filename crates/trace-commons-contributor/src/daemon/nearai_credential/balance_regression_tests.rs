@@ -154,6 +154,8 @@ struct ServerState {
     tokens: Mutex<Vec<Tokens>>,
     first_listed: &'static str,
     held_balance: Mutex<Option<ResponseGate>>,
+    held_refresh: Mutex<Option<ResponseGate>>,
+    held_payout_orgs: Mutex<Option<ResponseGate>>,
     balance_requests: Mutex<Vec<(Account, String)>>,
 }
 
@@ -179,11 +181,14 @@ impl LocalCloud {
             ),
             first_listed,
             held_balance: Mutex::new(gate),
+            held_refresh: Mutex::new(None),
+            held_payout_orgs: Mutex::new(None),
             balance_requests: Mutex::new(Vec::new()),
         });
         let router = Router::new()
             .route("/v1/users/me/access-tokens", post(refresh))
             .route("/v1/organizations", get(organizations))
+            .route("/v1/users/me", get(payout_user))
             .route(
                 "/v1/organizations/{organization}/usage/balance",
                 get(balance),
@@ -231,27 +236,40 @@ async fn refresh(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
 ) -> (StatusCode, Json<Value>) {
-    let mut tokens = state.tokens.lock().expect("synthetic token lock");
-    let Some(entry) = tokens
-        .iter_mut()
-        .find(|entry| bearer(&headers) == Some(entry.refresh.as_str()))
-    else {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "refresh"})));
+    let answer = {
+        let mut tokens = state.tokens.lock().expect("synthetic token lock");
+        let Some(entry) = tokens
+            .iter_mut()
+            .find(|entry| bearer(&headers) == Some(entry.refresh.as_str()))
+        else {
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "refresh"})));
+        };
+        entry.rotations += 1;
+        entry.refresh = format!("rt-synthetic-{}-{}", entry.account.label(), entry.rotations);
+        entry.access = format!(
+            "access-synthetic-{}-{}",
+            entry.account.label(),
+            entry.rotations
+        );
+        (
+            StatusCode::OK,
+            Json(json!({
+                "access_token": entry.access, "refresh_token": entry.refresh,
+                "refresh_token_expiration": Utc::now() + chrono::Duration::hours(1)
+            })),
+        )
     };
-    entry.rotations += 1;
-    entry.refresh = format!("rt-synthetic-{}-{}", entry.account.label(), entry.rotations);
-    entry.access = format!(
-        "access-synthetic-{}-{}",
-        entry.account.label(),
-        entry.rotations
-    );
-    (
-        StatusCode::OK,
-        Json(json!({
-            "access_token": entry.access, "refresh_token": entry.refresh,
-            "refresh_token_expiration": Utc::now() + chrono::Duration::hours(1)
-        })),
-    )
+    let gate = state.held_refresh.lock().unwrap().take();
+    if let Some(gate) = gate {
+        gate.entered
+            .send(())
+            .expect("notify refresh response barrier");
+        timeout(DEADLINE, gate.release)
+            .await
+            .expect("refresh response was not released")
+            .expect("refresh controller disappeared");
+    }
+    answer
 }
 
 async fn organizations(
@@ -432,4 +450,213 @@ async fn balance_uses_the_stored_keys_organization_instead_of_the_first_listed()
         !requests.iter().any(|(_, org)| org == "org-unselected"),
         "organization ordering must not redirect the credential's balance read"
     );
+}
+
+const PAYOUT_ORG: &str = "a0c18c96-6093-49f5-bb6f-6092ef0630b9";
+
+impl Fixture {
+    fn allow_payout_listing(&self) {
+        self.shared
+            .store
+            .save_config(&crate::commands::unenrolled_preview_config())
+            .expect("save payout configuration");
+        let session = crate::account_auth::AccountSession {
+            access_token: "synthetic-commons-account-session".into(),
+            expires_at: Utc::now() + chrono::Duration::hours(6),
+            account_id: "synthetic-account".into(),
+        };
+        self.shared
+            .store
+            .write_daemon_file(
+                crate::config::ACCOUNT_SESSION_FILE,
+                &serde_json::to_vec(&session).unwrap(),
+            )
+            .expect("save Commons account session");
+    }
+
+    async fn payout_organizations(&self, cloud: &LocalCloud) -> crate::daemon::ipc::Response {
+        crate::daemon::payout_link::orgs(
+            &self.shared,
+            &Request {
+                id: 2,
+                method: "payout_link_orgs".into(),
+                params: json!({}),
+            },
+            &cloud.api,
+        )
+        .await
+    }
+}
+
+async fn payout_user(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    let Some(account) = access_account(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "access"})));
+    };
+    let gate = state.held_payout_orgs.lock().unwrap().take();
+    if let Some(gate) = gate {
+        gate.entered.send(()).expect("notify payout org response");
+        timeout(DEADLINE, gate.release)
+            .await
+            .expect("payout org response was not released")
+            .expect("payout org controller disappeared");
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "id": "synthetic-user", "email": "synthetic@example.invalid",
+            "username": "synthetic", "is_active": true, "auth_provider": "github",
+            "organizations": [{
+                "id": PAYOUT_ORG, "name": account.label(), "role": "owner", "is_active": true
+            }],
+            "workspaces": []
+        })),
+    )
+}
+
+#[tokio::test]
+async fn concurrent_balance_and_payout_org_listing_share_the_management_session() {
+    let fixture = Fixture::new();
+    fixture.connect(Account::First, "org-first");
+    fixture.allow_payout_listing();
+    let cloud = LocalCloud::start("org-first", None).await;
+    let (gate, held) = HeldBalance::new();
+    *cloud.state.held_refresh.lock().unwrap() = Some(gate);
+
+    let (balance, organizations) = timeout(DEADLINE, async {
+        tokio::join!(fixture.read(&cloud), async {
+            // Balance owns the refresh lock but its rotated session has not
+            // reached the client. Poll the org lookup once at that exact
+            // boundary: it must wait on the shared coordinator BEFORE taking
+            // a session snapshot, not take the soon-retired token and wait
+            // only on the refresh mutex. No scheduling delay is assumed.
+            let release = held.wait().await;
+            let mut listing = Box::pin(fixture.payout_organizations(&cloud));
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(listing.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            release.send(()).expect("release concurrent refresh");
+            listing.await
+        })
+    })
+    .await
+    .expect("concurrent management reads timed out");
+    assert_known(balance, FIRST_BALANCE);
+    assert!(organizations.error.is_none(), "{:?}", organizations.error);
+    assert_eq!(
+        organizations.result.unwrap()["organizations"][0]["id"],
+        PAYOUT_ORG
+    );
+    {
+        let held = cache().lock().await;
+        let entry = held.get(fixture.shared.store.dir()).unwrap();
+        assert!(
+            entry.balance.is_some(),
+            "same-login rotation keeps the observed balance"
+        );
+        assert!(
+            entry.access_token.is_none(),
+            "the fresh payout proof is not cached"
+        );
+    }
+    assert_known(fixture.read(&cloud).await, FIRST_BALANCE);
+    assert_eq!(
+        cloud.state.balance_requests.lock().unwrap().len(),
+        1,
+        "the cached balance survives the payout's session rotation"
+    );
+    let tokens = cloud.state.tokens.lock().unwrap();
+    let first = tokens
+        .iter()
+        .find(|entry| entry.account == Account::First)
+        .unwrap();
+    assert_eq!(
+        first.rotations, 2,
+        "payout retains its freshly exchanged proof token"
+    );
+}
+
+#[tokio::test]
+async fn pending_payout_org_listing_cannot_succeed_after_forget() {
+    payout_org_listing_after_connection_change(false).await;
+}
+
+#[tokio::test]
+async fn pending_payout_org_listing_cannot_succeed_after_relogin() {
+    payout_org_listing_after_connection_change(true).await;
+}
+
+async fn payout_org_listing_after_connection_change(relogin: bool) {
+    let fixture = Fixture::new();
+    fixture.connect(Account::First, "org-first");
+    fixture.allow_payout_listing();
+    let cloud = LocalCloud::start("org-first", None).await;
+    let (gate, held) = HeldBalance::new();
+    *cloud.state.held_payout_orgs.lock().unwrap() = Some(gate);
+    let (response, ()) = timeout(DEADLINE, async {
+        tokio::join!(fixture.payout_organizations(&cloud), async {
+            let release = held.wait().await;
+            if relogin {
+                fixture.connect(Account::Replacement, "org-replacement");
+            } else {
+                fixture.forget();
+            }
+            release.send(()).expect("release stale payout org response");
+        })
+    })
+    .await
+    .expect("stale payout org read timed out");
+    assert!(
+        response.result.is_none(),
+        "old account organizations must not escape"
+    );
+    assert_eq!(
+        response
+            .error
+            .expect("a stale connection is refused")
+            .message,
+        if relogin {
+            "payout-link-near-ai-session-changed"
+        } else {
+            "payout-link-near-ai-sign-in-required"
+        }
+    );
+}
+
+#[tokio::test]
+async fn fresh_management_callback_keeps_token_paired_with_its_retained_session() {
+    let fixture = Fixture::new();
+    fixture.connect(Account::First, "org-first");
+    let cloud = LocalCloud::start("org-first", None).await;
+    super::with_fresh_management_session(&fixture.shared, &cloud.api, |tokens, retained| {
+        // A controlled replacement at callback entry is later than the
+        // exchange, before the callback can take any local snapshot. The
+        // supplied retained session must still identify the old token.
+        fixture.connect(Account::Replacement, "org-replacement");
+        let current = fixture
+            .shared
+            .settings
+            .lock()
+            .unwrap()
+            .near_ai_session
+            .clone()
+            .unwrap();
+        let api = &cloud.api;
+        async move {
+            let organizations = api.owned_organizations(&tokens).await?;
+            assert_eq!(organizations[0].name, "first");
+            assert_eq!(retained.refresh_token, "rt-synthetic-first-1");
+            assert!(
+                current != retained,
+                "a replacement login must differ from the token's supplied session"
+            );
+            Ok(())
+        }
+    })
+    .await
+    .expect("run synthetic token/session pairing callback");
 }

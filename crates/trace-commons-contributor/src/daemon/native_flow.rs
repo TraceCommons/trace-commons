@@ -186,11 +186,15 @@ fn snapshot(shared: &DaemonShared, id: u64, flow_id: &str) -> Response {
         .filter(|flow| flow.id == flow_id)
     {
         Some(flow) => Response::ok(id, serde_json::to_value(flow.view()).unwrap_or_default()),
-        None => Response::ok(
-            id,
-            json!({"state":"Unsupported","busy":false,"can_check":false,"can_start":false,"can_edit":false,"can_cancel":false,"wait":false,"flow_id":"","message":"","tone":"neutral","glyph":""}),
-        ),
+        None => unsupported(id),
     }
+}
+/// No flow to show: the shells draw nothing for it.
+fn unsupported(id: u64) -> Response {
+    Response::ok(
+        id,
+        json!({"state":"Unsupported","busy":false,"can_check":false,"can_start":false,"can_edit":false,"can_cancel":false,"wait":false,"flow_id":"","message":"","tone":"neutral","glyph":""}),
+    )
 }
 fn cancel_attempt(shared: &DaemonShared, id: u64, attempt: String) {
     let _ = account_onboarding::handle_cancel(
@@ -203,6 +207,11 @@ fn cancel_attempt(shared: &DaemonShared, id: u64, attempt: String) {
 /// cadence and observes the underlying ceremony. A close invalidates pending
 /// replies before cancelling a known attempt, including late start replies.
 pub async fn handle_wallet(shared: &DaemonShared, req: &Request) -> Response {
+    // Staging is reached through a NEAR AI login only (staging spec S12):
+    // no NEAR wallet signup is offered, so no flow opens.
+    if crate::channel::near_ai_staging() {
+        return unsupported(req.id);
+    }
     let action = req
         .params
         .get("action")
@@ -414,6 +423,31 @@ mod tests {
         assert_eq!(flow.view().state, WalletState::Idle);
     }
 
+    /// A staging build has no NEAR wallet signup: every action answers
+    /// Unsupported, which the shells draw as nothing, and none opens a flow.
+    #[cfg(feature = "near-ai-staging")]
+    #[tokio::test]
+    async fn a_staging_build_offers_no_wallet_signup() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let shared = DaemonShared::load(store).unwrap();
+        for action in ["open", "check", "start", "wait", "cancel"] {
+            let response = handle_wallet(
+                &shared,
+                &request(
+                    5,
+                    "native_wallet_flow",
+                    json!({"action": action, "flow_id": "", "ingest_url": "https://commons.example", "account_id": "a.near"}),
+                ),
+            )
+            .await;
+            let view = response.result.expect("answered");
+            assert_eq!(view["state"], "Unsupported", "{action}");
+            assert_eq!(view["can_start"], false, "{action}");
+            assert_eq!(view["can_check"], false, "{action}");
+        }
+        assert!(!flows().lock().unwrap().contains_key(shared.store.dir()));
+    }
+
     #[test]
     fn wallet_origin_requires_exact_https_and_no_credentials() {
         for invalid in [
@@ -461,6 +495,9 @@ mod tests {
     /// the sentence the shells print. This drives `handle_wallet` itself
     /// rather than the mapper, because the seam that used to be wrong is the
     /// one line between them: every refusal became "unavailable" there.
+    /// A staging build has no wallet signup to check
+    /// (`a_staging_build_offers_no_wallet_signup`).
+    #[cfg(not(feature = "near-ai-staging"))]
     #[tokio::test]
     async fn a_refused_address_and_an_unanswered_one_reach_the_shell_differently() {
         use crate::config::tests_support::temp_store;
@@ -492,9 +529,8 @@ mod tests {
         }
 
         // Nothing is listening here, so the daemon dials and gets nothing.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let addr = crate::config::tests_support::refusing_addr();
+        let port = addr.port();
 
         let refused = check("http://commons.example").await;
         let unanswered = check(&format!("https://127.0.0.1:{port}")).await;

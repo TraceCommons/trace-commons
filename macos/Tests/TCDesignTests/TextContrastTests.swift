@@ -27,6 +27,7 @@ final class TextContrastTests: XCTestCase {
         }
     }
 
+    @MainActor
     func test_anOffRowsWordsClearTextContrastInBothAppearances() {
         let title = GlassListRow.titleInk(selected: false, off: true)
         let sub = GlassListRow.plainSubInk(off: true)
@@ -40,6 +41,7 @@ final class TextContrastTests: XCTestCase {
 
     /// An off row still reads as off: its title steps down from the on
     /// row's, and the row itself is no longer faded.
+    @MainActor
     func test_anOffRowIsDimmedByInkNotOpacity() throws {
         XCTAssertNotEqual(GlassListRow.titleInk(selected: false, off: true),
                           GlassListRow.titleInk(selected: false, off: false))

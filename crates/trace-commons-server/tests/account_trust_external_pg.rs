@@ -251,13 +251,16 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
     let evidence = admin.query_one("SELECT earned_tier,trust_evaluation_digest FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&first.submission_id]).await.unwrap();
     assert_eq!(evidence.get::<_, Option<i32>>(0), Some(0));
     assert_eq!(evidence.get::<_, Option<String>>(1), None);
+    let base_status = runtime
+        .account_admission_status(&account, &principal, &policy)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!base_status.ready);
+    assert_eq!(base_status.effective_allowance, Some(10));
     assert!(
-        !runtime
-            .account_admission_status(&account, &principal, &policy)
-            .await
-            .unwrap()
-            .unwrap()
-            .ready
+        base_status.growth.is_none(),
+        "external growth has no tiered progress view"
     );
     // Writer fails closed for wrong tenant and future timestamps, without touching rows.
     for (scope, offset) in [("other-tenant", 0_i64), (tenant.as_str(), 3600)] {
@@ -350,13 +353,16 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
                 .decision,
             AdmissionDecision::Exhausted
         );
-        assert!(
-            !runtime
-                .account_admission_status(&account, &principal, &policy)
-                .await
-                .unwrap()
-                .unwrap()
-                .ready
+        let status = runtime
+            .account_admission_status(&account, &principal, &policy)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!status.ready);
+        assert_eq!(
+            status.effective_allowance,
+            Some(10),
+            "{version} {mode} {offset}"
         );
     }
     assert!(
@@ -390,13 +396,24 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
         tx.commit().await.unwrap();
     }
     admin.execute("UPDATE trace_account_trust_evaluations SET recorded_at=$3 WHERE tenant_id=$1 AND evaluation_id IN ($2,$4)",&[&tenant,&low,&as_of,&high]).await.unwrap();
-    assert!(
-        runtime
-            .account_admission_status(&account, &principal, &policy)
-            .await
-            .unwrap()
-            .unwrap()
-            .ready
+    let raised_status = runtime
+        .account_admission_status(&account, &principal, &policy)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(raised_status.ready);
+    assert_eq!(
+        raised_status.effective_allowance,
+        Some(30),
+        "validated ceiling, not raw evaluation's 99"
+    );
+    let unchanged_spend: i64 = admin.query_one(
+        "SELECT cost_used FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2",
+        &[&tenant, &account_id],
+    ).await.unwrap().get(0);
+    assert_eq!(
+        unchanged_spend, 10,
+        "reading the raised allowance never resets spent budget"
     );
     // A repeatable-read batch cannot publish an evaluation over a changed identity.
     let tx = evaluator
@@ -422,15 +439,16 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
     admin.execute("UPDATE trace_account_principals SET unlinked_at=unlinked_at WHERE tenant_id=$1 AND account_id=$2", &[&tenant,&account_id]).await.unwrap();
     assert!(tx.query_one("SELECT trace_record_external_account_trust_evaluation($1,$2,$3,'growth-fixture','applied',transaction_timestamp(),2,30,$4,$5)", &[&tenant,&Uuid::new_v4(),&account_id,&digest,&old_generation]).await.is_err());
     tx.rollback().await.unwrap();
+    let invalidated_status = runtime
+        .account_admission_status(&account, &principal, &policy)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
-        !runtime
-            .account_admission_status(&account, &principal, &policy)
-            .await
-            .unwrap()
-            .unwrap()
-            .ready,
+        !invalidated_status.ready,
         "identity mutation invalidates fresh applied evidence"
     );
+    assert_eq!(invalidated_status.effective_allowance, Some(10));
     let tx = repeatable_read(&mut evaluator).await;
     tx.query_one(
         "SELECT set_config('trace_commons.trace_tenant_id',$1,true)",
@@ -585,13 +603,16 @@ async fn external_evaluation_scope_freshness_clamps_and_spend() {
             .authority,
         Some("invited")
     );
-    assert!(
-        runtime
-            .account_admission_status(&account, &principal, &policy)
-            .await
-            .unwrap()
-            .unwrap()
-            .ready
+    let invited_status = runtime
+        .account_admission_status(&account, &principal, &policy)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(invited_status.ready);
+    assert_eq!(invited_status.authority, "invited");
+    assert_eq!(
+        invited_status.effective_allowance, None,
+        "invited authority keeps its separate bypass"
     );
     let evidence=admin.query_one("SELECT earned_tier,trust_evaluation_digest,last_charged FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2", &[&tenant,&invited.submission_id]).await.unwrap();
     assert_eq!(evidence.get::<_, Option<i32>>(0), None);

@@ -17,20 +17,26 @@ use anyhow::{Context, Result, bail};
 use super::settings::DaemonSettings;
 use crate::config::ConfigStore;
 
-const UNIT_FILE_NAME: &str = "trace-commons-contributor.service";
+const UNIT_FILE_NAME: &str = crate::channel::SYSTEMD_UNIT_NAME;
 
 /// The systemd user unit text.
 pub fn systemd_unit_text(exe: &str, config_dir: &str) -> String {
+    let env = crate::channel::STATE_DIR_ENV;
+    let channel = if crate::channel::near_ai_staging() {
+        " (staging)"
+    } else {
+        ""
+    };
     format!(
         "[Unit]\n\
-         Description=Trace Commons contributor background uploader\n\
+         Description=Trace Commons contributor background uploader{channel}\n\
          Documentation=https://github.com/zmanian/trace-commons-server\n\
          After=network-online.target\n\
          \n\
          [Service]\n\
          Type=simple\n\
          ExecStart={exe} daemon run\n\
-         Environment=TRACE_COMMONS_CONTRIBUTOR_DIR={config_dir}\n\
+         Environment={env}={config_dir}\n\
          Restart=on-failure\n\
          RestartSec=30\n\
          \n\
@@ -142,9 +148,30 @@ mod tests {
             "/home/z/.config/trace-commons",
         );
         assert!(unit.contains("ExecStart=/usr/local/bin/trace-commons-contributor daemon run"));
-        assert!(unit.contains("TRACE_COMMONS_CONTRIBUTOR_DIR=/home/z/.config/trace-commons"));
+        assert!(unit.contains(&format!(
+            "{}=/home/z/.config/trace-commons",
+            crate::channel::STATE_DIR_ENV
+        )));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    /// A staging daemon gets its own unit, so it runs beside a production
+    /// one and installing either never overwrites the other.
+    #[test]
+    fn each_channel_installs_its_own_unit() {
+        let unit = systemd_unit_text("/x", "/y");
+        if crate::channel::near_ai_staging() {
+            assert_eq!(UNIT_FILE_NAME, "trace-commons-contributor-staging.service");
+            assert!(
+                unit.contains(
+                    "Description=Trace Commons contributor background uploader (staging)\n"
+                )
+            );
+        } else {
+            assert_eq!(UNIT_FILE_NAME, "trace-commons-contributor.service");
+            assert!(unit.contains("Description=Trace Commons contributor background uploader\n"));
+        }
     }
 
     #[test]

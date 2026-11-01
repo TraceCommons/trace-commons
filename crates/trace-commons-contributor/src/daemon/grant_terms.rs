@@ -29,6 +29,11 @@
 //! - **Does not void:** scopes narrowing, attested bodies turning off, a
 //!   receipt endpoint removed, a witness measurement retired. Each means fewer
 //!   parties or less content, which the grant already covered.
+//! - **Carried, not voided:** scopes the contributor chooses themselves on
+//!   the data-use screen (`set_consent_scopes`). That choice is consent to
+//!   the new use, so every standing grant adopts it before the config is
+//!   written (`ProjectPolicy::adopt_chosen_scopes`; product owner,
+//!   2026-10-29). Scopes reaching the config any other way still void.
 //!
 //! The NEAR AI API key is deliberately absent, as it is from
 //! `input_fingerprint`: rotating a credential changes nothing about what

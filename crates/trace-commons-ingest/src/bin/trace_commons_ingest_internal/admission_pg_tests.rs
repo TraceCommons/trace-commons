@@ -2356,6 +2356,185 @@ async fn error_label(response: axum::response::Response) -> (StatusCode, serde_j
     )
 }
 
+/// The per-account hourly submission ceiling bounds an account whatever its
+/// admission authority -- bounded, attested or invited -- and runs before
+/// admission reserves: an upload it refuses leaves no admission row and
+/// charges nothing. It does not change the account budget either: an
+/// attested upload under the ceiling still debits nothing.
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn the_hourly_ceiling_bounds_every_authority_and_charges_nothing() {
+    let db = admission_pg_admin().await;
+    let token = "admission-fixture-token";
+    let (tenant, _, _) = provision_synthetic_near_account(&db, &principal_for(token)).await;
+    let (_temp, mut state, _) = anchor_state(db.clone(), &[(tenant.as_str(), token)]);
+    let uploads = AttestedUploads::new();
+    {
+        let state = Arc::make_mut(&mut state);
+        state.require_db_mirror_writes = true;
+        state.accept_medium_risk_submissions = true;
+        state.admission = Some(admission::AdmissionConfig {
+            limits: AdmissionLimits {
+                window_attempts: 1,
+                account_cost_limit: 100,
+                global_cost_limit: 1000,
+                processing_cost_bound: 10,
+                lease_seconds: 60,
+                challenge_ttl_seconds: 60,
+            },
+            providers: uploads.trust.clone(),
+        });
+        state.account_admission = Some(admission::AccountAdmissionConfig {
+            policy: trace_commons_server::account_trust::parse_bounded_policy(
+                r#"{"version":"hourly-ceiling","processing_cost_bound":10,"bounded_allowance":100,"period":{"mode":"lifetime"},"growth_rule":"none"}"#,
+                &["hourly-ceiling"],
+            )
+            .unwrap(),
+            lease_seconds: 60,
+            providers: Some(uploads.trust.clone()),
+        });
+        state.submission_quota.max_per_account_per_hour = 2;
+    }
+    let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let account: Uuid = client
+        .query_one(
+            "SELECT account_id FROM trace_accounts WHERE tenant_id=$1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let spent = || async {
+        client
+            .query_one(
+                "SELECT COALESCE(sum(cost_used),0)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+    };
+    let admission_rows = |submission: Uuid| {
+        let client = &client;
+        let tenant = &tenant;
+        async move {
+            client
+                .query_one(
+                    "SELECT (SELECT COUNT(*) FROM trace_account_admission_submissions WHERE tenant_id=$1 AND submission_id=$2)
+                          + (SELECT COUNT(*) FROM trace_submissions WHERE tenant_id=$1 AND submission_id=$2)",
+                    &[tenant, &submission],
+                )
+                .await
+                .unwrap()
+                .get::<_, i64>(0)
+        }
+    };
+    let refused_by_the_ceiling = |response: axum::response::Response| async move {
+        let retry_after = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok());
+        let (status, label) = error_label(response).await;
+        assert_eq!(
+            (status, label),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                serde_json::json!(SUBMIT_RATE_LIMITED_LABEL)
+            )
+        );
+        let retry_after = retry_after.expect("the refusal carries Retry-After");
+        assert!((1..=3600).contains(&retry_after), "{retry_after}");
+    };
+    let unattested = || async {
+        let mut envelope = sample_envelope().await;
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.source_session = Some(fresh_source());
+        envelope
+    };
+
+    // A bounded upload is charged as before.
+    require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&unattested().await).unwrap(),
+            HeaderMap::new(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(spent().await, 10);
+
+    // An attested upload under the ceiling debits nothing, as before.
+    let (attested, attested_headers) = uploads.upload(&mut state, Some(fresh_source())).await;
+    let attested_receipt = require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            attested.clone(),
+            attested_headers.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(spent().await, 10, "an attested upload debits nothing");
+
+    // The third upload of the hour is refused, attested or not, before
+    // admission reserves: no admission row, no submission row, no charge.
+    let (over, over_headers) = uploads.upload(&mut state, Some(fresh_source())).await;
+    let over_submission = serde_json::from_slice::<TraceContributionEnvelope>(&over)
+        .unwrap()
+        .submission_id;
+    refused_by_the_ceiling(post(state.clone(), "/v1/traces", over, over_headers).await).await;
+    assert_eq!(admission_rows(over_submission).await, 0);
+    assert_eq!(
+        spent().await,
+        10,
+        "a refusal by the ceiling charges nothing"
+    );
+
+    // A retry of a recorded submission is not counted against itself.
+    assert_eq!(
+        require_ok(post(state.clone(), "/v1/traces", attested, attested_headers).await).await,
+        attested_receipt,
+        "a completed retry is still a receipt read at the ceiling"
+    );
+
+    // An invited account is bounded by the same ceiling.
+    let invite_hash = format!("sha256:{}", hash_hex(Uuid::new_v4().as_bytes()));
+    client.execute("INSERT INTO trace_account_trust(tenant_id,account_id,authority,trust_version) VALUES($1,$2,'invited',1) ON CONFLICT(tenant_id,account_id) DO UPDATE SET authority='invited',trust_version=1", &[&tenant,&account]).await.unwrap();
+    client.execute("INSERT INTO trace_account_invite_grants(tenant_id,account_id,invite_subject_hash,trust_version) VALUES($1,$2,$3,1)", &[&tenant,&account,&invite_hash]).await.unwrap();
+    let invited = unattested().await;
+    refused_by_the_ceiling(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&invited).unwrap(),
+            HeaderMap::new(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(admission_rows(invited.submission_id).await, 0);
+
+    // A ceiling of zero bounds nothing.
+    Arc::make_mut(&mut state)
+        .submission_quota
+        .max_per_account_per_hour = 0;
+    require_ok(
+        post(
+            state.clone(),
+            "/v1/traces",
+            serde_json::to_vec(&invited).unwrap(),
+            HeaderMap::new(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(spent().await, 10, "an invited upload debits nothing");
+}
+
 /// Owner decision of 2026-10-11: an upload whose NEAR AI admission evidence
 /// verifies is admitted without debiting the bounded account allowance, and
 /// one with no `source_session` takes the V59 evidence ledger it took before
@@ -2886,6 +3065,28 @@ async fn contribution_status_reports_the_accounts_own_growth() {
             .unwrap();
         (code, bytes)
     };
+    let upload_allowance = |state: Arc<AppState>, who: &'static str| async move {
+        let mut request = axum::http::Request::builder()
+            .uri("/v1/account/upload-allowance")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .headers_mut()
+            .extend(account_session_headers(&state, who).await);
+        let response = app(state).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+    };
     let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
     let account_id: Uuid = client
         .query_one(
@@ -2940,6 +3141,12 @@ async fn contribution_status_reports_the_accounts_own_growth() {
         serde_json::json!({"units": 2, "active_weeks": 1, "age_seconds": 0, "attested_units": 0})
     );
     assert!(body["next_tier"]["current"].is_null(), "{body}");
+
+    assert_eq!(
+        upload_allowance(state.clone(), token).await,
+        serde_json::json!({"allowance":null}),
+        "no client daily limit is advertised"
+    );
 
     // A fresh applied evaluation at tier 1, and 10 already spent this period.
     client
@@ -3027,6 +3234,20 @@ async fn contribution_status_reports_the_accounts_own_growth() {
     let text = std::str::from_utf8(&bytes).unwrap();
     assert!(!text.contains(&tenant) && !text.contains(&account_id.to_string()));
 
+    assert_eq!(
+        upload_allowance(state.clone(), token).await,
+        serde_json::json!({"allowance":null}),
+        "earned trust grows the server budget; no client daily limit is advertised"
+    );
+    let unchanged_spend: i64 = client.query_one(
+        "SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2",
+        &[&tenant, &account_id],
+    ).await.unwrap().get(0);
+    assert_eq!(
+        unchanged_spend, 10,
+        "reading the allowance does not erase server spend"
+    );
+
     // Stale: older than evaluation_max_age_seconds reads as tier 0, and the
     // 10 already spent leaves nothing at the base allowance.
     client
@@ -3051,6 +3272,81 @@ async fn contribution_status_reports_the_accounts_own_growth() {
     assert!(body["allowance_tier_changed_at"].is_null());
     assert_eq!(body["next_tier"]["tier"], 1);
     assert!(body["next_tier"]["current"].is_null());
+
+    assert_eq!(
+        upload_allowance(state.clone(), token).await,
+        serde_json::json!({"allowance":null}),
+        "stale earned trust advertises no client daily limit either"
+    );
+
+    // With both admission ledgers off, the independent trust pool neither
+    // reserves nor debits, and no client daily limit is advertised.
+    // Optional explicit isolated worker login exercises the operator bootstrap's
+    // real status-read permissions while auth/source storage stays on admin.
+    let independent_database =
+        if let Ok(url) = std::env::var("TRACE_COMMONS_CLIENT_UPLOAD_TRUST_TEST_RUNTIME_URL") {
+            let source_url = std::env::var("TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL").unwrap();
+            let source = DatabaseConfig {
+                url: SecretString::from(source_url),
+                pool_size: 4,
+                ssl_mode: trace_commons_server::config::SslMode::Prefer,
+                login_resolver_url: None,
+                gate_driver_url: None,
+                pii_backstop_driver_url: None,
+                invite_registry_url: None,
+            };
+            let config = account_trust_growth_routes::trust_database_config_from_values(
+                Some(&source),
+                Some(&url),
+                true,
+                false,
+                false,
+                false,
+                true,
+            )
+            .unwrap()
+            .unwrap();
+            Some(Arc::new(PgBackend::new(&config).await.unwrap()) as Arc<dyn Database>)
+        } else {
+            None
+        };
+    let mut independent = state.clone();
+    let independent_mut = Arc::make_mut(&mut independent);
+    independent_mut.client_upload_trust_database = independent_database;
+    independent_mut.admission = None;
+    independent_mut.account_admission = None;
+    client.execute(
+        "UPDATE trace_account_trust_evaluations SET as_of=clock_timestamp() WHERE tenant_id=$1 AND account_id=$2",
+        &[&tenant, &account_id],
+    ).await.unwrap();
+    assert_eq!(
+        upload_allowance(independent.clone(), token).await,
+        serde_json::json!({"allowance":null}),
+        "no client daily limit with both admission ledgers off"
+    );
+    let (code, bytes) = status(independent.clone(), token).await;
+    assert_eq!(code, StatusCode::OK);
+    let legacy_status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(legacy_status["authority"], "legacy_evidence");
+    assert!(
+        legacy_status["policy_version"].is_null(),
+        "client trust does not enable account admission"
+    );
+    assert!(independent.admission.is_none() && independent.account_admission.is_none());
+    let unchanged_spend: i64 = client.query_one(
+        "SELECT sum(cost_used)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2",
+        &[&tenant, &account_id],
+    ).await.unwrap().get(0);
+    assert_eq!(unchanged_spend, 10);
+    client.execute(
+        "UPDATE trace_account_trust_evaluations SET as_of=as_of - interval '2 hours' WHERE tenant_id=$1 AND account_id=$2",
+        &[&tenant, &account_id],
+    ).await.unwrap();
+    assert_eq!(
+        upload_allowance(independent, token).await,
+        serde_json::json!({"allowance":null}),
+        "a stale evaluation advertises no client daily limit either"
+    );
 
     // A legacy-namespace session is still refused before any read.
     let (code, bytes) = status(state.clone(), legacy_token).await;

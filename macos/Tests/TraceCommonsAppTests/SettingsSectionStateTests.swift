@@ -1,4 +1,5 @@
 import Foundation
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -12,17 +13,18 @@ import XCTest
 /// main actor while the write is parked, and a wait under the lock would
 /// deadlock that read.
 private final class GatedConsentDaemon: DaemonCalling {
-    private let lock = NSLock()
-    private var recorded: [(method: String, params: String)] = []
+    private struct State: Sendable {
+        var recorded: [(method: String, params: String)] = []
+        var confirmed: [String]
+        var refuse = false
+    }
+    private let state: OSAllocatedUnfairLock<State>
     private let gate = DispatchSemaphore(value: 0)
-    private var confirmed: [String]
-    private var refuse = false
 
-    init(confirmed: [String]) { self.confirmed = confirmed }
+    init(confirmed: [String]) { state = OSAllocatedUnfairLock(initialState: State(confirmed: confirmed)) }
 
     var consentWrites: [[String]] {
-        lock.lock()
-        defer { lock.unlock() }
+        let recorded = state.withLock { $0.recorded }
         return recorded.filter { $0.method == "set_consent_scopes" }.map { call in
             let object = (try? JSONSerialization.jsonObject(with: Data(call.params.utf8))) as? [String: Any]
             return ((object?["scopes"] as? [String]) ?? []).sorted()
@@ -32,28 +34,26 @@ private final class GatedConsentDaemon: DaemonCalling {
     /// Lets the parked write answer: with `scopes` as the daemon's list, or
     /// refused.
     func release(confirming scopes: [String]? = nil, refused: Bool = false) {
-        lock.lock()
-        if let scopes { confirmed = scopes }
-        refuse = refused
-        lock.unlock()
+        state.withLock {
+            if let scopes { $0.confirmed = scopes }
+            $0.refuse = refused
+        }
         gate.signal()
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        recorded.append((method: method, params: paramsJSON))
-        lock.unlock()
+        state.withLock { $0.recorded.append((method: method, params: paramsJSON)) }
         guard method == "set_consent_scopes" else {
             return #"{"id":1,"error":{"code":"unavailable","message":"unexpected-test-method"}}"#
         }
         gate.wait()
-        lock.lock()
-        defer { lock.unlock() }
-        if refuse {
-            return #"{"id":1,"error":{"code":"refused","message":"test-refusal"}}"#
+        return state.withLock {
+            if $0.refuse {
+                return #"{"id":1,"error":{"code":"refused","message":"test-refusal"}}"#
+            }
+            let list = $0.confirmed.map { "\"\($0)\"" }.joined(separator: ",")
+            return #"{"id":1,"result":{"consent_scopes":["# + list + "]}}"
         }
-        let list = confirmed.map { "\"\($0)\"" }.joined(separator: ",")
-        return #"{"id":1,"result":{"consent_scopes":["# + list + "]}}"
     }
 
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }

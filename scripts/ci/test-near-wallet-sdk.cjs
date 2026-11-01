@@ -48,7 +48,9 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === "/near-ai/near-wallet/assets/browser.js") {
     res.setHeader("Content-Type", "application/javascript");
-    res.end(fs.readFileSync(browser, "utf8"));
+    // The daemon fills in the channel's NEP-413 recipient before serving the
+    // page (near_wallet_page.rs); this fixture signs for production's.
+    res.end(fs.readFileSync(browser, "utf8").replace(/__NEAR_AI_WALLET_RECIPIENT__/g, "cloud.near.ai"));
     return;
   }
   if (url.pathname === "/near-ai/near-wallet/assets/fixture-wallet.js") {

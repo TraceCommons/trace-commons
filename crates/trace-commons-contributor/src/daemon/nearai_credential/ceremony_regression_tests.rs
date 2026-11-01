@@ -70,7 +70,7 @@ impl Fixture {
         install_backend(&store, backend.clone());
         let mut settings =
             DaemonSettings::load_with_cloud_credentials(&store).expect("load synthetic settings");
-        settings.max_uploads_per_day = 7;
+        settings.max_reuploads = 7;
         settings
             .save_for_test(&store)
             .expect("save synthetic preference");
@@ -229,7 +229,7 @@ fn the_current_waiting_attempt_publishes_both_credentials_once() {
     assert_eq!(
         DaemonSettings::load_with_cloud_credentials(&fixture.store)
             .expect("reload persisted preference")
-            .max_uploads_per_day,
+            .max_reuploads,
         7
     );
 }
@@ -303,7 +303,7 @@ fn a_late_mint_cannot_replace_a_new_waiting_attempts_credentials() {
 async fn an_unstorable_ceremony_refuses_before_opening_a_browser() {
     let fixture = Fixture::new();
     fixture.backend.fail_next_with_unentitled();
-    let error = begin(&fixture.store, "github").await.unwrap_err();
+    let error = begin(&fixture.store, "google").await.unwrap_err();
     assert_eq!(error.to_string(), "near_ai_credential_storage_unentitled");
     assert_eq!(
         fixture.browser_urls_served(),

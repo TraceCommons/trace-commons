@@ -170,7 +170,7 @@ export TRACE_COMMONS_VECTOR_INDEX_DIM=1024
 # post-first-1000-pilot-traces. Novelty is the active primary gate at launch.
 export TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=6246774  # A2.7 (2026-05-15): calibrated from Qwen 3.6 27B per-trace scores; 0.5x headroom on geomean(Youden's-J=13.03, p10_novel=11.98). See docs/superpowers/reports/2026-05-15-a27-calibration-result.json.
 export TRACE_COMMONS_GATE_TAIL_FRACTION_FLOOR_MICROS=0   # A2.5: calibrate post-first-1000-traces
-export TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000    # 0.5 cosine novelty; unchanged
+export TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=100000    # 0.10 cosine novelty; provisional BGE holding value
 export TRACE_COMMONS_GATE_POLICY_VERSION=pilot-v1
 export TRACE_COMMONS_GATE_TOP_K=5
 
@@ -202,149 +202,14 @@ provisioning SQL (recommended: a dedicated LOGIN role with membership in
 permissive policy is what authorizes the cross-tenant `code_hash -> tenant_id`
 read.
 
-The Slice 2 discoverable **passkey login** path reuses this **same** resolver
-role and pool for its `credential_id -> tenant_id` bootstrap (V32 extends the
-role with a `(tenant_id, credential_id)` grant on `trace_webauthn_credentials`
-plus its own permissive policy). No additional login role is needed — the same
-provisioning above covers it. If the resolver pool is unconfigured, passkey login
-fails closed (every assertion collapses to the uniform deny; no session minted),
-while passkey enrollment/management on the authenticated runtime pool are
-unaffected.
+The same resolver role and pool also serve the NEAR sign-in bootstrap below;
+no additional login role is needed.
 
-### WebAuthn relying party (contributor passkeys, Slice 2)
-
-Passkey enrollment and login require the WebAuthn relying-party identity. All
-**three** of these env vars are **required together**:
-
-```sh
-export TRACE_COMMONS_WEBAUTHN_RP_ID="tracecommons.ai"            # effective domain; cannot change without invalidating every passkey
-export TRACE_COMMONS_WEBAUTHN_RP_ORIGIN="https://app.tracecommons.ai"  # full origin URL
-export TRACE_COMMONS_WEBAUTHN_RP_NAME="TraceCommons"            # shown in authenticator prompts
-```
-
-- **All-or-nothing.** Setting only some of the three is a misconfiguration: the
-  passkey surface stays **disabled** (fail-closed), and the server emits a startup
-  `WARN` naming which of the three are set vs unset (names only, never values).
-  Setting **none** of them is the normal "passkeys disabled" state and is silent.
-- **Origin must match the browser.** `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` must be the
-  exact origin the browser sees (scheme + host + port). A mismatch makes every
-  ceremony fail verification at the authenticator. `RP_ID` must be a registrable
-  suffix of that origin's host.
-- **Several origins.** `TRACE_COMMONS_WEBAUTHN_RP_ORIGIN` may be a
-  comma-separated list, e.g. `https://tracecommons.ai,https://ingest.tracecommons.ai`.
-  The first entry is the primary origin; every entry is accepted. A single value
-  means what it always did. Every entry must be the `RP_ID` host or a subdomain
-  of it, or startup fails. Subdomains are never implied: list each origin.
-- The `webauthn-authenticator-rs` crate is a **DEV-dependency only** (it backs the
-  in-process soft-authenticator used by the passkey tests). It is **not** compiled
-  into or shipped with the production binaries; no production env var enables it.
-
-### Native passkey creation (Z2 S2)
-
-The native app creates a passkey, and with it an `unbound` account, through the
-unauthenticated `POST /v1/account/native/passkey/create/{start,finish}`. Because
-anyone can call it, and attestation is `none`, creation is capped by:
-
-```sh
-export TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING=5000   # the pilot's value; there is no default
-```
-
-- **Unset disables creation.** Every `create` request gets the uniform deny.
-  A value that is not a non-negative integer fails startup.
-- The cap is on passkey accounts in state `unbound` or `closed`, counted
-  across every tenant. It is checked at `create/start` and again inside the
-  `create/finish` transaction. A `closed` account (a bind refused because the
-  NEAR AI account already had one, see S3 below) keeps its slot until the
-  reaper deletes it, 30 days after the close, so creating and closing accounts
-  in a loop cannot get past the cap (V102; before V102 only `unbound` counted).
-  `bound` accounts never count.
-- When the count reaches the cap, ingest logs the label
-  `unbound_account_ceiling_reached` once (target `trace_commons::passkey`), and
-  again only after the count has dropped below and reached it a second time.
-  Alert on it.
-- Each client IP (as the per-IP rate limiter reads it) may make at most
-  `TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` successful
-  `create/finish` calls in a rolling 24 hours; the next gets the uniform deny.
-  Unset means **10**; `0` refuses every creation; a value that is not a
-  non-negative integer fails startup. The count is held in process, like the
-  per-minute limits, and holds only a salted hash of each IP: nothing about
-  the caller's address is written to the database. A restart clears it, and
-  with more than one ingest instance each keeps its own count.
-- Native passkey **sign-in** (`/v1/account/native/passkey/login/*`) is not
-  capped and needs no new setting; like the browser sign-in it needs the
-  login-resolver pool above.
-  Its `login/finish` answer adds an optional `passkey_label`, the
-  authenticating passkey's own label, read under the session's tenant by
-  account and credential id; it needs no grant beyond the `SELECT` on
-  `trace_webauthn_credentials` the login already uses, and is never logged.
-
-V98 grants `trace_ingest_runtime` `INSERT` on `trace_account_bindings`, and
-`EXECUTE` on `trace_unbound_passkey_account_count()`, a `SECURITY DEFINER`
-function owned by the new NOLOGIN role `trace_unbound_account_count_guard`.
-An ingest login that holds its grants some other way than through
-`trace_ingest_runtime` needs both, or every `create` is refused:
-
-```sql
-SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'INSERT'),
-       has_function_privilege('<ingest runtime login>', 'public.trace_unbound_passkey_account_count()', 'EXECUTE');
-```
-
-### Connect near.ai: binding a passkey account (Z2 S3)
-
-An unbound account attaches its NEAR AI identity through
-`POST /v1/account/near-ai/provision/bind/{start,finish}`, behind the account
-middleware with a native (`tcn1_`) session. It runs the NEAR AI login
-provisioning ceremony and needs exactly what that path needs (the provisioning
-switch, the admission gate, the NEAR account identity, the published issuer,
-and the login-resolver pool); there is no new setting. It uses the v2
-readiness, so no witness JSON is required.
-
-V100 grants `trace_ingest_runtime` `UPDATE (state, bound_at)` on
-`trace_account_bindings` and nothing else. An ingest login that holds its
-grants some other way needs it, or every bind fails and leaves the account
-`unbound`:
-
-```sql
-SELECT has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'state', 'UPDATE'),
-       has_column_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'bound_at', 'UPDATE');
-```
-
-When the NEAR AI account already belongs to another commons account, the bind
-is refused: the passkey account is closed (its sessions and passkey revoked)
-and the response carries the existing account's session. Nothing moves between
-the two accounts; folding the passkey into the existing account is not built.
-
-When the daemon's device key is already registered to another account (the
-machine ran NEAR AI or wallet provisioning for a different account first),
-bind finish answers `409 {"error":"device_key_registered_elsewhere"}` rather
-than the uniform deny, and writes an `account_binding_failed` audit row with
-that stage. Nothing else is written: the passkey account stays `unbound`, and
-no fresh device key is minted. The label names no tenant or account.
-
-For an account that is already `bound` (a second Mac signed in with the same
-passkey), the same two routes enroll that Mac's device key into the account
-instead of refusing. Finish attaches the device only when the NEAR AI login's
-anchor is the session's own account's, checked inside the one tenant-scoped
-transaction that writes the device (the share lock on the binding row uses
-V100's column `UPDATE`; no new grant or migration). A login that is not the
-account's -- whether it owns another account or none -- is answered
-`409 {"error":"near_ai_account_mismatch"}` with an `account_binding_failed`
-row (stage `near_ai_account_mismatch`) and nothing else written. A success
-writes `account_device_enrolled` (`{"identity":"near_ai_login"}`); start writes
-`account_device_enrol_started`. There is no cap on how many devices one
-account can enroll this way.
-
-### Browser passkey step-up page (Z2 S7)
-
-`GET /account/step-up` is where the native app sends a person to add or remove
-a passkey or change the payout, which a weak native session cannot do. It runs
-the browser passkey sign-in on the ingest origin, so that origin must be on the
-origin list above, e.g.
-`TRACE_COMMONS_WEBAUTHN_RP_ORIGIN=https://tracecommons.ai,https://ingest.tracecommons.ai`.
-Without it the page loads but every sign-in is refused. There is no other
-setting; with the relying party or the account database unset, the page is a
-scriptless 503. The URL contract, headers and log labels are in
-[`native-step-up-page.md`](./native-step-up-page.md).
+Passkeys are removed (migration V144, see "V144: passkey removal" below). The
+`TRACE_COMMONS_WEBAUTHN_RP_*`, `TRACE_COMMONS_UNBOUND_PASSKEY_ACCOUNT_CEILING`,
+`TRACE_COMMONS_NATIVE_PASSKEY_CREATIONS_PER_IP_PER_DAY` and
+`TRACE_COMMONS_UNBOUND_REAPER_*` variables are accepted and ignored; see
+[`env-reference.md`](env-reference.md#removed-variables-passkeys).
 
 ### Login-with-NEAR (contributor NEAR sign-in, Slice 3a)
 
@@ -376,7 +241,7 @@ export TRACE_COMMONS_NEAR_LOGIN_RECIPIENT="app.tracecommons.ai"    # NEP-413 rec
   `public_key -> tenant` bootstrap runs on the `trace_login_resolver` pool
   (`TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL`, above). If that pool is
   unconfigured, NEAR login fails closed (uniform deny, no session) — same as
-  redeem and passkey login. See `docs/operator/login-resolver-role.md`.
+  redeem. See `docs/operator/login-resolver-role.md`.
 - **Encoding deps.** NEP-413 message encoding uses `borsh` (canonical struct
   serialization) and `bs58` (the `ed25519:<base58>` public-key form); both are
   compiled into the production binary and need no env vars.
@@ -459,9 +324,9 @@ Expect `private_person` and `private_email` spans. An empty `data` array or a
 call.
 
 At least one of the three gate floors must be positive — the binary
-refuses to start if all are zero. Under the A2.5 pilot-launch defaults
-the novelty floor (`TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000`,
-cosine novelty 0.5) is the floor satisfying that invariant; the
+refuses to start if all are zero. Under the restored BGE holding defaults
+the novelty floor (`TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=100000`,
+cosine novelty 0.10) is the floor satisfying that invariant; the
 perplexity and tail-fraction floors ship disabled. The tail-fraction
 floor is calibrated against the pilot distribution after ~1000 traces;
 the perplexity floor stays at zero until Phase A.5 work lands a
@@ -771,7 +636,6 @@ exact host that set them:
 | Cookie | Was | Now |
 |---|---|---|
 | account session | `tc_account_session` | `__Host-tc_account_session` |
-| passkey ceremony | `tc_passkey_ceremony` | `__Host-tc_passkey_ceremony` |
 | NEAR ceremony | `tc_near_ceremony` | `__Host-tc_near_ceremony` |
 | sign-in link ceremony | `tc_login_ceremony` (`Path=/account/login`) | `__Host-tc_login_ceremony` (`Path=/`) |
 
@@ -788,7 +652,7 @@ Server-side, the old sessions stay valid rows until they expire (seven days)
 or are revoked; only the browser's handle to them is dropped.
 
 The old cookie is also cleaned out of browsers. Every response that sets the
-new session cookie (sign-in by link, passkey or NEAR, and session rotation),
+new session cookie (sign-in by link or NEAR, and session rotation),
 and a browser logout, carries a second `Set-Cookie` that expires
 `tc_account_session` (`Max-Age=0`, `Path=/`, same attributes). The in-flight
 ceremony cookies need no cleanup: they live three to ten minutes, and a
@@ -804,18 +668,48 @@ seven days. A contributor who wants it gone now should sign in again and call
 `POST /v1/account/sessions/revoke-all`, which revokes every session on the
 account, the old one and the current one alike, and then sign in once more.
 
-### V97: account bindings
+### V144: passkey removal
 
-V97 (`trace_account_bindings`, native passkey identity) grants
-`trace_ingest_runtime` `SELECT` on the new table and nothing else. Session
-validation joins it on every authenticated `/v1/account/*` request, so an
-ingest login that holds its grants some other way than through
-`trace_ingest_runtime` fails those requests with a 500 until it can read the
-table. Check before deploying:
+V144 removes passkeys. It is forward-only and runs in one transaction:
 
-```sql
-SELECT has_table_privilege('<ingest runtime login>', 'public.trace_account_bindings', 'SELECT');
-```
+- Every passkey-origin account in state `unbound` or `closed` is closed and
+  its sessions revoked, then deleted; its sessions, credentials and login
+  links go with it. An account that a non-cascading row keeps from being
+  deleted stays closed with its sessions revoked.
+- `bound` passkey accounts are kept and sign in with their NEAR AI login.
+- The functions `trace_unbound_passkey_account_count()` and
+  `trace_reap_unbound_accounts(...)` and the tables `trace_account_bindings`
+  and `trace_webauthn_credentials` are dropped.
+- Hash-only audit rows (`trace_account_audit`, `trace_audit_events`) are kept.
+
+Stop every ingest and issuer instance on an older build before a binary
+carrying V144 starts; do not roll it out instance by instance. Each binary
+runs migrations at boot, and two things go wrong while an older instance is
+live:
+
+- its session writes hold `trace_sessions` row locks, and a deadlock or lock
+  wait against V144's session updates or cascaded deletes rolls back all of
+  V144, so the new binary fails to boot;
+- once V144 commits, the older instance's session check still joins
+  `trace_account_bindings`, which no longer exists, so every authenticated
+  account request it serves fails until it is restarted.
+
+The NOLOGIN roles `trace_unbound_account_count_guard`,
+`trace_unbound_account_reaper_guard` and `trace_unbound_account_reaper` are
+left in place with no privileges, because roles are cluster-global and
+dropping one can fail while another database in the cluster still holds
+grants to it. Once every database on the cluster is past V144 an operator may
+`DROP ROLE` them by hand, first revoking any membership the deployer granted
+(the reaper worker role was granted to a login).
+
+The removed routes now answer 404, and the unbound-account gate and reaper no
+longer run. The strong-authenticator gate counts an account's NEAR identities
+and, if it signs in with NEAR AI, that login; only a NEAR wallet browser
+session is strong. So an account that signs in with NEAR AI needs a NEAR
+wallet session to add or remove a NEAR key, set the NEAR payout target or
+confirm an account merge. The NEAR AI payout rail
+(`/v1/account/payout-links/...`) proves NEAR AI ownership in the request
+itself and is not behind this gate.
 
 ### V105 and V106: review, invalidation, and export tables
 
@@ -1490,4 +1384,19 @@ So `unknown` on a deployed binary points at the build step, not at the host.
 - Wire scheduled smoke testing.
 - After ~1000 real pilot traces, re-calibrate floors and flip
   `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA` from `0` to the
-  configured live value.
+  configured live value. The gate's scoring award settles like the
+  reviewed utility credit types, so a non-zero value is value the next
+  live settlement run batches and pays. A delta above `0` refuses to start
+  without two more settings:
+  `TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE=true`, and
+  `TRACE_COMMONS_NOVELTY_UTILITY_SETTLE_FROM` set to the RFC 3339 time the
+  delta goes live. Only awards written at or after that time settle;
+  awards written before it never do. A submission is paid at most once: a
+  $0 award or a pre-cut-over award does not count, so a trace scored during
+  calibration still earns one paid award after the cut-over, and a second
+  paid award is never written. Do not move the cut-over earlier once awards
+  have been written after the current one, or an older award can start to
+  count beside the paid one. The production gates are `enclave_local_gpu`,
+  `dstack` and `enclave_near_ai` (attested NEAR AI TEE scoring); the test
+  gates are withheld as `non_production_gate`. Run the settlement as a dry
+  run first.

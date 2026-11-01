@@ -17,15 +17,16 @@
 //!
 //! What stays: receipts, history and the audit log (the local record of what
 //! this device did -- the audit log also records this call), settings, folder
-//! rules, the queue, the NEAR AI notice marker, and the remembered passkeys,
-//! which are not an enrollment.
+//! rules, the queue, and the NEAR AI notice marker, which are not an
+//! enrollment.
 //!
 //! What also goes: the in-app suggestion ledger, the verdict news with its
 //! high-water marks, the idle-session batching set, and the attention log
 //! with the last-notified stamp (`DaemonState::clear_nudges`), so a next
 //! account never inherits this one's "Not now"s, stamps, news, announced
 //! sessions or notification budget. The notification switches are settings
-//! about this Mac and stay. The marks return to
+//! about this Mac and stay. Subscription-usage permissions are turned off,
+//! and their held readings are discarded. The marks return to
 //! unseeded, so the history cache this Mac keeps is seeded silently on the
 //! next account's first poll rather than replayed as its news.
 //!
@@ -171,7 +172,7 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
         shared.store.remove_enrollment_files()
     })
     .map_err(|_| (ERR_UNAVAILABLE, ERR_UNENROLL_FAILED))?;
-    clear_insights_counter(shared)?;
+    let insights_cleanup = clear_insights_counter(shared);
     for id in &approved {
         queue.revoke_approval(*id, super::preview::REASON_INPUTS_CHANGED);
     }
@@ -206,9 +207,10 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
     // account's `mission_fit` starts unknown. A leaf lock, taken alone.
     super::mission_matching::clear_catalogue(&shared.mission_catalogue);
     shared.account_admission.forget_enrollment();
-    if let Ok(mut ceremonies) = shared.native_identity.lock() {
-        ceremonies.clear();
+    if insights_cleanup.is_err() {
+        shared.publish(EVENT_QUEUE_CHANGED, json!({}));
     }
+    insights_cleanup?;
     Ok(Unenrolled {
         removed: true,
         approvals_returned: approved.len(),
@@ -224,19 +226,24 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
 fn clear_insights_counter(shared: &DaemonShared) -> Result<(), (&'static str, &'static str)> {
     // The setting goes off first, so the next watcher tick does not rebuild
     // under a new key the store this clears.
-    turn_off_insights_counter_pass(shared);
-    shared
+    let permission_revocation = turn_off_insights_readers(shared);
+    // Claude is available without an opt-in. Explicitly forget all readings
+    // and pending generations rather than relying on a preference change.
+    super::subscription_usage::forget_readings(shared);
+    super::subscription_usage::settings_changed(shared);
+    let counter_cleanup = shared
         .insights_counter
         .clear()
-        .map_err(|_| (ERR_UNAVAILABLE, ERR_UNENROLL_FAILED))
+        .map_err(|_| (ERR_UNAVAILABLE, ERR_UNENROLL_FAILED));
+    permission_revocation.and(counter_cleanup)
 }
 
 /// Off in memory always; on disk when the settings file can be read, since
 /// a file that cannot be read is not written over, as in `set_settings`. A
-/// setting that could not be persisted does not fail the unenroll: the
-/// removal matters more than the switch. Commit lock, then settings, in the
-/// order `set_settings` takes them.
-fn turn_off_insights_counter_pass(shared: &DaemonShared) {
+/// revocation that cannot be persisted is reported after enrollment cleanup,
+/// so the user can retry without restoring the old enrollment. Commit lock,
+/// then settings, in the order `set_settings` takes them.
+fn turn_off_insights_readers(shared: &DaemonShared) -> Result<(), (&'static str, &'static str)> {
     let persisted = (|| -> anyhow::Result<()> {
         let locks = super::nearai_credential::session::coordination(shared.store.dir())?;
         let _commit = locks
@@ -245,22 +252,30 @@ fn turn_off_insights_counter_pass(shared: &DaemonShared) {
             .map_err(|_| anyhow::anyhow!("settings commit lock"))?;
         let mut settings = shared.settings.lock().expect("settings lock");
         settings.insights_counter_pass = false;
+        settings.subscription_usage_codex_enabled = false;
+        settings.subscription_usage_claude_enabled = false;
         let mut persisted = super::settings::DaemonSettings::load(&shared.store)?;
-        if persisted.insights_counter_pass {
+        if persisted.insights_counter_pass
+            || persisted.subscription_usage_codex_enabled
+            || persisted.subscription_usage_claude_enabled
+        {
             persisted.insights_counter_pass = false;
+            persisted.subscription_usage_codex_enabled = false;
+            persisted.subscription_usage_claude_enabled = false;
             persisted.save_locked(&shared.store)?;
         }
         Ok(())
     })();
     if persisted.is_err() {
-        shared
-            .settings
-            .lock()
-            .expect("settings lock")
-            .insights_counter_pass = false;
+        let mut settings = shared.settings.lock().expect("settings lock");
+        settings.insights_counter_pass = false;
+        settings.subscription_usage_codex_enabled = false;
+        settings.subscription_usage_claude_enabled = false;
         // A fixed label only.
-        tracing::warn!("insights counter pass could not be turned off on disk");
+        tracing::warn!("insights readers could not be turned off on disk");
+        return Err((ERR_UNAVAILABLE, ERR_UNENROLL_FAILED));
     }
+    Ok(())
 }
 
 /// The socket entry point. Async-only: it waits on the pass lock, which a

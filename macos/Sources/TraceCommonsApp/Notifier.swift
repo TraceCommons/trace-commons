@@ -18,12 +18,13 @@ import UserNotifications
 /// these itself, precisely so it -- not the daemon -- controls that action
 /// list. The daemon's `digest_due` and `reengage_due` events are the
 /// triggers; every word posted is the daemon's or the core's.
+@MainActor
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = Notifier()
 
-    static let categoryIdentifier = "trace-commons.digest"
-    static let reviewAction = "trace-commons.review"
-    static let notNowAction = "trace-commons.not-now"
+    nonisolated static let categoryIdentifier = "trace-commons.digest"
+    nonisolated static let reviewAction = "trace-commons.review"
+    nonisolated static let notNowAction = "trace-commons.not-now"
 
     /// Set by the app so `Review` can open the window.
     var onReview: (() -> Void)?
@@ -32,7 +33,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     var onNudge: ((NudgeSurface.Intent) -> Void)?
 
     /// The opt-in events this app can render.
-    static let renderedEvents = ["reengage_due"]
+    nonisolated static let renderedEvents = ["reengage_due"]
 
     /// The opt-in events to declare: `renderedEvents` only while a
     /// notification can actually be posted, and none otherwise. The daemon
@@ -41,7 +42,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// `reengage_due`, so a declaration made while the system refuses
     /// notifications (denied, never asked, or no notification centre)
     /// would spend that budget on notifications nobody sees.
-    static func acceptedEvents(available: Bool, status: UNAuthorizationStatus?) -> [String] {
+    nonisolated static func acceptedEvents(available: Bool, status: UNAuthorizationStatus?) -> [String] {
         available && canPostDigest(status) ? renderedEvents : []
     }
 
@@ -54,14 +55,14 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// been answered, so the app can declare or withdraw `reengage_due`.
     var onAuthorizationAnswered: (() -> Void)?
     /// `userInfo` keys on a re-engagement notification.
-    static let kindKey = "trace-commons.nudge.kind"
-    static let defaultActionKey = "trace-commons.nudge.default"
+    nonisolated static let kindKey = "trace-commons.nudge.kind"
+    nonisolated static let defaultActionKey = "trace-commons.nudge.default"
     /// A re-engagement button's identifier is this prefix and the daemon's
     /// action id.
-    static let nudgeActionPrefix = "trace-commons.nudge."
+    nonisolated static let nudgeActionPrefix = "trace-commons.nudge."
 
     /// The core's fixed nudge words: the digest's two button labels.
-    static let nudgeCopy = NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON())
+    nonisolated static let nudgeCopy = NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON())
 
     /// One notification button.
     struct Button: Equatable {
@@ -84,7 +85,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 
     /// The plan for `due`, or nil for a kind this build does not know or a
     /// notification without words.
-    static func plan(_ due: DaemonData.ReengageDue) -> NudgePlan? {
+    nonisolated static func plan(_ due: DaemonData.ReengageDue) -> NudgePlan? {
         guard let note = NudgeSurface.notification(due) else { return nil }
         let set = nudgeCategory(note.actions.map { (id: $0.intent.actionId, label: $0.label) }, kind: note.kind)
         var info = [kindKey: note.kind.rawValue]
@@ -108,10 +109,15 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// The settlement estimate's buttons carry their own words ("Review
     /// traces", not the idle "Review"), so its set has an identifier of its
     /// own; two sets sharing one would register only one of the two.
-    static func nudgeCategory(
+    nonisolated static func nudgeCategory(
         _ actions: [(id: String, label: String)], kind: NudgeSurface.Kind? = nil
     ) -> CategorySpec {
-        let scope = kind == .settlementEstimate ? "settlement_estimate." : ""
+        // Kinds whose buttons carry their own words get their own scope.
+        let scope = switch kind {
+        case .settlementEstimate: "settlement_estimate."
+        case .nearAiCredit: "near_ai_credit."
+        default: ""
+        }
         return CategorySpec(
             identifier: nudgeActionPrefix + scope + actions.map(\.id).joined(separator: "+"),
             buttons: actions.map {
@@ -120,7 +126,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     /// The action id that only records an answer and opens nothing.
-    private static let notNowActionId = "not_now"
+    private nonisolated static let notNowActionId = "not_now"
 
     /// Every category registered at launch: the digest's, then each
     /// re-engagement button set the daemon sends today (idle: review and
@@ -131,7 +137,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// buttons only while its category is registered, so launch registers
     /// them all rather than the digest's alone. A set whose words are
     /// missing is left out; `postReengage` registers whatever it posts.
-    static func launchCategories(_ copy: NudgeCopy?) -> [CategorySpec] {
+    nonisolated static func launchCategories(_ copy: NudgeCopy?) -> [CategorySpec] {
         var specs = [CategorySpec(identifier: categoryIdentifier, buttons: digestButtons(copy))]
         if let review = copy?[.notifyActionReviewIdle], let notNow = copy?[.notifyActionNotNow] {
             specs.append(nudgeCategory([(id: "review", label: review), (id: notNowActionId, label: notNow)]))
@@ -143,6 +149,10 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             specs.append(nudgeCategory(
                 [(id: "review", label: review), (id: notNowActionId, label: notNow)], kind: .settlementEstimate))
         }
+        if let view = copy?[.notifyNearAiCreditActionView], let notNow = copy?[.notifyNearAiCreditActionNotNow] {
+            specs.append(nudgeCategory(
+                [(id: "review", label: view), (id: notNowActionId, label: notNow)], kind: .nearAiCredit))
+        }
         return specs
     }
 
@@ -150,7 +160,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// for a dismissal, for its own Not now (which dismisses and records
     /// nothing, so the in-app card is not silenced), for a notification
     /// that is not one (the digest), or for an id the kind does not define.
-    static func nudgeIntent(actionIdentifier: String, userInfo: [AnyHashable: Any]) -> NudgeSurface.Intent? {
+    nonisolated static func nudgeIntent(actionIdentifier: String, userInfo: [AnyHashable: Any]) -> NudgeSurface.Intent? {
         guard let raw = userInfo[kindKey] as? String, let kind = NudgeSurface.Kind(rawValue: raw) else { return nil }
         let actionId: String?
         if actionIdentifier == UNNotificationDefaultActionIdentifier {
@@ -165,7 +175,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     /// The digest's buttons, in the core's words; none without them.
-    static func digestButtons(_ copy: NudgeCopy?) -> [Button] {
+    nonisolated static func digestButtons(_ copy: NudgeCopy?) -> [Button] {
         guard let review = copy?[.digestActionReview], let notNow = copy?[.digestActionNotNow] else { return [] }
         return [
             Button(identifier: reviewAction, label: review, opensApp: true),
@@ -173,7 +183,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         ]
     }
 
-    static func category(_ identifier: String, _ buttons: [Button]) -> UNNotificationCategory {
+    nonisolated static func category(_ identifier: String, _ buttons: [Button]) -> UNNotificationCategory {
         UNNotificationCategory(
             identifier: identifier,
             actions: buttons.map {
@@ -269,16 +279,16 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
 
     /// Where the contributor turns notifications back on after saying no.
     /// The pane URL opens macOS notification settings.
-    static let systemSettingsURL = URL(
+    nonisolated static let systemSettingsURL = URL(
         string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
     )!
 
     /// The one sentence that says what a notification from this app is.
     /// Shown above the permission button in Settings (`StartupSection`).
-    static let copy = TCOnboardingCopy.load()
-    static var purpose: String { copy?.notificationPurpose ?? "" }
+    nonisolated static let copy = TCOnboardingCopy.load()
+    nonisolated static var purpose: String { copy?.notificationPurpose ?? "" }
 
-    static func canPostDigest(_ status: UNAuthorizationStatus?) -> Bool {
+    nonisolated static func canPostDigest(_ status: UNAuthorizationStatus?) -> Bool {
         switch status {
         case .authorized?, .provisional?, .ephemeral?: return true
         default: return false
@@ -329,7 +339,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// The digest's body: the core's text, unchanged, whenever it sent
     /// one; otherwise the counts' own lines, as before; nil when there is
     /// nothing to say.
-    static func digestBody(
+    nonisolated static func digestBody(
         text: String, pendingCount: Int, projects: [String], contributedCount: Int = 0,
         contributedProjects: [String] = [], creditPending: Double = 0
     ) -> String? {
@@ -356,7 +366,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         return lines.joined(separator: "\n")
     }
 
-    private static func joined(_ labels: [String]) -> String {
+    private nonisolated static func joined(_ labels: [String]) -> String {
         switch labels.count {
         case 0: return ""
         case 1: return labels[0]
@@ -366,7 +376,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    func userNotificationCenter(
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void

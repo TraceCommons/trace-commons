@@ -268,12 +268,12 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
         let noClient = await AppModel().grantAutomatic(witness: nil)
         XCTAssertEqual(noClient, .refused(label: "automatic-grant-unavailable"))
 
-        let ungranted = await model(["grant_automatic": #"{"result":{"granted":false}}"#])
+        let ungranted = await model(["grant_automatic_including_existing": #"{"result":{"granted":false}}"#])
             .grantAutomatic(witness: nil)
         XCTAssertEqual(ungranted, .refused(label: "automatic-grant-unavailable"))
 
         let refused = await model([
-            "grant_automatic": #"{"error":{"code":"unavailable","message":"arming-terms-unavailable"}}"#,
+            "grant_automatic_including_existing": #"{"error":{"code":"unavailable","message":"arming-terms-unavailable"}}"#,
         ]).grantAutomatic(witness: nil)
         XCTAssertEqual(refused, .refused(label: "arming-terms-unavailable"))
     }

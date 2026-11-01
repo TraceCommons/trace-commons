@@ -15,6 +15,7 @@ final class NudgeSettingsSectionTests: XCTestCase {
         XCTAssertEqual(store.rows.map(\.id), [
             .suggestions, .menuBarMark, .settlementEstimate, .notifications,
             .notify("digest"), .notify("verdicts_landed"), .notify("idle_sessions"),
+            .notify("near_ai_credit"),
         ])
         XCTAssertTrue(store.rows.allSatisfy(\.isOn))
         XCTAssertEqual(store.rows.first?.label, "Show suggestions in Traces, History and the menu bar")

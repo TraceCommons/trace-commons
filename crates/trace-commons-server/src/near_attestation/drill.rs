@@ -204,6 +204,13 @@ pub struct NearAttestationDrillOutcome {
     /// Where the report's unsigned JSON disagrees with the quote. Reporting
     /// only.
     pub json_claim_anomalies: Vec<NearAttestationJsonClaimAnomaly>,
+    /// True when the report made no register claim to compare (a gateway
+    /// report's model entry carries no `info.tcb_info`), so an empty
+    /// `json_claim_anomalies` means nothing was compared, not that the claim
+    /// agreed. Reporting only; nothing gates on it. Omitted when false, so a
+    /// single-report host's evidence keeps exactly the keys it always had.
+    #[serde(skip_serializing_if = "is_false")]
+    pub json_claim_registers_absent: bool,
     /// Whether the report's unsigned `signing_address` field agrees with the
     /// address the quote attests. Reporting only, for the same reason.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,6 +242,10 @@ impl NearAttestationDrillOutcome {
             })
             .collect()
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A `sha256:`-prefixed digest, for values that must never appear in full.
@@ -361,6 +372,7 @@ pub async fn run_near_attestation_drill(
         rtmr: None,
         measurements: None,
         json_claim_anomalies: Vec::new(),
+        json_claim_registers_absent: false,
         report_json_signing_address_agrees: None,
         attested_signer_ref: None,
         receipt_signer_ref: None,
@@ -508,15 +520,22 @@ pub async fn run_near_attestation_drill(
         }
     }
 
-    outcome.json_claim_anomalies =
-        json_claim_anomalies(&report.unverified_json_measurements(), &verified)
-            .into_iter()
-            .map(|anomaly| NearAttestationJsonClaimAnomaly {
-                field: anomaly.field.as_str().to_string(),
-                claimed: anomaly.claimed,
-                verified: anomaly.verified,
-            })
-            .collect();
+    // Reporting only, and only when the report claims registers at all: a
+    // gateway report's model entry carries no `info.tcb_info`, and that is
+    // recorded as "nothing compared", never as agreement.
+    match report.unverified_json_measurements() {
+        Some(claim) => {
+            outcome.json_claim_anomalies = json_claim_anomalies(&claim, &verified)
+                .into_iter()
+                .map(|anomaly| NearAttestationJsonClaimAnomaly {
+                    field: anomaly.field.as_str().to_string(),
+                    claimed: anomaly.claimed,
+                    verified: anomaly.verified,
+                })
+                .collect();
+        }
+        None => outcome.json_claim_registers_absent = true,
+    }
 
     // Everything above is free. Everything below is not: refuse to spend
     // money proving something about an endpoint we have not established.
@@ -756,7 +775,7 @@ mod tests {
 
     use super::*;
     use crate::near_attestation::AttestationReport;
-    use crate::near_attestation::client::{AttestationStep, CompletionOutcome};
+    use crate::near_attestation::client::{AttestationStep, CompletionOutcome, parse_report_body};
     use crate::near_attestation::quote::{Collateral, parse_collateral};
     use crate::near_attestation::receipt::{ReceiptAlgo, ReceiptPayload, ReceiptSignatureKind};
 
@@ -897,7 +916,9 @@ mod tests {
             _nonce: &str,
         ) -> Result<AttestationReport, AttestationClientError> {
             let json = self.report.clone()?;
-            Ok(AttestationReport::from_json(&json).expect("fixture report parses"))
+            // The live client's own parse, so these tests drive the shape
+            // selection the deployed drill runs.
+            parse_report_body(&json, &self.model)
         }
 
         async fn fetch_collateral(
@@ -1079,6 +1100,154 @@ mod tests {
         assert!(outcome.attested_signer_ref.is_some());
         assert!(outcome.receipt_signer_ref.is_some());
         assert_ne!(outcome.attested_signer_ref, outcome.receipt_signer_ref);
+    }
+
+    // -- the gateway shape ---------------------------------------------------
+
+    /// The captured report re-served in the gateway shape: the fixture's
+    /// single-enclave report becomes the model entry (minus `tcb_info`, which
+    /// a model entry does not carry), and `gateway_quote` sits under
+    /// `gateway_attestation`.
+    fn gateway_shaped(model_entry_quote: &str, gateway_quote: &str) -> String {
+        let fixture: serde_json::Value = serde_json::from_str(REPORT).unwrap();
+        let mut entry = fixture.clone();
+        let object = entry.as_object_mut().unwrap();
+        object.remove("_fixture_note");
+        object.remove("_fixture_nonce");
+        object.insert("intel_quote".into(), serde_json::json!(model_entry_quote));
+        object["info"].as_object_mut().unwrap().remove("tcb_info");
+        let mut other = entry.clone();
+        other["model_name"] = serde_json::json!("zai-org/GLM-5");
+        serde_json::json!({
+            "gateway_attestation": {
+                "signing_address": "0x1111111111111111111111111111111111111111",
+                "signing_algo": "ecdsa",
+                "intel_quote": gateway_quote,
+                "request_nonce": fixture_nonce(),
+                "info": fixture["info"].clone()
+            },
+            "model_attestations": [other, entry]
+        })
+        .to_string()
+    }
+
+    fn fixture_quote() -> String {
+        let fixture: serde_json::Value = serde_json::from_str(REPORT).unwrap();
+        fixture["intel_quote"].as_str().unwrap().to_string()
+    }
+
+    /// Valid hex that is not a TDX quote.
+    fn not_a_quote() -> String {
+        "ab".repeat(fixture_quote().len() / 2)
+    }
+
+    #[tokio::test]
+    async fn a_gateway_report_runs_every_check_on_the_model_quote() {
+        let single = StubEndpoint::honest();
+        let single_outcome = run(&single, Some(&all_pins()), &fixture_nonce()).await;
+
+        let mut gateway = StubEndpoint::honest();
+        gateway.report = Ok(gateway_shaped(&fixture_quote(), &not_a_quote()));
+        let outcome = run(&gateway, Some(&all_pins()), &fixture_nonce()).await;
+
+        // Same quote, same checks, same verdicts: the shape changes where the
+        // quote is read from and nothing about how it is judged.
+        assert_eq!(outcome.steps, single_outcome.steps);
+        assert_eq!(outcome.tcb_status, single_outcome.tcb_status);
+        assert_eq!(outcome.mrtd, single_outcome.mrtd);
+        assert_eq!(outcome.rtmr, single_outcome.rtmr);
+        assert_eq!(outcome.measurements, single_outcome.measurements);
+        assert_eq!(
+            outcome.attested_signer_ref,
+            single_outcome.attested_signer_ref
+        );
+        assert_eq!(
+            outcome.report_json_signing_address_agrees,
+            Some(true),
+            "the model entry's own signing_address, not the gateway's"
+        );
+        assert_eq!(gateway.completions_attempted(), 1);
+
+        // No tcb_info on a model entry: nothing was compared, and the
+        // evidence says so rather than letting an empty list read as
+        // agreement.
+        assert!(outcome.json_claim_anomalies.is_empty());
+        assert!(outcome.json_claim_registers_absent);
+        assert!(!single_outcome.json_claim_registers_absent);
+    }
+
+    #[tokio::test]
+    async fn the_gateway_quote_is_never_verified_as_the_models() {
+        // The gateway carries the genuine quote; the model entry carries
+        // junk. A drill that read the gateway's quote would pass the quote
+        // step here. It must fail it, and spend nothing.
+        let mut endpoint = StubEndpoint::honest();
+        endpoint.report = Ok(gateway_shaped(&not_a_quote(), &fixture_quote()));
+        let outcome = run(&endpoint, Some(&all_pins()), &fixture_nonce()).await;
+
+        assert_eq!(
+            step(&outcome, NearAttestationDrillStep::ReportFetched).status,
+            NearAttestationStepStatus::Passed
+        );
+        assert_eq!(
+            step(&outcome, NearAttestationDrillStep::QuoteVerified).status,
+            NearAttestationStepStatus::Failed
+        );
+        assert!(outcome.mrtd.is_none());
+        assert!(!outcome.passed);
+        assert_eq!(endpoint.completions_attempted(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_gateway_report_without_the_model_fails_at_the_report_step() {
+        let mut endpoint = StubEndpoint::honest();
+        endpoint.model = "Qwen/Qwen3.8-27B".to_string();
+        endpoint.report = Ok(gateway_shaped(&fixture_quote(), &fixture_quote()));
+        let outcome = run(&endpoint, Some(&all_pins()), &fixture_nonce()).await;
+
+        let report = step(&outcome, NearAttestationDrillStep::ReportFetched);
+        assert_eq!(report.status, NearAttestationStepStatus::Failed);
+        assert_eq!(report.reason.as_deref(), Some("model_not_attested"));
+        assert_eq!(
+            step(&outcome, NearAttestationDrillStep::QuoteVerified).status,
+            NearAttestationStepStatus::NotRun
+        );
+        assert_eq!(endpoint.completions_attempted(), 0);
+    }
+
+    /// Production pin: against a single-report host the evidence serializes
+    /// with exactly the keys it always had.
+    #[tokio::test]
+    async fn single_report_evidence_keeps_its_keys() {
+        let endpoint = StubEndpoint::honest();
+        let outcome = run(&endpoint, Some(&all_pins()), &fixture_nonce()).await;
+        let value = serde_json::to_value(&outcome).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "advisory_ids",
+                "attested_signer_ref",
+                "chat_id_ref",
+                "completion_charged",
+                "json_claim_anomalies",
+                "measurements",
+                "mrtd",
+                "nonce",
+                "passed",
+                "receipt_signer_ref",
+                "report_json_signing_address_agrees",
+                "rtmr",
+                "steps",
+                "tcb_status",
+            ]
+        );
     }
 
     #[tokio::test]

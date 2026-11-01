@@ -16,6 +16,9 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let stepTools: String
         public let stepRules: String
         public let stepUses: String
+        /// The animated first run's Traces and Private AI steps.
+        public let stepTraces: String
+        public let stepPrivateAi: String
         public let customSetupInstead: String
         public let continueButton: String
         public let answerEveryTool: String
@@ -25,9 +28,20 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let undo: String
         /// What an unanswered picker reads (Ron's `Picker` placeholder).
         public let choose: String
-        /// The footer's Back on every step after Join, and the passkey
-        /// popups' Back.
+        /// The footer's Back on every step after Join.
         public let back: String
+        /// Cancel on a wait or a confirmation (the near.ai sign-in on Join,
+        /// the sharing disclosures).
+        public let cancel: String
+        /// Close on a sheet.
+        public let close: String
+    }
+
+    /// Welcome, the animated first run's splash.
+    public struct Welcome: Decodable, Equatable, Sendable {
+        public let title: String
+        public let body: String
+        public let start: String
     }
 
     public struct Join: Decodable, Equatable, Sendable {
@@ -46,30 +60,17 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let payRangePoints: String
         /// `{min}`.
         public let payRangePointsOne: String
-        public let passkeyEyebrow: String
-        public let passkeyText: String
-        /// `{name}`.
-        public let passkeyReady: String
-        public let passkeyCreate: String
-        public let passkeyDone: String
-        /// Create passkey chosen, created once the daemon starts.
-        public let passkeyChosen: String
-        /// Create passkey could not start the daemon, so no sheet opened.
-        public let passkeyUnavailable: String
         public let nearAiEyebrow: String
         public let nearAiText: String
         public let nearAiSignIn: String
         /// near.ai chosen, signed in once the daemon starts.
         public let nearAiChosen: String
-        /// An invite and a new passkey are not combined.
-        public let inviteOrPasskey: String
         /// An invite host or pay range not known, in place of a dash.
         public let unknown: String
         public let signedIn: String
         public let noSharing: String
         public let skipNote: String
         public let skip: String
-        public let signedOut: String
     }
 
     public struct Folders: Decodable, Equatable, Sendable {
@@ -169,6 +170,16 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let eyebrow: String
         public let required: String
         public let allOptional: String
+        public let rewardOpportunities: String?
+        public let automaticScope: String?
+        public let askEachTime: String?
+        /// Settings > Projects' sharing choice: its note, and the question
+        /// Automatic asks when folders are set to Ask (`{count}`).
+        public let settingsSharingNote: String?
+        public let keepAsksTitle: String?
+        public let keepAsksBody: String?
+        public let keepAsksKeep: String?
+        public let keepAsksAll: String?
         /// `{count}`, and `{selected}` in the third.
         public let optionalAllOn: String
         public let optionalAllOff: String
@@ -182,64 +193,77 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         /// Start's failures, one per call that can stop it, and the refused
         /// grant, which finishes on Ask.
         public let sharingRefused: String
+        public let sharingSaveFailed: String?
         public let scopesFailed: String
         public let rulesFailed: String
         public let privateAiFailed: String
         /// Every call succeeded but setup could not be marked finished.
         public let completeFailed: String
+        /// The Uses graphic's labels.
+        public let thisMac: String
+        public let youReview: String
+        public let theCommons: String
+        /// Under Automatic before sign-in.
+        public let automaticAfterSignIn: String
+        /// The two equal buttons above the optional uses.
+        public let allowAll: String
+        public let onlyRequired: String
+        /// The collapsed section holding the required use; `{title}` is its
+        /// title.
+        public let alwaysOn: String
+        /// The optional use that earns credit, shown first, with
+        /// `creditRequired` under it.
+        public let creditScope: String
+        public let creditRequired: String
     }
 
-    public struct Passkey: Decodable, Equatable, Sendable {
-        public let close: String
-        public let cancel: String
-        public let chooseTitle: String
-        public let useExisting: String
-        public let createNew: String
-        public let chooseNote: String
-        public let nameTitle: String
-        /// P-2's submit button; the popup's title stays `nameTitle`.
-        public let nameSubmit: String
-        public let nameField: String
-        public let clearName: String
-        public let defaultName: String
-        public let nameWarning: String
-        public let nameEmpty: String
-        /// `{max}`.
-        public let nameTooLong: String
-        public let verifyTitle: String
-        public let verifyBody: String
-        public let verify: String
-        public let verifyNote: String
-        public let welcomeTitle: String
-        public let welcomeBody: String
-        public let welcomeSignIn: String
-        public let otherOptions: String
-        /// A refused ceremony; its label is never shown.
-        public let refused: String
-        /// An existing passkey's account is a legacy one; signed out.
-        public let boundElsewhere: String
-        /// This Mac's near.ai sign-in is not the passkey account's; signed out.
-        public let nearAiMismatch: String
+    /// Traces: what the watched tools' traces could earn.
+    public struct Traces: Decodable, Equatable, Sendable {
+        /// While the use that earns credit is off, and the link to Uses.
+        public let noCredit: String
+        public let backToUses: String
+        public let titleLight: String
+        public let titleBold: String
+        public let onThisMac: String
+        /// The one estimate line's words. The core fills them
+        /// (`tc_first_run_estimate_line`); a screen shows its answer.
+        public let estimatePoints: String
+        public let estimatePointsOne: String
+        public let estimateUsd: String
+        public let estimateUsdOne: String
+        /// The owner's estimate before an invite gives a range, in points
+        /// per accepted trace.
+        public let estimate: Estimate
+
+        public struct Estimate: Decodable, Equatable, Sendable {
+            public let min: Int
+            public let max: Int
+        }
     }
 
     public struct PrivateAi: Decodable, Equatable, Sendable {
         public let loading: String
         public let unavailable: String
-        public let toggleLoading: String
         /// The offer's first two sentences, shown before "Learn more".
         public let offerLead: String
         /// The rest of the offer's first paragraph, disclosed by "Learn more".
         public let offerMore: String
         public let learnMore: String
+        public let titleLight: String
+        public let titleBold: String
+        /// `{total}`: after the figure of tools Private AI can route.
+        public let canConnect: String
+        public let canConnectOne: String
     }
 
     public let frame: Frame
+    public let welcome: Welcome
     public let join: Join
     public let folders: Folders
     public let tools: Tools
     public let rules: Rules
     public let uses: Uses
-    public let passkey: Passkey
+    public let traces: Traces
     public let privateAi: PrivateAi
 
     /// Fill a string's `{name}` placeholders, each with its value. The one

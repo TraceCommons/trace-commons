@@ -16,13 +16,18 @@ use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
 pub mod postgres_inference_connection;
+mod postgres_payout;
+mod postgres_referral;
+#[doc(hidden)]
+pub use postgres_referral::REFERRAL_RESOLVER_ASSUME_SQL;
+mod postgres_referral_bonus;
 
 mod trace_corpus_common;
 mod trace_corpus_pg;
 
 pub(crate) use trace_corpus_pg::{
-    insert_credit_settlement_batch_on_tx, list_trace_credit_holds_on_tx,
-    record_source_submission_withdrawal_on_tx, withdraw_source_session_on_tx,
+    insert_credit_settlement_batch_on_tx, record_source_submission_withdrawal_on_tx,
+    withdraw_source_session_on_tx,
 };
 
 pub use postgres::InviteRedemption;
@@ -363,6 +368,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
         Ok(false)
     }
+    /// Advisory client caps use a narrower worker/status role than admission.
+    /// No direct table or column writes, admission mutations, or ledger role.
+    async fn client_upload_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
     /// The extra grants a `tiered-v1` admission policy's in-process
     /// evaluator needs (V126). See `db/postgres_account_trust_growth.rs`.
     async fn tiered_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
@@ -482,6 +492,25 @@ pub trait Database: TraceCorpusStore + Send + Sync {
             "account_trust_worker_unavailable".into(),
         ))
     }
+    /// Records one accepted submission's starter-advance plausibility
+    /// features (V131) once. Returns whether a row was written. See
+    /// `crate::starter_plausibility`.
+    async fn record_starter_plausibility_features(
+        &self,
+        _tenant_id: &str,
+        _submission_id: uuid::Uuid,
+        _features: &crate::starter_plausibility::StarterEnvelopeFeatures,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool("starter_features_unavailable".into()))
+    }
+    /// The starter-advance features of one account's own accepted,
+    /// unwithdrawn submissions, oldest first. Tenant-scoped.
+    async fn starter_plausibility_features_for_account(
+        &self,
+        _account: &crate::account_trust::TrustAccount,
+    ) -> Result<Vec<crate::starter_plausibility::StarterEnvelopeFeatures>, DatabaseError> {
+        Err(DatabaseError::Pool("starter_features_unavailable".into()))
+    }
     /// Sources naming this account that have no trust fact yet.
     async fn list_account_trust_fact_candidates(
         &self,
@@ -566,6 +595,19 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _next: &str,
     ) -> Result<bool, DatabaseError> {
         Err(DatabaseError::Pool("admission_database_unavailable".into()))
+    }
+
+    /// Bounded, tenant-ID-only discovery of potentially unsettled utility credit.
+    /// Eligibility and holds are rechecked inside each tenant's settlement pass.
+    async fn pending_credit_settlement_tenants(
+        &self,
+        _after: Option<&str>,
+        _limit: usize,
+        _novelty_settle_from: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<String>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "credit_settlement_enumerator_unavailable".into(),
+        ))
     }
 
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
@@ -1082,28 +1124,9 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Resolve the tenant for a WebAuthn `credential_id` via the SAME NARROW
-    /// restricted-role resolver pool used by `resolve_login_link_tenant` (separate
-    /// role, column-scoped SELECT, no BYPASSRLS). Returns the tenant ONLY. The
-    /// discoverable-login path (Task 6) calls this with the credential id parsed
-    /// from an UNAUTHENTICATED assertion, BEFORE any tenant context exists, then
-    /// re-confirms tenant inside an RLS-scoped tx via
-    /// `load_webauthn_credential_for_login`. Fail-closed: an unconfigured resolver
-    /// pool MUST error with a safe missing-control name, never fall back to the
-    /// runtime pool. NO `ensure_trace_tenant` here: this is a pure read on a
-    /// globally-UNIQUE column and MUST NOT write any tenant row for a forged id.
-    async fn resolve_credential_tenant(
-        &self,
-        _credential_id: &str,
-    ) -> Result<Option<String>, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "resolve_credential_tenant not implemented".to_string(),
-        ))
-    }
-
     /// Resolve a NEAR access public_key to its tenant via the column-scoped,
-    /// restricted-role resolver pool, exactly as `resolve_credential_tenant` does
-    /// for webauthn credentials. Returns the tenant ONLY. The NEAR-login path
+    /// restricted-role resolver pool, exactly as `resolve_login_link_tenant` does
+    /// for login codes. Returns the tenant ONLY. The NEAR-login path
     /// (Task 7) calls this with the public_key parsed from an UNAUTHENTICATED,
     /// wallet-signed assertion, BEFORE any tenant context exists, then re-confirms
     /// tenant inside an RLS-scoped tx. Fail-closed: an unconfigured resolver pool
@@ -1165,6 +1188,11 @@ pub trait Database: TraceCorpusStore + Send + Sync {
 
     /// Provision from a verified NEAR AI login (#836).
     ///
+    /// With `grant_template`, the device also gets the contributor grant
+    /// invite enrollment writes, from that template, insert-only (owner
+    /// decision 2026-10-24). Bind and enrollment below take the same
+    /// argument with the same meaning. `None` writes no grant.
+    ///
     /// The default refuses, like its wallet sibling: a backend that has not
     /// implemented this has not configured login provisioning, and the
     /// fail-closed answer is the only safe one for a path that mints an
@@ -1175,67 +1203,35 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         _device_public_key: &[u8; 32],
         _session: NewSession<'_>,
         _identity: &crate::near_account_identity::NearAccountIdentity,
+        _grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
     ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
         Err(DatabaseError::Pool(
             "near_ai_login_provisioning_unconfigured".into(),
         ))
     }
 
-    /// Store a NEAR AI bind ceremony (Z2 S3) in the provisioning ceremony
-    /// table. Fail-closed by default.
-    async fn store_near_ai_bind_ceremony(
-        &self,
-        _ceremony_hash: &str,
-        _pending: &crate::account_onboarding::NearAiBindPending,
-        _expires_at: i64,
-    ) -> Result<(), DatabaseError> {
-        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
-    }
-
-    /// Consume a NEAR AI bind ceremony. Single use; a row that is not a bind
-    /// ceremony (a provisioning or wallet row) is consumed and refused.
-    async fn take_near_ai_bind_ceremony(
-        &self,
-        _ceremony_hash: &str,
-    ) -> Result<Option<crate::account_onboarding::NearAiBindPending>, DatabaseError> {
-        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
-    }
-
-    /// Bind a verified NEAR AI login to the unbound passkey account
-    /// `(tenant_id, account_id)` (Z2 S3), or, when the login's anchor already
-    /// belongs to another account, provision that account exactly as
-    /// [`Self::provision_near_ai_login`] would and close the passkey account.
-    /// The default refuses.
-    async fn bind_near_ai_login(
+    /// Write the NEAR AI sign-up contributor grant for a device NEAR AI
+    /// provisioned before sign-up wrote one (owner decision 2026-10-24).
+    ///
+    /// The issuer calls this at claim time when a device has no active
+    /// contributor grant. In one transaction in `tenant_id`, it checks that
+    /// the device is a live `near_ai`-origin key there, and if so inserts the
+    /// grant sign-up would have written from `template`, never replacing a
+    /// grant row that exists (so a revoked grant stays revoked and a later
+    /// template does not rewrite an earlier one). Returns whether the device
+    /// was eligible; `false` writes nothing. A written grant is issued at
+    /// `issued_at`, the instant the caller lists grants at. The default
+    /// refuses.
+    async fn backfill_near_ai_signup_device_grant(
         &self,
         _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _login: &crate::near_ai_login::VerifiedNearAiLogin,
-        _device_public_key: &[u8; 32],
-        _session: NewSession<'_>,
-        _identity: &crate::near_account_identity::NearAccountIdentity,
-    ) -> Result<crate::account_onboarding::NearAiBindOutcome, DatabaseError> {
-        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
-    }
-
-    /// Enroll a further device into the `bound` account `(tenant_id,
-    /// account_id)` from a verified NEAR AI login: a second Mac signed in with
-    /// the account's passkey. Attaches the device only if the login's anchor
-    /// is that account's own, decided in the same transaction that would
-    /// write the device; otherwise refuses with
-    /// [`crate::account_onboarding::NEAR_AI_ENROL_ACCOUNT_MISMATCH`] having
-    /// written nothing. Never claims an anchor or mints a tenant or account.
-    /// The default refuses.
-    async fn enrol_near_ai_login(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _login: &crate::near_ai_login::VerifiedNearAiLogin,
-        _device_public_key: &[u8; 32],
-        _session: NewSession<'_>,
-        _identity: &crate::near_account_identity::NearAccountIdentity,
-    ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
-        Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
+        _device_key_id: &str,
+        _template: &crate::near_ai_signup_policy::NearAiSignupPolicyTemplate,
+        _issued_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "near_ai_signup_grant_backfill_unconfigured".into(),
+        ))
     }
 
     async fn resolve_near_public_key_tenant(
@@ -1329,6 +1325,36 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Record the ownership alias of an authenticated device upload claim.
+    /// Call only after verifying the device signature and claim scope. This
+    /// binds provenance to the device, never grants an account authenticator.
+    /// Registered legacy devices without server-side NEAR provisioning are a
+    /// no-op: their signed principals retain the independent login model.
+    async fn bind_device_upload_principal(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+        _actor_ref: &str,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool(
+            "device_upload_principal_binding_unavailable".to_string(),
+        ))
+    }
+
+    /// Explicit operator repair for the native client's deterministic subject.
+    /// Returns the number of existing submissions whose exact provenance hash
+    /// matches that device. Dry-run never writes; apply records only the alias.
+    async fn repair_native_device_upload_principal(
+        &self,
+        _tenant_id: &str,
+        _device_key_id: &str,
+        _dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "device_upload_principal_repair_unavailable".to_string(),
+        ))
+    }
+
     /// Resolve the active account a device `principal_ref` is linked to (bearer
     /// path). Active-membership only (`unlinked_at IS NULL`, Hardening A). `None`
     /// when the principal is unlinked or links to no account.
@@ -1358,79 +1384,13 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Insert a registered passkey for `account_id`. The serialized webauthn-rs
-    /// `Passkey` (public key, sign counter, AAGUID, transports) is stored as
-    /// JSONB; `credential_id` is the globally-UNIQUE base64url WebAuthn id and
-    /// `label` is an optional user-supplied display name. Tenant- + account-
-    /// scoped under forced RLS.
-    async fn insert_webauthn_credential(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _credential_id: &str,
-        _passkey: &serde_json::Value,
-        _label: Option<&str>,
-    ) -> Result<(), DatabaseError> {
-        Err(DatabaseError::Pool(
-            "insert_webauthn_credential not implemented".to_string(),
-        ))
-    }
-
-    /// Load an ACTIVE credential for the LOGIN (assertion) path by its
-    /// `credential_id`, under the already-resolved `tenant_id`. Returns the
-    /// account id and serialized `Passkey` JSON, or `None` for an unknown /
-    /// revoked / other-tenant credential. Runs inside an RLS-scoped tx; the
-    /// `tenant_id = trace_current_tenant_id()` predicate is belt-and-suspenders
-    /// on top of forced RLS, and `credential_id` is globally UNIQUE.
-    async fn load_webauthn_credential_for_login(
-        &self,
-        _tenant_id: &str,
-        _credential_id: &str,
-    ) -> Result<Option<WebauthnCredentialRow>, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "load_webauthn_credential_for_login not implemented".to_string(),
-        ))
-    }
-
-    /// The label `account_id` gave its ACTIVE credential `credential_id`, for
-    /// the native sign-in answer (`passkey_label`). `None` for no label, and
-    /// for an unknown, revoked, other-account or other-tenant credential: the
-    /// row must match the tenant, the account AND the credential, so a caller
-    /// can only ever read the label of a credential its own account holds.
-    /// Tenant-scoped under forced RLS.
-    async fn credential_label_for_account(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _credential_id: &str,
-    ) -> Result<Option<String>, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "credential_label_for_account not implemented".to_string(),
-        ))
-    }
-
-    /// Persist the post-finish `Passkey` after a successful assertion so the
-    /// updated sign counter (clone-detection state) is durable, and stamp
-    /// `last_used_at`. Tenant-scoped under forced RLS; only an active
-    /// (unrevoked) credential is updated.
-    async fn update_webauthn_credential_after_login(
-        &self,
-        _tenant_id: &str,
-        _credential_id: &str,
-        _passkey: &serde_json::Value,
-    ) -> Result<(), DatabaseError> {
-        Err(DatabaseError::Pool(
-            "update_webauthn_credential_after_login not implemented".to_string(),
-        ))
-    }
-
     /// Issue a session for a native-app loopback sign-in whose one-time code and
     /// PKCE verifier have ALREADY been checked. Mirrors
-    /// [`Database::issue_passkey_session`] except `client_kind = 'native'` and
-    /// `auth_credential_id` is NULL: no passkey or wallet key authenticated this
+    /// [`Database::issue_near_session`] except `client_kind = 'native'` and
+    /// `auth_credential_id` is NULL: no wallet key authenticated this
     /// session, the human's browser login did.
     ///
-    /// As with the passkey/NEAR paths there is NO `ensure_trace_tenant` here.
+    /// As with the NEAR path there is NO `ensure_trace_tenant` here.
     /// The tenant came from a login link that a human already redeemed in a
     /// browser, so the account row provably exists; the insert is FK-bound to
     /// `(tenant_id, account_id)` and a bogus pair simply fails rather than
@@ -1447,34 +1407,9 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Issue a browser session for a passkey login that has ALREADY been verified
-    /// (Task 6). Inserts a `trace_sessions` row (hash-only `token_hash`,
-    /// `client_kind = 'passkey'`, `auth_credential_id` = the base64url credential
-    /// id STRING that authenticated the session, `token_issued_at` defaulted) plus
-    /// a hash-only audit row, in ONE RLS-scoped tx under the already-resolved
-    /// tenant. The caller MUST have verified the assertion (and thereby the
-    /// credential's FK-backed tenant) before calling this; there is therefore NO
-    /// `ensure_trace_tenant` here — the tenant provably exists via the credential
-    /// row, and an UPSERT before verification would let a forged assertion spray
-    /// tenant rows. The raw session secret never reaches the database; only its
-    /// sha256 `token_hash` is stored.
-    async fn issue_passkey_session(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _session: NewSession<'_>,
-        _auth_credential_id: &str,
-        _audit: RedeemAudit,
-    ) -> Result<(), DatabaseError> {
-        Err(DatabaseError::Pool(
-            "issue_passkey_session not implemented".to_string(),
-        ))
-    }
-
     /// Issue a browser session for a NEAR wallet login that has ALREADY been
-    /// verified (Slice 3a Task 7). Mirrors [`Database::issue_passkey_session`]
-    /// exactly except `client_kind = 'near'` and `auth_credential_id` carries the
-    /// NEAR access key (`ed25519:...` public key) that authenticated the session.
+    /// verified (Slice 3a Task 7): `client_kind = 'near'` and `auth_credential_id`
+    /// carries the NEAR access key (`ed25519:...` public key) that authenticated the session.
     /// Inserts a `trace_sessions` row (hash-only `token_hash`, `token_issued_at`
     /// defaulted) plus a hash-only audit row in ONE RLS-scoped tx under the
     /// already-resolved tenant. The caller MUST have verified the NEP-413 assertion
@@ -1493,72 +1428,6 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::Pool(
             "issue_near_session not implemented".to_string(),
-        ))
-    }
-
-    /// List the ACTIVE (unrevoked) credentials for `account_id`, oldest first.
-    /// Label- and timestamp-only; no key material. Tenant- + account-scoped
-    /// under forced RLS so another account's credentials are never returned.
-    async fn list_account_credentials(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-    ) -> Result<Vec<AccountCredentialSummary>, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "list_account_credentials not implemented".to_string(),
-        ))
-    }
-
-    /// Rename one of `account_id`'s ACTIVE credentials. Returns whether a row was
-    /// affected (`false` for an unknown / revoked / other-account credential).
-    /// Tenant- + account-scoped under forced RLS so a caller can never rename a
-    /// credential they do not own.
-    async fn rename_account_credential(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _credential_id: &str,
-        _label: Option<&str>,
-    ) -> Result<bool, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "rename_account_credential not implemented".to_string(),
-        ))
-    }
-
-    /// Soft-revoke one of `account_id`'s ACTIVE credentials and report how many of
-    /// the account's credentials remain active afterwards. `removed` is `false`
-    /// for an unknown / already-revoked / other-account credential. Tenant- +
-    /// account-scoped under forced RLS so a caller can never revoke a credential
-    /// they do not own; the remaining-count lets the caller refuse to remove the
-    /// last passkey. When a credential is removed, every live session it
-    /// minted (`auth_credential_id` = that credential, browser or native) is
-    /// revoked in the same transaction. See
-    /// [`Database::revoke_account_credential_sparing_session`], which the
-    /// removal route calls to keep the caller's own session.
-    async fn revoke_account_credential(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _credential_id: &str,
-    ) -> Result<RevokeCredentialResult, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "revoke_account_credential not implemented".to_string(),
-        ))
-    }
-
-    /// [`Database::revoke_account_credential`], sparing one session: the one
-    /// whose current or within-grace previous `token_hash` is
-    /// `caller_token_hash` (the session making the removal request). `None`
-    /// spares nothing. Sessions with no recorded credential are never touched.
-    async fn revoke_account_credential_sparing_session(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-        _credential_id: &str,
-        _caller_token_hash: Option<&str>,
-    ) -> Result<RevokeCredentialResult, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "revoke_account_credential_sparing_session not implemented".to_string(),
         ))
     }
 
@@ -1586,7 +1455,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     /// other-tenant key. Runs inside an RLS-scoped tx; the `tenant_id =
     /// trace_current_tenant_id()` predicate is belt-and-suspenders on top of forced
     /// RLS, and `public_key` is globally UNIQUE. NO `ensure_trace_tenant` here: this
-    /// mirrors `load_webauthn_credential_for_login` — the tenant already exists for
+    /// the tenant already exists for
     /// any registered identity, and the resolver mapped public_key -> tenant first.
     async fn load_near_identity_for_login(
         &self,
@@ -1642,7 +1511,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     }
 
     /// Soft-revoke one of `account_id`'s ACTIVE NEAR identities and report how many
-    /// strong authenticators (webauthn credentials + NEAR identities) remain active
+    /// NEAR identities (NEAR keys) remain active
     /// for the account afterwards, computed in the SAME tx as the revoke. `removed`
     /// is `false` for an unknown / already-revoked / other-account key. Tenant- +
     /// account-scoped under forced RLS so a caller can never revoke an identity they
@@ -1659,10 +1528,166 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
-    /// Count `account_id`'s ACTIVE strong authenticators: webauthn credentials plus
-    /// NEAR identities, summed in ONE RLS-scoped tx. Lets a caller enforce
-    /// "keep at least one strong authenticator" before revoking the last passkey or
-    /// NEAR key. Tenant- + account-scoped under forced RLS.
+    /// List the ACTIVE devices linked to `account_id` through NEAR sign-in
+    /// (`trace_near_provisioned_devices` joined to unrevoked `device_keys`),
+    /// oldest first. `session_token_hash` is the hash of the session the caller
+    /// presented, used only to flag `this_device`. Tenant- and account-scoped
+    /// under forced RLS, so another account's devices are never returned.
+    async fn list_account_devices(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _session_token_hash: Option<&str>,
+    ) -> Result<Vec<AccountDeviceSummary>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "list_account_devices not implemented".to_string(),
+        ))
+    }
+
+    /// Rename one of `account_id`'s ACTIVE devices. `None` clears the label.
+    /// Returns whether a row was affected (`false` for an unknown, revoked or
+    /// other-account device).
+    async fn rename_account_device(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _device_key_id: &str,
+        _label: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "rename_account_device not implemented".to_string(),
+        ))
+    }
+
+    /// Revoke one of `account_id`'s ACTIVE devices in one transaction: set
+    /// `device_keys.revoked_at` (the upload-claim issuer then refuses the key),
+    /// revoke the device principal's active tenant access grants, and revoke
+    /// the native sessions minted for the device. The account's native sessions
+    /// that name neither a device nor a credential (issued before V139, or by the
+    /// login-link native sign-in) cannot be attributed, so they are revoked
+    /// too, except the caller's own (`caller_session_token_hash`). The device's principal
+    /// stays linked, so traces it already contributed remain in the account's
+    /// history. `actor_ref` is recorded as the grant revoker.
+    async fn revoke_account_device(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _device_key_id: &str,
+        _actor_ref: &str,
+        _caller_session_token_hash: Option<&str>,
+    ) -> Result<RevokeAccountDeviceResult, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "revoke_account_device not implemented".to_string(),
+        ))
+    }
+
+    /// The caller's traces that could take the `model_training` use (V141):
+    /// owned by one of `owner_principal_refs`, `accepted`, not revoked,
+    /// purged, expired or withdrawn (either withdrawal ledger), and without
+    /// `model_training` in their allowed uses. The count is all of them; the
+    /// ids are the oldest `limit`. No owners lists nothing.
+    async fn list_model_training_consent_eligible(
+        &self,
+        _tenant_id: &str,
+        _owner_principal_refs: &[String],
+        _limit: i64,
+    ) -> Result<ModelTrainingConsentEligible, DatabaseError> {
+        Err(DatabaseError::Pool(
+            MODEL_TRAINING_CONSENT_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Add the `model_training` consent scope and allowed use to each listed
+    /// trace that is eligible (as above), in one transaction, and record one
+    /// dated grant row per trace. Add-only and idempotent: a trace that
+    /// already carries the use is answered `AlreadyGranted` and left as it
+    /// is; one that is not eligible is answered `NotEligible`.
+    async fn grant_model_training_consent(
+        &self,
+        _grant: ModelTrainingConsentGrant<'_>,
+    ) -> Result<Vec<ModelTrainingConsentGrantRow>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            MODEL_TRAINING_CONSENT_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// The submission's latest gate decision when it is a legacy-gate
+    /// decision that passed both floors and whose scoring award was withheld
+    /// as `policy_mismatch` (or left at `credit_check_error` by a re-run whose
+    /// checks failed): the award a model-training grant re-runs.
+    /// `None` otherwise (never scored, a floor failed, withheld for another
+    /// reason, credited, or a pipeline Settle row).
+    async fn withheld_policy_mismatch_gate_award(
+        &self,
+        _tenant_id: &str,
+        _submission_id: uuid::Uuid,
+    ) -> Result<Option<WithheldGateAward>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            MODEL_TRAINING_CONSENT_BACKEND_MISSING.to_string(),
+        ))
+    }
+
+    /// Mint a one-time device code for `code.account_id`, after checking
+    /// that `code.minter_device_key_id` is an active device of that account.
+    async fn mint_account_device_code(
+        &self,
+        _code: NewAccountDeviceCode<'_>,
+    ) -> Result<MintAccountDeviceCodeOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "mint_account_device_code not implemented".to_string(),
+        ))
+    }
+
+    /// One of `account_id`'s minted codes, or `None` for an unknown or
+    /// foreign code.
+    async fn account_device_code_status(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _code_id: uuid::Uuid,
+    ) -> Result<Option<AccountDeviceCodeStatus>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "account_device_code_status not implemented".to_string(),
+        ))
+    }
+
+    /// Spend a device code and link `device_public_key` to the code's
+    /// account in one transaction, as a NEAR AI sign-in links a device: key,
+    /// principal, grant from `grant_template`, provisioned-device row, and
+    /// a native session. The code's label becomes the device's label.
+    async fn redeem_account_device_code(
+        &self,
+        _tenant_id: &str,
+        _code_hash: &str,
+        _device_public_key: &[u8; 32],
+        _session: NewSession<'_>,
+        _grant_template: Option<&crate::near_ai_signup_policy::NearAiSignupPolicyTemplate>,
+    ) -> Result<DeviceSignInOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "redeem_account_device_code not implemented".to_string(),
+        ))
+    }
+
+    /// Mint a fresh native session for a device that joined by code and is
+    /// still active, recording `nonce_hash` so the proof cannot be replayed.
+    /// Refuses a device that renewed within `min_interval`.
+    async fn renew_device_session(
+        &self,
+        _tenant_id: &str,
+        _device_public_key: &[u8; 32],
+        _nonce_hash: &str,
+        _session: NewSession<'_>,
+        _min_interval: chrono::Duration,
+    ) -> Result<DeviceSignInOutcome, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "renew_device_session not implemented".to_string(),
+        ))
+    }
+
+    /// Count `account_id`'s ACTIVE strong authenticators in ONE RLS-scoped tx:
+    /// its NEAR identities, plus one if it signs in with NEAR AI. The
+    /// strong-authenticator gate reads it. Tenant- + account-scoped under
+    /// forced RLS.
     async fn count_active_strong_authenticators(
         &self,
         _tenant_id: &str,
@@ -1670,46 +1695,6 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<i64, DatabaseError> {
         Err(DatabaseError::Pool(
             "count_active_strong_authenticators not implemented".to_string(),
-        ))
-    }
-
-    /// Count passkey-origin accounts that hold a slot under the unbound-account
-    /// ceiling, in EVERY tenant (Z2 S2): `unbound` ones, and since V102
-    /// `closed` ones the reaper has not yet removed, so create-then-close
-    /// cycles cannot escape the ceiling. A cross-tenant read, so the
-    /// PostgreSQL backend answers through the V98 SECURITY DEFINER function,
-    /// never through a runtime-pool query. The default refuses: a backend that
-    /// cannot count cannot enforce the ceiling, so creation stays closed.
-    async fn count_unbound_passkey_accounts(&self) -> Result<i64, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "unbound_passkey_account_count_unconfigured".to_string(),
-        ))
-    }
-
-    /// Create a passkey-origin account from a verified native `create/finish`
-    /// (Z2 S2): in ONE transaction under the freshly minted tenant, re-check
-    /// the unbound-account ceiling, then write the tenant, the account and its
-    /// `unbound` binding row, the credential, a native session and the audit
-    /// row. Either every row is written or none is. The default refuses.
-    async fn create_passkey_origin_account(
-        &self,
-        _account: NewPasskeyOriginAccount<'_>,
-    ) -> Result<PasskeyOriginAccountOutcome, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "create_passkey_origin_account not implemented".to_string(),
-        ))
-    }
-
-    /// The binding state of one account, read under its tenant's RLS. No
-    /// binding row is `Legacy`. Used by native passkey sign-in to report
-    /// `binding_state`; the unbound gate reads it inside `validate_session`.
-    async fn account_binding_state(
-        &self,
-        _tenant_id: &str,
-        _account_id: uuid::Uuid,
-    ) -> Result<crate::account_binding::AccountBindingState, DatabaseError> {
-        Err(DatabaseError::Pool(
-            "account_binding_state not implemented".to_string(),
         ))
     }
 
@@ -2101,18 +2086,20 @@ pub struct RedeemedSession {
 
 /// Outcome of a successful [`Database::validate_session`] lookup. Carries the
 /// durable account id and the `auth_credential_id` recorded on the session row
-/// (the base64url WebAuthn credential id that authenticated a passkey session, or
-/// `None` for a device-link session). The credential id is a public identifier,
-/// never key material.
+/// (the NEAR access key that authenticated a NEAR session, the WebAuthn
+/// credential id of a session minted before passkeys were removed, or `None`
+/// otherwise, which covers device-link and native sessions; a keyed native
+/// session names its device in `device_key_id`). The credential id is a public
+/// identifier, never key material.
 #[derive(Debug, Clone)]
 pub struct ValidatedSession {
     pub account_id: uuid::Uuid,
     pub auth_credential_id: Option<String>,
     /// The `client_kind` recorded on the session row (`'web'` for a device-link
-    /// session, `'passkey'` for a passkey login, `'near'` for a NEAR login). Used
-    /// by the strong-authenticator gate to classify session strength: a `'web'`
-    /// session is WEAK, a `'passkey'`/`'near'` session is STRONG. A public label,
-    /// never key material.
+    /// session, `'near'` for a NEAR login, `'native'` for the app; `'passkey'`
+    /// on a session minted before passkeys were removed). Used by the
+    /// strong-authenticator gate to classify session strength: only a `'near'`
+    /// session is STRONG. A public label, never key material.
     pub client_kind: String,
     /// Set to the NEW raw session secret when rotation-on-use fired for this
     /// request (the matched row's `token_issued_at` aged past the rotation
@@ -2123,80 +2110,13 @@ pub struct ValidatedSession {
     /// matched the previous token within grace (multi-tab) does NOT re-rotate and
     /// leaves this `None`.
     pub rotated_secret: Option<String>,
-    /// The account's binding state (Z2 S1), read in the SAME query that
-    /// validated the session, so the unbound gate costs no second round trip
-    /// and cannot see a different account than the session did. No binding row
-    /// is [`AccountBindingState::Legacy`](crate::account_binding::AccountBindingState::Legacy),
-    /// which is never gated.
-    pub binding: crate::account_binding::AccountBindingState,
-    /// The session's absolute expiry, as stored. Rotation-on-use never moves
-    /// it; the auth middleware caps a rotated cookie's Max-Age at what is left
-    /// of it, so a rotated cookie never outlives its row.
+    /// The session's expiry, as stored once this validation is done. A
+    /// browser session's rotation never moves it; the auth middleware caps a
+    /// rotated cookie's Max-Age at what is left of it, so a rotated cookie never
+    /// outlives its row. A native session's rotation extends it (see
+    /// `account_native_auth::NATIVE_SESSION_MAX_LIFETIME_DAYS`), and this is the
+    /// extended value, which the middleware hands back beside the new token.
     pub expires_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// A registered passkey resolved for the LOGIN (assertion) path. Carries only
-/// the durable account id and the serialized webauthn-rs `Passkey` JSON (public
-/// key, sign counter, AAGUID, transports); never PII. The loader runs under the
-/// already-resolved tenant's RLS, so the row is tenant-scoped by construction.
-#[derive(Debug, Clone)]
-pub struct WebauthnCredentialRow {
-    pub account_id: uuid::Uuid,
-    pub passkey: serde_json::Value,
-}
-
-/// A single ACTIVE credential as surfaced in the account's credential list.
-/// Label-only and timestamp-only: no public-key material or counter state. The
-/// `credential_id` is the base64url WebAuthn id (a label, not a secret).
-#[derive(Debug, Clone)]
-pub struct AccountCredentialSummary {
-    pub credential_id: String,
-    pub label: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// Outcome of revoking one of an account's credentials. `removed` is whether the
-/// soft-delete affected a row (false for an unknown / already-revoked / other
-/// account's credential); `remaining` is the count of the account's credentials
-/// still active after the revoke, so the caller can refuse to remove the last
-/// passkey if policy requires it.
-#[derive(Debug, Clone, Copy)]
-pub struct RevokeCredentialResult {
-    pub removed: bool,
-    pub remaining: i64,
-}
-
-/// Everything native passkey `create/finish` writes for a new passkey-origin
-/// account (Z2 S2). Every value is server-minted or came out of a verified
-/// attestation: the tenant from the OS RNG, the account id from `start`, the
-/// credential from `finish_passkey_registration`. Nothing here is client
-/// supplied except the optional label, which the start handler bounded.
-#[derive(Debug)]
-pub struct NewPasskeyOriginAccount<'a> {
-    pub tenant_id: &'a str,
-    pub account_id: uuid::Uuid,
-    /// Canonical base64url credential id; globally UNIQUE (V32), so a replayed
-    /// attestation fails the insert and rolls the whole account back.
-    pub credential_id: &'a str,
-    /// The serialized webauthn-rs `Passkey`.
-    pub passkey: &'a serde_json::Value,
-    pub label: Option<&'a str>,
-    /// The weak native session minted with the account. Its `client_kind`
-    /// must be `native`; the backend refuses anything else.
-    pub session: NewSession<'a>,
-    /// The unbound-account ceiling, re-checked inside the transaction.
-    pub ceiling: i64,
-}
-
-/// What `create_passkey_origin_account` did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PasskeyOriginAccountOutcome {
-    /// Every row was written and committed.
-    Created,
-    /// The ceiling was reached when re-checked inside the transaction; nothing
-    /// was written.
-    CeilingReached,
 }
 
 /// A registered NEAR identity resolved for the LOGIN (wallet-assertion) path.
@@ -2293,13 +2213,156 @@ pub enum PayoutResolution {
 
 /// Outcome of revoking one of an account's NEAR identities. `removed` is whether
 /// the soft-delete affected a row (false for an unknown / already-revoked / other
-/// account's key); `remaining_strong` is the count of the account's strong
-/// authenticators (webauthn credentials + NEAR identities) still active after the
-/// revoke, so the caller can refuse to remove the last strong authenticator.
+/// account's key); `remaining_strong` is the count of the account's NEAR
+/// identities (NEAR keys) still active after the revoke. It does not count a
+/// NEAR AI login, so `0` means no NEAR key is left, not that the account has
+/// no strong authenticator.
 #[derive(Debug, Clone, Copy)]
 pub struct RevokeNearResult {
     pub removed: bool,
     pub remaining_strong: i64,
+}
+
+/// One device linked to an account through NEAR sign-in, as
+/// [`Database::list_account_devices`] reports it. `device_key_id` and
+/// `public_key` are public identifiers, not secrets. `last_seen_at` is the
+/// newest `last_seen_at` of the device's native sessions, or `None` when no
+/// session names the device (one minted before sessions carried it).
+#[derive(Debug, Clone)]
+pub struct AccountDeviceSummary {
+    pub device_key_id: String,
+    pub public_key: String,
+    pub label: Option<String>,
+    /// `near` (wallet sign-in) or `near_ai` (NEAR AI sign-in).
+    pub onboarding_origin: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// True when the session the caller presented belongs to this device.
+    pub this_device: bool,
+    /// How many of the device's traces still stand: submissions under its
+    /// own principal, or an upload principal bound to it (V135), that are
+    /// received, accepted or quarantined and not withdrawn, revoked or
+    /// purged. Counted only while the device's principal is linked to this
+    /// account. Zero is a count, not "unknown".
+    pub contributed_traces: i64,
+    /// When the newest of those was received; `None` with none.
+    pub last_contributed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Safe label a backend without the V141 methods refuses with.
+pub const MODEL_TRAINING_CONSENT_BACKEND_MISSING: &str = "model_training_consent_backend_missing";
+
+/// What [`Database::list_model_training_consent_eligible`] found.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelTrainingConsentEligible {
+    pub eligible_count: u64,
+    pub submission_ids: Vec<uuid::Uuid>,
+}
+
+/// A grant, as [`Database::grant_model_training_consent`] takes it.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelTrainingConsentGrant<'a> {
+    pub tenant_id: &'a str,
+    /// The principals whose traces the caller may grant on: its own, and
+    /// its account's when it is linked to one.
+    pub owner_principal_refs: &'a [String],
+    pub submission_ids: &'a [uuid::Uuid],
+    /// The authenticated principal storage ref, recorded on the grant row.
+    pub actor_principal_ref: &'a str,
+    /// When the contributor gave the consent; stored as given.
+    pub granted_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One trace's answer from [`Database::grant_model_training_consent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTrainingConsentGrantRow {
+    pub submission_id: uuid::Uuid,
+    pub outcome: trace_commons_protocol::model_training_consent::ModelTrainingConsentOutcome,
+    /// The recorded grant time; `None` when nothing was recorded (not
+    /// eligible, or the trace was sent with the use).
+    pub granted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The stored gate decision whose withheld scoring award a model-training
+/// grant re-runs, as [`Database::withheld_policy_mismatch_gate_award`]
+/// returns it. Both floors passed, by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithheldGateAward {
+    pub decision_id: uuid::Uuid,
+    pub gate_policy_version: String,
+    pub gate_version_hash: String,
+    pub vector_entry_id: Option<uuid::Uuid>,
+    pub chunks_capped: bool,
+}
+
+/// A code to mint, as [`Database::mint_account_device_code`] takes it. Every
+/// value is a hash, an id or a label; the code's secret never reaches the
+/// database.
+#[derive(Debug, Clone)]
+pub struct NewAccountDeviceCode<'a> {
+    pub tenant_id: &'a str,
+    pub account_id: uuid::Uuid,
+    pub minter_device_key_id: &'a str,
+    pub mint_nonce_hash: &'a str,
+    pub code_hash: &'a str,
+    pub label: Option<&'a str>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Refuse when the account already holds this many unexpired, unredeemed
+    /// codes.
+    pub outstanding_cap: i64,
+}
+
+/// What [`Database::mint_account_device_code`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MintAccountDeviceCodeOutcome {
+    Minted {
+        code_id: uuid::Uuid,
+    },
+    /// The proving key is not an active device of the session's account, or
+    /// it joined the account by code (a code-joined device never mints).
+    MinterNotADevice,
+    TooManyOutstanding,
+    /// The proof's nonce was already used.
+    NonceReused,
+}
+
+/// A minted code as its account sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountDeviceCodeStatus {
+    pub expired: bool,
+    pub redeemed_device_key_id: Option<String>,
+}
+
+/// What [`Database::redeem_account_device_code`] or
+/// [`Database::renew_device_session`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceSignInOutcome {
+    SignedIn(crate::account_onboarding::ProvisionedNearAccount),
+    /// Redeem: no unexpired, unredeemed code with that hash. Renew: the key
+    /// is not an active device that joined by code.
+    NotFound,
+    /// Redeem: the device key is registered to another tenant or account.
+    DeviceKeyElsewhere,
+    /// Renew: the proof's nonce was already used.
+    NonceReused,
+    /// Renew: the device renewed too recently.
+    TooSoon,
+}
+
+/// Outcome of [`Database::revoke_account_device`]. `removed` is `false` for an
+/// unknown, already-revoked or other-account device; the counts say what the
+/// revoke ended, for a hash-free audit row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RevokeAccountDeviceResult {
+    pub removed: bool,
+    pub sessions_revoked: u64,
+    pub grants_revoked: u64,
+    /// The account's live native sessions that named no device key (issued
+    /// before V139, by the login-link native sign-in, or by a passkey sign-in
+    /// before V144, whatever credential id it carries), revoked with the
+    /// device because they cannot be told apart from its own. The caller's
+    /// session is never among them.
+    pub unattributed_sessions_revoked: u64,
 }
 
 /// Outcome of [`Database::stage_merge_proposal`]: device B's login-link was
@@ -2314,7 +2377,7 @@ pub struct StagedMergeProposal {
 }
 
 /// Outcome of a successful [`Database::execute_merge`]: how many active principal
-/// links and strong authenticators (webauthn credentials + NEAR identities) were
+/// links and strong authenticators (NEAR identities) were
 /// re-keyed from the absorbed account onto the surviving account. Counts only;
 /// never identifiers.
 #[derive(Debug, Clone, Copy)]
@@ -2648,3 +2711,1984 @@ pub enum InstanceEnrollmentOutcome {
 }
 
 mod token_bundles;
+
+// ---------------------------------------------------------------------------
+// Payout rails (V132; docs/superpowers/specs/2026-10-21-nearai-credit-payout-
+// design.md, sections 4 and 5).
+//
+// One set of tables serves every rail, each row keyed by `rail_id`. Every
+// tenant-scoped call takes the auth-derived tenant and runs under
+// `trace_current_tenant_id()`; the two deployment-wide reads and writes, and
+// the cross-tenant enumeration, run under their narrow roles with
+// `SET LOCAL ROLE`, so the role ends with the transaction on every path.
+// Amounts are a rail's atomic units, `u128`, stored as NUMERIC(39,0).
+// ---------------------------------------------------------------------------
+
+use trace_commons_gate_api::pipeline::{AtomicUnits, InstrumentId};
+use trace_commons_gate_api::{RailId, RailRate, RecipientKind};
+use uuid::Uuid;
+
+/// A link's lifecycle on one rail. Per account and rail, at most one
+/// `Waiting` link and at most one link that is `Active` or `Closing`: a link
+/// goes active only once its predecessor is closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayoutLinkState {
+    Waiting,
+    Active,
+    Closing,
+    Closed,
+}
+
+impl PayoutLinkState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Active => "active",
+            Self::Closing => "closing",
+            Self::Closed => "closed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "waiting" => Self::Waiting,
+            "active" => Self::Active,
+            "closing" => Self::Closing,
+            "closed" => Self::Closed,
+            _ => return None,
+        })
+    }
+}
+
+/// Which program of a link a line pays (V142; referral rewards spec
+/// section 5). `Earned` is the account's own credit on the link's program
+/// and every line written before V142; `Referral` is referral bonus on the
+/// link's referral program. A link has at most one pending line per stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+pub enum PayoutStream {
+    #[default]
+    Earned,
+    Referral,
+}
+
+impl PayoutStream {
+    pub const ALL: [Self; 2] = [Self::Earned, Self::Referral];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Earned => "earned",
+            Self::Referral => "referral",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "earned" => Self::Earned,
+            "referral" => Self::Referral,
+            _ => return None,
+        })
+    }
+}
+
+/// What a referrer is owed on a rail from referral bonus: the signed sum of
+/// `bonus_units` over its `trace_referral_bonus_accruals` rows (bonus,
+/// reversal and void), and how many rows that is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayoutReferralOwed {
+    /// `None` when the rows sum below zero, which bonus rows that take back
+    /// only what they gave cannot produce: the pass holds rather than guess.
+    pub net: Option<u128>,
+    pub bonus_count: i64,
+}
+
+/// A payout line's state. `Pending` until its outcome is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayoutLineState {
+    Pending,
+    Confirmed,
+    NoOp,
+    Held,
+    Failed,
+}
+
+impl PayoutLineState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Confirmed => "confirmed",
+            Self::NoOp => "no_op",
+            Self::Held => "held",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "pending" => Self::Pending,
+            "confirmed" => Self::Confirmed,
+            "no_op" => Self::NoOp,
+            "held" => Self::Held,
+            "failed" => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
+/// A credit accrual adds to what an account is owed on a rail; a reversal
+/// takes back exactly what its credit added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayoutAccrualKind {
+    Credit,
+    Reversal,
+}
+
+impl PayoutAccrualKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Credit => "credit",
+            Self::Reversal => "reversal",
+        }
+    }
+}
+
+/// What a `trace_payout_audit` row records. Hash-only: the row carries an
+/// actor ref hash, a link id hash, states and a label, never an account,
+/// recipient, program, amount or rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayoutAuditAction {
+    LinkRequested,
+    UnlinkRequested,
+    LinkCreated,
+    LinkConfirmed,
+    LinkActivated,
+    LinkClosing,
+    LinkClosed,
+    LinkReleased,
+    LinkRecipientUnavailable,
+    HoldSet,
+    HoldCleared,
+    AccrualClaimed,
+}
+
+impl PayoutAuditAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LinkRequested => "link_requested",
+            Self::UnlinkRequested => "unlink_requested",
+            Self::LinkCreated => "link_created",
+            Self::LinkConfirmed => "link_confirmed",
+            Self::LinkActivated => "link_activated",
+            Self::LinkClosing => "link_closing",
+            Self::LinkClosed => "link_closed",
+            Self::LinkReleased => "link_released",
+            Self::LinkRecipientUnavailable => "link_recipient_unavailable",
+            Self::HoldSet => "hold_set",
+            Self::HoldCleared => "hold_cleared",
+            Self::AccrualClaimed => "accrual_claimed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "link_requested" => Self::LinkRequested,
+            "unlink_requested" => Self::UnlinkRequested,
+            "link_created" => Self::LinkCreated,
+            "link_confirmed" => Self::LinkConfirmed,
+            "link_activated" => Self::LinkActivated,
+            "link_closing" => Self::LinkClosing,
+            "link_closed" => Self::LinkClosed,
+            "link_released" => Self::LinkReleased,
+            "link_recipient_unavailable" => Self::LinkRecipientUnavailable,
+            "hold_set" => Self::HoldSet,
+            "hold_cleared" => Self::HoldCleared,
+            "accrual_claimed" => Self::AccrualClaimed,
+            _ => return None,
+        })
+    }
+
+    /// Whether this action may record a `from` to `to` link transition made
+    /// by [`PayoutStore::transition_payout_link`]: `waiting` to `active` is
+    /// `LinkActivated`; `active` to `closing` is `LinkClosing` (a change or
+    /// an unlink) or `LinkReleased` (an operator release).
+    pub fn fits_link_transition(self, from: PayoutLinkState, to: PayoutLinkState) -> bool {
+        use PayoutLinkState::{Active, Closing, Waiting};
+        matches!(
+            (from, to, self),
+            (Waiting, Active, Self::LinkActivated)
+                | (Active, Closing, Self::LinkClosing | Self::LinkReleased)
+        )
+    }
+}
+
+/// A recipient as stored: sealed, with a keyed blind index, the key and
+/// pepper refs it was sealed and indexed under, and a keyed index of what
+/// proved it. Neither key is in the database. `Debug` prints none of it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SealedRecipient {
+    pub sealed: serde_json::Value,
+    pub recipient_index: String,
+    pub recipient_key_ref: String,
+    pub index_pepper_ref: String,
+    pub subject_index: String,
+    /// What the status route reports so the app can check the server holds
+    /// the recipient it chose (for `near_ai`,
+    /// `trace_commons_protocol::payout_link::near_ai_recipient_ref`). A hash;
+    /// `None` on a link written without one.
+    pub recipient_ref: Option<String>,
+}
+
+impl std::fmt::Debug for SealedRecipient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SealedRecipient([redacted])")
+    }
+}
+
+/// One accrual to insert. `award_units` and `rail_units` are magnitudes; a
+/// reversal is stored negated. `account_id` is `None` for a line keyed to a
+/// bare principal, owed to nobody until claimed. `Debug` prints neither the
+/// account nor its hash.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutAccrualWrite {
+    pub rail_id: RailId,
+    pub kind: PayoutAccrualKind,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub reversal_event_id: Option<Uuid>,
+    pub account_id: Option<Uuid>,
+    pub award_units: AtomicUnits,
+    pub rail_units: AtomicUnits,
+    pub rate_version: String,
+    pub instrument_id: InstrumentId,
+}
+
+/// One stored accrual on a rail, as accrual reads it back to skip what is
+/// already priced and to price a reversal at its credit's version.
+/// `award_units` and `rail_units` are magnitudes; `kind` gives the sign.
+/// `Debug` prints neither the account nor its hash.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutAccrual {
+    pub rail_id: RailId,
+    pub kind: PayoutAccrualKind,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub reversal_event_id: Option<Uuid>,
+    pub account_id: Option<Uuid>,
+    pub award_units: AtomicUnits,
+    pub rail_units: AtomicUnits,
+    pub rate_version: String,
+    pub instrument_id: InstrumentId,
+}
+
+impl std::fmt::Debug for PayoutAccrual {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutAccrual")
+            .field("rail_id", &self.rail_id)
+            .field("kind", &self.kind)
+            .field("owned", &self.account_id.is_some())
+            .field("rate_version", &self.rate_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What an account is owed on a rail, from its accruals alone: the credit
+/// and reversal sums, each a `u128` of the rail's atomic units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayoutOwed {
+    pub credited: u128,
+    pub reversed: u128,
+    pub accrual_count: i64,
+}
+
+impl PayoutOwed {
+    /// Credited minus reversed; `None` if reversals exceed credits, which a
+    /// reversal that takes back exactly its own credit cannot produce.
+    pub fn net(&self) -> Option<u128> {
+        self.credited.checked_sub(self.reversed)
+    }
+}
+
+/// A new link generation. Only `Waiting` or `Active` may be inserted.
+/// `Debug` redacts the account, the recipient and the program.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutLinkWrite {
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub link_id: Uuid,
+    pub recipient_kind: RecipientKind,
+    pub recipient: SealedRecipient,
+    pub program: String,
+    pub state: PayoutLinkState,
+    pub actor_ref_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkInsert {
+    Inserted,
+    /// The account already has a waiting link on that rail or, for an
+    /// active insert, an active or closing one.
+    StateTaken,
+}
+
+/// The outcome of [`PayoutStore::transition_payout_link`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkTransition {
+    Moved,
+    /// The link is not in `from` in this tenant; nothing changed.
+    NotInState,
+    /// Activating would give the account a second active-or-closing link on
+    /// the rail; nothing changed. A waiting successor is activated by
+    /// [`PayoutStore::close_payout_link`] instead.
+    LiveLinkTaken,
+}
+
+/// The outcome of [`PayoutStore::close_payout_link`]. Every variant but
+/// `Closed` changed nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkClose {
+    Closed,
+    /// The link is not `closing` in this tenant.
+    NotClosing,
+    /// The link still has a `pending` line, which recovery resolves first.
+    PendingLineOpen,
+    /// The named successor is not a `waiting` link of the same account and
+    /// rail.
+    SuccessorNotWaiting,
+    /// A referral total was given for a link with no referral program, or
+    /// none for a link that has one.
+    ReferralTotalMismatch,
+}
+
+/// A stored link. `Debug` redacts the recipient and the program.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutLink {
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub link_id: Uuid,
+    pub recipient_kind: RecipientKind,
+    pub state: PayoutLinkState,
+    pub recipient: SealedRecipient,
+    pub program: String,
+    pub final_paid: Option<AtomicUnits>,
+    /// The link's referral program, set when its first referral line is
+    /// written; `None` on a link that never carried referral credit.
+    pub referral_program: Option<String>,
+    /// The referral program's total, recorded when a link that has one
+    /// closes.
+    pub final_paid_referral: Option<AtomicUnits>,
+    pub unlink_requested_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub recipient_unavailable_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub version: i64,
+}
+
+impl std::fmt::Debug for PayoutLink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLink")
+            .field("rail_id", &self.rail_id)
+            .field("state", &self.state)
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A line to write `pending`, committed before any network call. `Debug`
+/// redacts the account.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutLineWrite {
+    pub line_id: Uuid,
+    pub link_id: Uuid,
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub target_total: AtomicUnits,
+    pub delta: AtomicUnits,
+    /// For an earned line, the account's accrual count; for a referral
+    /// line, its bonus row count.
+    pub owed_through_accrual_count: i64,
+    pub stream: PayoutStream,
+    /// A referral line's program: the link's referral program, which the
+    /// insert sets on the link when it has none yet. Required for a
+    /// referral line and refused on an earned one.
+    pub referral_program: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingPayoutLineInsert {
+    Inserted,
+    /// The link already has an unresolved line on this stream, which
+    /// recovery handles first.
+    LinkHasPendingLine,
+    /// The link is not `active` (or is not this account's on this rail): a
+    /// line is never written to a waiting, closing or closed link.
+    LinkNotActive,
+    /// A referral line names a program other than the referral program the
+    /// link already carries; nothing changed.
+    ReferralProgramMismatch,
+    /// A referral line's delta is more than the referrer's referral owed
+    /// less what is confirmed or pending, read under the account lock a
+    /// void takes: owed fell since the pass priced the line. Nothing
+    /// changed.
+    ReferralOwedChanged,
+}
+
+/// A stored line. `Debug` redacts the account.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutLine {
+    pub line_id: Uuid,
+    pub link_id: Uuid,
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub target_total: AtomicUnits,
+    pub delta: AtomicUnits,
+    pub state: PayoutLineState,
+    pub receipt_hash: Option<String>,
+    pub attempts: i32,
+    pub last_error_label: Option<String>,
+    pub stream: PayoutStream,
+}
+
+/// How a pending line is resolved. `Retry` keeps it pending and counts the
+/// attempt; every other variant ends it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayoutLineResolution {
+    Confirmed {
+        receipt_hash: String,
+        delta: AtomicUnits,
+    },
+    NoOp,
+    Held {
+        label: String,
+    },
+    Failed {
+        label: String,
+    },
+    Retry {
+        label: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLineResolve {
+    Resolved,
+    /// No pending line with that id in this tenant.
+    NotPending,
+    /// Another line on this rail, in any tenant, already holds that
+    /// receipt; nothing changed. The authoritative answer: a caller skips the
+    /// record and keeps looking, and the line stays pending.
+    ReceiptAlreadyClaimed,
+}
+
+/// What a link request asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PayoutLinkAction {
+    Link,
+    Unlink,
+}
+
+impl PayoutLinkAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Link => "link",
+            Self::Unlink => "unlink",
+        }
+    }
+}
+
+/// A link or unlink request awaiting the contributor's confirmation. A link request
+/// carries its verified, sealed recipient; an unlink request none. `Debug`
+/// redacts the account, the handle and the recipient.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutLinkRequestWrite {
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub idempotency_key: Uuid,
+    pub handle_hash: String,
+    pub request_digest: String,
+    pub action: PayoutLinkAction,
+    pub expected_current_version: Option<i64>,
+    pub recipient: Option<(RecipientKind, SealedRecipient)>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub actor_ref_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkRequestInsert {
+    Inserted,
+    /// The same idempotency key with the same request digest: nothing new.
+    Replayed,
+    /// The same idempotency key with a different request.
+    IdempotencyConflict,
+}
+
+/// A taken link request. The caller checks `expires_at`. `Debug` redacts
+/// the account and the recipient.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutLinkRequest {
+    pub account_id: Uuid,
+    pub rail_id: RailId,
+    pub idempotency_key: Uuid,
+    pub action: PayoutLinkAction,
+    pub expected_current_version: Option<i64>,
+    pub recipient: Option<(RecipientKind, SealedRecipient)>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// What a confirm writes beside the request it takes: the new link's id and
+/// program (for a `link`) and the confirming account's actor hash. The
+/// recipient comes from the request row, never from the confirm call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutLinkConfirmWrite {
+    pub link_id: Uuid,
+    pub program: String,
+    pub actor_ref_hash: String,
+}
+
+/// The outcome of [`PayoutStore::confirm_payout_link_request`]. Every
+/// variant but `Confirmed` changed nothing but consuming the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutLinkConfirm {
+    Confirmed {
+        action: PayoutLinkAction,
+        /// The account's link version on the rail after the change.
+        version: i64,
+    },
+    /// No request with that handle on this account and rail, or a newer
+    /// request on the same account and rail superseded it.
+    NotFound,
+    Expired,
+    /// The account's link version on the rail is not the one the request
+    /// was made against: the link changed since the app showed it.
+    VersionConflict,
+    /// A link already waits for the pass, or an unlink is already recorded.
+    ChangePending,
+    /// An unlink with no active link.
+    NotLinked,
+}
+
+/// One account's link state on one rail, for the link routes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PayoutAccountLinkView {
+    /// Counts every link the account was given on the rail and every unlink
+    /// it confirmed: it moves on each change the person makes and on none
+    /// the pass makes, so it says whether the recipient changed since an app
+    /// read it. 0 with no history.
+    pub version: i64,
+    /// The newest link that is not closed: the waiting one if there is one,
+    /// else the active or closing one.
+    pub newest: Option<PayoutLink>,
+    /// An unexpired request waits for a confirm.
+    pub pending_request: bool,
+}
+
+impl std::fmt::Debug for PayoutAccountLinkView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutAccountLinkView")
+            .field("version", &self.version)
+            .field("newest", &self.newest)
+            .field("pending_request", &self.pending_request)
+            .finish()
+    }
+}
+
+// Hash-only logging (spec, "Hash-only logging"): these `Debug` impls print
+// the rail, kinds and states, never an account id, its hash, a program, a
+// handle or a recipient. `payout_debug_tests` pins it.
+impl std::fmt::Debug for PayoutAccrualWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutAccrualWrite")
+            .field("rail_id", &self.rail_id)
+            .field("kind", &self.kind)
+            .field("rate_version", &self.rate_version)
+            .field("instrument_id", &self.instrument_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PayoutLinkWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLinkWrite")
+            .field("rail_id", &self.rail_id)
+            .field("recipient_kind", &self.recipient_kind)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PayoutLineWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLineWrite")
+            .field("rail_id", &self.rail_id)
+            .field("stream", &self.stream)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PayoutLine {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLine")
+            .field("rail_id", &self.rail_id)
+            .field("stream", &self.stream)
+            .field("state", &self.state)
+            .field("attempts", &self.attempts)
+            .field("last_error_label", &self.last_error_label)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PayoutLinkRequestWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLinkRequestWrite")
+            .field("rail_id", &self.rail_id)
+            .field("action", &self.action)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for PayoutLinkRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PayoutLinkRequest")
+            .field("rail_id", &self.rail_id)
+            .field("action", &self.action)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Whether a rate epoch was recorded at boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayoutRateEpochRecord {
+    Recorded,
+    /// The same `(rail, version)` with the same rate is already there.
+    AlreadyRecorded,
+    /// The `(rail, version)` is there with a different rate: a version names
+    /// one rate forever, so the caller refuses to start.
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutRateEpoch {
+    pub rate: RailRate,
+    pub pricing_label: Option<String>,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A rail's kill switch: the latest halt or resume row, or not halted when
+/// there is none.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PayoutControl {
+    pub halted: bool,
+    pub label: Option<String>,
+    pub changed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The account state every rail shares (payout spec section 4, "Holds", and
+/// section 6): whether the account is open, and whether a credit hold is
+/// open on it or on any principal linked to it. Each rail checks it itself,
+/// before every send, and holds only its own sends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayoutAccountStanding {
+    /// The account row exists in this tenant.
+    pub exists: bool,
+    /// `trace_accounts.closed_at` is set.
+    pub closed: bool,
+    /// An open `trace_credit_holds` row names the account's `account:` key
+    /// or a principal actively linked to it.
+    pub credit_held: bool,
+}
+
+/// An account whose row is gone or closed.
+pub const PAYOUT_ACCOUNT_CLOSED: &str = "payout_account_closed";
+/// An open credit hold on the account or a principal linked to it.
+pub const PAYOUT_ACCOUNT_CREDIT_HOLD: &str = "payout_account_credit_hold";
+
+impl PayoutAccountStanding {
+    /// The shared hold label, if any. A missing account row holds like a
+    /// closed one: nothing is sent to an account this tenant does not have.
+    pub fn hold_label(&self) -> Option<&'static str> {
+        if !self.exists || self.closed {
+            Some(PAYOUT_ACCOUNT_CLOSED)
+        } else if self.credit_held {
+            Some(PAYOUT_ACCOUNT_CREDIT_HOLD)
+        } else {
+            None
+        }
+    }
+}
+
+pub use postgres_payout::{
+    PayoutPassLock, account_id_hash as payout_account_id_hash, link_id_hash as payout_link_id_hash,
+};
+
+/// One open hold on a rail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutHold {
+    pub account_id: Uuid,
+    pub label: String,
+}
+
+/// The payout rail store. Implemented for PostgreSQL in `postgres_payout`.
+#[async_trait]
+pub trait PayoutStore: Send + Sync {
+    // -- tenant-scoped ------------------------------------------------------
+
+    /// Inserts each accrual once (`ON CONFLICT DO NOTHING` on its credit or
+    /// reversal key); returns how many were new. Never re-prices a row.
+    async fn insert_payout_accruals(
+        &self,
+        tenant: &str,
+        accruals: &[PayoutAccrualWrite],
+    ) -> Result<u64, DatabaseError>;
+
+    /// Sets the owner of every unowned accrual on `rail` keyed to
+    /// `credit_account_hash`, once, with one audit row when any was claimed.
+    /// Per rail: one rail's accrual never writes another rail's rows.
+    async fn claim_payout_accruals(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        credit_account_hash: &str,
+        account: Uuid,
+        actor_ref_hash: &str,
+    ) -> Result<u64, DatabaseError>;
+
+    /// The account each of `principals` is actively linked to, for
+    /// accrual. Reads the shared ownership view only: unlike
+    /// [`Database::resolve_principals_to_accounts`] it never upserts the
+    /// tenant row, so accrual writes nothing outside the payout tables.
+    async fn payout_principal_accounts(
+        &self,
+        tenant: &str,
+        principals: &[String],
+    ) -> Result<std::collections::HashMap<String, Uuid>, DatabaseError>;
+
+    /// The database clock (`clock_timestamp()`), the clock rate epochs'
+    /// `observed_at` is taken from.
+    async fn payout_database_now(&self) -> Result<chrono::DateTime<chrono::Utc>, DatabaseError>;
+
+    /// Every accrual on `rail` in this tenant, oldest first.
+    async fn payout_accruals(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutAccrual>, DatabaseError>;
+
+    /// What `account` is owed on `rail`, from its accruals. Refuses a sum
+    /// above `u128::MAX` rather than wrap.
+    async fn payout_owed(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<PayoutOwed, DatabaseError>;
+
+    /// The sum of `final_paid` over the account's closed links on `rail`.
+    async fn payout_closed_links_final_paid(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<u128, DatabaseError>;
+
+    /// The account's `active` link on `rail`.
+    async fn payout_live_link(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<Option<PayoutLink>, DatabaseError>;
+
+    /// The account-agnostic read the pass needs: every link on `rail` in
+    /// this tenant whose state is one of `states`, by account then age.
+    async fn payout_links(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        states: &[PayoutLinkState],
+    ) -> Result<Vec<PayoutLink>, DatabaseError>;
+
+    /// Records a confirmed unlink on an `active` link (spec section 5,
+    /// "Unlink"), with an audit row; the pass then closes it. False, with
+    /// nothing changed, when the link is not active or is already marked.
+    async fn mark_payout_link_unlink_requested(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Marks an `active` or `closing` link's recipient unavailable (the
+    /// rail answered that the recipient is gone), with an audit row. A mark,
+    /// not a state: the link keeps its slot until it is closed. False, with
+    /// nothing changed, when the link is in neither state or already marked.
+    async fn mark_payout_link_recipient_unavailable(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Inserts a `waiting` or `active` link and its audit row together.
+    async fn insert_payout_link(
+        &self,
+        tenant: &str,
+        link: &PayoutLinkWrite,
+    ) -> Result<PayoutLinkInsert, DatabaseError>;
+
+    /// Moves a link `waiting` to `active`, or `active` to `closing`, and
+    /// writes `action`'s audit row, in one transaction. `action` must fit
+    /// the move ([`PayoutAuditAction::fits_link_transition`]); any other
+    /// pair is an error. A waiting link cannot go active while the account
+    /// has an active or closing link on the rail (`LiveLinkTaken`); closing
+    /// to closed is [`Self::close_payout_link`].
+    #[allow(clippy::too_many_arguments)]
+    async fn transition_payout_link(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        from: PayoutLinkState,
+        to: PayoutLinkState,
+        action: PayoutAuditAction,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<PayoutLinkTransition, DatabaseError>;
+
+    /// Closes a `closing` link with its program total `final_paid` and, when
+    /// `successor` names the same account's `waiting` link on the same rail,
+    /// activates it, in one transaction with an audit row for each (spec
+    /// section 5, "Closing"). Refuses, changing nothing, while the closing
+    /// link has a `pending` line. Concurrent writers are excluded by the
+    /// rail pass's single-flight lock; the V132 link trigger refuses a close
+    /// over a pending line as a backstop.
+    ///
+    /// The earned stream only: a link that carries a referral program closes
+    /// through [`Self::close_payout_link_streams`], or V142's shape check
+    /// refuses it.
+    #[allow(clippy::too_many_arguments)]
+    async fn close_payout_link(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        final_paid: AtomicUnits,
+        successor: Option<Uuid>,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<PayoutLinkClose, DatabaseError> {
+        self.close_payout_link_streams(
+            tenant,
+            link_id,
+            final_paid,
+            None,
+            successor,
+            actor_ref_hash,
+            label,
+        )
+        .await
+    }
+
+    /// [`Self::close_payout_link`], recording each stream's final total:
+    /// `final_paid` for the earned program and, for a link with a referral
+    /// program, `final_paid_referral` (referral rewards spec section 5,
+    /// "Closing a link reads both programs"). A link with a referral program
+    /// and no `final_paid_referral`, or the reverse, is refused by the
+    /// V142 shape check and changes nothing. Refuses while a line of either
+    /// stream is pending.
+    #[allow(clippy::too_many_arguments)]
+    async fn close_payout_link_streams(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        final_paid: AtomicUnits,
+        final_paid_referral: Option<AtomicUnits>,
+        successor: Option<Uuid>,
+        actor_ref_hash: &str,
+        label: Option<&str>,
+    ) -> Result<PayoutLinkClose, DatabaseError>;
+
+    /// Writes a `pending` line, only onto the account's `active` link on the
+    /// line's rail.
+    async fn insert_pending_payout_line(
+        &self,
+        tenant: &str,
+        line: &PayoutLineWrite,
+    ) -> Result<PendingPayoutLineInsert, DatabaseError>;
+
+    /// The link's pending earned line.
+    async fn pending_payout_line_for_link(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+    ) -> Result<Option<PayoutLine>, DatabaseError> {
+        self.pending_payout_line_for_stream(tenant, link_id, PayoutStream::Earned)
+            .await
+    }
+
+    /// The link's pending line on `stream`; at most one exists.
+    async fn pending_payout_line_for_stream(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        stream: PayoutStream,
+    ) -> Result<Option<PayoutLine>, DatabaseError>;
+
+    async fn resolve_payout_line(
+        &self,
+        tenant: &str,
+        line_id: Uuid,
+        resolution: &PayoutLineResolution,
+    ) -> Result<PayoutLineResolve, DatabaseError>;
+
+    /// Whether a line on `rail` in this tenant already holds `receipt_hash`,
+    /// so recovery can skip a record that answers another line.
+    ///
+    /// This is a hint, not the authority. It sees only this tenant (forced
+    /// RLS), while `trace_payout_lines_one_receipt` is unique on `(rail_id,
+    /// receipt_hash)` across every tenant. A record already claimed by a line
+    /// in another tenant reads `false` here and surfaces only when the
+    /// resolve is refused with [`PayoutLineResolve::ReceiptAlreadyClaimed`],
+    /// which a caller treats the same way: skip that record and keep paging,
+    /// leaving the line pending. (On `near_ai` each link has its own program,
+    /// so a record from another tenant's program cannot match.)
+    async fn payout_receipt_is_claimed(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        receipt_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Opens a hold with an audit row; false if that hold is already open.
+    async fn open_payout_hold(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        label: &str,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Records, once per `(rail, reversal_event_id)`, accrual's decision to
+    /// hold `account` for a reversal it cannot price, and opens that hold
+    /// (with its audit row) only when the decision is new. A later run
+    /// finds the decision and leaves the hold as it is, so an operator's
+    /// clear stands. True if a hold was opened.
+    async fn open_payout_reversal_hold(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        reversal_event_id: Uuid,
+        label: &str,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Clears an open hold with an audit row; false if none was open.
+    async fn clear_payout_hold(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        label: &str,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    async fn open_payout_hold_labels(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<Vec<String>, DatabaseError>;
+
+    /// Every open hold in `tenant` on `rail`, by account and label: the
+    /// operator's view before clearing one.
+    async fn open_payout_holds(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutHold>, DatabaseError>;
+
+    /// Records a request with its audit row.
+    async fn insert_payout_link_request(
+        &self,
+        tenant: &str,
+        request: &PayoutLinkRequestWrite,
+    ) -> Result<PayoutLinkRequestInsert, DatabaseError>;
+
+    /// Takes (deletes and returns) the account's request on `rail` with that
+    /// handle hash, so it can be confirmed at most once.
+    async fn take_payout_link_request(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        handle_hash: &str,
+    ) -> Result<Option<PayoutLinkRequest>, DatabaseError>;
+
+    /// Deletes this tenant's requests whose `expires_at` has passed by the
+    /// database clock; returns how many. Requests are audited when made, so
+    /// a discard writes no audit row.
+    async fn purge_expired_payout_link_requests(&self, tenant: &str) -> Result<u64, DatabaseError>;
+
+    /// The account's version, newest live link and pending-request flag on
+    /// `rail` ([`PayoutAccountLinkView`]).
+    async fn payout_account_link_view(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<PayoutAccountLinkView, DatabaseError>;
+
+    /// The account's NEAR AI login anchors (`trace_near_account_anchors`
+    /// rows with `identity_source = 'near_ai_login'`), which a `near_ai`
+    /// proof's subject must match. Empty for an account with none.
+    async fn payout_account_login_anchors(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<Vec<String>, DatabaseError>;
+
+    /// Takes the account's request on `rail` with that handle hash and, in
+    /// the same transaction, writes what it asks for: a `waiting` link
+    /// carrying the request's sealed recipient, or the unlink mark on the
+    /// active link, each with its audit rows. Serialized per account and
+    /// rail. Refuses (consuming the request) when it expired, a newer
+    /// request superseded it, or the account's link version is no longer
+    /// the request's `expected_current_version`.
+    async fn confirm_payout_link_request(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        handle_hash: &str,
+        confirm: &PayoutLinkConfirmWrite,
+    ) -> Result<PayoutLinkConfirm, DatabaseError>;
+
+    /// The audit actions on `rail` in this tenant, oldest first.
+    async fn payout_audit_actions(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutAuditAction>, DatabaseError>;
+
+    // -- deployment-wide ----------------------------------------------------
+
+    /// Records `(rail, rate.version)` once, under `trace_payout_config_writer`,
+    /// with `observed_at` from the database clock.
+    async fn record_payout_rate_epoch(
+        &self,
+        rail: &RailId,
+        rate: &RailRate,
+        pricing_label: Option<&str>,
+    ) -> Result<PayoutRateEpochRecord, DatabaseError>;
+
+    /// The rail's epochs, oldest observation first.
+    async fn payout_rate_epochs(
+        &self,
+        rail: &RailId,
+    ) -> Result<Vec<PayoutRateEpoch>, DatabaseError>;
+
+    async fn payout_control(&self, rail: &RailId) -> Result<PayoutControl, DatabaseError>;
+
+    /// Appends a halt or resume row under `trace_payout_config_writer`.
+    async fn set_payout_control(
+        &self,
+        rail: &RailId,
+        halted: bool,
+        label: Option<&str>,
+        actor_ref_hash: &str,
+    ) -> Result<(), DatabaseError>;
+
+    /// The tenants with a `waiting`, `active` or `closing` link on `rail`,
+    /// read under `trace_payout_enumerator`, which sees only tenant, rail and
+    /// state. `waiting` is included because every confirmed link is written
+    /// waiting and only the pass activates it: a tenant whose only link is
+    /// waiting (every first link, or a successor left after a crash) must
+    /// still get a pass.
+    async fn tenants_with_live_payout_links(
+        &self,
+        rail: &RailId,
+    ) -> Result<Vec<String>, DatabaseError>;
+
+    /// The shared account state a rail checks before every send (spec
+    /// section 4, "Holds"). Reads only.
+    async fn payout_account_standing(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<PayoutAccountStanding, DatabaseError>;
+
+    /// The sum of `delta` over the link's `confirmed` earned lines: what the
+    /// commons has confirmed landing on the link's program.
+    async fn payout_link_confirmed_total(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+    ) -> Result<u128, DatabaseError> {
+        self.payout_link_stream_confirmed_total(tenant, link_id, PayoutStream::Earned)
+            .await
+    }
+
+    /// The sum of `delta` over the link's `confirmed` lines on `stream`:
+    /// what has landed on that stream's program of the link.
+    async fn payout_link_stream_confirmed_total(
+        &self,
+        tenant: &str,
+        link_id: Uuid,
+        stream: PayoutStream,
+    ) -> Result<u128, DatabaseError>;
+
+    /// The sum of `delta` over every `confirmed` line on `stream` of the
+    /// account on `rail`, across all its links: the status route's `sent`.
+    async fn payout_account_stream_sent(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        stream: PayoutStream,
+    ) -> Result<u128, DatabaseError>;
+
+    /// What `account` is owed on `rail` from referral bonus: the signed sum
+    /// of `bonus_units` over its `trace_referral_bonus_accruals` rows.
+    /// Refuses a sum whose magnitude exceeds `u128::MAX` rather than wrap.
+    async fn payout_referral_owed(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<PayoutReferralOwed, DatabaseError>;
+
+    /// The sum of `final_paid_referral` over the account's closed links on
+    /// `rail`.
+    async fn payout_closed_links_final_paid_referral(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<u128, DatabaseError>;
+
+    /// Takes the rail's single-flight pass lock (spec section 4, "One pass,
+    /// per rail", step 0): a session-level
+    /// `pg_try_advisory_lock(hashtextextended('payout-pass-v1:' || rail, 0))`
+    /// on a connection pinned until [`PayoutPassLock::release`]. `None` when
+    /// another pass of the same rail holds it. Each rail has its own key, so
+    /// passes on two rails never wait on each other.
+    async fn try_acquire_payout_pass_lock(
+        &self,
+        rail: &RailId,
+    ) -> Result<Option<PayoutPassLock>, DatabaseError>;
+}
+
+// -- referral codes and attributions (V142) ---------------------------------
+//
+// docs/superpowers/specs/2026-10-29-referral-rewards-design.md, sections 2
+// and 3. Implemented for PostgreSQL in `postgres_referral`.
+
+/// Refused applies an account may make in [`REFERRAL_REFUSAL_WINDOW_HOURS`]
+/// before every further attempt is `referral_rate_limited`, counted from its
+/// own `referral_refused` audit rows.
+pub const REFERRAL_REFUSAL_LIMIT: i64 = 10;
+pub const REFERRAL_REFUSAL_WINDOW_HOURS: i64 = 24;
+
+/// A new code row: its index, its sealed text and the refs it was sealed
+/// under (`referral_code::seal_referral_code`). `Debug` prints the id only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralCodeWrite {
+    pub code_id: Uuid,
+    pub code_index: String,
+    pub sealed_code: serde_json::Value,
+    pub code_key_ref: String,
+    pub index_pepper_ref: String,
+}
+
+impl std::fmt::Debug for ReferralCodeWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralCodeWrite")
+            .field("code_id", &self.code_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The outcome of [`ReferralStore::create_referral_code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralCodeCreate {
+    Created {
+        created_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// The account already has the most live codes it may.
+    LimitReached,
+    /// Some code, in any tenant, already has this index: draw another code.
+    /// Nothing was written.
+    IndexTaken,
+    /// No open account row.
+    AccountIneligible,
+}
+
+/// One of an account's codes, with what it brought in.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralCodeRow {
+    pub code_id: Uuid,
+    pub code_index: String,
+    pub sealed_code: serde_json::Value,
+    pub code_key_ref: String,
+    pub index_pepper_ref: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub disabled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub voided_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Referees of this code whose referral is not voided.
+    pub referee_count: u64,
+    /// The sum of `bonus_units` of the bonus rows of this code's referees on
+    /// the `near_ai` rail. Signed: reversals and voids are negative.
+    pub bonus_owed: i128,
+}
+
+impl std::fmt::Debug for ReferralCodeRow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralCodeRow")
+            .field("code_id", &self.code_id)
+            .field("created_at", &self.created_at)
+            .field("referee_count", &self.referee_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReferralCodeRow {
+    /// Live while none of disabled, suspended and voided is set.
+    pub fn is_live(&self) -> bool {
+        self.disabled_at.is_none() && self.suspended_at.is_none() && self.voided_at.is_none()
+    }
+}
+
+/// An account's codes and its referral totals on the `near_ai` rail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralCodesView {
+    /// Oldest first.
+    pub codes: Vec<ReferralCodeRow>,
+    /// The sum of `bonus_units` of every bonus row of the account. Signed.
+    pub bonus_owed: i128,
+    /// The sum of `delta` over the account's `confirmed` lines on the
+    /// referral stream.
+    pub bonus_sent: u128,
+}
+
+/// The outcome of [`ReferralStore::disable_referral_code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralCodeDisable {
+    Disabled,
+    /// It was already disabled; nothing changed.
+    AlreadyDisabled,
+    NotFound,
+}
+
+/// What an apply is checked against: the program window and how late an
+/// account may apply (`referral_config::ReferralConfig::apply_policy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferralApplyPolicy {
+    /// `None`: the program has not started.
+    pub program_start: Option<chrono::DateTime<chrono::Utc>>,
+    pub program_end: Option<chrono::DateTime<chrono::Utc>>,
+    pub late_days: u32,
+    /// The earning period in force at apply time, stamped on the
+    /// attribution as its `earn_until`.
+    pub earn_days: u32,
+}
+
+/// Why an apply was refused (spec section 3), in the order the checks run.
+/// Recorded only on the referee's `referral_refused` audit row; the client
+/// is answered `referral_not_applied` whatever this is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralRefusal {
+    Unavailable,
+    RateLimited,
+    CodeUnknown,
+    AlreadyReferred,
+    AccountTooOld,
+    SelfReferral,
+}
+
+impl ReferralRefusal {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "referral_unavailable",
+            Self::RateLimited => "referral_rate_limited",
+            Self::CodeUnknown => "referral_code_unknown",
+            Self::AlreadyReferred => "referral_already_referred",
+            Self::AccountTooOld => "referral_account_too_old",
+            Self::SelfReferral => "referral_self",
+        }
+    }
+}
+
+/// The outcome of [`ReferralStore::apply_referral_code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferralApply {
+    Applied {
+        applied_at: chrono::DateTime<chrono::Utc>,
+        referee_account_created_at: chrono::DateTime<chrono::Utc>,
+        /// The earning period's end stamped at apply time.
+        earn_until: chrono::DateTime<chrono::Utc>,
+    },
+    Refused(ReferralRefusal),
+}
+
+/// An account's own referral, as its referee sees it: never whose code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferralAttribution {
+    pub applied_at: chrono::DateTime<chrono::Utc>,
+    pub referee_account_created_at: chrono::DateTime<chrono::Utc>,
+    /// The earning period's end stamped at apply time.
+    pub earn_until: chrono::DateTime<chrono::Utc>,
+    pub applied_via: trace_commons_protocol::referral::ReferralAppliedVia,
+    pub voided: bool,
+}
+
+/// What `GET /v1/account/referral` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferralAccountStatus {
+    pub attribution: Option<ReferralAttribution>,
+    /// `None` without an account row.
+    pub account_created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// The referral code store. Every call is scoped to the auth-derived tenant
+/// and account; the one cross-tenant read (which tenant owns a code index)
+/// happens inside [`ReferralStore::apply_referral_code`] under the narrow
+/// `trace_referral_resolver` role and is not offered on its own.
+#[async_trait]
+pub trait ReferralStore: Send + Sync {
+    /// Writes a code for `account`, under an advisory lock on the account
+    /// so two concurrent creates cannot both pass the live-code limit, with
+    /// a `code_created` audit row.
+    async fn create_referral_code(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        code: &ReferralCodeWrite,
+    ) -> Result<ReferralCodeCreate, DatabaseError>;
+
+    /// The account's codes, oldest first, with referee counts and bonus
+    /// totals.
+    async fn referral_codes(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<ReferralCodesView, DatabaseError>;
+
+    /// Turns one of the account's codes off, with a `code_disabled` audit
+    /// row. Existing referrals keep earning.
+    async fn disable_referral_code(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        code_id: Uuid,
+    ) -> Result<ReferralCodeDisable, DatabaseError>;
+
+    /// Applies the code whose index is `code_index` (`None`: the input was
+    /// not a code) to `account`, running the checks of spec section 3 in
+    /// order. A refusal writes one `referral_refused` row in the referee's
+    /// tenant with the precise label. Success writes, in one transaction,
+    /// the attribution and a `referral_applied` row under the referee's
+    /// tenant, and the referee mirror and a `referral_applied` row under the
+    /// referrer's.
+    async fn apply_referral_code(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        code_index: Option<&str>,
+        applied_via: trace_commons_protocol::referral::ReferralAppliedVia,
+        policy: &ReferralApplyPolicy,
+    ) -> Result<ReferralApply, DatabaseError>;
+
+    /// The account's own referral, if any, and its creation time.
+    async fn referral_status(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<ReferralAccountStatus, DatabaseError>;
+
+    /// Records `mark` (a keyed network mark, `crate::referral_network`) for
+    /// `account`, only while the account is in the referral program: it owns
+    /// a code or has an attribution. A known mark's `last_seen_at` moves at
+    /// most once an hour. In the same transaction, deletes the account's
+    /// marks last seen more than `retention_days` ago. True when a row was
+    /// inserted or refreshed.
+    async fn record_referral_network_mark(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        mark: &str,
+        retention_days: u32,
+    ) -> Result<bool, DatabaseError>;
+}
+
+// -- Referral bonus (docs/superpowers/specs/2026-10-29-referral-rewards-design.md,
+// sections 4, 6 and 7). Implemented for PostgreSQL in
+// `postgres_referral_bonus`. Every `Debug` below prints kinds, counts and
+// labels, never an account, tenant, index or hash.
+
+/// A `trace_referral_bonus_accruals` row's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReferralBonusKind {
+    Bonus,
+    Reversal,
+    Void,
+}
+
+impl ReferralBonusKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bonus => "bonus",
+            Self::Reversal => "reversal",
+            Self::Void => "void",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "bonus" => Self::Bonus,
+            "reversal" => Self::Reversal,
+            "void" => Self::Void,
+            _ => return None,
+        })
+    }
+}
+
+/// An attribution as the bonus pass reads it, in the referee's tenant.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralAttributionRecord {
+    pub account_id: Uuid,
+    pub code_index: String,
+    pub referrer_tenant_id: String,
+    pub referrer_account_id: Uuid,
+    pub referee_ref_hash: String,
+    pub referee_account_created_at: chrono::DateTime<chrono::Utc>,
+    pub applied_at: chrono::DateTime<chrono::Utc>,
+    /// The earning period's end stamped at apply time.
+    pub earn_until: chrono::DateTime<chrono::Utc>,
+    pub voided: bool,
+}
+
+impl std::fmt::Debug for ReferralAttributionRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralAttributionRecord")
+            .field("voided", &self.voided)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One of the referee's payout accruals on a rail, with its batch's
+/// creation time (the referral window is over batches). `rail_units` is a
+/// magnitude; `kind` gives the sign.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralRefereeAccrual {
+    pub accrual_id: Uuid,
+    pub kind: PayoutAccrualKind,
+    pub settlement_batch_id: Uuid,
+    pub credit_account_hash: String,
+    pub account_id: Option<Uuid>,
+    pub rail_units: u128,
+    pub rate_version: String,
+    pub instrument_id: InstrumentId,
+    pub batch_created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl std::fmt::Debug for ReferralRefereeAccrual {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralRefereeAccrual")
+            .field("kind", &self.kind)
+            .field("owned", &self.account_id.is_some())
+            .field("rate_version", &self.rate_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A stored bonus row for one referee. Units are magnitudes; `kind` gives
+/// the sign.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralBonusRecord {
+    pub kind: ReferralBonusKind,
+    pub source_accrual_id: Option<Uuid>,
+    pub bps: u32,
+    pub base_units: u128,
+    pub bonus_units: u128,
+}
+
+/// One bonus row to write in the referrer's tenant. Units are magnitudes; a
+/// reversal or void is stored negated.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralBonusWrite {
+    pub rail_id: RailId,
+    /// The referrer's account.
+    pub account_id: Uuid,
+    pub referee_ref_hash: String,
+    pub kind: ReferralBonusKind,
+    pub source_accrual_id: Option<Uuid>,
+    pub bps: u32,
+    pub base_units: u128,
+    pub bonus_units: u128,
+    pub rate_version: String,
+    pub instrument_id: InstrumentId,
+}
+
+impl std::fmt::Debug for ReferralBonusWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralBonusWrite")
+            .field("rail_id", &self.rail_id)
+            .field("kind", &self.kind)
+            .field("bps", &self.bps)
+            .field("rate_version", &self.rate_version)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What the referee's tenant says about the referee, for the abuse signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReferralRefereeFactsRow {
+    pub submissions: u64,
+    pub refused: u64,
+    /// A reversal accrual on the rail against the account.
+    pub reversed: bool,
+    /// Any credit accrual on the rail for the account.
+    pub credited: bool,
+}
+
+/// What the bonus pass reads in the referrer's tenant for one referee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralReferrerView {
+    /// The referrer's account row exists. A missing tenant reads as false.
+    pub referrer_exists: bool,
+    /// The mirror row, when there is one.
+    pub mirror: Option<crate::referral_abuse::RefereeMirror>,
+    /// Every bonus row for this referee on the rail.
+    pub bonus_rows: Vec<ReferralBonusRecord>,
+}
+
+/// One referral code's state, in its owner's tenant.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReferralCodeState {
+    pub code_index: String,
+    pub account_id: Uuid,
+    pub disabled: bool,
+    pub suspended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub suspension_labels: Vec<String>,
+    pub voided: bool,
+    /// Signal labels an operator exempted when clearing a suspension.
+    pub exempt_labels: std::collections::BTreeSet<String>,
+}
+
+impl std::fmt::Debug for ReferralCodeState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReferralCodeState")
+            .field("disabled", &self.disabled)
+            .field("suspended", &self.suspended_at.is_some())
+            .field("suspension_labels", &self.suspension_labels)
+            .field("voided", &self.voided)
+            .field("exempt_labels", &self.exempt_labels)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReferralCodeState {
+    pub fn state_label(&self) -> &'static str {
+        if self.voided {
+            "voided"
+        } else if self.suspended_at.is_some() {
+            "suspended"
+        } else if self.disabled {
+            "disabled"
+        } else {
+            "live"
+        }
+    }
+}
+
+/// The referrer's referral stream on a rail: `owed` is the net of the
+/// account's bonus rows (floored at zero), `sent` the referral-stream
+/// lines confirmed or still pending (a pending line may have landed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReferralOwed {
+    pub owed: u128,
+    pub sent: u128,
+}
+
+impl ReferralOwed {
+    pub fn unsent(&self) -> u128 {
+        self.owed.saturating_sub(self.sent)
+    }
+}
+
+/// What a void wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReferralVoidOutcome {
+    /// The referrer's account, for holds.
+    pub account_id: Option<Uuid>,
+    pub referees_voided: u64,
+    /// Units taken back by the void rows.
+    pub taken_back: u128,
+}
+
+/// A suspended code, for the operator list. Hash-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferralSuspendedCode {
+    pub code_index: String,
+    pub suspension_labels: Vec<String>,
+    pub suspended_at: chrono::DateTime<chrono::Utc>,
+    pub referees: u64,
+    /// Net bonus of the code's referees: what the suspension holds.
+    pub held_units: u128,
+}
+
+/// One tenant's part of the dry-run report. Counts and units only.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReferralTenantReport {
+    pub codes_by_state: std::collections::BTreeMap<String, u64>,
+    pub referees: u64,
+    pub referees_by_signal: std::collections::BTreeMap<String, u64>,
+    pub owed: u128,
+    /// Unsent bonus of accounts with no open hold on the rail.
+    pub sendable: u128,
+    /// Unsent bonus of accounts with an open hold on the rail.
+    pub held: u128,
+}
+
+/// The referral bonus store.
+#[async_trait]
+pub trait ReferralBonusStore: Send + Sync {
+    // -- the referee's tenant ------------------------------------------------
+
+    /// Every attribution in the tenant (at most one per account).
+    async fn referral_attributions(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<ReferralAttributionRecord>, DatabaseError>;
+
+    /// The account's accruals on `rail` whose batch is finalized, with the
+    /// batch's creation time, oldest batch first.
+    async fn referral_referee_accruals(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        account: Uuid,
+    ) -> Result<Vec<ReferralRefereeAccrual>, DatabaseError>;
+
+    /// Submission and accrual facts about the account, for its signals.
+    async fn referral_referee_facts(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        account: Uuid,
+    ) -> Result<ReferralRefereeFactsRow, DatabaseError>;
+
+    /// Voids the account's attribution, once, with a `referral_voided` audit
+    /// row in the tenant. False when it was already void or is missing.
+    async fn void_referral_attribution(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        label: &str,
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    // -- either side's own tenant -------------------------------------------
+    //
+    // Server-observed signals (owner decision 2026-10-29): each side's rows
+    // are read under that side's tenant, and only compared in the pass.
+
+    /// The distinct near-duplicate clusters (`dedup_cluster_id`) of the
+    /// gate decisions on the account's own submissions: its most recent
+    /// `limit` submissions received at or after `since`.
+    async fn referral_trace_clusters(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        since: chrono::DateTime<chrono::Utc>,
+        limit: i64,
+    ) -> Result<Vec<Uuid>, DatabaseError>;
+
+    /// The account's network marks, most recently seen first, at most
+    /// `limit`, none last seen more than `retention_days` ago.
+    async fn referral_network_marks(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        retention_days: u32,
+        limit: i64,
+    ) -> Result<Vec<String>, DatabaseError>;
+
+    /// Deletes the tenant's network marks last seen more than
+    /// `retention_days` ago. Returns how many.
+    async fn prune_referral_network_marks(
+        &self,
+        tenant: &str,
+        retention_days: u32,
+    ) -> Result<u64, DatabaseError>;
+
+    // -- the referrer's tenant -----------------------------------------------
+
+    async fn referral_referrer_view(
+        &self,
+        tenant: &str,
+        referrer_account: Uuid,
+        referee_ref_hash: &str,
+        rail: &RailId,
+    ) -> Result<ReferralReferrerView, DatabaseError>;
+
+    /// Inserts each row once (`ON CONFLICT DO NOTHING` on the source or void
+    /// index); returns how many were new. Never re-prices a row. Under the
+    /// referrer's account lock, drops every bonus and reversal row of a
+    /// referee whose referral was voided (mirror row or void row) after the
+    /// rows were planned.
+    async fn insert_referral_bonus_rows(
+        &self,
+        tenant: &str,
+        rows: &[ReferralBonusWrite],
+    ) -> Result<u64, DatabaseError>;
+
+    /// Rewrites the mirror row's signal labels and the referee's link
+    /// indexes.
+    async fn refresh_referral_referee_signals(
+        &self,
+        tenant: &str,
+        referee_ref_hash: &str,
+        labels: &[String],
+        recipient_index: Option<&str>,
+        subject_index: Option<&str>,
+    ) -> Result<(), DatabaseError>;
+
+    /// Every mirror row of every code `account` owns.
+    async fn referral_mirror_rows(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<Vec<crate::referral_abuse::RefereeMirror>, DatabaseError>;
+
+    /// Every code in the tenant, with its exemptions.
+    async fn referral_codes(&self, tenant: &str) -> Result<Vec<ReferralCodeState>, DatabaseError>;
+
+    /// Suspends a code that is not suspended or voided, with a
+    /// `code_suspended` audit row per label. False when nothing changed.
+    async fn suspend_referral_code(
+        &self,
+        tenant: &str,
+        code_index: &str,
+        labels: &[String],
+        actor_ref_hash: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Clears a suspension, with one `code_resumed` audit row per exempt
+    /// label (or one labelled `operator_clear`). The exempt labels never
+    /// trip the code again. The code's owner, or `None` when the code was not
+    /// suspended.
+    async fn resume_referral_code(
+        &self,
+        tenant: &str,
+        code_index: &str,
+        exempt_labels: &[String],
+        actor_ref_hash: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
+
+    /// Voids a code: sets `voided_at`, voids each referee's mirror row, and
+    /// writes one `void` bonus row per referee taking back their unsent
+    /// bonus. `None` when the code is missing or already void.
+    async fn void_referral_code(
+        &self,
+        tenant: &str,
+        code_index: &str,
+        label: &str,
+        rail: &RailId,
+        actor_ref_hash: &str,
+    ) -> Result<Option<ReferralVoidOutcome>, DatabaseError>;
+
+    /// Voids one referee's mirror row and writes its `void` bonus row, once.
+    /// `None` when the mirror row is missing or already void.
+    async fn void_referral_referee(
+        &self,
+        tenant: &str,
+        referee_ref_hash: &str,
+        label: &str,
+        rail: &RailId,
+        actor_ref_hash: &str,
+    ) -> Result<Option<ReferralVoidOutcome>, DatabaseError>;
+
+    /// The referrer's referral stream on `rail`.
+    async fn referral_bonus_owed(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+    ) -> Result<ReferralOwed, DatabaseError>;
+
+    async fn referral_suspended_codes(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<Vec<ReferralSuspendedCode>, DatabaseError>;
+
+    async fn referral_tenant_report(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+    ) -> Result<ReferralTenantReport, DatabaseError>;
+
+    // -- deployment-wide, through `trace_referral_resolver` -------------------
+
+    /// `(tenant, code_index)` of every suspended, unvoided code.
+    async fn referral_suspended_code_tenants(&self)
+    -> Result<Vec<(String, String)>, DatabaseError>;
+
+    /// Every tenant holding a code.
+    async fn referral_code_tenants(&self) -> Result<Vec<String>, DatabaseError>;
+
+    /// Codes whose suspension began at or after `since`.
+    async fn referral_codes_suspended_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DatabaseError>;
+}
+
+#[cfg(test)]
+mod payout_debug_tests {
+    //! Hash-only logging: a `{:?}` of any payout row type must print neither
+    //! the account id nor the program, so a `tracing::warn!(?line)` cannot
+    //! leak either.
+
+    use super::*;
+
+    const ACCOUNT: &str = "6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f";
+    const PROGRAM: &str = "tc1-programsecretvalue";
+    const ACCOUNT_HASH: &str =
+        "sha256:abababababababababababababababababababababababababababababababab";
+    const HANDLE_HASH: &str =
+        "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+
+    fn account() -> Uuid {
+        Uuid::parse_str(ACCOUNT).unwrap()
+    }
+
+    fn rail() -> RailId {
+        RailId::new("near_ai").unwrap()
+    }
+
+    fn sealed() -> SealedRecipient {
+        SealedRecipient {
+            sealed: serde_json::json!({"ciphertext": "sealedvalue"}),
+            recipient_index: "sha256:00".into(),
+            recipient_key_ref: "key".into(),
+            index_pepper_ref: "pepper".into(),
+            subject_index: "sha256:11".into(),
+            recipient_ref: None,
+        }
+    }
+
+    fn assert_redacted(rendered: String) {
+        for secret in [ACCOUNT, PROGRAM, ACCOUNT_HASH, HANDLE_HASH, "sealedvalue"] {
+            assert!(
+                !rendered.contains(secret),
+                "Debug printed {secret}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn payout_row_types_redact_account_and_program_in_debug() {
+        let kind = RecipientKind::new("test_recipient").unwrap();
+        let expires = chrono::Utc::now();
+        assert_redacted(format!(
+            "{:?}",
+            PayoutAccrualWrite {
+                rail_id: rail(),
+                kind: PayoutAccrualKind::Credit,
+                settlement_batch_id: Uuid::nil(),
+                credit_account_hash: ACCOUNT_HASH.into(),
+                reversal_event_id: None,
+                account_id: Some(account()),
+                award_units: AtomicUnits::from_raw(1),
+                rail_units: AtomicUnits::from_raw(1),
+                rate_version: "v1".into(),
+                instrument_id: InstrumentId::new("test_units").unwrap(),
+            }
+        ));
+        assert_redacted(format!(
+            "{:?}",
+            PayoutLinkWrite {
+                account_id: account(),
+                rail_id: rail(),
+                link_id: Uuid::nil(),
+                recipient_kind: kind.clone(),
+                recipient: sealed(),
+                program: PROGRAM.into(),
+                state: PayoutLinkState::Waiting,
+                actor_ref_hash: ACCOUNT_HASH.into(),
+            }
+        ));
+        assert_redacted(format!(
+            "{:?}",
+            PayoutLineWrite {
+                line_id: Uuid::nil(),
+                link_id: Uuid::nil(),
+                account_id: account(),
+                rail_id: rail(),
+                target_total: AtomicUnits::from_raw(1),
+                delta: AtomicUnits::from_raw(1),
+                owed_through_accrual_count: 1,
+                stream: PayoutStream::Referral,
+                referral_program: Some(PROGRAM.into()),
+            }
+        ));
+        assert_redacted(format!(
+            "{:?}",
+            PayoutLine {
+                line_id: Uuid::nil(),
+                link_id: Uuid::nil(),
+                account_id: account(),
+                rail_id: rail(),
+                target_total: AtomicUnits::from_raw(1),
+                delta: AtomicUnits::from_raw(1),
+                state: PayoutLineState::Pending,
+                receipt_hash: None,
+                attempts: 0,
+                last_error_label: None,
+                stream: PayoutStream::Referral,
+            }
+        ));
+        assert_redacted(format!(
+            "{:?}",
+            PayoutLinkRequestWrite {
+                account_id: account(),
+                rail_id: rail(),
+                idempotency_key: Uuid::nil(),
+                handle_hash: HANDLE_HASH.into(),
+                request_digest: HANDLE_HASH.into(),
+                action: PayoutLinkAction::Link,
+                expected_current_version: None,
+                recipient: Some((kind.clone(), sealed())),
+                expires_at: expires,
+                actor_ref_hash: ACCOUNT_HASH.into(),
+            }
+        ));
+        assert_redacted(format!(
+            "{:?}",
+            PayoutLinkRequest {
+                account_id: account(),
+                rail_id: rail(),
+                idempotency_key: Uuid::nil(),
+                action: PayoutLinkAction::Link,
+                expected_current_version: None,
+                recipient: Some((kind, sealed())),
+                expires_at: expires,
+            }
+        ));
+    }
+}

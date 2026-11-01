@@ -312,23 +312,6 @@ async fn near_identity_payout_designated(
         > 0
 }
 
-async fn credential_account(
-    backend: &PgBackend,
-    tenant_id: &str,
-    credential_id: &str,
-) -> Option<Uuid> {
-    raw_opt_uuid(
-        backend,
-        tenant_id,
-        "SELECT account_id FROM trace_webauthn_credentials
-          WHERE tenant_id = trace_current_tenant_id()
-            AND credential_id = $1
-            AND revoked_at IS NULL",
-        &[&credential_id.to_string()],
-    )
-    .await
-}
-
 async fn merge_audit_count(backend: &PgBackend, tenant_id: &str) -> i64 {
     raw_scalar_i64(
         backend,
@@ -360,18 +343,7 @@ async fn merge_round_trip_moves_everything_and_closes_absorbed() {
         .expect("mint B");
     assert_ne!(account_a, account_b);
 
-    // B owns a webauthn credential, a NEAR identity, and a live session.
-    let cred_id = format!("cred-{}", Uuid::new_v4());
-    backend
-        .insert_webauthn_credential(
-            &tenant,
-            account_b,
-            &cred_id,
-            &serde_json::json!({"fake": "passkey"}),
-            Some("b-key"),
-        )
-        .await
-        .expect("seed webauthn for B");
+    // B owns a NEAR identity and a live session.
     let near_pk = format!("ed25519:merge-b-{}", Uuid::new_v4());
     backend
         .insert_near_identity(&tenant, account_b, &near_pk, "b.near", Some("b-wallet"))
@@ -442,7 +414,7 @@ async fn merge_round_trip_moves_everything_and_closes_absorbed() {
         .expect("execute ok")
         .expect("executed some");
     assert_eq!(executed.principals_moved, 1);
-    assert_eq!(executed.authenticators_moved, 2);
+    assert_eq!(executed.authenticators_moved, 1);
 
     // P2 now links to A; A holds both principals.
     assert_eq!(
@@ -453,11 +425,7 @@ async fn merge_round_trip_moves_everything_and_closes_absorbed() {
         active_principal_count(&backend, &tenant, account_b).await,
         0
     );
-    // B's webauthn + NEAR identity now belong to A.
-    assert_eq!(
-        credential_account(&backend, &tenant, &cred_id).await,
-        Some(account_a)
-    );
+    // B's NEAR identity now belongs to A.
     assert_eq!(
         near_identity_account(&backend, &tenant, &near_pk).await,
         Some(account_a)
@@ -1008,7 +976,7 @@ async fn restricted_merge_backend(backend: &PgBackend) -> PgBackend {
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_trust_merge_runtime') THEN CREATE ROLE trace_trust_merge_runtime LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT SELECT,INSERT,UPDATE ON trace_tenants TO trace_trust_merge_runtime;
              GRANT SELECT,UPDATE ON trace_accounts,trace_account_merge_proposals,trace_account_principals,
-                 trace_webauthn_credentials,trace_near_identities,trace_public_runs,trace_sessions TO trace_trust_merge_runtime;
+                 trace_near_identities,trace_public_runs,trace_sessions TO trace_trust_merge_runtime;
              GRANT INSERT ON trace_account_audit TO trace_trust_merge_runtime;
              GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_trust_merge_runtime;",
         ))

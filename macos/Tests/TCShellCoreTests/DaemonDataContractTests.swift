@@ -61,7 +61,6 @@ final class DaemonDataContractTests: XCTestCase {
                 _ = try await client.missionCatalogue()
                 _ = try await client.networkMissionCatalogue()
                 _ = try await client.lookupInvite(code: "c")
-                _ = try await client.passkeyState()
                 _ = try await client.accountState()
             } catch {
                 XCTFail("\(set): \(error)")
@@ -83,6 +82,19 @@ final class DaemonDataContractTests: XCTestCase {
         let status = try await SampleDaemonClient(.unknownCounts).status()
         XCTAssertNil(status.decisionsOwed)
         XCTAssertNotNil(status.queueDepth, "queue_depth is present and must not stand in for it")
+    }
+
+    func testSetupCompletionPreservesAbsentNullFalseAndTrue() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let absent = try decoder.decode(DaemonData.Status.self, from: Data(#"{}"#.utf8))
+        XCTAssertNil(absent.setupComplete, "an older daemon must retain the local completion fallback")
+        let null = try decoder.decode(DaemonData.Status.self, from: Data(#"{"setup_complete":null}"#.utf8))
+        XCTAssertNil(null.setupComplete)
+        let incomplete = try decoder.decode(DaemonData.Status.self, from: Data(#"{"setup_complete":false}"#.utf8))
+        XCTAssertEqual(incomplete.setupComplete, false)
+        let complete = try decoder.decode(DaemonData.Status.self, from: Data(#"{"setup_complete":true}"#.utf8))
+        XCTAssertEqual(complete.setupComplete, true)
+        XCTAssertThrowsError(try decoder.decode(DaemonData.Status.self, from: Data(#"{"setup_complete":"true"}"#.utf8)))
     }
 
     func testNullAndAbsentDecisionsOwedBothDecodeAsNilAndZeroStaysZero() throws {
@@ -206,7 +218,7 @@ final class DaemonDataContractTests: XCTestCase {
         XCTAssertNotNil(projects.projects.first?.sessionCount)
         XCTAssertNotNil(projects.projects.first?.lastSessionAt)
         let harness = try await client.harnessList()
-        XCTAssertEqual(harness.harnesses.map(\.answersAt), ["Anthropic", "OpenAI"])
+        XCTAssertEqual(harness.harnesses.map(\.answersAt), ["Anthropic", "OpenAI", nil])
         let settings = try await client.settings()
         XCTAssertEqual(settings.digestSchedule, .evening(hour: 18))
         XCTAssertEqual(settings.localNotifications, true)
@@ -254,7 +266,6 @@ final class DaemonDataContractTests: XCTestCase {
             ("missionCatalogue", { _ = try await client.missionCatalogue() }),
             ("networkMissionCatalogue", { _ = try await client.networkMissionCatalogue() }),
             ("lookupInvite", { _ = try await client.lookupInvite(code: "c") }),
-            ("passkeyState", { _ = try await client.passkeyState() }),
             ("accountState", { _ = try await client.accountState() }),
         ]
         for (name, call) in calls {

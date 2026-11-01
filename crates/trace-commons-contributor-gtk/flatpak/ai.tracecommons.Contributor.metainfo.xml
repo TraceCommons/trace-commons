@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="0.21.0" date="2026-11-01">
+      <description>
+        <p>Removes the daily upload limit, reads sessions up to 512 MiB, offers Codex's compressed sessions, and spreads out retries when the commons is busy.</p>
+      </description>
+    </release>
     <release version="0.20.6" date="2026-10-20">
       <description>
         <p>Trusts an updated set of root certificates: the emSign roots that are no longer trusted are removed.</p>

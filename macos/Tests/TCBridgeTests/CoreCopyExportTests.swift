@@ -107,21 +107,18 @@ final class CoreCopyExportTests: XCTestCase {
     func testTheArmingBodyIsTheAgreedWording() throws {
         XCTAssertEqual(
             try armingCopy(0).body,
-            "Traces from this project will be scrubbed and contributed without asking "
-                + "you, including any already waiting. You won't review them first.\n\nNo "
-                + "trace is sent until it has been quiet for a day.\n\nYou can turn this off "
-                + "at any time. Anything it hasn't sent yet goes back to waiting for you, and "
-                + "anything already sent stays sent."
+            "With Auto enabled, traces are submitted automatically. You don't need to "
+                + "approve each one manually. You can change this setting anytime."
         )
     }
 
-    /// The body states the scrubbing, that review stops, and the way back.
+    /// The body says review stops and names the way back (the owner's
+    /// words, 2026-10-31).
     func testTheArmingBodySaysReviewStopsAndNamesTheWayBack() throws {
         let body = try armingCopy(0).body
-        XCTAssertTrue(body.contains("scrubbed"), body)
-        XCTAssertTrue(body.contains("without asking you"), body)
-        XCTAssertTrue(body.contains("You won't review them first."), body)
-        XCTAssertTrue(body.contains("turn this off at any time"), body)
+        XCTAssertTrue(body.contains("submitted automatically"), body)
+        XCTAssertTrue(body.contains("You don't need to approve each one manually."), body)
+        XCTAssertTrue(body.contains("change this setting anytime"), body)
     }
 
     // MARK: - The scrubbing panel

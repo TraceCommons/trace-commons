@@ -43,12 +43,21 @@ async fn exercise_terminal_exit(hangup: bool, setup_hangup: bool) {
     );
     assert!(created.error.is_none());
     let account = created.result.unwrap();
+    let saved = handle_request(
+        &daemon.shared,
+        &Request {
+            id: 10,
+            method: "managed_cli_options_set".into(),
+            params: json!({"tool":"claude", "options": "--model 'custom model' --append-system-prompt '$(touch injected); literal'"}),
+        },
+    );
+    assert!(saved.error.is_none(), "{:?}", saved.error);
     let bin = home.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let project = home.path().join("project with spaces");
     std::fs::create_dir(&project).unwrap();
     let native = bin.join("claude");
-    std::fs::write(&native, "#!/bin/sh\ncase \"$1\" in\n--version) if [ \"$FIXTURE_SLOW_SETUP\" = 1 ]; then printf '%s' \"$PPID\" > setup-helper; sleep 0.5; fi; echo '2.1.289 (Claude Code)'; exit 0;;\nauth) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'; exit 0;;\nesac\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > profile-root\nprintf '%s' \"$PPID\" > helper-pid\nwhile [ ! -f finish ]; do sleep 0.05; done\nexit 7\n").unwrap();
+    std::fs::write(&native, "#!/bin/sh\ncase \"$1\" in\n--version) if [ \"$FIXTURE_SLOW_SETUP\" = 1 ]; then printf '%s' \"$PPID\" > setup-helper; sleep 0.5; fi; echo '2.1.289 (Claude Code)'; exit 0;;\nauth) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'; exit 0;;\nesac\nprintf '%s\\n' \"$@\" > received-args\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > profile-root\nprintf '%s' \"$PPID\" > helper-pid\nwhile [ ! -f finish ]; do sleep 0.05; done\nexit 7\n").unwrap();
     std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut child = Command::new("python3")
         .args([
@@ -143,6 +152,14 @@ async fn exercise_terminal_exit(hangup: bool, setup_hangup: bool) {
         assert!(Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    assert_eq!(
+        std::fs::read_to_string(project.join("received-args")).unwrap(),
+        format!(
+            "--model\ncustom model\n--append-system-prompt\n$(touch injected); literal\n--session-id\n{}\n",
+            running["id"].as_str().unwrap()
+        )
+    );
+    assert!(!project.join("injected").exists());
     assert!(
         std::fs::read_to_string(project.join("profile-root"))
             .unwrap()
@@ -212,10 +229,19 @@ async fn two_managed_accounts_and_a_standard_session_run_together() {
     let daemon = start_embedded(ConfigStore::open(state.clone()).unwrap())
         .await
         .unwrap();
+    let saved = handle_request(
+        &daemon.shared,
+        &Request {
+            id: 10,
+            method: "managed_cli_options_set".into(),
+            params: json!({"tool":"claude", "options": "--model 'custom model' --append-system-prompt '$(touch injected); literal'"}),
+        },
+    );
+    assert!(saved.error.is_none(), "{:?}", saved.error);
     let bin = home.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let native = bin.join("claude");
-    std::fs::write(&native, "#!/bin/sh\ncase \"$1\" in\n--version) echo '2.1.289 (Claude Code)'; exit 0;;\nauth) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'; exit 0;;\nesac\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > profile-root\nprintf '%s' \"$ANTHROPIC_API_KEY\" > inherited-key\nwhile [ ! -f finish ]; do sleep 0.05; done\n").unwrap();
+    std::fs::write(&native, "#!/bin/sh\ncase \"$1\" in\n--version) echo '2.1.289 (Claude Code)'; exit 0;;\nauth) echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'; exit 0;;\nesac\nprintf '%s\\n' \"$@\" > received-args\nprintf '%s' \"$CLAUDE_CONFIG_DIR\" > profile-root\nprintf '%s' \"$ANTHROPIC_API_KEY\" > inherited-key\nwhile [ ! -f finish ]; do sleep 0.05; done\n").unwrap();
     std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut children = vec![];
     let mut projects = vec![];

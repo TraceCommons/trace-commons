@@ -1,6 +1,7 @@
 {
   "schema_version": "trace_commons.daemon.v1_1",
   "logged_in": true,
+  "setup_complete": false,
   "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "tenant_id": "tenant-sample",
   "consent_scopes": [
@@ -9,6 +10,8 @@
   "consent_hold": null,
   "paused": false,
   "queue_depth": 3,
+  "queue_capacity_used": 3,
+  "queue_at_capacity": false,
   "decisions_owed": 1,
   "unpurposed_traces": 0,
   "nudge": {
@@ -21,18 +24,6 @@
   "health": {
     "last_error_label": null,
     "since": null
-  },
-  "daily_budget": {
-    "bytes_today": 0,
-    "max_bytes_per_day": 209715200,
-    "bytes_remaining": 209715200,
-    "uploads_today": 0,
-    "max_uploads_per_day": 50,
-    "uploads_remaining": 50,
-    "resets_at": "1970-01-01T00:00:00Z",
-    "blocked": false,
-    "blocked_entries": 0,
-    "blocked_bytes": 0
   },
   "routing": {
     "state": "not_declared",

@@ -39,8 +39,11 @@ struct ProjectsSection: View {
         // The container is always present, so the dialog is attached
         // whether or not any project is drawn.
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // Setup's sharing choice, changeable here (#1753 A2), over the
+            // folders it is the default for.
+            SharingChoiceCard()
             GlassEyebrowCard(SettingsWords.projects) {
-                VStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     // The list defaults to empty, and a failed
                     // `list_projects` keeps it so; until that call answers,
                     // "none yet" would be a count nothing reported.
@@ -142,7 +145,10 @@ struct ProjectsSection: View {
     }
 
     private func row(_ project: ProjectRow) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+        #if DEBUG
+        OtherCollectionRowBodies.record("projects", project.id)
+        #endif
+        return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
                 // `displayLabel`, not `projectLabel`: the bucket's own label
                 // is a slug, and the row is recognised by the daemon's flag.

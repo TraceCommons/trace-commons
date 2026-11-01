@@ -84,8 +84,7 @@ struct SummaryInspector: View {
             })
     }
 
-    /// Waiting, worth a second look, contributed with its pending credit,
-    /// and today's uploads, in Ron's order.
+    /// Waiting, and contributed with its pending credit, in Ron's order.
     @ViewBuilder
     private func decisions(_ words: MonitorTracesCopy) -> some View {
         let fill = { (template: String, count: String) in FirstRunCopy.fill(template, ["count": count]) }
@@ -93,15 +92,9 @@ struct SummaryInspector: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             SummaryDecisionLine(glyph: "rectangle.split.2x1", tone: .ask, text: fill(
                 words.summaryPanel.waitingForYou, SummaryFacts.waiting(traces.status)))
-            SummaryDecisionLine(glyph: "exclamationmark.triangle", tone: .ask, text: fill(
-                words.summaryPanel.worthASecondLook, SummaryFacts.secondLook(loaded: loaded, sessions: sessions)))
             SummaryDecisionLine(glyph: "checkmark", tone: .on, text: fill(
                 words.counts.contributedCount, SummaryFacts.contributed(rollup)))
             pending
-            if let uploads = SummaryFacts.uploads(traces.status) {
-                SummaryDecisionLine(glyph: "pause", tone: nil, text: FirstRunCopy.fill(
-                    words.summaryPanel.uploadsToday, ["count": uploads.count, "max": uploads.max]))
-            }
         }
     }
 
@@ -137,12 +130,12 @@ struct SummaryInspector: View {
         }
     }
 
-    /// The daily limit and inference routing (Ron's `QueueStatusPanel`).
+    /// Inference routing (Ron's `QueueStatusPanel`).
     /// What is holding sessions back is the host's banners, drawn above.
     @ViewBuilder
     private var safeguards: some View {
         if let copy = MonitorWords.table?.safeguards, let status = traces.status,
-            status.dailyBudget != nil || status.routing != nil
+            status.routing != nil
         {
             GlassEyebrowCard(copy.eyebrow) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
@@ -150,11 +143,6 @@ struct SummaryInspector: View {
                         .glassType(GlassTokens.TypeScale.bodyStrong)
                         .foregroundStyle(GlassColor.textPrimary)
                     SafeguardGrid(rows: SummaryFacts.safeguardRows(status, copy: copy))
-                    if let held = SummaryFacts.heldByLimit(status.dailyBudget, copy: copy) {
-                        Text(held)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textTertiary)
-                    }
                     if let unreadable = SummaryFacts.unreadableRows(status.routing, copy: copy) {
                         Text(unreadable)
                             .glassType(GlassTokens.TypeScale.caption)
@@ -287,13 +275,6 @@ enum SummaryFacts {
         HomeFormat.count(status?.decisionsOwed)
     }
 
-    /// Sessions waiting that are worth a second look, as the queue shield
-    /// counts them; a dash before the tree is read.
-    static func secondLook(loaded: Bool, sessions: [DaemonData.QueueEntry]) -> String {
-        guard loaded else { return "—" }
-        return String(sessions.filter { !($0.secondLook ?? []).isEmpty }.count)
-    }
-
     /// Sessions waiting in the tree; a dash before it is read.
     static func kept(loaded: Bool, sessions: [DaemonData.QueueEntry]) -> String {
         loaded ? String(sessions.count) : "—"
@@ -330,13 +311,6 @@ enum SummaryFacts {
         let condition = HomeFormat.pendingCondition(credit)
         guard condition != nil, let figure = rollup?.creditPending else { return ("—", condition) }
         return (HomeFormat.points(figure), condition)
-    }
-
-    /// Today's uploads and the daily maximum; nil when the core reported no
-    /// budget, a dash for a count it left out.
-    static func uploads(_ status: DaemonData.Status?) -> (count: String, max: String)? {
-        guard let budget = status?.dailyBudget else { return nil }
-        return (HomeFormat.count(budget.uploadsToday), HomeFormat.count(budget.maxUploadsPerDay))
     }
 
     /// The header's sub line: tools watched, projects, sessions waiting. A
@@ -425,35 +399,15 @@ enum SummaryFacts {
         }
     }
 
-    /// The safeguards panel's rows: the daily limit as uploads and
-    /// megabytes left (Ron's), and inference routing in the core's state
+    /// The safeguards panel's rows: inference routing in the core's state
     /// sentence.
     static func safeguardRows(_ status: DaemonData.Status, copy: MonitorSafeguardsCopy) -> [GlassKeyValueList.Item] {
         var rows: [GlassKeyValueList.Item] = []
-        if let budget = status.dailyBudget {
-            rows.append(.init(copy.dailyLimit, FirstRunCopy.fill(copy.remaining, [
-                "uploads": HomeFormat.count(budget.uploadsRemaining),
-                "megabytes": HomeFormat.count(budget.bytesRemaining.map(megabytes)),
-            ])))
-        }
         if let routing = status.routing {
             let state = copy.routingLabel(routing.state)
             rows.append(.init(copy.inferenceRouting, routing.derived == true ? "\(state) · \(copy.daemonOwned)" : state))
         }
         return rows
-    }
-
-    /// Whole megabytes, rounded as Ron rounds them.
-    static func megabytes(_ bytes: Int) -> Int {
-        Int((Double(bytes) / 1024 / 1024).rounded())
-    }
-
-    /// The approved sessions a spent daily limit holds back, when it holds
-    /// any; nil when the limit is not reached or the count is unsaid (the
-    /// spent-limit banner above says so in that case).
-    static func heldByLimit(_ budget: DaemonData.DailyBudget?, copy: MonitorSafeguardsCopy) -> String? {
-        guard let budget, budget.blocked == true, let held = budget.blockedEntries, held > 0 else { return nil }
-        return held == 1 ? copy.heldByLimitOne : FirstRunCopy.fill(copy.heldByLimit, ["count": String(held)])
     }
 
     /// Ledger rows the daemon could not read, when there are any.

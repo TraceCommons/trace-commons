@@ -41,11 +41,11 @@ pub(crate) const CHATS_DIR: &str = "chats";
 /// hash-named project directories do not have one.
 const PROJECT_ROOT_FILE: &str = ".project_root";
 
-/// The largest session document this adapter will load, shared with every
-/// other adapter's budget rather than picked separately: they bound the same
-/// thing, which is how much of one conversation may become resident on its
-/// way to being discarded.
-pub(crate) const GEMINI_SESSION_BUDGET: u64 = super::claude_code::GROUP_RAW_BYTE_BUDGET;
+/// The largest session document this adapter will load: the budget shared
+/// by the adapters that parse one whole JSON document, which stayed at
+/// 64 MB when the streaming adapters' cap was raised. See
+/// [`super::DOCUMENT_SESSION_BYTE_BUDGET`].
+pub(crate) const GEMINI_SESSION_BUDGET: u64 = super::DOCUMENT_SESSION_BYTE_BUDGET;
 
 /// The conventional store on this machine: `$GEMINI_CLI_HOME/tmp`, or
 /// `~/.gemini/tmp` when the variable is unset or empty.

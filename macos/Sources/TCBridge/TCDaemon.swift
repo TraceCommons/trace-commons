@@ -14,7 +14,17 @@ import Foundation
 /// host calls methods here from many threads at once and then quits; the
 /// gate below is what makes those two facts compatible. Safe to use from any
 /// thread.
-public final class TCDaemon {
+///
+/// Sendable invariant: after initialization, every read and write of
+/// `handle`, `inFlight`, and `closing` holds `gate`; `isAttached` is immutable.
+/// An admitted ABI call owns an in-flight count until it returns. Teardown
+/// closes admission and exclusively takes the handle only after those calls
+/// drain, or leaks it if their completion cannot be proved. No raw handle
+/// escapes this bridge. The C ABI permits the admitted calls to overlap.
+/// Swift cannot verify this condition-variable/raw-pointer ownership, so the
+/// conformance is unchecked. New mutable fields must preserve this invariant.
+/// Subscription tokens retain their separate, caller-owned lifetime contract.
+public final class TCDaemon: @unchecked Sendable {
     // MARK: - Handle lifetime
     //
     // WHY A COUNTED GATE AND NOT AN ACTOR, A SERIAL QUEUE, OR A PLAIN LOCK.
@@ -406,7 +416,9 @@ public final class TCDaemon {
     /// Registers `handler`, invoked with each JSON event frame the daemon
     /// publishes, on a Rust background thread. `handler` must therefore do
     /// its own hop to the main actor before touching observable state; see
-    /// `DaemonHost` for the one call site that does.
+    /// `DaemonHost` for the one call site that does. Sendable captures must
+    /// also tolerate overlapping registrations during `redeclare`, when
+    /// the same handler can receive two callbacks.
     ///
     /// Returns nil if the ABI refused (NULL handle or a stopped daemon --
     /// token 0 is never valid).
@@ -416,7 +428,7 @@ public final class TCDaemon {
     /// an attached handle's socket too). Empty declares none and is exactly
     /// `tc_subscribe`: a subscriber that cannot draw an opt-in event never
     /// receives one, and the daemon never counts it as a renderer.
-    public func subscribe(accepts: [String] = [], _ handler: @escaping (String) -> Void) -> TCSubscription? {
+    public func subscribe(accepts: [String] = [], _ handler: @escaping @Sendable (String) -> Void) -> TCSubscription? {
         // ctx must stay alive until tc_unsubscribe RETURNS, per the header's
         // SUBSCRIPTION LIFETIME rule -- retained here, released only by a
         // tc_unsubscribe that we confirmed was not refused.
@@ -456,7 +468,7 @@ public final class TCDaemon {
         }
         // The new registration holds its own retain on the same ctx; ending
         // the old one releases the old retain.
-        Unmanaged<TCCallbackBox>.fromOpaque(ctx).retain()
+        _ = Unmanaged<TCCallbackBox>.fromOpaque(ctx).retain()
         let token = register(ctx, accepts: accepts)
         if token == 0 {
             Unmanaged<TCCallbackBox>.fromOpaque(ctx).release()
@@ -549,7 +561,10 @@ public final class TCDaemon {
     /// Swift's cooperative pool is not a tokio runtime.
     ///
     /// Blocks the calling thread for up to `drainTimeout` plus
-    /// `unsubscribeTimeout`. That is the point: teardown that does not block
+    /// `unsubscribeTimeout`, plus at most 3 seconds inside `tc_daemon_stop`
+    /// (2) and `tc_handle_free` (1), which stop waiting on a daemon pass
+    /// that is still running (TEARDOWN BOUNDS in the header). That is the
+    /// point: teardown that does not block
     /// is teardown that does not know whether it is safe to free. The
     /// previous implementation slept a fixed 200ms and freed regardless,
     /// which is the defect this replaces -- a sleep is a guess, and a guess
@@ -713,8 +728,8 @@ private final class UnsubscribeRetryState: @unchecked Sendable {
 /// Heap box carrying a Swift closure across the C `void* ctx` boundary. A C
 /// function pointer cannot capture, so the closure has to travel this way.
 final class TCCallbackBox {
-    let handler: (String) -> Void
-    init(_ handler: @escaping (String) -> Void) {
+    let handler: @Sendable (String) -> Void
+    init(_ handler: @escaping @Sendable (String) -> Void) {
         self.handler = handler
     }
 }

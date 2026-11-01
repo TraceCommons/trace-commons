@@ -10,6 +10,7 @@ import XCTest
 final class LibraryStationTests: XCTestCase {
     /// The mark's outline is the brand path, flattened, at the asked
     /// height, centred on the station's axis.
+    @MainActor
     func test_theMarksOutlineIsTheBrandPathAtItsHeight() {
         let outline = GlassLibraryStation.markOutline(height: 30)
         XCTAssertGreaterThan(outline.count, 20)
@@ -21,6 +22,7 @@ final class LibraryStationTests: XCTestCase {
 
     /// The mesh has depth: the mark's two faces and its sides, a ring, and
     /// parts on every side of the axis.
+    @MainActor
     func test_theMeshIsASolidRoundTheMark() {
         let mesh = GlassLibraryStation.mesh
         XCTAssertEqual(mesh.filter(\.markCap).count, 2)
@@ -36,6 +38,7 @@ final class LibraryStationTests: XCTestCase {
     /// The standard map's orb: its meridians turn, each between edge-on
     /// and full width, half of them on the near side, and its sphere
     /// leaves room for the glow.
+    @MainActor
     func test_theOrbsMeridiansTurn() {
         let rest = GlassLibraryOrb.meridianWidths(angle: 0)
         let turned = GlassLibraryOrb.meridianWidths(angle: 0.5)
@@ -49,6 +52,7 @@ final class LibraryStationTests: XCTestCase {
 
     /// Turning is a rotation: it keeps every point's distance from the
     /// centre, and a quarter turn moves the parts.
+    @MainActor
     func test_turningKeepsTheStationsShape() {
         for p in [SIMD3<Double>(36, 0, 0), SIMD3(0, 3.2, -15), SIMD3(-20, 1, 12)] {
             for angle in [0.0, 0.6, 2.1] {
@@ -63,6 +67,7 @@ final class LibraryStationTests: XCTestCase {
     /// Before anything is contributed the station is drawn as bright as
     /// after (owner, 2026-10-19: dimmed, it read too dark beside the launch
     /// pad); only the glow is softer.
+    @MainActor
     func test_theRestingStationIsDrawnAtFullBrightness() throws {
         let source = try String(
             contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

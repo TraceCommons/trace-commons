@@ -11,6 +11,8 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let destination: String
     /// The line under the destination's title, from the Rust.
     public let subtitle: String
+    /// Said after `subtitle` only while NEAR AI answers calls (`running`).
+    public let subtitleCredit: String
     public let offerTitle: String
     public let offerWhat: String
     public let offerExposure: String
@@ -240,6 +242,8 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let fundingTitle: String
     public let fundingWhat: String
     public let fundingManage: String
+    /// The NEAR AI balance card's button to billing.
+    public let balanceAddFunds: String
     public let fundingRefresh: String
     public let fundingUnavailable: String
     public let balanceWhat: String
@@ -296,6 +300,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public enum CodingKeys: String, CodingKey, CaseIterable {
         case destination
         case subtitle
+        case subtitleCredit = "subtitle_credit"
         case offerTitle = "offer_title"
         case offerWhat = "offer_what"
         case offerExposure = "offer_exposure"
@@ -435,6 +440,7 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case fundingTitle = "funding_title"
         case fundingWhat = "funding_what"
         case fundingManage = "funding_manage"
+        case balanceAddFunds = "balance_add_funds"
         case fundingRefresh = "funding_refresh"
         case fundingUnavailable = "funding_unavailable"
         case balanceWhat = "balance_what"
@@ -560,19 +566,27 @@ public struct PrivateInferenceCalls: Sendable {
     public let servingLine: @Sendable (UInt16?) -> String?
     public let shouldOffer: @Sendable (Bool, Bool) -> Bool
     public let quitNeedsNotice: @Sendable (Bool, String) -> Bool
+    /// The menu-bar popover's one word for a state, and the tone of its dot.
+    /// A caller that does not wire them gets no word, which reads as unknown.
+    public let menuWord: @Sendable (String) -> String?
+    public let menuTone: @Sendable (String) -> Int32
 
     public init(
         stateLine: @escaping @Sendable (String) -> String?,
         stateTone: @escaping @Sendable (String) -> Int32,
         servingLine: @escaping @Sendable (UInt16?) -> String?,
         shouldOffer: @escaping @Sendable (Bool, Bool) -> Bool,
-        quitNeedsNotice: @escaping @Sendable (Bool, String) -> Bool
+        quitNeedsNotice: @escaping @Sendable (Bool, String) -> Bool,
+        menuWord: @escaping @Sendable (String) -> String? = { _ in nil },
+        menuTone: @escaping @Sendable (String) -> Int32 = { _ in 0 }
     ) {
         self.stateLine = stateLine
         self.stateTone = stateTone
         self.servingLine = servingLine
         self.shouldOffer = shouldOffer
         self.quitNeedsNotice = quitNeedsNotice
+        self.menuWord = menuWord
+        self.menuTone = menuTone
     }
 }
 
@@ -604,6 +618,17 @@ public enum PrivateInferenceSurface {
         calls: PrivateInferenceCalls
     ) -> PrivateInferenceTone {
         PrivateInferenceTone.fromABI(calls.stateTone(state.label))
+    }
+
+    /// The menu-bar popover's one word for the state, and its dot's tone,
+    /// both from the core. Nil word when the Rust caught a panic: the caller
+    /// draws no word rather than a guess.
+    public static func menuState(
+        _ state: PrivateInferenceState,
+        calls: PrivateInferenceCalls
+    ) -> (word: String, tone: PrivateInferenceTone)? {
+        guard let word = calls.menuWord(state.label), !word.isEmpty else { return nil }
+        return (word, PrivateInferenceTone.fromABI(calls.menuTone(state.label)))
     }
 
     /// The reported local port, or nothing at all. An empty string is drawn as

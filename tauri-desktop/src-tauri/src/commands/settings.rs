@@ -56,25 +56,9 @@ pub(crate) async fn set_digest_hours(
     set_numeric_setting(state, "digest_interval_secs", (hours * 3600).into()).await
 }
 
-#[tauri::command]
-pub(crate) async fn set_max_uploads_per_day(
-    state: State<'_, AppState>,
-    uploads: u64,
-) -> Result<serde_json::Value, String> {
-    set_numeric_setting(state, "max_uploads_per_day", uploads.into()).await
-}
-
-#[tauri::command]
-pub(crate) async fn set_max_bytes_per_day_mb(
-    state: State<'_, AppState>,
-    megabytes: u64,
-) -> Result<serde_json::Value, String> {
-    set_numeric_setting(state, "max_bytes_per_day", (megabytes * 1024 * 1024).into()).await
-}
-
-/// The ranges a shell draws its quiescence/approval-hold/digest/daily-cap
-/// controls from, converted from the core's seconds/bytes into the
-/// minute/hour/megabyte units those controls use. One conversion, so the
+/// The ranges a shell draws its quiescence/approval-hold/digest controls
+/// from, converted from the core's seconds into the minute/hour units those
+/// controls use. One conversion, so the
 /// frontend never hand-maintains a second copy of the core's numbers.
 #[tauri::command]
 pub(crate) fn settings_ranges() -> serde_json::Value {
@@ -91,14 +75,6 @@ pub(crate) fn settings_ranges() -> serde_json::Value {
         "digest_hours": {
             "min": ranges.digest_interval_secs.min.div_ceil(3600),
             "max": ranges.digest_interval_secs.max / 3600,
-        },
-        "max_uploads_per_day": {
-            "min": ranges.max_uploads_per_day.min,
-            "max": ranges.max_uploads_per_day.max,
-        },
-        "max_bytes_per_day_mb": {
-            "min": ranges.max_bytes_per_day.min.div_ceil(1024 * 1024),
-            "max": ranges.max_bytes_per_day.max / (1024 * 1024),
         },
     })
 }
@@ -218,9 +194,7 @@ mod tests {
         assert_eq!(ranges["approval_hold_seconds"]["max"], 300);
         assert_eq!(ranges["digest_hours"]["min"], 1);
         assert_eq!(ranges["digest_hours"]["max"], 24);
-        assert_eq!(ranges["max_uploads_per_day"]["min"], 1);
-        assert_eq!(ranges["max_uploads_per_day"]["max"], 1_000);
-        assert_eq!(ranges["max_bytes_per_day_mb"]["min"], 1);
-        assert_eq!(ranges["max_bytes_per_day_mb"]["max"], 5_120);
+        assert!(ranges.get("max_uploads_per_day").is_none());
+        assert!(ranges.get("max_bytes_per_day_mb").is_none());
     }
 }

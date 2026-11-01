@@ -1,0 +1,12 @@
+{"case":0,"kind":"exact","novelty_micros":0,"passes_100000":false,"passes_500000":false}
+{"case":0,"kind":"near","novelty_micros":621,"passes_100000":false,"passes_500000":false}
+{"case":0,"kind":"distinct","novelty_micros":404121,"passes_100000":true,"passes_500000":false}
+{"case":0,"kind":"distinct_same_domain","novelty_micros":286357,"passes_100000":true,"passes_500000":false}
+{"case":1,"kind":"exact","novelty_micros":0,"passes_100000":false,"passes_500000":false}
+{"case":1,"kind":"near","novelty_micros":138,"passes_100000":false,"passes_500000":false}
+{"case":1,"kind":"distinct","novelty_micros":372868,"passes_100000":true,"passes_500000":false}
+{"case":1,"kind":"distinct_same_domain","novelty_micros":187455,"passes_100000":true,"passes_500000":false}
+{"case":2,"kind":"exact","novelty_micros":0,"passes_100000":false,"passes_500000":false}
+{"case":2,"kind":"near","novelty_micros":1369,"passes_100000":false,"passes_500000":false}
+{"case":2,"kind":"distinct","novelty_micros":431653,"passes_100000":true,"passes_500000":false}
+{"case":2,"kind":"distinct_same_domain","novelty_micros":247181,"passes_100000":true,"passes_500000":false}

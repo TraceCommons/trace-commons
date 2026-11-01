@@ -1,3 +1,4 @@
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -17,29 +18,28 @@ private final class RecordingDaemon: DaemonCalling {
     /// reads `calls` from the main actor. An unsynchronised `Array.append`
     /// under that corrupts the buffer's refcount and segfaults the test
     /// process. See CredentialCancelTests for the crash this prevents.
-    private let lock = NSLock()
-    private var recorded: [(method: String, params: String)] = []
+    private struct State: Sendable {
+        var recorded: [(method: String, params: String)] = []
+        var response = #"{"id":1,"result":{}}"#
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     var calls: [(method: String, params: String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
     /// What the next call answers with. Defaults to a well-formed frame
     /// carrying an empty result, which every call here either ignores or
     /// fails to decode -- never a silent success.
-    private var responseValue = #"{"id":1,"result":{}}"#
-
     var response: String {
-        get { lock.lock(); defer { lock.unlock() }; return responseValue }
-        set { lock.lock(); defer { lock.unlock() }; responseValue = newValue }
+        get { state.withLock { $0.response } }
+        set { state.withLock { $0.response = newValue } }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append((method: method, params: paramsJSON))
-        return responseValue
+        state.withLock {
+            $0.recorded.append((method: method, params: paramsJSON))
+            return $0.response
+        }
     }
 
     /// Never called by these tests. Nil is the honest answer for a
@@ -180,7 +180,6 @@ final class SetSettingsTests: XCTestCase {
         daemon.response = settingsFrame
         let view = try client.setSettings(["quiescence_secs": 45])
         XCTAssertEqual(view.quiescenceSecs, 45)
-        XCTAssertEqual(view.maxUploadsPerDay, 100)
     }
 
     /// A refusal from the daemon surfaces as the same `Failure` every other
@@ -330,7 +329,7 @@ final class DaemonClientMethodInventoryTests: XCTestCase {
         _ = try? client.probeRouting(RoutingForm(on: true, port: 8463, tokenDir: ""))
         _ = try? client.probeRoutedTools(RoutingForm(on: true, port: 8463, tokenDir: ""))
         _ = try? client.queueOutcomeCounts()
-        try? client.refreshHistory()
+        _ = try? client.refreshHistory()
         try? client.resume()
         _ = try? client.setConsentScopes(["model_training"])
         _ = try? client.setProjectMode(projectID: "p", mode: .ask)
@@ -566,18 +565,13 @@ private final class ConsentReconciliationDaemon: DaemonCalling {
     /// entirely ordinary thing to add -- would have several threads
     /// appending here at once. See CredentialCancelTests for what that
     /// costs when it is left unguarded.
-    private let lock = NSLock()
-    private var recorded: [String] = []
+    private let recorded = OSAllocatedUnfairLock(initialState: [String]())
     var calls: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        recorded.withLock { $0 }
     }
     init(failRead: Bool) { self.failRead = failRead }
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        recorded.append(method)
-        lock.unlock()
+        recorded.withLock { $0.append(method) }
         if method == "status", !failRead {
             return #"{"result":{"logged_in":true,"consent_scopes":["debugging_evaluation","training"],"health":{}}}"#
         }

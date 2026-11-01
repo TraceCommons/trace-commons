@@ -10,6 +10,9 @@ use secrecy::{ExposeSecret, SecretString};
 /// Database-related errors for TraceCommons server storage.
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseError {
+    #[error("Upload-only principal cannot authenticate an account")]
+    UploadPrincipalAuthenticationDenied,
+
     #[error("Connection pool error: {0}")]
     Pool(String),
 

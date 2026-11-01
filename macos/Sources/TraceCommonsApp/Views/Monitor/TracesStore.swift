@@ -709,6 +709,29 @@ final class TracesStore {
             && EligibilitySurface.offersContribute(eligibility, calls: calls)
     }
 
+    /// Whether a session's row Submit sends it (owner, 2026-10-22: a row's
+    /// Submit sends the trace at once, without its preview, as a folder's
+    /// Submit sends its traces). The review card's gate without the
+    /// preview: a core that answers, the consent words read, the daemon
+    /// holding an enrollment, the trace eligible by the shared table, and
+    /// its folder not ignored. A trace held as worth a second look is not
+    /// sent from its row: its look comes first, in its review.
+    func maySubmitSession(_ entry: DaemonData.QueueEntry, folderIgnored: Bool) -> Bool {
+        guard client != nil, consent != nil, status?.loggedIn == true, !folderIgnored, !entry.heldForReview
+        else { return false }
+        if case .failed = phase { return false }
+        return EligibilitySurface.offersContribute(Self.eligibility(entry), calls: Self.eligibilityCalls)
+    }
+
+    /// A row's Submit: the session sent with no verdict, as a folder's
+    /// Submit sends its traces, asked again at the press.
+    func submitSession(_ entry: DaemonData.QueueEntry, folderIgnored: Bool) async {
+        guard let live = tree.allSessions.first(where: { $0.entryId == entry.entryId }),
+              maySubmitSession(live, folderIgnored: folderIgnored)
+        else { return }
+        await perform(.contribute, on: live.entryId)
+    }
+
     /// What the tab says for a refused action: a skipped approve in the
     /// submit toast's words, anything else in the core's line. Never the
     /// error's fixed label.
@@ -800,6 +823,14 @@ final class TracesStore {
         /// The core's severity for a label line; budget, witness and
         /// gate-held lines are `.waiting`.
         let severity: HealthCopy.Severity
+        let condition: String?
+
+        init(title: String, body: String?, severity: HealthCopy.Severity, condition: String? = nil) {
+            self.title = title
+            self.body = body
+            self.severity = severity
+            self.condition = condition
+        }
     }
 
     /// What the queue's safeguards say right now: a spent daily budget, a
@@ -822,25 +853,22 @@ final class TracesStore {
         guard let status else { return [] }
         var out: [Safeguard] = []
         var said: Set<String> = []
-        if let budget = status.dailyBudget, budget.blocked == true {
-            out.append(Safeguard(
-                title: DailyBudgetCopy.title,
-                body: DailyBudgetCopy.detail(blockedEntries: budget.blockedEntries ?? 0, resetsAt: budget.resetsAt),
-                severity: .waiting))
-            said.insert("daily-cap-reached")
-        }
+        // The health slot may retain an earlier watcher failure after the
+        // queue has room. Only the authoritative capacity read clears it.
+        if status.queueAtCapacity == false { said.insert("queue-full") }
         if let capacity = status.witnessCapacity {
             // Reported but not readable (no count, a negative one, or one
             // the core could not word) is never "none waiting" (Ron's
             // `QueueStatusPanel`): sessions may be held, so it is said.
             let waiting = capacity.waitingSessions
             if let waiting, waiting == 0 {
-                // None waiting.
+                // An explicit clear outranks a stale single-slot health label.
+                said.insert("witness-saturated")
             } else if let waiting, waiting > 0, let wire = Self.wire(capacity),
                 let notice = TCConsentCopy.witnessCapacityNoticeJSON(forCapacity: wire)
                     .flatMap(WitnessCapacityNotice.decode(fromJSON:))
             {
-                out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
+                out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting, condition: "witness-saturated"))
                 said.insert("witness-saturated")
             } else {
                 if let unreadable = capacityUnreadable {
@@ -857,16 +885,17 @@ final class TracesStore {
                 said.insert("witness-saturated")
             }
         }
+        if status.automaticContributionHeld?.heldSessions == 0 { said.insert(GateHeld.label) }
         if let held = status.automaticContributionHeld, (held.heldSessions ?? 0) > 0,
             let wire = Self.wire(held),
             let notice = TCConsentCopy.gateHeldNoticeJSON(forHeld: wire).flatMap(GateHeldNotice.decode(fromJSON:))
         {
-            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting))
+            out.append(Safeguard(title: notice.title, body: notice.body, severity: .waiting, condition: GateHeld.label))
             said.insert(GateHeld.label)
         }
         if let label = status.health?.lastErrorLabel, !said.contains(label) {
             let health = HealthCopy.core(label: label, maxQueueEntries: maxQueueEntries)
-            out.insert(Safeguard(title: health.title, body: health.detail, severity: health.severity), at: 0)
+            out.insert(Safeguard(title: health.title, body: health.detail, severity: health.severity, condition: label), at: 0)
         }
         return out
     }
@@ -876,19 +905,6 @@ final class TracesStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) }
-    }
-
-    /// Whether something waiting is worth a second look (nothing matched, or
-    /// trimmed to fit), as the main window's queue shield reads it. The
-    /// badge pairs with it, so it never says only a count.
-    var shield: QueueShieldState { Self.shield(tree.allSessions) }
-
-    static func shield(_ sessions: [DaemonData.QueueEntry]) -> QueueShieldState {
-        let reasons = sessions.map { Set($0.secondLook ?? []) }
-        return QueueShieldState.state(
-            waiting: sessions.count,
-            nothingMatched: reasons.filter { $0.contains("nothing-matched") }.count,
-            trimmed: reasons.filter { $0.contains("trimmed-to-fit") }.count)
     }
 
     /// A tool's source declaration, from its switch after the core's
@@ -915,6 +931,12 @@ final class TracesStore {
     /// confirmation the view showed (arming, or ignoring a folder with
     /// sessions waiting). `promised` is the waiting count that confirmation
     /// named; the core's `purged` is the authority, and a difference is said.
+    /// A line for the tab's folder notice that no write produced: why a
+    /// switch did not move.
+    func say(_ line: String) {
+        folderNotice = line
+    }
+
     func setFolderMode(_ folder: TracesTree.FolderNode, _ mode: ProjectMode, promised: Int) async {
         guard !writing.contains(folder.id) else { return }
         let mine = attachment

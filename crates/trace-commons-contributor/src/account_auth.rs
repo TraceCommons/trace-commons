@@ -118,38 +118,82 @@ pub(crate) fn try_load_session_with_snapshot(
     }))
 }
 
-impl LoadedAccountSession {
-    /// The `binding_state` stored with this session when it was signed in
-    /// (`native_identity::persist_session`), or `None` for a record that has
-    /// none (an older record, or one an enrollment wrote).
-    pub(crate) fn stored_binding_state(&self) -> Option<String> {
-        serde_json::from_slice::<serde_json::Value>(&self.raw)
-            .ok()?
-            .get("binding_state")?
-            .as_str()
-            .map(str::to_owned)
-    }
-}
-
 /// Whether a session is still worth presenting: not expired, and not about
 /// to be. The same test [`try_load_session_with_snapshot`] applies on load,
 /// for a caller that holds a loaded session across time.
 pub(crate) fn session_is_usable(session: &AccountSession) -> bool {
-    session.expires_at > Utc::now() + EXPIRY_SKEW
+    session_is_usable_at(session, Utc::now())
+}
+
+fn session_is_usable_at(session: &AccountSession, now: DateTime<Utc>) -> bool {
+    session.expires_at > now + EXPIRY_SKEW
+}
+
+/// A session rotation the server handed back: the new bearer token and, from
+/// a server that extends a session when it rotates it, the session's new
+/// expiry. `token` is a SECRET; like [`AccountSession`] this is deliberately
+/// not `Debug`.
+#[derive(Clone)]
+pub struct RotatedToken {
+    pub token: String,
+    /// `None` from a server that does not send
+    /// [`trace_commons_protocol::ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER`]:
+    /// the stored expiry is kept, which is what such a server enforces.
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl RotatedToken {
+    /// Build from the two response headers. No token, no rotation. An expiry
+    /// that is not RFC 3339 is dropped rather than refusing the token: the
+    /// old token stops working shortly after a rotation, so losing the new
+    /// one signs the contributor out, while losing the expiry only keeps the
+    /// earlier one.
+    pub fn from_headers(token: Option<String>, expires_at: Option<String>) -> Option<Self> {
+        let token = token?;
+        let expires_at = expires_at
+            .and_then(|raw| DateTime::parse_from_rfc3339(raw.trim()).ok())
+            .map(|at| at.with_timezone(&Utc));
+        Some(Self { token, expires_at })
+    }
+}
+
+/// A token alone: what a server that does not extend sessions hands back.
+impl From<String> for RotatedToken {
+    fn from(token: String) -> Self {
+        Self {
+            token,
+            expires_at: None,
+        }
+    }
+}
+
+impl From<&str> for RotatedToken {
+    fn from(token: &str) -> Self {
+        token.to_string().into()
+    }
 }
 
 pub(crate) fn store_rotated_token(
     store: &ConfigStore,
     loaded: &LoadedAccountSession,
-    rotated_token: String,
+    rotated: RotatedToken,
 ) -> Result<()> {
+    let RotatedToken {
+        token: rotated_token,
+        expires_at,
+    } = rotated;
     if rotated_token.trim().is_empty() || rotated_token.trim() != rotated_token {
         bail!("account_session_rotation_invalid");
     }
     // Preserve pre-enrollment origin/binding metadata and future extension
-    // fields while rotating only the bearer secret.
+    // fields while rotating only the bearer secret and, when the server sent
+    // one, the expiry it moved with it.
     let mut payload: serde_json::Value = serde_json::from_slice(&loaded.raw)?;
     payload["access_token"] = serde_json::Value::String(rotated_token);
+    if let Some(expires_at) = expires_at {
+        payload["expires_at"] = serde_json::to_value(expires_at)
+            .context("serializing the rotated account session expiry")?;
+    }
     let body = serde_json::to_vec(&payload).context("serializing the rotated account session")?;
     crate::daemon::commons_credentials::replace_account_rotation(store, &loaded.snapshot, &body)
 }
@@ -662,12 +706,84 @@ mod tests {
         let loaded = try_load_session_with_snapshot(&store)
             .expect("load account session")
             .expect("account session exists");
-        store_rotated_token(&store, &loaded, "synthetic-token-after".to_string())
+        store_rotated_token(&store, &loaded, "synthetic-token-after".to_string().into())
             .expect("store rotated token");
         assert_eq!(
             try_load_token(&store).expect("reload token").as_deref(),
             Some("synthetic-token-after")
         );
+    }
+
+    /// A server that extends the session on rotation sends the new expiry
+    /// beside the token; both are stored, so the session stays usable past
+    /// the expiry it was signed in with.
+    #[test]
+    fn a_rotation_with_an_expiry_extends_the_stored_session() {
+        use chrono::SubsecRound;
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let signed_in = Utc::now() + chrono::TimeDelta::hours(1);
+        let mut session = live_session("synthetic-token-before");
+        session.expires_at = signed_in;
+        save_session(&store, &session).expect("save session");
+        let loaded = try_load_session_with_snapshot(&store)
+            .expect("load account session")
+            .expect("account session exists");
+        let extended = (Utc::now() + chrono::TimeDelta::hours(12)).trunc_subsecs(0);
+        let rotated = RotatedToken::from_headers(
+            Some("synthetic-token-after".to_string()),
+            Some(extended.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        )
+        .expect("a rotation");
+        store_rotated_token(&store, &loaded, rotated).expect("store rotated token");
+        let reloaded = try_load_session_with_snapshot(&store)
+            .expect("reload")
+            .expect("still signed in");
+        assert_eq!(reloaded.session.access_token, "synthetic-token-after");
+        assert_eq!(reloaded.session.expires_at, extended);
+        let later = signed_in + chrono::TimeDelta::hours(2);
+        assert!(!session_is_usable_at(&session, later));
+        assert!(
+            session_is_usable_at(&reloaded.session, later),
+            "usable past the expiry it was signed in with"
+        );
+        // The rest of the record is kept.
+        assert_eq!(reloaded.session.account_id, "synthetic-account");
+    }
+
+    /// An older server sends no expiry: the token rotates and the expiry is
+    /// the one already stored, as before.
+    #[test]
+    fn a_rotation_without_an_expiry_keeps_the_stored_one() {
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let session = live_session("synthetic-token-before");
+        save_session(&store, &session).expect("save session");
+        let loaded = try_load_session_with_snapshot(&store)
+            .expect("load account session")
+            .expect("account session exists");
+        let rotated = RotatedToken::from_headers(Some("synthetic-token-after".to_string()), None)
+            .expect("a rotation");
+        assert_eq!(rotated.expires_at, None);
+        store_rotated_token(&store, &loaded, rotated).expect("store rotated token");
+        let reloaded = try_load_session_with_snapshot(&store)
+            .expect("reload")
+            .expect("still signed in");
+        assert_eq!(reloaded.session.access_token, "synthetic-token-after");
+        assert_eq!(reloaded.session.expires_at, session.expires_at);
+    }
+
+    /// An expiry that does not parse is dropped and the token is still kept:
+    /// losing the token would sign the contributor out, losing the expiry
+    /// only means the stored one is used.
+    #[test]
+    fn an_unparseable_expiry_never_costs_the_token() {
+        for raw in ["", "tomorrow", "2026-13-40T00:00:00Z", "1761264000"] {
+            let rotated =
+                RotatedToken::from_headers(Some("synthetic-token".to_string()), Some(raw.into()))
+                    .expect("the token is kept");
+            assert_eq!(rotated.token, "synthetic-token");
+            assert_eq!(rotated.expires_at, None, "{raw:?}");
+        }
+        assert!(RotatedToken::from_headers(None, Some("2026-11-01T00:00:00Z".into())).is_none());
     }
 
     #[test]
@@ -678,7 +794,10 @@ mod tests {
             .expect("load account session")
             .expect("account session exists");
         clear_token(&store).expect("sign out locally");
-        assert!(store_rotated_token(&store, &loaded, "synthetic-token-after".to_string()).is_err());
+        assert!(
+            store_rotated_token(&store, &loaded, "synthetic-token-after".to_string().into())
+                .is_err()
+        );
         assert!(
             try_load_token(&store)
                 .expect("reload signed-out state")
@@ -696,9 +815,9 @@ mod tests {
         let second = try_load_session_with_snapshot(&store)
             .expect("load second account session")
             .expect("second account session exists");
-        store_rotated_token(&store, &first, "synthetic-token-newer".to_string())
+        store_rotated_token(&store, &first, "synthetic-token-newer".to_string().into())
             .expect("store first rotation");
-        store_rotated_token(&store, &second, "synthetic-token-late".to_string())
+        store_rotated_token(&store, &second, "synthetic-token-late".to_string().into())
             .expect("accept concurrent rotation without rollback");
         assert_eq!(
             try_load_token(&store).expect("reload token").as_deref(),

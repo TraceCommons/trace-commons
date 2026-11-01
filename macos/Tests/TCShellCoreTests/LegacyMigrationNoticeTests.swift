@@ -86,9 +86,9 @@ final class LegacyMigrationNoticeTests: XCTestCase {
         XCTAssertEqual(decoded.startFailed, "s")
         XCTAssertEqual(decoded.dismiss, "Dismiss")
         XCTAssertEqual(decoded.later, "l")
-        XCTAssertEqual(decoded.passkeyWaiting, "pw")
-        XCTAssertEqual(decoded.passkeyFailed, "pf")
-        XCTAssertEqual(decoded.passkeyCancel, "Cancel")
+        XCTAssertEqual(decoded.nearAILoginWaiting, "pw")
+        XCTAssertEqual(decoded.nearAILoginFailed, "pf")
+        XCTAssertEqual(decoded.nearAILoginCancel, "Cancel")
         XCTAssertEqual(decoded.actionNameNotice, "Move, card")
         XCTAssertEqual(decoded.actionNameSettings, "Move, Settings")
     }

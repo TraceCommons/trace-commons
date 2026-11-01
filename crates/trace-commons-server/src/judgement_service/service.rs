@@ -38,7 +38,7 @@ use std::time::Instant;
 
 use trace_commons_protocol::insights_judgement::{
     JUDGEMENT_EVENT_KIND_MAX, JudgementKind, JudgementRefusal, JudgementRequestNonce,
-    JudgementResult, JudgementSpend, parse_judgement_request,
+    JudgementResult, JudgementSpend, TurnDigest, parse_judgement_request,
 };
 
 use super::claim::{IssuerKeys, verify_judgement_claim};
@@ -233,7 +233,15 @@ impl JudgementService {
         // The digest goes to the model as text, so it must be UTF-8.
         let digest = std::str::from_utf8(request.digest())
             .map_err(|_| JudgementRefusal::RequestMalformed)?;
-        let events = marked_event_count(digest)?;
+        // `stuck` comes alone with a turn digest, which parses closed: it
+        // must carry no contributor text. The others read a session digest.
+        let stuck = request.judgements() == [JudgementKind::Stuck];
+        let events = if stuck {
+            TurnDigest::parse(request.digest()).map_err(|_| JudgementRefusal::RequestMalformed)?;
+            0
+        } else {
+            marked_event_count(digest)?
+        };
         if events == 0
             && request
                 .judgements()
@@ -250,7 +258,7 @@ impl JudgementService {
         let mut results = Vec::new();
         for &kind in request.judgements() {
             match kind {
-                JudgementKind::Task | JudgementKind::Finished => {
+                JudgementKind::Task | JudgementKind::Finished | JudgementKind::Stuck => {
                     results.push(
                         self.caller
                             .judge(&account_key, digest, kind, None, time)
@@ -445,6 +453,56 @@ pub(crate) mod tests {
         );
         let account = LimiterKeys::from_root(&ROOT).account_key(ACCOUNT);
         assert!(h.limiter.account_spent_nanousd(&account, NOW) > 0);
+    }
+
+    fn turn_digest() -> String {
+        serde_json::json!({
+            "digest_version": 1, "calls": 24, "edits": 9, "files_edited": 1,
+            "most_edits_to_one_file": 9, "failures": 9, "repeated_failures": 7,
+            "checks": 9, "last_check_failed": true, "usual_calls": 15,
+            "recent": [{"kind": "check", "failed": true, "repeated": true}],
+        })
+        .to_string()
+    }
+
+    /// `stuck` judges a turn digest, once. A session digest, or a turn
+    /// digest carrying anything beyond counts, is refused before any call.
+    #[tokio::test]
+    async fn stuck_judges_a_turn_digest_and_nothing_else() {
+        let _serial = LOG_LINE.lock().await;
+        let h = harness();
+        let stuck = request(
+            h.issuer.valid_claim(),
+            turn_digest(),
+            vec![JudgementKind::Stuck],
+        );
+        let judged = h
+            .service
+            .judge(&plaintext(&stuck), NOW, no_permit)
+            .await
+            .expect("judged");
+        assert_eq!(judged.results.len(), 1);
+        assert_eq!(judged.results[0].judgement(), JudgementKind::Stuck);
+        assert!(
+            JudgementKind::Stuck
+                .choices()
+                .contains(&judged.results[0].label())
+        );
+        assert_eq!(h.model.calls(), 1);
+
+        let mut with_text: serde_json::Value = serde_json::from_str(&turn_digest()).unwrap();
+        with_text["prompt"] = serde_json::json!(CANARY);
+        for digest in [digest(1), with_text.to_string()] {
+            let refused = request(h.issuer.valid_claim(), digest, vec![JudgementKind::Stuck]);
+            assert_eq!(
+                h.service
+                    .judge(&plaintext(&refused), NOW, no_permit)
+                    .await
+                    .err(),
+                Some(JudgementRefusal::RequestMalformed)
+            );
+        }
+        assert_eq!(h.model.calls(), 1, "no call for a refused digest");
     }
 
     #[tokio::test]

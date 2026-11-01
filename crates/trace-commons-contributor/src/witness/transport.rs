@@ -189,6 +189,13 @@ pub trait WitnessTransport: Send + Sync {
         witness: &VerifiedWitness,
         body: &[u8],
     ) -> Result<WitnessedEnvelope, WitnessTrustError>;
+
+    /// The envelope limit this transport's sessions are held to, before a
+    /// session is offered and on the envelope that comes back. The state
+    /// directory's (`ConfigStore::envelope_limit_bytes`), which the caller
+    /// sets with `HttpWitnessTransport::with_envelope_limit`;
+    /// `MAX_ENVELOPE_BYTES` in a shipped build.
+    fn envelope_limit_bytes(&self) -> usize;
 }
 
 /// One session's attested inference call, and the receipt offered for it.
@@ -299,7 +306,9 @@ pub async fn witness_contribution(
     // raw contributions above this bound in `raw_contribution_size_ok`; what
     // is new here is naming the refusal on this path, where the cost of
     // finding out late is that the session was already transmitted.
-    raw_contribution_size_ok(&raw).map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
+    let envelope_limit = transport.envelope_limit_bytes();
+    raw_contribution_size_ok(&raw, envelope_limit)
+        .map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
 
     // The in-transit copy. `raw` itself is left alone so a caller that keeps
     // it -- for a retry, for a local fallback -- never finds bodies in it.
@@ -351,7 +360,7 @@ pub async fn witness_contribution(
     // The envelope must still be submittable. Checked before the certificate
     // so an oversized artifact is reported as oversized rather than as a
     // certificate problem.
-    if response.envelope_bytes.len() > MAX_ENVELOPE_BYTES {
+    if response.envelope_bytes.len() > crate::envelope::clamp_envelope_limit(envelope_limit) {
         return Err(WitnessTrustError::WitnessPayloadTooLarge);
     }
 
@@ -847,6 +856,8 @@ pub struct HttpWitnessTransport {
     /// Whether this transport's witness POSTs declare the background
     /// workload. See [`Self::with_background_workload`].
     background_workload: bool,
+    /// See [`WitnessTransport::envelope_limit_bytes`].
+    envelope_limit: usize,
 }
 
 /// The longest a witness's `Retry-After` may hold a session, in seconds. One
@@ -895,6 +906,7 @@ impl HttpWitnessTransport {
             allowlist,
             admission_evidence: false,
             background_workload: false,
+            envelope_limit: MAX_ENVELOPE_BYTES,
         })
     }
 
@@ -917,6 +929,14 @@ impl HttpWitnessTransport {
         self
     }
 
+    /// Hold this transport's sessions to the caller's state-directory limit
+    /// (`ConfigStore::envelope_limit_bytes`). Never above
+    /// `MAX_ENVELOPE_BYTES`: a larger value is clamped to it.
+    pub(crate) fn with_envelope_limit(mut self, limit: usize) -> Self {
+        self.envelope_limit = crate::envelope::clamp_envelope_limit(limit);
+        self
+    }
+
     /// The allowlist gate, applied **before** a request is built.
     ///
     /// The same `HostAllowlist` `issuer_url` and `ingest_url` pass. A host
@@ -933,6 +953,10 @@ impl HttpWitnessTransport {
 
 #[async_trait::async_trait]
 impl WitnessTransport for HttpWitnessTransport {
+    fn envelope_limit_bytes(&self) -> usize {
+        self.envelope_limit
+    }
+
     async fn attestation(
         &self,
         nonce: &WitnessNonce,
@@ -1193,7 +1217,8 @@ impl HttpWitnessTransport {
         raw.consent.message_text_included = presence.message_text;
         raw.consent.tool_payloads_included = presence.tool_payloads;
         raw.consent.routing_metadata_included = presence.routing_metadata;
-        raw_contribution_size_ok(&raw).map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
+        raw_contribution_size_ok(&raw, self.envelope_limit)
+            .map_err(|_| WitnessTrustError::WitnessPayloadTooLarge)?;
         let contribution: serde_json::Value =
             serde_json::from_slice(&witness_request_body(&raw, granted, attested.receipt)?)
                 .map_err(|_| WitnessTrustError::WitnessResponseMalformed)?;
@@ -1260,7 +1285,7 @@ impl HttpWitnessTransport {
             signature_hex: response.envelope_signature_hex,
             admission,
         };
-        if envelope.envelope_bytes.len() > MAX_ENVELOPE_BYTES {
+        if envelope.envelope_bytes.len() > self.envelope_limit {
             return Err(WitnessTrustError::WitnessPayloadTooLarge);
         }
         if artifact_still_carries(&envelope.envelope_bytes, attested.call) {
@@ -2484,8 +2509,10 @@ mod tests {
         let witness =
             crate::witness::verify::verified_witness_for_test(&server.base, &address_of(&signer));
 
+        let transport = transport.with_envelope_limit(crate::envelope::TEST_ENVELOPE_LIMIT_BYTES);
         let mut oversized = raw_with_secret();
-        oversized.events[0].content = Some("x".repeat(MAX_ENVELOPE_BYTES + 1));
+        oversized.events[0].content =
+            Some("x".repeat(crate::envelope::TEST_ENVELOPE_LIMIT_BYTES + 1));
 
         let err = witness_contribution(&transport, &witness, oversized, None, &granted())
             .await
@@ -2824,8 +2851,10 @@ mod tests {
     /// The verbatim request body the mock proxy captured. Awkward on
     /// purpose -- a re-serialiser would change it, and then the digest the
     /// row records would not match.
+    #[cfg(not(feature = "near-ai-staging"))]
     const CAPTURED_REQUEST: &str = "{\"model\":\"Qwen/Qwen3.6-27B-FP8\", \"temperature\":0.30000000000000004,\n  \"messages\":[{\"role\":\"user\",\"content\":\"café — the contributor's prompt\"}]}";
     /// The verbatim response body, as a stream comes back.
+    #[cfg(not(feature = "near-ai-staging"))]
     const CAPTURED_RESPONSE: &str =
         "data: {\"choices\":[{\"delta\":{\"content\":\"café\"}}]}\n\ndata: [DONE]\n\n";
 
@@ -2840,6 +2869,7 @@ mod tests {
     /// `SourceRoots::with_attested_bodies` here, which is the point: that
     /// function existed and was exercised by tests while the production
     /// path never reached it.
+    #[cfg(not(feature = "near-ai-staging"))]
     async fn transcript_from_a_declared_proxy(
         carry_bodies: bool,
     ) -> (crate::source::SessionTranscript, Vec<tempfile::TempDir>) {
@@ -2900,7 +2930,9 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let store = crate::config::ConfigStore::open(state.path().to_path_buf()).expect("store");
-        let shared = crate::daemon::ipc::DaemonShared::load(store).expect("daemon state");
+        let shared = std::sync::Arc::new(
+            crate::daemon::ipc::DaemonShared::load(store).expect("daemon state"),
+        );
         {
             let mut settings = shared.settings.lock().expect("settings lock");
             settings.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
@@ -2951,6 +2983,7 @@ mod tests {
     /// mock on loopback cannot be fetched from, and a receipt is only
     /// verifiable against a signer this test does not have. It is shaped like
     /// one and carried like one, which is what the wire assertion needs.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn admission_wire_contains_only_the_isolated_call_and_never_retries_ordinary() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
@@ -3030,6 +3063,7 @@ mod tests {
         task.abort();
     }
 
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn token_wire_contains_only_the_isolated_call_and_never_retries_ordinary() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
@@ -3125,6 +3159,7 @@ mod tests {
     /// path; anything else keeps the old reading. The request never declares
     /// the background workload, even on a transport built with it: a person
     /// is waiting on this one.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_busy_witness_is_busy_on_the_token_review_route_too() {
         async fn token_attempt(
@@ -3221,6 +3256,7 @@ mod tests {
     /// whose `content` is the completion and whose structured payload is the
     /// prompt. The second half is what a blanket `true` would fail: the same
     /// projection offered without bodies must still declare `false`.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn the_offered_declaration_follows_the_appended_bodies() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
@@ -3314,6 +3350,7 @@ mod tests {
         task.abort();
     }
 
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn a_declared_bodies_directory_reaches_the_witness_through_the_daemon_source_roots() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(true).await;
@@ -3395,6 +3432,7 @@ mod tests {
     /// The receipt goes nowhere either, and not by a second check: the
     /// bundle is built from the call, so no call is no bundle. A receipt
     /// with no bodies to verify it against is unrepresentable.
+    #[cfg(not(feature = "near-ai-staging"))] // declares an IronWire a staging build refuses (S10)
     #[tokio::test]
     async fn routing_declared_without_the_switch_carries_no_body_to_the_witness() {
         let (transcript, _dirs) = transcript_from_a_declared_proxy(false).await;

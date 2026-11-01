@@ -13,13 +13,16 @@ enum TracesHealth {
         let title: String
         let detail: String?
         let tone: GlassStatus
+        /// Semantic daemon condition; absent for unread/down fallbacks.
+        let condition: String?
         /// Position plus title, so two lines with one title never collide.
         let id: String
 
-        init(title: String, detail: String?, tone: GlassStatus, index: Int = 0) {
+        init(title: String, detail: String?, tone: GlassStatus, index: Int = 0, condition: String? = nil) {
             self.title = title
             self.detail = detail
             self.tone = tone
+            self.condition = condition
             id = "\(index)-\(title)"
         }
     }
@@ -59,7 +62,7 @@ enum TracesHealth {
             return TracesStore.safeguards(status, maxQueueEntries: maxQueueEntries)
                 .filter { !$0.title.isEmpty }
                 .enumerated()
-                .map { Banner(title: $1.title, detail: $1.body, tone: .ask, index: $0) }
+                .map { Banner(title: $1.title, detail: $1.body, tone: .ask, index: $0, condition: $1.condition) }
         }
     }
 }

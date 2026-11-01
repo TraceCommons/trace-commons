@@ -446,6 +446,13 @@ pub struct PreviewSummary {
     /// and upload revokes the approval rather than riding along with it.
     pub consent_scopes: Vec<String>,
     pub residual_risk: String,
+    /// `envelope-too-large` when `would_send_bytes` is over the upload
+    /// limit, so the preview says up front what approval would refuse the
+    /// entry for; absent otherwise. The same word, from the same predicate
+    /// ([`size_refusal`]), as the refusal itself. See
+    /// [`PreviewCardSummary::reason_label`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_label: Option<&'static str>,
     /// Digest of the redacted envelope this summary describes, and a
     /// fingerprint of the inputs that produced it. Hashes, never content.
     ///
@@ -528,6 +535,14 @@ pub struct PreviewCardSummary {
     pub enrolled: bool,
     pub subagent_count: u32,
     pub subagents_dropped: u32,
+    /// `envelope-too-large` when the envelope this build produced is over
+    /// the upload limit (`MAX_ENVELOPE_BYTES`); `None` otherwise. Set only
+    /// by [`size_refusal`], the predicate `approve` refuses the entry
+    /// under, so the preview's warning and the approval's refusal cannot
+    /// disagree. A warning, not a state change: a card build records
+    /// nothing on the queue entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_label: Option<&'static str>,
     /// See [`PreviewSummary::scrub_counts`].
     #[serde(skip)]
     pub scrub_counts: super::second_look::ScrubCounts,
@@ -550,6 +565,7 @@ impl PreviewCardSummary {
             pii_labels_present: self.pii_labels_present,
             consent_scopes: self.consent_scopes,
             residual_risk: self.residual_risk,
+            reason_label: self.reason_label,
             envelope_digest,
             input_fingerprint: self.input_fingerprint,
             enrolled: self.enrolled,
@@ -587,7 +603,7 @@ impl PreviewCardSummary {
 /// summary says so (`PreviewSummary::enrolled`), and callers must not pin
 /// an entry to an unenrolled build.
 pub async fn build_preview(
-    _store: &ConfigStore,
+    store: &ConfigStore,
     cfg: Option<&ContributorConfig>,
     near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
@@ -599,7 +615,7 @@ pub async fn build_preview(
     // `build_preview_card` and pass the contributor's real answer -- a
     // summary built here reports the terms of a machine that carries no
     // bodies, which is what a caller with no daemon settings is.
-    build_preview_with_correction(_store, cfg, near_ai, source, session_ref, None, false).await
+    build_preview_with_correction(store, cfg, near_ai, source, session_ref, None, false).await
 }
 
 /// [`build_preview`], with the contributor's written correction folded into
@@ -615,7 +631,7 @@ pub async fn build_preview(
 /// A credential in the correction surfaces here as an `Err`, which is the
 /// refusal: nothing is pinned, so nothing can be approved.
 pub async fn build_preview_with_correction(
-    _store: &ConfigStore,
+    store: &ConfigStore,
     cfg: Option<&ContributorConfig>,
     near_ai: Option<NearAiSettings>,
     source: &dyn TraceSource,
@@ -623,6 +639,10 @@ pub async fn build_preview_with_correction(
     correction: Option<&str>,
     attested_bodies: bool,
 ) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
+    // Held across the read, the redaction, the digest and the body below --
+    // the whole peak -- and released when this returns. See
+    // `crate::large_session_gate`.
+    let _large_session = crate::large_session_gate::admit(session_ref.size_bytes).await;
     let (core, envelope) = build_preview_core(
         cfg,
         near_ai,
@@ -630,6 +650,7 @@ pub async fn build_preview_with_correction(
         session_ref,
         correction,
         attested_bodies,
+        store.envelope_limit_bytes(),
     )
     .await?;
     // Digested here, at exactly the point `submit_loaded` takes over the
@@ -679,14 +700,26 @@ pub async fn build_preview_with_correction(
 /// or a fresh build made at the moment of approval, never a stale card
 /// summary silently standing in for either.
 pub async fn build_preview_card(
+    store: &ConfigStore,
     cfg: Option<&ContributorConfig>,
     near_ai: Option<NearAiSettings>,
     attested_bodies: bool,
     source: &dyn TraceSource,
     session_ref: &SessionRef,
 ) -> Result<PreviewCardSummary> {
-    let (core, _envelope) =
-        build_preview_core(cfg, near_ai, source, session_ref, None, attested_bodies).await?;
+    // See `build_preview_with_correction`: one large session builds at a
+    // time, and a small one never waits.
+    let _large_session = crate::large_session_gate::admit(session_ref.size_bytes).await;
+    let (core, _envelope) = build_preview_core(
+        cfg,
+        near_ai,
+        source,
+        session_ref,
+        None,
+        attested_bodies,
+        store.envelope_limit_bytes(),
+    )
+    .await?;
     Ok(core)
 }
 
@@ -706,8 +739,11 @@ async fn build_preview_core(
     // body never enters a local envelope at all -- so it reaches this
     // function only to be fingerprinted.
     attested_bodies: bool,
+    // The state directory's envelope limit, for the summary's
+    // `envelope-too-large` label (`ConfigStore::envelope_limit_bytes`).
+    envelope_limit: usize,
 ) -> Result<(PreviewCardSummary, TraceContributionEnvelope)> {
-    let transcript = source.load(session_ref)?;
+    let mut transcript = source.load(session_ref)?;
     let raw_session_bytes = session_ref.size_bytes;
 
     let enrolled = cfg.is_some();
@@ -761,6 +797,12 @@ async fn build_preview_core(
     if enrolled && cfg.witness.is_some() {
         return Err(anyhow::anyhow!("witness_claim_unavailable"));
     }
+    // The raw contribution now holds its own copy of every event, and only
+    // the transcript's subagent counts are read past this point. Freeing
+    // the parsed events before redaction keeps them from sitting beside the
+    // raw contribution and the envelope at the build's peak, which for a
+    // session near `source::MAX_SESSION_BYTES` is hundreds of megabytes.
+    transcript.events = Vec::new();
     let envelope = redact_to_envelope(&redactor, raw).await?;
     summarize_envelope(
         &envelope,
@@ -769,6 +811,7 @@ async fn build_preview_core(
         fingerprint,
         enrolled,
         &redactor,
+        envelope_limit,
     )
     .map(|summary| (summary, envelope))
 }
@@ -780,6 +823,7 @@ fn summarize_envelope(
     fingerprint: String,
     enrolled: bool,
     redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
+    envelope_limit: usize,
 ) -> Result<PreviewCardSummary> {
     let would_send_bytes = envelope_size(envelope)?;
     let event_count = envelope.events.len();
@@ -836,8 +880,23 @@ fn summarize_envelope(
         enrolled,
         subagent_count: transcript.subagent_count,
         subagents_dropped: transcript.subagents_dropped,
+        reason_label: size_refusal(would_send_bytes, envelope_limit),
         scrub_counts,
     })
+}
+
+/// The refusal an envelope of `would_send_bytes` meets at approval, if any:
+/// `envelope-too-large` over `limit`, `None` at or under it.
+///
+/// One predicate for both ends, called with the same limit at both: the
+/// state directory's (`ConfigStore::envelope_limit_bytes`,
+/// `MAX_ENVELOPE_BYTES` in a shipped build). The preview reports it as
+/// `reason_label` so the contributor hears it before approving; `approve`
+/// refuses the entry under it. A `limit` above `MAX_ENVELOPE_BYTES` is
+/// treated as `MAX_ENVELOPE_BYTES`.
+pub(crate) fn size_refusal(would_send_bytes: usize, limit: usize) -> Option<&'static str> {
+    (would_send_bytes > crate::envelope::clamp_envelope_limit(limit))
+        .then_some(super::queue::REASON_TOO_LARGE)
 }
 
 /// Explicit user authorization for a single remote review. Not inferred from
@@ -878,6 +937,10 @@ pub async fn build_witnessed_preview(
     if device.device_key_id != cfg.device_key_id {
         anyhow::bail!("witness-review-not-enrolled");
     }
+    // The whole review holds it: the read, the witness round trip that
+    // builds the envelope, and the summary of it. See
+    // `crate::large_session_gate`.
+    let _large_session = crate::large_session_gate::admit(session_ref.size_bytes).await;
     let transcript = source
         .load(session_ref)
         .map_err(|_| anyhow::anyhow!("parse-failed"))?;
@@ -973,6 +1036,7 @@ pub async fn build_witnessed_preview(
         fingerprint,
         true,
         &redactor,
+        store.envelope_limit_bytes(),
     )?
     .into_summary(artifact.digest()?);
     if let Some(bundle) = &artifact.token_bundle {
@@ -980,6 +1044,7 @@ pub async fn build_witnessed_preview(
         summary.would_send_bytes = summary
             .would_send_bytes
             .saturating_add(bundle.attachment_bytes as usize);
+        summary.reason_label = size_refusal(summary.would_send_bytes, store.envelope_limit_bytes());
     }
     let preview = WitnessPreview {
         summary,
@@ -998,6 +1063,8 @@ pub fn summarize_witnessed_preview(
     transcript: &crate::source::SessionTranscript,
     raw_session_bytes: u64,
     include_inference_bodies: bool,
+    // The state directory's envelope limit (`ConfigStore::envelope_limit_bytes`).
+    envelope_limit: usize,
 ) -> Result<(PreviewSummary, String, TraceContributionEnvelope)> {
     let fingerprint = input_fingerprint(cfg, near_ai.as_ref(), include_inference_bodies);
     let envelope = artifact.validate_stored(cfg, &transcript.session_hash, &fingerprint)?;
@@ -1009,6 +1076,7 @@ pub fn summarize_witnessed_preview(
         fingerprint,
         true,
         &redactor,
+        envelope_limit,
     )?
     .into_summary(artifact.digest()?);
     if let Some(bundle) = &artifact.token_bundle {
@@ -1016,6 +1084,7 @@ pub fn summarize_witnessed_preview(
         summary.would_send_bytes = summary
             .would_send_bytes
             .saturating_add(bundle.attachment_bytes as usize);
+        summary.reason_label = size_refusal(summary.would_send_bytes, envelope_limit);
     }
     Ok((summary, body_of(&envelope)?, envelope))
 }
@@ -1423,7 +1492,7 @@ mod tests {
             "witness_claim_unavailable"
         );
         assert_eq!(
-            build_preview_card(Some(&cfg), None, true, &source, &reference)
+            build_preview_card(&store, Some(&cfg), None, true, &source, &reference)
                 .await
                 .err()
                 .unwrap()
@@ -1547,9 +1616,16 @@ mod tests {
         let redactor =
             trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
                 .unwrap();
-        let summary =
-            summarize_envelope(&envelope, 0, &transcript, "fixture".into(), true, &redactor)
-                .unwrap();
+        let summary = summarize_envelope(
+            &envelope,
+            0,
+            &transcript,
+            "fixture".into(),
+            true,
+            &redactor,
+            crate::envelope::MAX_ENVELOPE_BYTES,
+        )
+        .unwrap();
 
         // Non-vacuity: the secret really is still in what would be sent, and
         // the pipeline really did not count it as something it removed.
@@ -1591,7 +1667,7 @@ mod tests {
         }
 
         // The queue card reads the same map through the same shared build.
-        let card = build_preview_card(Some(&cfg), None, false, &src, &r)
+        let card = build_preview_card(&store, Some(&cfg), None, false, &src, &r)
             .await
             .unwrap();
         assert_eq!(
@@ -1719,10 +1795,10 @@ mod tests {
     #[tokio::test]
     async fn a_114_member_group_still_fits_the_envelope_cap() {
         // The plan's ratio (42 MB raw to a 2.8 MB envelope) is one
-        // observation, and `GROUP_RAW_BYTE_BUDGET` is set on the assumption
-        // that it holds with room to spare. This is the measurement rather
-        // than the assumption: the largest group on the probed machine had
-        // 114 members, and a group that overruns the cap is refused whole.
+        // observation, and the group budget once leaned on it. This is the
+        // measurement rather than the assumption: the largest group on the
+        // probed machine had 114 members, and a group that overruns the
+        // envelope cap is refused whole.
         let (_d, src, r) = grouped_session(114, 200);
         let (_sd, store) = crate::config::tests_support::temp_store();
         let cfg = sample_cfg(&store);
@@ -1737,6 +1813,83 @@ mod tests {
             summary.would_send_bytes,
             crate::envelope::MAX_ENVELOPE_BYTES
         );
+    }
+
+    /// A preview of a large session waits for the process-wide gate, and
+    /// a small one does not. The session on disk is tiny; only the size the
+    /// ref reports (which is what the gate reads, before anything is
+    /// loaded) is set past the threshold.
+    #[tokio::test]
+    async fn a_large_preview_waits_for_the_gate_and_a_small_one_does_not() {
+        use crate::large_session_gate::{LARGE_SESSION_BYTES, admit};
+        use std::time::Duration;
+        let (_store_dir, store) = crate::config::tests_support::temp_store();
+        let (_d, src, small_ref) = fixture_session();
+        let mut large_ref = small_ref.clone();
+        large_ref.size_bytes = LARGE_SESSION_BYTES + 1;
+
+        let held = admit(LARGE_SESSION_BYTES + 1).await;
+        assert!(held.holds_gate());
+
+        let small = tokio::time::timeout(
+            Duration::from_secs(30),
+            build_preview_card(&store, None, None, false, &src, &small_ref),
+        )
+        .await
+        .expect("a small session is never queued behind a large one");
+        assert!(small.is_ok());
+
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(200),
+            build_preview_card(&store, None, None, false, &src, &large_ref),
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "a large preview must wait while another large build holds the gate"
+        );
+
+        drop(held);
+        let admitted = tokio::time::timeout(
+            Duration::from_secs(30),
+            build_preview_card(&store, None, None, false, &src, &large_ref),
+        )
+        .await
+        .expect("a large preview proceeds once the gate is free");
+        assert!(admitted.is_ok());
+    }
+
+    #[test]
+    fn the_size_refusal_is_the_word_approval_uses_and_only_over_the_limit() {
+        let max = crate::envelope::MAX_ENVELOPE_BYTES;
+        assert_eq!(size_refusal(0, max), None);
+        assert_eq!(size_refusal(max, max), None);
+        assert_eq!(
+            size_refusal(max + 1, max),
+            Some(super::super::queue::REASON_TOO_LARGE)
+        );
+    }
+
+    /// The full summary (the preview sheet, `tc_preview_summary_json`)
+    /// carries the same field as the card, through the same constructor.
+    #[tokio::test]
+    async fn a_preview_within_the_limit_carries_no_reason_label() {
+        let (_d, src, r) = fixture_session();
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let cfg = sample_cfg(&store);
+        let (summary, _body, _envelope) = build_preview(&store, Some(&cfg), None, &src, &r)
+            .await
+            .unwrap();
+        assert_eq!(summary.reason_label, None);
+        let value = serde_json::to_value(&summary).unwrap();
+        assert!(value.get("reason_label").is_none(), "{value}");
+
+        let mut over = summary.clone();
+        over.would_send_bytes = crate::envelope::MAX_ENVELOPE_BYTES + 1;
+        over.reason_label =
+            size_refusal(over.would_send_bytes, crate::envelope::MAX_ENVELOPE_BYTES);
+        let value = serde_json::to_value(&over).unwrap();
+        assert_eq!(value["reason_label"], "envelope-too-large", "{value}");
     }
 
     #[tokio::test]

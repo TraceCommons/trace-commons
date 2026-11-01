@@ -8,7 +8,8 @@ import TCShellCore
 ///
 /// Each read stands alone: a tool list the daemon could not read leaves
 /// the calls standing, and the other way round. A failed read keeps the
-/// last good value rather than drawing nothing, as `TracesStore` does.
+/// last good value rather than drawing nothing, as `TracesStore` does,
+/// except the full-window summary, whose totals must stay fresh.
 @MainActor
 @Observable
 final class InferenceStore {
@@ -16,13 +17,11 @@ final class InferenceStore {
     private(set) var harnesses: HarnessList?
     /// The newest page of `inference_calls`.
     private(set) var calls: DaemonData.InferenceCallPage?
-    /// The per-model summary. PROVISIONAL: the live client throws
-    /// `notAvailableYet` for this shape, and the tab then shows the calls
-    /// alone; the daemon's real reply is `networkInferenceSummary()`, and
-    /// moving this store to it is a follow-up. Once it reads that method,
-    /// an older daemon's `unknown_method` is drawn the same way
-    /// (`isNotServed`); today the live client sends nothing for it.
+    /// Legacy per-model display data, retained for compatible test clients.
     private(set) var summary: DaemonData.InferenceSummary?
+    /// The daemon's full-window shared and managed inference totals.
+    /// Cleared on failed or unreadable refreshes so old totals never look current.
+    private(set) var networkSummary: DaemonData.NetworkInferenceSummary?
     /// `tool_destinations`: its per-tool counts (K14) are the core's call
     /// totals for the window, which one page of calls is not.
     private(set) var destinations: DaemonData.ToolDestinations?
@@ -72,6 +71,7 @@ final class InferenceStore {
         harnesses = nil
         calls = nil
         summary = nil
+        networkSummary = nil
         destinations = nil
         privateAI = nil
         privateAIRefusal = nil
@@ -96,13 +96,16 @@ final class InferenceStore {
             case .inferenceCallAdded:
                 async let calls: Void = loadCalls()
                 async let destinations: Void = loadDestinations()
-                _ = await (calls, destinations)
+                async let summary: Void = loadNetworkSummary()
+                _ = await (calls, destinations, summary)
             case .snapshot, .statusChanged, .resyncRequired:
                 await load()
             // A managed session started, stopped, exited or was dismissed:
             // the map draws those from `tool_destinations`.
             case .unknown("managed_changed"):
-                await loadDestinations()
+                async let destinations: Void = loadDestinations()
+                async let summary: Void = loadNetworkSummary()
+                _ = await (destinations, summary)
             case .queueChanged, .digestDue, .reengageDue, .previewReady, .usageChanged, .unknown:
                 break
             }
@@ -123,9 +126,19 @@ final class InferenceStore {
         async let harnesses: Void = loadHarnesses()
         async let calls: Void = loadCalls()
         async let summary: Void = loadSummary()
+        async let networkSummary: Void = loadNetworkSummary()
         async let destinations: Void = loadDestinations()
         async let privateAI: Void = loadPrivateAI()
-        _ = await (harnesses, calls, summary, destinations, privateAI)
+        _ = await (harnesses, calls, summary, networkSummary, destinations, privateAI)
+    }
+
+    /// Reads the Private AI switch and listener state again, alone: the
+    /// app's settings read saw it move (a NEAR AI sign-in or sign-out
+    /// landed), and every dot drawn from this store follows now rather than
+    /// on the next event. Nothing while the daemon is still starting.
+    func reloadPrivateAI() async {
+        guard !awaiting else { return }
+        await loadPrivateAI()
     }
 
     private func loadPrivateAI() async {
@@ -219,7 +232,13 @@ final class InferenceStore {
     }
 
     private func loadSummary() async {
-        await read("inference_summary", { try await $0.inferenceSummary() }) { if let value = $0 { self.summary = value } }
+        await read("legacy_inference_summary", { try await $0.inferenceSummary() }) { if let value = $0 { self.summary = value } }
+    }
+
+    private func loadNetworkSummary() async {
+        await read("inference_summary", { try await $0.networkInferenceSummary() }) {
+            self.networkSummary = $0?.readable == true ? $0 : nil
+        }
     }
 
     /// One read, recording its failure by method, then `apply` with its

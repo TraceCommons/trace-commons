@@ -17,6 +17,15 @@ final class MenuBarGlassPanelTests: XCTestCase {
         XCTAssertTrue(panel.contains("radius: GlassTokens.Radius.menuPanel"))
     }
 
+    /// The popover is a quarter narrower than the handoff's 380 (owner,
+    /// 2026-10-21). The wordmark in its top row stays past the brand kit's
+    /// 72px floor for the wordmark.
+    func test_thePanelIsAQuarterNarrower() throws {
+        XCTAssertEqual(MenuBarGlassPanel.width, 380 * 0.75)
+        let ratio = GlassNearWordmark.viewBox.width / GlassNearWordmark.viewBox.height
+        XCTAssertGreaterThanOrEqual(MenuBarGlassPanel.wordmarkHeight * ratio, 72)
+    }
+
     // MARK: Mode roll-up
 
     /// One mode for every folder reads as that mode; any difference is
@@ -93,47 +102,97 @@ final class MenuBarGlassPanelTests: XCTestCase {
         return patched
     }
 
-    // MARK: Day graph
+    // MARK: Graph
 
-    /// Contributions go up and kept sessions go down, on the day they
-    /// happened; the newest day is the last column; older days fall off.
-    func test_theGraphCountsPerDayEndingToday() {
+    /// The popover's bars are the Traces graph's (owner, 2026-10-22): its
+    /// days and counts, every other weekday left out counting back from
+    /// today's, so the labels fit the popover's narrower columns.
+    func test_theGraphBarsAreTheAppsWithEveryOtherLabel() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC")!
         let now = Date(timeIntervalSince1970: 1_790_000_000)
         let day: TimeInterval = 86_400
-        let columns = MenuPanelData.days(
-            shared: [now, now - 60, now - day, now - 40 * day],
-            kept: [now - 2 * day], ending: now, count: 36, calendar: calendar)
-        XCTAssertEqual(columns.count, 36)
-        XCTAssertEqual(columns.last?.up, 2)
-        XCTAssertEqual(columns[34].up, 1)
-        XCTAssertEqual(columns[33].down, 1)
-        XCTAssertEqual(columns.reduce(0) { $0 + $1.up }, 3, "a day outside the window is not drawn")
+        let buckets = TracesGraphModel.buckets(
+            shared: [now, now - 60, now - day, now - 40 * day], kept: [now - 2 * day],
+            offset: 0, now: now, range: .days, calendar: calendar)
+        let bars = MenuPanelData.bars(buckets, words: MonitorShellWords.graphWords)
+        XCTAssertEqual(bars.count, TracesGraphModel.days)
+        XCTAssertEqual(bars.map(\.id), buckets.map { TracesGraphFooter.bar($0, words: nil).id })
+        XCTAssertEqual(bars.last?.up, 2)
+        XCTAssertEqual(bars[bars.count - 2].up, 1)
+        XCTAssertEqual(bars[bars.count - 3].down, 1)
+        XCTAssertEqual(bars.reduce(0) { $0 + $1.up }, 3, "a day outside the window is not drawn")
+        XCTAssertEqual(bars.last?.label, buckets.last?.label, "today is labelled")
+        XCTAssertFalse(bars.last?.label.isEmpty ?? true)
+        XCTAssertEqual(bars[bars.count - 2].label, "")
+        XCTAssertEqual(bars[bars.count - 3].label, buckets[buckets.count - 3].label)
+        XCTAssertEqual(bars.filter { !$0.label.isEmpty }.count, (TracesGraphModel.days + 1) / 2)
     }
 
-    // MARK: Flagged and recent
+    // MARK: Menu-bar item
 
-    /// Flagged counts the queue's attention reasons only.
-    func test_flaggedCountsNothingMatchedAndTrimmed() async throws {
-        // A real sample entry, with only its second-look reasons varied.
-        let pending = try await SampleDaemonClient(.normalDay).listPending(projectId: nil)
-        let sample = try XCTUnwrap(pending.first)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        func entry(_ id: String, _ reasons: [String]) throws -> DaemonData.QueueEntry {
-            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(sample)) as? [String: Any])
-            object["entry_id"] = id
-            object["second_look"] = reasons
-            return try decoder.decode(DaemonData.QueueEntry.self, from: JSONSerialization.data(withJSONObject: object))
-        }
-        let entries = try [
-            entry("a", ["nothing-matched"]), entry("b", ["trimmed-to-fit"]),
-            entry("c", ["looks-unsure"]), entry("d", []),
-        ]
-        XCTAssertEqual(MenuPanelData.flagged(entries), 2)
+    /// The item's trace bars count per four-hour step over the last 24
+    /// hours: a contribution or kept session lands in its step, one stamped
+    /// after the span's end in the last, one before the span nowhere.
+    func test_theItemCountsTracesPerFourHourStep() {
+        let end = Date(timeIntervalSince1970: 1_790_000_000)
+        let hour: TimeInterval = 3_600
+        let steps = MenuPanelData.steps(
+            shared: [end - 60, end - 5 * hour, end + 30, end - 25 * hour],
+            kept: [end - 21 * hour, end - 24 * hour], span: MenuPanelData.Span(end: end))
+        XCTAssertEqual(steps.count, 6)
+        XCTAssertEqual(steps[5].up, 2, "the newest step, and one stamped after the end")
+        XCTAssertEqual(steps[4].up, 1)
+        XCTAssertEqual(steps.reduce(0) { $0 + $1.up }, 3, "a contribution before the span is not drawn")
+        XCTAssertEqual(steps[0].down, 2, "the oldest step starts 24 hours before the end")
+    }
+
+    /// The Private AI steps are verified (up) over all calls (down), their
+    /// span ends one step after the last step's start, and a ledger that
+    /// did not answer is unknown, never six zeros.
+    func test_thePrivateAIStepsAreVerifiedOverCalls() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let activity = try decoder.decode(DaemonData.InferenceActivity.self, from: Data(#"""
+            {"readable":true,"window_hours":24,"step_hours":2,"steps":[
+             {"start":"2026-10-21T08:00:00+00:00","calls":5,"verified":3},
+             {"start":"2026-10-21T10:00:00+00:00","calls":2,"verified":2}]}
+            """#.utf8))
+        let steps = try XCTUnwrap(MenuPanelData.privateAISteps(activity))
+        XCTAssertEqual(steps.map(\.up), [3, 2])
+        XCTAssertEqual(steps.map(\.down), [5, 2])
+        let span = try XCTUnwrap(MenuPanelData.span(activity))
+        XCTAssertEqual(span.count, 2)
+        XCTAssertEqual(span.stepHours, 2)
+        XCTAssertEqual(span.end, DaemonTimestamp.parse("2026-10-21T12:00:00Z"))
+
+        let unread = try decoder.decode(DaemonData.InferenceActivity.self, from: Data(
+            #"{"readable":false,"window_hours":24,"step_hours":2,"steps":[]}"#.utf8))
+        XCTAssertNil(MenuPanelData.privateAISteps(unread))
+        XCTAssertNil(MenuPanelData.span(unread))
+
+        // A step that is no length of time gives no clock to count on.
+        let zero = try decoder.decode(DaemonData.InferenceActivity.self, from: Data(#"""
+            {"readable":true,"window_hours":24,"step_hours":0,"steps":[
+             {"start":"2026-10-21T10:00:00+00:00","calls":1,"verified":1}]}
+            """#.utf8))
+        XCTAssertNil(MenuPanelData.span(zero))
+        XCTAssertNil(
+            MenuPanelData.privateAISteps(zero),
+            "steps with no clock are not drawn, or they would pair with trace steps on another clock")
+        XCTAssertEqual(
+            MenuPanelData.steps(shared: [Date()], kept: [], span: MenuPanelData.Span(end: Date(), stepHours: 0)), [])
+    }
+
+    // MARK: Recent activity
+
+    func test_theMenuHasNoSecondLookCategoryOrAggregateCount() throws {
+        let panel = try GlassSurfaceRulesTests.text("Views/Monitor/MenuBarGlassPanel.swift")
+        let store = try GlassSurfaceRulesTests.text("Views/Monitor/MenuPanelStore.swift")
+        XCTAssertFalse(panel.contains("flaggedRow"))
+        XCTAssertFalse(panel.contains("MenuWords.flagged"))
+        XCTAssertFalse(store.contains("flaggedCount"))
+        XCTAssertFalse(store.contains("static func flagged("))
+        XCTAssertTrue(store.contains("client.listPending(projectId: nil)"), "Kept still reads waiting traces")
     }
 
     /// Recent activity is newest first, at most three, and an outside call
@@ -237,16 +296,17 @@ final class MenuBarGlassPanelTests: XCTestCase {
     /// switch left on over a listener that refused to start, crashed or is
     /// stopping is never drawn On. Unknown is unknown, never Off.
     func test_thePrivateAIPillFollowsTheListenerNotTheSwitch() throws {
-        let running = PrivateInferenceSurface.tone(
-            PrivateInferenceState(label: "running", port: 8080), calls: .testing)
-        XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: running), .on)
+        let calls = PrivateInferenceMenuBarTests.coreCalls
+        let running = PrivateInferenceSurface.menuState(
+            PrivateInferenceState(label: "running", port: 8080), calls: calls)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: true, menu: running), .listener(word: "On", tone: .clear))
         for label in ["port_in_use", "start_failed", "crashed", "stopping", "unknown_state", ""] {
-            let tone = PrivateInferenceSurface.tone(PrivateInferenceState(label: label, port: nil), calls: .testing)
-            XCTAssertEqual(MenuPanelStatus.privateAI(on: true, tone: tone), .notWorking,
-                           "a switch on over \(label) must not read On")
+            let menu = PrivateInferenceSurface.menuState(PrivateInferenceState(label: label, port: nil), calls: calls)
+            XCTAssertNotEqual(MenuPanelStatus.privateAIDot(MenuPanelStatus.privateAI(on: true, menu: menu)), .on,
+                              "a switch on over \(label) must not read green")
         }
-        XCTAssertEqual(MenuPanelStatus.privateAI(on: false, tone: running), .off)
-        XCTAssertEqual(MenuPanelStatus.privateAI(on: nil, tone: running), .unknown)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: false, menu: running), .off)
+        XCTAssertEqual(MenuPanelStatus.privateAI(on: nil, menu: running), .unknown)
         // The pill's fill and value come from that, not from the switch.
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -623,5 +683,23 @@ final class MenuBarGlassPanelTests: XCTestCase {
         // The core's words missing: nothing is drawn.
         XCTAssertNil(MenuPanelStatus.settlementLine(status, available: true, copy: NudgeCopy(table: [:])))
         XCTAssertNil(MenuPanelStatus.settlementLine(status, available: true, copy: nil))
+    }
+
+    /// The popover offers "Check for Updates…" only where Sparkle runs, and
+    /// disabled while the updater cannot check (owner, 2026-10-29).
+    func test_theMenuChecksForUpdatesOnlyWhenSelfUpdating() throws {
+        let panel = try GlassSurfaceRulesTests.text("Views/Monitor/MenuBarGlassPanel.swift")
+        XCTAssertTrue(panel.contains("@ObservedObject private var updates = UpdateController.shared"))
+        XCTAssertTrue(panel.contains("if updates.mode == .selfUpdating, let title = MenuWords.checkForUpdates {"))
+        XCTAssertTrue(panel.contains("updates.checkNow()"))
+        XCTAssertTrue(panel.contains(".disabled(!updates.canCheckNow)"))
+        // Sparkle's window opens in front of a menu-bar app.
+        XCTAssertTrue(panel.contains("NSApp.activate(ignoringOtherApps: true)\n                    updates.checkNow()"))
+    }
+
+    /// The label is the core's word, with a real ellipsis.
+    func test_theUpdateCheckWordComesFromTheCore() throws {
+        let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
+        XCTAssertEqual(copy.checkForUpdates, "Check for Updates\u{2026}")
     }
 }

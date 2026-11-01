@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import AppKit
 import SwiftUI
+import TCBridge
 import XCTest
 import TCShellCore
 @testable import TraceCommonsApp
@@ -128,9 +129,10 @@ final class ComputeNavigationTests: XCTestCase {
 
     func testComputeDirectoryDoesNotInheritDaemonSocketLengthRestriction() throws {
         let path = "/private/tmp/" + String(repeating: "a", count: 120)
-        XCTAssertThrowsError(try StateDirectory.resolve(explicit: path, probe: .init { _ in .absent }))
-        XCTAssertEqual(try StateDirectory.resolveCompute(explicit: path, probe: .init { _ in .absent }).path, path)
-        XCTAssertThrowsError(try StateDirectory.resolveCompute(explicit: path, probe: .init { _ in .file }))
+        let channel = try XCTUnwrap(BuildChannel.decode(fromJSON: TCBuildChannel.json()))
+        XCTAssertThrowsError(try StateDirectory.resolve(channel: channel, explicit: path, probe: .init { _ in .absent }, overrideCheck: DaemonHost.overrideCheck))
+        XCTAssertEqual(try StateDirectory.resolveCompute(channel: channel, explicit: path, probe: .init { _ in .absent }, overrideCheck: DaemonHost.overrideCheck).path, path)
+        XCTAssertThrowsError(try StateDirectory.resolveCompute(channel: channel, explicit: path, probe: .init { _ in .file }, overrideCheck: DaemonHost.overrideCheck))
     }
 
     @MainActor

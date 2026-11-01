@@ -12,17 +12,16 @@
 # by one app has to be readable by the other. So the group below is fixed,
 # and everything app-specific -- the bundle id, the executable name -- is
 # read from the bundle's own Info.plist.
+#
+# The one exception is the native shell's staging build (staging design
+# 4.2), ai.tracecommons.shell.staging: it has its own group, so that it never
+# reads a production credential, and it is held to that group exactly.
 set -euo pipefail
 
 APP="${1:?usage: verify-macos-entitlements.sh <path to a Near.ai or Trace Commons .app>}"
 PROFILE="$APP/Contents/embedded.provisionprofile"
 ACCESS_GROUP="KXSWJN7WY8.ai.tracecommons.shell"
 TEAM_ID="KXSWJN7WY8"
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-case "${TC_REQUIRE_NATIVE_PASSKEYS:-0}" in
-  0|1) ;;
-  *) echo "FAIL: invalid TC_REQUIRE_NATIVE_PASSKEYS (expected 0 or 1)"; exit 1 ;;
-esac
 
 INFO="$APP/Contents/Info.plist"
 test -f "$INFO" || { echo "FAIL: no Contents/Info.plist in $APP"; exit 1; }
@@ -31,6 +30,9 @@ BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$INFO" 2>/dev/null)" \
 EXECUTABLE="$(plutil -extract CFBundleExecutable raw -o - "$INFO" 2>/dev/null)" \
   || { echo "FAIL: Info.plist carries no CFBundleExecutable"; exit 1; }
 echo "bundle $BUNDLE_ID, executable $EXECUTABLE"
+if [ "$BUNDLE_ID" = "ai.tracecommons.shell.staging" ]; then
+  ACCESS_GROUP="$TEAM_ID.ai.tracecommons.shell.staging"
+fi
 
 echo "--- the profile is embedded"
 test -f "$PROFILE" || { echo "FAIL: no embedded.provisionprofile in the bundle"; exit 1; }
@@ -55,7 +57,9 @@ PLIST="$(security cms -D -i "$PROFILE" 2>/dev/null)" \
   || { echo "FAIL: embedded.provisionprofile is not readable CMS"; exit 1; }
 GRANTED="$(printf '%s' "$PLIST" | plutil -extract Entitlements.keychain-access-groups xml1 -o - - 2>/dev/null)" \
   || { echo "FAIL: profile carries no Entitlements.keychain-access-groups"; exit 1; }
-echo "$GRANTED" | grep -qE "KXSWJN7WY8\.(\*|ai\.tracecommons\.shell)" \
+# The team wildcard, or this exact group: a grant of the production group
+# does not cover the staging one.
+echo "$GRANTED" | grep -qE "<string>($TEAM_ID\.\*|${ACCESS_GROUP//./\\.})</string>" \
   || { echo "FAIL: profile does not grant the requested access group"; exit 1; }
 
 echo "--- the profile is this app's profile"
@@ -74,22 +78,6 @@ test "$SIGNED_APP_ID" = "$EXPECTED_APP_ID" \
   || { echo "FAIL: signed application-identifier $SIGNED_APP_ID is not $EXPECTED_APP_ID"; exit 1; }
 test "$PROFILE_APP_ID" = "$EXPECTED_APP_ID" \
   || { echo "FAIL: embedded profile is for $PROFILE_APP_ID, not $EXPECTED_APP_ID"; exit 1; }
-
-echo "--- native Associated Domains qualification"
-# Pure metadata fixtures cover missing/wrong domains and grants separately.
-# This path reads the ACTUAL signature and embedded CMS, never synthetic CMS.
-NATIVE_METADATA="$(mktemp -d)"
-trap 'rm -rf "$NATIVE_METADATA"' EXIT
-printf '%s' "$ENTS" > "$NATIVE_METADATA/entitlements.plist"
-printf '%s' "$PLIST" > "$NATIVE_METADATA/profile.plist"
-PASSKEY_ARGS=(--bundle-id "$BUNDLE_ID")
-if [ "${TC_REQUIRE_NATIVE_PASSKEYS:-0}" = 1 ]; then
-  PASSKEY_ARGS+=(--require-passkeys)
-fi
-python3 "$ROOT/scripts/ci/native-passkey-entitlements.py" \
-  --entitlements "$NATIVE_METADATA/entitlements.plist" \
-  --profile "$NATIVE_METADATA/profile.plist" \
-  "${PASSKEY_ARGS[@]}"
 
 echo "--- the profile is not near expiry"
 EXPIRES="$(printf '%s' "$PLIST" | plutil -extract ExpirationDate raw -o - - 2>/dev/null)" \

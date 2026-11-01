@@ -76,6 +76,23 @@ pub fn parse_client_ip_header(raw: Option<&str>) -> anyhow::Result<Option<Header
         })
 }
 
+/// The address the trusted edge observed: the rightmost hop of the last
+/// line of `header`, parsed as an IP address. `None` when the header is
+/// missing or that hop is not an address. Hops to its left came from the
+/// caller and are never read. The same trust assumption as
+/// [`lookup_client_key`]: the proxy in front overwrites or appends the
+/// header.
+pub fn trusted_edge_hop(headers: &HeaderMap, header: &HeaderName) -> Option<IpAddr> {
+    headers
+        .get_all(header)
+        .iter()
+        .next_back()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit(',').next())
+        .map(str::trim)
+        .and_then(|hop| hop.parse::<IpAddr>().ok())
+}
+
 /// The per-client throttle key for one lookup, read from the header the
 /// operator named as written by their trusted proxy.
 ///
@@ -89,15 +106,7 @@ pub fn parse_client_ip_header(raw: Option<&str>) -> anyhow::Result<Option<Header
 /// and the proxy overwrites or appends the header; see
 /// `docs/operator/pilot-allowlist.md`.
 pub fn lookup_client_key(headers: &HeaderMap, header: &HeaderName) -> String {
-    let hop = headers
-        .get_all(header)
-        .iter()
-        .next_back()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.rsplit(',').next())
-        .map(str::trim)
-        .and_then(|hop| hop.parse::<IpAddr>().ok());
-    match hop {
+    match trusted_edge_hop(headers, header) {
         Some(IpAddr::V4(v4)) => v4.to_string(),
         Some(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
             Some(v4) => v4.to_string(),

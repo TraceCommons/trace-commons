@@ -47,17 +47,22 @@ final class DesignRulings20261019Tests: XCTestCase {
         XCTAssertGreaterThanOrEqual(card.components(separatedBy: ".padding(.horizontal, Self.textInset)").count - 1, 2)
     }
 
-    /// The popover's top row: the traces worth a second look on the left,
-    /// then Watching, Settings and Quit as icon buttons; no pills.
+    /// The popover's top row: Watching, Settings and Quit as icon buttons
+    /// on the right; no pills. On the left were the traces worth a second
+    /// look, until the NEAR AI wordmark took their place (owner,
+    /// 2026-10-22, `DesignRulings20261022Tests`).
     func test_thePopoversTopRowHoldsTheIconButtons() throws {
         let panel = try Self.text("Views/Monitor/MenuBarGlassPanel.swift")
         let row = try XCTUnwrap(panel.range(of: "    private var topRow: some View {"))
-        let body = String(panel[row.upperBound...].prefix(1800))
-        let flagged = try XCTUnwrap(body.range(of: "MenuWords.flagged"))
-        let watching = try XCTUnwrap(body.range(of: "GlassRoundMenu(MonitorWords.watching"))
+        let body = String(panel[row.upperBound...].prefix(1200))
+        let wordmark = try XCTUnwrap(body.range(of: "GlassNearWordmark()"))
+        // Watching is the shared round dropdown (owner, 2026-10-22: the
+        // edge rail's Traces peek has it too).
+        let watching = try XCTUnwrap(body.range(of: "WatchingMenuButton()"))
+        XCTAssertTrue(panel.contains("GlassRoundMenu(MonitorWords.watching, systemImage: paused ? \"eye.slash\" : \"eye\")"))
         let settings = try XCTUnwrap(body.range(of: "icon: .glyph(.gear)"))
         let quit = try XCTUnwrap(body.range(of: "GlassRoundButton(MenuWords.quit, systemImage: \"power\")"))
-        XCTAssertLessThan(flagged.lowerBound, watching.lowerBound)
+        XCTAssertLessThan(wordmark.lowerBound, watching.lowerBound)
         XCTAssertLessThan(watching.lowerBound, settings.lowerBound)
         XCTAssertLessThan(settings.lowerBound, quit.lowerBound)
         // Watching is a traditional dropdown (owner, 2026-10-19), not a
@@ -98,7 +103,7 @@ final class DesignRulings20261019Tests: XCTestCase {
     }
 
     /// Signed out, the Balance tile's "Sign in required" sits beside its
-    /// dash; a longer sentence, such as an expired sign-in's, goes under it.
+    /// dash; an expired sign-in has no extra notice beside recovery controls.
     func test_theSignedOutBalanceSitsBesideTheDash() throws {
         let model = AppModel()
         let copy = try XCTUnwrap(model.privateInferenceCopy)
@@ -111,7 +116,7 @@ final class DesignRulings20261019Tests: XCTestCase {
             BalanceStatus.parse(fromJSON: #"{"state":"session_expired"}"#), copy: copy, calls: model.balanceCalls)
         XCTAssertEqual(expired.value, "—")
         XCTAssertNil(expired.beside)
-        XCTAssertNotNil(expired.detail)
+        XCTAssertNil(expired.detail)
     }
 
     /// The tabs' own headings share one style (owner, 2026-10-19): the
@@ -121,7 +126,7 @@ final class DesignRulings20261019Tests: XCTestCase {
         let traces = try Self.text("Views/Monitor/NudgeViews.swift")
         let privateAI = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(traces.contains("GlassTabHeading(store.words?.tree.treeTitle ?? \"\") {"))
-        XCTAssertTrue(privateAI.contains("return GlassTabHeading(copy.inspectorStatus) {"))
+        XCTAssertTrue(privateAI.contains("GlassTabHeading(copy.inspectorStatus) {"))
         XCTAssertFalse(privateAI.contains("InspectorFactRow"), "the status has its own row style again")
         XCTAssertEqual(GlassTabHeading<EmptyView>.titleType, GlassTokens.TypeScale.bodyStrong)
     }

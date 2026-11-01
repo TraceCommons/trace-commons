@@ -166,6 +166,9 @@ struct SettingsWindowView: View {
             navigation: navigation, paused: model.status.paused,
             onClose: { dismiss() })
             .frame(minWidth: GlassTokens.Size.modalNavWidth * 3, minHeight: 420)
+            // The sheet for sent traces without Train coding models, when
+            // turning it on here raised it.
+            .modifier(SentTracesTrainingPresenter(site: .settings))
             // Confirmations raised by a section cover this window, with
             // #1146's close button in the core's words.
             .glassModalHost()
@@ -243,6 +246,8 @@ struct MonitorScene: Scene {
 struct MonitorCommands: Commands {
     @ObservedObject var model: AppModel
     let navigation: MainWindowNavigation
+    /// The person's tab order, so Cmd-N follows the strip as dragged.
+    @AppStorage(MonitorWindowView.Tab.orderKey) private var tabOrder = ""
 
     /// Cmd-N for the Nth tab.
     static let tabModifiers: EventModifiers = [.command]
@@ -252,14 +257,11 @@ struct MonitorCommands: Commands {
     static let toggleModifiers: EventModifiers = [.command, .shift]
     static let toggleKey: Character = "m"
 
-    /// The tab's shortcut: its position in the tab strip.
-    static func shortcut(_ tab: MonitorWindowView.Tab) -> Character {
-        switch tab {
-        case .home: "1"
-        case .inference: "2"
-        case .traces: "3"
-        case .insights: "4"
-        }
+    /// The tab's shortcut: its position in the tab strip, in the person's
+    /// order (Home is always Cmd-1).
+    static func shortcut(_ tab: MonitorWindowView.Tab, order: String = "") -> Character {
+        let position = MonitorWindowView.Tab.ordered(order).firstIndex(of: tab) ?? 0
+        return Character(String(position + 1))
     }
 
     /// Where the tab's item goes. Home lands on its overview.
@@ -274,9 +276,9 @@ struct MonitorCommands: Commands {
 
     var body: some Commands {
         CommandGroup(after: .sidebar) {
-            ForEach(MonitorWindowView.Tab.allCases) { tab in
+            ForEach(MonitorWindowView.Tab.ordered(tabOrder)) { tab in
                 Button(tab.title) { OpenMonitor.request(Self.destination(tab)) }
-                    .keyboardShortcut(KeyEquivalent(Self.shortcut(tab)), modifiers: Self.tabModifiers)
+                    .keyboardShortcut(KeyEquivalent(Self.shortcut(tab, order: tabOrder)), modifiers: Self.tabModifiers)
             }
             Divider()
             toggle
@@ -284,6 +286,11 @@ struct MonitorCommands: Commands {
         // Cmd-comma: the Settings window (owner, 2026-10-08).
         CommandGroup(replacing: .appSettings) {
             OpenSettingsButton(navigation: navigation)
+        }
+        // Install, update or remove the command-line tool (owner,
+        // 2026-10-29), like VS Code's "Install 'code' command in PATH".
+        CommandGroup(after: .appSettings) {
+            CliToolMenuItem()
         }
     }
 
@@ -419,6 +426,8 @@ private struct Launcher: View {
         ) { _ in
             Task { @MainActor in
                 model.refreshBalanceOnActivation()
+                model.refreshCredentialOnActivation()
+                model.refreshManagedSessions()
                 await model.refreshReengageDeclaration()
             }
         }

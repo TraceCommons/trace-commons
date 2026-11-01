@@ -287,6 +287,15 @@ pub fn save_witnessed(
     entry_id: Uuid,
     artifact: &WitnessReviewArtifact,
 ) -> Result<()> {
+    // The certified envelope is held to the same limit as a local one
+    // (`save`). The witness transport already refuses a larger response, so
+    // in a shipped build this only restates that bound here, where the
+    // bytes are stored.
+    if artifact.response.envelope_bytes.len()
+        > crate::envelope::clamp_envelope_limit(store.envelope_limit_bytes())
+    {
+        bail!("approved-envelope-too-large");
+    }
     let bytes =
         serde_json::to_vec(artifact).map_err(|_| anyhow::anyhow!("witness-artifact-malformed"))?;
     if bytes.len() > MAX_STORED_ARTIFACT_BYTES {
@@ -330,16 +339,17 @@ pub fn load_witnessed(
 
 /// Persist the redacted envelope a preview just built for `entry_id`.
 ///
-/// Refuses anything over `MAX_ENVELOPE_BYTES`: such an envelope would be
-/// refused for size at upload anyway, and the cap is what bounds this
-/// directory.
+/// Refuses anything over the store's envelope limit
+/// (`ConfigStore::envelope_limit_bytes`, `MAX_ENVELOPE_BYTES` in a shipped
+/// build): such an envelope would be refused for size at upload anyway, and
+/// the cap is what bounds this directory.
 pub fn save(
     store: &ConfigStore,
     entry_id: Uuid,
     envelope: &TraceContributionEnvelope,
 ) -> Result<()> {
     let body = serde_json::to_vec(envelope).context("serializing approved envelope")?;
-    if body.len() > MAX_ENVELOPE_BYTES {
+    if body.len() > crate::envelope::clamp_envelope_limit(store.envelope_limit_bytes()) {
         bail!("approved-envelope-too-large");
     }
     crate::token_bundle::with_review_budget(
@@ -359,7 +369,7 @@ pub fn load(store: &ConfigStore, entry_id: Uuid) -> Result<Option<TraceContribut
     let Some(body) = store.read_daemon_file(&file_name(entry_id))? else {
         return Ok(None);
     };
-    if body.len() > MAX_ENVELOPE_BYTES {
+    if body.len() > crate::envelope::clamp_envelope_limit(store.envelope_limit_bytes()) {
         bail!("approved-envelope-too-large");
     }
     let envelope = serde_json::from_slice(&body).context("parsing stored approved envelope")?;

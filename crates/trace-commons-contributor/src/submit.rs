@@ -441,12 +441,15 @@ fn refused(reason_label: &str, session_ref: &str) -> SubmitOutcome {
     }
 }
 
-fn refused_for_size(session_ref: &str, size_bytes: usize) -> SubmitOutcome {
+/// `limit_bytes` is the limit the session was refused over: the state
+/// directory's (`ConfigStore::envelope_limit_bytes`), which is
+/// `MAX_ENVELOPE_BYTES` in a shipped build.
+fn refused_for_size(session_ref: &str, size_bytes: usize, limit_bytes: usize) -> SubmitOutcome {
     SubmitOutcome::Refused {
         reason_label: "session-too-large".to_string(),
         session_ref: session_ref.to_string(),
         size_bytes: Some(size_bytes),
-        limit_bytes: Some(MAX_ENVELOPE_BYTES),
+        limit_bytes: Some(crate::envelope::clamp_envelope_limit(limit_bytes)),
     }
 }
 
@@ -679,6 +682,13 @@ pub struct SubmitContext<'a> {
     /// `subagents_dropped`, the one second-look input the envelope does not.
     /// One-shot, like the hold above.
     hold_unless_scrub_clear: Option<u32>,
+    /// The large-session gate, when the session about to be submitted is
+    /// over `large_session_gate::LARGE_SESSION_BYTES` and its caller took
+    /// the gate before reading it. `submit_loaded` takes it at the start
+    /// and drops it once the envelope is built and checked, right before
+    /// the upload, so the network transfer never holds it. One-shot, like
+    /// the holds above.
+    large_session_permit: Option<crate::large_session_gate::LargeSessionPermit>,
     /// What the last `submit_one`'s receipt fetch produced, for the daemon to
     /// correct the attestation mark after an upload. Reset at the start of
     /// each `submit_one`, set by `witness_envelope` when it runs.
@@ -716,6 +726,15 @@ pub struct SubmitContext<'a> {
     /// seconds; zero for none. Reset like `last_witness_retry_after`. See
     /// [`REASON_RATE_LIMITED`].
     last_rate_limit_retry_after: std::sync::atomic::AtomicU32,
+    /// The wait, in seconds, a `503` from ingest asked for with `Retry-After`
+    /// (or a body `retry_after_seconds`) on the most recent submission; zero
+    /// for none. Reset like `last_rate_limit_retry_after`.
+    last_unavailable_retry_after: std::sync::atomic::AtomicU32,
+    /// When the last submission started sending to ingest, or `None` if it
+    /// stopped before any send (a hold, a local refusal, a classifier
+    /// failure, a dry run). Reset at the start of each submission. The
+    /// daemon's burst window counts exactly these.
+    last_ingest_send_at: Option<DateTime<Utc>>,
     /// Stands in for a fetched provider receipt, tests only.
     ///
     /// `receipt_for_attested_call` refuses a plaintext endpoint before it
@@ -792,12 +811,15 @@ impl<'a> SubmitContext<'a> {
             approved_token_bundle: None,
             hold_unless_low_risk: false,
             hold_unless_scrub_clear: None,
+            large_session_permit: None,
             last_receipt_shipped: ReceiptShipped::NoCall,
             last_sent_witness: None,
             background_witness: false,
             upload_provenance: None,
             last_witness_retry_after: std::sync::atomic::AtomicU32::new(0),
             last_rate_limit_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_unavailable_retry_after: std::sync::atomic::AtomicU32::new(0),
+            last_ingest_send_at: None,
             #[cfg(test)]
             receipt_override: None,
             #[cfg(test)]
@@ -981,7 +1003,8 @@ impl<'a> SubmitContext<'a> {
             std::sync::Arc::new(config_allowlist(self.cfg)),
             std::time::Duration::from_secs(120),
         )?
-        .with_admission_evidence(true);
+        .with_admission_evidence(true)
+        .with_envelope_limit(self.store.envelope_limit_bytes());
         let payload = crate::witness::witness_token_session(
             &transport,
             crate::witness::TokenBundleSession {
@@ -1356,7 +1379,8 @@ impl<'a> SubmitContext<'a> {
         )
         .map_err(|e| e.refusal_label())?
         .with_admission_evidence(admission_profile)
-        .with_background_workload(self.background_witness);
+        .with_background_workload(self.background_witness)
+        .with_envelope_limit(self.store.envelope_limit_bytes());
 
         // The source-selected profile is already frozen. Optional legacy
         // receipt failures retain ordinary review; a bound admission call
@@ -1435,6 +1459,18 @@ impl<'a> SubmitContext<'a> {
         self.background_witness = true;
     }
 
+    /// Hand the next `submit_loaded` the large-session gate its caller took
+    /// before reading the session, so the gate stays held through the build
+    /// and is released before the upload. See `crate::large_session_gate`.
+    /// Set immediately before the call, like `set_upload_provenance`, so it
+    /// cannot outlive the submission it was taken for.
+    pub fn hold_large_session_permit(
+        &mut self,
+        permit: crate::large_session_gate::LargeSessionPermit,
+    ) {
+        self.large_session_permit = Some(permit);
+    }
+
     /// Record the queue entry's provenance for the very next submission this
     /// context runs (K7). One-shot, like `use_approved_envelope`: taken at
     /// the top of `submit_loaded` so it cannot leak onto whatever session
@@ -1466,6 +1502,18 @@ impl<'a> SubmitContext<'a> {
         .filter(|secs| *secs > 0)
     }
 
+    /// The wait, in seconds, a `503` from ingest asked for on the most recent
+    /// submission, or `None` if it sent none. Meaningful immediately after a
+    /// submission returns `Failed` with [`REASON_INGEST_UNREACHABLE`].
+    #[must_use]
+    pub fn last_unavailable_retry_after(&self) -> Option<u32> {
+        Some(
+            self.last_unavailable_retry_after
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|secs| *secs > 0)
+    }
+
     /// The wait, in seconds, ingest's rate limit asked for on the most recent
     /// submission, or `None` if it was not rate limited. Meaningful
     /// immediately after a submission returns `Failed` with
@@ -1479,11 +1527,22 @@ impl<'a> SubmitContext<'a> {
         .filter(|secs| *secs > 0)
     }
 
+    /// When the last submission started sending to ingest, or `None` if it
+    /// returned before sending anything. Meaningful immediately after
+    /// [`Self::submit_loaded`] returns.
+    #[must_use]
+    pub fn last_ingest_send_at(&self) -> Option<DateTime<Utc>> {
+        self.last_ingest_send_at
+    }
+
     pub async fn submit_one(
         &mut self,
         source: &dyn TraceSource,
         session_ref: &SessionRef,
     ) -> Result<SubmitOutcome> {
+        // Before the read: a large session waits here for any other large
+        // build to finish. See `crate::large_session_gate`.
+        let permit = crate::large_session_gate::admit(session_ref.size_bytes).await;
         let transcript = match source.load(session_ref) {
             Ok(t) => t,
             Err(_) => {
@@ -1492,6 +1551,7 @@ impl<'a> SubmitContext<'a> {
                 });
             }
         };
+        self.large_session_permit = Some(permit);
         self.submit_loaded(transcript).await
     }
 
@@ -1520,7 +1580,12 @@ impl<'a> SubmitContext<'a> {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.last_rate_limit_retry_after
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_unavailable_retry_after
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_ingest_send_at = None;
         let opts = self.opts;
+        // Every size refusal below is against the state directory's limit.
+        let envelope_limit = self.store.envelope_limit_bytes();
         // Taken up front, not at the point it is used below: several paths
         // return before that point (already-submitted, an unavailable
         // filter, an over-size refusal), and an approved envelope left
@@ -1537,6 +1602,9 @@ impl<'a> SubmitContext<'a> {
         };
         let hold_unless_low_risk = std::mem::take(&mut self.hold_unless_low_risk);
         let hold_unless_scrub_clear = self.hold_unless_scrub_clear.take();
+        // Held until the envelope is built and checked, and dropped before
+        // either upload below; every early return drops it too.
+        let large_session_permit = self.large_session_permit.take();
 
         if opts.no_reasoning {
             crate::commands::strip_reasoning(&mut transcript);
@@ -1674,16 +1742,27 @@ impl<'a> SubmitContext<'a> {
                 // the expensive redaction/privacy-filter pass; they would be
                 // refused for size after redaction anyway (envelope_size_ok
                 // below is the authoritative check).
-                if raw_contribution_size_ok(&raw).is_err() {
+                if raw_contribution_size_ok(&raw, envelope_limit).is_err() {
                     let size = raw_contribution_size(&raw).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-                    return Ok(refused_for_size(&transcript.session_hash, size));
+                    return Ok(refused_for_size(
+                        &transcript.session_hash,
+                        size,
+                        envelope_limit,
+                    ));
                 }
                 match witness_settings {
                     // Absent means the witness path is not entered at all, and
                     // this is byte for byte what it was before the feature
                     // existed.
                     None => {
-                        match checked_local_redaction(&redactor, raw, self.canary_checked).await {
+                        match checked_local_redaction(
+                            &redactor,
+                            raw,
+                            self.canary_checked,
+                            envelope_limit,
+                        )
+                        .await
+                        {
                             Ok(e) => {
                                 // Recorded, rather than left at whatever the
                                 // previous submission set: a shell asking "what
@@ -1799,11 +1878,15 @@ impl<'a> SubmitContext<'a> {
             self.near_ai_notice_recorded = true;
         }
 
-        let size = match envelope_size_ok(&envelope) {
+        let size = match envelope_size_ok(&envelope, envelope_limit) {
             Ok(s) => s,
             Err(_) => {
                 let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-                return Ok(refused_for_size(&transcript.session_hash, size));
+                return Ok(refused_for_size(
+                    &transcript.session_hash,
+                    size,
+                    envelope_limit,
+                ));
             }
         };
 
@@ -1875,9 +1958,13 @@ impl<'a> SubmitContext<'a> {
             return Ok(outcome);
         }
 
-        if envelope_size_ok(&envelope).is_err() {
+        if envelope_size_ok(&envelope, envelope_limit).is_err() {
             let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-            return Ok(refused_for_size(&transcript.session_hash, size));
+            return Ok(refused_for_size(
+                &transcript.session_hash,
+                size,
+                envelope_limit,
+            ));
         }
 
         // R5: the last check before anything reaches the commons, after every
@@ -1904,6 +1991,10 @@ impl<'a> SubmitContext<'a> {
         // below carries, if it goes.
         self.last_sent_witness = witnessed.clone();
 
+        // The envelope is built and measured; the network transfer below
+        // must not keep the next large session waiting.
+        drop(large_session_permit);
+
         if let Some(bundle) = self.approved_token_bundle.take() {
             let journal =
                 crate::token_bundle::BundleJournal::open(&self.store.dir().join("token-bundles"))?;
@@ -1913,6 +2004,7 @@ impl<'a> SubmitContext<'a> {
             journal.validate_review(&bundle, &response.envelope_bytes)?;
             let uploaded_bytes = sent_envelope_bytes(&envelope, Some(response));
             let client = build_ingest_client(self.cfg, &token)?;
+            self.last_ingest_send_at = Some(Utc::now());
             match journal.upload_approved(bundle.journal_id, &client).await {
                 Ok(_) => {
                     let receipt = Receipt {
@@ -1944,6 +2036,8 @@ impl<'a> SubmitContext<'a> {
             .as_ref()
             .ok_or(SubmitPreconditionFailure(PRECONDITION_NOT_LOGGED_IN))?;
         let mut rate_limit_retry_after = None;
+        let mut unavailable_retry_after = None;
+        self.last_ingest_send_at = Some(Utc::now());
         let uploaded = upload_with_retry(
             self.cfg,
             &self.issuer,
@@ -1953,10 +2047,16 @@ impl<'a> SubmitContext<'a> {
             &self.effective_cfg,
             witnessed.as_ref(),
             &mut rate_limit_retry_after,
+            &mut unavailable_retry_after,
+            envelope_limit,
         )
         .await;
         if let Some(seconds) = rate_limit_retry_after {
             self.last_rate_limit_retry_after
+                .store(seconds, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(seconds) = unavailable_retry_after {
+            self.last_unavailable_retry_after
                 .store(seconds, std::sync::atomic::Ordering::Relaxed);
         }
         match uploaded {
@@ -1986,7 +2086,11 @@ impl<'a> SubmitContext<'a> {
             }
             Err(reason_label) if reason_label == "session-too-large" => {
                 let size = envelope_size(&envelope).unwrap_or(MAX_ENVELOPE_BYTES + 1);
-                Ok(refused_for_size(&transcript.session_hash, size))
+                Ok(refused_for_size(
+                    &transcript.session_hash,
+                    size,
+                    envelope_limit,
+                ))
             }
             Err(reason_label) => Ok(SubmitOutcome::Failed { reason_label }),
         }
@@ -2476,10 +2580,15 @@ pub async fn emit_scoped_attestation(
 /// Shared local preview/submit redaction, including post-redaction checks.
 /// A submit batch may have already checked this same redactor; standalone
 /// previews always pass false. No state, credentials, or network are opened.
+///
+/// `envelope_limit` is the caller's state directory's limit
+/// (`ConfigStore::envelope_limit_bytes`); a caller with no state directory
+/// passes `MAX_ENVELOPE_BYTES`.
 pub(crate) async fn checked_local_redaction(
     redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
     raw: RawTraceContribution,
     canary_checked: bool,
+    envelope_limit: usize,
 ) -> std::result::Result<TraceContributionEnvelope, &'static str> {
     if !canary_checked {
         canary_self_test_async(redactor)
@@ -2516,15 +2625,16 @@ pub(crate) async fn checked_local_redaction(
             _ => "redaction-failed",
         }
     })?;
-    validate_local_envelope(redactor, &envelope)?;
+    validate_local_envelope(redactor, &envelope, envelope_limit)?;
     Ok(envelope)
 }
 
 pub(crate) fn validate_local_envelope(
     redactor: &trace_commons_protocol::trace_contribution::DeterministicTraceRedactor,
     envelope: &TraceContributionEnvelope,
+    envelope_limit: usize,
 ) -> std::result::Result<(), &'static str> {
-    envelope_size_ok(envelope).map_err(|_| "session-too-large")?;
+    envelope_size_ok(envelope, envelope_limit).map_err(|_| "session-too-large")?;
     if envelope_has_residual_secret(redactor, envelope).map_err(|_| "secret-scan-failed")? {
         return Err("secret-leak-detected");
     }
@@ -2693,6 +2803,47 @@ pub(crate) fn build_ingest_client(
     .build()
 }
 
+/// The least time any `/v1/traces` upload is given, however small its body:
+/// room for the TLS handshake, the server's admission checks and its
+/// answer, none of which scale with the body.
+pub(crate) const UPLOAD_TIMEOUT_FLOOR: StdDuration = StdDuration::from_secs(60);
+
+/// The slowest uplink an upload is sized for, in bytes per second: 1 Mbit/s.
+/// A contributor on a slower link can still time out on a large body; one
+/// on any faster link cannot.
+pub(crate) const UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC: u64 = 125_000;
+
+/// The whole-request timeout for a `/v1/traces` upload of `body_len` bytes:
+/// [`UPLOAD_TIMEOUT_FLOOR`] plus the time the body takes at
+/// [`UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC`], rounded up to the second.
+///
+/// The operator client's default is a flat 30 s, which is right for the
+/// small calls that share [`build_ingest_client`] and wrong for an envelope
+/// that can now be 256 MiB (about 72 Mbit/s to send in 30 s). Only the
+/// upload uses this.
+pub(crate) fn upload_timeout(body_len: u64) -> StdDuration {
+    UPLOAD_TIMEOUT_FLOOR.saturating_add(StdDuration::from_secs(
+        body_len.div_ceil(UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC),
+    ))
+}
+
+/// [`build_ingest_client`] with its timeout sized for an upload of
+/// `body_len` bytes. See [`upload_timeout`].
+fn build_upload_client(
+    cfg: &ContributorConfig,
+    token: &ClaimToken,
+    body_len: u64,
+) -> std::result::Result<Client, OcError> {
+    Client::builder(
+        &cfg.ingest_url,
+        "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
+    )
+    .bearer_token(&token.access_token)
+    .host_allowlist(config_allowlist(cfg))
+    .timeout(upload_timeout(body_len))
+    .build()
+}
+
 /// Upload `envelope`, retrying transient transport failures up to 3 attempts
 /// total (1s then 4s backoff) and, on a 401/403, re-minting the claim once
 /// and retrying once more before giving up.
@@ -2728,6 +2879,11 @@ async fn upload_with_retry(
     effective_cfg: &ContributorConfig,
     witnessed: Option<&WitnessedEnvelope>,
     rate_limit_retry_after: &mut Option<u32>,
+    // Written with the wait a `503` asked for (`Retry-After` or the body's
+    // `retry_after_seconds`), clamped like the rate limit's.
+    unavailable_retry_after: &mut Option<u32>,
+    // The state directory's envelope limit (`ConfigStore::envelope_limit_bytes`).
+    envelope_limit: usize,
 ) -> std::result::Result<TraceSubmissionReceipt, String> {
     let mut transport_attempts: u32 = 0;
     let mut remint_attempted = false;
@@ -2737,7 +2893,16 @@ async fn upload_with_retry(
             .as_ref()
             .expect("a claim must be minted before uploading")
             .clone();
-        let client = match build_ingest_client(cfg, &token) {
+        // The length of exactly the body this attempt sends, measured
+        // without materialising it: the certified bytes for a witnessed
+        // upload, and for an ordinary one the counting-sink serialization of
+        // the same value `call_json` is about to serialize (re-measured each
+        // attempt, because a re-mint restamps the scopes). Should the
+        // measurement ever fail, the timeout is sized for the largest
+        // envelope there is rather than for nothing.
+        let body_len =
+            sent_envelope_bytes(envelope, witnessed).unwrap_or(MAX_ENVELOPE_BYTES as u64);
+        let client = match build_upload_client(cfg, &token, body_len) {
             Ok(c) => c,
             Err(e) => return Err(e.kind().to_string()),
         };
@@ -2805,8 +2970,11 @@ async fn upload_with_retry(
                 if transport_attempts >= 3 {
                     return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
-                let delay_secs = if transport_attempts == 1 { 1 } else { 4 };
-                tokio::time::sleep(StdDuration::from_secs(delay_secs)).await;
+                tokio::time::sleep(in_call_retry_delay(
+                    transport_attempts,
+                    crate::retry_jitter::random_u64(),
+                ))
+                .await;
             }
             Err(e) => {
                 // A refusal the gate sent deliberately, before anything reads
@@ -2822,9 +2990,11 @@ async fn upload_with_retry(
                     *rate_limit_retry_after = Some(retry_after_secs);
                     return Err(REASON_RATE_LIMITED.to_string());
                 }
-                // Ingest, or something in front of it, is down or failing.
-                // Not a verdict either; the daemon retries it with backoff.
+                // Ingest, or something in front of it, is down or failing,
+                // or timed out a stalled body (408). Not a verdict either;
+                // the daemon retries it with backoff.
                 if ingest_unavailable(&e) {
+                    *unavailable_retry_after = unavailable_retry_hint(&e, Utc::now());
                     return Err(REASON_INGEST_UNREACHABLE.to_string());
                 }
                 if !is_auth_failure(&e) {
@@ -2842,7 +3012,7 @@ async fn upload_with_retry(
                         } else {
                             stamp_granted_scopes(envelope, effective_cfg, &new_token);
                         }
-                        if envelope_size_ok(envelope).is_err() {
+                        if envelope_size_ok(envelope, envelope_limit).is_err() {
                             return Err("session-too-large".to_string());
                         }
                         *claim = Some(new_token);
@@ -2877,36 +3047,95 @@ fn admission_refusal(e: &OcError) -> Option<AdmissionRefusal> {
 /// `1..=RATE_LIMIT_MAX_RETRY_SECS`, or [`RATE_LIMIT_DEFAULT_RETRY_SECS`] when
 /// the body has none (an older server, or something in front of ingest).
 fn upload_rate_limit(e: &OcError) -> Option<u32> {
+    upload_rate_limit_at(e, Utc::now())
+}
+
+/// [`upload_rate_limit`] measured from `now`, which only matters for a
+/// `Retry-After` given as an HTTP date.
+///
+/// The body's `retry_after_seconds` wins when it is present; the standard
+/// `Retry-After` header (delta-seconds or an HTTP date) is read only when the
+/// body has none. Both are clamped the same way.
+fn upload_rate_limit_at(e: &OcError, now: DateTime<Utc>) -> Option<u32> {
     if admission_refusal(e).is_some() {
         return None;
     }
-    let body = match e {
-        OcError::ServerLabel { status, body, .. } | OcError::HttpFailure { status, body, .. }
-            if status.as_u16() == 429 =>
-        {
-            body
+    let (body, header) = match e {
+        OcError::ServerLabel {
+            status,
+            body,
+            retry_after,
+            ..
         }
+        | OcError::HttpFailure {
+            status,
+            body,
+            retry_after,
+            ..
+        } if status.as_u16() == 429 => (body, retry_after.as_deref()),
         _ => return None,
     };
-    let hint = serde_json::from_str::<serde_json::Value>(body.trim())
-        .ok()
-        .and_then(|value| value.get("retry_after_seconds")?.as_u64())
-        .map(|seconds| u32::try_from(seconds).unwrap_or(u32::MAX));
+    let hint = crate::retry_jitter::server_retry_after(body_retry_after_seconds(body), header, now);
     Some(
         hint.unwrap_or(RATE_LIMIT_DEFAULT_RETRY_SECS)
             .clamp(1, RATE_LIMIT_MAX_RETRY_SECS),
     )
 }
 
-/// Whether this answer says ingest is down or failing rather than judging the
-/// upload: any `5xx`, labelled or not. See [`REASON_INGEST_UNREACHABLE`].
+/// The `retry_after_seconds` field of a JSON error body, if it has one.
+fn body_retry_after_seconds(body: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(body.trim())
+        .ok()?
+        .get("retry_after_seconds")?
+        .as_u64()
+}
+
+/// The wait a `503` from ingest asked for, clamped to
+/// `1..=RATE_LIMIT_MAX_RETRY_SECS`; `None` for any other answer or a `503`
+/// that named none. The body's `retry_after_seconds` wins over the header.
+fn unavailable_retry_hint(e: &OcError, now: DateTime<Utc>) -> Option<u32> {
+    let (body, header) = match e {
+        OcError::ServerLabel {
+            status,
+            body,
+            retry_after,
+            ..
+        }
+        | OcError::HttpFailure {
+            status,
+            body,
+            retry_after,
+            ..
+        } if status.as_u16() == 503 => (body, retry_after.as_deref()),
+        _ => return None,
+    };
+    crate::retry_jitter::server_retry_after(body_retry_after_seconds(body), header, now)
+        .map(|secs| secs.clamp(1, RATE_LIMIT_MAX_RETRY_SECS))
+}
+
+/// How long to wait before the next in-call transport retry, after the
+/// `attempt`-th failure: a second, then four, with equal jitter
+/// ([`crate::retry_jitter`]) so contributors that lost the same connection do
+/// not all come back on the same tick. Between half the base and the base, so
+/// the schedule never gets longer than the old fixed one.
+fn in_call_retry_delay(attempt: u32, random: u64) -> StdDuration {
+    let base_ms = if attempt <= 1 { 1_000 } else { 4_000 };
+    StdDuration::from_millis(crate::retry_jitter::equal_jitter_millis(base_ms, random))
+}
+
+/// Whether this answer says ingest is down, failing or could not read the
+/// upload, rather than judging it: any `5xx`, and `408`, labelled or not.
+/// See [`REASON_INGEST_UNREACHABLE`].
 ///
-/// Only the status decides. A `4xx` is a verdict on this request and stays
-/// with the caller's terminal handling.
+/// Only the status decides. `408` is ingest's idle-body refusal
+/// (`upload_body_idle_timeout`: the body stopped arriving, as when a laptop
+/// sleeps mid-upload) or a proxy's request timeout; neither says anything
+/// about the session, so it is retried. Every other `4xx` is a verdict on
+/// this request and stays with the caller's terminal handling.
 fn ingest_unavailable(e: &OcError) -> bool {
     match e {
         OcError::ServerLabel { status, .. } | OcError::HttpFailure { status, .. } => {
-            status.is_server_error()
+            status.is_server_error() || *status == reqwest::StatusCode::REQUEST_TIMEOUT
         }
         _ => false,
     }
@@ -2934,6 +3163,35 @@ fn is_auth_failure(e: &OcError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_upload_timeout_grows_with_the_body() {
+        // An empty body still gets the whole floor.
+        assert_eq!(upload_timeout(0), UPLOAD_TIMEOUT_FLOOR);
+        // One second of the slowest uplink assumed adds one second.
+        assert_eq!(
+            upload_timeout(UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC),
+            UPLOAD_TIMEOUT_FLOOR + StdDuration::from_secs(1)
+        );
+        // A byte past a whole second rounds up, never down.
+        assert_eq!(
+            upload_timeout(UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC + 1),
+            UPLOAD_TIMEOUT_FLOOR + StdDuration::from_secs(2)
+        );
+        // A body at the envelope limit: 256 MiB at 1 Mbit/s is 2148 s on
+        // top of the floor, far past the operator client's 30 s default.
+        let at_limit = upload_timeout(MAX_ENVELOPE_BYTES as u64);
+        assert_eq!(
+            at_limit,
+            UPLOAD_TIMEOUT_FLOOR
+                + StdDuration::from_secs(
+                    (MAX_ENVELOPE_BYTES as u64).div_ceil(UPLOAD_FLOOR_UPLINK_BYTES_PER_SEC)
+                )
+        );
+        assert!(at_limit > StdDuration::from_secs(30 * 60));
+        // Never overflows, whatever length it is handed.
+        assert!(upload_timeout(u64::MAX) > at_limit);
+    }
     use crate::config::WitnessSettings;
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
@@ -2944,17 +3202,20 @@ mod tests {
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             label: label.into(),
             body: body.into(),
+            retry_after: None,
         }
     }
 
     /// Any 5xx, labelled or bare, is ingest being unavailable (#1358); no
-    /// 4xx is, including the 409s and 429s that keep their own handling.
+    /// other 4xx than 408 is (see the test below), including the 409s and
+    /// 429s that keep their own handling.
     #[test]
     fn only_a_5xx_reads_as_ingest_unavailable() {
         let bare = |status: u16| OcError::HttpFailure {
             url: "http://127.0.0.1/v1/traces".into(),
             status: reqwest::StatusCode::from_u16(status).unwrap(),
             body: "Bad Gateway".into(),
+            retry_after: None,
         };
         for status in [500, 502, 503, 504] {
             assert!(ingest_unavailable(&labelled(
@@ -2971,6 +3232,123 @@ mod tests {
                 "{\"error\":\"x\"}"
             )));
             assert!(!ingest_unavailable(&bare(status)));
+        }
+    }
+
+    /// Ingest's idle-body refusal (`408 upload_body_idle_timeout`, #1800) is
+    /// a stalled connection, not a verdict on the session: it is retried
+    /// like an outage, labelled or bare (a proxy's 408 too).
+    #[test]
+    fn a_408_upload_body_idle_timeout_is_retried_not_a_verdict() {
+        assert!(ingest_unavailable(&labelled(
+            408,
+            "upload_body_idle_timeout",
+            r#"{"error":"upload_body_idle_timeout"}"#
+        )));
+        assert!(ingest_unavailable(&OcError::HttpFailure {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::REQUEST_TIMEOUT,
+            body: String::new(),
+            retry_after: None,
+        }));
+    }
+
+    fn with_retry_after(status: u16, body: &str, header: Option<&str>) -> OcError {
+        OcError::HttpFailure {
+            url: "http://127.0.0.1/v1/traces".into(),
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            body: body.into(),
+            retry_after: header.map(str::to_string),
+        }
+    }
+
+    /// The standard `Retry-After` header is read on a 429 when the body has
+    /// no `retry_after_seconds`; the body wins when both are present; both are
+    /// clamped alike.
+    #[test]
+    fn a_429_retry_after_header_is_read_when_the_body_has_no_hint() {
+        let now = DateTime::parse_from_rfc3339("2026-10-21T07:27:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            upload_rate_limit_at(&with_retry_after(429, "Too Many Requests", Some("45")), now),
+            Some(45)
+        );
+        assert_eq!(
+            upload_rate_limit_at(&with_retry_after(429, "{}", Some("86400")), now),
+            Some(RATE_LIMIT_MAX_RETRY_SECS)
+        );
+        assert_eq!(
+            upload_rate_limit_at(&with_retry_after(429, "", Some("0")), now),
+            Some(1)
+        );
+        assert_eq!(
+            upload_rate_limit_at(
+                &with_retry_after(429, "", Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+                now
+            ),
+            Some(60)
+        );
+        assert_eq!(
+            upload_rate_limit_at(
+                &with_retry_after(
+                    429,
+                    r#"{"error":"submit_rate_limited","retry_after_seconds":17}"#,
+                    Some("90")
+                ),
+                now
+            ),
+            Some(17),
+            "the body's field wins over the header"
+        );
+        assert_eq!(
+            upload_rate_limit_at(&with_retry_after(429, "", Some("soon")), now),
+            Some(RATE_LIMIT_DEFAULT_RETRY_SECS),
+            "an unreadable header is no hint"
+        );
+    }
+
+    /// A 503 that names a wait is read the same way; other statuses and a 503
+    /// naming none yield nothing.
+    #[test]
+    fn a_503_retry_after_is_read_from_the_header_or_the_body() {
+        let now = Utc::now();
+        assert_eq!(
+            unavailable_retry_hint(&with_retry_after(503, "", Some("12")), now),
+            Some(12)
+        );
+        assert_eq!(
+            unavailable_retry_hint(
+                &with_retry_after(503, r#"{"error":"x","retry_after_seconds":9}"#, Some("12")),
+                now
+            ),
+            Some(9)
+        );
+        assert_eq!(
+            unavailable_retry_hint(&with_retry_after(503, "", Some("99999")), now),
+            Some(RATE_LIMIT_MAX_RETRY_SECS)
+        );
+        assert_eq!(
+            unavailable_retry_hint(&with_retry_after(503, "", None), now),
+            None
+        );
+        assert_eq!(
+            unavailable_retry_hint(&with_retry_after(502, "", Some("12")), now),
+            None
+        );
+    }
+
+    /// The in-call transport waits keep the old 1 s and 4 s as their ceiling
+    /// and never fall below half of it.
+    #[test]
+    fn the_in_call_retry_wait_is_jittered_within_the_old_fixed_wait() {
+        for (attempt, base_ms) in [(1_u32, 1_000_u64), (2, 4_000)] {
+            let waits: std::collections::BTreeSet<u128> = (0..500_u64)
+                .map(|r| in_call_retry_delay(attempt, r).as_millis())
+                .collect();
+            assert!(waits.iter().all(|w| *w >= u128::from(base_ms / 2)));
+            assert!(waits.iter().all(|w| *w <= u128::from(base_ms)));
+            assert!(waits.len() > 1, "attempt {attempt} did not spread");
         }
     }
 
@@ -3012,6 +3390,7 @@ mod tests {
                 url: "http://127.0.0.1/v1/traces".into(),
                 status: reqwest::StatusCode::TOO_MANY_REQUESTS,
                 body: "Too Many Requests".into(),
+                retry_after: None,
             }),
             Some(RATE_LIMIT_DEFAULT_RETRY_SECS),
             "a proxy in front of ingest"
@@ -3835,8 +4214,8 @@ mod tests {
             "canonical-width placeholder identity must preserve serialized size"
         );
         assert_eq!(
-            envelope_size_ok(&preview).is_ok(),
-            envelope_size_ok(&enrolled).is_ok(),
+            envelope_size_ok(&preview, MAX_ENVELOPE_BYTES).is_ok(),
+            envelope_size_ok(&enrolled, MAX_ENVELOPE_BYTES).is_ok(),
             "placeholder identity must not change the size decision"
         );
         assert_eq!(
@@ -3989,6 +4368,31 @@ mod tests {
         assert!(note.contains("TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS"));
         assert!(residual_risk_storage_note(ResidualPiiRisk::Low).contains("accepted"));
         assert!(residual_risk_storage_note(ResidualPiiRisk::High).contains("quarantines"));
+    }
+
+    /// What the CLI prints for an over-size session: `refused
+    /// (session-too-large) session=… size=… limit=…`. The limit is the
+    /// envelope cap itself, never a literal.
+    #[test]
+    fn refused_for_size_names_the_session_the_size_and_the_limit() {
+        let outcome = refused_for_size("sha256:abc", MAX_ENVELOPE_BYTES + 1, MAX_ENVELOPE_BYTES);
+        match outcome {
+            SubmitOutcome::Refused {
+                reason_label,
+                session_ref,
+                size_bytes,
+                limit_bytes,
+            } => {
+                assert_eq!(reason_label, "session-too-large");
+                assert_eq!(session_ref, "sha256:abc");
+                assert_eq!(size_bytes, Some(MAX_ENVELOPE_BYTES + 1));
+                assert_eq!(limit_bytes, Some(MAX_ENVELOPE_BYTES));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let refusal = refused_for_size("sha256:abc", MAX_ENVELOPE_BYTES + 1, MAX_ENVELOPE_BYTES);
+        assert!(!outcomes_have_failure(std::slice::from_ref(&refusal), true));
+        assert!(outcomes_have_failure(&[refusal], false));
     }
 
     #[test]
@@ -5680,12 +6084,15 @@ mod tests {
             None,
             None,
         );
+        // The witness path holds the session to this state directory's
+        // limit, lowered so the oversized session need not be 256 MiB.
+        store.lower_envelope_limit_for_tests(crate::envelope::TEST_ENVELOPE_LIMIT_BYTES);
         let mut oversized = raw.events[0].clone();
-        oversized.content = Some("x".repeat(crate::envelope::MAX_ENVELOPE_BYTES + 1_000_000));
+        oversized.content = Some("x".repeat(crate::envelope::TEST_ENVELOPE_LIMIT_BYTES + 1));
         raw.events.push(oversized);
         assert!(
             crate::envelope::raw_contribution_size(&raw).unwrap()
-                > crate::envelope::MAX_ENVELOPE_BYTES,
+                > crate::envelope::TEST_ENVELOPE_LIMIT_BYTES,
             "the session must exceed the bound, or this test observes nothing"
         );
         let request = r#"{"model":"Qwen/Qwen3.6-27B-FP8","metadata":{"trace_commons_admission":"tcad1:bound-call"}}"#;
@@ -6234,7 +6641,7 @@ mod tests {
             capture.lock().unwrap().bodies.is_empty(),
             "nothing reached the commons"
         );
-        assert_eq!(state.uploads_today, 0);
+        assert!(state.prior_uploads.is_empty());
     }
 
     /// A body that cannot be serialized for the unsure-span detector counts
@@ -6657,6 +7064,8 @@ mod tests {
             &cfg,
             witnessed,
             &mut None,
+            &mut None,
+            MAX_ENVELOPE_BYTES,
         )
         .await;
         let captured = captured.lock().unwrap().clone();
@@ -6670,6 +7079,19 @@ mod tests {
         let redactor = build_redactor_with(cfg, transcript.cwd.as_deref(), None).unwrap();
         let raw = build_raw_contribution_with_verdict(&transcript, cfg, Utc::now(), None);
         redact_to_envelope(&redactor, raw).await.unwrap()
+    }
+
+    /// Through `upload_with_retry`: a `408` from ingest (its idle-body
+    /// refusal) comes back as `ingest-unreachable`, which the daemon keeps
+    /// and retries, not as a terminal `server-label` failure.
+    #[tokio::test]
+    async fn an_upload_refused_408_is_kept_for_retry() {
+        let (result, captured) = upload_once(None, 408).await;
+        assert_eq!(
+            result.expect_err("the stub refused the first upload"),
+            REASON_INGEST_UNREACHABLE
+        );
+        assert_eq!(captured.bodies.len(), 1, "handed back, not re-sent here");
     }
 
     #[tokio::test]
@@ -6943,7 +7365,11 @@ mod json_output_tests {
         // stops a future change from surfacing a response body or path to a
         // caller that logs this output.
         let out = outcomes_to_json(
-            &[refused_for_size("sha256:test", 1_600_000)],
+            &[refused_for_size(
+                "sha256:test",
+                1_600_000,
+                MAX_ENVELOPE_BYTES,
+            )],
             true,
             &["preview notice"],
         );

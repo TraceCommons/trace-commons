@@ -27,7 +27,7 @@ public struct GlassLibraryOrb: View {
     /// The angle the orb rests at, and starts from.
     static let restAngle: Double = 0.4
     /// The share of the frame's half-size left round the sphere.
-    public static let inset: CGFloat = 0.29
+    nonisolated public static let inset: CGFloat = 0.29
     /// The meridians drawn, and the axis's lean.
     static let meridians = 6
     static let lean: Double = -14 * Double.pi / 180
