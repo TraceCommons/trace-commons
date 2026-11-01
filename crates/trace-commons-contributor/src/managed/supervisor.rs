@@ -1032,9 +1032,11 @@ mod tests {
 
     #[cfg(unix)]
     use super::{PARENT_SESSION_ENV, clear_parent_session, with_open_files_floor};
-    use super::{near_ai_route, sign_in_route_command, status_line, stop_asked};
+    use super::{
+        near_ai_route, project_workflows_notice, sign_in_route_command, status_line, stop_asked,
+    };
     #[cfg(unix)]
-    use super::{opencode_route_command, opencode_sign_in_command, project_workflows_notice};
+    use super::{opencode_route_command, opencode_sign_in_command};
     use crate::config::ConfigStore;
     #[cfg(unix)]
     use crate::managed::{ConnectionKind, opencode::OpenCodeSession};
