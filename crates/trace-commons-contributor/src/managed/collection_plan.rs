@@ -182,6 +182,11 @@ pub fn write(store: &ConfigStore, plan: &CollectionPlan) -> Result<(), ManagedEr
         return Err(ManagedError::Conflict);
     }
     let bytes = serde_json::to_vec(plan).map_err(|_| ManagedError::StorageUnavailable)?;
+    // A plan no reader would accept is never written: its row's launcher
+    // then collects for itself, with no fallback.
+    if bytes.len() as u64 > MAX_PLAN {
+        return Err(ManagedError::StorageUnavailable);
+    }
     let partial = root.join(format!(
         "{}.{}.partial",
         plan.session_id,
@@ -307,6 +312,17 @@ pub fn collect(store: &ConfigStore, plan: &CollectionPlan) -> Result<(), Managed
     }
 }
 
+/// Whether the trace of `plan`'s row is already staged: published where its
+/// tool's collection publishes it, which happens only once it verified.
+pub fn staged(store: &ConfigStore, plan: &CollectionPlan) -> bool {
+    match plan.tool {
+        ToolId::Claude | ToolId::Codex => {
+            super::native_collection::published(store, plan.tool, plan.session_id)
+        }
+        ToolId::Opencode => super::opencode::exported(store, plan.session_id),
+    }
+}
+
 /// What the registry says about a row with a plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowStatus {
@@ -328,27 +344,68 @@ pub enum Next {
     /// The tool is gone and nobody collected: claim and collect.
     Collect,
     /// Record collection as failed, then remove the plan: the tool ran past
-    /// [`GIVE_UP_AFTER`], or whoever claimed it died before finishing.
+    /// [`GIVE_UP_AFTER`], whoever claimed it died before staging its trace,
+    /// or this build cannot read the plan ([`unreadable`]).
     Fail,
+    /// Record collection as done, then remove the plan: whoever claimed it
+    /// died after staging the row's trace, before recording the result.
+    Collected,
     /// Remove the plan and change nothing: the row is gone, never
     /// collected, or already has its result.
     Discard,
 }
 
+/// What the daemon does with a row's plan that the row alone decides, so
+/// the plan need not be read: Discard for a row that is gone, does not
+/// collect or has its result; Wait for one whose launcher still reports,
+/// and collects for itself whatever its claim looks like.
+pub fn before_reading(row: Option<RowStatus>) -> Option<Next> {
+    let Some(row) = row else {
+        return Some(Next::Discard);
+    };
+    if !row.collect_traces || row.collection != CollectionState::Pending {
+        return Some(Next::Discard);
+    }
+    if matches!(row.state, SessionState::Starting | SessionState::Running) {
+        return Some(Next::Wait);
+    }
+    None
+}
+
+/// The daemon's decision for a plan this build cannot read: another
+/// schema, too large, corrupt, or a link. Nobody can collect from it, so
+/// its row's collection fails, unless a live holder of its claim is still
+/// collecting under it.
+pub fn unreadable(row: Option<RowStatus>, claim: Option<bool>) -> Next {
+    if let Some(decided) = before_reading(row) {
+        return decided;
+    }
+    if claim == Some(true) {
+        Next::Wait
+    } else {
+        Next::Fail
+    }
+}
+
 /// The daemon's decision for `plan`. `row` is the registry's view of its
-/// row; `tool_running` and `claim` (who holds the claim and whether that
-/// process runs) are read from the OS by the caller.
+/// row; `tool_running`, `claim` (who holds the claim and whether that
+/// process runs) and `staged` (whether the row's trace is already staged,
+/// [`staged`]) are read from the OS by the caller.
 pub fn next(
     plan: &CollectionPlan,
     row: Option<RowStatus>,
     tool_running: bool,
     claim: Option<bool>,
+    staged: bool,
     now: DateTime<Utc>,
 ) -> Next {
+    if let Some(decided) = before_reading(row) {
+        return decided;
+    }
     let Some(row) = row else {
         return Next::Discard;
     };
-    if !plan.collect_traces || !row.collect_traces || row.collection != CollectionState::Pending {
+    if !plan.collect_traces {
         return Next::Discard;
     }
     // A plan collects only the conversation its row launched on: the row's
@@ -364,13 +421,9 @@ pub fn next(
     {
         return Next::Discard;
     }
-    // A launcher that still reports collects for itself, whatever its claim
-    // looks like.
-    if matches!(row.state, SessionState::Starting | SessionState::Running) {
-        return Next::Wait;
-    }
     match claim {
         Some(true) => return Next::Wait,
+        Some(false) if staged => return Next::Collected,
         Some(false) => return Next::Fail,
         None => {}
     }
@@ -565,76 +618,176 @@ mod tests {
         let now = Utc::now();
         let p = plan(Uuid::new_v4());
         assert_eq!(
-            next(&p, row(SessionState::Unknown), false, None, now),
+            next(&p, row(SessionState::Unknown), false, None, false, now),
             Next::Collect
         );
         assert_eq!(
-            next(&p, row(SessionState::Failed), false, None, now),
+            next(&p, row(SessionState::Failed), false, None, false, now),
             Next::Collect
         );
         assert_eq!(
-            next(&p, row(SessionState::Exited), false, None, now),
+            next(&p, row(SessionState::Exited), false, None, false, now),
             Next::Collect
         );
         // Never while the tool runs, nor while its launcher still reports.
         assert_eq!(
-            next(&p, row(SessionState::Unknown), true, None, now),
+            next(&p, row(SessionState::Unknown), true, None, false, now),
             Next::Wait
         );
         assert_eq!(
-            next(&p, row(SessionState::Running), false, None, now),
+            next(&p, row(SessionState::Running), false, None, false, now),
             Next::Wait
         );
         assert_eq!(
-            next(&p, row(SessionState::Starting), false, None, now),
+            next(&p, row(SessionState::Starting), false, None, false, now),
             Next::Wait
         );
         // A held claim waits; a dead holder's is a failure.
         assert_eq!(
-            next(&p, row(SessionState::Unknown), false, Some(true), now),
+            next(&p, row(SessionState::Unknown), false, Some(true), false, now),
             Next::Wait
         );
         assert_eq!(
-            next(&p, row(SessionState::Unknown), false, Some(false), now),
+            next(&p, row(SessionState::Unknown), false, Some(false), false, now),
             Next::Fail
         );
         // Bounded.
         let later = now + GIVE_UP_AFTER + Duration::minutes(1);
         assert_eq!(
-            next(&p, row(SessionState::Unknown), true, None, later),
+            next(&p, row(SessionState::Unknown), true, None, false, later),
             Next::Fail
         );
         // Never for a row that does not collect, is gone, or has its result.
-        assert_eq!(next(&p, None, false, None, now), Next::Discard);
+        assert_eq!(next(&p, None, false, None, false, now), Next::Discard);
         let off = Some(RowStatus {
             collect_traces: false,
             collection: CollectionState::Off,
             ..row(SessionState::Unknown).unwrap()
         });
-        assert_eq!(next(&p, off, false, None, now), Next::Discard);
+        assert_eq!(next(&p, off, false, None, false, now), Next::Discard);
         let done = Some(RowStatus {
             collection: CollectionState::Collected,
             ..row(SessionState::Exited).unwrap()
         });
-        assert_eq!(next(&p, done, false, None, now), Next::Discard);
+        assert_eq!(next(&p, done, false, None, false, now), Next::Discard);
         let off_plan = CollectionPlan {
             collect_traces: false,
             ..p.clone()
         };
         assert_eq!(
-            next(&off_plan, row(SessionState::Unknown), false, None, now),
+            next(&off_plan, row(SessionState::Unknown), false, None, false, now),
             Next::Discard
         );
         // A launcher that still reports is waited for, even when its claim
         // cannot be told from a dead holder's.
         assert_eq!(
-            next(&p, row(SessionState::Running), false, Some(false), now),
+            next(&p, row(SessionState::Running), false, Some(false), false, now),
             Next::Wait
         );
         assert_eq!(
-            next(&p, row(SessionState::Starting), false, Some(false), now),
+            next(&p, row(SessionState::Starting), false, Some(false), false, now),
             Next::Wait
         );
+    }
+
+    /// A holder that died after staging the row's trace, before it could
+    /// record the result: the row is collected, not failed.
+    #[test]
+    fn a_dead_holder_that_staged_the_trace_is_recorded_as_collected() {
+        let now = Utc::now();
+        let p = plan(Uuid::new_v4());
+        assert_eq!(
+            next(&p, row(SessionState::Unknown), false, Some(false), true, now),
+            Next::Collected
+        );
+        assert_eq!(
+            next(&p, row(SessionState::Unknown), false, Some(false), false, now),
+            Next::Fail
+        );
+        assert_eq!(
+            next(&p, row(SessionState::Unknown), false, Some(true), true, now),
+            Next::Wait,
+            "a live holder is still finishing"
+        );
+    }
+
+    /// The row's staged output is found where each tool's collection
+    /// publishes it, and only there.
+    #[test]
+    fn staged_output_is_found_where_each_tool_publishes_it() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let id = Uuid::new_v4();
+        let claude = plan(id);
+        assert!(!staged(&store, &claude));
+        let pending = store
+            .dir()
+            .join(super::super::native_collection::STAGING)
+            .join("claude");
+        std::fs::create_dir_all(pending.join(format!("{id}.pending"))).unwrap();
+        assert!(!staged(&store, &claude), "a collection still being verified");
+        std::fs::create_dir_all(pending.join(id.to_string())).unwrap();
+        assert!(staged(&store, &claude));
+        let codex = CollectionPlan {
+            tool: ToolId::Codex,
+            ..plan(id)
+        };
+        assert!(!staged(&store, &codex), "another tool's output");
+
+        let opencode = CollectionPlan {
+            tool: ToolId::Opencode,
+            native: None,
+            opencode: Some(OpenCodePlan {
+                native: PathBuf::from("/usr/bin/opencode"),
+                session: id,
+                version: Version::V1,
+            }),
+            ..plan(id)
+        };
+        assert!(!staged(&store, &opencode));
+        let exports = store.dir().join(super::super::opencode::STAGING);
+        std::fs::create_dir_all(&exports).unwrap();
+        std::fs::write(exports.join(format!("{id}.json")), b"{}").unwrap();
+        assert!(staged(&store, &opencode));
+    }
+
+    /// A plan this build cannot read fails its row's collection, so the
+    /// row does not wait for a result forever, unless a live holder is
+    /// still collecting under it. A row that needs no result drops it.
+    #[test]
+    fn an_unreadable_plan_fails_its_rows_collection() {
+        assert_eq!(unreadable(row(SessionState::Unknown), None), Next::Fail);
+        assert_eq!(unreadable(row(SessionState::Failed), Some(false)), Next::Fail);
+        assert_eq!(unreadable(row(SessionState::Unknown), Some(true)), Next::Wait);
+        assert_eq!(unreadable(row(SessionState::Running), None), Next::Wait);
+        assert_eq!(unreadable(None, None), Next::Discard);
+        let done = Some(RowStatus {
+            collection: CollectionState::Collected,
+            ..row(SessionState::Exited).unwrap()
+        });
+        assert_eq!(unreadable(done, None), Next::Discard);
+    }
+
+    /// A plan larger than a reader accepts is never written, so the
+    /// launcher collects for itself instead.
+    #[test]
+    fn a_plan_too_large_to_read_back_is_not_written() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let id = Uuid::new_v4();
+        let name = "p/".to_owned() + &"x".repeat(1000);
+        let before = (0..(MAX_PLAN as usize / 1000 + 1))
+            .map(|n| PathBuf::from(format!("{name}{n}.jsonl")))
+            .collect();
+        let large = CollectionPlan {
+            native: Some(NativePlan {
+                before: Some(before),
+                codex_bound: false,
+            }),
+            ..plan(id)
+        };
+        assert_eq!(write(&store, &large), Err(ManagedError::StorageUnavailable));
+        assert!(!exists(&store, id));
     }
 
     /// A plan whose tool, account or conversation is not its row's is
@@ -661,7 +814,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                next(&p, Some(disagreeing), false, None, now),
+                next(&p, Some(disagreeing), false, None, false, now),
                 Next::Discard,
                 "{disagreeing:?}"
             );
@@ -671,7 +824,7 @@ mod tests {
             ..plan(id)
         };
         assert_eq!(
-            next(&resumed, Some(lapsed), false, None, now),
+            next(&resumed, Some(lapsed), false, None, false, now),
             Next::Discard
         );
         let resumed_row = RowStatus {
@@ -679,7 +832,7 @@ mod tests {
             ..lapsed
         };
         assert_eq!(
-            next(&resumed, Some(resumed_row), false, None, now),
+            next(&resumed, Some(resumed_row), false, None, false, now),
             Next::Collect
         );
 
@@ -698,11 +851,11 @@ mod tests {
             ..lapsed
         };
         assert_eq!(
-            next(&opencode(id), Some(opencode_row), false, None, now),
+            next(&opencode(id), Some(opencode_row), false, None, false, now),
             Next::Collect
         );
         assert_eq!(
-            next(&opencode(root), Some(opencode_row), false, None, now),
+            next(&opencode(root), Some(opencode_row), false, None, false, now),
             Next::Discard,
             "another conversation"
         );
@@ -719,7 +872,7 @@ mod tests {
                 }),
                 false,
                 None,
-                now
+                false, now
             ),
             Next::Collect
         );

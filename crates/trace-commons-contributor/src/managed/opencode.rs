@@ -440,6 +440,12 @@ impl OpenCodeSession {
     }
 }
 
+/// Whether row `row`'s export was staged ([`OpenCodeSession::collect_as`]).
+pub fn exported(store: &ConfigStore, row: Uuid) -> bool {
+    std::fs::symlink_metadata(store.dir().join(STAGING).join(format!("{row}.json")))
+        .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

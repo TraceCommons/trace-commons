@@ -270,6 +270,11 @@ struct Entry {
     /// `request.resume_of`, stored here and copied back on open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     resume_of: Option<Uuid>,
+    /// The daemon ended this row when it saw the tool exit while the
+    /// launcher was quiet ([`SessionRegistry::tool_exited`]). Cleared by
+    /// the launcher's final report, which is then taken as how it ended.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    ended_by_daemon: bool,
     ticket_hash: Option<String>,
     ticket_expires: DateTime<Utc>,
     proof_hash: Option<String>,
@@ -327,11 +332,12 @@ impl SessionRegistry {
                     lapsed(entry.view.connection)
                 };
             }
-            // A row with a collection plan is still collected by the
-            // daemon once its tool is gone (`collection_plan`).
+            // A row with a collection plan this build can read is still
+            // collected by the daemon once its tool is gone
+            // (`collection_plan`); any other plan is removed by it.
             if entry.view.state == SessionState::Failed
                 && entry.view.collection == CollectionState::Pending
-                && !super::collection_plan::exists(store, entry.view.id)
+                && super::collection_plan::read(store, entry.view.id).is_none()
             {
                 entry.view.collection = CollectionState::Failed;
             }
@@ -711,6 +717,7 @@ impl SessionRegistry {
             view,
             keep_saved_model: request.keep_saved_model,
             resume_of: request.resume_of,
+            ended_by_daemon: false,
             request,
             ticket_hash: Some(digest(&ticket)),
             ticket_expires: now + Duration::seconds(120),
@@ -964,24 +971,38 @@ impl SessionRegistry {
             let ended_by_daemon = entry.view.connection == ConnectionKind::NearAiSignIn
                 && entry.view.state == SessionState::Failed
                 && matches!(report.state, SessionState::Exited | SessionState::Failed);
+            // The daemon ended this row once it saw the tool exit: the
+            // launcher's final word is the first to say how, and is taken.
+            let first_word = entry.ended_by_daemon
+                && matches!(report.state, SessionState::Exited | SessionState::Failed);
             if !(ended_by_daemon
+                || first_word
                 || (report.state == entry.view.state && report.exit_code == entry.view.exit_code))
             {
                 return Err(ManagedError::Conflict);
             }
+            let mut changed = false;
+            if first_word {
+                if report.state == SessionState::Exited && report.exit_code.is_none() {
+                    return Err(ManagedError::InvalidRequest);
+                }
+                entry.view.state = report.state;
+                entry.view.exit_code = report.exit_code;
+                entry.ended_by_daemon = false;
+                changed = true;
+            }
             // Its collection result is still taken while the row waits for
             // one: the launcher collected, and removed the collection plan
             // the daemon would otherwise have collected from.
-            return match report.collection {
-                Some(collection @ (CollectionState::Collected | CollectionState::Failed))
-                    if entry.view.collect_traces
-                        && entry.view.collection == CollectionState::Pending =>
-                {
+            if let Some(collection @ (CollectionState::Collected | CollectionState::Failed)) =
+                report.collection
+            {
+                if entry.view.collect_traces && entry.view.collection == CollectionState::Pending {
                     entry.view.collection = collection;
-                    self.commit(next)
+                    changed = true;
                 }
-                _ => Ok(()),
-            };
+            }
+            return if changed { self.commit(next) } else { Ok(()) };
         }
         if report.state == SessionState::Starting {
             return Err(ManagedError::InvalidRequest);
@@ -1084,6 +1105,27 @@ impl SessionRegistry {
             return Err(ManagedError::Conflict);
         }
         entry.view.collection = collection;
+        self.commit(next)
+    }
+
+    /// The daemon saw row `id`'s tool exit while its launcher was quiet
+    /// (the row's lease lapsed, so it is unknown): the row has ended,
+    /// without an exit code from its tool, and no longer holds its
+    /// conversation. The launcher's final report, if one still comes, is
+    /// taken as how it ended. A row in any other state is left as it is:
+    /// a launcher that still reports says so itself.
+    pub fn tool_exited(&mut self, id: Uuid) -> Result<(), ManagedError> {
+        let mut next = self.data.clone();
+        let entry = next
+            .entries
+            .iter_mut()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        if entry.view.state != SessionState::Unknown {
+            return Ok(());
+        }
+        entry.view.state = SessionState::Failed;
+        entry.ended_by_daemon = true;
         self.commit(next)
     }
 
@@ -2125,6 +2167,84 @@ mod tests {
                 .unwrap()
                 .collect_traces,
             "a chain keeps the root's choice"
+        );
+    }
+
+    /// A quiet row whose tool the daemon saw exit has ended: it no longer
+    /// holds its conversation, so the conversation can be resumed. Its
+    /// launcher's late final report, live or from its exit receipt at the
+    /// next start, is still taken and says how the tool ended.
+    #[test]
+    fn a_quiet_row_whose_tool_exited_ends_and_frees_its_conversation() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(
+                LaunchRequest {
+                    collect_traces: true,
+                    ..coding(&account, home.path())
+                },
+                &account,
+            )
+            .unwrap();
+        let id = prepared.session_id;
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let report = |state, exit_code| LifecycleReport {
+            model: None,
+            collection: None,
+            session_id: id,
+            proof: context.proof.clone(),
+            state,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code,
+        };
+        registry
+            .report(report(SessionState::Running, None))
+            .unwrap();
+        registry.tool_exited(id).unwrap();
+        assert_eq!(
+            registry.collection_status(id).unwrap().state,
+            SessionState::Running,
+            "a launcher that still reports says how its tool ended"
+        );
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        assert_eq!(registry.resume_root(id), None, "unknown still holds it");
+        registry
+            .record_collection(id, CollectionState::Collected)
+            .unwrap();
+        registry.tool_exited(id).unwrap();
+        let status = registry.collection_status(id).unwrap();
+        assert_eq!(status.state, SessionState::Failed);
+        assert_eq!(status.collection, CollectionState::Collected);
+        assert_eq!(registry.resume_root(id), Some(id));
+
+        // The launcher's exit receipt, left on disk, does not stop the
+        // registry from opening, and its exit code is taken.
+        let late = report(SessionState::Exited, Some(0));
+        persist_exit(&store, &late).unwrap();
+        drop(registry);
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let status = registry.collection_status(id).unwrap();
+        assert_eq!(status.state, SessionState::Exited);
+        assert_eq!(status.collection, CollectionState::Collected);
+        assert_eq!(registry.resume_root(id), Some(id));
+        // Taken once: the same word again changes nothing; another is refused.
+        registry
+            .report(report(SessionState::Exited, Some(0)))
+            .unwrap();
+        assert_eq!(
+            registry.report(report(SessionState::Failed, None)),
+            Err(ManagedError::Conflict)
         );
     }
 

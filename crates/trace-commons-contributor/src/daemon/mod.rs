@@ -599,6 +599,9 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     // the lease plus one of these ticks.
     let mut managed_lease_tick = tokio::time::interval(std::time::Duration::from_secs(15));
     managed_lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // At most one abandoned-collection pass at a time; a slow one is not
+    // started again until it finished.
+    let mut collection_pass: Option<tokio::task::JoinHandle<()>> = None;
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
     // The published estimate table's fetch schedule (OWNER DECISION E11).
     // A local of this loop, so nothing that answers a request can reach it.
@@ -650,7 +653,12 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             _ = managed_lease_tick.tick() => {
                 managed::sweep(shared, Utc::now()).await;
                 // Detached: a collection is recorded when it finishes.
-                drop(managed::collect_abandoned(shared, Utc::now()));
+                if collection_pass.as_ref().is_none_or(|pass| pass.is_finished()) {
+                    let shared = Arc::clone(shared);
+                    collection_pass = Some(tokio::spawn(async move {
+                        managed::collect_abandoned(&shared, Utc::now()).await;
+                    }));
+                }
             }
             _ = shared.upload_due_changed.notified() => {
                 if let Some(at) = shared.upload_due() {

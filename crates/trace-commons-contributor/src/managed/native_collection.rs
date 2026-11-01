@@ -377,6 +377,22 @@ impl NativeCollection {
     }
 }
 
+/// Whether row `id`'s collection for `tool` was published: its staged
+/// directory is there, which it is only once it verified.
+pub fn published(store: &ConfigStore, tool: ToolId, id: Uuid) -> bool {
+    let Ok(directory) = tool_directory(tool) else {
+        return false;
+    };
+    std::fs::symlink_metadata(
+        store
+            .dir()
+            .join(STAGING)
+            .join(directory)
+            .join(id.to_string()),
+    )
+    .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+}
+
 /// Explicit staged roots are separate from automatic native discovery. Only
 /// successfully published, real UUID directories can enter the watcher.
 pub fn roots(store: &ConfigStore, tool: ToolId) -> Vec<PathBuf> {

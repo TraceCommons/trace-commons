@@ -1218,84 +1218,113 @@ pub async fn sweep(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) {
 /// Collect the trace of a collecting session whose launcher went quiet
 /// (terminal window closed, force quit, logout), once its tool has exited,
 /// from the collection plan the launcher left (`managed::collection_plan`).
-/// The daemon's loop calls this on its lease tick, whose first tick is at
+/// The daemon's loop runs this on its lease tick, whose first tick is at
 /// startup, so rows a restart found unknown or failed are picked up too.
+/// A row whose tool the daemon saw exit has ended, so its conversation can
+/// be resumed (`SessionRegistry::tool_exited`).
 ///
 /// Never while the launcher still reports, never while the tool's process
 /// runs (its pid and start time), never for a row that does not collect,
-/// and never when the launcher took the row's claim first. The collection
-/// itself runs on a blocking task, off the managed lock; the returned
-/// handles finish when it is recorded (tests wait on them, the loop does
-/// not). Past `collection_plan::GIVE_UP_AFTER` a running tool's collection
-/// is recorded as failed and its local session is left as it is.
-pub fn collect_abandoned(
+/// and never when the launcher took the row's claim first. A plan is read
+/// only for a quiet row still waiting for its result, and all file,
+/// process and collection work runs on a blocking task, off the daemon's
+/// loop and off the managed lock, which is taken only to read rows and
+/// record results. Past `collection_plan::GIVE_UP_AFTER` a running tool's
+/// collection is recorded as failed and its local session is left as it
+/// is. Returns how many rows it collected.
+pub async fn collect_abandoned(
     shared: &std::sync::Arc<DaemonShared>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Vec<tokio::task::JoinHandle<()>> {
+) -> usize {
+    let shared = std::sync::Arc::clone(shared);
+    tokio::task::spawn_blocking(move || collect_abandoned_now(&shared, now))
+        .await
+        .unwrap_or(0)
+}
+
+fn collect_abandoned_now(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) -> usize {
     use crate::managed::collection_plan::{self, Next, ProcessIdentity};
     let store = &shared.store;
-    let plans: Vec<_> = collection_plan::list(store)
-        .into_iter()
-        .filter_map(|id| collection_plan::read(store, id))
-        .collect();
-    if plans.is_empty() {
-        return vec![];
+    let ids = collection_plan::list(store);
+    if ids.is_empty() {
+        return 0;
     }
     // Rows lapse lazily (a shell's snapshot, or a sweep while the daemon
     // hosts a route); lapse them here so a quiet launcher is seen.
     let Ok(rows) = with_service(shared, |service| {
         service.sessions.sweep(now)?;
-        Ok(plans
+        Ok(ids
             .iter()
-            .map(|plan| service.sessions.collection_status(plan.session_id))
+            .map(|id| service.sessions.collection_status(*id))
             .collect::<Vec<_>>())
     }) else {
-        return vec![];
+        return 0;
     };
-    let me = ProcessIdentity::current();
-    let mut handles = Vec::new();
-    for (plan, row) in plans.into_iter().zip(rows) {
-        let id = plan.session_id;
-        let claim = collection_plan::claimant(store, id)
-            .map(|holder| holder.is_some_and(|holder| holder.is_running()));
-        match collection_plan::next(&plan, row, plan.process.is_running(), claim, now) {
+    let record = |id, collection, tool_exited: bool| {
+        let _ = with_service(shared, |service| {
+            service.sessions.record_collection(id, collection)?;
+            if tool_exited {
+                service.sessions.tool_exited(id)?;
+            }
+            Ok(())
+        });
+    };
+    let mut me = None;
+    let mut collected = 0;
+    for (id, row) in ids.into_iter().zip(rows) {
+        let (next, plan) = match collection_plan::before_reading(row) {
+            Some(decided) => (decided, None),
+            None => {
+                let claim = collection_plan::claimant(store, id)
+                    .map(|holder| holder.is_some_and(|holder| holder.is_running()));
+                match collection_plan::read(store, id) {
+                    None => (collection_plan::unreadable(row, claim), None),
+                    Some(plan) => {
+                        let tool_running = plan.process.is_running();
+                        let staged =
+                            claim == Some(false) && collection_plan::staged(store, &plan);
+                        let next =
+                            collection_plan::next(&plan, row, tool_running, claim, staged, now);
+                        (next, Some((plan, tool_running)))
+                    }
+                }
+            }
+        };
+        // Whether the tool is known to be gone: only a plan names it.
+        let tool_exited = plan.as_ref().is_some_and(|(_, running)| !running);
+        match next {
             Next::Wait => {}
             Next::Discard => collection_plan::finish(store, id),
             Next::Fail => {
-                let _ = with_service(shared, |service| {
-                    service
-                        .sessions
-                        .record_collection(id, CollectionState::Failed)
-                });
+                record(id, CollectionState::Failed, tool_exited);
+                collection_plan::finish(store, id);
+            }
+            Next::Collected => {
+                record(id, CollectionState::Collected, tool_exited);
                 collection_plan::finish(store, id);
             }
             Next::Collect => {
-                if collection_plan::claim(store, id, &me) != Ok(true) {
+                let Some((plan, _)) = plan else {
+                    continue;
+                };
+                let me = me.get_or_insert_with(ProcessIdentity::current);
+                if collection_plan::claim(store, id, me) != Ok(true) {
                     continue;
                 }
-                let shared = std::sync::Arc::clone(shared);
-                handles.push(tokio::spawn(async move {
-                    let task = std::sync::Arc::clone(&shared);
-                    let collected = tokio::task::spawn_blocking(move || {
-                        collection_plan::collect(&task.store, &plan)
-                    })
-                    .await;
-                    let result = match collected {
-                        Ok(Ok(())) => CollectionState::Collected,
-                        _ => {
-                            tracing::warn!(pass = "managed-collection", "collection failed");
-                            CollectionState::Failed
-                        }
-                    };
-                    let _ = with_service(&shared, |service| {
-                        service.sessions.record_collection(id, result)
-                    });
-                    collection_plan::finish(&shared.store, id);
-                }));
+                let result = match collection_plan::collect(store, &plan) {
+                    Ok(()) => CollectionState::Collected,
+                    Err(_) => {
+                        tracing::warn!(pass = "managed-collection", "collection failed");
+                        CollectionState::Failed
+                    }
+                };
+                record(id, result, true);
+                collection_plan::finish(store, id);
+                collected += 1;
             }
         }
     }
-    handles
+    collected
 }
 
 /// Whether Claude Code wrote the conversation `id` in the profile at
@@ -3128,33 +3157,29 @@ mod tests {
             chrono::Utc::now() + crate::managed::sessions::LEASE + chrono::Duration::seconds(1)
         }
 
-        async fn finish(handles: Vec<tokio::task::JoinHandle<()>>) -> usize {
-            let count = handles.len();
-            for handle in handles {
-                handle.await.unwrap();
-            }
-            count
-        }
-
         #[tokio::test]
         async fn a_lapsed_rows_exited_tool_is_collected_once() {
             let f = fixture();
             let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
             let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
             assert_eq!(
-                finish(collect_abandoned(&shared, chrono::Utc::now())).await,
+                collect_abandoned(&shared, chrono::Utc::now()).await,
                 0,
                 "a launcher inside its lease collects for itself"
             );
             assert!(!staged(&f, id));
-            assert_eq!(finish(collect_abandoned(&shared, lapsed())).await, 1);
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 1);
             assert!(staged(&f, id));
             let row = status(&shared, id);
             assert_eq!(row.collection, CollectionState::Collected);
-            assert_eq!(row.state, SessionState::Unknown);
+            assert_eq!(
+                row.state,
+                SessionState::Failed,
+                "its tool exited: the row has ended"
+            );
             assert!(!collection_plan::exists(&f.store, id), "removed once final");
             assert!(collection_plan::claimant(&f.store, id).is_none());
-            assert_eq!(finish(collect_abandoned(&shared, lapsed())).await, 0);
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
         }
 
         #[tokio::test]
@@ -3167,13 +3192,13 @@ mod tests {
                 .unwrap();
             let process = ProcessIdentity::of(tool.id());
             let id = sessions_of(&shared, |s| running(&f, s, process, true));
-            assert_eq!(finish(collect_abandoned(&shared, lapsed())).await, 0);
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
             assert!(!staged(&f, id));
             assert_eq!(status(&shared, id).collection, CollectionState::Pending);
             assert!(collection_plan::exists(&f.store, id));
             tool.kill().unwrap();
             tool.wait().unwrap();
-            assert_eq!(finish(collect_abandoned(&shared, lapsed())).await, 1);
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 1);
             assert!(staged(&f, id));
             assert_eq!(status(&shared, id).collection, CollectionState::Collected);
         }
@@ -3183,7 +3208,7 @@ mod tests {
             let f = fixture();
             let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
             let id = sessions_of(&shared, |s| running(&f, s, exited(), false));
-            assert_eq!(finish(collect_abandoned(&shared, lapsed())).await, 0);
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
             assert!(!staged(&f, id));
             assert_eq!(status(&shared, id).collection, CollectionState::Off);
             assert!(
@@ -3202,11 +3227,71 @@ mod tests {
             let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
             assert_eq!(status(&shared, id).state, SessionState::Unknown);
             assert_eq!(
-                finish(collect_abandoned(&shared, chrono::Utc::now())).await,
+                collect_abandoned(&shared, chrono::Utc::now()).await,
                 1
             );
             assert!(staged(&f, id));
             assert_eq!(status(&shared, id).collection, CollectionState::Collected);
+            assert!(!collection_plan::exists(&f.store, id));
+        }
+
+        /// A collected row whose launcher was killed has ended once its
+        /// tool is gone, so its conversation can be resumed.
+        #[tokio::test]
+        async fn a_killed_rows_conversation_can_be_resumed_once_collected() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
+            let can_resume = |shared: &DaemonShared| {
+                let mut held = shared.managed.lock().unwrap();
+                let service = held.as_mut().unwrap();
+                service.sessions.sweep(lapsed()).unwrap();
+                row(service, id, false)["can_resume"].clone()
+            };
+            assert_eq!(can_resume(&shared), false, "unknown: it may still run");
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 1);
+            assert_eq!(status(&shared, id).state, SessionState::Failed);
+            assert_eq!(can_resume(&shared), true);
+        }
+
+        /// A plan this build cannot read fails its row's collection and is
+        /// removed, so the row does not stay pending.
+        #[tokio::test]
+        async fn an_unreadable_plan_fails_its_rows_collection_and_is_removed() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
+            let path = f
+                .store
+                .dir()
+                .join(collection_plan::DIRECTORY)
+                .join(format!("{id}.json"));
+            let mut plan: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            plan["schema_version"] = json!(2);
+            std::fs::write(&path, serde_json::to_vec(&plan).unwrap()).unwrap();
+            assert_eq!(collect_abandoned(&shared, chrono::Utc::now()).await, 0);
+            assert!(path.exists(), "its launcher still reports");
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
+            assert!(!staged(&f, id));
+            assert_eq!(status(&shared, id).collection, CollectionState::Failed);
+            assert!(!path.exists());
+        }
+
+        /// A holder that died after staging the row's trace, before it
+        /// recorded the result, leaves the row collected, not failed.
+        #[tokio::test]
+        async fn a_dead_holder_that_staged_the_trace_leaves_the_row_collected() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let id = sessions_of(&shared, |s| running(&f, s, exited(), true));
+            let plan = collection_plan::read(&f.store, id).unwrap();
+            assert_eq!(collection_plan::claim(&f.store, id, &exited()), Ok(true));
+            collection_plan::collect(&f.store, &plan).unwrap();
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
+            assert!(staged(&f, id));
+            let row = status(&shared, id);
+            assert_eq!(row.collection, CollectionState::Collected);
+            assert_eq!(row.state, SessionState::Failed);
             assert!(!collection_plan::exists(&f.store, id));
         }
 
@@ -3223,13 +3308,13 @@ mod tests {
                 .unwrap();
             let holder = ProcessIdentity::of(launcher.id());
             assert_eq!(collection_plan::claim(&f.store, id, &holder), Ok(true));
-            assert_eq!(finish(collect_abandoned(&shared, lapsed())).await, 0);
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
             assert!(!staged(&f, id));
             assert_eq!(status(&shared, id).collection, CollectionState::Pending);
             assert_eq!(collection_plan::claimant(&f.store, id), Some(Some(holder)));
             launcher.kill().unwrap();
             launcher.wait().unwrap();
-            assert_eq!(finish(collect_abandoned(&shared, lapsed())).await, 0);
+            assert_eq!(collect_abandoned(&shared, lapsed()).await, 0);
             assert!(!staged(&f, id), "a dead holder's claim is not taken over");
             assert_eq!(status(&shared, id).collection, CollectionState::Failed);
             assert!(!collection_plan::exists(&f.store, id));
