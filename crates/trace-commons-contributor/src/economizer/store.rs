@@ -210,7 +210,33 @@ impl Store {
     pub fn remove_session(&self, id: &str) {
         if safe_id(id) {
             let _ = std::fs::remove_file(self.root.join(SESSIONS).join(format!("{id}.json")));
+            let _ = std::fs::remove_file(self.root.join(SESSIONS).join(format!("{id}.lock")));
         }
+    }
+
+    /// An exclusive lock on one session's state, held until the returned
+    /// file is dropped. The coding tool runs the hooks of parallel tool
+    /// calls as concurrent processes; each holds this lock from reading the
+    /// session to writing it back, so none loses another's update.
+    pub fn lock_session(&self, id: &str) -> Result<std::fs::File> {
+        anyhow::ensure!(safe_id(id), "not a usable economizer id");
+        let dir = self.directory(Some(SESSIONS))?;
+        let lock = dir.join(format!("{id}.lock"));
+        if std::fs::symlink_metadata(&lock)
+            .is_ok_and(|meta| !meta.is_file() || meta.file_type().is_symlink())
+        {
+            anyhow::bail!("economizer lock is not a regular file");
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&lock).context("opening the economizer lock")?;
+        file.lock().context("locking the economizer session")?;
+        Ok(file)
     }
 
     /// Remove session files older than [`STALE_SESSION`].
@@ -229,6 +255,7 @@ impl Store {
                 && path.extension().is_some_and(|ext| ext == "json")
             {
                 let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(path.with_extension("lock"));
             }
         }
     }

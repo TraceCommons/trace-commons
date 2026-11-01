@@ -102,15 +102,36 @@ fn plain(word: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// Whether `output` says `program` was not found.
+/// Whether `output` says `program` was not found, in one of the shells'
+/// own formats. The program must be the word the shell names, not a
+/// substring of it: `pnpm: command not found` does not say `npm` was
+/// missing.
 fn not_found(output: &str, program: &str) -> bool {
+    let named = [
+        // bash, and sh's `{program}: not found`
+        format!("{program}: command not found"),
+        format!("{program}: not found"),
+        // zsh, fish
+        format!("command not found: {program}"),
+        format!("Unknown command: {program}"),
+        // cmd, PowerShell
+        format!("'{program}' is not recognized as"),
+        format!("The term '{program}' is not recognized"),
+        // python -m
+        format!("No module named {program}"),
+        format!("No module named '{program}'"),
+    ];
+    let name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
     output.lines().any(|line| {
-        line.contains(program)
-            && (line.contains("command not found")
-                || line.contains("is not recognized as")
-                || line.contains(&format!("No module named {program}"))
-                || line.contains(&format!("No module named '{program}'"))
-                || line.contains(&format!("{program}: not found")))
+        named.iter().any(|pattern| {
+            line.match_indices(pattern.as_str()).any(|(at, matched)| {
+                // Whole words only at both ends of the match, so `pnpm`
+                // never reads as `npm` and `pytest` never as `py`.
+                let before = line[..at].chars().next_back();
+                let after = line[at + matched.len()..].chars().next();
+                !before.is_some_and(name_char) && !after.is_some_and(name_char)
+            })
+        })
     })
 }
 
@@ -140,6 +161,7 @@ pub struct FactBook {
 impl FactBook {
     /// Fold one finished session, named by `session` (a digest).
     pub fn fold_session(&mut self, session: &str, observations: &Observations) {
+        let mut confirmed = Vec::new();
         for (program, prefix) in &observations.repairs {
             match self
                 .facts
@@ -154,6 +176,7 @@ impl FactBook {
                         }
                     }
                     fact.contradictions = 0;
+                    confirmed.push((program.clone(), prefix.clone()));
                 }
                 None => self.facts.push(Fact {
                     program: program.clone(),
@@ -175,13 +198,27 @@ impl FactBook {
                 fact.contradictions += 1;
             }
         }
+        // The facts are kept in order of their latest confirmation, oldest
+        // first: a fact confirmed again moves to the end, as a new one is
+        // pushed there.
+        for key in confirmed {
+            if let Some(at) = self
+                .facts
+                .iter()
+                .position(|fact| fact.program == key.0 && fact.prefix == key.1)
+            {
+                let fact = self.facts.remove(at);
+                self.facts.push(fact);
+            }
+        }
         self.facts
             .retain(|fact| fact.contradictions < CONTRADICTIONS);
-        // Keep the told facts first, then the most recently confirmed.
-        if self.facts.len() > MAX_KEPT {
-            self.facts
-                .sort_by_key(|fact| std::cmp::Reverse(fact.told()));
-            self.facts.truncate(MAX_KEPT);
+        // Over the cap, the oldest untold fact goes first, then the oldest
+        // told one, so a folder full of one-off repairs still learns new
+        // ones.
+        while self.facts.len() > MAX_KEPT {
+            let at = self.facts.iter().position(|fact| !fact.told()).unwrap_or(0);
+            self.facts.remove(at);
         }
     }
 

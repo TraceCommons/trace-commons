@@ -406,6 +406,66 @@ fn paths_and_arguments_never_become_facts() {
     assert!(observations.repairs.is_empty());
 }
 
+#[test]
+fn a_program_is_not_found_only_by_its_own_name() {
+    let mut observations = Observations::default();
+    observations.record(&bash_failed(
+        "npm i -g pnpm && pnpm test",
+        "Exit code 127\nbash: pnpm: command not found",
+    ));
+    assert!(observations.missing.contains("pnpm"));
+    assert!(!observations.missing.contains("npm"), "pnpm is not npm");
+    let mut zsh = Observations::default();
+    zsh.record(&bash_failed("pytest -q", "zsh: command not found: pytest"));
+    assert!(zsh.missing.contains("pytest"));
+    assert!(!zsh.missing.contains("py"));
+}
+
+/// Over the cap, the oldest untold fact goes, so a folder full of one-off
+/// repairs still learns a new one.
+#[test]
+fn a_full_fact_book_still_learns_a_new_repair() {
+    use super::facts::MAX_KEPT;
+    let mut book = FactBook::default();
+    for i in 0..MAX_KEPT {
+        let mut once = Observations::default();
+        once.repairs
+            .insert((format!("tool{i}"), "python -m".to_owned()));
+        book.fold_session(&format!("old{i}"), &once);
+    }
+    assert_eq!(book.facts.len(), MAX_KEPT);
+    for session in ["s1", "s2", "s3"] {
+        book.fold_session(session, &repair_session());
+        assert!(
+            book.facts.iter().any(|fact| fact.program == "pytest"),
+            "the new fact is kept ({session})"
+        );
+        assert_eq!(book.facts.len(), MAX_KEPT);
+    }
+    assert!(book.render().unwrap().contains("python -m pytest"));
+    assert!(
+        !book.facts.iter().any(|fact| fact.program == "tool0"),
+        "the oldest one-off went first"
+    );
+}
+
+/// Source printed by a command is content: `error:` or `Exception` in it is
+/// not a failure. A check's output still is.
+#[test]
+fn a_command_printing_source_is_not_a_failure() {
+    for (command, output) in [
+        (
+            "cat src/main.rs",
+            "    // error: never here\n    panic!(\"error: x\")",
+        ),
+        ("rg Exception src", "src/a.py:3: raise Exception('x')"),
+        ("git diff", "+    return Err(\"error: bad\")"),
+    ] {
+        assert!(!bash(command, output).is_failure(), "{command}");
+    }
+    assert!(bash("cargo test | tail -3", "error: test failed").is_failure());
+}
+
 // ---- store ----
 
 #[test]
@@ -525,6 +585,44 @@ fn the_hook_does_nothing_while_the_economizer_is_off() {
     run_session(&store, "repo1", "s1", 12);
     assert_eq!(store.repo("repo1"), RepoState::default());
     assert!(!store.root().join("sessions").exists());
+}
+
+#[test]
+fn parallel_hooks_of_one_session_lose_no_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    store.set_enabled(true).unwrap();
+    handle(
+        &store,
+        "repo1",
+        Harness::Claude,
+        &event("SessionStart", "p1"),
+        Utc::now(),
+    );
+    let calls = 16;
+    std::thread::scope(|scope| {
+        for i in 0..calls {
+            let store = &store;
+            scope.spawn(move || {
+                let tool = if i == 0 { "WebFetch" } else { "Read" };
+                handle(
+                    store,
+                    "repo1",
+                    Harness::Claude,
+                    &tool_event(
+                        "PostToolUse",
+                        "p1",
+                        json!({"tool_name": tool, "tool_input": {"file_path": "/r/a"},
+                               "tool_response": "x"}),
+                    ),
+                    Utc::now(),
+                );
+            });
+        }
+    });
+    let session = store.session("p1").unwrap();
+    assert_eq!(session.turn.calls, calls);
+    assert!(session.used_tools.contains("WebFetch"));
 }
 
 #[test]

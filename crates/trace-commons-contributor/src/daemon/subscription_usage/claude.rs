@@ -301,7 +301,9 @@ enum Source {
     File,
     Keychain {
         service: String,
-        revision: ItemRevision,
+        /// `None` when the item could not be checked: a background load in a
+        /// build without the entitlement, serving its in-memory copy.
+        revision: Option<ItemRevision>,
         login_key: String,
     },
 }
@@ -493,11 +495,31 @@ fn load_keychain(
     // The first store operation, so `unentitled()` is known after it.
     let cached = deps.cache.lookup(&key, &binding, now);
     // Attribute-only and prompt-free, in every build.
-    let Some(before) = deps.keychain.version(&service)? else {
-        if cached.is_some() {
-            deps.cache.forget(&key);
+    let before = match deps.keychain.version(&service) {
+        Ok(Some(before)) => before,
+        Ok(None) => {
+            if cached.is_some() {
+                deps.cache.forget(&key);
+            }
+            return Err("auth_missing");
         }
-        return Err("auth_missing");
+        // A background load in a build without the entitlement serves its
+        // in-memory copy when the item cannot be checked (a locked keychain,
+        // say): that is not knowledge that the item changed. Only a deleted
+        // or recreated item ends it there.
+        Err(reason) => {
+            return match cached {
+                Some(cached) if !interactive && deps.cache.unentitled() => Ok((
+                    cached.token,
+                    Source::Keychain {
+                        service,
+                        revision: None,
+                        login_key: key,
+                    },
+                )),
+                _ => Err(reason),
+            };
+        }
     };
     let cached = match cached {
         Some(cached) if cached.revision.item != before.item => {
@@ -508,7 +530,7 @@ fn load_keychain(
     };
     let source = Source::Keychain {
         service: service.clone(),
-        revision: before.clone(),
+        revision: Some(before.clone()),
         login_key: key.clone(),
     };
     if !interactive && deps.cache.unentitled() {
@@ -584,8 +606,11 @@ fn unchanged(
     }
     match &credential.source {
         Source::File => Ok(true),
+        Source::Keychain { revision: None, .. } => Ok(true),
         Source::Keychain {
-            service, revision, ..
+            service,
+            revision: Some(revision),
+            ..
         } => Ok(deps.keychain.version(service)?.as_ref() == Some(revision)),
     }
 }
@@ -902,6 +927,8 @@ mod tests {
         pub version: std::sync::Mutex<Option<String>>,
         /// The item's identity; a new value is a deleted and recreated item.
         pub item: std::sync::Mutex<String>,
+        /// When set, the attribute query fails with this reason.
+        pub version_error: std::sync::Mutex<Option<&'static str>>,
         pub silent: std::sync::Mutex<Result<Option<Vec<u8>>, &'static str>>,
         pub with_ui: std::sync::Mutex<Result<Option<Vec<u8>>, &'static str>>,
         pub reads: std::sync::Mutex<Vec<bool>>,
@@ -915,6 +942,7 @@ mod tests {
             Arc::new(Self {
                 version: std::sync::Mutex::new(Some("item-1".into())),
                 item: std::sync::Mutex::new("item".into()),
+                version_error: std::sync::Mutex::new(None),
                 silent: std::sync::Mutex::new(silent),
                 with_ui: std::sync::Mutex::new(with_ui),
                 reads: std::sync::Mutex::new(Vec::new()),
@@ -931,6 +959,9 @@ mod tests {
     impl NativeKeychain for FakeKeychain {
         fn version(&self, _service: &str) -> Result<Option<ItemRevision>, &'static str> {
             *self.versions.lock().unwrap() += 1;
+            if let Some(reason) = *self.version_error.lock().unwrap() {
+                return Err(reason);
+            }
             let item = self.item.lock().unwrap().clone();
             Ok(self
                 .version
@@ -1258,6 +1289,29 @@ mod tests {
             Err("keychain_needs_permission")
         ));
         assert_eq!(keychain.reads(), [false, false]);
+    }
+
+    #[test]
+    fn an_unentitled_build_serves_its_copy_when_the_item_cannot_be_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = login(dir.path());
+        let keychain = FakeKeychain::new(Ok(Some(KEYCHAIN_DOC.to_vec())), Err("unexpected"));
+        let deps = Deps {
+            keychain: Arc::clone(&keychain) as Arc<dyn NativeKeychain>,
+            cache: Arc::new(TokenCache::new(Box::new(UnentitledStore))),
+            cli: Arc::new(claude_cli::NoCli),
+        };
+        assert!(load(&spec, true, &deps).is_ok());
+        // A locked keychain refuses even the attribute query: that is not
+        // knowledge that the item changed, so the in-memory copy is served,
+        // and the check after the request does not fail it either.
+        *keychain.version_error.lock().unwrap() = Some("keychain_needs_permission");
+        let credential = load(&spec, false, &deps).ok().unwrap();
+        assert_eq!(credential.token.as_ref(), b"fixture-token");
+        assert_eq!(unchanged(&spec, &credential, &deps), Ok(true));
+        assert_eq!(keychain.reads(), [false]);
+        // A signed build, or a pressed Refresh, still needs the check.
+        assert!(load(&spec, true, &deps).is_err());
     }
 
     #[test]

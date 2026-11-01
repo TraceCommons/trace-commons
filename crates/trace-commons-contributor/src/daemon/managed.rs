@@ -1429,7 +1429,7 @@ fn verify_visible_version(
     account: &AccountView,
 ) -> Result<(), ManagedError> {
     match find_native(account.tool) {
-        Ok(native) => profiles.verify_version(account, &native),
+        Ok(native) => profiles.verify_version(account, &native).map(drop),
         Err(ManagedError::ToolUnavailable) => Ok(()),
         Err(other) => Err(other),
     }

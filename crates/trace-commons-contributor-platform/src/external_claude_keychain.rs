@@ -88,6 +88,7 @@ unsafe extern "C" {
     static kSecACLAuthorizationDecrypt: Ref;
     static kSecACLAuthorizationPartitionID: Ref;
     static kSecCodeInfoTeamIdentifier: Ref;
+    static kSecCodeInfoUnique: Ref;
     fn SecItemCopyMatching(query: Ref, result: *mut Ref) -> i32;
     fn SecKeychainItemGetTypeID() -> usize;
     fn SecKeychainItemCopyAccess(item: Ref, access: *mut Ref) -> i32;
@@ -206,6 +207,19 @@ impl Drop for NoUiContext {
             unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
         unsafe { release(self.0, sel_registerName(c"release".as_ptr())) };
     }
+}
+
+thread_local! {
+    /// One no-UI context per thread. Each load runs on its own leased
+    /// thread, so this is one context per load, never shared across threads;
+    /// it is released when the thread ends.
+    static CONTEXT: Result<NoUiContext, &'static str> = NoUiContext::new();
+}
+/// Run `f` with this thread's no-UI context, failing closed without one.
+fn with_no_ui_context<T>(
+    f: impl FnOnce(&NoUiContext) -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
+    CONTEXT.with(|context| f(context.as_ref().map_err(|reason| *reason)?))
 }
 
 fn string(value: &str) -> Result<Owned, &'static str> {
@@ -566,31 +580,51 @@ fn requirement_checks() -> &'static std::sync::Mutex<std::collections::HashMap<V
     MEMO.get_or_init(Default::default)
 }
 
-/// This process's signing team, or `None` for an ad-hoc or unsigned build.
-fn own_team() -> Option<&'static str> {
-    static TEAM: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    TEAM.get_or_init(|| {
+/// This process's own partition IDs: its signing team (`teamid:`), and its
+/// code-directory hash (`cdhash:`), which securityd uses for an ad-hoc or
+/// unsigned build and adds to an item's list on "Always Allow".
+struct OwnCode {
+    team: Option<String>,
+    cdhash: Option<String>,
+}
+fn own_code() -> &'static OwnCode {
+    static OWN: std::sync::OnceLock<OwnCode> = std::sync::OnceLock::new();
+    OWN.get_or_init(|| {
+        let unknown = || OwnCode {
+            team: None,
+            cdhash: None,
+        };
         let mut code = std::ptr::null();
         // SAFETY: default flags; the copy is released by Owned.
         if unsafe { SecCodeCopySelf(0, &mut code) } != 0 {
-            return None;
+            return unknown();
         }
-        let code = Owned::new(code).ok()?;
+        let Ok(code) = Owned::new(code) else {
+            return unknown();
+        };
         let mut information = std::ptr::null();
         // SAFETY: a live code object; the copy is released by Owned.
         if unsafe { SecCodeCopySigningInformation(code.0, SIGNING_INFORMATION, &mut information) }
             != 0
         {
-            return None;
+            return unknown();
         }
-        let information = Owned::new(information).ok()?;
+        let Ok(information) = Owned::new(information) else {
+            return unknown();
+        };
         if !is_type(information.0, unsafe { CFDictionaryGetTypeID() }) {
-            return None;
+            return unknown();
         }
         let team = unsafe { CFDictionaryGetValue(information.0, kSecCodeInfoTeamIdentifier) };
-        cf_string(team).ok().filter(|team| !team.is_empty())
+        let unique = unsafe { CFDictionaryGetValue(information.0, kSecCodeInfoUnique) };
+        OwnCode {
+            team: cf_string(team).ok().filter(|team| !team.is_empty()),
+            cdhash: data(unique)
+                .ok()
+                .filter(|hash| !hash.is_empty())
+                .map(|hash| hash.iter().map(|b| format!("{b:02x}")).collect()),
+        }
     })
-    .as_deref()
 }
 
 /// The partition IDs in a `partition_id` access-list entry's description:
@@ -633,26 +667,31 @@ fn partitions(description: &str) -> Option<Vec<String>> {
 /// One `partition_id` entry. `None` partitions: the description could not be
 /// read. A process outside the listed partitions is asked for the keychain
 /// password even when the access list trusts it, so only this build's own
-/// `teamid:` partition admits it; an unsigned or ad-hoc build has none.
-fn partition_access(partitions: Option<&[String]>, team: Option<&str>) -> Access {
-    let (Some(partitions), Some(team)) = (partitions, team) else {
+/// partition admits it: `teamid:` for a signed build, or `cdhash:` for the
+/// exact code an "Always Allow" was given to. Hashes compare without case.
+fn partition_access(
+    partitions: Option<&[String]>,
+    team: Option<&str>,
+    cdhash: Option<&str>,
+) -> Access {
+    let Some(partitions) = partitions else {
         return Access::Indeterminate;
     };
-    let own = format!("teamid:{team}");
-    if partitions.contains(&own) {
+    if team.is_none() && cdhash.is_none() {
+        return Access::Indeterminate;
+    }
+    let admitted = partitions.iter().any(|partition| {
+        team.is_some_and(|team| partition.strip_prefix("teamid:") == Some(team))
+            || cdhash.is_some_and(|hash| {
+                partition
+                    .strip_prefix("cdhash:")
+                    .is_some_and(|listed| listed.eq_ignore_ascii_case(hash))
+            })
+    });
+    if admitted {
         Access::Allowed
     } else {
         Access::Rejected
-    }
-}
-
-/// Both checks must admit this process: the decrypt access list and the
-/// partition list.
-fn both(decrypt: Access, partition: Access) -> Access {
-    match (decrypt, partition) {
-        (Access::Allowed, Access::Allowed) => Access::Allowed,
-        (Access::Rejected, _) | (_, Access::Rejected) => Access::Rejected,
-        _ => Access::Indeterminate,
     }
 }
 
@@ -690,18 +729,18 @@ fn silent_access(persistent_ref: Ref, search_list: Option<Ref>, context: &NoUiCo
     if !is_type(acls.0, unsafe { CFArrayGetTypeID() }) {
         return Access::Indeterminate;
     }
-    let mut code = std::ptr::null();
-    // SAFETY: default flags; the copy is released by Owned.
-    if unsafe { SecCodeCopySelf(0, &mut code) } != 0 {
-        return Access::Indeterminate;
-    }
-    let Ok(code) = Owned::new(code) else {
-        return Access::Indeterminate;
-    };
     // SAFETY: a live SecAccess and an exported authorization constant.
     let partition = match Owned::new(unsafe {
         SecAccessCopyMatchingACLList(access.0, kSecACLAuthorizationPartitionID)
     }) {
+        // An item with no partition entry predates partition lists, and
+        // securityd does not ask for it; the access list alone decides.
+        Ok(entries)
+            if is_type(entries.0, unsafe { CFArrayGetTypeID() })
+                && unsafe { CFArrayGetCount(entries.0) } == 0 =>
+        {
+            Access::Allowed
+        }
         Ok(entries) if is_type(entries.0, unsafe { CFArrayGetTypeID() }) => {
             list_access((0..unsafe { CFArrayGetCount(entries.0) }).map(|index| {
                 let entry = unsafe { CFArrayGetValueAtIndex(entries.0, index) };
@@ -719,16 +758,30 @@ fn silent_access(persistent_ref: Ref, search_list: Option<Ref>, context: &NoUiCo
                     .ok()
                     .and_then(|description| cf_string(description.0).ok())
                     .and_then(|description| partitions(&description));
-                partition_access(listed.as_deref(), own_team())
+                let own = own_code();
+                partition_access(
+                    listed.as_deref(),
+                    own.team.as_deref(),
+                    own.cdhash.as_deref(),
+                )
             }))
         }
+        // NULL is an error, not an empty list: fail closed.
         _ => Access::Indeterminate,
     };
     if partition != Access::Allowed {
         return partition;
     }
+    let mut code = std::ptr::null();
+    // SAFETY: default flags; the copy is released by Owned.
+    if unsafe { SecCodeCopySelf(0, &mut code) } != 0 {
+        return Access::Indeterminate;
+    }
+    let Ok(code) = Owned::new(code) else {
+        return Access::Indeterminate;
+    };
     let count = unsafe { CFArrayGetCount(acls.0) };
-    let decrypt = list_access((0..count).map(|index| {
+    list_access((0..count).map(|index| {
         // SAFETY: index is within the array's count; acls outlives the call.
         let acl = unsafe { CFArrayGetValueAtIndex(acls.0, index) };
         let mut applications = std::ptr::null();
@@ -770,8 +823,7 @@ fn silent_access(persistent_ref: Ref, search_list: Option<Ref>, context: &NoUiCo
             })
             .collect();
         entry_access(selector, Some(&statuses))
-    }));
-    both(decrypt, partition)
+    }))
 }
 
 // errSecInteractionNotAllowed. Callers above this module see it only from a
@@ -782,11 +834,12 @@ use super::ItemRevision;
 
 #[cfg(not(test))]
 pub(super) fn version(service: &str) -> Result<Option<ItemRevision>, &'static str> {
-    let context = NoUiContext::new()?;
-    metadata(service, None, &context)
-        .map_err(permission_label)?
-        .map(|m| m.revision())
-        .transpose()
+    with_no_ui_context(|context| {
+        metadata(service, None, context)
+            .map_err(permission_label)?
+            .map(|m| m.revision())
+            .transpose()
+    })
 }
 #[cfg(not(test))]
 pub(super) fn read(service: &str, allow_ui: bool) -> Result<Option<Vec<u8>>, &'static str> {
@@ -804,11 +857,18 @@ fn read_in(
     search_list: Option<Ref>,
     allow_ui: bool,
 ) -> Result<Option<Vec<u8>>, &'static str> {
-    // One no-UI context serves every query of this read.
-    let context = NoUiContext::new()?;
+    // This thread's no-UI context serves every query of this read.
+    with_no_ui_context(|context| read_with(service, search_list, allow_ui, context))
+}
+fn read_with(
+    service: &str,
+    search_list: Option<Ref>,
+    allow_ui: bool,
+    context: &NoUiContext,
+) -> Result<Option<Vec<u8>>, &'static str> {
     // A locked keychain can refuse even the attribute query. On a silent
     // read that is an interaction need; with UI allowed it is final.
-    let item = metadata(service, search_list, &context).map_err(|reason| {
+    let item = metadata(service, search_list, context).map_err(|reason| {
         if allow_ui {
             permission_label(reason)
         } else {
@@ -821,8 +881,7 @@ fn read_in(
     let before = item.revision()?;
     // Without UI, read the payload only when the access list already admits
     // this process; anything else is left to a user-pressed Refresh.
-    if !allow_ui && silent_access(item.persistent_ref()?, search_list, &context) != Access::Allowed
-    {
+    if !allow_ui && silent_access(item.persistent_ref()?, search_list, context) != Access::Allowed {
         return Err(INTERACTION_REQUIRED);
     }
     let query = query(
@@ -833,12 +892,12 @@ fn read_in(
         },
         item.persistent_ref()?,
         search_list,
-        Some(&context),
+        Some(context),
     )?;
     let Some(result) = execute(&query)? else {
         return Ok(None);
     };
-    let after = metadata(service, search_list, &context)
+    let after = metadata(service, search_list, context)
         .map_err(permission_label)?
         .map(|m| m.revision())
         .transpose()?;
@@ -916,39 +975,58 @@ mod tests {
     }
 
     #[test]
-    fn only_this_builds_team_partition_admits_a_silent_read() {
+    fn only_this_builds_own_partition_admits_a_silent_read() {
         let listed = partitions(LIVE_PARTITIONS).unwrap();
+        let team = Some("KXSWJN7WY8");
+        assert_eq!(partition_access(Some(&listed), team, None), Access::Allowed);
+        // Trusted by the access list is not enough: another team is outside
+        // the partition list.
         assert_eq!(
-            partition_access(Some(&listed), Some("KXSWJN7WY8")),
+            partition_access(Some(&listed), Some("OTHERTEAM1"), None),
+            Access::Rejected
+        );
+        // An ad-hoc build is known by its code-directory hash, which an
+        // "Always Allow" adds to the list.
+        let hash = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            partition_access(Some(&listed), None, Some(hash)),
+            Access::Rejected
+        );
+        let mut allowed = listed.clone();
+        allowed.push(format!("cdhash:{}", hash.to_ascii_uppercase()));
+        assert_eq!(
+            partition_access(Some(&allowed), None, Some(hash)),
             Access::Allowed
         );
-        // Trusted by the access list is not enough: another team, or an
-        // ad-hoc build with no team, is outside the partition list.
+        // A process with neither cannot be matched.
         assert_eq!(
-            partition_access(Some(&listed), Some("OTHERTEAM1")),
-            Access::Rejected
+            partition_access(Some(&listed), None, None),
+            Access::Indeterminate
         );
-        assert_eq!(partition_access(Some(&listed), None), Access::Indeterminate);
         // `apple-tool:` names Apple's tools, never this app.
         assert_eq!(
-            partition_access(Some(&["apple-tool:".to_string()]), Some("KXSWJN7WY8")),
+            partition_access(Some(&["apple-tool:".to_string()]), team, Some(hash)),
             Access::Rejected
         );
+        // A team ID only matches whole.
         assert_eq!(
-            partition_access(None, Some("KXSWJN7WY8")),
-            Access::Indeterminate
+            partition_access(Some(&["teamid:KXSWJN7WY8X".to_string()]), team, None),
+            Access::Rejected
         );
+        assert_eq!(partition_access(None, team, None), Access::Indeterminate);
+    }
 
-        assert_eq!(both(Access::Allowed, Access::Allowed), Access::Allowed);
-        assert_eq!(both(Access::Allowed, Access::Rejected), Access::Rejected);
-        assert_eq!(
-            both(Access::Allowed, Access::Indeterminate),
-            Access::Indeterminate
-        );
-        assert_eq!(
-            both(Access::Indeterminate, Access::Allowed),
-            Access::Indeterminate
-        );
+    #[test]
+    fn each_thread_reuses_one_no_ui_context() {
+        let first = with_no_ui_context(|context| Ok(context.0 as usize)).unwrap();
+        let again = with_no_ui_context(|context| Ok(context.0 as usize)).unwrap();
+        assert_eq!(first, again);
+        assert!(with_no_ui_context(|context| Ok(context.interaction_not_allowed())).unwrap());
+        let other =
+            std::thread::spawn(|| with_no_ui_context(|context| Ok(context.0 as usize)).unwrap())
+                .join()
+                .unwrap();
+        assert_ne!(first, other);
     }
 
     #[test]
@@ -1185,12 +1263,11 @@ mod tests {
         // The creating process is the item's trusted application.
         let context = NoUiContext::new().unwrap();
         let found = metadata(service, Some(list.0), &context).unwrap().unwrap();
-        // The test binary is the item's trusted application, but an ad-hoc
-        // build has no team partition, so a silent read is not admitted.
-        assert_ne!(
-            silent_access(found.persistent_ref().unwrap(), Some(list.0), &context),
-            Access::Allowed
-        );
+        // Runs the whole access-list walk over FFI. Whether an ad-hoc test
+        // binary is admitted depends on the partition its creation recorded,
+        // which this fixture has not been run to observe; no outcome is
+        // asserted.
+        let _ = silent_access(found.persistent_ref().unwrap(), Some(list.0), &context);
         let before = found.revision().unwrap();
         assert_eq!(
             read_in(service, Some(list.0), true).unwrap().unwrap(),

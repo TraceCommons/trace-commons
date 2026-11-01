@@ -19,6 +19,25 @@ pub mod statusline;
 pub mod supervisor;
 pub mod tool_setup;
 
+/// Stdin, read for at most `budget` and at most `max` bytes, for the hidden
+/// commands a coding tool runs (hooks, the status line). A terminal, a
+/// read error, or a writer that does not close stdin in time yields none.
+/// The reader is a detached thread, so one blocked on stdin never holds the
+/// process open.
+pub fn read_stdin_bounded(budget: std::time::Duration, max: u64) -> Option<Vec<u8>> {
+    use std::io::{IsTerminal, Read};
+    if std::io::stdin().is_terminal() {
+        return None;
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = std::io::stdin().take(max).read_to_end(&mut bytes).ok();
+        let _ = sender.send(read.map(|_| bytes));
+    });
+    receiver.recv_timeout(budget).ok().flatten()
+}
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

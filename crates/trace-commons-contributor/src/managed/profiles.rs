@@ -221,7 +221,13 @@ impl NativeProfiles {
         Ok(numeric)
     }
 
-    pub fn verify_version(&self, account: &AccountView, native: &Path) -> Result<(), ManagedError> {
+    /// Refuse an unsupported version; return the version it read, so a
+    /// caller that needs it does not run the native tool again.
+    pub fn verify_version(
+        &self,
+        account: &AccountView,
+        native: &Path,
+    ) -> Result<Option<(u32, u32, u32)>, ManagedError> {
         let numeric = self.native_version(account, native)?;
         let supported = match account.tool {
             ToolId::Claude => numeric.is_some_and(|v| v.0 == 2 && v >= (2, 1, 289)),
@@ -233,7 +239,7 @@ impl NativeProfiles {
         if !supported {
             return Err(ManagedError::UnsupportedVersion);
         }
-        Ok(())
+        Ok(numeric)
     }
 
     pub fn inspect(&self, account: &AccountView, native: &Path) -> Result<AuthState, ManagedError> {
@@ -836,12 +842,30 @@ fn project_model_check_in(
     cli_options: &[String],
     home: Option<&Path>,
 ) -> Result<ProjectNotice, ManagedError> {
+    project_model_check_on(tool, connection, cwd, cli_options, home, cfg!(windows))
+}
+
+/// [`project_model_check_in`] with Windows' path rules (`windows`) or not.
+fn project_model_check_on(
+    tool: ToolId,
+    connection: ConnectionKind,
+    cwd: &Path,
+    cli_options: &[String],
+    home: Option<&Path>,
+    windows: bool,
+) -> Result<ProjectNotice, ManagedError> {
     let near_ai = matches!(
         connection,
         ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
     );
     if tool != ToolId::Claude || !near_ai {
         return Ok(ProjectNotice::default());
+    }
+    // A drive-relative folder (`C:shared`) resolves against a per-drive
+    // current folder only Claude Code's own environment knows, so this
+    // check could not be sure to read the folder Claude Code reads.
+    if windows && super::options::add_dir_values(cli_options).any(super::options::drive_relative) {
+        return Err(ManagedError::InvalidCliOptions);
     }
     let project = claude_project_dirs(cwd, home).map_err(|_| ManagedError::Conflict)?;
     let added = added_dirs(cli_options, cwd);
@@ -887,7 +911,6 @@ fn holds_workflows(dir: &Path) -> bool {
 /// may touch and are not read for agents, so they are not listed.
 fn added_dirs(cli_options: &[String], cwd: &Path) -> Vec<PathBuf> {
     super::options::add_dir_values(cli_options)
-        .into_iter()
         .map(|value| cwd.join(value))
         .collect()
 }
@@ -1623,6 +1646,59 @@ mod tests {
         assert!(text.contains('\\'), "{text}");
         let args = crate::managed::options::parse(ToolId::Claude, &text).unwrap();
         assert_eq!(args[1], extra.path().display().to_string());
+        assert_eq!(
+            project_model_check_in(
+                ToolId::Claude,
+                ConnectionKind::NearAi,
+                launch.path(),
+                &args,
+                None
+            ),
+            Err(ManagedError::ProjectChoosesModel)
+        );
+    }
+
+    /// A drive-relative `--add-dir` (`C:shared`) resolves against a
+    /// per-drive current folder only Claude Code's own environment knows,
+    /// so a NEAR AI launch cannot check it and refuses it as options to
+    /// fix. Any other connection is not checked and launches as before
+    /// (#1817 review).
+    #[test]
+    fn a_drive_relative_add_dir_refuses_only_a_near_ai_windows_launch() {
+        let launch = project(&[]);
+        let args = vec!["--add-dir".to_string(), "C:shared".to_string()];
+        let check = |connection, windows| {
+            project_model_check_on(
+                ToolId::Claude,
+                connection,
+                launch.path(),
+                &args,
+                None,
+                windows,
+            )
+        };
+        for connection in NEAR_AI {
+            assert_eq!(
+                check(connection, true),
+                Err(ManagedError::InvalidCliOptions)
+            );
+            assert_eq!(check(connection, false), Ok(ProjectNotice::default()));
+        }
+        assert_eq!(
+            check(ConnectionKind::Subscription, true),
+            Ok(ProjectNotice::default())
+        );
+    }
+
+    /// A folder whose name starts with `-` is still a folder Claude Code
+    /// adds, and is checked (#1817 review).
+    #[test]
+    fn an_add_dir_starting_with_a_dash_is_checked() {
+        let launch = project(&[]);
+        let agents = launch.path().join("-shared/.claude/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("x.md"), markdown(&format!("model: {ID}"))).unwrap();
+        let args = vec!["--add-dir".to_string(), "-shared".to_string()];
         assert_eq!(
             project_model_check_in(
                 ToolId::Claude,

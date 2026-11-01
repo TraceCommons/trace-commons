@@ -2501,30 +2501,13 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
     );
     if attention.digest_posts {
         // The verdicts fold, when there is one, states the credit of the
-        // traces it covers ("is now final"). The `text` (which carries the
-        // fold) leaves exactly those traces out of its contribution
-        // sentence, so each earned figure is stated once there. Shells that
-        // build their own digest do not show the fold, so they are sent the
-        // sentence and figure with all of it (`contribution`, `credit_final`).
-        let folded_final: std::collections::BTreeSet<String> =
-            if matches!(&attention.fold, Some((attention::Kind::VerdictsLanded, _))) {
-                shared
-                    .state
-                    .lock()
-                    .expect("state lock")
-                    .verdicts_pending
-                    .as_ref()
-                    .map(|d| {
-                        d.submissions
-                            .iter()
-                            .filter(|(_, v)| v.final_credit)
-                            .map(|(id, _)| id.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                std::collections::BTreeSet::new()
-            };
+        // traces it covers ("is now final"), from the arbiter's own
+        // snapshot (`fold_covers`). The `text` (which carries the fold)
+        // leaves exactly those traces out of its contribution sentence, so
+        // each earned figure is stated once there. Shells that build their
+        // own digest do not show the fold, so they are sent the sentence and
+        // figure with all of it (`contribution`, `credit_final`).
+        let folded_final = &attention.fold_covers;
         // Two sentences, either of which may be absent: what is waiting for
         // you, and what went without you. Joined rather than merged because
         // they are about different things and a contributor acts on only one
@@ -2539,8 +2522,8 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
                 )
             })
         };
-        let contribution = sentence(contributed.credit_final);
-        let contribution_in_text = sentence(contributed.credit_final_not_in(&folded_final));
+        let contribution = sentence(contributed.credit_final());
+        let contribution_in_text = sentence(contributed.credit_final_not_in(folded_final));
         let mut body = match (pending_count > 0, contribution_in_text.as_deref()) {
             (true, Some(c)) => format!("{digest}\n{c}"),
             (true, None) => digest.clone(),
@@ -2565,7 +2548,7 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
             "contribution": contribution,
             // Rounded once to tenths and decimal-clean, so no shell rounds a
             // raw f32 widened to f64 (0.35 would read 0.3 or 0.4 by shell).
-            "credit_final": notify::wire_credit(contributed.credit_final),
+            "credit_final": notify::wire_credit(contributed.credit_final()),
             "credit_pending": notify::wire_credit(contributed.credit_pending),
             "text": body,
         });
