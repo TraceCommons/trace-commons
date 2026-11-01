@@ -951,15 +951,69 @@ fn prepares_on_sign_in(shared: &DaemonShared, request: &Request, sign_in: bool) 
         .is_ok_and(|service| service.prepares_on_sign_in(request, sign_in))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Reads of NEAR AI's catalogue made on this thread, for tests that
+    /// prove a path never fetches (`#[tokio::test]` runs on one thread).
+    static FETCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// NEAR AI's chat models, read without a key. `None` when NEAR AI cannot
 /// be read.
 async fn fetch_chat_models() -> Option<Vec<models::ChatModel>> {
+    #[cfg(test)]
+    FETCHES.with(|n| n.set(n.get() + 1));
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .ok()?;
     models::fetch(&client, near_ai_base_url()).await
+}
+
+/// NEAR AI's chat models through the daemon's one cache
+/// (`managed::catalogue_cache`). A fresh or stale copy is served at once;
+/// a stale one is refreshed on the daemon's runtime, never in the caller's
+/// wait. Only an empty cache waits on the network. `None` when there is
+/// nothing held and NEAR AI cannot be read.
+async fn chat_models(shared: &DaemonShared) -> Option<Vec<models::ChatModel>> {
+    use crate::managed::catalogue_cache::Lookup;
+    match shared.model_catalogue.lookup(std::time::SystemTime::now()) {
+        Lookup::Fresh(models) | Lookup::StaleRefreshing(models) => Some(models),
+        Lookup::Stale(models) => {
+            // With no daemon runtime (a test, a one-shot command) the
+            // refresh runs inline instead.
+            if shared
+                .spawn_detached(|this| async move {
+                    refresh_chat_models(&this).await;
+                })
+                .is_none()
+            {
+                return Some(refresh_chat_models(shared).await.unwrap_or(models));
+            }
+            Some(models)
+        }
+        Lookup::Empty => refresh_chat_models(shared).await,
+    }
+}
+
+/// Read NEAR AI and keep what it says. An empty list counts as unreadable.
+async fn refresh_chat_models(shared: &DaemonShared) -> Option<Vec<models::ChatModel>> {
+    match fetch_chat_models()
+        .await
+        .filter(|models| !models.is_empty())
+    {
+        Some(models) => {
+            shared
+                .model_catalogue
+                .store(models.clone(), std::time::SystemTime::now());
+            Some(models)
+        }
+        None => {
+            shared.model_catalogue.refresh_failed();
+            None
+        }
+    }
 }
 
 /// The stored favorite model ids.
@@ -1060,12 +1114,20 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
     #[serde(deny_unknown_fields)]
     struct Params {
         tool: ToolId,
+        /// Answer from the cache alone and never read NEAR AI: for a row
+        /// that only wants display names.
+        #[serde(default)]
+        cache_only: bool,
     }
     let p: Params = match parse(request) {
         Ok(p) => p,
         Err(error) => return respond(request, Err(error.into())),
     };
-    let listed = fetch_chat_models().await;
+    let listed = if p.cache_only {
+        shared.model_catalogue.peek()
+    } else {
+        chat_models(shared).await
+    };
     let offered = listed.clone().map(|models| models::offered(p.tool, models));
     let result = match (listed, offered) {
         (Some(listed), Some(models)) if !models.is_empty() => {
@@ -1139,7 +1201,7 @@ async fn favorite_set(shared: &DaemonShared, request: &Request) -> Response {
         return respond(request, Err(ManagedError::InvalidRequest.into()));
     }
     if p.favorite {
-        match fetch_chat_models().await {
+        match chat_models(shared).await {
             Some(models) if models.iter().any(|m| m.id == p.model) => {}
             _ => return respond(request, Err(ManagedError::ModelUnavailable.into())),
         }
@@ -1459,6 +1521,103 @@ mod tests {
             total_tokens: 0,
             observed_at: chrono::Utc::now(),
         })
+    }
+
+    fn seeded(models: &[(&str, Option<&str>)]) -> Vec<models::ChatModel> {
+        models
+            .iter()
+            .map(|(id, name)| models::ChatModel {
+                id: (*id).into(),
+                name: name.map(str::to_owned),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn catalogue_request(params: Value) -> Request {
+        Request {
+            id: 1,
+            method: "managed_model_catalogue".into(),
+            params,
+        }
+    }
+
+    /// Session rows ask with `cache_only`: they get the cached names, and
+    /// nothing is read from NEAR AI, with or without a copy.
+    #[tokio::test]
+    async fn a_cache_only_catalogue_read_never_fetches() {
+        let (_home, store, _service) = service();
+        let shared = DaemonShared::load(store).unwrap();
+        let before = FETCHES.with(|n| n.get());
+        let empty = model_catalogue(
+            &shared,
+            &catalogue_request(json!({"tool":"claude","cache_only":true})),
+        )
+        .await;
+        assert_eq!(empty.error.unwrap().message, "managed-model-unavailable");
+        shared.model_catalogue.store(
+            seeded(&[("z-ai/glm-5.3", Some("GLM 5.3 Flash")), ("a/b", None)]),
+            std::time::SystemTime::now() - std::time::Duration::from_secs(86_400),
+        );
+        // Even a day-old copy is only read, never refreshed, by a row.
+        let answer = model_catalogue(
+            &shared,
+            &catalogue_request(json!({"tool":"claude","cache_only":true})),
+        )
+        .await;
+        let models = answer.result.expect("cached")["models"].clone();
+        assert_eq!(
+            models[0],
+            json!({"id":"z-ai/glm-5.3","name":"GLM 5.3 Flash"})
+        );
+        assert_eq!(
+            FETCHES.with(|n| n.get()),
+            before,
+            "a row never reads NEAR AI"
+        );
+    }
+
+    /// The picker shares the cache: a fresh copy answers it with no read.
+    #[tokio::test]
+    async fn the_picker_is_answered_from_a_fresh_cache() {
+        let (_home, store, _service) = service();
+        let shared = DaemonShared::load(store).unwrap();
+        shared.model_catalogue.store(
+            seeded(&[("a/b", Some("A B"))]),
+            std::time::SystemTime::now(),
+        );
+        let before = FETCHES.with(|n| n.get());
+        for _ in 0..3 {
+            let answer =
+                model_catalogue(&shared, &catalogue_request(json!({"tool":"opencode"}))).await;
+            assert_eq!(answer.result.expect("picker")["default"], "a/b");
+        }
+        assert_eq!(FETCHES.with(|n| n.get()), before);
+    }
+
+    /// A daemon that starts offline has the last copy from disk at once.
+    #[tokio::test]
+    async fn a_restarted_daemon_has_the_last_catalogue_from_disk() {
+        let (_home, store, _service) = service();
+        {
+            let first = DaemonShared::load(store.clone()).unwrap();
+            first.model_catalogue.store(
+                seeded(&[("a/b", Some("A B"))]),
+                std::time::SystemTime::now(),
+            );
+        }
+        let cold = DaemonShared::load(store).unwrap();
+        let before = FETCHES.with(|n| n.get());
+        let answer = model_catalogue(
+            &cold,
+            &catalogue_request(json!({"tool":"claude","cache_only":true})),
+        )
+        .await;
+        assert_eq!(
+            answer.result.expect("from disk")["models"][0],
+            json!({"id":"a/b","name":"A B"})
+        );
+        assert_eq!(FETCHES.with(|n| n.get()), before);
     }
 
     #[test]
