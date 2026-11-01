@@ -270,7 +270,11 @@ pub enum JudgementRetry {
     DropDigest,
     /// Wait for [`JudgementRefusalBody::retry_not_before`], which checks the
     /// sent `reset_at` against the client's clock, so a forged value defers
-    /// at most to the next month start the client itself computes.
+    /// at most to the next month start the client itself computes. When
+    /// that is a month start already passed, the wait is a short floor, and
+    /// the retries it allows are bounded like [`Self::Soon`]'s: after that
+    /// many refusals in a row the client waits for the next month start by
+    /// its own clock.
     UntilReset,
     /// Not again today. A retry could be charged to the account's monthly
     /// budget again, and a forgery gains nothing that dropping the
@@ -459,33 +463,6 @@ fn parse_closed_value<T: serde::de::DeserializeOwned>(
     // `Value`: a `Value` keeps the last of duplicate keys, where the derived
     // struct parse refuses them.
     serde_json::from_slice(bytes).map_err(|_| ())
-}
-
-/// Whether `bytes` is a JSON object that names each top-level key once.
-fn top_level_keys_unique(bytes: &[u8]) -> bool {
-    struct Keys;
-    impl<'de> serde::de::Visitor<'de> for Keys {
-        type Value = bool;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a JSON object")
-        }
-        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
-            let mut seen = std::collections::BTreeSet::new();
-            let mut unique = true;
-            while let Some(key) = map.next_key::<String>()? {
-                map.next_value::<serde::de::IgnoredAny>()?;
-                unique &= seen.insert(key);
-            }
-            Ok(unique)
-        }
-    }
-    struct Unique(bool);
-    impl<'de> Deserialize<'de> for Unique {
-        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            deserializer.deserialize_map(Keys).map(Unique)
-        }
-    }
-    serde_json::from_slice::<Unique>(bytes).is_ok_and(|unique| unique.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1920,7 +1897,14 @@ impl TurnDigest {
             // A `Value` keeps the last of duplicate keys, so a current
             // digest with a later `digest_version` appended would read as
             // later. Only one that names its version once is.
-            if !top_level_keys_unique(bytes) {
+            // `value` is an object; a derived struct parse refuses a
+            // duplicate `digest_version`.
+            #[derive(Deserialize)]
+            struct DigestVersionOnly {
+                #[allow(dead_code)]
+                digest_version: u64,
+            }
+            if serde_json::from_slice::<DigestVersionOnly>(bytes).is_err() {
                 return Err(malformed);
             }
             return Err(JudgementWireError::WireVersionUnsupported);
