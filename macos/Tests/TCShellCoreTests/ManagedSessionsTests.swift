@@ -431,12 +431,12 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertNil(ManagedSurface.modelOptions(unnamed) { Self.modelCopy[$0] ?? "" }.first?.tier)
     }
 
-    /// A daemon from before `tier_order` sends a tier on each model but no
-    /// order (#1797 review): the picker falls back to the known order, most
-    /// private first, rather than one flat list that mixes Incognito with
-    /// TEE models. An order the core does send, even an empty one, is
-    /// followed.
-    func testAnOlderDaemonWithoutTierOrderStillGroupsByTier() throws {
+    /// The shell takes the tier order from the core only (owner,
+    /// 2026-11-01): the app always ships with its own daemon, so it keeps
+    /// no copy of the order. Without one the picker lists the catalogue in
+    /// its own order, favorites first, under no heading; an order the core
+    /// sends, even an empty one, is followed.
+    func testWithoutATierOrderThePickerKeepsTheCataloguesOrder() throws {
         let models = #"""
         "models":[
           {"id":"i/one","tier":"incognito"},
@@ -445,16 +445,11 @@ final class ManagedSessionsTests: XCTestCase {
           {"id":"n/star","tier":"near_ai"}
         ],"default":null,"favorites":["n/star"]
         """#
-        let older = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(("{" + models + "}").utf8))
-        XCTAssertEqual(older.tierOrder, ["near_ai", "external", "incognito"])
-        XCTAssertEqual(older.tierOrder, ManagedSurface.knownTierOrder)
-        let options = ManagedSurface.modelOptions(older) { Self.modelCopy[$0] ?? "" }
-        XCTAssertEqual(options.map(\.value), [ManagedSurface.defaultModel, "n/star", "n/one", "e/one", "i/one"])
-        XCTAssertEqual(options.map(\.section), [
-            nil, nil, "NEAR AI private models", "External private models", "Incognito models",
-        ])
-        XCTAssertEqual(options[1].tierHeading, "NEAR AI private models")
-        // Sent empty: the core asked for no groups.
+        let unordered = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(("{" + models + "}").utf8))
+        XCTAssertEqual(unordered.tierOrder, [])
+        let options = ManagedSurface.modelOptions(unordered) { Self.modelCopy[$0] ?? "" }
+        XCTAssertEqual(options.map(\.value), [ManagedSurface.defaultModel, "n/star", "i/one", "e/one", "n/one"])
+        XCTAssertEqual(options.map(\.section), [nil, nil, nil, nil, nil])
         let none = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(
             ("{" + models + #","tier_order":[]}"#).utf8))
         XCTAssertEqual(none.tierOrder, [])

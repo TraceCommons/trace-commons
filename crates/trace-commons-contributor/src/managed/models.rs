@@ -849,25 +849,6 @@ mod tests {
         );
     }
 
-    /// #1798 review: the macOS shell keeps one copy of the tier order, a
-    /// fallback for a daemon from before `tier_order`. It must name the
-    /// same tiers in the same order as [`ModelTier::ORDER`].
-    #[test]
-    fn the_shells_fallback_tier_order_is_the_cores() {
-        let swift =
-            include_str!("../../../../macos/Sources/TCShellCore/ManagedSessionsSurface.swift");
-        let line = swift
-            .lines()
-            .find(|line| line.contains("static let knownTierOrder"))
-            .expect("the shell's fallback order");
-        let literal = &line[line.find('[').unwrap()..=line.rfind(']').unwrap()];
-        let shell: Vec<String> = serde_json::from_str(literal).unwrap();
-        assert_eq!(
-            serde_json::to_value(shell).unwrap(),
-            serde_json::to_value(ModelTier::ORDER).unwrap()
-        );
-    }
-
     /// With a NEAR AI private (TEE-hosted) model listed, Claude and
     /// OpenCode start on it, the first of [`PRIVATE_PREFERRED`]; Codex keeps
     /// to the models NEAR AI is known to run with its tools.

@@ -336,10 +336,10 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
     /// An older daemon sends none.
     public let unavailableFavorites: [String]
     /// The privacy tiers the picker groups by, most private first, as the
-    /// core orders them (`tier_order`): a tier the core does not list
-    /// groups nothing. A daemon from before `tier_order` sends none, which
-    /// reads as `ManagedSurface.knownTierOrder`, so its tiered models are
-    /// still grouped; an empty list sent by the core is followed.
+    /// core orders them (`tier_order`). The shell keeps no order of its own
+    /// (owner, 2026-11-01: the app always ships with its own daemon): a tier
+    /// the core does not list, or no list, groups nothing, and the picker
+    /// keeps the catalogue's order.
     public let tierOrder: [String]
     /// For each model as the main model, its background default and the
     /// index in `backgroundSets` of the background ids the core allows
@@ -362,7 +362,7 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         `default` = try container.decodeIfPresent(String.self, forKey: .default)
         favorites = try container.decodeIfPresent([String].self, forKey: .favorites) ?? []
         unavailableFavorites = try container.decodeIfPresent([String].self, forKey: .unavailableFavorites) ?? []
-        tierOrder = try container.decodeIfPresent([String].self, forKey: .tierOrder) ?? ManagedSurface.knownTierOrder
+        tierOrder = try container.decodeIfPresent([String].self, forKey: .tierOrder) ?? []
         background = try container.decodeIfPresent([String: ManagedBackgroundEntry].self, forKey: .background) ?? [:]
         backgroundSets = try container.decodeIfPresent([[String]].self, forKey: .backgroundSets) ?? []
     }
@@ -531,9 +531,6 @@ public extension ManagedSurface {
     /// The copy key of a tier's group heading: `model_group_` and the tier id.
     static func modelGroupKey(_ tier: String) -> String { "model_group_" + tier }
 
-    /// The core's tier order (`ModelTier::ORDER`), for a daemon from before
-    /// it sent `tier_order`: most private first.
-    static let knownTierOrder = ["near_ai", "external", "incognito"]
 
     /// What a tier id means; none for a tier this build does not know.
     static func modelPrivacy(_ tier: String?) -> ManagedModelPrivacy? {
