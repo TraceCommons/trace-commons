@@ -358,7 +358,8 @@ Each launch owns a separate HOME/XDG profile beneath its saved account.
 OpenCode 1.x uses `--pure` and the legacy provider configuration. OpenCode 2.x
 uses `--standalone`, native provider configuration, and `session import/export`;
 it never joins the shared background service. Project configuration and external
-plugins are disabled. Since v2 cannot bypass overriding system or macOS MDM
+plugins are disabled. The one exception is the economizer's own plugin, which a
+1.x launch loads when the economizer is on (see [Economizer](#economizer)). Since v2 cannot bypass overriding system or macOS MDM
 configuration, managed launches refuse when those settings are present or
 cannot be inspected. The ordinary OpenCode profile is unchanged.
 The selected model also handles v1 small-model calls and v2 title/compaction calls. The session's
@@ -392,6 +393,54 @@ covers import, exact-ID run, selected-model routing, the native session header,
 export, validation and staging for both launch paths.
 It does not certify real provider credentials, NEAR AI receipts, or unattended
 end-to-end contribution without an invite.
+
+## Economizer
+
+The economizer cuts the tokens a managed session spends on work the agent does
+not need. It is off until the person runs `near-ai economizer on`, and applies
+to new managed Claude Code, Codex and OpenCode sessions. It is our own Rust
+implementation of the mechanisms described by Microsoft's TokenEconomizer
+(arXiv 2610.22732); no TokenEconomizer code is used.
+
+| Mechanism | What it does |
+| --- | --- |
+| Loop guard | A turn gets one short note in the model's context, asking it to step back, when it looks stuck: at least 20 tool calls, edits that keep returning to the same file (or spread over three files or more), at least six failed calls, and little progress. It must also have run past what this folder's turns usually take: the 90th percentile of turns that ended well, learned from at least five. Without five, no note. Once per turn. |
+| Tool pruning | A tool from a short list per coding tool (below; for Claude Code, its subagent, scheduling, worktree, notebook, todo and web tools) that the agent has not used in 10 prompts over two sessions, or in five sessions, is left out of later sessions in that folder. Tools whose loss would be felt (web fetch and search, notebook editing, every Codex feature) need three times that. A tool once used, or given back with `restore`, is never left out again. |
+| Learned commands | A command that is not found in a folder and then works through a launcher (`pytest` as `python -m pytest`) is told to the agent at the start of later sessions, once three sessions confirm it. Two sessions that run the plain command fine, with no confirmation between, forget it. |
+
+How each tool takes it:
+
+| Tool | Hooks | Pruning |
+| --- | --- | --- |
+| Claude Code 2.1.300+ | `hooks` in the launch's `--settings` | `permissions.deny` there |
+| Codex 0.164+, Unix only | `-c hooks.<Event>=...`, each trusted by its hash | `-c features.<name>=false` for `multi_agent`, `goals`, `view_image`, `image_generation` |
+| OpenCode 1.19.5+ (1.x) | A plugin written into the session's own profile | `tools.<name> = false` for `todowrite`, `task`, `webfetch` |
+
+OpenCode 1.x launches normally run with `--pure`, which keeps every external
+plugin out, ours too. With the economizer on, the launch drops `--pure` and
+names only its own plugin. That plugin is the only one that loads: the
+profile's configuration directories belong to the session alone, project
+configuration is disabled, and on OpenCode 1.19.5 neither a project's
+`opencode.json` plugins nor its `.opencode/plugin` directory load. OpenCode 2
+could not be checked yet, so its launches run without the economizer.
+
+Nothing is written into the person's folder. The economizer's state lives in
+the contributor state directory under `economizer/`, owner-only, with each
+folder named by a digest of the tool and the path. It is never uploaded.
+
+A launch runs without the economizer when it resumes a conversation (a changed
+tool list would make the tool rewrite its whole prompt cache) or collects its
+trace (a contributed trace would carry the economizer's notes and a shorter
+tool list, with no way yet to say so). Any economizer failure is silent and
+leaves the session as if it were off. What it adds goes into the model's
+context only; nothing is shown to the person.
+
+```sh
+near-ai economizer on
+near-ai economizer status --cwd /path/to/project
+near-ai economizer restore --cwd /path/to/project   # give back every left-out tool
+near-ai economizer off
+```
 
 ## Native shell visibility and map
 

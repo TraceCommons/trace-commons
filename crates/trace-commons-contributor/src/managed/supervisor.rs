@@ -135,10 +135,11 @@ async fn run_native(
     };
     let profiles = NativeProfiles::new(store);
     let native = find_native(row.tool)?;
-    profiles.verify_version(&account, &native)?;
+    // Read once: the economizer needs it too.
+    let version = profiles.verify_version(&account, &native)?;
     if row.connection == ConnectionKind::Subscription
         && !login
-        && profiles.inspect(&account, &native)? != AuthState::Ready
+        && profiles.inspect_verified(&account, &native)? != AuthState::Ready
     {
         return Err(ManagedError::SignInRequired.into());
     }
@@ -176,11 +177,24 @@ async fn run_native(
         command.args(claude_session_args(row.id, resume));
     }
     let mut route = None;
+    // Claude Code's `--settings`, passed once: the status line and the
+    // economizer each add their keys.
+    let mut settings = serde_json::Map::new();
     // Removed when this function returns, however it returns.
     let mut codex_catalog: Option<super::codex::CatalogFile> = None;
     let opencode = if row.tool == super::ToolId::Opencode {
         // Every connection below runs on this session, seeded only when new.
-        let session = opencode_session(store, &account, &native, row, resume)?;
+        let mut session = opencode_session(store, &account, &native, row, resume)?;
+        if !login {
+            let launch = economizer_launch(context, version, resume.is_some());
+            if let Ok(exe) = std::env::current_exe() {
+                let economizer = crate::economizer::store::Store::new(store.dir());
+                if let Some(plan) = crate::economizer::launch::opencode(&economizer, &exe, &launch)
+                {
+                    session.economize(plan);
+                }
+            }
+        }
         // A saved key names its model; the sign-in's proxy names a default.
         let model = || row.model.as_deref().ok_or(ManagedError::InvalidRequest);
         match row.connection {
@@ -282,7 +296,7 @@ async fn run_native(
                     },
                 )?;
                 if !login {
-                    status_line(&mut command, row.tool, proxy.home());
+                    status_line(&mut settings, row.tool, proxy.home());
                 }
                 route = Some(proxy);
             }
@@ -292,16 +306,20 @@ async fn run_native(
             ConnectionKind::NearAiSignIn => {
                 codex_catalog = sign_in_route_command(
                     &mut command,
+                    (!login).then_some(&mut settings),
                     store,
                     &profiles,
                     &account,
                     &native,
                     context,
-                    login,
                 )?;
             }
         }
     }
+    if !login {
+        economize(&mut settings, store, context, version, resume.is_some());
+    }
+    apply_settings(&mut command, settings);
     // Signals were registered before ticket redemption. A terminal closed
     // during native status checks must never lead to a late child spawn.
     #[cfg(unix)]
@@ -321,14 +339,15 @@ async fn run_native(
     }
     // After every other argument, so a hook the person passed is seen.
     let codex_binding = if row.tool == super::ToolId::Codex && !login && resume.is_none() {
-        codex_binding(
-            store,
-            row,
-            login,
-            resume,
-            profiles.native_version(&account, &native).ok().flatten(),
-            &mut command,
-        )
+        let launch = economizer_launch(context, version, false);
+        let economizer = std::env::current_exe().ok().and_then(|exe| {
+            crate::economizer::launch::codex(
+                &crate::economizer::store::Store::new(store.dir()),
+                &exe,
+                &launch,
+            )
+        });
+        codex_binding(store, row, login, resume, version, economizer, &mut command)
     } else {
         None
     };
@@ -550,30 +569,45 @@ fn opencode_session(
 
 /// Prepare and install this Codex coding launch's SessionStart binding,
 /// which records Codex's own thread id so the conversation can be resumed,
-/// whether or not the launch collects. Trace collection reads the same
-/// records. None for a sign-in, a resumed conversation (its root's binding
-/// holds the id), a Codex before 0.164, or a refusal (the person passed
-/// their own CLI hooks): the launch goes on, and that row cannot be
+/// whether or not the launch collects, and the economizer's hooks and
+/// feature switches when it is on. Trace collection reads the binding's
+/// records. No binding for a sign-in, a resumed conversation (its root's
+/// binding holds the id), a Codex before 0.164, or a refusal (the person
+/// passed their own CLI hooks): the launch goes on, and that row cannot be
 /// resumed. Unavailable tracking never blocks a session or loosens hook
-/// trust.
+/// trust. Every hook is declared in one call ([`super::codex_hooks`]); when
+/// that is refused, the economizer is left out too.
 fn codex_binding(
     store: &ConfigStore,
     row: &super::sessions::SessionView,
     login: bool,
     resume: Option<Resume>,
     version: Option<(u32, u32, u32)>,
+    economizer: Option<crate::economizer::launch::CodexPlan>,
     command: &mut std::process::Command,
 ) -> Option<super::session_binding::CodexBinding> {
-    if row.tool != super::ToolId::Codex
+    let binding = if row.tool != super::ToolId::Codex
         || login
         || resume.is_some()
         || !version.is_some_and(|version| version.0 == 0 && version >= (0, 164, 0))
     {
-        return None;
+        None
+    } else {
+        super::session_binding::prepare(store, row.id).ok()
+    };
+    let mut hooks = Vec::new();
+    let binding = binding.and_then(|binding| {
+        hooks.push(binding.hook().ok()?);
+        Some(binding)
+    });
+    if let Some(plan) = &economizer {
+        hooks.extend(plan.hooks.iter().cloned());
     }
-    let binding = super::session_binding::prepare(store, row.id).ok()?;
-    binding.configure(command).ok()?;
-    Some(binding)
+    super::codex_hooks::configure(command, &hooks).ok()?;
+    if let Some(plan) = economizer {
+        command.args(plan.feature_args());
+    }
+    binding
 }
 
 /// The daemon-hosted proxy a sign-in session runs on: its loopback port,
@@ -616,18 +650,18 @@ fn sign_in_route(
 /// Claude Code or Codex on the NEAR AI sign-in: the daemon holds the
 /// sign-in and hosts this session's proxy, and says its port, default and
 /// models ([`sign_in_route`]). Points `command` at it, writes Codex's
-/// catalog, and, unless this is a sign-in, adds the status line for the
-/// daemon's route, whose home is where every route's is
-/// ([`super::route::home_for`]). Returns the catalog file, which lives
-/// as long as the session.
+/// catalog, and adds the status line for the daemon's route to
+/// `settings`, given unless this is a sign-in. The route's home is where
+/// every route's is ([`super::route::home_for`]). Returns the catalog
+/// file, which lives as long as the session.
 fn sign_in_route_command(
     command: &mut std::process::Command,
+    settings: Option<&mut serde_json::Map<String, Value>>,
     store: &ConfigStore,
     profiles: &NativeProfiles,
     account: &AccountView,
     native: &std::path::Path,
     context: &LaunchContext,
-    login: bool,
 ) -> Result<Option<super::codex::CatalogFile>, ManagedError> {
     let row = &context.session;
     let (port, default, models) = sign_in_route(context)?;
@@ -644,8 +678,8 @@ fn sign_in_route_command(
             cli_options: &context.cli_options,
         },
     )?;
-    if !login {
-        status_line(command, row.tool, &super::route::home_for(store, row.id));
+    if let Some(settings) = settings {
+        status_line(settings, row.tool, &super::route::home_for(store, row.id));
     }
     Ok(catalog)
 }
@@ -806,18 +840,75 @@ struct Choices<'a> {
 /// over the profile's and a project's, and nothing is written to disk.
 /// When this executable's path cannot be found or written, the session runs
 /// without a status line. Other tools have no status-line slot.
-fn status_line(command: &mut std::process::Command, tool: super::ToolId, home: &std::path::Path) {
+fn status_line(
+    settings: &mut serde_json::Map<String, Value>,
+    tool: super::ToolId,
+    home: &std::path::Path,
+) {
     if tool != super::ToolId::Claude {
         return;
     }
-    match super::statusline::settings(home) {
-        Some(settings) => {
-            command.arg("--settings").arg(settings);
-        }
+    match super::statusline::settings(home)
+        .and_then(|line| serde_json::from_str::<serde_json::Map<String, Value>>(&line).ok())
+    {
+        Some(line) => settings.extend(line),
         None => tracing::warn!(
             harness = "claude",
             "managed session runs without a status line"
         ),
+    }
+}
+
+/// What the economizer needs to know about this launch
+/// ([`crate::economizer::launch`] decides whether it runs).
+fn economizer_launch(
+    context: &LaunchContext,
+    version: Option<(u32, u32, u32)>,
+    resumed: bool,
+) -> crate::economizer::launch::Launch<'_> {
+    let row = &context.session;
+    let harness = match row.tool {
+        super::ToolId::Claude => crate::economizer::Harness::Claude,
+        super::ToolId::Codex => crate::economizer::Harness::Codex,
+        super::ToolId::Opencode => crate::economizer::Harness::Opencode,
+    };
+    crate::economizer::launch::Launch {
+        harness,
+        version,
+        resumed: resumed || context.resume_of.is_some(),
+        collecting: row.collect_traces,
+        cwd: &row.cwd,
+    }
+}
+
+/// The economizer's hooks and deny list, for a Claude Code session when the
+/// person turned it on. When this executable's path cannot be found, the
+/// session runs without it.
+fn economize(
+    settings: &mut serde_json::Map<String, Value>,
+    store: &ConfigStore,
+    context: &LaunchContext,
+    version: Option<(u32, u32, u32)>,
+    resumed: bool,
+) {
+    let launch = economizer_launch(context, version, resumed);
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let economizer = crate::economizer::store::Store::new(store.dir());
+    if let Some(extra) = crate::economizer::launch::claude_settings(&economizer, &exe, &launch) {
+        settings.extend(extra);
+    }
+}
+
+/// Pass Claude Code's `--settings`, once, when anything was added. Settings
+/// from the command line take precedence over the profile's and a
+/// project's, and nothing is written to disk.
+fn apply_settings(command: &mut std::process::Command, settings: serde_json::Map<String, Value>) {
+    if !settings.is_empty() {
+        command
+            .arg("--settings")
+            .arg(Value::Object(settings).to_string());
     }
 }
 
@@ -1033,7 +1124,8 @@ mod tests {
     #[cfg(unix)]
     use super::{PARENT_SESSION_ENV, clear_parent_session, with_open_files_floor};
     use super::{
-        near_ai_route, project_workflows_notice, sign_in_route_command, status_line, stop_asked,
+        apply_settings, near_ai_route, project_workflows_notice, sign_in_route_command,
+        status_line, stop_asked,
     };
     #[cfg(unix)]
     use super::{opencode_route_command, opencode_sign_in_command};
@@ -1136,7 +1228,9 @@ mod tests {
     fn claude_on_a_route_shows_the_routes_status_line() {
         let home = std::path::Path::new("/state dir/managed-routes/it's");
         let mut command = std::process::Command::new("claude");
-        status_line(&mut command, ToolId::Claude, home);
+        let mut settings = serde_json::Map::new();
+        status_line(&mut settings, ToolId::Claude, home);
+        apply_settings(&mut command, settings);
         let args: Vec<String> = command
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1154,7 +1248,9 @@ mod tests {
         assert_eq!(settings.as_object().unwrap().len(), 1);
         for tool in [ToolId::Codex, ToolId::Opencode] {
             let mut command = std::process::Command::new("tool");
-            status_line(&mut command, tool, home);
+            let mut settings = serde_json::Map::new();
+            status_line(&mut settings, tool, home);
+            apply_settings(&mut command, settings);
             assert_eq!(command.get_args().count(), 0);
         }
     }
@@ -1191,16 +1287,18 @@ mod tests {
             .join(id.to_string());
         for login in [false, true] {
             let mut command = std::process::Command::new("claude");
+            let mut settings = serde_json::Map::new();
             let catalog = sign_in_route_command(
                 &mut command,
+                (!login).then_some(&mut settings),
                 &store,
                 &NativeProfiles::new(&store),
                 &account,
                 &native,
                 &context,
-                login,
             )
             .unwrap();
+            apply_settings(&mut command, settings);
             assert!(catalog.is_none());
             assert_eq!(
                 env_of(&command, "ANTHROPIC_BASE_URL"),
@@ -1290,12 +1388,12 @@ mod tests {
             let mut command = std::process::Command::new("claude");
             sign_in_route_command(
                 &mut command,
+                None,
                 &store,
                 &NativeProfiles::new(&store),
                 &account,
                 &home.path().join("claude"),
                 &context,
-                true,
             )
             .unwrap();
             for (name, value) in command.get_envs() {
@@ -1992,7 +2090,7 @@ mod tests {
         let fresh = row("codex", home.path(), false);
         assert!(!fresh.collect_traces);
         let mut command = std::process::Command::new("codex");
-        let binding = codex_binding(&store, &fresh, false, None, version, &mut command)
+        let binding = codex_binding(&store, &fresh, false, None, version, None, &mut command)
             .expect("bound without collection");
         assert!(binding.directory().ends_with(fresh.id.to_string()));
         assert!(
@@ -2016,7 +2114,9 @@ mod tests {
             root: fresh.id,
             codex_thread: Some(uuid::Uuid::new_v4()),
         });
-        assert!(codex_binding(&store, &resumed, false, resume, version, &mut command).is_none());
+        assert!(
+            codex_binding(&store, &resumed, false, resume, version, None, &mut command).is_none()
+        );
         assert_eq!(command.get_args().count(), 0);
         assert!(
             !store
@@ -2032,12 +2132,123 @@ mod tests {
         ] {
             let other = row("codex", home.path(), false);
             let mut command = std::process::Command::new("codex");
-            assert!(codex_binding(&store, &other, login, None, version, &mut command).is_none());
+            assert!(
+                codex_binding(&store, &other, login, None, version, None, &mut command).is_none()
+            );
             assert_eq!(command.get_args().count(), 0);
         }
         let claude = row("claude", home.path(), false);
         let mut command = std::process::Command::new("claude");
-        assert!(codex_binding(&store, &claude, false, None, version, &mut command).is_none());
+        assert!(codex_binding(&store, &claude, false, None, version, None, &mut command).is_none());
+    }
+
+    /// The economizer's hooks join the binding's in one declaration with one
+    /// trust map, and its feature switches follow. Refused hooks (the
+    /// person passed their own) leave out the economizer's switches too.
+    #[cfg(unix)]
+    #[test]
+    fn codex_binding_declares_the_economizers_hooks_with_its_own() {
+        use super::codex_binding;
+        use crate::economizer::launch::CodexPlan;
+        use crate::managed::codex_hooks::Hook;
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().join("state")).unwrap();
+        let version = Some((0, 166, 0));
+        let plan = CodexPlan {
+            hooks: vec![
+                Hook {
+                    event: "SessionStart",
+                    command: "econ".into(),
+                    timeout: 10,
+                },
+                Hook {
+                    event: "PostToolUse",
+                    command: "econ".into(),
+                    timeout: 10,
+                },
+            ],
+            features_off: vec!["goals".into()],
+        };
+        let fresh = row("codex", home.path(), false);
+        let mut command = std::process::Command::new("codex");
+        let binding = codex_binding(
+            &store,
+            &fresh,
+            false,
+            None,
+            version,
+            Some(plan.clone()),
+            &mut command,
+        );
+        assert!(binding.is_some());
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let start = args
+            .iter()
+            .find(|arg| arg.starts_with("hooks.SessionStart="))
+            .unwrap();
+        assert_eq!(start.matches("{hooks=").count(), 2, "{start}");
+        assert_eq!(
+            args.iter()
+                .filter(|a| a.starts_with("hooks.state="))
+                .count(),
+            1
+        );
+        assert!(args.iter().any(|a| a.starts_with("hooks.PostToolUse=")));
+        assert_eq!(args[args.len() - 2..], ["-c", "features.goals=false"]);
+
+        // A resumed launch has no binding, but still gets the economizer
+        // when the plan says so.
+        let resumed = row("codex", home.path(), false);
+        let mut command = std::process::Command::new("codex");
+        let resume = Some(super::Resume {
+            root: fresh.id,
+            codex_thread: None,
+        });
+        assert!(
+            codex_binding(
+                &store,
+                &resumed,
+                false,
+                resume,
+                version,
+                Some(plan.clone()),
+                &mut command
+            )
+            .is_none()
+        );
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let start = args
+            .iter()
+            .find(|arg| arg.starts_with("hooks.SessionStart="))
+            .unwrap();
+        assert_eq!(start.matches("{hooks=").count(), 1, "{start}");
+
+        let other = row("codex", home.path(), false);
+        let mut command = std::process::Command::new("codex");
+        command.args(["-c", "hooks.Stop=[]"]);
+        assert!(
+            codex_binding(
+                &store,
+                &other,
+                false,
+                None,
+                version,
+                Some(plan),
+                &mut command
+            )
+            .is_none()
+        );
+        assert_eq!(
+            command.get_args().count(),
+            2,
+            "nothing added after a refusal"
+        );
     }
 
     /// A resumed OpenCode session reuses the root's per-session profile and

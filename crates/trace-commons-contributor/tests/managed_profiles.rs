@@ -251,6 +251,7 @@ fn opencode_launcher_detects_supported_major_versions() {
         let result = profiles.verify_version(&account, &native);
         assert_eq!(result.is_ok(), expected.is_some(), "{version}: {result:?}");
         if let Some(expected) = expected {
+            assert_eq!(result.unwrap(), Some(expected), "{version}");
             assert_eq!(
                 profiles.native_version(&account, &native).unwrap(),
                 Some(expected)

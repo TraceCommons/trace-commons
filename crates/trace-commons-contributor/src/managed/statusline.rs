@@ -45,20 +45,9 @@ pub async fn run(home: Option<&Path>) {
 
 /// The document on stdin, read for at most [`BUDGET`]. Claude Code writes it
 /// and closes stdin; a terminal, or a writer that never closes, yields none.
-/// The reader is a detached thread, so one blocked on stdin never holds the
-/// process open.
 fn read_document() -> Option<String> {
-    use std::io::{IsTerminal, Read};
-    if std::io::stdin().is_terminal() {
-        return None;
-    }
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buffer = String::new();
-        let read = std::io::stdin().read_to_string(&mut buffer).ok();
-        let _ = sender.send(read.map(|_| buffer));
-    });
-    receiver.recv_timeout(BUDGET).ok().flatten()
+    let bytes = super::read_stdin_bounded(BUDGET, u64::MAX)?;
+    String::from_utf8(bytes).ok()
 }
 
 /// The shell Claude Code runs a status-line command in.
@@ -69,13 +58,13 @@ fn read_document() -> Option<String> {
 /// is written for Git Bash with forward slashes, and is left unquoted, which
 /// both shells read the same way, whenever the paths allow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shell {
+pub(crate) enum Shell {
     Posix,
     WindowsGitBash,
 }
 
 impl Shell {
-    fn current() -> Self {
+    pub(crate) fn current() -> Self {
         if cfg!(windows) {
             Self::WindowsGitBash
         } else {
@@ -87,7 +76,7 @@ impl Shell {
 /// One word for `shell`: as written when every character is one neither
 /// shell treats specially, otherwise single-quoted, with each `'` closed,
 /// escaped and reopened.
-fn quote(word: &str, shell: Shell) -> String {
+pub(crate) fn quote(word: &str, shell: Shell) -> String {
     let word = match shell {
         Shell::Posix => word.to_owned(),
         Shell::WindowsGitBash => word.replace('\\', "/"),

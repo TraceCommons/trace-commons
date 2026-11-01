@@ -5,3 +5,8 @@ See `imports/ironclaw-server/SOURCE.md` for the source snapshot and extraction
 mapping.
 
 TraceCommons Server is distributed under MIT OR Apache-2.0.
+
+The contributor's economizer (`crates/trace-commons-contributor/src/economizer`)
+is an independent implementation of mechanisms described in Microsoft's
+TokenEconomizer (https://github.com/microsoft/TokenEconomizer, arXiv
+2610.22732). It contains no TokenEconomizer code.

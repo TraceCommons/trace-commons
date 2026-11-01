@@ -69,6 +69,26 @@ enum Command {
         #[arg(long)]
         home: Option<PathBuf>,
     },
+    /// Make managed coding sessions cheaper by learning from earlier
+    /// sessions in the same folder. Off until turned on.
+    Economizer {
+        #[command(subcommand)]
+        action: crate::economizer::cli::EconomizerCommand,
+    },
+    /// Handle one hook event of a managed session for the economizer.
+    /// Prints nothing and succeeds on any failure.
+    #[command(hide = true)]
+    EconomizerHook {
+        /// The economizer's directory: `<config dir>/economizer`
+        #[arg(long)]
+        state: Option<PathBuf>,
+        /// The folder's key
+        #[arg(long)]
+        repo: Option<String>,
+        /// The coding tool sending the events
+        #[arg(long, value_enum, default_value = "claude")]
+        harness: crate::economizer::Harness,
+    },
     #[command(hide = true)]
     ManagedSessionBind {
         #[arg(long)]
@@ -609,6 +629,17 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         crate::managed::session_binding::run_record(directory, nonce);
         return Ok(());
     }
+    // Runs on every hook event of a managed session with the economizer on:
+    // never opens the config store, never fails.
+    if let Command::EconomizerHook {
+        state,
+        repo,
+        harness,
+    } = &cli.command
+    {
+        crate::economizer::hook::run(state.as_deref(), repo.as_deref(), *harness);
+        return Ok(());
+    }
     // Before anything that opens or creates the config directory: this runs
     // on every render of Claude Code's status line.
     if let Command::Statusline { home } = &cli.command {
@@ -664,6 +695,10 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Command::ManagedSessionBind { .. } => {
             unreachable!("binding recorder handled before config resolution")
         }
+        Command::EconomizerHook { .. } => {
+            unreachable!("economizer hook handled before config resolution")
+        }
+        Command::Economizer { action } => crate::economizer::cli::run(&store, action, cli.json),
         Command::RedeemLaunch { session_id, ticket } => {
             let code = crate::managed::supervisor::redeem_and_run(
                 &store,
