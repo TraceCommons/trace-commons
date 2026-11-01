@@ -1986,19 +1986,49 @@ async fn bind_device_upload_principal_tx(
     Ok(())
 }
 
-/// One account's active strong authenticators (unrevoked NEAR identities),
-/// inside a transaction already scoped to its tenant. The single definition of
-/// the count `count_active_strong_authenticators` reads.
+/// One account's active NEAR identities (unrevoked NEAR keys), inside a
+/// transaction already scoped to its tenant. What a NEAR key revoke reports as
+/// remaining: `0` means no NEAR key is left.
+pub(super) async fn active_near_identity_count(
+    tx: &deadpool_postgres::Transaction<'_>,
+    account_id: &Uuid,
+) -> Result<i64, DatabaseError> {
+    let row = tx
+        .query_one(
+            "SELECT count(*) AS key_count FROM trace_near_identities
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND revoked_at IS NULL",
+            &[account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    Ok(row.get("key_count"))
+}
+
+/// One account's active strong authenticators, inside a transaction already
+/// scoped to its tenant: its unrevoked NEAR identities, plus one if it signs in
+/// with NEAR AI (a `near_ai_login` anchor; one however many a merge left). The
+/// strong-authenticator gate reads it, so an account that signs in with NEAR AI
+/// is never at zero and never takes the bootstrapping carve-out. The single
+/// definition of the count `count_active_strong_authenticators` reads.
 pub(super) async fn active_strong_authenticator_count(
     tx: &deadpool_postgres::Transaction<'_>,
     account_id: &Uuid,
 ) -> Result<i64, DatabaseError> {
     let row = tx
         .query_one(
-            "SELECT count(*) AS strong_count FROM trace_near_identities
-              WHERE tenant_id = trace_current_tenant_id()
-                AND account_id = $1
-                AND revoked_at IS NULL",
+            "SELECT (SELECT count(*) FROM trace_near_identities
+                      WHERE tenant_id = trace_current_tenant_id()
+                        AND account_id = $1
+                        AND revoked_at IS NULL)
+                  + (SELECT CASE WHEN EXISTS (
+                        SELECT 1 FROM trace_near_account_anchors
+                         WHERE tenant_id = trace_current_tenant_id()
+                           AND account_id = $1
+                           AND identity_source = 'near_ai_login')
+                     THEN 1 ELSE 0 END)
+                    AS strong_count",
             &[account_id],
         )
         .await
@@ -4824,9 +4854,9 @@ impl Database for PgBackend {
             )
             .await
             .map_err(DatabaseError::Postgres)?;
-        // remaining strong authenticators (NEAR identities), computed in the
-        // SAME tx after the revoke.
-        let remaining_strong = active_strong_authenticator_count(&tx, &account_id).await?;
+        // Remaining NEAR identities (NEAR keys), computed in the SAME tx after
+        // the revoke. Not the gate's count: a NEAR AI login is not a key.
+        let remaining_strong = active_near_identity_count(&tx, &account_id).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(crate::db::RevokeNearResult {
             removed: removed > 0,
