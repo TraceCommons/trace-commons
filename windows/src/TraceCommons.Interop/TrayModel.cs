@@ -382,8 +382,10 @@ public static class DigestText
 
         // Only when there is some: "0 credit pending" reads as a failure
         // rather than as a fresh start, and the first digest after arming a
-        // project is exactly when that would show. Always "pending", never
-        // "earned" -- settlement is off on every deployment shipped so far.
+        // project is exactly when that would show. This is the fallback for
+        // a daemon that sends no `contribution` sentence; the core's own
+        // sentence (which also says decided credit as "earned") is posted
+        // instead whenever it is present. Pending is never called earned.
         if (creditPending > 0)
         {
             // Rounded half away from zero explicitly, matching the daemon and
