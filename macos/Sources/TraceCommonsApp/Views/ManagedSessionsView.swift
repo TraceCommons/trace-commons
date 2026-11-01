@@ -24,6 +24,8 @@ struct ManagedSessionsSection: View {
     /// The session whose resume command was just copied: its status reads
     /// "Copied" for about two seconds.
     @State private var copiedFor: ManagedCopyMark?
+    /// Display names by model id, read from the daemon's cache only.
+    @State private var modelNames: [String: String] = [:]
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn {
@@ -262,6 +264,11 @@ struct ManagedSessionsSection: View {
                         }
                         if let failure { actionFailure(failure) }
                     }
+                    // The cache is read again when a session's tool or the
+                    // snapshot changes; a read is local and never asks NEAR AI.
+                    .task(id: ModelNamesRead(tools: Set(snapshot.sessions.filter { $0.model != nil }.map(\.tool)), revision: snapshot.revision)) {
+                        loadModelNames(tools: Set(snapshot.sessions.filter { $0.model != nil }.map(\.tool)))
+                    }
                 })
         }
     }
@@ -275,7 +282,7 @@ struct ManagedSessionsSection: View {
             session.accountLabel,
             model.managedText(session.connection),
         ].compactMap { $0 }.filter { !$0.isEmpty }
-        if let selectedModel = session.model { meta.append(selectedModel) }
+        if let selectedModel = session.model { meta.append(ManagedSurface.rowModel(selectedModel, names: modelNames)) }
         if let collection = session.collection, ["off", "pending", "collected", "failed"].contains(collection) {
             meta.append(model.managedText("collection_" + collection))
         }
@@ -319,6 +326,16 @@ struct ManagedSessionsSection: View {
             }
         }
         return ManagedSessionRowActions(session: session, onStop: { stopping = session }) { row }
+    }
+
+    /// Names from the daemon's cache for the tools whose sessions name a
+    /// model. An error or an empty cache leaves the raw ids.
+    private func loadModelNames(tools: Set<String>) {
+        for tool in tools {
+            model.managedModelCatalogue(tool: tool, cacheOnly: true) { catalogue in
+                modelNames.merge(ManagedSurface.modelNames(catalogue)) { _, new in new }
+            }
+        }
     }
 
     private func sessionText(title: String, caption: String) -> some View {
@@ -390,6 +407,12 @@ struct SessionRowLayout: Layout {
             subviews[2].place(at: CGPoint(x: bounds.maxX - plan.trailing.width, y: bounds.minY + top + lineSpacing), anchor: .topLeading, proposal: ProposedViewSize(plan.trailing))
         }
     }
+}
+
+/// What the session rows' display names were last read for.
+struct ModelNamesRead: Equatable {
+    let tools: Set<String>
+    let revision: UInt64
 }
 
 /// A copy of one row's resume command; the token tells a stale reset from

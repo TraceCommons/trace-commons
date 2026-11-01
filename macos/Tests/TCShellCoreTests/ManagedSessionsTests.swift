@@ -425,6 +425,30 @@ final class ManagedSessionsTests: XCTestCase {
     /// tier, NEAR AI's own TEEs first, then a third party's, then
     /// Incognito, each in NEAR AI's order. The default heads no group; a model with
     /// no tier (an older daemon) comes last, under no heading.
+    func testRowsNameModelsFromTheCacheAndFallBackToTheId() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"{"models":[{"id":"z-ai/glm-5.3","name":"GLM 5.3 Flash"},{"id":"x/no-name"},{"id":"x/blank","name":" "}]}"#.utf8))
+        let names = ManagedSurface.modelNames(catalogue)
+        XCTAssertEqual(names, ["z-ai/glm-5.3": "GLM 5.3 Flash"])
+        // The picker and the row call a model the same thing.
+        let option = ManagedSurface.modelOptions(catalogue) { Self.modelCopy[$0] ?? "" }.first { $0.value == "z-ai/glm-5.3" }
+        XCTAssertEqual(ManagedSurface.rowModel("z-ai/glm-5.3", names: names), option?.title)
+        // No name, or an empty or failed cache: the recorded id.
+        XCTAssertEqual(ManagedSurface.rowModel("x/no-name", names: names), "x/no-name")
+        XCTAssertEqual(ManagedSurface.rowModel("z-ai/glm-5.3", names: ManagedSurface.modelNames(nil)), "z-ai/glm-5.3")
+    }
+
+    /// A row's read never asks NEAR AI: it always sends `cache_only`.
+    func testARowsCatalogueReadIsCacheOnly() {
+        let row = ManagedSurface.catalogueParams(tool: "claude", cacheOnly: true)
+        XCTAssertEqual(row["cache_only"] as? Bool, true)
+        XCTAssertEqual(row["tool"] as? String, "claude")
+        XCTAssertEqual(row.count, 2)
+        // The picker's read is unchanged.
+        let picker = ManagedSurface.catalogueParams(tool: "claude", cacheOnly: false)
+        XCTAssertNil(picker["cache_only"])
+        XCTAssertEqual(picker.count, 1)
+    }
+
     func testThePickersTitleModelsByDisplayNameAndKeepTheIdAsValueAndTooltip() throws {
         let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data(#"""
         {"models":[

@@ -603,6 +603,26 @@ public enum ManagedModelPrivacy: Equatable, Sendable {
     case incognito
 }
 
+/// A session row's model name, from the daemon's catalogue cache.
+public extension ManagedSurface {
+    /// `managed_model_catalogue`'s params. A row passes `cacheOnly`, so the
+    /// daemon answers from its cache and never reads NEAR AI for a row.
+    static func catalogueParams(tool: String, cacheOnly: Bool) -> [String: Any] {
+        cacheOnly ? ["tool": tool, "cache_only": true] : ["tool": tool]
+    }
+
+    /// Display names by model id, for the models that have one.
+    static func modelNames(_ catalogue: ManagedModelCatalogue?) -> [String: String] {
+        var names: [String: String] = [:]
+        for model in catalogue?.models ?? [] where model.label != model.id { names[model.id] = model.label }
+        return names
+    }
+
+    /// The model as a row says it: its display name when the cache has one,
+    /// else the id the session recorded.
+    static func rowModel(_ id: String, names: [String: String]) -> String { names[id] ?? id }
+}
+
 /// Choosing the model of a NEAR AI session in the Launch sheet.
 public extension ManagedSurface {
     /// The picker value that names no model: the session takes the tool's
