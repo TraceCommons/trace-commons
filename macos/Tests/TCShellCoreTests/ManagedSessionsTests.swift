@@ -336,6 +336,30 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.rowMenuItems(running, terminalLaunch: true, resumeCapable: true), [.show, .stop])
     }
 
+    func testCopyResumeCommandIsAMenuItemNotARowButton() throws {
+        let both = try session("exited", again: true, resume: true)
+        // Never a visible row button.
+        XCTAssertFalse(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: true).contains(.copyResumeCommand))
+        // In the menu once the config directory is known, after Start again.
+        XCTAssertEqual(
+            ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true),
+            [.startAgain, .copyResumeCommand])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true), [.startAgain])
+        // Resume only: the menu holds just the copy item.
+        let resumeOnly = try session("exited", resume: true)
+        XCTAssertEqual(
+            ManagedSurface.rowMenuItems(resumeOnly, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true),
+            [.copyResumeCommand])
+        // A row that cannot resume, or is running, never offers it.
+        let again = try session("exited", again: true)
+        XCTAssertEqual(
+            ManagedSurface.rowMenuItems(again, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true), [])
+        let running = try session("running", focus: true, stop: true)
+        XCTAssertEqual(
+            ManagedSurface.rowMenuItems(running, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true),
+            [.show, .stop])
+    }
+
     func testResumedFromDecodesAndFormatsTheMarker() throws {
         XCTAssertNil(try session("exited").resumedFrom)
         XCTAssertNil(try session("exited", resumedFrom: "not a time").resumedFrom)

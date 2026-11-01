@@ -673,8 +673,8 @@ struct ManagedRemoveSheet: View {
 // MARK: - Session row actions (#1407)
 
 /// A session row's trailing actions (Ron, #1407): a running row's menu with
-/// Show and Stop; an ended row's Resume (Start again moves into the menu
-/// beside it) or else Start again, then Dismiss as a link. What
+/// Show and Stop; an ended row's Resume (Start again and Copy resume
+/// command live in the menu) or else Start again, then Dismiss as a link. What
 /// the daemon cannot do is left out, never drawn disabled.
 struct ManagedSessionActions: View {
     let session: ManagedSession
@@ -682,15 +682,14 @@ struct ManagedSessionActions: View {
     @Binding var menuFor: String?
     let onStop: () -> Void
     @EnvironmentObject private var model: AppModel
-    /// The copy link reads "Copied" for about two seconds after it copies.
-    @State private var copied = false
-    @State private var copyToken = 0
 
     var body: some View {
         let terminalLaunch = model.managedSnapshot?.capabilities.terminalLaunch == true
         let resumeCapable = model.managedSnapshot?.capabilities.resume == true
         let actions = ManagedSurface.rowButtons(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable)
-        let menuItems = ManagedSurface.rowMenuItems(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable)
+        let menuItems = ManagedSurface.rowMenuItems(
+            session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable,
+            configDirectoryKnown: !model.configDirectory.isEmpty)
         if !menuItems.isEmpty {
             menu(menuItems)
         }
@@ -710,12 +709,6 @@ struct ManagedSessionActions: View {
             .buttonStyle(GlassButtonStyle(.glass, small: true))
             .fixedSize()
             .disabled(model.managedBusy)
-        }
-        if copiesResumeCommand {
-            Button(copied ? model.managedText("copied") : model.managedText("copy_resume_command")) { copyResumeCommand() }
-                .buttonStyle(GlassButtonStyle(.link))
-                .accessibilityLabel((copied ? model.managedText("copied") : model.managedText("copy_resume_command")) + " " + session.projectLabel)
-                .fixedSize()
         }
         if actions.contains(.dismiss) {
             Button(model.managedText("dismiss")) {
@@ -751,15 +744,15 @@ struct ManagedSessionActions: View {
                             startAgain()
                         }
                     }
+                    if actions.contains(.copyResumeCommand) {
+                        GlassMenuItem(model.managedText("copy_resume_command")) {
+                            menuFor = nil
+                            copyResumeCommand()
+                        }
+                    }
                 }
                 .disabled(model.managedBusy)
             }
-    }
-
-    /// An ended row the daemon can resume offers the command for a terminal,
-    /// once the app knows its config directory.
-    private var copiesResumeCommand: Bool {
-        session.canResume && !session.holdsAccount && !model.configDirectory.isEmpty
     }
 
     /// The conversation continues; the terminal opens as for any launch.
@@ -776,17 +769,11 @@ struct ManagedSessionActions: View {
             binaryPath: binary, configDirectory: model.configDirectory, sessionID: session.id)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(line, forType: .string)
-        // The link says "Copied" in place for about two seconds, then
-        // reverts. No toast or banner; VoiceOver hears the new word.
-        copyToken += 1
-        let token = copyToken
-        copied = true
+        // The menu closes on the click; VoiceOver hears "Copied". No toast
+        // or banner.
         NSAccessibility.post(
             element: NSApp as Any, notification: .announcementRequested,
             userInfo: [.announcement: model.managedText("copied"), .priority: NSAccessibilityPriorityLevel.high.rawValue])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            if copyToken == token { copied = false }
-        }
     }
 
     /// Same tool, account and folder, with no folder chooser; the terminal

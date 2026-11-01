@@ -87,6 +87,8 @@ public enum ManagedSessionAction: Equatable, Sendable {
     case resume
     /// Launch the ended session again, same tool, account and folder.
     case startAgain
+    /// Copy the command line that resumes the session from a terminal.
+    case copyResumeCommand
     /// Take the ended row off the list.
     case dismiss
 }
@@ -308,12 +310,25 @@ public extension ManagedSurface {
         return (session.canStartAgain && terminalLaunch ? [.startAgain] : []) + [.dismiss]
     }
 
+    /// Whether an ended row offers "Copy resume command": the row can resume
+    /// and holds no account, and the app knows its config directory.
+    static func offersCopyResumeCommand(_ session: ManagedSession, configDirectoryKnown: Bool) -> Bool {
+        session.canResume && !session.holdsAccount && configDirectoryKnown
+    }
+
     /// The items in the row's menu: Show and Stop for a running row; for an
-    /// ended row that offers Resume, Start again.
-    static func rowMenuItems(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
+    /// ended row that offers Resume, Start again; then Copy resume command
+    /// when the row offers it (#1799 put it in the menu, not on the row).
+    static func rowMenuItems(
+        _ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false, configDirectoryKnown: Bool = false
+    ) -> [ManagedSessionAction] {
         if session.state == "running" { return menuActions(session) }
-        guard offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) else { return [] }
-        return session.canStartAgain ? [.startAgain] : []
+        var items: [ManagedSessionAction] = []
+        if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable), session.canStartAgain {
+            items.append(.startAgain)
+        }
+        if offersCopyResumeCommand(session, configDirectoryKnown: configDirectoryKnown) { items.append(.copyResumeCommand) }
+        return items
     }
 
     /// The row's continuation marker, "Resumed · Continues 2:14 PM": the

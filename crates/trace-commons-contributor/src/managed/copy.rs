@@ -54,18 +54,17 @@
 //!   `capabilities.resume`, before `dismiss`; `start_again` then moves into
 //!   the row's menu. It continues the session's conversation in a new
 //!   session.
-//! - `copy_resume_command` "Copy resume command" -- a link on an ended row
-//!   that says `can_resume`, after its buttons and before `dismiss`, shown
-//!   once the shell knows the config directory it passes. Copies the
+//! - `copy_resume_command` "Copy resume command" -- an item in the row's
+//!   menu on an ended row that says `can_resume`, shown once the shell
+//!   knows the config directory it passes. Copies the
 //!   command line that resumes the session from any terminal.
 //! - `resumed` "Resumed" -- a small secondary label on the status line of a
 //!   row that continues an earlier session (the row says `resumed_from`).
 //!   `resumed_from` "Continues {time}" -- the same label with the root
 //!   row's start time; shells fill `{time}` with it, formatted as they
 //!   format a row's own time.
-//! - `copied` "Copied" -- the "Copy resume command" link's text for about
-//!   two seconds after it copies, then it reverts. An in-place label
-//!   change, not a notice.
+//! - `copied` "Copied" -- what a screen reader announces when the "Copy
+//!   resume command" menu item has copied. Not a notice.
 //!
 //! Installing a coding tool. Approved 2026-10-15 (#1419 review):
 //! - `tools_title` "Coding tools", above the install block shown when no
