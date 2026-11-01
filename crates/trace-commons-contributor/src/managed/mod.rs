@@ -1,6 +1,7 @@
 //! Local saved accounts and explicitly managed native-tool sessions.
 
 pub mod accounts;
+pub mod catalogue_cache;
 pub mod cli;
 pub mod codex;
 pub mod collection_plan;
