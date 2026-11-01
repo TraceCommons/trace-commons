@@ -1493,8 +1493,10 @@ async fn drain_approved(
                     // approval, and with it every guard a retry re-runs,
                     // until the budget is spent; then it ends `Failed`
                     // under the same label, which reads as what it is.
-                    let failures = q.record_transient_upload_failure(entry.entry_id);
-                    if failures >= MAX_TRANSIENT_UPLOAD_FAILURES {
+                    let observed_at = observed_at();
+                    let (failures, run_started) =
+                        q.record_transient_upload_failure(entry.entry_id, observed_at);
+                    if transient_upload_budget_spent(failures, run_started, observed_at) {
                         q.record_attempt(entry.entry_id, None);
                         q.set_state(
                             entry.entry_id,
@@ -1502,7 +1504,6 @@ async fn drain_approved(
                             Some(reason_label),
                         );
                     } else {
-                        let observed_at = observed_at();
                         q.record_attempt(
                             entry.entry_id,
                             Some(
@@ -1743,12 +1744,41 @@ fn witness_capacity_jitter(entry_id: uuid::Uuid, retry_after_secs: u32) -> chron
 const MAX_TRANSIENT_REDACTION_FAILURES: u32 = 24;
 
 /// Uploads in a row that may reach no verdict for a passing reason
-/// ([`transient_upload_kind`]) before the entry ends `Failed`. With
-/// [`transient_upload_retry_delay`] that is about six hours of retrying,
-/// well past a deploy's four or five minutes, and bounded so a server that
-/// never comes back does not re-run the privacy scan on the session for
-/// ever.
+/// ([`transient_upload_kind`]) before the entry may end `Failed`. It ends
+/// only once the run is also [`transient_upload_give_up_horizon`] old (see
+/// [`transient_upload_budget_spent`]).
 const MAX_TRANSIENT_UPLOAD_FAILURES: u32 = 12;
+
+/// How long a run of transient upload failures must last before the entry
+/// may end `Failed`: the unjittered schedule, every wait of
+/// [`transient_upload_retry_delay`] from the first failure to the last one
+/// counted, 21,780 s or about six hours. Well past a deploy's four or five
+/// minutes, and bounded so a server that never comes back does not re-run
+/// the privacy scan on the session for ever.
+fn transient_upload_give_up_horizon() -> chrono::Duration {
+    (1..MAX_TRANSIENT_UPLOAD_FAILURES)
+        .map(transient_upload_retry_delay)
+        .fold(chrono::Duration::zero(), |total, wait| total + wait)
+}
+
+/// Whether a run of `failures` transient upload failures, the first at
+/// `run_started`, has spent its budget at `now`.
+///
+/// Both the count and the horizon must be reached. The waits are jittered
+/// ([`transient_upload_retry_wait`]), so twelve failures can come in about
+/// three hours; the horizon keeps the entry approved through the outage the
+/// unjittered schedule survived, retrying at the capped wait meanwhile. The
+/// count keeps a machine that slept through most of an outage from giving
+/// up on its first try after waking. A run with no recorded start never
+/// gives up; the caller stamps one on every failure, so that cannot last.
+fn transient_upload_budget_spent(
+    failures: u32,
+    run_started: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    failures >= MAX_TRANSIENT_UPLOAD_FAILURES
+        && run_started.is_some_and(|started| now - started >= transient_upload_give_up_horizon())
+}
 
 /// Why an upload reached no verdict for a reason that clears on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4876,6 +4906,90 @@ mod tests {
         // A hint above the client's cap is bounded by it.
         let capped = transient_upload_retry_wait(1, Some(u32::MAX), 7).num_seconds();
         assert_eq!(capped, i64::from(crate::submit::RATE_LIMIT_MAX_RETRY_SECS));
+    }
+
+    /// The give-up horizon is the old unjittered schedule: every wait from
+    /// the first failure to the last one counted, summed (#1805 review).
+    #[test]
+    fn transient_upload_give_up_horizon_is_the_unjittered_schedule() {
+        let total: i64 = (1..MAX_TRANSIENT_UPLOAD_FAILURES)
+            .map(|f| transient_upload_retry_delay(f).num_seconds())
+            .sum();
+        assert_eq!(total, 21_780);
+        assert_eq!(transient_upload_give_up_horizon().num_seconds(), total);
+    }
+
+    /// Jitter must never shorten how long an entry survives an outage. With
+    /// every wait drawn at its shortest, twelve failures arrive after about
+    /// three hours; the entry still keeps its approval until the old
+    /// six-hour schedule has run out.
+    #[test]
+    fn jitter_never_shortens_the_transient_upload_give_up_horizon() {
+        let started = chrono::DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let horizon = transient_upload_give_up_horizon();
+        // Draw each wait at the bottom of its range: the shortest outage
+        // that reaches the count.
+        let mut now = started;
+        for failures in 1..MAX_TRANSIENT_UPLOAD_FAILURES {
+            assert!(!transient_upload_budget_spent(failures, Some(started), now));
+            let shortest = transient_upload_retry_wait(failures, None, 0);
+            assert_eq!(
+                shortest.num_seconds(),
+                transient_upload_retry_delay(failures).num_seconds() / 2
+            );
+            now += shortest;
+        }
+        assert!(
+            now - started < horizon,
+            "the shortest run is under the horizon"
+        );
+        assert!(
+            !transient_upload_budget_spent(MAX_TRANSIENT_UPLOAD_FAILURES, Some(started), now),
+            "twelve fast failures inside the horizon must not give up"
+        );
+        // It keeps going, past the count, until the horizon is reached.
+        let just_short = started + horizon - chrono::Duration::seconds(1);
+        assert!(!transient_upload_budget_spent(
+            MAX_TRANSIENT_UPLOAD_FAILURES + 5,
+            Some(started),
+            just_short
+        ));
+        assert!(transient_upload_budget_spent(
+            MAX_TRANSIENT_UPLOAD_FAILURES + 5,
+            Some(started),
+            started + horizon
+        ));
+    }
+
+    /// Time alone is not enough either: a machine asleep through most of an
+    /// outage wakes past the horizon, and must still make the full count of
+    /// attempts before it gives up.
+    #[test]
+    fn a_transient_upload_run_gives_up_only_with_both_the_count_and_the_horizon() {
+        let started = chrono::DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let long_after = started + chrono::Duration::days(2);
+        for failures in 1..MAX_TRANSIENT_UPLOAD_FAILURES {
+            assert!(
+                !transient_upload_budget_spent(failures, Some(started), long_after),
+                "{failures} failures after a long sleep"
+            );
+        }
+        assert!(transient_upload_budget_spent(
+            MAX_TRANSIENT_UPLOAD_FAILURES,
+            Some(started),
+            long_after
+        ));
+        // A run with no start recorded (an entry from before the start was
+        // kept) never gives up on the count alone.
+        assert!(!transient_upload_budget_spent(
+            MAX_TRANSIENT_UPLOAD_FAILURES + 50,
+            None,
+            long_after
+        ));
     }
 
     #[test]
