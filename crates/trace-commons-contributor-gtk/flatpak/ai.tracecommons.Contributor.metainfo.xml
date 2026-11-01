@@ -64,7 +64,7 @@
   <releases>
     <release version="0.21.1" date="2026-11-01">
       <description>
-        <p>Keeps uploads retrying for at least six hours during an outage, and keeps a NEAR AI session's models inside its privacy tier when a project's Claude Code settings choose a model.</p>
+        <p>Keeps a NEAR AI session's models inside its privacy tier when a project's Claude Code settings choose a model, keeps uploads retrying for at least six hours during an outage, and reports final credit as earned in the daily digest.</p>
       </description>
     </release>
     <release version="0.21.0" date="2026-11-01">
