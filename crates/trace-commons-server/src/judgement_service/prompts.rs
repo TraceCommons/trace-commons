@@ -1,7 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The three pinned prompts and their versions (spec section 7).
+//! The four pinned prompts and their versions (spec section 7): three over
+//! a session digest, and `stuck` over the economizer's turn digest.
 //!
 //! Each prompt is a text file under `prompts/`, compiled in with
 //! `include_str!`, so it is in the image and therefore in the measurement.
@@ -114,12 +115,20 @@ pub static FINISHED_V1: Prompt = Prompt {
     text: include_str!("prompts/finished-v1.txt"),
 };
 
+pub static STUCK_V1: Prompt = Prompt {
+    kind: JudgementKind::Stuck,
+    name: "stuck",
+    version: 1,
+    text: include_str!("prompts/stuck-v1.txt"),
+};
+
 /// The prompt the service uses for a judgement.
 pub fn prompt_for(kind: JudgementKind) -> &'static Prompt {
     match kind {
         JudgementKind::Task => &TASK_V1,
         JudgementKind::EventKind => &EVENT_KIND_V1,
         JudgementKind::Finished => &FINISHED_V1,
+        JudgementKind::Stuck => &STUCK_V1,
     }
 }
 
@@ -129,7 +138,9 @@ pub fn prompt_for(kind: JudgementKind) -> &'static Prompt {
 pub fn fallback_label(kind: JudgementKind) -> JudgementLabel {
     match kind {
         JudgementKind::Task => JudgementLabel::Other,
-        JudgementKind::EventKind | JudgementKind::Finished => JudgementLabel::Unclear,
+        JudgementKind::EventKind | JudgementKind::Finished | JudgementKind::Stuck => {
+            JudgementLabel::Unclear
+        }
     }
 }
 
@@ -272,10 +283,11 @@ mod tests {
     /// The one exception is a change to what is hashed rather than to any
     /// value: v1 was re-pinned in place when the call settings and the
     /// fallback were added to the hash, before any v1 label was served.
-    const PINS: [(&Prompt, &str); 3] = [
+    const PINS: [(&Prompt, &str); 4] = [
         (&TASK_V1, "task-v1+sha256:8638a175f575"),
         (&EVENT_KIND_V1, "event-kind-v1+sha256:2bb523279ac9"),
         (&FINISHED_V1, "finished-v1+sha256:1274085b4ff8"),
+        (&STUCK_V1, "stuck-v1+sha256:3cc2f90572be"),
     ];
 
     #[test]
@@ -298,6 +310,7 @@ mod tests {
             JudgementKind::Task,
             JudgementKind::EventKind,
             JudgementKind::Finished,
+            JudgementKind::Stuck,
         ] {
             let prompt = prompt_for(kind);
             assert_eq!(prompt.kind(), kind);
