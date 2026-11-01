@@ -184,6 +184,10 @@ path = "src/bin/trace-commons-smoke-envelope.rs"
 name = "trace-commons-witness"
 path = "src/bin/trace-commons-witness.rs"
 
+[[bin]]
+name = "trace-commons-judgement"
+path = "src/bin/trace-commons-judgement.rs"
+
 # The staging NEAR AI pin re-sign tool: observes NEAR AI staging's enclave
 # measurements and signs the pin set a staging app trusts. Operators run it;
 # nothing ships it. `observe` also needs `near-attestation-collateral` to

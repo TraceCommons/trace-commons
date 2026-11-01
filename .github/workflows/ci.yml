@@ -73,6 +73,25 @@ jobs:
         run: |
           scripts/ci/check-release-credential-store.sh check
           scripts/ci/check-release-credential-store.sh self-test
+      # Seconds, no build. The judgement development features
+      # (`judgement-development-models` in the server, and the daemon's
+      # `judgement-development`) must never reach a release, a shipped
+      # crate's default, or the production judgement image; the unit tests
+      # never read a release workflow or a Dockerfile, so this does. The
+      # self-test seeds each violation and requires a refusal.
+      - name: No shipped build enables a judgement development feature
+        run: |
+          scripts/ci/check-release-judgement-features.sh check
+          scripts/ci/check-release-judgement-features.sh self-test
+      # Seconds, no build. A committed judgement compose read-back
+      # (deploy/judgement/compose-readback.<profile>.json, the
+      # `compose_file` that `phala cvms get --json` reports) must show the
+      # hardened manifest: logs and sysinfo private, only the expected
+      # allowed_envs, no DSTACK_AUTHORIZED_KEYS, no SSH pre-launch step.
+      - name: Committed judgement compose read-backs are hardened
+        run: |
+          scripts/ci/check-judgement-compose-readback.sh check
+          scripts/ci/check-judgement-compose-readback.sh self-test
       # Seconds, no build. `near-ai-staging` switches the compiled-in NEAR AI
       # host (server, ingest and the contributor daemon) to NEAR AI staging,
       # for the payout staging run only. This refuses any release, packaging
@@ -1466,6 +1485,66 @@ jobs:
           cargo test -p trace-commons-ingest --features near-attestation-collateral --lib near_attestation 2>&1 | tee ingest-near-attestation.log
           grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' ingest-near-attestation.log
       - run: cargo test -p trace-commons-attestation --features collateral-client
+      # Last, so every step above still has its binaries; see the action for
+      # what is removed and why, and for why only a push to main saves.
+      - uses: ./.github/actions/trim-cargo-cache
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  judgement-development-models:
+    name: judgement service (judgement-development-models)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - id: cargo-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-judgement-development-models-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-judgement-development-models-
+      # No other job enables `judgement-development-models`, so without this
+      # job the judgement service's boot rules that only that feature
+      # compiles (the remaining-configuration refusals, and the mock never
+      # reaching the production allowlist) never run, and the development
+      # image's own feature set (this feature, without
+      # `near-attestation-collateral`) is compiled only by the manual
+      # judgement-image workflow.
+      - name: clippy, the development image's feature set
+        env:
+          RUSTFLAGS: -D warnings
+        run: >-
+          cargo clippy -p trace-commons-server --bin trace-commons-judgement
+          --features judgement-development-models --
+          -A clippy::type_complexity -A clippy::collapsible_if
+          -A clippy::manual_option_as_slice -A clippy::useless_vec
+          -A clippy::redundant_pattern_matching
+      # A filter that matches nothing passes with "0 passed", so the step
+      # names the two feature-gated boot tests and requires both ran.
+      - name: judgement service tests (judgement-development-models)
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --lib --features judgement-development-models -- judgement_service 2>&1 | tee judgement-development-models.log
+          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' judgement-development-models.log
+          grep -q 'the_remaining_configuration_refuses_in_order \.\.\. ok' judgement-development-models.log
+          grep -q 'a_development_build_registers_the_mock_and_never_on_the_production_allowlist \.\.\. ok' judgement-development-models.log
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why, and for why only a push to main saves.
       - uses: ./.github/actions/trim-cargo-cache

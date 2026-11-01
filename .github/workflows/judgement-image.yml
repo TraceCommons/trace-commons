@@ -1,0 +1,199 @@
+# Build and publish an Insights judgement service image, and print the
+# digest to pin.
+#
+# Copied from witness-image.yml, and manual only for the same reason: a
+# measurement pins an artifact, so cutting one is a deliberate act. There is
+# no pull_request or push trigger, so nothing here publishes from a PR.
+#
+# Two profiles, two image names, never one image for both (spec section 2,
+# docs/superpowers/specs/2026-10-20-insights-judgement-service-design.md):
+#
+#   production   ghcr.io/tracecommons/trace-commons-judgement
+#   development  ghcr.io/tracecommons/trace-commons-judgement-development
+#
+# The build is not reproducible, so this runs on a public runner whose log
+# says who built the artifact a measurement pins. No `target` cache: the
+# image compiles inside docker, so there is nothing for actions/cache or the
+# trim-cargo-cache step to hold.
+name: judgement-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Which image to build
+        type: choice
+        options:
+          - production
+          - development
+        required: true
+      ref:
+        description: Commit or ref to build (defaults to the branch this is run from)
+        type: string
+        required: false
+
+concurrency:
+  group: judgement-image-${{ inputs.profile }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  # Pushing to GHCR.
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 1
+
+      - name: Resolve build identity
+        id: id
+        env:
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          set -euo pipefail
+          case "$PROFILE" in
+            production) image="ghcr.io/tracecommons/trace-commons-judgement" ;;
+            development) image="ghcr.io/tracecommons/trace-commons-judgement-development" ;;
+            *) echo "::error::profile must be production or development"; exit 1 ;;
+          esac
+          commit="$(git rev-parse --short HEAD)"
+          # The commit's own timestamp, not the wall clock (checked below).
+          epoch="$(git log -1 --format=%ct)"
+          {
+            echo "profile=$PROFILE"
+            echo "commit=$commit"
+            echo "epoch=$epoch"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $PROFILE at $commit with SOURCE_DATE_EPOCH=$epoch"
+
+      - name: Build the image
+        run: |
+          set -euo pipefail
+          docker build \
+            -f deploy/judgement/Dockerfile \
+            --build-arg PROFILE="${{ steps.id.outputs.profile }}" \
+            --build-arg TRACE_COMMONS_BUILD_COMMIT="${{ steps.id.outputs.commit }}" \
+            --build-arg SOURCE_DATE_EPOCH="${{ steps.id.outputs.epoch }}" \
+            -t "${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}" \
+            .
+
+      # Read-only root, no network, no dstack socket. Each refusal check
+      # requires the exact label the binary prints, not just a non-zero
+      # exit: a check that passes on any failure cannot tell which rule
+      # refused, and would pass on a crash.
+      - name: Check the image before pushing it
+        env:
+          PROFILE: ${{ steps.id.outputs.profile }}
+          IMG: ${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}
+          EPOCH: ${{ steps.id.outputs.epoch }}
+        run: |
+          set -euo pipefail
+          run() { docker run --rm --read-only --tmpfs /tmp --network none "$@"; }
+
+          # A public test-vector Ed25519 key (RFC 8032, test 1). Never an
+          # issuer's.
+          issuer="d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+          mock="trace-commons/mock-judgement-model"
+          configured=(
+            -e TRACE_COMMONS_JUDGEMENT_ISSUER_PUBLIC_KEYS="$issuer"
+            -e TRACE_COMMONS_JUDGEMENT_ACCOUNT_MONTHLY_CAP_USD=5
+            -e TRACE_COMMONS_JUDGEMENT_OPERATOR_MONTHLY_BUDGET_USD=100
+          )
+
+          expect_refusal() {
+            local what="$1" label="$2"; shift 2
+            echo "--- $what"
+            local out
+            if out="$(run "$@" "$IMG" 2>&1)"; then
+              echo "$out"
+              echo "::error::$what: the service started; it must refuse with $label"
+              exit 1
+            fi
+            echo "$out"
+            if ! grep -q "judgement_boot_refused: $label" <<<"$out"; then
+              echo "::error::$what: refused, but not with $label"
+              exit 1
+            fi
+            echo "ok: $label"
+          }
+
+          echo "--- 1. the runtime image resolves every library the binary links"
+          version_out="$(run "$IMG" --version)"
+          echo "$version_out"
+
+          echo "--- 1b. SOURCE_DATE_EPOCH took"
+          expected="$(date -u -d "@$EPOCH" +%Y-%m-%d)"
+          if ! grep -q "$expected" <<<"$version_out"; then
+            echo "::error::SOURCE_DATE_EPOCH did not take: --version does not carry $expected"
+            exit 1
+          fi
+          echo "ok: stamped $expected"
+
+          expect_refusal "2. boot refuses with no model configured" \
+            judgement_model_unconfigured
+
+          # Jev is a development placeholder, and its adapter is slice 6:
+          # no image of this slice may call it.
+          expect_refusal "3. boot refuses a development model (Jev)" \
+            judgement_model_not_allowlisted \
+            -e TRACE_COMMONS_JUDGEMENT_MODEL=typesafe/jev-1.13 "${configured[@]}"
+
+          if [ "$PROFILE" = production ]; then
+            # The mock is compiled out of the production binary.
+            expect_refusal "4. a production image refuses the mock" \
+              judgement_model_not_allowlisted \
+              -e TRACE_COMMONS_JUDGEMENT_MODEL="$mock" "${configured[@]}"
+            # The production allowlist is empty until slice 9 (owner
+            # decision 1), so every model refuses at the model check and
+            # the volume and guest-agent checks cannot be reached on this
+            # image. They run on the development image.
+            echo "note: volume and guest-agent checks run on the development image"
+          else
+            # /data exists in the image, owned by the service user, but
+            # nothing is mounted on it: that is not the volume.
+            expect_refusal "4. boot refuses with no limiter volume" \
+              judgement_limiter_volume_absent \
+              -e TRACE_COMMONS_JUDGEMENT_MODEL="$mock" "${configured[@]}"
+            expect_refusal "5. boot refuses with no dstack guest agent" \
+              judgement_enclave_unavailable \
+              --tmpfs /data:rw,uid=10001,gid=10001 \
+              -e TRACE_COMMONS_JUDGEMENT_MODEL="$mock" "${configured[@]}"
+          fi
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push
+        run: docker push "${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}"
+
+      - name: Report the digest to pin
+        env:
+          PROFILE: ${{ steps.id.outputs.profile }}
+          IMG: ${{ steps.id.outputs.image }}:${{ steps.id.outputs.commit }}
+        run: |
+          set -euo pipefail
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG")"
+          echo "$digest"
+          if [ "$PROFILE" = production ]; then
+            compose="deploy/judgement/docker-compose.yml"
+          else
+            compose="deploy/judgement/docker-compose.development.yml"
+          fi
+          {
+            echo "## Judgement image ($PROFILE)"
+            echo
+            echo '```'
+            echo "$digest"
+            echo '```'
+            echo
+            echo "Pin that digest in \`$compose\`. The tag is a moving"
+            echo "target, and a measurement pinned over one pins nothing."
+          } >> "$GITHUB_STEP_SUMMARY"
