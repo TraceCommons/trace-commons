@@ -301,13 +301,14 @@ public extension ManagedSurface {
         !session.holdsAccount && session.canResume && terminalLaunch && resumeCapable
     }
 
-    /// The buttons drawn on the row: an ended row's Resume, or Start again
-    /// when it has no Resume, then Dismiss. Start again moves into the menu
-    /// when Resume is offered (`rowMenuItems`). A running row draws none.
+    /// The one visible action on the row (owner, 2026-11-01: fewer things on
+    /// a crowded row): an ended row's Resume, or Start again when it has no
+    /// Resume, or Dismiss when nothing else is offered. Everything else is in
+    /// the menu (`rowMenuItems`). A row that holds its account draws none.
     static func rowButtons(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
         guard !session.holdsAccount else { return [] }
-        if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) { return [.resume, .dismiss] }
-        return (session.canStartAgain && terminalLaunch ? [.startAgain] : []) + [.dismiss]
+        if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) { return [.resume] }
+        return [session.canStartAgain && terminalLaunch ? .startAgain : .dismiss]
     }
 
     /// Whether an ended row offers "Copy resume command": the row can resume
@@ -317,18 +318,25 @@ public extension ManagedSurface {
     }
 
     /// The items in the row's menu: Show and Stop for a running row; for an
-    /// ended row that offers Resume, Start again; then Copy resume command
-    /// when the row offers it (#1799 put it in the menu, not on the row).
+    /// ended row, Start again (when Resume is the button), Copy resume
+    /// command, then Dismiss (unless Dismiss is the button).
     static func rowMenuItems(
         _ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false, configDirectoryKnown: Bool = false
     ) -> [ManagedSessionAction] {
         if session.state == "running" { return menuActions(session) }
+        guard !session.holdsAccount else { return [] }
+        let buttons = rowButtons(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable)
         var items: [ManagedSessionAction] = []
-        if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable), session.canStartAgain {
-            items.append(.startAgain)
-        }
+        if buttons == [.resume], session.canStartAgain, terminalLaunch { items.append(.startAgain) }
         if offersCopyResumeCommand(session, configDirectoryKnown: configDirectoryKnown) { items.append(.copyResumeCommand) }
+        if buttons != [.dismiss] { items.append(.dismiss) }
         return items
+    }
+
+    /// The model as the row names it: NEAR AI's display name when the
+    /// catalogue gave one, else the id the session recorded.
+    static func modelLabel(_ id: String, names: [String: String]) -> String {
+        names[id].flatMap { $0.isEmpty ? nil : $0 } ?? id
     }
 
     /// The row's continuation marker, "Resumed · Continues 2:14 PM": the

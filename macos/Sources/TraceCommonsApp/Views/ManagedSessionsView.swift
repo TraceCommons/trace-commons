@@ -21,6 +21,10 @@ struct ManagedSessionsSection: View {
     @State private var stopping: ManagedSession?
     /// The session whose row menu is open.
     @State private var menuFor: String?
+    /// NEAR AI's display names by model id, read once per tool, so a row
+    /// names its model as the picker does.
+    @State private var modelNames: [String: String] = [:]
+    @State private var modelNamesRead: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
@@ -273,7 +277,7 @@ struct ManagedSessionsSection: View {
             session.accountLabel,
             model.managedText(session.connection),
         ].compactMap { $0 }.filter { !$0.isEmpty }
-        if let selectedModel = session.model { meta.append(selectedModel) }
+        if let selectedModel = session.model { meta.append(ManagedSurface.modelLabel(selectedModel, names: modelNames)) }
         if let collection = session.collection, ["off", "pending", "collected", "failed"].contains(collection) {
             meta.append(model.managedText("collection_" + collection))
         }
@@ -284,23 +288,70 @@ struct ManagedSessionsSection: View {
             session, resumed: model.managedText("resumed"), resumedFrom: model.managedText("resumed_from")) {
             meta.append(marker)
         }
-        let row = HStack(spacing: GlassTokens.Space.s4) {
-            GlassToolTile(.tool(ManagedWords.glassTool(session.tool)))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(session.purpose == "login" ? model.managedText("sign_in") : session.projectLabel)
-                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(1)
-                Text(ManagedSurface.caption(meta, startedAt: session.startedAt))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .lineLimit(1)
+        let title = session.purpose == "login" ? model.managedText("sign_in") : session.projectLabel
+        let caption = ManagedSurface.caption(meta, startedAt: session.startedAt)
+        let status = GlassStatusLabel(model.managedText(ManagedSurface.stateKey(session.state)), status: ManagedWords.status(session.state))
+        let actions = ManagedSessionActions(session: session, menuFor: $menuFor, onStop: { stopping = session })
+        // Title, then model, then status, then actions keep their room in
+        // that order: the wide layout is tried first at its natural width,
+        // and when it does not fit, the status and actions move to a second
+        // line so no text is cut (owner, 2026-11-01).
+        let row = ViewThatFits(in: .horizontal) {
+            HStack(spacing: GlassTokens.Space.s4) {
+                GlassToolTile(.tool(ManagedWords.glassTool(session.tool)))
+                sessionText(title: title, caption: caption, lines: 1, natural: true)
+                Spacer(minLength: GlassTokens.Space.s4)
+                status.fixedSize()
+                actions
             }
-            Spacer(minLength: GlassTokens.Space.s4)
-            GlassStatusLabel(model.managedText(ManagedSurface.stateKey(session.state)), status: ManagedWords.status(session.state))
-            ManagedSessionActions(session: session, menuFor: $menuFor, onStop: { stopping = session })
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
+                    GlassToolTile(.tool(ManagedWords.glassTool(session.tool)))
+                    sessionText(title: title, caption: caption, lines: 2, natural: false)
+                }
+                HStack(spacing: GlassTokens.Space.s4) {
+                    Spacer(minLength: 0)
+                    status.fixedSize()
+                    actions
+                }
+            }
         }
         return ManagedSessionRowActions(session: session, onStop: { stopping = session }) { row }
+            .onAppear { loadModelNames() }
+            .onChange(of: session.tool) { loadModelNames() }
+    }
+
+    private func sessionText(title: String, caption: String, lines: Int, natural: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                .foregroundStyle(GlassColor.textPrimary)
+                .lineLimit(lines)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: natural, vertical: !natural)
+                .help(title)
+            Text(caption)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+                .lineLimit(lines)
+                .truncationMode(.middle)
+                .fixedSize(horizontal: natural, vertical: !natural)
+                .help(caption)
+                .accessibilityLabel(caption)
+        }
+        .layoutPriority(1)
+    }
+
+    /// Read the display names for a session's tool, once per tool.
+    private func loadModelNames() {
+        for tool in Set((model.managedSnapshot?.sessions ?? []).filter { $0.model != nil }.map(\.tool))
+        where !modelNamesRead.contains(tool) {
+            modelNamesRead.insert(tool)
+            model.managedModelCatalogue(tool: tool) { catalogue in
+                guard let catalogue else { modelNamesRead.remove(tool); return }
+                for entry in catalogue.models { if let name = entry.name, !name.isEmpty { modelNames[entry.id] = name } }
+            }
+        }
     }
 }
 
@@ -711,6 +762,7 @@ struct ManagedSessionActions: View {
             .disabled(model.managedBusy)
         }
         if actions.contains(.dismiss) {
+            // Dismiss is the row's only action, so it stays a link.
             Button(model.managedText("dismiss")) {
                 model.managedAction("managed_session_dismiss", params: ["session_id": session.id])
             }
@@ -748,6 +800,12 @@ struct ManagedSessionActions: View {
                         GlassMenuItem(model.managedText("copy_resume_command")) {
                             menuFor = nil
                             copyResumeCommand()
+                        }
+                    }
+                    if actions.contains(.dismiss) {
+                        GlassMenuItem(model.managedText("dismiss")) {
+                            menuFor = nil
+                            model.managedAction("managed_session_dismiss", params: ["session_id": session.id])
                         }
                     }
                 }

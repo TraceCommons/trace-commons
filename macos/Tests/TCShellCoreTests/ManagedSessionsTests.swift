@@ -316,24 +316,35 @@ final class ManagedSessionsTests: XCTestCase {
 
     func testRowButtonsAndMenuSplitWhenResumeIsOffered() throws {
         let both = try session("exited", again: true, resume: true)
-        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: true), [.resume, .dismiss])
-        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true), [.startAgain])
-        // Without Resume, Start again stays the glass button and the menu is empty.
+        // One visible action; Start again and Dismiss are in the menu.
+        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: true), [.resume])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true), [.startAgain, .dismiss])
+        // Without Resume, Start again is the button and Dismiss the menu.
         let again = try session("exited", again: true)
-        XCTAssertEqual(ManagedSurface.rowButtons(again, terminalLaunch: true, resumeCapable: true), [.startAgain, .dismiss])
-        XCTAssertEqual(ManagedSurface.rowMenuItems(again, terminalLaunch: true, resumeCapable: true), [])
-        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: false), [.startAgain, .dismiss])
-        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true), [])
+        XCTAssertEqual(ManagedSurface.rowButtons(again, terminalLaunch: true, resumeCapable: true), [.startAgain])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(again, terminalLaunch: true, resumeCapable: true), [.dismiss])
+        XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: true, resumeCapable: false), [.startAgain])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true), [.dismiss])
+        // Nothing to launch: Dismiss alone, visible, no menu.
         XCTAssertEqual(ManagedSurface.rowButtons(both, terminalLaunch: false, resumeCapable: true), [.dismiss])
         XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: false, resumeCapable: true), [])
-        // Resume without Start again: Resume and Dismiss, an empty menu.
         let resumeOnly = try session("exited", resume: true)
-        XCTAssertEqual(ManagedSurface.rowButtons(resumeOnly, terminalLaunch: true, resumeCapable: true), [.resume, .dismiss])
-        XCTAssertEqual(ManagedSurface.rowMenuItems(resumeOnly, terminalLaunch: true, resumeCapable: true), [])
+        XCTAssertEqual(ManagedSurface.rowButtons(resumeOnly, terminalLaunch: true, resumeCapable: true), [.resume])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(resumeOnly, terminalLaunch: true, resumeCapable: true), [.dismiss])
         // A running row keeps Show and Stop in the menu and draws no buttons.
         let running = try session("running", focus: true, stop: true)
         XCTAssertEqual(ManagedSurface.rowButtons(running, terminalLaunch: true, resumeCapable: true), [])
         XCTAssertEqual(ManagedSurface.rowMenuItems(running, terminalLaunch: true, resumeCapable: true), [.show, .stop])
+        // A row still holding its account draws neither.
+        let starting = try session("starting")
+        XCTAssertEqual(ManagedSurface.rowButtons(starting, terminalLaunch: true, resumeCapable: true), [])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(starting, terminalLaunch: true, resumeCapable: true), [])
+    }
+
+    func testModelLabelPrefersTheCatalogueName() {
+        XCTAssertEqual(ManagedSurface.modelLabel("z-ai/glm-5.3", names: ["z-ai/glm-5.3": "GLM 5.3 Flash"]), "GLM 5.3 Flash")
+        XCTAssertEqual(ManagedSurface.modelLabel("z-ai/glm-5.3", names: [:]), "z-ai/glm-5.3")
+        XCTAssertEqual(ManagedSurface.modelLabel("m", names: ["m": ""]), "m")
     }
 
     func testCopyResumeCommandIsAMenuItemNotARowButton() throws {
@@ -343,17 +354,17 @@ final class ManagedSessionsTests: XCTestCase {
         // In the menu once the config directory is known, after Start again.
         XCTAssertEqual(
             ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true),
-            [.startAgain, .copyResumeCommand])
-        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true), [.startAgain])
+            [.startAgain, .copyResumeCommand, .dismiss])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(both, terminalLaunch: true, resumeCapable: true), [.startAgain, .dismiss])
         // Resume only: the menu holds just the copy item.
         let resumeOnly = try session("exited", resume: true)
         XCTAssertEqual(
             ManagedSurface.rowMenuItems(resumeOnly, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true),
-            [.copyResumeCommand])
+            [.copyResumeCommand, .dismiss])
         // A row that cannot resume, or is running, never offers it.
         let again = try session("exited", again: true)
         XCTAssertEqual(
-            ManagedSurface.rowMenuItems(again, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true), [])
+            ManagedSurface.rowMenuItems(again, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true), [.dismiss])
         let running = try session("running", focus: true, stop: true)
         XCTAssertEqual(
             ManagedSurface.rowMenuItems(running, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true),

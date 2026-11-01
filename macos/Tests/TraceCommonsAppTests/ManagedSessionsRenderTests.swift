@@ -143,16 +143,53 @@ final class ManagedSessionsRenderTests: XCTestCase {
         model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
         let rows = try XCTUnwrap(model.managedSnapshot?.sessions)
         let resumeCapable = model.managedSnapshot?.capabilities.resume == true
-        XCTAssertEqual(rows.map { ManagedSurface.rowButtons($0, terminalLaunch: true, resumeCapable: resumeCapable) }, [[], [], [.resume, .dismiss]])
-        XCTAssertEqual(rows.map { ManagedSurface.rowMenuItems($0, terminalLaunch: true, resumeCapable: resumeCapable) }, [[.show, .stop], [], [.startAgain]])
-        XCTAssertEqual(ManagedSurface.rowButtons(rows[2], terminalLaunch: true, resumeCapable: true), [.resume, .dismiss])
-        XCTAssertEqual(ManagedSurface.rowMenuItems(rows[2], terminalLaunch: true, resumeCapable: true), [.startAgain])
+        XCTAssertEqual(rows.map { ManagedSurface.rowButtons($0, terminalLaunch: true, resumeCapable: resumeCapable) }, [[], [], [.resume]])
+        XCTAssertEqual(rows.map { ManagedSurface.rowMenuItems($0, terminalLaunch: true, resumeCapable: resumeCapable) }, [[.show, .stop], [], [.startAgain, .dismiss]])
+        XCTAssertEqual(ManagedSurface.rowButtons(rows[2], terminalLaunch: true, resumeCapable: true), [.resume])
+        XCTAssertEqual(ManagedSurface.rowMenuItems(rows[2], terminalLaunch: true, resumeCapable: true), [.startAgain, .dismiss])
         XCTAssertNotNil(rows[2].resumedFrom)
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
         try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 640), to: directory.appendingPathComponent("managed-session-actions.png"))
         try render(ManagedStopSheet(session: rows[0], onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 240), to: directory.appendingPathComponent("managed-stop.png"))
+    }
+
+    /// Every row state at a wide and a narrow width, to PNG for review
+    /// (TRACE_COMMONS_SCREENSHOT_DIR), off screen.
+    @MainActor
+    func testSessionRowStatesRenderWideAndNarrow() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let fixture = try Data(contentsOf: repository.appendingPathComponent("tests/fixtures/managed/snapshot.json"))
+        var value = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
+        let base = try XCTUnwrap((value["sessions"] as? [[String: Any]])?.first)
+        func row(_ id: Int, _ state: String, _ edit: (inout [String: Any]) -> Void = { _ in }) -> [String: Any] {
+            var r = base
+            r["id"] = "00000000-0000-0000-0000-00000000010\(id)"
+            r["state"] = state
+            r["model"] = "z-ai/glm-5.3-flash-with-a-long-id"
+            r["project_label"] = "VolumeFi Invoice data"
+            r["can_focus"] = false; r["can_stop"] = false; r["can_start_again"] = false; r["can_resume"] = false
+            edit(&r)
+            return r
+        }
+        value["capabilities"] = (value["capabilities"] as? [String: Any] ?? [:]).merging(["resume": true, "terminal_launch": true]) { $1 }
+        value["sessions"] = [
+            row(1, "running") { $0["can_focus"] = true; $0["can_stop"] = true },
+            row(2, "starting"),
+            row(3, "exited") { $0["can_resume"] = true; $0["can_start_again"] = true; $0["exit_code"] = 0 },
+            row(4, "failed") { $0["can_resume"] = true; $0["exit_code"] = 1 },
+            row(5, "exited") { $0["can_start_again"] = true },
+            row(6, "failed"),
+            row(7, "something-new"),
+        ]
+        let model = AppModel()
+        model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
+        let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
+        try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 900, height: 900), to: directory.appendingPathComponent("rows-wide.png"))
+        try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 420, height: 1200), to: directory.appendingPathComponent("rows-narrow.png"))
     }
 
     @MainActor
