@@ -175,8 +175,9 @@ app; changing collection staging rules.
   executable path (re-resolving deferred: the daemon's PATH may not see the
   terminal's tool); other plan fields are checked against the registry row.
 - UI as built: Resume primary; Start again, Copy resume command and
-  Dismiss are items in the row menu (Dismiss stays a link only when it is
-  the row's sole action); after Copy resume command the row's status reads
+  Dismiss are items in the row menu (Dismiss stays a link when neither
+  Resume nor Start again is offered, even if the menu holds Copy resume
+  command); after Copy resume command the row's status reads
   "Copied" with a neutral dot for 2 s;
   resumed rows show "Resumed · Continues <time>" (`SessionView.resumed_from`,
   stored at prepare time).

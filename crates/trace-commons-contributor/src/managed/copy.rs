@@ -46,7 +46,9 @@
 //!   with the row's folder name.
 //! - `start_again` "Start again" -- an ended row's glass button when it
 //!   has no `resume`; otherwise an item in the row's menu. `dismiss` is that
-//!   row's menu item too, except when it is the row's only action.
+//!   row's menu item too, unless neither `resume` nor `start_again` is
+//!   offered; then it is a link, even when the menu holds
+//!   `copy_resume_command`.
 //!
 //! Resuming a session (design agreed 2026-10-31,
 //! `docs/superpowers/specs/2026-10-31-managed-session-resume-design.md`):

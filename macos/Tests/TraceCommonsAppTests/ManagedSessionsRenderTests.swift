@@ -188,25 +188,66 @@ final class ManagedSessionsRenderTests: XCTestCase {
         model.managedSnapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
         let rows = try XCTUnwrap(model.managedSnapshot?.sessions)
         XCTAssertEqual(rows.count, 7)
-        // Each state's one button and its menu (the config directory is
-        // unknown here, so no Copy resume command).
-        let expected: [([ManagedSessionAction], [ManagedSessionAction])] = [
-            ([], [.show, .stop]), ([], []),
-            ([.resume], [.startAgain, .dismiss]), ([.resume], [.dismiss]),
-            ([.startAgain], [.dismiss]), ([.dismiss], []), ([], []),
+        // What the row view draws for each state, from the same inputs it
+        // passes (`ManagedSessionActions.drawn`): one visible action at
+        // most, the rest in the menu. With the config directory unknown the
+        // menu has no Copy resume command; known, it has one exactly where a
+        // resumable ended row is.
+        let expected: [(buttons: [ManagedSessionAction], menu: [ManagedSessionAction], menuKnown: [ManagedSessionAction])] = [
+            ([], [.show, .stop], [.show, .stop]),
+            ([], [], []),
+            ([.resume], [.startAgain, .dismiss], [.startAgain, .copyResumeCommand, .dismiss]),
+            ([.resume], [.dismiss], [.copyResumeCommand, .dismiss]),
+            ([.startAgain], [.dismiss], [.dismiss]),
+            ([.dismiss], [], []),
+            ([], [], []),
         ]
         for (index, session) in rows.enumerated() {
-            let buttons = ManagedSurface.rowButtons(session, terminalLaunch: true, resumeCapable: true)
-            let items = ManagedSurface.rowMenuItems(session, terminalLaunch: true, resumeCapable: true)
-            XCTAssertLessThanOrEqual(buttons.count, 1, "row \(index + 1) draws more than one visible action")
-            XCTAssertEqual(buttons, expected[index].0, "row \(index + 1) buttons")
-            XCTAssertEqual(items, expected[index].1, "row \(index + 1) menu")
+            let unknown = ManagedSessionActions.drawn(session, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: false)
+            let known = ManagedSessionActions.drawn(session, terminalLaunch: true, resumeCapable: true, configDirectoryKnown: true)
+            XCTAssertLessThanOrEqual(known.0.count, 1, "row \(index + 1) draws more than one visible action")
+            XCTAssertEqual(unknown.0, expected[index].buttons, "row \(index + 1) buttons")
+            XCTAssertEqual(unknown.1, expected[index].menu, "row \(index + 1) menu")
+            XCTAssertEqual(known.1, expected[index].menuKnown, "row \(index + 1) menu with the config directory known")
         }
+        // A resumable row without a terminal keeps Dismiss as its link and
+        // Copy resume command in the menu.
+        let noTerminal = ManagedSessionActions.drawn(rows[2], terminalLaunch: false, resumeCapable: true, configDirectoryKnown: true)
+        XCTAssertEqual(noTerminal.0, [.dismiss])
+        XCTAssertEqual(noTerminal.1, [.copyResumeCommand])
         let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"].map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
         try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 900, height: 900), to: directory.appendingPathComponent("rows-wide.png"))
         try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 420, height: 1200), to: directory.appendingPathComponent("rows-narrow.png"))
+    }
+
+    /// The row layout itself: one line when everything fits (900 pt), two
+    /// when it does not (420 pt) with the text wrapped, never cut, and the
+    /// trailing views no wider than the row.
+    @MainActor
+    func testSessionRowLayoutWrapsToTwoLinesInsteadOfCutting() throws {
+        func height(_ width: CGFloat, trailing: CGFloat = 200) -> CGFloat {
+            let view = SessionRowLayout(spacing: 8, lineSpacing: 6) {
+                Color.clear.frame(width: 40, height: 40)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("VolumeFi Invoice data").font(.system(size: 13, weight: .semibold))
+                    Text("Claude Code \u{00B7} Personal \u{00B7} Subscription \u{00B7} z-ai/glm-5.3-flash-with-a-long-id \u{00B7} Exit code 0 \u{00B7} Resumed \u{00B7} Continues 2:14 PM \u{00B7} 3 min ago")
+                        .font(.system(size: 11))
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                Color.clear.frame(width: trailing, height: 28)
+            }
+            let controller = NSHostingController(rootView: view)
+            return controller.sizeThatFits(in: CGSize(width: width, height: 10_000)).height
+        }
+        let wide = height(1_000)
+        let narrow = height(420)
+        XCTAssertEqual(wide, 40, accuracy: 1, "one line: the tile's height")
+        // Two lines: the wrapped text beside the tile, then the trailing row.
+        XCTAssertGreaterThan(narrow, wide + 28, "the trailing views sit on a line of their own")
+        // The caption wraps in full: a narrower row is taller, never shorter.
+        XCTAssertGreaterThanOrEqual(height(300), narrow)
     }
 
     @MainActor

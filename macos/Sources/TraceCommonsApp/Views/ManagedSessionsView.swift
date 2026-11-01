@@ -289,21 +289,27 @@ struct ManagedSessionsSection: View {
         let title = session.purpose == "login" ? model.managedText("sign_in") : session.projectLabel
         let caption = ManagedSurface.caption(meta, startedAt: session.startedAt)
         let justCopied = copiedFor?.id == session.id
-        // Both labels are laid out, one drawn, so the status keeps the width
-        // of the wider and a copy never moves the row's layout. While copied
-        // the dot is neutral, so a failed row does not look like a failed copy.
+        // A row that can copy lays out both labels and draws one, so the
+        // status keeps the width of the wider and a copy never moves the
+        // row's layout; a row that cannot copy lays out only its state.
+        // While copied the dot is neutral, so a failed row does not look
+        // like a failed copy.
+        let canCopy = ManagedSurface.offersCopyResumeCommand(session, configDirectoryKnown: !model.configDirectory.isEmpty)
         let status = ZStack(alignment: .trailing) {
             GlassStatusLabel(model.managedText(ManagedSurface.stateKey(session.state)), status: ManagedWords.status(session.state))
                 .opacity(justCopied ? 0 : 1)
                 .accessibilityHidden(justCopied)
-            GlassStatusLabel(model.managedText("copied"), status: .off)
-                .opacity(justCopied ? 1 : 0)
-                .accessibilityHidden(!justCopied)
+            if canCopy {
+                GlassStatusLabel(model.managedText("copied"), status: .off)
+                    .opacity(justCopied ? 1 : 0)
+                    .accessibilityHidden(!justCopied)
+            }
         }
         .fixedSize()
         // One row, one set of actions and one popover. `SessionRowLayout`
         // puts the status and actions after the text when it all fits on one
-        // line, and on a line below when it does not, so no text is cut.
+        // line, and on a line below when it does not. The text wraps with no
+        // line limit, so nothing in it is cut.
         let row = SessionRowLayout(spacing: GlassTokens.Space.s4, lineSpacing: GlassTokens.Space.s3) {
             GlassToolTile(.tool(ManagedWords.glassTool(session.tool)))
             sessionText(title: title, caption: caption)
@@ -311,7 +317,6 @@ struct ManagedSessionsSection: View {
                 status
                 ManagedSessionActions(session: session, menuFor: $menuFor, copiedFor: $copiedFor, onStop: { stopping = session })
             }
-            .fixedSize()
         }
         return ManagedSessionRowActions(session: session, onStop: { stopping = session }) { row }
     }
@@ -321,21 +326,19 @@ struct ManagedSessionsSection: View {
             Text(title)
                 .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                 .foregroundStyle(GlassColor.textPrimary)
-                .lineLimit(2)
-                .help(title)
             Text(caption)
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textTertiary)
-                .lineLimit(2)
-                .help(caption)
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
 /// A session row's layout: tile, text, then the trailing status and
 /// actions. At the width where all three fit on one line the trailing
 /// views sit at the right; otherwise the text takes the full width beside
-/// the tile (up to two lines) and the trailing views sit below, right-aligned.
+/// the tile, wrapping as far as it needs, and the trailing views sit below,
+/// right-aligned and never wider than the row.
 /// The children are the same views either way, so an open menu survives a
 /// resize.
 struct SessionRowLayout: Layout {
@@ -353,7 +356,8 @@ struct SessionRowLayout: Layout {
     private func plan(_ proposal: ProposedViewSize, _ subviews: Subviews) -> Plan {
         let tile = subviews[0].sizeThatFits(.unspecified)
         let ideal = subviews[1].sizeThatFits(.unspecified)
-        let trailing = subviews[2].sizeThatFits(.unspecified)
+        let idealTrailing = subviews[2].sizeThatFits(.unspecified)
+        let trailing = CGSize(width: min(idealTrailing.width, proposal.width ?? idealTrailing.width), height: idealTrailing.height)
         let oneLineWidth = tile.width + spacing + ideal.width + spacing + trailing.width
         let available = proposal.width ?? oneLineWidth
         if oneLineWidth <= available {
@@ -383,7 +387,7 @@ struct SessionRowLayout: Layout {
             let top = max(plan.tile.height, plan.text.height)
             subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.minY), anchor: .topLeading, proposal: ProposedViewSize(plan.tile))
             subviews[1].place(at: CGPoint(x: bounds.minX + plan.tile.width + spacing, y: bounds.minY), anchor: .topLeading, proposal: ProposedViewSize(plan.text))
-            subviews[2].place(at: CGPoint(x: bounds.maxX, y: bounds.minY + top + lineSpacing), anchor: .topTrailing, proposal: ProposedViewSize(plan.trailing))
+            subviews[2].place(at: CGPoint(x: bounds.maxX - plan.trailing.width, y: bounds.minY + top + lineSpacing), anchor: .topLeading, proposal: ProposedViewSize(plan.trailing))
         }
     }
 }
@@ -773,16 +777,26 @@ struct ManagedSessionActions: View {
     let session: ManagedSession
     /// The row whose menu is open, shared with the account rows.
     @Binding var menuFor: String?
-    /// Set to this row's id for about two seconds after the command copies.
+    /// Set to a mark of this row for about two seconds after the command copies.
     @Binding var copiedFor: ManagedCopyMark?
     let onStop: () -> Void
     @EnvironmentObject private var model: AppModel
 
+    /// The one visible action and the menu's items, from the inputs the
+    /// view passes.
+    static func drawn(
+        _ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool, configDirectoryKnown: Bool
+    ) -> ([ManagedSessionAction], [ManagedSessionAction]) {
+        (ManagedSurface.rowButtons(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable),
+         ManagedSurface.rowMenuItems(
+            session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable,
+            configDirectoryKnown: configDirectoryKnown))
+    }
+
     var body: some View {
         let terminalLaunch = model.managedSnapshot?.capabilities.terminalLaunch == true
         let resumeCapable = model.managedSnapshot?.capabilities.resume == true
-        let actions = ManagedSurface.rowButtons(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable)
-        let menuItems = ManagedSurface.rowMenuItems(
+        let (actions, menuItems) = Self.drawn(
             session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable,
             configDirectoryKnown: !model.configDirectory.isEmpty)
         if !menuItems.isEmpty {
