@@ -87,6 +87,8 @@ public enum ManagedSessionAction: Equatable, Sendable {
     case resume
     /// Launch the ended session again, same tool, account and folder.
     case startAgain
+    /// Copy the command line that resumes the session from a terminal.
+    case copyResumeCommand
     /// Take the ended row off the list.
     case dismiss
 }
@@ -299,21 +301,36 @@ public extension ManagedSurface {
         !session.holdsAccount && session.canResume && terminalLaunch && resumeCapable
     }
 
-    /// The buttons drawn on the row: an ended row's Resume, or Start again
-    /// when it has no Resume, then Dismiss. Start again moves into the menu
-    /// when Resume is offered (`rowMenuItems`). A running row draws none.
+    /// The one visible action on the row (owner, 2026-11-01: fewer things on
+    /// a crowded row): an ended row's Resume, or Start again when it has no
+    /// Resume, or Dismiss when nothing else is offered. Everything else is in
+    /// the menu (`rowMenuItems`). A row that holds its account draws none.
     static func rowButtons(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
         guard !session.holdsAccount else { return [] }
-        if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) { return [.resume, .dismiss] }
-        return (session.canStartAgain && terminalLaunch ? [.startAgain] : []) + [.dismiss]
+        if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) { return [.resume] }
+        return [session.canStartAgain && terminalLaunch ? .startAgain : .dismiss]
+    }
+
+    /// Whether an ended row offers "Copy resume command": the row can resume
+    /// and holds no account, and the app knows its config directory.
+    static func offersCopyResumeCommand(_ session: ManagedSession, configDirectoryKnown: Bool) -> Bool {
+        session.canResume && !session.holdsAccount && configDirectoryKnown
     }
 
     /// The items in the row's menu: Show and Stop for a running row; for an
-    /// ended row that offers Resume, Start again.
-    static func rowMenuItems(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
+    /// ended row, Start again (when Resume is the button), Copy resume
+    /// command, then Dismiss (unless Dismiss is the button).
+    static func rowMenuItems(
+        _ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false, configDirectoryKnown: Bool = false
+    ) -> [ManagedSessionAction] {
         if session.state == "running" { return menuActions(session) }
-        guard offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) else { return [] }
-        return session.canStartAgain ? [.startAgain] : []
+        guard !session.holdsAccount else { return [] }
+        let buttons = rowButtons(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable)
+        var items: [ManagedSessionAction] = []
+        if buttons == [.resume], session.canStartAgain, terminalLaunch { items.append(.startAgain) }
+        if offersCopyResumeCommand(session, configDirectoryKnown: configDirectoryKnown) { items.append(.copyResumeCommand) }
+        if buttons != [.dismiss] { items.append(.dismiss) }
+        return items
     }
 
     /// The row's continuation marker, "Resumed · Continues 2:14 PM": the
