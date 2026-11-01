@@ -668,6 +668,23 @@ seven days. A contributor who wants it gone now should sign in again and call
 `POST /v1/account/sessions/revoke-all`, which revokes every session on the
 account, the old one and the current one alike, and then sign in once more.
 
+### V145: NEAR AI sign-in stamp on sessions
+
+V145 adds the nullable column `trace_sessions.near_ai_login_at`. It is
+additive, takes no backfill and needs no new grant (the ingest runtime holds
+`trace_sessions` table-wide). A NEAR AI sign-in stamps the session it mints;
+a device-code sign-in, a device's renewal, a device-link sign-in and the
+loopback native sign-in leave it NULL.
+
+The strong-authenticator gate (adding or removing a NEAR key, setting the
+payout target, confirming an account merge) now passes a NEAR wallet session,
+or a session a NEAR AI sign-in minted within the last ten minutes. An
+account's NEAR AI login counts as a strong authenticator, so an account that
+signs in with NEAR AI no longer takes the zero-authenticator bootstrap path:
+any other session is refused with `403` until the contributor signs in with
+NEAR AI again. Sessions minted before V145 are unstamped and are refused the
+same way.
+
 ### V144: passkey removal
 
 V144 removes passkeys. It is forward-only and runs in one transaction:

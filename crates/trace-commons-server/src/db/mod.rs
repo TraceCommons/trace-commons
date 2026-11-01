@@ -2100,6 +2100,10 @@ pub struct ValidatedSession {
     /// strong-authenticator gate to classify session strength: only a `'near'`
     /// session is STRONG. A public label, never key material.
     pub client_kind: String,
+    /// Whether a NEAR AI sign-in minted this session within the last
+    /// `NEAR_AI_LOGIN_FRESH_SECS` (`trace_sessions.near_ai_login_at`). Such a
+    /// session passes the strong-authenticator gate while it holds.
+    pub fresh_near_ai_login: bool,
     /// Set to the NEW raw session secret when rotation-on-use fired for this
     /// request (the matched row's `token_issued_at` aged past the rotation
     /// interval and the request matched the CURRENT `token_hash`), and `None`

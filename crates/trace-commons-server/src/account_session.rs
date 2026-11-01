@@ -92,7 +92,9 @@ pub enum AccountAuthMethod {
     /// 'native'`). It is a SESSION, not a device credential: it expires, it
     /// rotates on use, and `revoke-all` kills it. It is deliberately WEAK for
     /// the strong-authenticator gate — a native token can read and withdraw,
-    /// never change authenticators or redirect the NEAR wallet payout. It
+    /// never change authenticators or redirect the NEAR wallet payout, except
+    /// for the first `NEAR_AI_LOGIN_FRESH_SECS` after a NEAR AI sign-in minted
+    /// it (`AccountCtx::fresh_near_ai_login`). It
     /// may link a payout rail's recipient (the NEAR AI org): the owner chose
     /// the signed-in session as that authority on 2026-10-23, behind the
     /// server's own ownership check with NEAR AI (payout spec section 5).
@@ -127,6 +129,11 @@ pub struct AccountCtx {
     /// bearer is NOT a strong authenticator for the gate). A public label, never
     /// key material.
     pub client_kind: String,
+    /// Whether a NEAR AI sign-in minted THIS session within the last
+    /// `NEAR_AI_LOGIN_FRESH_SECS`. Read only by the strong-authenticator gate
+    /// (`may_change_authenticators`); `false` on every path but a native
+    /// token from a recent NEAR AI sign-in.
+    pub fresh_near_ai_login: bool,
     /// The sha256 `token_hash` of the session credential THIS request
     /// presented (cookie or native token), set by the resolver. Used only to
     /// spare the caller's own session when a device revoke ends the account's
@@ -144,7 +151,23 @@ impl AccountCtx {
     pub fn is_strong_session(&self) -> bool {
         self.client_kind == "near"
     }
+
+    /// True iff THIS session may change authenticators, the payout target or
+    /// merge accounts whatever the account holds: a NEAR wallet session, or a
+    /// session a NEAR AI sign-in minted within `NEAR_AI_LOGIN_FRESH_SECS`.
+    /// Any other session is refused unless the account has no strong
+    /// authenticator at all (the bootstrapping carve-out, enforced by the
+    /// caller).
+    pub fn may_change_authenticators(&self) -> bool {
+        self.is_strong_session() || self.fresh_near_ai_login
+    }
 }
+
+/// How long a session a NEAR AI sign-in minted counts as that sign-in, for the
+/// strong-authenticator gate: ten minutes. Past it the session is as weak as
+/// any other native session, and changing an authenticator, the payout target
+/// or merging accounts takes a new NEAR AI sign-in.
+pub const NEAR_AI_LOGIN_FRESH_SECS: i64 = 10 * 60;
 
 /// 160-bit CSPRNG login code, URL-safe base64 (unpadded).
 pub fn generate_login_code() -> String {
@@ -202,6 +225,7 @@ mod tests {
             actor_ref: "account-actor:t".to_string(),
             auth_credential_id: None,
             client_kind: client_kind.to_string(),
+            fresh_near_ai_login: false,
             session_token_hash: None,
         };
         assert!(ctx("near").is_strong_session());

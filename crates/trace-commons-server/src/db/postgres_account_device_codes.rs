@@ -207,6 +207,8 @@ impl PgBackend {
             &anchor_hash,
             &session,
             grant_template,
+            // A device code is not a NEAR AI sign-in.
+            false,
         )
         .await
         {

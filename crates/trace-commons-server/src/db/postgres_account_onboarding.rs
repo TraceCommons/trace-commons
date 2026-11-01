@@ -200,10 +200,17 @@ impl NearAiAnchorMaterial {
 /// (`insert_near_ai_signup_device_tenant_access_grant`): a returning sign-in,
 /// of the same device never duplicates, widens or revives it. With no template, no grant is written and the floor stays.
 ///
-/// Used by provisioning (#836), where the account was just found or minted.
-/// No `trace_near_identities` row: that table binds a wallet public key to a
-/// NEAR account name, and this path has neither. A login proves an account,
-/// not a key. Returns the device key id and the principal.
+/// Used by provisioning (#836), where the account was just found or minted,
+/// and by a device-code sign-in, where an existing device vouches for a new
+/// one. No `trace_near_identities` row: that table binds a wallet public key
+/// to a NEAR account name, and this path has neither. A login proves an
+/// account, not a key. Returns the device key id and the principal.
+///
+/// `near_ai_sign_in` is true only when this request itself verified a NEAR
+/// AI sign-in. It stamps the session's `near_ai_login_at` (V145), which the
+/// strong-authenticator gate reads; a device code proves no NEAR AI sign-in
+/// and leaves it NULL.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn attach_near_ai_login_device(
     tx: &deadpool_postgres::Transaction<'_>,
     tenant: &str,
@@ -212,6 +219,7 @@ pub(super) async fn attach_near_ai_login_device(
     anchor_hash: &str,
     session: &NewSession<'_>,
     grant_template: Option<&NearAiSignupPolicyTemplate>,
+    near_ai_sign_in: bool,
 ) -> Result<(String, String), DatabaseError> {
     let device =
         trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(device_public_key);
@@ -226,7 +234,9 @@ pub(super) async fn attach_near_ai_login_device(
         .await?;
     }
     tx.execute("INSERT INTO trace_near_provisioned_devices(tenant_id,principal_ref,account_id,device_key_id,anchor_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,principal_ref) DO NOTHING", &[&tenant,&principal,account,&device,&anchor_hash]).await?;
-    tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at,device_key_id) VALUES($1,$2,$3,$4,'native',$5,$6)", &[&tenant,&Uuid::new_v4(),account,&session.token_hash,&session.expires_at,&device]).await?;
+    // A NEAR AI sign-in is stamped (V145): for a few minutes the session may
+    // change authenticators, the payout target or merge accounts.
+    tx.execute("INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at,device_key_id,near_ai_login_at) VALUES($1,$2,$3,$4,'native',$5,$6,CASE WHEN $7 THEN now() END)", &[&tenant,&Uuid::new_v4(),account,&session.token_hash,&session.expires_at,&device,&near_ai_sign_in]).await?;
     Ok((device, principal))
 }
 
@@ -643,6 +653,7 @@ impl PgBackend {
             anchor_hash,
             session,
             grant_template,
+            true,
         )
         .await?;
         // Hash-only, like its wallet sibling: the audit row names the identity

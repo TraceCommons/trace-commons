@@ -1391,3 +1391,206 @@ async fn pg_a_revoked_device_key_is_refused_by_name_at_provisioning() {
     reset_account_rate_limiter_for_db_test().await;
     drop_tenants(&admin, &[&tenant]).await;
 }
+
+/// How a test request authenticates to the account surface.
+enum AccountAuth<'a> {
+    /// A browser session cookie (`{b64url(tenant)}.{secret}`).
+    Cookie(&'a str),
+    /// A native `tcn1_` bearer token.
+    Bearer(&'a str),
+}
+
+async fn send_account(
+    state: &Arc<AppState>,
+    method: &str,
+    uri: &str,
+    body: Option<&serde_json::Value>,
+    auth: &AccountAuth<'_>,
+) -> Reply {
+    let mut builder = axum::http::Request::builder().method(method).uri(uri);
+    builder = match auth {
+        AccountAuth::Cookie(value) => builder
+            .header(
+                axum::http::header::COOKIE,
+                format!("{ACCOUNT_SESSION_COOKIE}={value}"),
+            )
+            .header("sec-fetch-site", "same-origin"),
+        AccountAuth::Bearer(token) => builder.header(AUTHORIZATION, format!("Bearer {token}")),
+    };
+    let body = match body {
+        Some(body) => {
+            builder = builder.header(CONTENT_TYPE, "application/json");
+            Body::from(serde_json::to_vec(body).expect("json"))
+        }
+        None => Body::empty(),
+    };
+    let response = app(state.clone())
+        .oneshot(builder.body(body).expect("request"))
+        .await
+        .expect("router is infallible");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body")
+        .to_vec();
+    Reply { status, bytes }
+}
+
+/// A session on `account` that no NEAR AI sign-in minted, inserted as a
+/// device-link sign-in or the loopback native sign-in would leave it.
+/// Returns the raw secret.
+async fn insert_plain_session(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    account: Uuid,
+    client_kind: &str,
+) -> String {
+    let secret = trace_commons_server::account_session::generate_session_secret();
+    let token_hash = trace_commons_server::account_session::hash_secret(&secret);
+    admin
+        .execute(
+            "INSERT INTO trace_sessions(tenant_id,session_id,account_id,token_hash,client_kind,expires_at)
+             VALUES($1,$2,$3,$4,$5,now() + interval '1 hour')",
+            &[&tenant, &Uuid::new_v4(), &account, &token_hash, &client_kind],
+        )
+        .await
+        .expect("insert session");
+    secret
+}
+
+/// Every route behind the strong-authenticator gate, with a request that
+/// passes the gate and then fails on its own terms (an unknown key, a bogus
+/// proposal) so the status alone says whether the gate let it through.
+fn gated_requests() -> Vec<(&'static str, &'static str, Option<serde_json::Value>)> {
+    vec![
+        ("POST", "/v1/account/near/enroll/start", None),
+        (
+            "PATCH",
+            "/v1/account/near-identities/ed25519:unknown-key/payout",
+            Some(serde_json::json!({"payout": true})),
+        ),
+        (
+            "DELETE",
+            "/v1/account/near-identities/ed25519:unknown-key",
+            None,
+        ),
+        (
+            "POST",
+            "/v1/account/merge/confirm",
+            Some(serde_json::json!({"proposal_id": Uuid::new_v4()})),
+        ),
+    ]
+}
+
+/// A NEAR AI login is a strong authenticator: an account that signs in with
+/// NEAR AI and holds no NEAR wallet key is not left with zero, so a weak
+/// session (a browser device-link session, or a native token no NEAR AI
+/// sign-in minted) is refused every authenticator change, the payout
+/// target and an account merge.
+#[tokio::test]
+async fn pg_a_weak_session_cannot_change_authenticators_on_a_near_ai_login_account() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let admin = h.admin().await;
+    let device = Device::new();
+    let provisioned = provision(&h, &device).await;
+    let tenant = provisioned["tenant_id"]
+        .as_str()
+        .expect("tenant")
+        .to_string();
+    let account: Uuid = provisioned["account_id"]
+        .as_str()
+        .expect("account")
+        .parse()
+        .expect("uuid");
+
+    let web = insert_plain_session(&admin, &tenant, account, "web").await;
+    let web_cookie = format!(
+        "{}.{}",
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            tenant.as_bytes()
+        ),
+        web
+    );
+    let native = insert_plain_session(&admin, &tenant, account, "native").await;
+    let native_token =
+        trace_commons_server::account_native_auth::native_token_value(&tenant, &native);
+
+    for auth in [
+        AccountAuth::Cookie(&web_cookie),
+        AccountAuth::Bearer(&native_token),
+    ] {
+        for (method, uri, body) in gated_requests() {
+            reset_account_rate_limiter_for_db_test().await;
+            let reply = send_account(&h.state, method, uri, body.as_ref(), &auth).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::FORBIDDEN,
+                "{method} {uri}: {:?}",
+                reply.json()
+            );
+        }
+    }
+
+    drop_tenants(&admin, &[&tenant]).await;
+}
+
+/// A session a NEAR AI sign-in just minted may make those changes. Once the
+/// sign-in is older than `NEAR_AI_LOGIN_FRESH_SECS`, the same session is
+/// refused until the contributor signs in with NEAR AI again.
+#[tokio::test]
+async fn pg_a_fresh_near_ai_login_session_may_change_authenticators_and_a_stale_one_may_not() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let admin = h.admin().await;
+    let device = Device::new();
+    let provisioned = provision(&h, &device).await;
+    let tenant = provisioned["tenant_id"]
+        .as_str()
+        .expect("tenant")
+        .to_string();
+    let token = provisioned["access_token"]
+        .as_str()
+        .expect("access token")
+        .to_string();
+    let auth = AccountAuth::Bearer(&token);
+
+    for (method, uri, body) in gated_requests() {
+        reset_account_rate_limiter_for_db_test().await;
+        let reply = send_account(&h.state, method, uri, body.as_ref(), &auth).await;
+        assert_ne!(
+            reply.status,
+            StatusCode::FORBIDDEN,
+            "a fresh NEAR AI sign-in passes the gate: {method} {uri}: {:?}",
+            reply.json()
+        );
+    }
+
+    let window = trace_commons_server::account_session::NEAR_AI_LOGIN_FRESH_SECS + 1;
+    admin
+        .execute(
+            "UPDATE trace_sessions
+                SET near_ai_login_at = now() - make_interval(secs => $2::float8)
+              WHERE tenant_id = $1",
+            &[&tenant, &(window as f64)],
+        )
+        .await
+        .expect("age the sign-in");
+    for (method, uri, body) in gated_requests() {
+        reset_account_rate_limiter_for_db_test().await;
+        let reply = send_account(&h.state, method, uri, body.as_ref(), &auth).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::FORBIDDEN,
+            "a stale NEAR AI sign-in is refused: {method} {uri}: {:?}",
+            reply.json()
+        );
+    }
+
+    drop_tenants(&admin, &[&tenant]).await;
+}

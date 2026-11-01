@@ -470,6 +470,7 @@ async fn exercise_narrow_upload_trust_role(check_privileges: bool) {
         actor_ref: principal.clone(),
         auth_credential_id: None,
         client_kind: "native".to_owned(),
+        fresh_near_ai_login: false,
         session_token_hash: None,
     };
     let response = upload_allowance::handler(State(state.clone()), Extension(ctx))
