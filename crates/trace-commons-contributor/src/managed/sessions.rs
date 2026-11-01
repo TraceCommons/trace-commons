@@ -1423,9 +1423,10 @@ mod tests {
         let extra = home.path().join("extra");
         std::fs::create_dir_all(extra.join(".claude/agents")).unwrap();
         std::fs::write(extra.join(".claude/agents/a.md"), agent).unwrap();
-        // Quoted: the options text is split as a POSIX shell would split
-        // it, so a Windows path's backslashes would otherwise be escapes.
-        let add_dir = format!("--add-dir '{}'", extra.display());
+        let add_dir = format!(
+            "--add-dir {}",
+            crate::managed::options::quote(&extra.display().to_string())
+        );
         assert!(!registry.would_prepare_new(request(Some(&add_dir)), &sign_in));
         assert_eq!(
             registry
