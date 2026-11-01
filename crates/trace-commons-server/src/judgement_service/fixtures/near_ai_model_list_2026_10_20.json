@@ -1,0 +1,71 @@
+{
+  "_note": "Three entries of GET https://cloud-api.near.ai/v1/model/list (public, unauthenticated), fetched 2026-10-20, trimmed to the fields the judgement catalog check reads plus providerType and base_url. limit/offset/total are the live page values.",
+  "models": [
+    {
+      "modelId": "moonshotai/kimi-k2.6",
+      "inputCostPerToken": {
+        "amount": 810,
+        "scale": 9,
+        "currency": "USD"
+      },
+      "outputCostPerToken": {
+        "amount": 3850,
+        "scale": 9,
+        "currency": "USD"
+      },
+      "metadata": {
+        "verifiable": true,
+        "ownedBy": "attested 3p",
+        "providerType": "chutes",
+        "attestationSupported": true,
+        "providerConfig": {
+          "base_url": "https://openrouter.ai/api/v1"
+        }
+      }
+    },
+    {
+      "modelId": "Qwen/Qwen3.8-27B",
+      "inputCostPerToken": {
+        "amount": 40,
+        "scale": 9,
+        "currency": "USD"
+      },
+      "outputCostPerToken": {
+        "amount": 1350,
+        "scale": 9,
+        "currency": "USD"
+      },
+      "metadata": {
+        "verifiable": true,
+        "ownedBy": "nearai",
+        "providerType": "vllm",
+        "attestationSupported": true
+      }
+    },
+    {
+      "modelId": "typesafe/jev-1.13",
+      "inputCostPerToken": {
+        "amount": 42,
+        "scale": 9,
+        "currency": "USD"
+      },
+      "outputCostPerToken": {
+        "amount": 0,
+        "scale": 9,
+        "currency": "USD"
+      },
+      "metadata": {
+        "verifiable": false,
+        "ownedBy": "typesafe",
+        "providerType": "external",
+        "attestationSupported": false,
+        "providerConfig": {
+          "base_url": "https://openrouter.ai/api/v1"
+        }
+      }
+    }
+  ],
+  "limit": 100,
+  "offset": 0,
+  "total": 59
+}
