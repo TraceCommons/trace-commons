@@ -24,8 +24,8 @@ final class InsightsEconomizerModel {
     private(set) var answer: DaemonData.EconomizerStatus?
     private(set) var failed = false
     /// The read after a switch or Give back failed, so `answer` is from
-    /// before it. The page keeps it and says details are unavailable
-    /// under the switch, until a read succeeds.
+    /// before it. The page keeps it and says it may be out of date under
+    /// the switch, until a read succeeds.
     private(set) var stale = false
     /// The daemon predates the economizer (`unknown_method`): the tab is
     /// hidden, since a tab that cannot be used is not drawn greyed. A
@@ -103,6 +103,12 @@ final class InsightsEconomizerModel {
         do {
             let reply = try await calls.setEnabled(on)
             switchRefusal = reply.enabled == on ? nil : MonitorWords.table?.requestFailed
+            // Draw what the daemon confirmed, even if the read after this
+            // fails and the rest of the page stays as it was.
+            if let shown = answer {
+                answer = DaemonData.EconomizerStatus(
+                    enabled: reply.enabled, folders: shown.folders, foldersTruncated: shown.foldersTruncated)
+            }
         } catch {
             switchRefusal = MonitorWords.table?.requestFailed
         }
@@ -226,7 +232,7 @@ struct InsightsEconomizerTab: View {
             }
             // What is below may be from before the last change.
             if model.stale {
-                Text(text("analytics_econ_unavailable")).insightsCaption()
+                Text(text("analytics_econ_stale")).insightsCaption()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

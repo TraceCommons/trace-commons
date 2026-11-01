@@ -184,8 +184,7 @@ final class DaemonClient: Sendable {
     /// event to come. See `docs/contributor-daemon-ipc-v1_1.md`, "Scheduled
     /// previews".
     func supportsWitnessReview() throws -> Bool {
-        let hello = try resultObject("hello")
-        return (hello["methods"] as? [String])?.contains("witness_preview_request") == true
+        try call("hello", as: DaemonHello.self).serves("witness_preview_request")
     }
 
     func requestWitnessReview(entryID: String) throws {

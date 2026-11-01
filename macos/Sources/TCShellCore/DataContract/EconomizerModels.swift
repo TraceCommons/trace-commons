@@ -78,3 +78,22 @@ extension DaemonData {
         public init(restored: [String]) { self.restored = restored }
     }
 }
+
+/// The part of the daemon's `hello` reply a shell reads to learn whether a
+/// method is served: its advertised `methods`. Ask it on each check, since
+/// a call may reach a restarted or upgraded daemon.
+public struct DaemonHello: Decodable, Sendable {
+    public let methods: [String]
+
+    public init(methods: [String]) { self.methods = methods }
+
+    private enum CodingKeys: String, CodingKey { case methods }
+
+    /// A reply without `methods` serves nothing, rather than failing.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        methods = try container.decodeIfPresent([String].self, forKey: .methods) ?? []
+    }
+
+    public func serves(_ method: String) -> Bool { methods.contains(method) }
+}

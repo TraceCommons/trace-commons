@@ -19,6 +19,8 @@ use super::tools::Thresholds;
 
 /// The most folders one answer carries, most sessions first.
 pub const MAX_FOLDERS: usize = 100;
+/// How long Give back waits for a folder's lock before refusing.
+const RESTORE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// One command the economizer tells the agent: run `program` as
 /// `prefix program`.
@@ -117,6 +119,16 @@ pub fn summarize_in(
     folders: impl IntoIterator<Item = (Harness, PathBuf)>,
     home: Option<&Path>,
 ) -> Summary {
+    // Home as given and as resolved, so a folder recorded under either
+    // spelling (a symlinked home, `/private/var` on macOS) is seen as
+    // under home.
+    let homes: Vec<PathBuf> = home
+        .into_iter()
+        .flat_map(|home| {
+            let resolved = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+            [home.to_path_buf(), resolved]
+        })
+        .collect();
     let mut seen = BTreeSet::new();
     let mut rows = Vec::new();
     for (harness, path) in folders {
@@ -125,7 +137,7 @@ pub fn summarize_in(
             continue;
         }
         let row = FolderSummary::of(
-            label(&path, 0, home),
+            label(&path, 0, &homes),
             harness,
             key.clone(),
             &store.repo(&key),
@@ -148,7 +160,7 @@ pub fn summarize_in(
         let mut lengthened = false;
         for members in groups.into_values().filter(|m| m.len() > 1) {
             for i in members {
-                let longer = label(&rows[i].1, depths[i] + 1, home);
+                let longer = label(&rows[i].1, depths[i] + 1, &homes);
                 if longer != rows[i].0.folder {
                     depths[i] += 1;
                     rows[i].0.folder = longer;
@@ -179,12 +191,12 @@ pub fn summarize_in(
 
 /// `path`'s last `depth + 1` components, joined with `/`. The home folder
 /// is `~` and ends the label, so its name never shows.
-fn label(path: &Path, depth: usize, home: Option<&Path>) -> String {
+fn label(path: &Path, depth: usize, homes: &[PathBuf]) -> String {
     let mut parts = Vec::new();
     let mut current = Some(path);
     for _ in 0..=depth {
         let Some(here) = current else { break };
-        if home == Some(here) {
+        if homes.iter().any(|home| home == here) {
             parts.push("~".to_owned());
             break;
         }
@@ -208,7 +220,9 @@ pub fn restore(store: &Store, harness: Harness, key: &str) -> anyhow::Result<Vec
     if !store.has_repo(key) {
         return Ok(Vec::new());
     }
-    store.update_repo(key, |state| {
+    // Generous, but bounded: a hook stopped while holding the lock (the
+    // agent suspended mid-write) must not hold a daemon thread for good.
+    store.try_update_repo(key, RESTORE_LOCK_WAIT, |state| {
         let given = state.tools.restore(harness, &Thresholds::default());
         (!given.is_empty(), given)
     })

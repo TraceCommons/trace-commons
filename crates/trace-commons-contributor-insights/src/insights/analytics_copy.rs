@@ -995,6 +995,9 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_econ_unavailable",
         "Economizer details are unavailable.",
     ),
+    // Under the switch when the read after a change failed; the page
+    // below is from before it.
+    ("analytics_econ_stale", "These details may be out of date."),
     ("analytics_econ_folder_tool", "{folder} · {harness}"),
     ("analytics_econ_sessions", "Learned from {n} sessions"),
     ("analytics_econ_sessions_one", "Learned from {n} session"),

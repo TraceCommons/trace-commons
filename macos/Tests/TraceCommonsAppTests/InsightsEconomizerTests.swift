@@ -93,6 +93,27 @@ final class InsightsEconomizerTests: XCTestCase {
         XCTAssertTrue(model.stale)
     }
 
+    func testAConfirmedSwitchIsDrawnEvenWhenTheReadAfterItFails() async {
+        final class Box: @unchecked Sendable { var reads = 0 }
+        let box = Box()
+        struct Stopped: Error {}
+        let model = InsightsEconomizerModel(calls: .init(
+            served: { true },
+            status: {
+                box.reads += 1
+                if box.reads > 1 { throw Stopped() }
+                return DaemonData.EconomizerStatus(enabled: false, folders: [InsightsEconomizerTests.folder])
+            },
+            setEnabled: { DaemonData.EconomizerSwitch(enabled: $0) },
+            restore: { _, _ in DaemonData.EconomizerRestored(restored: []) }))
+        await model.load()
+        await model.setEnabled(true)
+        XCTAssertEqual(model.answer?.enabled, true)
+        XCTAssertEqual(model.answer?.folders.first?.key, "repo-1")
+        XCTAssertNil(model.switchRefusal)
+        XCTAssertTrue(model.stale)
+    }
+
     func testAFailedReadWhenTheTabOpensIsNotHiddenByAnEarlierAnswer() async {
         final class Box: @unchecked Sendable { var up = true }
         let box = Box()

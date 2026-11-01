@@ -173,8 +173,8 @@ impl Store {
     /// on `repos/<key>.lock`, so two writers (a session ending, a Give
     /// back) never lose each other's change. Returns what `change`
     /// returns; the state is written only when `change` says so. Waits
-    /// for the lock as long as it takes; the agent's hook uses
-    /// [`Store::try_update_repo`] instead, so it never blocks for long.
+    /// for the lock as long as it takes; the agent's hook and Give back
+    /// use [`Store::try_update_repo`] instead, so neither blocks for long.
     ///
     /// The lock file stays beside the state file once made: it is empty,
     /// mode 0600, and one per folder that was written.
@@ -187,8 +187,8 @@ impl Store {
     }
 
     /// [`Store::update_repo`], giving up after `wait` if another writer
-    /// holds the lock. Giving up writes nothing, so it only delays what a
-    /// session teaches; it never undoes another writer's change.
+    /// holds the lock. Giving up writes nothing and returns an error; it
+    /// never undoes another writer's change.
     pub fn try_update_repo<T>(
         &self,
         key: &str,

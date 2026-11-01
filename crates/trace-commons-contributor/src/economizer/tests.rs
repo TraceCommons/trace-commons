@@ -1320,6 +1320,28 @@ fn labels_grow_until_they_differ_and_never_name_the_home_folder() {
     );
     let unique: std::collections::BTreeSet<_> = all.iter().collect();
     assert_eq!(unique.len(), 4, "{all:?}");
+
+    // Home given through a symlink still matches folders recorded under
+    // its resolved path.
+    #[cfg(unix)]
+    {
+        let link = dir.path().join("home-link");
+        std::os::unix::fs::symlink(&home, &link).unwrap();
+        let mut through_link: Vec<String> = summarize_in(
+            &store,
+            [
+                (Harness::Claude, at_home.clone()),
+                (Harness::Claude, elsewhere.clone()),
+            ],
+            Some(&link),
+        )
+        .folders
+        .into_iter()
+        .map(|row| row.folder)
+        .collect();
+        through_link.sort();
+        assert_eq!(through_link, ["srv/api", "~/api"]);
+    }
 }
 
 #[test]
