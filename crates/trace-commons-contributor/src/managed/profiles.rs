@@ -512,22 +512,24 @@ fn frontmatter_names_a_model(text: &str) -> bool {
 }
 
 /// Which project markdown Claude Code reads a `model` from, under a
-/// folder's `.claude`: subagents and slash commands at any depth, and each
-/// skill's `SKILL.md`.
+/// folder's `.claude`: subagents, slash commands and routines at any depth,
+/// and each skill's `SKILL.md`.
 #[derive(Clone, Copy)]
 enum ProjectMarkdown {
     Agents,
     Commands,
+    Routines,
     Skills,
 }
 
 impl ProjectMarkdown {
-    const ALL: [ProjectMarkdown; 3] = [Self::Agents, Self::Commands, Self::Skills];
+    const ALL: [ProjectMarkdown; 4] = [Self::Agents, Self::Commands, Self::Routines, Self::Skills];
 
     fn folder(self) -> &'static str {
         match self {
             Self::Agents => "agents",
             Self::Commands => "commands",
+            Self::Routines => "routines",
             Self::Skills => "skills",
         }
     }
@@ -555,7 +557,9 @@ fn markdown_names_a_model(dir: &Path, kind: ProjectMarkdown) -> Result<bool, ()>
                 // A skill is one folder deep; nothing below it is a skill.
                 let descend = match kind {
                     ProjectMarkdown::Skills => depth == 0,
-                    ProjectMarkdown::Agents | ProjectMarkdown::Commands => true,
+                    ProjectMarkdown::Agents
+                    | ProjectMarkdown::Commands
+                    | ProjectMarkdown::Routines => true,
                 };
                 if descend {
                     if depth + 1 > MAX_DEPTH {
@@ -568,7 +572,7 @@ fn markdown_names_a_model(dir: &Path, kind: ProjectMarkdown) -> Result<bool, ()>
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let read = match kind {
                 ProjectMarkdown::Skills => depth == 1 && name.eq_ignore_ascii_case("SKILL.md"),
-                ProjectMarkdown::Agents | ProjectMarkdown::Commands => {
+                ProjectMarkdown::Agents | ProjectMarkdown::Commands | ProjectMarkdown::Routines => {
                     path.extension().and_then(|e| e.to_str()) == Some("md")
                 }
             };
@@ -646,7 +650,8 @@ fn claude_project_dirs(cwd: &Path, home: Option<&Path>) -> Result<Vec<PathBuf>, 
     let mut main_checkout = None;
     if let Some(root) = git_root {
         let dot_git = root.join(".git");
-        let metadata = std::fs::symlink_metadata(&dot_git).map_err(|_| ())?;
+        // Followed: a `.git` that links to a folder is an ordinary checkout.
+        let metadata = std::fs::metadata(&dot_git).map_err(|_| ())?;
         if !metadata.is_dir() {
             main_checkout = linked_worktree_main(&dot_git)?;
             if let Some(main) = &main_checkout {
@@ -1100,6 +1105,7 @@ mod tests {
             ".claude/commands/review.md",
             ".claude/commands/team/review.md",
             ".claude/skills/review/SKILL.md",
+            ".claude/routines/nightly.md",
         ] {
             let dir = project(&[(path, &markdown(&format!("model: {ID}")))]);
             for connection in NEAR_AI {
@@ -1286,6 +1292,17 @@ mod tests {
         std::fs::create_dir_all(&between).unwrap();
         std::fs::write(between.join("SKILL.md"), &agent).unwrap();
         assert_eq!(refused(&nested, root.path()), Err(ManagedError::Conflict));
+
+        // A `.git` that links to a folder is an ordinary checkout.
+        #[cfg(unix)]
+        {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("real-git")).unwrap();
+            let repo = root.path().join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            std::os::unix::fs::symlink(root.path().join("real-git"), repo.join(".git")).unwrap();
+            assert_eq!(refused(&repo, root.path()), Ok(()));
+        }
 
         // A `.git` file that cannot be understood is not guessed at.
         let root = tempfile::tempdir().unwrap();
