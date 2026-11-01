@@ -23234,6 +23234,13 @@ const ACCOUNT_CEREMONY_COOKIE_MAX_AGE_SECS: i64 = 3 * 60;
 /// session or a phished device-link link cannot silently swap the account's
 /// real second factor.
 ///
+/// The strong authenticators are the account's NEAR keys and, if it signs in
+/// with NEAR AI, that login (`count_active_strong_authenticators`). A NEAR AI
+/// session is still weak: the daemon's unattended renewal mints the same
+/// session a person's sign-in does, so no NEAR AI session proves that someone
+/// just signed in. An account that signs in with NEAR AI therefore needs a NEAR
+/// wallet session for these changes.
+///
 /// The single exception is the BOOTSTRAPPING carve-out: when the account has zero
 /// strong authenticators a weak session MAY add the FIRST one (otherwise a
 /// contributor who only ever held a device link could never enroll a NEAR key).
@@ -23271,7 +23278,7 @@ async fn require_authenticator_change_allowed(state: &AppState, ctx: &AccountCtx
     .map_err(internal_error)?;
     Err(api_error(
         StatusCode::FORBIDDEN,
-        "a NEAR sign-in is required to change authenticators",
+        "a NEAR wallet sign-in is required to change authenticators",
     ))
 }
 

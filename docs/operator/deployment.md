@@ -703,8 +703,13 @@ grants to it. Once every database on the cluster is past V144 an operator may
 (the reaper worker role was granted to a login).
 
 The removed routes now answer 404, and the unbound-account gate and reaper no
-longer run. The strong-authenticator gate counts NEAR identities only, and
-only a NEAR wallet browser session is strong.
+longer run. The strong-authenticator gate counts an account's NEAR identities
+and, if it signs in with NEAR AI, that login; only a NEAR wallet browser
+session is strong. So an account that signs in with NEAR AI needs a NEAR
+wallet session to add or remove a NEAR key, set the NEAR payout target or
+confirm an account merge. The NEAR AI payout rail
+(`/v1/account/payout-links/...`) proves NEAR AI ownership in the request
+itself and is not behind this gate.
 
 ### V105 and V106: review, invalidation, and export tables
 
