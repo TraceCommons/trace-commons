@@ -55,7 +55,7 @@ pub(super) fn account_session(
 pub(super) fn keep_rotated_token(
     shared: &DaemonShared,
     session: &mut crate::account_auth::LoadedAccountSession,
-    rotated_token: Option<String>,
+    rotated_token: Option<crate::account_auth::RotatedToken>,
 ) -> bool {
     let Some(rotated_token) = rotated_token else {
         return true;
@@ -68,7 +68,14 @@ pub(super) fn keep_rotated_token(
     match super::run_blocking(|| crate::account_auth::try_load_session_with_snapshot(&shared.store))
     {
         Ok(Some(reloaded)) if stored => *session = reloaded,
-        _ => session.session.access_token = rotated_token,
+        _ => {
+            // Not stored: present the new token, and its new expiry when the
+            // server sent one, for the rest of this batch.
+            session.session.access_token = rotated_token.token;
+            if let Some(expires_at) = rotated_token.expires_at {
+                session.session.expires_at = expires_at;
+            }
+        }
     }
     stored
 }
@@ -113,7 +120,7 @@ pub(super) async fn handle_withdraw(shared: &DaemonShared, req: &Request) -> Res
         Ok(id) => id,
         Err(m) => return Response::err(req.id, ERR_BAD_PARAMS, m),
     };
-    let mut session = match account_session(shared) {
+    let mut session = match super::account_session_renewal::account_session_live(shared).await {
         Ok(Some(session)) => session,
         Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
         Err(_) => {
@@ -173,7 +180,7 @@ pub(super) async fn handle_withdraw_bulk(shared: &DaemonShared, req: &Request) -
         Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "status-invalid"),
         None => return Response::err(req.id, ERR_BAD_PARAMS, "status-required"),
     };
-    let mut session = match account_session(shared) {
+    let mut session = match super::account_session_renewal::account_session_live(shared).await {
         Ok(Some(session)) => session,
         Ok(None) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_ACCOUNT_SESSION_REQUIRED),
         Err(_) => {
@@ -473,6 +480,7 @@ mod tests {
                 consent_scopes: Vec::new(),
                 credit_points_pending: 0.0,
                 credit_points_final: None,
+                credit_outcome_reason: None,
                 explanations: Vec::new(),
                 last_refreshed_at: None,
                 withdrawn_at: None,

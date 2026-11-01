@@ -24,7 +24,14 @@ final class MonitorHomeInsightsTests: XCTestCase {
         XCTAssertTrue(home.contains("openInsights: openInsights"))
         XCTAssertTrue(home.contains("openMissionDrafts: { page = .missionDrafts }"))
         let window = try MonitorNavigationTests.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("InsightsView(storeSelection: insightsStoreSelection, daemon: home.client)"))
+        XCTAssertTrue(window.contains("InsightsView(storeSelection: insightsStoreSelection"))
+        XCTAssertTrue(window.contains("daemon: home.client,"))
+        XCTAssertTrue(window.contains("subscriptions: model.subscriptionUsageModel,\n                                 inspector: insightsInspector, home: home,"))
+        XCTAssertTrue(window.contains("payoutStreams: Self.payoutStreams(model.payoutLinkDaemonClient),"))
+        // The get-started card's one link opens Traces' folder list; it no
+        // longer offers Settings (product owner, 2026-10-29).
+        XCTAssertTrue(window.contains("tracesPage = .tree"))
+        XCTAssertFalse(window.contains("navigation.requestSettings(at: .projects)"))
         XCTAssertTrue(window.contains("openInsights: { tab = .insights }"))
         XCTAssertTrue(window.contains("insightsStoreSelection: insightsStoreSelection"))
         XCTAssertTrue(window.contains("missionDrafts: missionDrafts"))
@@ -39,7 +46,8 @@ final class MonitorHomeInsightsTests: XCTestCase {
     /// with a Swift-authored word.
     func test_theHomeCardsTakeTheirHeadingsFromTheCore() throws {
         let home = try MonitorNavigationTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("private static let insightsCopy = TCInsights.copy()"))
+        XCTAssertNotNil(home.range(of: #"\bstatic\s+(?:nonisolated\s+)?let\s+insightsCopy\s*=\s*TCInsights\.copy\(\)"#,
+                                  options: .regularExpression))
         // One reading: Home's card and the Insights tab's name both take it
         // from `HomeTabView.insightsHeading` (its own tab since 2026-10-15).
         XCTAssertEqual(home.components(separatedBy: #"Self.insightsCopy?["title"]"#).count - 1, 1)
@@ -53,21 +61,15 @@ final class MonitorHomeInsightsTests: XCTestCase {
 
     func test_insightsAreOnTheGlassRules() {
         let rules = Set(GlassSurfaceRulesTests.files)
-        for path in ["Views/InsightsView.swift", "Views/InsightsSummaryView.swift", "Views/InsightsEpisodesView.swift",
-                     "Views/InsightCardsView.swift", "Views/InsightEvidenceView.swift", "Views/ComparisonTasksView.swift",
-                     "Views/ComparisonSpecificationsView.swift", "Views/MissionDraftsView.swift"] {
+        for path in ["Views/InsightsView.swift", "Views/MissionDraftsView.swift"] {
             XCTAssertTrue(rules.contains(path), "\(path) is not on the glass rules")
         }
     }
 
-    /// Error lines in the hosted screens draw in the status text token and
-    /// success notices in the on token, never a system colour.
+    /// Error lines in the hosted screens draw in the status text token,
+    /// never a system colour.
     func test_hostedErrorsUseTheStatusTextTokens() throws {
-        let errorSites: [(String, Int)] = [
-            ("Views/InsightsView.swift", 2), ("Views/InsightCardsView.swift", 1),
-            ("Views/InsightsEpisodesView.swift", 1), ("Views/ComparisonTasksView.swift", 1),
-            ("Views/ComparisonSpecificationsView.swift", 1), ("Views/MissionDraftsView.swift", 1),
-        ]
+        let errorSites: [(String, Int)] = [("Views/MissionDraftsView.swift", 1)]
         for (path, count) in errorSites {
             let source = try MonitorNavigationTests.text(path)
             // Ron's rebuilds (#1241) say the status text token through
@@ -75,11 +77,6 @@ final class MonitorHomeInsightsTests: XCTestCase {
             XCTAssertEqual(source.components(separatedBy: ".foregroundStyle(GlassStatus.outside.textColor)").count - 1,
                            count, path)
             XCTAssertFalse(source.contains(".foregroundStyle(GlassColor.textPrimary)"), path)
-        }
-        for path in ["Views/InsightsEpisodesView.swift", "Views/ComparisonTasksView.swift",
-                     "Views/ComparisonSpecificationsView.swift"] {
-            let source = try MonitorNavigationTests.text(path)
-            XCTAssertEqual(source.components(separatedBy: ".foregroundStyle(GlassStatus.on.textColor)").count - 1, 1, path)
         }
     }
 
@@ -94,13 +91,13 @@ final class MonitorHomeInsightsTests: XCTestCase {
         XCTAssertEqual(MissionFormat.count(store.missions), "\u{2014}")
     }
 
-    /// The Private AI inspector's summary is absent, not zero, when the live
-    /// client does not answer it yet.
-    func test_theInferenceStoreKeepsTheSummaryAbsentWhenItIsNotAvailableYet() async {
+    /// A malformed real summary stays absent and records the failed read.
+    func test_theInferenceStoreKeepsMalformedNetworkSummaryAbsent() async {
         let store = InferenceStore(client: LiveDaemonClient(transport: SilentTransport()))
         await store.load()
         XCTAssertNil(store.summary)
-        XCTAssertNil(store.failures["inference_summary"])
+        XCTAssertNil(store.networkSummary)
+        XCTAssertEqual(store.failures["inference_summary"], .undecodable(method: "inference_summary"))
     }
 
     /// M-3: Insights and Mission drafts are reachable only through their

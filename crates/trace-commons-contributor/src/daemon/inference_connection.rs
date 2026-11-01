@@ -98,7 +98,7 @@ use trace_commons_protocol::inference_connection::{
 
 use super::audit::{self, AuditEntry};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
-use super::withdraw::{ERR_ACCOUNT_SESSION_REQUIRED, account_session, keep_rotated_token};
+use super::withdraw::{ERR_ACCOUNT_SESSION_REQUIRED, keep_rotated_token};
 use crate::account_auth::LoadedAccountSession;
 use crate::config::{
     ContributorConfig, DAEMON_INFERENCE_CONNECTION_FILE, WitnessSettings, allowlist_for,
@@ -272,11 +272,14 @@ fn installed_is_live(installed: &Installed, current: &ConnectionStatus) -> bool 
 /// The account session and enrolled config every method needs, or the
 /// refusal. The session is checked first, so a shell that has not signed in
 /// is routed to sign-in whatever else is missing.
-fn session_and_config(
+///
+/// An expired session on a NEAR AI-provisioned account is renewed first
+/// ([`super::account_session_renewal`]).
+async fn session_and_config(
     shared: &DaemonShared,
     req: &Request,
 ) -> Result<(LoadedAccountSession, ContributorConfig), Box<Response>> {
-    let session = match account_session(shared) {
+    let session = match super::account_session_renewal::account_session_live(shared).await {
         Ok(Some(session)) => session,
         Ok(None) => {
             return Err(Box::new(Response::err(
@@ -337,7 +340,7 @@ fn parse_uuid(req: &Request, name: &'static str) -> Result<Uuid, Box<Response>> 
 
 /// `inference_connection_offers`. A read; selects nothing.
 pub(super) async fn handle_offers(shared: &DaemonShared, req: &Request) -> Response {
-    let (mut session, cfg) = match session_and_config(shared, req) {
+    let (mut session, cfg) = match session_and_config(shared, req).await {
         Ok(pair) => pair,
         Err(response) => return *response,
     };
@@ -357,7 +360,7 @@ pub(super) async fn handle_offers(shared: &DaemonShared, req: &Request) -> Respo
 /// disconnect stops new use once a cooperating client observes it. A retired
 /// revision (`reselection_required`) is reported and changes nothing.
 pub(super) async fn handle_current(shared: &DaemonShared, req: &Request) -> Response {
-    let (mut session, cfg) = match session_and_config(shared, req) {
+    let (mut session, cfg) = match session_and_config(shared, req).await {
         Ok(pair) => pair,
         Err(response) => return *response,
     };
@@ -450,7 +453,7 @@ pub(super) async fn handle_select(shared: &DaemonShared, req: &Request) -> Respo
         Ok(pair) => pair,
         Err(response) => return *response,
     };
-    let (mut session, cfg) = match session_and_config(shared, req) {
+    let (mut session, cfg) = match session_and_config(shared, req).await {
         Ok(pair) => pair,
         Err(response) => return *response,
     };
@@ -584,7 +587,7 @@ pub(super) async fn handle_install(shared: &DaemonShared, req: &Request) -> Resp
         Ok(digest) => digest.to_string(),
         Err(response) => return *response,
     };
-    let (mut session, cfg) = match session_and_config(shared, req) {
+    let (mut session, cfg) = match session_and_config(shared, req).await {
         Ok(pair) => pair,
         Err(response) => return *response,
     };
@@ -810,7 +813,10 @@ pub(super) async fn handle_disconnect(shared: &DaemonShared, req: &Request) -> R
 
     let mut persisted = true;
     let mut state_version = None;
-    let (server, server_refusal) = match (account_session(shared), shared.store.load_config()) {
+    let (server, server_refusal) = match (
+        super::account_session_renewal::account_session_live(shared).await,
+        shared.store.load_config(),
+    ) {
         (Ok(None), _) => (SERVER_PENDING, Some(ERR_ACCOUNT_SESSION_REQUIRED)),
         (Err(_), _) => (
             SERVER_PENDING,

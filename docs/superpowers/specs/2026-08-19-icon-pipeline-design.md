@@ -497,3 +497,27 @@ Three failure modes, each demonstrated to fail the build:
 
 The third is the one that matters most: it is precisely the state this build
 shipped in before the shape was understood.
+
+## Addendum: the macOS icon is the NEAR AI tile
+
+Recorded 2026-10-26. The macOS app icon is no longer built from the bracket
+glyphs. Both channels compile a checked-in Icon Composer document instead:
+`macos/icons/production/AppIcon.icon` (the brand-tile fill, #024175 in dark,
+and the kit's N in brand-paper as one SVG layer) and
+`macos/icons/staging/AppIcon.icon` (the same plus an amber hazard ribbon as
+its top group). `TC_ICON_SOURCE` names the document; `macos/icons/README.md`
+records the provenance and the checks.
+
+What carries over from above: `actool` still validates nothing, so the build
+still checks the document before compiling and decodes the output after. The
+checks now look for the N rather than the brackets, compare each compiled
+ground with the document's fill rather than comparing two glyph digests, and
+assert the pre-rendered 16-1024 images macOS 14 and 15 draw. The flat
+`.icns`-only route (`make-icons.sh`, `render-mark.swift`, `verify-icns.swift`)
+was removed: backing out to it would have restored the old mark.
+
+With nothing left to read them, `mark-export` no longer writes the
+`mark-glyph-*.svg` glyphs, `assets/mark-staging` or `geometry.json` (whose
+only reader was `render-mark.swift`), and `--staging-dir` is gone. The Linux,
+Windows and Tauri packaging icons still come from `mark-export` and are
+unchanged.

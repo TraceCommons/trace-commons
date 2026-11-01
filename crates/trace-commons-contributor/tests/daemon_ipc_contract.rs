@@ -48,6 +48,53 @@ fn publication_methods_are_documented_with_bounds_and_fixed_errors() {
     }
 }
 #[test]
+fn model_training_consent_methods_are_documented_with_every_label() {
+    use trace_commons_contributor::model_training_consent::ConsentCallError;
+    let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
+    for method in [
+        "model_training_consent_status",
+        "model_training_consent_grant",
+    ] {
+        assert!(METHODS.contains(&method), "not served: {method}");
+        let row = format!("| `{method}` |");
+        assert!(contract.contains(&row), "missing method row: {method}");
+    }
+    for error in [
+        ConsentCallError::NotPermitted,
+        ConsentCallError::Unavailable,
+        ConsentCallError::BadSelection,
+        ConsentCallError::Failed,
+    ] {
+        let label = format!("`{}`", error.label());
+        assert!(contract.contains(&label), "missing label: {label}");
+    }
+    for required in [
+        "`selection-required`",
+        "`submission_ids-invalid`",
+        "`already_granted`",
+        "`not_eligible`",
+        "`credited`",
+        "`pending`",
+        "`remaining_eligible`",
+    ] {
+        assert!(contract.contains(required), "missing: {required}");
+    }
+}
+
+#[test]
+fn the_credit_outcome_reason_is_documented_with_every_label() {
+    let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
+    assert!(contract.contains("### Credit outcome on history rows"));
+    assert!(contract.contains("`credit_outcome_reason`"));
+    for label in trace_commons_protocol::credit_outcome::CREDIT_OUTCOME_REASONS {
+        assert!(
+            contract.contains(&format!("`{label}`")),
+            "missing credit outcome label: {label}"
+        );
+    }
+}
+
+#[test]
 fn first_run_picker_methods_are_documented_with_every_label() {
     use trace_commons_contributor::daemon::past_sessions as past;
     let contract = include_str!("../../../docs/contributor-daemon-ipc-v1_1.md");
@@ -884,7 +931,10 @@ async fn an_over_long_socket_path_is_explained_rather_than_truncated() {
     let err = bind(&store).await.unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("kernel limit"), "{msg}");
-    assert!(msg.contains("TRACE_COMMONS_CONTRIBUTOR_DIR"), "{msg}");
+    assert!(
+        msg.contains(trace_commons_contributor::channel::STATE_DIR_ENV),
+        "{msg}"
+    );
 }
 
 /// A daemon with one pending entry over a fixture session that carries a
@@ -1662,16 +1712,26 @@ async fn approve_reports_counts_a_client_can_show_without_asking_again() {
     assert_eq!(v["skipped"].as_array().unwrap().len(), 0, "{v}");
 }
 
+/// The envelope limit the oversized-session daemon's state directory runs
+/// under: far above the ordinary fixture session's envelope, so that one is
+/// still approved, and far below the production `MAX_ENVELOPE_BYTES`
+/// (256 MiB), which a debug build took minutes to serialize and preview. The
+/// production value is pinned by
+/// `envelope::tests::the_production_envelope_limit_is_256_mib`.
+const OVERSIZED_FIXTURE_LIMIT_BYTES: usize =
+    trace_commons_contributor::envelope::TEST_ENVELOPE_LIMIT_BYTES;
+
 /// An enrolled daemon with two pending entries in one project: one ordinary
-/// session, and one whose sole event carries content past
-/// `MAX_ENVELOPE_BYTES`. `build_preview` does not size-check the raw
+/// session, and one whose sole event carries content past the envelope limit
+/// of the daemon's state directory, which this fixture lowers to
+/// `OVERSIZED_FIXTURE_LIMIT_BYTES` (`ConfigStore::lower_envelope_limit_for_tests`). `build_preview` does not size-check the raw
 /// contribution -- only the stored artifact does -- so the build itself
 /// succeeds; `approve` catches the oversize before attempting to pin it and
 /// reports the entry `skipped` (`envelope-too-large`) rather than letting it
 /// vanish from both `approved` and `skipped`. Built for the "every entry
 /// attempted is accounted for" guarantee.
-async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledDaemon, ConfigStore)
-{
+async fn enrolled_daemon_with_one_good_and_one_oversized_session()
+-> (EnrolledDaemon, ConfigStore, Arc<DaemonShared>) {
     let dir = tempfile::tempdir().unwrap();
     let store_dir = dir.path().join("state");
     let store = ConfigStore::open(store_dir.clone()).unwrap();
@@ -1686,13 +1746,13 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
         "/Users/testuser/code/proj-a",
     );
 
-    // Past `MAX_ENVELOPE_BYTES` (16_000_000). Preview builds this fine --
-    // the size guard `approve` checks (`summary.would_send_bytes`) mirrors
-    // the one `approved_envelope::save` would otherwise apply, not
+    // Past the daemon's envelope limit. Preview builds this fine -- the
+    // size guard `approve` checks (`summary.would_send_bytes`) mirrors the
+    // one `approved_envelope::save` would otherwise apply, not
     // `build_preview` itself -- so this is what drives the entry into the
     // `envelope-too-large` skip rather than a build-time (`preview-failed`)
     // one.
-    let oversized_content = "x".repeat(trace_commons_contributor::envelope::MAX_ENVELOPE_BYTES + 1);
+    let oversized_content = "x".repeat(OVERSIZED_FIXTURE_LIMIT_BYTES + 1);
     let oversized = serde_json::json!({
         "type": "user",
         "message": {"role": "user", "content": oversized_content},
@@ -1749,10 +1809,14 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
     seed("oversized-fixture-oversized", &oversized_ref);
     queue.save(&store).unwrap();
 
+    // Every size check against this state directory -- the preview's label,
+    // the pin, `approve`, `submit` -- reads the lowered limit.
+    store.lower_envelope_limit_for_tests(OVERSIZED_FIXTURE_LIMIT_BYTES);
     let shared = Arc::new(DaemonShared::load(store).unwrap());
+    let served = Arc::clone(&shared);
     let listener = bind_store(&store_dir).await;
     tokio::spawn(async move {
-        let _ = serve(listener, shared).await;
+        let _ = serve(listener, served).await;
     });
     let client = connect_to(&store_dir).await;
 
@@ -1762,12 +1826,12 @@ async fn enrolled_daemon_with_one_good_and_one_oversized_session() -> (EnrolledD
         client: tokio::sync::Mutex::new(client),
     };
     let store = ConfigStore::open(store_dir).unwrap();
-    (daemon, store)
+    (daemon, store, shared)
 }
 
 #[tokio::test]
 async fn a_partial_batch_accounts_for_every_entry_it_was_given() {
-    let (daemon, _store) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
+    let (daemon, store, _shared) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
     let v = call(&daemon, "approve", serde_json::json!({ "all": true })).await;
     let approved = v["approved"].as_u64().expect("approved");
     let skipped = v["skipped"].as_array().expect("skipped");
@@ -1799,6 +1863,81 @@ async fn a_partial_batch_accounts_for_every_entry_it_was_given() {
         );
         assert!(s["entry_id"].is_string(), "{v}");
     }
+    // The refusal happened where production refuses it: the pin's write
+    // (`approved_envelope::save`) declined the oversized envelope, so no
+    // bytes were stored for it, while the good entry's were.
+    let stored = |hash: &str| {
+        trace_commons_contributor::daemon::approved_envelope::load(&store, entry_id_for(hash))
+            .unwrap()
+            .is_some()
+    };
+    assert!(
+        !stored("oversized-fixture-oversized"),
+        "the oversized envelope must not be stored"
+    );
+    assert!(
+        stored("oversized-fixture-good"),
+        "the good envelope must be stored"
+    );
+}
+
+/// The preview and the approval refuse the same entry for size, with the
+/// same label: what the contributor is told before approving is what
+/// approving then does. Both read the state directory's limit.
+#[tokio::test]
+async fn the_preview_and_the_approval_agree_on_an_oversized_entry() {
+    let (daemon, store, shared) = enrolled_daemon_with_one_good_and_one_oversized_session().await;
+    let oversized_id = entry_id_for("oversized-fixture-oversized");
+    let good_id = entry_id_for("oversized-fixture-good");
+
+    let preview = call(
+        &daemon,
+        "preview",
+        serde_json::json!({ "entry_id": oversized_id.to_string() }),
+    )
+    .await;
+    assert_eq!(
+        preview["reason_label"], "envelope-too-large",
+        "the preview must warn about the size approve will refuse: {preview}"
+    );
+    assert!(
+        preview["would_send_bytes"].as_u64().unwrap() > OVERSIZED_FIXTURE_LIMIT_BYTES as u64,
+        "{preview}"
+    );
+    let good = call(
+        &daemon,
+        "preview",
+        serde_json::json!({ "entry_id": good_id.to_string() }),
+    )
+    .await;
+    assert!(good.get("reason_label").is_none(), "{good}");
+    assert!(good["would_send_bytes"].is_u64(), "{good}");
+
+    // The preview sheet (`open_preview`, the shells' in-process full
+    // preview) builds through the pinning path, not the card's; it must say
+    // the same.
+    let (sheet, _body) =
+        trace_commons_contributor::daemon::ipc::open_preview(&shared, oversized_id)
+            .await
+            .expect("the oversized session still builds a preview");
+    assert_eq!(
+        sheet.reason_label,
+        Some("envelope-too-large"),
+        "the preview sheet must warn about the size approve will refuse"
+    );
+
+    let v = call(&daemon, "approve", serde_json::json!({ "all": true })).await;
+    assert_eq!(v["approved"].as_u64(), Some(1), "{v}");
+    let skipped = v["skipped"].as_array().expect("skipped");
+    assert_eq!(skipped.len(), 1, "{v}");
+    assert_eq!(skipped[0]["entry_id"], oversized_id.to_string(), "{v}");
+    assert_eq!(skipped[0]["reason_label"], preview["reason_label"], "{v}");
+    assert!(
+        trace_commons_contributor::daemon::approved_envelope::load(&store, oversized_id)
+            .unwrap()
+            .is_none(),
+        "neither the preview nor the approval may store the oversized envelope"
+    );
 }
 
 #[tokio::test]
@@ -2457,23 +2596,29 @@ async fn preview_visible_and_cancel_are_safe_to_call_repeatedly() {
 /// `too_large` must be able to trust that no would-send number accompanies
 /// it.
 #[test]
-fn the_admission_cap_admits_the_measured_claude_corpus_and_refuses_the_codex_tail() {
+fn the_admission_cap_admits_the_owners_long_sessions_and_refuses_past_512_mib() {
     // Asked of a real scheduler built the way the daemon builds it, so this
     // tracks the shipped policy rather than restating a constant.
     let sched = trace_commons_contributor::daemon::preview_scheduler::PreviewScheduler::default();
     assert_eq!(sched.admission_cap(), MAX_PREVIEW_SESSION_BYTES);
-    // The corpus behind the incident: Claude sessions topped out at
-    // 29.8 MB, Codex rollouts at 367.5 MB against a 3.5 MB mean.
+    assert_eq!(MAX_PREVIEW_SESSION_BYTES, 536_870_912);
+    // The owner's machine, 2026-10-29: Claude Code sessions up to 186 MB
+    // and Codex rollouts up to 432 MB in the last 28 days, all of which
+    // the old 64 MiB cap refused.
     assert!(
-        sched.admits(29_800_000),
-        "the largest measured Claude session must still be previewable"
+        sched.admits(186_000_000),
+        "the largest recent Claude Code session must be previewable"
+    );
+    assert!(
+        sched.admits(432_000_000),
+        "the largest recent Codex rollout must be previewable"
     );
     assert!(
         sched.admits(3_500_000),
         "the mean Codex rollout must be previewable"
     );
     assert!(
-        !sched.admits(367_500_000),
-        "the largest measured Codex rollout must not be parsed to draw a card"
+        !sched.admits(MAX_PREVIEW_SESSION_BYTES + 1),
+        "a session past the shared 512 MiB cap is not parsed to draw a card"
     );
 }

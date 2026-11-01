@@ -9,7 +9,7 @@ import SwiftUI
 /// The line carries the window's label and its new size in whole points,
 /// nothing else: no title, no path, no content. It goes to the unified log
 /// at the default level, which is kept on disk, and is read with
-/// `log show --predicate 'subsystem == "ai.tracecommons.shell" AND category == "window"'`
+/// `log show --predicate 'subsystem == "<the app's bundle id>" AND category == "window"'`
 /// around the crash's time. It is not in the `.ips` report.
 enum WindowBreadcrumb {
     /// The app's windows, each by a fixed label.
@@ -27,7 +27,11 @@ enum WindowBreadcrumb {
         }
     }
 
-    static let logger = Logger(subsystem: "ai.tracecommons.shell", category: "window")
+    /// The bundle id, so a staging app logs under its own subsystem
+    /// (staging design, section 4.2). Outside a bundle, the process name.
+    static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? ProcessInfo.processInfo.processName,
+        category: "window")
 
     /// Which resizes are logged: the first of a burst, then one more line if
     /// the burst runs past `burst` resizes inside `interval` seconds. A
@@ -85,7 +89,7 @@ private struct WindowBreadcrumbProbe: NSViewRepresentable {
     private final class Probe: NSView {
         private let scene: WindowBreadcrumb.Scene
         private var throttle = WindowBreadcrumb.Throttle()
-        private var observer: NSObjectProtocol?
+        private var observer: WindowNotificationObservers?
 
         init(scene: WindowBreadcrumb.Scene) {
             self.scene = scene
@@ -97,25 +101,21 @@ private struct WindowBreadcrumbProbe: NSViewRepresentable {
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if let observer { NotificationCenter.default.removeObserver(observer) }
             observer = nil
             guard let window else { return }
-            observer = NotificationCenter.default.addObserver(
+            let token = NotificationCenter.default.addObserver(
                 forName: NSWindow.didResizeNotification, object: window, queue: nil
             ) { [weak self] note in
                 guard let window = note.object as? NSWindow else { return }
                 MainActor.assumeIsolated { self?.noteResize(window.frame.size) }
             }
+            observer = WindowNotificationObservers(center: .default, tokens: [token])
         }
 
         private func noteResize(_ size: CGSize) {
             if let line = throttle.note(at: ProcessInfo.processInfo.systemUptime) {
                 WindowBreadcrumb.log(line, scene: scene, size: size)
             }
-        }
-
-        deinit {
-            if let observer { NotificationCenter.default.removeObserver(observer) }
         }
     }
 }

@@ -418,10 +418,15 @@ async fn v2_enrols_without_legacy_witness_and_never_selects_implicitly() {
     )
     .unwrap();
     assert_eq!(v2["near_ai_login_ready"], true);
-    assert_eq!(v2["ready"], true);
+    // `ready` is the wallet ceremony, which a staging build never offers.
+    let wallet_offered = !cfg!(feature = "near-ai-staging");
+    assert_eq!(v2["ready"], wallet_offered);
     assert_eq!(v2["offers_available"], true);
     assert!(v2.get("witness").is_none());
-    assert!(v2.get("issuer_url").is_none());
+    // The issuer and audience a contributor mints upload claims with are
+    // published by a ready v2 commons (#1574 review, H1); the witness is not.
+    assert_eq!(v2["issuer_url"], "https://issuer.example");
+    assert_eq!(v2["audience"], "upload");
     assert_eq!(
         v2["near_ai_start_path"],
         "/v1/account/near-ai/provision/start/v2"
@@ -457,8 +462,8 @@ async fn v2_enrols_without_legacy_witness_and_never_selects_implicitly() {
     )
     .await;
     assert_eq!(
-        wallet_status,
-        StatusCode::OK,
+        wallet_status == StatusCode::OK,
+        wallet_offered,
         "{}",
         String::from_utf8_lossy(&wallet_body)
     );

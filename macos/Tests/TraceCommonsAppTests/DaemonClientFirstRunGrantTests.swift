@@ -1,3 +1,4 @@
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -7,26 +8,32 @@ import XCTest
 /// so the method name and the parameter object are assertable without a
 /// running daemon. The same shape as the double in `SetSettingsTests`.
 private final class GrantRecordingDaemon: DaemonCalling {
-    private let lock = NSLock()
-    private var recorded: [(method: String, params: String)] = []
-    private var responseValue = #"{"id":1,"result":{}}"#
+    private struct State: Sendable {
+        var recorded: [(method: String, params: String)] = []
+        var methodResponses: [String: String] = [:]
+        var response = #"{"id":1,"result":{}}"#
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    var methodResponses: [String: String] {
+        get { state.withLock { $0.methodResponses } }
+        set { state.withLock { $0.methodResponses = newValue } }
+    }
 
     var calls: [(method: String, params: String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     var response: String {
-        get { lock.lock(); defer { lock.unlock() }; return responseValue }
-        set { lock.lock(); defer { lock.unlock() }; responseValue = newValue }
+        get { state.withLock { $0.response } }
+        set { state.withLock { $0.response = newValue } }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append((method: method, params: paramsJSON))
-        return responseValue
+        state.withLock {
+            $0.recorded.append((method: method, params: paramsJSON))
+            return $0.methodResponses[method] ?? $0.response
+        }
     }
 
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
@@ -49,7 +56,7 @@ private final class GrantRecordingDaemon: DaemonCalling {
 /// The Flow 1 grant and the invite lookup, as the macOS client sends them.
 final class DaemonClientFirstRunGrantTests: XCTestCase {
     private let grantedFrame =
-        #"{"id":1,"result":{"granted":true,"granted_at":"2026-10-04T12:00:00.123456Z","on_disk_recorded":false}}"#
+        #"{"id":1,"result":{"granted":true,"granted_at":"2026-10-04T12:00:00.123456Z","on_disk_recorded":false,"include_existing":true}}"#
 
     func test_grantAutomaticSendsConfirmedAndTheWitness() throws {
         let daemon = GrantRecordingDaemon()
@@ -58,9 +65,12 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
 
         let grant = try client.grantAutomatic(witnessSigningAddress: nil)
 
-        XCTAssertEqual(daemon.calls.map(\.method), ["grant_automatic"])
+        XCTAssertEqual(daemon.calls.map(\.method), ["grant_automatic_including_existing"])
         let params = try XCTUnwrap(daemon.lastParams)
-        XCTAssertEqual(Set(params.keys), ["confirmed", "witness_signing_address"])
+        XCTAssertEqual(Set(params.keys), ["confirmed", "witness_signing_address", "include_existing", "keep_folder_asks"])
+        XCTAssertEqual(params["include_existing"] as? Bool, true)
+        // A folder's own Ask is kept under the first run's grant (#1753).
+        XCTAssertEqual(params["keep_folder_asks"] as? Bool, true)
         // A JSON true, not 1: the daemon only takes a boolean confirmation.
         XCTAssertTrue(daemon.calls[0].params.contains(#""confirmed":true"#))
         // No witness is a JSON null, never an omitted key: an omitted key is
@@ -70,6 +80,7 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
         XCTAssertTrue(grant.granted)
         XCTAssertNotNil(grant.grantedAt)
         XCTAssertEqual(grant.onDiskRecorded, false)
+        XCTAssertEqual(grant.includeExisting, true)
     }
 
     func test_grantAutomaticPassesTheWitnessShown() throws {
@@ -81,6 +92,7 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
 
         let params = try XCTUnwrap(daemon.lastParams)
         XCTAssertEqual(params["witness_signing_address"] as? String, "witness-address")
+        XCTAssertEqual(params["include_existing"] as? Bool, true)
     }
 
     func test_aRefusedGrantThrowsTheDaemonsLabel() {
@@ -104,6 +116,35 @@ final class DaemonClientFirstRunGrantTests: XCTestCase {
         XCTAssertFalse(grant.granted)
         XCTAssertNil(grant.grantedAt)
         XCTAssertNil(grant.onDiskRecorded)
+    }
+
+    func test_anOlderDaemonCannotConfirmTheBroaderAutomaticScope() throws {
+        for extra in ["", #","include_existing":false"#] {
+            let daemon = GrantRecordingDaemon()
+            daemon.response = #"{"id":1,"result":{"granted":true"# + extra + "}}"
+            let client = DaemonClient(daemon: daemon)
+            XCTAssertThrowsError(try client.grantAutomatic(witnessSigningAddress: nil))
+        }
+    }
+
+    /// Ask each time withdraws the grant and returns the folders it armed
+    /// to Ask; it sets no global Ask override, which no screen could clear
+    /// and under which a folder set to Automatic never sent (#1753 A2).
+    func test_askWithdrawsTheGrantAndSetsNoOverride() throws {
+        let daemon = GrantRecordingDaemon()
+        daemon.response = #"{"id":1,"result":{"withdrawn":true}}"#
+        XCTAssertTrue(try DaemonClient(daemon: daemon).setAskEachTime())
+        XCTAssertEqual(daemon.calls.map(\.method), ["withdraw_automatic_grant"])
+        let params = try XCTUnwrap(daemon.lastParams)
+        XCTAssertEqual(params["return_folders_to_ask"] as? Bool, true)
+    }
+
+    func test_aRefusedAskThrowsTheDaemonsLabel() {
+        let daemon = GrantRecordingDaemon()
+        daemon.response = #"{"id":1,"error":{"code":"unavailable","message":"policy-write-failed"}}"#
+        XCTAssertThrowsError(try DaemonClient(daemon: daemon).setAskEachTime()) { error in
+            XCTAssertEqual((error as? DaemonClient.Failure)?.message, "policy-write-failed")
+        }
     }
 
     func test_inviteLookupSendsTheInviteAsItsCode() throws {

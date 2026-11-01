@@ -1,0 +1,102 @@
+# Release build of the staging server binaries, with the `near-ai-staging`
+# feature, for the staging host only (staging design 3.5).
+#
+# Builds, on ubuntu:24.04 to match the staging VM:
+#   trace-commons-ingest               the cloud features plus near-ai-staging
+#   trace-commons-upload-claim-issuer  no features, as on the pilot
+#   trace-commons-repair-upload-ownership  explicit historical ownership repair
+#   trace-commons-staging-pins         the pin re-sign tool (near-ai-staging,
+#                                      and the collateral client `observe` needs)
+# and publishes each, with a sha256 sidecar and a latest.txt pointer, to the
+# staging artifacts bucket and nowhere else. The staging VM fetches them with
+# deploy/pilot-gcp/pull-and-install.sh and TC_ARTIFACT_BUCKET set to that
+# bucket (deploy/staging-gcp/README.md).
+#
+# Submitted by hand, never by a trigger:
+#   gcloud builds submit --config deploy/staging-gcp/cloudbuild.yaml \
+#     --project tracecommons-pilot-2026 \
+#     --substitutions _TAG=$(git rev-parse --short HEAD),_CODE_REVISION_HASH=none
+#
+# _CODE_REVISION_HASH is the versioned pipeline's code revision, as in the
+# root cloudbuild.yaml; staging runs no pipeline runtime, so `none` is the
+# usual value. Empty fails the build.
+#
+# scripts/ci/check-release-staging-feature.sh lists this file as a staging
+# file: it must name the feature and must name no production destination.
+
+substitutions:
+  _TAG: 'manual'            # short SHA; defaults to BUILD_ID below if 'manual'
+  _BUCKET: 'tc-staging-artifacts-20261021'
+  _CODE_REVISION_HASH: ''   # sha256: digest or `none`; empty fails
+
+steps:
+  - name: 'ubuntu:24.04'
+    id: build
+    env:
+      - 'RUSTFLAGS=-D warnings'
+      - 'CARGO_INCREMENTAL=0'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euxo pipefail
+        # The staging bucket only. A substitution naming any other bucket
+        # stops the build before anything compiles.
+        [ "${_BUCKET}" = "tc-staging-artifacts-20261021" ] \
+          || { echo "_BUCKET must be the staging artifacts bucket" >&2; exit 1; }
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          build-essential pkg-config libssl-dev curl ca-certificates git clang cmake
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | sh -s -- -y --default-toolchain stable --profile minimal
+        . "$$HOME/.cargo/env"
+        # The identity the binaries report on --version and /health; the
+        # upload has no .git, so this is the only source of the commit.
+        export TRACE_COMMONS_BUILD_COMMIT="${_TAG}"
+        [ "$$TRACE_COMMONS_BUILD_COMMIT" = "manual" ] \
+          && export TRACE_COMMONS_BUILD_COMMIT="${BUILD_ID}"
+        if [ "${_CODE_REVISION_HASH}" != "none" ]; then
+          printf '%s' "${_CODE_REVISION_HASH}" | grep -Eqx 'sha256:[0-9a-f]{64}' \
+            || { echo "_CODE_REVISION_HASH is not a sha256: digest or none" >&2; exit 1; }
+          export TRACE_COMMONS_BUILD_CODE_REVISION_HASH="${_CODE_REVISION_HASH}"
+        fi
+        # near-ai-staging switches every compiled-in NEAR AI host to NEAR AI
+        # staging, and the ingest refuses at boot any configured NEAR AI host
+        # that is not staging (staging design 3.9). The other features are
+        # the pilot's: GCS, Cloud KMS, the NEAR AI scorer and the Intel DCAP
+        # collateral client.
+        cargo build --release -p trace-commons-ingest --bin trace-commons-ingest \
+          --features gcs-client,gcp-kms,near-ai-scorer,near-attestation-collateral,near-ai-staging
+        cargo build --release --bin trace-commons-upload-claim-issuer
+        cargo build --release -p trace-commons-server --bin trace-commons-repair-upload-ownership
+        # As docs/operator/staging-pin-signing.md builds it: without the
+        # collateral client, `observe` refuses and prints no set.
+        cargo build --release -p trace-commons-server --bin trace-commons-staging-pins \
+          --features near-ai-staging,near-attestation-collateral
+        mkdir -p /workspace/out
+        for b in trace-commons-ingest trace-commons-upload-claim-issuer trace-commons-staging-pins trace-commons-repair-upload-ownership; do
+          cp "target/release/$$b" "/workspace/out/$$b"
+          ( cd /workspace/out && sha256sum "$$b" > "$$b.sha256" )
+        done
+
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: publish
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euxo pipefail
+        TAG="${_TAG}"; [ "$$TAG" = "manual" ] && TAG="${BUILD_ID}"
+        for b in trace-commons-ingest trace-commons-upload-claim-issuer trace-commons-staging-pins trace-commons-repair-upload-ownership; do
+          DEST="gs://${_BUCKET}/binaries/$$b/$$TAG"
+          gcloud storage cp "/workspace/out/$$b"        "$$DEST/$$b"
+          gcloud storage cp "/workspace/out/$$b.sha256" "$$DEST/$$b.sha256"
+          printf '%s' "$$DEST/$$b" | gcloud storage cp - "gs://${_BUCKET}/binaries/$$b/latest.txt"
+          echo "published: $$DEST/$$b"
+        done
+
+options:
+  machineType: 'E2_HIGHCPU_32'
+  diskSizeGb: 120
+timeout: '3600s'

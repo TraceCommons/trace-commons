@@ -8,13 +8,18 @@
 //! `analyze` returns the SHA-256 of the exact bytes of any path the daemon
 //! user can read, `open` is a recursive private-directory create at any path,
 //! and any sufficiently private directory is adopted as a store, `~/.ssh`
-//! among them. No daemon method forwards here today, and none may without an
-//! authorization gate and an allow-list of store directories first. The same
-//! constraint is stated in both copies of the C header.
+//! among them. So no daemon method forwards a caller's request here. One
+//! daemon method builds its own: `insights_analyze_session` runs `analyze`
+//! on a file its own watcher found, matched to a row the caller names by an
+//! opaque reference, into the standard store, so the caller chooses neither
+//! the file nor the directory. Any other forwarding needs an authorization
+//! gate and an allow-list of store directories first. The same constraint is
+//! stated in both copies of the C header.
 use std::{io::Write, path::PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use trace_commons_contributor_platform::os_secret_store::KeychainIdentity;
 use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionId};
 
 use super::InsightsStoreError;
@@ -323,7 +328,8 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("outcome", "Outcome"), ("recorded_at", "Recorded at"),
         ("unknown", "Unknown"), ("working", "Working…"),
         ("no_file", "No file selected"), ("cost", "Estimated cost"),
-        ("codex", "Codex rollout"), ("claude_code", "Claude Code trace"), ("trajectory", "Trajectory"),
+        // "Claude", not "Claude Code", in Insights (owner, approved 2026-10-28).
+        ("codex", "Codex rollout"), ("claude_code", "Claude trace"), ("trajectory", "Trajectory"),
         ("metric_sessions", "Traces"), ("metric_events", "Events"),
         ("metric_input_tokens", "Input tokens"), ("metric_output_tokens", "Output tokens"),
         ("metric_tool_calls", "Tool calls"), ("metric_tool_failures", "Reported tool failures"),
@@ -629,12 +635,12 @@ pub enum LocalInsightsOperation {
         snapshot_id: String,
         tz: i32,
     },
-    /// Feed T comparisons: each goal with its six weekly marks, the lever of
-    /// the week and the weekly summary card. `counter_weeks` is the daemon's
+    /// Feed T comparisons: the lever of the week and the weekly summary
+    /// card. `counter_weeks` is the daemon's
     /// `insights_week` `history`, passed through unchanged, and absent under
     /// feed S; `recap_card_enabled` is the daemon's
-    /// `insights_recap_card_enabled`, passed through. Goals and the lever's
-    /// feedback live here and the counter rows in the daemon, so neither side
+    /// `insights_recap_card_enabled`, passed through. The lever's feedback
+    /// lives here and the counter rows in the daemon, so neither side
     /// can compare alone. Measured figures only; no rate, path or assumption.
     /// A read: an absent store is not created.
     Comparisons {
@@ -645,15 +651,6 @@ pub enum LocalInsightsOperation {
         tz: i32,
         #[serde(default)]
         recap_card_enabled: bool,
-    },
-    /// Add a goal, or replace the one with `id`.
-    GoalSet {
-        #[serde(default)]
-        id: Option<String>,
-        goal: super::goals::Goal,
-    },
-    GoalDelete {
-        id: String,
     },
     /// "Not useful" on the lever's kind in the week shown (its Monday), or,
     /// with `action: reenable`, the kind turned back on. Stored as the kind
@@ -834,12 +831,6 @@ pub enum LocalInsightsResponse {
     Comparisons {
         comparisons: Box<super::recap::WeekComparisons>,
     },
-    GoalSet {
-        state: Box<super::goal_store::GoalState>,
-    },
-    GoalDelete {
-        state: Box<super::goal_store::GoalState>,
-    },
     LeverFeedback {
         state: Box<super::goal_store::GoalState>,
     },
@@ -852,18 +843,87 @@ pub enum LocalInsightsResponse {
 }
 
 /// Resolve only local Insights storage; never resolve enrollment configuration.
+///
+/// The store refuses its digest key: see [`LocalInsightStore::open`]. A host
+/// that saves snapshots uses [`open_store_for`] with its channel's keychain.
 pub fn open_store(store_dir: Option<&std::path::Path>) -> Result<LocalInsightStore> {
-    LocalInsightStore::open(&store_path(store_dir)?)
+    open_store_with(store_dir, None)
+}
+
+/// [`list_saved`] in the store of the build's channel.
+pub fn list_saved_for(
+    store_dir: Option<&std::path::Path>,
+    channel: StoreChannel,
+) -> Result<Vec<LocalInsight>> {
+    list_saved(Some(&channel.store_dir(store_dir)?))
+}
+
+/// Where a host's Insights live: its channel's keychain namespace, which
+/// holds the digest key, and the name of its per-user state directory, under
+/// which the default store sits. Two hosts on one machine with different
+/// channels share neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreChannel {
+    pub keychain: KeychainIdentity,
+    pub state_dir_name: &'static str,
+}
+
+impl StoreChannel {
+    /// `store_dir`, or this channel's default store when it is `None`.
+    pub fn store_dir(&self, store_dir: Option<&std::path::Path>) -> Result<PathBuf> {
+        match store_dir {
+            Some(path) => Ok(path.to_path_buf()),
+            None => default_store_dir(self.state_dir_name),
+        }
+    }
+
+    /// `request` with its store directory filled in from this channel when it
+    /// names none. Left as it was when there is no per-user data directory,
+    /// which every store operation then refuses as before.
+    fn fill(&self, mut request: LocalInsightsRequest) -> LocalInsightsRequest {
+        if request.store_dir.is_none() {
+            request.store_dir = default_store_dir(self.state_dir_name).ok();
+        }
+        request
+    }
+}
+
+/// The default store of the state directory named `state_dir_name`: its
+/// `insights` directory under the platform's per-user data directory.
+pub fn default_store_dir(state_dir_name: &str) -> Result<PathBuf> {
+    Ok(dirs::data_local_dir()
+        .ok_or_else(|| anyhow!("insights-local-directory-unavailable"))?
+        .join(state_dir_name)
+        .join("insights"))
+}
+
+/// The state directory name of a host that names no channel.
+const UNCHANNELED_STATE_DIR_NAME: &str = "trace-commons";
+
+/// [`open_store`] in the store and keychain namespace of the build's channel.
+pub fn open_store_for(
+    store_dir: Option<&std::path::Path>,
+    channel: StoreChannel,
+) -> Result<LocalInsightStore> {
+    LocalInsightStore::open_for(&channel.store_dir(store_dir)?, channel.keychain)
+}
+
+fn open_store_with(
+    store_dir: Option<&std::path::Path>,
+    keychain: Option<KeychainIdentity>,
+) -> Result<LocalInsightStore> {
+    let path = store_path(store_dir)?;
+    match keychain {
+        Some(keychain) => LocalInsightStore::open_for(&path, keychain),
+        None => LocalInsightStore::open(&path),
+    }
 }
 
 fn store_path(store_dir: Option<&std::path::Path>) -> Result<PathBuf> {
-    Ok(match store_dir {
-        Some(path) => path.to_path_buf(),
-        None => dirs::data_local_dir()
-            .ok_or_else(|| anyhow!("insights-local-directory-unavailable"))?
-            .join("trace-commons")
-            .join("insights"),
-    })
+    match store_dir {
+        Some(path) => Ok(path.to_path_buf()),
+        None => default_store_dir(UNCHANNELED_STATE_DIR_NAME),
+    }
 }
 
 /// Reading an empty history must not create state before an explicit save.
@@ -931,14 +991,37 @@ fn refresh_saved_weeks(store: &LocalInsightStore) {
 
 /// Synchronous local IO. Native callers must schedule this off the UI thread.
 /// Dropping a UI task does not cancel a save/delete that has already started.
+///
+/// A snapshot saved here records its turn series as unknown, because no
+/// keychain namespace is named; hosts use [`execute_for`].
 pub fn execute(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
-    let response = execute_inner(request)?;
+    execute_with(request, None)
+}
+
+/// [`execute`] in the store of the build's channel when the request names
+/// none, and with its keychain namespace, where the digest key for a saved
+/// snapshot's turn series lives.
+pub fn execute_for(
+    request: LocalInsightsRequest,
+    channel: StoreChannel,
+) -> Result<LocalInsightsResponse> {
+    execute_with(channel.fill(request), Some(channel.keychain))
+}
+
+fn execute_with(
+    request: LocalInsightsRequest,
+    keychain: Option<KeychainIdentity>,
+) -> Result<LocalInsightsResponse> {
+    let response = execute_inner(request, keychain)?;
     response_json(&response)?;
     Ok(response)
 }
 
-fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse> {
-    let store = || open_store(request.store_dir.as_deref());
+fn execute_inner(
+    request: LocalInsightsRequest,
+    keychain: Option<KeychainIdentity>,
+) -> Result<LocalInsightsResponse> {
+    let store = || open_store_with(request.store_dir.as_deref(), keychain);
     let episode_store = || {
         existing_store(request.store_dir.as_deref())?
             .ok_or_else(|| anyhow!(EpisodeStoreError::NotFound))
@@ -1388,18 +1471,6 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
                 )),
             }
         }
-        LocalInsightsOperation::GoalSet { id, goal } => LocalInsightsResponse::GoalSet {
-            state: Box::new(store()?.goal_set(id.as_deref(), goal)?),
-        },
-        LocalInsightsOperation::GoalDelete { id } => {
-            let state = match existing_store(request.store_dir.as_deref())? {
-                Some(store) => store.goal_delete(&id)?,
-                None => return Err(super::goal_store::GoalStoreError::NotFound.into()),
-            };
-            LocalInsightsResponse::GoalDelete {
-                state: Box::new(state),
-            }
-        }
         LocalInsightsOperation::LeverFeedback {
             kind,
             week_start,
@@ -1427,12 +1498,27 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
 
 /// Strict typed JSON boundary. Errors deliberately contain fixed labels only.
 pub fn dispatch_json(bytes: &[u8]) -> Result<String> {
+    dispatch_json_with(bytes, None)
+}
+
+/// [`dispatch_json`] in the store and keychain namespace of the build's
+/// channel, as [`execute_for`].
+pub fn dispatch_json_for(bytes: &[u8], channel: StoreChannel) -> Result<String> {
+    dispatch_json_with(bytes, Some(channel))
+}
+
+fn dispatch_json_with(bytes: &[u8], channel: Option<StoreChannel>) -> Result<String> {
     if bytes.len() > MAX_REQUEST_BYTES {
         bail!("insights-request-too-large");
     }
     let text = std::str::from_utf8(bytes).map_err(|_| anyhow!("insights-request-invalid-utf8"))?;
-    let request = serde_json::from_str(text).map_err(|_| anyhow!("insights-request-invalid"))?;
-    let response = execute_inner(request).map_err(public_error)?;
+    let request: LocalInsightsRequest =
+        serde_json::from_str(text).map_err(|_| anyhow!("insights-request-invalid"))?;
+    let (request, keychain) = match channel {
+        Some(channel) => (channel.fill(request), Some(channel.keychain)),
+        None => (request, None),
+    };
+    let response = execute_inner(request, keychain).map_err(public_error)?;
     response_json(&response).map_err(public_error)
 }
 
@@ -1523,6 +1609,37 @@ fn response_json(response: &LocalInsightsResponse) -> Result<String> {
 mod tests {
     use super::*;
 
+    const CHANNEL: StoreChannel = StoreChannel {
+        keychain: KeychainIdentity {
+            access_group: "TEAM.example.group",
+            cloud_service: "example.cloud",
+            account_service: "example.account",
+            insights_digest_key_service: "example.insights",
+            claude_usage_service: "example.claude-usage",
+        },
+        state_dir_name: "example-channel",
+    };
+
+    /// A request naming no store is given the channel's default store, and
+    /// one naming a store keeps it. Resolving reads and creates nothing.
+    #[test]
+    fn a_channel_fills_in_its_own_default_store() {
+        let request = |store_dir| LocalInsightsRequest {
+            store_dir,
+            operation: LocalInsightsOperation::List {},
+        };
+        let filled = CHANNEL.fill(request(None)).store_dir.expect("filled");
+        assert!(filled.ends_with(std::path::Path::new("example-channel").join("insights")));
+        assert_eq!(filled, default_store_dir("example-channel").unwrap());
+        let named = PathBuf::from("/elsewhere/insights");
+        assert_eq!(
+            CHANNEL.fill(request(Some(named.clone()))).store_dir,
+            Some(named.clone())
+        );
+        assert_eq!(CHANNEL.store_dir(Some(&named)).unwrap(), named);
+        assert_eq!(CHANNEL.store_dir(None).unwrap(), filled);
+    }
+
     /// `ui_copy()` keys for these four enums are derived from their
     /// snake_case wire form by naming convention only, with nothing linking
     /// the two: renaming or adding a variant leaves a shell indexing a
@@ -1583,6 +1700,39 @@ mod tests {
         }
     }
 
+    /// The owner's plain-words pass (2026-10-29): the coverage line is the
+    /// count alone with its breakdown behind an "i", and the Benchmarks
+    /// header and cards read plainly. The removed keys stay removed.
+    #[test]
+    fn the_coverage_and_benchmarks_words_are_the_plain_ones() {
+        let copy = ui_copy();
+        for (key, words) in [
+            ("analytics_coverage_line", "{n} traces"),
+            ("analytics_coverage_info_known", "Full details for {k}."),
+            ("analytics_coverage_info_partial", "Some missing for {p}."),
+            (
+                "analytics_coverage_info_unknown",
+                "None for {u}; these aren't counted as zero.",
+            ),
+            ("analytics_bench_intro", "Compared on {n} of your traces"),
+            ("analytics_bench_quality", "Quality"),
+            ("analytics_bench_value", "Value"),
+            ("analytics_bench_speed", "Speed"),
+            ("analytics_bench_quality_detail", "Share of edits you kept"),
+            (
+                "analytics_bench_value_detail",
+                "Cost per trace at API prices",
+            ),
+            ("analytics_bench_speed_detail", "Time per trace"),
+            ("analytics_bench_not_enough", "Waiting for more data"),
+        ] {
+            assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
+        }
+        for key in ["analytics_bench_min", "analytics_bench_empty"] {
+            assert!(!copy.contains_key(key), "{key} was removed");
+        }
+    }
+
     /// Ron's owner review of #1287 (D17, adopted by the owner 2026-10-11):
     /// his table's approved words, the two new strings and the four removed
     /// keys. The route split is pinned in the test above with its fifth,
@@ -1594,9 +1744,12 @@ mod tests {
         for (key, words) in [
             ("analytics_lever_title", "Higher than usual"),
             ("analytics_goals_title", "Goals"),
+            ("analytics_coverage_line", "{n} traces"),
+            ("analytics_coverage_info_known", "Full details for {k}."),
+            ("analytics_coverage_info_partial", "Some missing for {p}."),
             (
-                "analytics_coverage_line",
-                "Counts known for {k} of {n} traces · {p} partial · {u} unknown, not counted as zero",
+                "analytics_coverage_info_unknown",
+                "None for {u}; these aren't counted as zero.",
             ),
             (
                 "analytics_coverage_undated",
@@ -1701,11 +1854,9 @@ mod tests {
             ("analytics_from_counters", "from token counts"),
             (
                 "analytics_claude_sessions_only",
-                "Claude Code traces only: {k} of {n}.",
+                "Claude traces only: {k} of {n}.",
             ),
             ("analytics_see_sessions", "Show {n} traces"),
-            ("analytics_goal_cache_share", "Cache share at least {p}%"),
-            ("analytics_goal_delete", "Delete"),
             ("analytics_lever_show_reads", "Show reads"),
             (
                 "analytics_lever_off",
@@ -1760,6 +1911,12 @@ mod tests {
                 "analytics_setting_counter_pass",
                 "Count tokens in watched folders",
             ),
+            // Owner, 2026-10-28: "Claude", never "Claude Code", in the
+            // drill-down; one trace is singular; an unmeasured login's
+            // card says this.
+            ("analytics_credit_tool_claude_code", "Claude"),
+            ("analytics_projects_traces_one", "{n} trace"),
+            ("analytics_limits_refresh_to_see", "Refresh to see limits"),
         ] {
             assert_eq!(copy.get(key).map(String::as_str), Some(words), "{key}");
         }
@@ -1771,15 +1928,26 @@ mod tests {
         ] {
             assert!(!copy.contains_key(key), "{key} was removed");
         }
-        // User-facing copy says "trace", not "session", with two exceptions:
-        // the Sessions tab (with its card title and drill-down column
-        // header) and the context tip's "current session".
+        // Trace-related copy says "trace", not "session", except the Sessions
+        // tab and context tip. A provider quota's Session window is a separate
+        // concept, not a name for an uploaded trace.
         let exceptions = [
             "analytics_tab_sessions",
             "analytics_card_sessions",
             "analytics_drill_session",
+            "analytics_analyze_empty",
+            "analytics_analyze_how",
             "analytics_tip_context",
+            "analytics_subscriptions_session",
+            // The quota's Session window again, on the usage cards.
+            "analytics_limits_session_left",
+            "analytics_usage_session_resets",
+            // The get-started steps, in the owner's words (2026-10-29):
+            // what Claude Code and Codex record on this Mac.
+            "analytics_start_step_use_detail",
+            "analytics_start_step_fill_detail",
         ];
+        assert_eq!(copy["analytics_subscriptions_session"], "Session");
         for (key, words) in ANALYTICS_COPY {
             if !exceptions.contains(key) {
                 assert!(!words.to_lowercase().contains("session"), "{key}: {words}");
@@ -1802,6 +1970,31 @@ mod tests {
             copy["analytics_tip_context"],
             "Context is at {ctx} in your current session."
         );
+    }
+
+    /// Every value a Sessions row's own labels can take has its words, so
+    /// a shell never shows a wire label, and the inferred task says so.
+    #[test]
+    fn every_session_label_has_its_words() {
+        use super::super::session_labels::{LabelledTask, SessionOutcome};
+        let copy = ui_copy();
+        for task in LabelledTask::ALL {
+            let key = format!("analytics_task_{}", task.wire());
+            assert!(!copy[&key].is_empty(), "{key}");
+        }
+        for outcome in SessionOutcome::ALL {
+            let key = format!("analytics_outcome_{}", outcome.wire());
+            assert!(!copy[&key].is_empty(), "{key}");
+        }
+        assert!(!copy.contains_key("analytics_task_no_edits"));
+        assert_eq!(copy["analytics_task_inferred"], "{label} · inferred");
+        for key in [
+            "analytics_label_task_a11y",
+            "analytics_label_outcome_a11y",
+            "analytics_task_confirm_a11y",
+        ] {
+            assert!(copy[key].contains("{label}"), "{key} names its row");
+        }
     }
 
     /// Owner decision 2026-10-20: a Patterns card whose estimate rounds to
@@ -1875,10 +2068,7 @@ mod tests {
                 "analytics_by_project_unavailable",
                 "Not available for analyzed files",
             ),
-            (
-                "analytics_coverage_line",
-                "Counts known for {k} of {n} traces \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
-            ),
+            ("analytics_coverage_line", "{n} traces"),
             ("analytics_glance_tokens_only", "{tokens} tokens"),
             // A saved session's picker and drill-down label, never its id.
             (
@@ -2884,7 +3074,7 @@ mod tests {
         assert_eq!(found["type"], "comparisons");
         let found = &found["comparisons"];
         assert_eq!(found["feed"], "saved");
-        assert_eq!(found["goals"], serde_json::json!([]));
+        assert!(found.get("goals").is_none());
         assert_eq!(found["lever"]["unavailable"], "needs_counter_pass");
         assert_eq!(found["recap"], serde_json::Value::Null);
         // Feed T figures over an absent store: compared, nothing created.
@@ -2915,9 +3105,16 @@ mod tests {
                 serde_json::json!({"type": "comparisons", "tz": 0, "rate": 3}),
                 "insights-request-invalid",
             ),
+            // The threshold goals left Insights: their writes are refused.
             (
                 serde_json::json!({"type": "goal_delete", "id": "goal-1"}),
-                "insights_goal_not_found",
+                "insights-request-invalid",
+            ),
+            (
+                serde_json::json!({"type": "goal_set", "goal": {
+                    "kind": "weekly_tokens_under", "source": "claude_code", "tokens": 900_000
+                }}),
+                "insights-request-invalid",
             ),
         ] {
             assert_eq!(
@@ -2988,18 +3185,9 @@ mod tests {
     }
 
     #[test]
-    fn goal_and_lever_writes_feed_the_comparisons() {
+    fn lever_writes_feed_the_comparisons() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("store");
-        let set = analytics_call(
-            &directory,
-            serde_json::json!({"type": "goal_set", "goal": {
-                "kind": "weekly_tokens_under", "source": "claude_code", "tokens": 900_000
-            }}),
-        )
-        .unwrap();
-        assert_eq!(set["type"], "goal_set");
-        let id = set["state"]["goals"][0]["id"].as_str().unwrap().to_string();
         let compared = analytics_call(
             &directory,
             serde_json::json!({
@@ -3008,22 +3196,10 @@ mod tests {
             }),
         )
         .unwrap();
-        let goal = &compared["comparisons"]["goals"][0];
-        assert_eq!(goal["id"], id.as_str());
-        assert_eq!(goal["figure"], 800_000);
-        assert_eq!(
-            goal["marks"]["marks"],
-            serde_json::json!(["not_met", "not_met", "not_met", "not_met", "not_met", "met"])
-        );
-        assert_eq!(
-            goal["marks"]["change"],
-            serde_json::json!({"direction": "down", "from": 1_000_000})
-        );
         let recap = &compared["comparisons"]["recap"];
         let closed = recap["week_start"].as_str().unwrap().to_string();
 
         for bad in [
-            serde_json::json!({"type": "goal_set", "goal": {"kind": "long_context_under", "tokens": 0}}),
             serde_json::json!({"type": "lever_feedback", "kind": "repeated_reads", "week_start": "2026-10-06"}),
             serde_json::json!({"type": "recap_opened", "week_start": "2026-10-06"}),
         ] {
@@ -3054,11 +3230,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(after["comparisons"]["recap"], serde_json::Value::Null);
-        let deleted = analytics_call(
-            &directory,
-            serde_json::json!({"type": "goal_delete", "id": id}),
-        )
-        .unwrap();
-        assert_eq!(deleted["state"]["goals"], serde_json::json!([]));
+        assert!(opened["state"].get("goals").is_none());
     }
 }

@@ -125,7 +125,7 @@ final class EdgeRailOpening {
 
     init(
         state: EdgeRailState,
-        nextTurn: @escaping @MainActor (@escaping @MainActor () -> Void) -> Void = GlassWindowFrame.onNextTurn,
+        nextTurn: @escaping @MainActor (@escaping @MainActor () -> Void) -> Void = { GlassWindowFrame.onNextTurn($0) },
         animate: @escaping Animate = EdgeRailOpening.animate,
         place: @escaping @MainActor (Bool) -> Void
     ) {
@@ -174,52 +174,41 @@ final class EdgeRailOpening {
 @MainActor
 final class EdgeRailState {
     var open = false
-    var peek: EdgeRailPeek = .home
+    var peek: EdgeRailPeek = .privateAI
 }
 
 /// The rail's icons, top to bottom (owner, 2026-10-11): one per tab of
-/// the app, each peek a compact summary of that tab. The app's own tile
-/// closes the rail.
+/// the app, each peek a compact summary of that tab. Home's is gone (owner,
+/// 2026-10-22). The app's own tile closes the rail.
 enum EdgeRailPeek: CaseIterable, Identifiable {
-    case home, privateAI, traces
+    case privateAI, traces
 
     var id: Self { self }
 
-    /// The icon: a house, a shield for Private AI (owner, 2026-10-11, in
-    /// place of the key), and the Trace mark for Traces.
+    /// The icon: a shield for Private AI (owner, 2026-10-11, in place of
+    /// the key), and four connected nodes in a T for Traces (owner,
+    /// 2026-10-22, in place of the Trace mark).
     var icon: EdgeRailIcon {
         switch self {
-        case .home: .symbol("house")
         case .privateAI: .symbol("shield")
-        case .traces: .traceMark
+        case .traces: .traceNodes
         }
     }
 
     /// The icon's name and its peek's title: the app's tab names.
     func name(nav: MonitorSettingsNavCopy?, shell: MonitorShellCopy?) -> String {
         switch self {
-        case .home: shell?.tabHome ?? ""
         case .privateAI: nav?.privateAI ?? ""
         case .traces: shell?.tabTraces ?? ""
         }
     }
-
-    /// The tab the peek's link opens.
-    var destination: MonitorDestination {
-        switch self {
-        case .home: .home(.overview)
-        case .privateAI: .inference
-        case .traces: .traces(entryId: nil)
-        }
-    }
 }
 
-/// What a rail icon draws: an SF Symbol, or the Trace mark.
+/// What a rail icon draws: an SF Symbol, or Traces' connected nodes.
 enum EdgeRailIcon: Equatable {
     case symbol(String)
-    /// The Trace logo's live-trace mark (`GlassTraceMark`, Claude Design
-    /// 1c, owner 2026-10-12).
-    case traceMark
+    /// Four nodes in a T (`GlassTraceNodesGlyph`, owner, 2026-10-22).
+    case traceNodes
 }
 
 /// A borderless panel that floats over every app on every Space and never

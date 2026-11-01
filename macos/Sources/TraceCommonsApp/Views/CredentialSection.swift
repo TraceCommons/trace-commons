@@ -22,7 +22,9 @@ struct CredentialSection: View {
     /// Whether the section draws its own title. Inside #1146's connection
     /// panel it does not: the panel's title is the heading.
     var titled = true
-    @State private var ownProvider = "near"
+    /// The first provider this build offers (the daemon's default): the
+    /// NEAR wallet in production, NEAR AI's Google login in staging.
+    @State private var ownProvider = CredentialSection.offeredProviders.first ?? ""
     /// Where the provider choice lives when the caller holds it. `nil` -- every
     /// production caller -- keeps it in this view's own state.
     ///
@@ -43,21 +45,25 @@ struct CredentialSection: View {
         let title: String
     }
 
-    static func providerOptions(_ copy: PrivateInferenceCopy) -> [ProviderOption] {
-        [
-            ProviderOption(tag: "near", title: copy.credentialProviderNear),
-            ProviderOption(tag: "github", title: copy.credentialProviderGithub),
-            ProviderOption(tag: "google", title: copy.credentialProviderGoogle),
-        ]
-    }
+    /// The providers this build offers, as the core reports them
+    /// (`tc_build_channel_json`): a staging build offers NEAR AI's Google
+    /// login only.
+    static var offeredProviders: [String] { BuildChannelGate.dylibChannel?.nearAiSignInProviders ?? [] }
 
-    /// How often a ceremony in flight is re-read.
-    ///
-    /// It finishes in a browser this app does not own, so nothing here is
-    /// told when it does; the poll is what closes that. It runs only while
-    /// the shared table still offers a cancel, which is the one state that
-    /// has an outcome pending.
-    private static let pollInterval = Duration.seconds(2)
+    /// `offered`, in its order, with the core's title for each. A provider
+    /// this build has no title for is not drawn.
+    static func providerOptions(
+        _ copy: PrivateInferenceCopy, offered: [String] = CredentialSection.offeredProviders
+    ) -> [ProviderOption] {
+        offered.compactMap { tag in
+            switch tag {
+            case "near": return ProviderOption(tag: tag, title: copy.credentialProviderNear)
+            case "github": return ProviderOption(tag: tag, title: copy.credentialProviderGithub)
+            case "google": return ProviderOption(tag: tag, title: copy.credentialProviderGoogle)
+            default: return nil
+            }
+        }
+    }
 
     var body: some View {
         let status = model.credentialStatus
@@ -135,15 +141,6 @@ struct CredentialSection: View {
             // decision is `BalanceSurface.actionToDraw`'s, not this view's.
             actionButton(balanceAction)
         }
-        .task(id: action) {
-            // A state nobody could read polls nothing. There is no outcome
-            // pending and no attempt to name.
-            while action == .cancel, !Task.isCancelled {
-                try? await Task.sleep(for: Self.pollInterval)
-                guard !Task.isCancelled else { return }
-                model.refreshNearAiCredential()
-            }
-        }
     }
 
     /// One button, or none at all.
@@ -172,9 +169,7 @@ struct CredentialSection: View {
                 // The URL is served once, by start. Opening it is this
                 // view's environment; the model has no window.
                 guard let url = await model.startNearAiCredential(provider: provider) else { return }
-                let accepted = await withCheckedContinuation { continuation in
-                    openURL(url) { continuation.resume(returning: $0) }
-                }
+                let accepted = await openURL.opened(url)
                 // A browser that never opened leaves a ceremony nobody can
                 // finish, so it is stopped rather than left to time out.
                 if !accepted { model.cancelNearAiCredential() }

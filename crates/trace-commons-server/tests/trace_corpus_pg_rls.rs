@@ -1433,6 +1433,25 @@ fn force_rls_migration_covers_every_trace_rls_table() {
     sql.push_str(include_str!(
         "../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"
     ));
+    sql.push_str(include_str!(
+        "../../../migrations/V131__starter_plausibility_features.sql"
+    ));
+    sql.push_str(include_str!("../../../migrations/V132__payout_rails.sql"));
+    sql.push_str(include_str!(
+        "../../../migrations/V133__payout_reversal_hold_decisions.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V135__device_upload_ownership.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V140__account_device_codes.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V141__trace_model_training_consent_grants.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V142__referral_rewards.sql"
+    ));
     // `trace_pii_backstop` carries the same tenant-isolation policy but is not
     // in `TRACE_COMMONS_RLS_TABLES`, so assert it here rather than lose the
     // coverage the hand-maintained table list used to provide.
@@ -1550,6 +1569,25 @@ fn central_rls_tenant_predicate_migration_covers_every_trace_rls_table() {
     ));
     sql.push_str(include_str!(
         "../../../migrations/V128__pipeline_settle_finish_and_score_bases.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V131__starter_plausibility_features.sql"
+    ));
+    sql.push_str(include_str!("../../../migrations/V132__payout_rails.sql"));
+    sql.push_str(include_str!(
+        "../../../migrations/V133__payout_reversal_hold_decisions.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V135__device_upload_ownership.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V140__account_device_codes.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V141__trace_model_training_consent_grants.sql"
+    ));
+    sql.push_str(include_str!(
+        "../../../migrations/V142__referral_rewards.sql"
     ));
     for table in expected_trace_rls_tables()
         .into_iter()

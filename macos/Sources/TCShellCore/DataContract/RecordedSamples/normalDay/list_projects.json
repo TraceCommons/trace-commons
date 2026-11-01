@@ -9,6 +9,11 @@
       "added_at": "2026-09-02T10:00:00Z",
       "configured": true,
       "is_unresolved_bucket": false,
+      "offerable_modes": [
+        "notify_only",
+        "auto_upload",
+        "ignore"
+      ],
       "session_count": 22,
       "last_session_at": "2026-09-30T09:00:00Z",
       "tools": [
@@ -29,6 +34,11 @@
       "added_at": "2026-09-02T10:00:00Z",
       "configured": true,
       "is_unresolved_bucket": false,
+      "offerable_modes": [
+        "notify_only",
+        "auto_upload",
+        "ignore"
+      ],
       "session_count": 9,
       "last_session_at": "2026-09-30T09:00:00Z",
       "tools": [

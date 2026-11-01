@@ -557,6 +557,8 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Claude {
                 series: UsageSeries {
                     turns,
@@ -574,6 +576,8 @@ mod tests {
             import_seq: seq,
             placed_at: None,
             harness_session: None,
+            automated: false,
+            facts: None,
             body: SessionBody::Codex {
                 observed: Some(crate::insights::week_rollup::CodexObserved {
                     first_at: at(day),
@@ -584,6 +588,7 @@ mod tests {
                     total: 110,
                     baseline_excluded: false,
                 }),
+                series: None,
             },
         }
     }

@@ -3,14 +3,20 @@
 pub mod accounts;
 pub mod cli;
 pub mod codex;
+pub mod collection_plan;
+pub mod folder;
 pub mod models;
+pub mod native_collection;
 pub mod opencode;
+pub mod options;
 pub mod profiles;
 pub mod secrets;
+pub mod session_binding;
 pub mod sessions;
 pub mod signin;
 pub mod statusline;
 pub mod supervisor;
+pub mod tool_setup;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -87,6 +93,8 @@ pub struct Selection {
 pub enum ManagedError {
     #[error("managed selection conflict; refresh and try again")]
     Conflict,
+    #[error("trace collection requires exclusive access to this managed account")]
+    CollectionAccountBusy,
     #[error("managed account or session not found")]
     NotFound,
     #[error("account label is ambiguous; select an account ID")]
@@ -97,6 +105,8 @@ pub enum ManagedError {
     ToolUnavailable,
     #[error("unsupported native tool version")]
     UnsupportedVersion,
+    #[error("OpenCode system settings prevent an isolated managed session")]
+    SystemConfiguration,
     #[error("sign in to this account before launching")]
     SignInRequired,
     #[error("sign in to NEAR AI before launching")]
@@ -107,11 +117,26 @@ pub enum ManagedError {
     LaunchUnknown,
     #[error("invalid managed request")]
     InvalidRequest,
+    #[error("invalid managed CLI options")]
+    InvalidCliOptions,
     #[error("the chosen terminal app was not found")]
     TerminalNotFound,
     #[error("the chosen model is not available on NEAR AI")]
     ModelUnavailable,
+    #[error("add funds to NEAR AI before launching")]
+    NearAiBalanceTooLow,
+    /// A NEAR AI Claude Code launch whose project, or a folder its CLI
+    /// options add, chooses a model by id (owner's wording, 2026-11-01).
+    #[error(
+        "This project's Claude Code settings, agents, commands or skills choose a model. NEAR AI sessions use the session's models."
+    )]
+    ProjectChoosesModel,
 }
+
+/// The daemon's label for [`ManagedError::ProjectChoosesModel`], which the
+/// CLI turns back into its sentence and the shells map to the shared
+/// `project_chooses_model` line.
+pub const PROJECT_CHOOSES_MODEL_LABEL: &str = "managed-project-chooses-model";
 
 pub mod copy;
 pub mod route;

@@ -32,11 +32,12 @@ the link.
 | Running a versioned pipeline corpus locally | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate locally | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
 | Comparing the old gate path with the versioned pipeline | [`./pipeline-comparison.md`](./pipeline-comparison.md) |
+| The retired client daily upload allowance, its endpoint, and the staging upload-trust evaluator | [`./client-upload-allowance.md`](./client-upload-allowance.md) |
+| Diagnosing upload credits missing from an account or payout | [`./upload-credit-ownership.md`](./upload-credit-ownership.md) |
 | Reading a failure label of `pipeline.py compare` | [`./pipeline-comparison-labels.md`](./pipeline-comparison-labels.md) |
 | Activating, rolling back, or containing the versioned pipeline for a tenant, suspending a policy, or reading the legacy drain report | [`./pipeline-activation.md`](./pipeline-activation.md) |
 | Arming, re-arming, or disarming default routing of every tenant to the versioned pipeline | [`./pipeline-activation.md`](./pipeline-activation.md) ("Default routing") and [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) (stage 4a) |
 | Smoke-testing a move to the versioned pipeline, stage by stage | [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) |
-| Qualifying the signed native passkey entitlement and profile | [`./native-passkey-release-qualification.md`](./native-passkey-release-qualification.md) |
 | Preparing offline anonymized pilot response projections | [`./network-recording-projections.md`](./network-recording-projections.md) |
 | Verifying the contributor apps before tagging a release | [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
@@ -45,14 +46,15 @@ the link.
 | Calibrating the perplexity floor after A2.6 Outcome 1 | [`./a27-perplexity-floor-calibration.md`](./a27-perplexity-floor-calibration.md) |
 | Running the pilot bootstrap harness | [`./pilot-bootstrap.md`](./pilot-bootstrap.md) (see also [`./pilot-bootstrap-dryrun-notes.md`](./pilot-bootstrap-dryrun-notes.md) — known real-data defects) |
 | Running the pilot-bootstrap first-100-traces dry run | [`./pilot-bootstrap-first-100-traces.md`](./pilot-bootstrap-first-100-traces.md) |
-| Sending a native-app user to the browser passkey step-up page (URL contract, origin list) | [`./native-step-up-page.md`](./native-step-up-page.md) |
 | Provisioning the contributor-account login-resolver DB role | [`./login-resolver-role.md`](./login-resolver-role.md) |
+| Granting the referral-resolver DB role to the ingest login | [`./referral-resolver-role.md`](./referral-resolver-role.md) |
 | Provisioning the public register-stats read role | [`./register-stats-role.md`](./register-stats-role.md) |
 | Reviewing account invite trust and its activation blockers | [`./account-invite-trust.md`](./account-invite-trust.md) |
 | Consolidating two contributor devices into one account | [`./account-merge.md`](./account-merge.md) |
-| Enabling the unbound passkey-account reaper | [`./unbound-account-reaper.md`](./unbound-account-reaper.md) |
+| Automatically settling eligible contributor credits | [`./automatic-credit-settlement.md`](./automatic-credit-settlement.md) |
 | Setting the NEAR settlement mode or designating payout | [`./settlement-mode.md`](./settlement-mode.md) |
 | Issuing and reviewing mission or Insights rewards | [`./mission-insight-rewards.md`](./mission-insight-rewards.md) |
+| Reading native Codex and Claude subscription limits in Insights | [`./subscription-usage.md`](./subscription-usage.md) |
 | Publishing executable mission packages | [`./mission-packages.md`](./mission-packages.md) |
 | Publishing participant reward offers or provisioning account access | [`./participant-rewards.md`](./participant-rewards.md) |
 | Gating the pilot to invited contributors only | [`./pilot-allowlist.md`](./pilot-allowlist.md) |
@@ -261,6 +263,17 @@ Every runbook in this directory, with a one-line description.
   works on schemas before V76 and says which source it used.
 - [`./smoke-test.md`](./smoke-test.md) — post-deploy validation checklist
   that exercises every required drill plus a fixture gate evaluation.
+- [`./staging-pin-signing.md`](./staging-pin-signing.md) — the staging NEAR AI
+  pin-signing key (creating it, who may read it) and re-signing the pin set a
+  staging app trusts with `trace-commons-staging-pins`.
+- [`./private-ai-campaigns.md`](./private-ai-campaigns.md) — publish the native app campaign JSON and artwork without an app release.
+- [`./staging-runbook.md`](./staging-runbook.md) — the staging environment
+  for the operator: making a staging macOS build, checking it published, the
+  update feed, and pointers to pin re-signing. Server bring-up and the first
+  pin set are placeholders until their tasks land.
+- [`./staging-tester-guide.md`](./staging-tester-guide.md) — for staging
+  testers: installing the staging app, making a NEAR AI staging account, what
+  works and what does not yet, and removing it.
 - [`./tracecommons-ai-community-site.md`](./tracecommons-ai-community-site.md) —
   Cloudflare Pages deployment and pilot playbook for the public
   pseudonymous leaderboard, contributor profiles, and aggregate analytics.

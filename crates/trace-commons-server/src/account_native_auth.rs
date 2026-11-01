@@ -40,7 +40,7 @@
 //! # Single-instance limitation
 //!
 //! The pending-request and issued-code stores are the in-process
-//! [`crate::account_passkey::CeremonyStore`], with the same caveat: a flow
+//! [`crate::account_ceremony::CeremonyStore`], with the same caveat: a flow
 //! started on one process cannot be finished on another, and state is lost on
 //! restart. Both TTLs are minutes, and the pilot runs a single ingest process.
 //! A horizontally-scaled deployment MUST move these to a shared short-TTL
@@ -62,10 +62,37 @@ pub const NATIVE_AUTH_REQUEST_TTL: Duration = Duration::from_secs(5 * 60);
 /// only thing this window has to cover is one loopback round trip.
 pub const NATIVE_AUTH_CODE_TTL: Duration = Duration::from_secs(2 * 60);
 
-/// Lifetime of the bearer token minted at exchange. Short-lived by
-/// requirement: a native client re-runs the browser flow rather than holding a
-/// week-long credential the way a browser cookie does.
+/// Lifetime of a native session from its last rotation. Short-lived by
+/// requirement: a native token is never good for more than this past the last
+/// time the client used it. Each rotation-on-use moves `expires_at` to
+/// `now + NATIVE_SESSION_TTL_HOURS` (see [`NATIVE_SESSION_MAX_LIFETIME_DAYS`]),
+/// so an account in use keeps its session, and one left alone this long
+/// signs in again.
 pub const NATIVE_SESSION_TTL_HOURS: i64 = 12;
+
+/// Rotation-on-use cadence for a native session, in seconds. A native request
+/// presenting a CURRENT token older than this rotates it, and that rotation is
+/// what extends the session (see [`NATIVE_SESSION_TTL_HOURS`]). It must be
+/// well inside the 12-hour lifetime: at the browser cadence (also 12 hours) a
+/// native token could never rotate before it expired.
+pub const NATIVE_SESSION_ROTATION_INTERVAL_SECS: i64 = 60 * 60;
+
+/// Absolute ceiling on a native session's life, counted from the sign-in that
+/// created it (`created_at`). The sliding extension never moves `expires_at`
+/// past `created_at + NATIVE_SESSION_MAX_LIFETIME_DAYS`, so however active the
+/// account, a native session re-runs a sign-in at least this often, and a
+/// stolen token that is kept in use dies at the cap. Thirty days: long enough
+/// that an active contributor signs in about once a month, short enough that
+/// a credential never lives indefinitely. The 3-day idle cap shared with
+/// browser sessions still applies, though the 12-hour sliding lifetime is the
+/// tighter of the two for a native session.
+pub const NATIVE_SESSION_MAX_LIFETIME_DAYS: i64 = 30;
+
+// The cadence has to be well inside the lifetime, or a native token can never
+// rotate, and so never extend, before it expires. It was not: browser and
+// native sessions both rotated at 12 hours, and a native session lived 12.
+const _: () = assert!(NATIVE_SESSION_ROTATION_INTERVAL_SECS < NATIVE_SESSION_TTL_HOURS * 60 * 60);
+const _: () = assert!(NATIVE_SESSION_MAX_LIFETIME_DAYS * 24 > NATIVE_SESSION_TTL_HOURS);
 
 /// `client_kind` recorded on the session row. A public label. It is NOT in
 /// [`crate::account_session::AccountCtx::is_strong_session`]'s strong set, so

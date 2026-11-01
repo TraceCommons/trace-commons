@@ -1,0 +1,16 @@
+TC_ARTIFACT_KEY_HEX=dummy-artifact-key
+TC_CLOUD_SQL_INSTANCE=dummy-instance
+TC_DB_PASSWORD=dummy-db-password
+TC_GATE_MASTER_KEY_HEX=dummy-gate-master-key
+TC_GCP_PROJECT=dummy-project
+TC_GCP_REGION=dummy-region
+TC_GCS_BUCKET=dummy-bucket
+TC_ISSUER_SIGNING_KID=dummy-kid
+TC_KMS_KEY_NAME=projects/dummy-project/locations/dummy-region/keyRings/dummy-ring/cryptoKeys/dummy-key
+TC_LE_EMAIL=ops@example.invalid
+TC_LOGIN_RESOLVER_PASSWORD=dummy-resolver-password
+TC_NEAR_AI_API_KEY=dummy-near-ai-key
+TC_PII_BACKSTOP_DRIVER_PASSWORD=dummy-backstop-password
+TC_PUBLIC_HOST=pilot.example.invalid
+TC_RUNTIME_SA=dummy-runtime@example.invalid
+TC_TENANT_ID=dummy-tenant

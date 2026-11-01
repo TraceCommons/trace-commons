@@ -359,6 +359,7 @@ public struct GlassBarGraph: View {
     private let buckets: [GlassBarBucket]
     private let scaleFloor: Double
     private let period: Int
+    private let compact: Bool
     @Binding private var hovered: String?
     /// The window last drawn, so a change knows which side it came from.
     @State private var shownPeriod: Int?
@@ -366,15 +367,26 @@ public struct GlassBarGraph: View {
 
     /// `period` names the window the buckets cover (0 is now, -1 the window
     /// before it): when it changes the bars slide in from the side the new
-    /// window lies on (#1146 `tc-slide-l` / `tc-slide-r`).
+    /// window lies on (#1146 `tc-slide-l` / `tc-slide-r`). `compact` closes
+    /// the gaps between and inside the columns for a narrow panel (the
+    /// menu-bar popover, owner, 2026-10-22), so its dots keep the full
+    /// graph's pitch instead of crowding together.
     public init(
-        _ buckets: [GlassBarBucket], scaleFloor: Double = 1, period: Int = 0,
+        _ buckets: [GlassBarBucket], scaleFloor: Double = 1, period: Int = 0, compact: Bool = false,
         hovered: Binding<String?> = .constant(nil)
     ) {
         self.buckets = buckets
         self.scaleFloor = scaleFloor
         self.period = period
+        self.compact = compact
         self._hovered = hovered
+    }
+
+    /// The gap between columns and the matrix's inset inside each: a thin
+    /// graph's (one dot across), a compact one's, or the full graph's.
+    static func gaps(thin: Bool, compact: Bool) -> (between: CGFloat, inset: CGFloat) {
+        if thin { return (2, 1) }
+        return compact ? (2, 2) : (6, 5)
     }
 
     /// The bar labels' ink: `statusOff`, primary under the pointer (#1146
@@ -398,17 +410,18 @@ public struct GlassBarGraph: View {
     private var bars: some View {
         let maximum = max(scaleFloor, buckets.map { max($0.up, $0.down) }.max() ?? 0)
         let thin = buckets.count > 14
+        let gaps = Self.gaps(thin: thin, compact: compact)
         // Top-aligned: a bucket with no label is shorter than one with a
         // label, and on the bottom it would lift the labelled columns' dots
         // off the others' rows.
-        return HStack(alignment: .top, spacing: thin ? 2 : 6) {
+        return HStack(alignment: .top, spacing: gaps.between) {
             ForEach(Array(buckets.enumerated()), id: \.element.id) { index, bucket in
                 let isHovered = hovered == bucket.id
                 VStack(spacing: GlassTokens.Space.s2) {
                     Canvas { context, size in
                         Self.drawMatrix(
                             in: &context, size: size, columns: thin ? 1 : 3,
-                            radius: thin ? 1.5 : 1.9, inset: thin ? 1 : 5, end: Self.matrixEnd,
+                            radius: thin ? 1.5 : 1.9, inset: gaps.inset, end: Self.matrixEnd,
                             up: Self.dotAlphas(bucket.up, of: maximum),
                             down: Self.dotAlphas(bucket.down, of: maximum),
                             unlit: GlassColor.ink(isHovered ? 0.2 : 0.09))
@@ -687,25 +700,11 @@ enum GlassMapMarks {
     static let shimmerSlant: Double = 20
 
     /// The shimmer band at `sweep` (its fractional part; each whole step is
-    /// one pass): the gradient's start and end. The band leans
-    /// `shimmerSlant` degrees from upright and travels left to right, from
-    /// wholly before the field's first corner to wholly past its last, so a
-    /// pass starts and ends off the field whatever the field's shape.
+    /// one pass): the gradient's start and end (`GlassShimmerBand`), leaning
+    /// `shimmerSlant` degrees from upright.
     static func shimmerBand(sweep: Double, size: CGSize) -> (start: CGPoint, end: CGPoint) {
-        let progress = CGFloat(sweep - sweep.rounded(.down))
-        let angle = shimmerSlant * .pi / 180
-        // Square to the band: rightward, tipped down by the slant (y runs
-        // down), so the band itself leans with its top to the right.
-        let unit = CGVector(dx: CGFloat(cos(angle)), dy: CGFloat(sin(angle)))
-        let corners = [CGPoint.zero, CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: size.height),
-                       CGPoint(x: size.width, y: size.height)]
-        let along = corners.map { $0.x * unit.dx + $0.y * unit.dy }
-        let half = shimmerHalfWidth * max(hypot(size.width, size.height), 1)
-        let from = (along.min() ?? 0) - half
-        let to = (along.max() ?? 0) + half
-        let centre = from + (to - from) * progress
-        return (CGPoint(x: unit.dx * (centre - half), y: unit.dy * (centre - half)),
-                CGPoint(x: unit.dx * (centre + half), y: unit.dy * (centre + half)))
+        GlassShimmerBand.band(progress: sweep - sweep.rounded(.down), size: size,
+                              slant: shimmerSlant, halfWidth: shimmerHalfWidth)
     }
 
     /// The dots' centres in a field of `size`, from the cells that touch

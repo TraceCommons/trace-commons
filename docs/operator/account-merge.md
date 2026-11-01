@@ -40,7 +40,6 @@ half sits behind the strong-auth gate.
 never observable. It:
 
 - moves B's **principals** (device identities) to A;
-- moves B's **WebAuthn authenticators** to A;
 - **clears B's payout designation** (a single account may designate at most one
   active payout NEAR identity; B's stale designation must not survive);
 - moves B's **NEAR account anchors and NEAR-provisioned devices** to A, so a

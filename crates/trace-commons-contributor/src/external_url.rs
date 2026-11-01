@@ -54,8 +54,10 @@ fn loopback_callback_url_is_allowed(url: &str) -> bool {
 
 /// The near.ai credits dashboard for one organisation.
 fn near_credits_url_is_allowed(url: &str) -> bool {
-    let prefix = "https://cloud.near.ai/dashboard/organizations/";
-    let Some(rest) = url.strip_prefix(prefix) else {
+    let Some(rest) = url
+        .strip_prefix(crate::channel::NEAR_AI_DASHBOARD_ORIGIN)
+        .and_then(|rest| rest.strip_prefix("/dashboard/organizations/"))
+    else {
         return false;
     };
     let Some(organization_id) = rest.strip_suffix("/credits") else {
@@ -70,8 +72,7 @@ fn near_credits_url_is_allowed(url: &str) -> bool {
 
 /// A tracecommons.ai public run page, named by its slug alone.
 fn tracecommons_run_url_is_allowed(url: &str) -> bool {
-    let prefix = "https://tracecommons.ai/runs/";
-    let Some(slug) = url.strip_prefix(prefix) else {
+    let Some(slug) = url.strip_prefix(crate::channel::PUBLIC_RUNS_PREFIX) else {
         return false;
     };
     !slug.is_empty()
@@ -93,17 +94,30 @@ fn tracecommons_fixture_url_is_allowed(url: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A test URL written against production, moved onto this build's
+    /// channel: the same path on the channel's dashboard or public site.
+    fn ch(url: &str) -> String {
+        url.replace(
+            "https://cloud.near.ai",
+            crate::channel::NEAR_AI_DASHBOARD_ORIGIN,
+        )
+        .replace(
+            "https://tracecommons.ai/runs/",
+            crate::channel::PUBLIC_RUNS_PREFIX,
+        )
+    }
+
     #[test]
     fn the_four_allowed_destinations_pass() {
         assert!(is_allowed(
             "http://127.0.0.1:49152/near-ai/callback?state=abc"
         ));
-        assert!(is_allowed(
+        assert!(is_allowed(&ch(
             "https://cloud.near.ai/dashboard/organizations/example/credits"
-        ));
-        assert!(is_allowed(
+        )));
+        assert!(is_allowed(&ch(
             "https://tracecommons.ai/runs/repair-a-stalled-upload"
-        ));
+        )));
         assert!(is_allowed(
             "https://github.com/TraceCommons/trace-commons/commit/b6722426bb4b83d90425494b664ac468d67943b5"
         ));
@@ -128,31 +142,31 @@ mod tests {
 
     #[test]
     fn near_credits_rejects_a_query_string_a_path_traversal_and_an_empty_id() {
-        assert!(near_credits_url_is_allowed(
+        assert!(near_credits_url_is_allowed(&ch(
             "https://cloud.near.ai/dashboard/organizations/example/credits"
-        ));
-        assert!(!near_credits_url_is_allowed(
+        )));
+        assert!(!near_credits_url_is_allowed(&ch(
             "https://cloud.near.ai/dashboard/organizations/example/credits?next=https://example.com"
-        ));
-        assert!(!near_credits_url_is_allowed(
+        )));
+        assert!(!near_credits_url_is_allowed(&ch(
             "https://cloud.near.ai/dashboard/organizations/../other/credits"
-        ));
-        assert!(!near_credits_url_is_allowed(
+        )));
+        assert!(!near_credits_url_is_allowed(&ch(
             "https://cloud.near.ai/dashboard/organizations//credits"
-        ));
+        )));
     }
 
     #[test]
     fn tracecommons_run_rejects_a_query_string_and_uppercase() {
-        assert!(tracecommons_run_url_is_allowed(
+        assert!(tracecommons_run_url_is_allowed(&ch(
             "https://tracecommons.ai/runs/repair-a-stalled-upload"
-        ));
-        assert!(!tracecommons_run_url_is_allowed(
+        )));
+        assert!(!tracecommons_run_url_is_allowed(&ch(
             "https://tracecommons.ai/runs/repair-a-stalled-upload?next=https://example.com"
-        ));
-        assert!(!tracecommons_run_url_is_allowed(
+        )));
+        assert!(!tracecommons_run_url_is_allowed(&ch(
             "https://tracecommons.ai/runs/Repair-A-Stalled-Upload"
-        ));
+        )));
     }
 
     #[test]
@@ -211,7 +225,7 @@ mod tests {
     /// the prefix/suffix matches above failing to find room for it.
     #[test]
     fn over_long_and_garbage_input_is_refused() {
-        let huge = format!("https://tracecommons.ai/runs/{}", "a".repeat(3000));
+        let huge = format!("{}{}", crate::channel::PUBLIC_RUNS_PREFIX, "a".repeat(3000));
         assert!(!is_allowed(&huge));
         assert!(!is_allowed(&"x".repeat(100_000)));
         assert!(!is_allowed(""));
@@ -224,23 +238,23 @@ mod tests {
     /// handed one that looks allowed until it does.
     #[test]
     fn embedded_whitespace_and_control_characters_are_refused() {
-        assert!(!is_allowed(
+        assert!(!is_allowed(&ch(
             "https://cloud.near.ai/dashboard/organizations/example/credits\nopen"
-        ));
-        assert!(!is_allowed(
+        )));
+        assert!(!is_allowed(&ch(
             "https://tracecommons.ai/runs/repair-a-stalled\t-upload"
-        ));
-        assert!(!is_allowed(
+        )));
+        assert!(!is_allowed(&ch(
             "https://cloud.near.ai/dashboard/organizations/example/credits\u{7}"
-        ));
+        )));
     }
 
     /// Non-ASCII (e.g. a homoglyph/IDN host) is refused outright, not
     /// normalised and re-checked.
     #[test]
     fn non_ascii_is_refused() {
-        assert!(!is_allowed(
+        assert!(!is_allowed(&ch(
             "https://tracecommons.ai/runs/répair-a-stalled-upload"
-        ));
+        )));
     }
 }

@@ -73,6 +73,7 @@ fn isolated_launch_exports_only_its_owned_session_and_stages_validated_bytes() {
     let native = tmp.path().join("opencode");
     // The fixture importer preserves the seed, and exporter must receive its exact ID.
     std::fs::write(&native, r#"#!/bin/sh
+if [ "$1" = --version ]; then echo '1.19.0'; exit 0; fi
 shift
 case "$1" in
 import) cp "$2" "$HOME/fixture-seed.json";;
@@ -129,20 +130,76 @@ esac
     assert_eq!(source.discover().unwrap().len(), 1);
 }
 
+/// A resumed OpenCode session exports its root's whole conversation
+/// (`ses_<root>`) and stages it as the resumed row's own file, leaving the
+/// root row's earlier export in place.
+#[cfg(unix)]
+#[test]
+fn resumed_session_stages_under_its_own_row_without_replacing_the_roots_export() {
+    use std::os::unix::fs::PermissionsExt;
+    use trace_commons_contributor::managed::opencode::{OpenCodeSession, STAGING};
+    let tmp = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(tmp.path().join("state")).unwrap();
+    let account = AccountStore::open(&store)
+        .unwrap()
+        .add(ToolId::Opencode, ConnectionKind::ApiKey, "Work")
+        .unwrap();
+    let native = tmp.path().join("opencode");
+    std::fs::write(&native, r#"#!/bin/sh
+if [ "$1" = --version ]; then echo '1.19.0'; exit 0; fi
+shift
+case "$1" in
+import) cp "$2" "$HOME/fixture-seed.json";;
+export) python3 -c 'import json,os,sys; v=json.load(open(os.environ["HOME"]+"/fixture-seed.json")); assert v["info"]["id"] == sys.argv[1]; print(json.dumps(v))' "$2";;
+esac
+"#).unwrap();
+    std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = uuid::Uuid::new_v4();
+    let first = OpenCodeSession::new(&store, &account, &native, root, tmp.path()).unwrap();
+    first.prepare().unwrap();
+    first.collect(&store).unwrap();
+    let staged = store.dir().join(STAGING);
+    let earlier = std::fs::read(staged.join(format!("{root}.json"))).unwrap();
+
+    let row = uuid::Uuid::new_v4();
+    let resumed = OpenCodeSession::new(&store, &account, &native, root, tmp.path()).unwrap();
+    resumed.collect_as(&store, row).unwrap();
+    assert_eq!(
+        std::fs::read(staged.join(format!("{root}.json"))).unwrap(),
+        earlier,
+        "the root's export is not replaced"
+    );
+    assert!(staged.join(format!("{row}.json")).is_file());
+    let settings = trace_commons_contributor::daemon::settings::DaemonSettings::default();
+    let sources = trace_commons_contributor::source::all_sources(&settings.source_roots(&store));
+    let source = sources.iter().find(|s| s.name() == "opencode").unwrap();
+    let refs = source.discover().unwrap();
+    assert_eq!(refs.len(), 2);
+    for reference in refs {
+        assert_eq!(
+            source.load(&reference).unwrap().conversation_id,
+            Some(format!("ses_{}", root.simple()))
+        );
+    }
+}
+
 /// Optional installed-binary qualification. The executable must be a wrapper
 /// that denies external network, e.g. sandbox-exec; never uses real credentials.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires TC_OPENCODE_TEST_BIN pointing to an externally network-denied OpenCode 1.19.0"]
+#[ignore = "requires TC_OPENCODE_TEST_BIN pointing to an externally network-denied OpenCode 1.x or 2.x"]
 async fn installed_opencode_round_trip_uses_selected_model_and_exact_session() {
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
     use trace_commons_contributor::managed::opencode::OpenCodeSession;
     let seen = Arc::new(Mutex::new(Vec::new()));
     let observations = seen.clone();
-    let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<serde_json::Value>| {
+    let app = Router::new().route("/v1/chat/completions", post(move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
         let observations = observations.clone();
         async move {
-            observations.lock().unwrap().push(body["model"].as_str().unwrap().to_owned());
+            observations.lock().unwrap().push((
+                body["model"].as_str().unwrap().to_owned(),
+                headers.get("x-ironwire-session-id").and_then(|v| v.to_str().ok()).map(str::to_owned),
+            ));
             let a = serde_json::json!({"id":"fixture","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{"role":"assistant","content":"Synthetic."},"finish_reason":null}]});
             let b = serde_json::json!({"id":"fixture","object":"chat.completion.chunk","created":0,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
             ([("content-type", "text/event-stream")], format!("data: {a}\n\ndata: {b}\n\ndata: [DONE]\n\n"))
@@ -173,7 +230,27 @@ async fn installed_opencode_round_trip_uses_selected_model_and_exact_session() {
             "synthetic-key",
         )
         .unwrap();
-    command.args(["run", "--format", "json", "Return the synthetic word."]);
+    if std::env::var("TC_OPENCODE_TEST_MAJOR").as_deref() == Ok("2") {
+        // v2 scopes standalone/session flags to the subcommand. The product
+        // command is interactive; qualify its exact configuration via `run`.
+        let mut run = std::process::Command::new(command.get_program());
+        run.current_dir(command.get_current_dir().unwrap());
+        for (key, value) in command.get_envs() {
+            match value {
+                Some(value) => {
+                    run.env(key, value);
+                }
+                None => {
+                    run.env_remove(key);
+                }
+            }
+        }
+        run.arg("run").args(command.get_args());
+        command = run;
+    } else {
+        command.arg("run");
+    }
+    command.args(["--format", "json", "Return the synthetic word."]);
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::process::Command::from(command)
@@ -183,13 +260,17 @@ async fn installed_opencode_round_trip_uses_selected_model_and_exact_session() {
     .await
     .unwrap()
     .unwrap();
-    assert!(output.status.success(), "native run failed");
+    assert!(
+        output.status.success(),
+        "native run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(!seen.lock().unwrap().is_empty());
     assert!(
         seen.lock()
             .unwrap()
             .iter()
-            .all(|model| model == "fixture-model")
+            .all(|(model, _)| model == "fixture-model")
     );
     run.collect(&store)
         .expect("real native export validates and stages");
@@ -202,7 +283,16 @@ async fn installed_opencode_round_trip_uses_selected_model_and_exact_session() {
     assert_eq!(refs.len(), 1);
     let transcript = source.load(&refs[0]).unwrap();
     assert!(transcript.events.len() >= 2);
-    assert_eq!(transcript.agent_version.as_deref(), Some("1.19.0"));
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|(_, session)| session.as_deref() == transcript.conversation_id.as_deref())
+    );
+    match std::env::var("TC_OPENCODE_TEST_MAJOR").as_deref() {
+        Ok("2") => assert_eq!(transcript.agent_version, None),
+        _ => assert_eq!(transcript.agent_version.as_deref(), Some("1.19.0")),
+    }
     server.abort();
 }
 
@@ -243,7 +333,7 @@ fn declared_and_managed_exports_share_one_source_and_both_load() {
 }
 
 #[test]
-fn turning_opencode_off_stops_managed_discovery() {
+fn automatic_opencode_off_preserves_only_explicitly_collected_exports() {
     use trace_commons_contributor::{
         daemon::settings::{DaemonSettings, SourceDeclaration},
         source::all_sources,
@@ -253,19 +343,56 @@ fn turning_opencode_off_stops_managed_discovery() {
     let root = store
         .dir()
         .join(trace_commons_contributor::managed::opencode::STAGING);
-    std::fs::create_dir(&root).unwrap();
-    std::fs::write(
-        root.join("s.json"),
-        include_bytes!("fixtures/opencode/completed-1.19.0.json"),
-    )
-    .unwrap();
-    let settings = DaemonSettings {
-        opencode_source: Some(SourceDeclaration::Off),
+    let ordinary = tmp.path().join("ordinary-opencode");
+    for folder in [&root, &ordinary] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::write(
+            folder.join("session.json"),
+            include_bytes!("fixtures/opencode/completed-1.19.0.json"),
+        )
+        .unwrap();
+    }
+    let mut settings = DaemonSettings {
+        opencode_source: Some(SourceDeclaration::Watch {
+            path: ordinary.clone(),
+        }),
         ..Default::default()
     };
+    let watching = all_sources(&settings.source_roots(&store));
+    assert_eq!(
+        watching
+            .iter()
+            .find(|source| source.name() == "opencode")
+            .unwrap()
+            .discover()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    settings.opencode_source = Some(SourceDeclaration::Off);
     let roots = settings.source_roots(&store);
-    assert!(!roots.source_identities().contains_key("opencode"));
-    assert!(all_sources(&roots).iter().all(|s| s.name() != "opencode"));
+    let identity = &roots.source_identities()["opencode"];
+    assert!(identity.contains(&root.to_string_lossy().to_string()));
+    assert!(!identity.contains(&ordinary.to_string_lossy().to_string()));
+    let sources = all_sources(&roots);
+    let source = sources
+        .iter()
+        .find(|source| source.name() == "opencode")
+        .unwrap();
+    let found = source.discover().unwrap();
+    assert_eq!(found.len(), 1, "automatic discovery must remain off");
+    assert!(found[0].path.starts_with(&root));
+    assert!(
+        source.load(&found[0]).is_ok(),
+        "explicitly collected bytes remain reviewable"
+    );
+    assert!(
+        source
+            .session_at(&ordinary.join("session.json"))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

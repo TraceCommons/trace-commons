@@ -31,6 +31,17 @@ final class ModalTests: XCTestCase {
         XCTAssertNil(GlassModalAction.defaultAction(in: [action("save", .standard)]))
     }
 
+    /// An action's accessibility name is the caller's when it gives one,
+    /// and the footer button reads it; without one the title is read, as
+    /// before the field existed.
+    func test_anActionsAccessibilityNameIsReadByItsButton() throws {
+        XCTAssertNil(action("plain", .standard).accessibilityName)
+        let named = GlassModalAction("Allow", accessibilityName: "Allow for 3") {}
+        XCTAssertEqual(named.accessibilityName, "Allow for 3")
+        let modal = try XCTUnwrap(DesignSources.all().first { $0.0 == "Modal.swift" }?.1)
+        XCTAssertTrue(modal.contains(".accessibilityLabel(action.accessibilityName ?? action.title)"))
+    }
+
     func test_theKindEachActionDrawsIn() {
         XCTAssertEqual(GlassModalAction.kind(action("d", .destructive), isDefault: false), .destructive)
         XCTAssertEqual(GlassModalAction.kind(action("c", .cancel), isDefault: false), .glass)

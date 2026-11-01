@@ -133,7 +133,7 @@ fn run_preview(config_dir: &Path, entry_id: &str, json: bool) -> Output {
         .arg("preview")
         .arg(entry_id)
         .env_remove("TRACE_COMMONS_ALLOWED_HOSTS")
-        .env_remove("TRACE_COMMONS_CONTRIBUTOR_DIR")
+        .env_remove(trace_commons_contributor::channel::STATE_DIR_ENV)
         .env_remove("TRACE_NEAR_AI_PRIVACY_API_KEY")
         .env_remove("TRACE_NEAR_AI_PRIVACY_BASE_URL")
         .env_remove("TRACE_NEAR_AI_PRIVACY_MODEL")

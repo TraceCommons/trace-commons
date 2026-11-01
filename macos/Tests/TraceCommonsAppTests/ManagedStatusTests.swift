@@ -35,13 +35,15 @@ final class ManagedStatusTests: XCTestCase {
     }
 
     /// (a) A failed launch is said on the NEAR AI card, under the buttons
-    /// that started it; a failed stop, dismiss or start again, or a launch
+    /// that started it; a failed stop, dismiss, start again or resume, or a launch
     /// with no NEAR AI card drawn, on the sessions card. The lines and the
     /// update links are drawn either way.
     func test_aFailureIsSaidWhereItWasAsked() throws {
         XCTAssertTrue(ManagedSessionsSection.failureOnSignInCard(method: "managed_launch_prepare", signInCardShown: true))
+        XCTAssertTrue(ManagedSessionsSection.failureOnSignInCard(method: "managed_tool_setup", signInCardShown: true))
+        XCTAssertFalse(ManagedSessionsSection.failureOnSignInCard(method: "managed_tool_setup", signInCardShown: false))
         XCTAssertFalse(ManagedSessionsSection.failureOnSignInCard(method: "managed_launch_prepare", signInCardShown: false))
-        for method in ["managed_session_stop", "managed_session_dismiss", "managed_session_start_again", nil] {
+        for method in ["managed_session_stop", "managed_session_dismiss", "managed_session_start_again", "managed_session_resume", nil] {
             XCTAssertFalse(ManagedSessionsSection.failureOnSignInCard(method: method, signInCardShown: true), method ?? "nil")
         }
         let source = try Self.source()
@@ -92,15 +94,23 @@ final class ManagedStatusTests: XCTestCase {
     }
 
     /// (d) The list not read yet: the sessions card says it is connecting,
-    /// with Retry.
+    /// with Retry as the card's own re-read icon, the size the balance
+    /// card's is (owner, 2026-10-22), in the core's words even before the
+    /// daemon has sent its table.
     func test_anUnreadListSaysConnectingWithRetry() throws {
         let source = try Self.source()
         for needle in [
             "} else {\n                connectingCard\n            }",
             "subtitle: [model.managedText(\"connecting\")]",
-            "Label(model.managedText(\"retry\"), systemImage: \"arrow.clockwise\")",
+            "refresh: .init(model.managedText(\"retry\"), isDisabled: model.managedBusy) {",
         ] {
             XCTAssertTrue(source.contains(needle), "ManagedSessionsView.swift lacks \(needle)")
+        }
+        XCTAssertFalse(source.contains("Label(model.managedText(\"retry\")"), "Retry is a capsule again")
+        let model = AppModel()
+        XCTAssertNil(model.managedSnapshot)
+        for key in ["title", "connecting", "retry"] {
+            XCTAssertFalse(model.managedText(key).isEmpty, "\(key) has no words before the first read")
         }
     }
 

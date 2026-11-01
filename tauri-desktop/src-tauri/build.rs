@@ -33,8 +33,6 @@ const TAURI_COMMANDS: &[&str] = &[
     "set_quiescence_minutes",
     "set_approval_hold_seconds",
     "set_digest_hours",
-    "set_max_uploads_per_day",
-    "set_max_bytes_per_day_mb",
     "witness_status",
     "configure_witness",
     "clear_witness",

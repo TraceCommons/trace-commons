@@ -208,3 +208,71 @@ E2E (extends `e2e_enroll_and_submit`):
   `consent_scopes` field on the submission-status response.
 - Retention-policy changes and credit changes.
 - Schema migrations (none needed; grant columns exist and are written).
+
+## Addendum 2026-10-24: NEAR AI sign-up writes the grant
+
+**Finding (staging, 2026-10-24).** A NEAR AI-provisioned account's trace was
+scored, but its NoveltyUtility award was withheld as `policy_mismatch`: the
+award needs `model_training` in the trace's allowed uses, and the trace had
+only `debugging, evaluation, aggregate_analytics`, although the contributor
+had granted `model_training` in the app an hour earlier. The table above
+says "Only instance-enrolled keys (grant row present) get broader scopes".
+NEAR AI provisioning (`/v1/account/near-ai/provision/{start,finish}` and
+`/v2`, bind and device enrollment) wrote no grant, so `resolve_device_scope_ceiling`
+gave every NEAR AI device the floor. Separately, neither the staging nor the
+pilot issuer env template attached the grant database
+(`TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB`), and without it
+the ceiling is the floor whatever grants exist.
+
+**Owner decision (2026-10-24), "Honor app consent":** NEAR AI sign-up writes
+the same contributor grant that invite enrollment writes, using the
+instance's policy template. The trace then carries whatever uses the person
+consented to in the app, model training included, capped by that template.
+New traces only; already-uploaded traces keep their uses.
+
+**Design.**
+
+- **Template.** A NEAR AI sign-up has no instance, so the deployment
+  supplies one template, `TRACE_COMMONS_NEAR_AI_SIGNUP_POLICY_TEMPLATE`:
+  JSON in the allowlist's `policy_template` shape, parsed by
+  `near_ai_signup_policy::NearAiSignupPolicyTemplate` in both ingest and the
+  issuer. Unset or blank: no grant is written and the floor stays (fail
+  closed). Malformed, an unknown scope or use, or an empty list: the process
+  refuses to boot.
+- **Write at sign-up.** `attach_near_ai_login_device`, which provisioning
+  (new and returning account), bind and device enrollment all go through,
+  inserts the grant in the same tenant transaction that registers the
+  device: role `contributor`, the device principal, the invite path's
+  deterministic `grant_id`, `metadata_json.source = "near_ai_signup"`.
+  Insert-only (`ON CONFLICT DO NOTHING`), unlike the invite path's upsert:
+  a returning sign-in never duplicates, rewrites or revives a grant, and a
+  later template does not move an existing grant. The wallet (`near`)
+  provisioning path is unchanged.
+- **Backfill: lazily, at the issuer.** Accounts NEAR AI provisioned before
+  this have no grant, and nothing makes them sign in again (uploads use the
+  device key, not the 12-hour native session), so a next-sign-in backfill
+  would leave them on the floor indefinitely. Instead, when a device-key
+  claim finds no active contributor grant and the issuer has the template,
+  `Database::backfill_near_ai_signup_device_grant` checks in one tenant
+  transaction that the device is a live `near_ai`-origin key and inserts the
+  same grant (issued at the claim's instant), and the ceiling is then read
+  from it. An invite or wallet device, a revoked device, and a revoked grant
+  are all left as they are, so they keep the floor. No migration and no
+  operator route: nothing beyond the template is ever granted, and
+  already-stored traces are not touched.
+- **Issuer configuration.** The template requires the grant database; the
+  issuer refuses to start with a template and no
+  `TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_TENANT_ACCESS_GRANT_DB=true`, rather
+  than run inert. Requiring grants
+  (`TRACE_COMMONS_UPLOAD_CLAIM_ISSUER_REQUIRE_TENANT_ACCESS_GRANTS`) is not
+  needed and stays off on staging.
+- **Client.** Unchanged: the daemon already requests its configured consent
+  scopes and the uses they imply (`consent::scopes_to_allowed_uses`) and
+  stamps the envelope with the claim's granted set.
+
+Tests: `account_onboarding_pg.rs` (grant written once from the template;
+re-provisioning and a later template leave it; revoked stays revoked; no
+template no grant; the backfill and what it refuses; a real issuer over the
+real database granting `model_training` up to the template and clipping
+past it), `near_ai_bind_tests::open_sign_up::sign_up_and_bind_write_the_contributor_grant_from_the_template`,
+and the issuer's refusal to start with a template and no grant database.

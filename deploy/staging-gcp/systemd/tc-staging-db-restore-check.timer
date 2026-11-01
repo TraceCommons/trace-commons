@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly staging database restore check
+
+[Timer]
+# Sunday, two hours after that night's backup.
+OnCalendar=Sun *-*-* 05:17:00 UTC
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -33,6 +33,23 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         XCTAssertTrue(link.label.hasSuffix("Near.ai"))
     }
 
+    /// The command-line tool's words: each status line names the link path,
+    /// and each action has its button, accessible name and menu item.
+    func testTheCliToolWordsDecode() throws {
+        let words = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())).cliTool
+        let json = try XCTUnwrap(TCCliTool.json(bundlePath: "/nowhere/Near.ai.app"))
+        let unavailable = try XCTUnwrap(CliToolStatus.decode(fromJSON: json))
+        XCTAssertEqual(unavailable.state, .unavailable)
+        XCTAssertNil(words.statusLine(unavailable))
+        XCTAssertTrue(unavailable.linkPath.hasPrefix("/usr/local/bin/near-ai"))
+        XCTAssertTrue(words.failedLine(path: "/x").contains("/x"))
+        for action in CliToolStatus.Action.allCases {
+            XCTAssertFalse(words.button(action).isEmpty)
+            XCTAssertNotEqual(words.button(action), words.label(action))
+            XCTAssertNotEqual(words.button(action), words.menuItem(action))
+        }
+    }
+
     /// Ron's #1146 Settings modal over the Monitor (#1241 Task 10): its
     /// title, subtitle, section list name and close button, from the core.
     func testTheSettingsModalWordsDecode() throws {
@@ -58,9 +75,9 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         let shell = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())).shell
         XCTAssertEqual(shell.watching(tools: 1), "Watching 1 tool")
         XCTAssertEqual(shell.watching(tools: 3), "Watching 3 tools")
-        XCTAssertEqual(shell.waiting(0, secondLook: 2), "Nothing waiting for you")
-        XCTAssertEqual(shell.waiting(1, secondLook: 0), "1 trace waiting for you")
-        XCTAssertEqual(shell.waiting(4, secondLook: 2), "4 traces waiting for you \u{00B7} 2 worth a second look")
+        XCTAssertEqual(shell.waiting(0), "Nothing waiting for you")
+        XCTAssertEqual(shell.waiting(1), "1 trace waiting for you")
+        XCTAssertEqual(shell.waiting(4), "4 traces waiting for you")
         XCTAssertEqual(shell.focusTip(tool: nil, focused: false), "Select a tool, project or trace first")
         XCTAssertEqual(shell.focusTip(tool: "Codex", focused: false), "Show Codex in the map")
         XCTAssertEqual(shell.focusTip(tool: "Codex", focused: true), "Back to the whole map")
@@ -93,8 +110,6 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.safeguards.heading, "Contribution safeguards")
         XCTAssertEqual(copy.safeguards.rowsUnavailable, "{count} rows unavailable")
         XCTAssertTrue(copy.safeguards.capacityUnreadable.contains("could not read how many"))
-        XCTAssertEqual(copy.safeguards.remaining, "{uploads} uploads left \u{00B7} {megabytes} MB left")
-        XCTAssertEqual(copy.safeguards.heldByLimitOne, "1 queued trace held by limit")
     }
 
     /// The screens and the Traces tab say the same thing when the core does

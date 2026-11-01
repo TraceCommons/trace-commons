@@ -1780,7 +1780,13 @@ async fn source_submission_owned_by_account(
             SELECT 1 FROM trace_submissions s
             WHERE s.tenant_id=$1 AND s.submission_id=$2 AND NOT EXISTS (
                 SELECT 1 FROM trace_account_principals p
-                WHERE p.tenant_id=s.tenant_id AND p.principal_ref=s.auth_principal_ref
+                WHERE p.tenant_id=s.tenant_id
+                  AND (p.principal_ref=s.auth_principal_ref OR EXISTS (
+                      SELECT 1 FROM trace_device_upload_principals u
+                      WHERE u.tenant_id=p.tenant_id
+                        AND u.device_principal_ref=p.principal_ref
+                        AND u.upload_principal_ref=s.auth_principal_ref
+                  ))
                   AND p.account_id IN (SELECT account_id FROM owned)
             )
          ) AND NOT EXISTS (
@@ -2508,6 +2514,56 @@ impl TraceCorpusStore for PgBackend {
         let records = rows.iter().map(row_to_submission).collect();
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         records
+    }
+
+    async fn recent_trace_submission_window(
+        &self,
+        tenant_id: &str,
+        principal_refs: Option<&[String]>,
+        submission_id: Uuid,
+        since: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<crate::trace_corpus_storage::RecentTraceSubmissionWindow, DatabaseError> {
+        let limit = limit.max(0);
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        // The `recent` scan walks idx_trace_submissions_account_keyset (V31,
+        // `(tenant_id, received_at DESC, ...)`) from the newest row and stops
+        // at `limit`, so for the whole tenant (an account tenant) the read is
+        // bounded by the ceiling, not by the tenant's history. With a
+        // principal filter (a pooled tenant) the filter applies during the
+        // walk, so the read is bounded by the tenant's last-hour volume.
+        // The known-id test is a primary-key probe, scoped like the count:
+        // in a pooled tenant another principal's id is not exempt.
+        // `$4::text[] IS NULL` counts the whole tenant.
+        let row = tx
+            .query_one(
+                "WITH recent AS (
+                     SELECT received_at
+                       FROM trace_submissions
+                      WHERE tenant_id = $1
+                        AND received_at > $3
+                        AND ($4::text[] IS NULL OR auth_principal_ref = ANY($4))
+                      ORDER BY received_at DESC
+                      LIMIT $5
+                 )
+                 SELECT (SELECT COUNT(*) FROM recent) AS counted,
+                        (SELECT MIN(received_at) FROM recent) AS oldest_counted_at,
+                        EXISTS(SELECT 1 FROM trace_submissions
+                                WHERE tenant_id = $1 AND submission_id = $2
+                                  AND ($4::text[] IS NULL
+                                       OR auth_principal_ref = ANY($4))) AS submission_known",
+                &[&tenant_id, &submission_id, &since, &principal_refs, &limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        let window = crate::trace_corpus_storage::RecentTraceSubmissionWindow {
+            counted: row.get("counted"),
+            oldest_counted_at: row.get("oldest_counted_at"),
+            submission_known: row.get("submission_known"),
+        };
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(window)
     }
 
     async fn account_activity_days(
@@ -7499,7 +7555,9 @@ impl TraceCorpusStore for PgBackend {
                         credit_withheld_reason,
                         chunk_count,
                         total_chunk_count,
-                        chunks_capped
+                        chunks_capped,
+                        perplexity_passed,
+                        novelty_passed
                  FROM trace_gate_decisions
                  WHERE tenant_id = $1
                    AND submission_id = ANY($2)
@@ -7519,6 +7577,8 @@ impl TraceCorpusStore for PgBackend {
                 chunk_count: row.get("chunk_count"),
                 total_chunk_count: row.get("total_chunk_count"),
                 chunks_capped: row.get("chunks_capped"),
+                perplexity_passed: Some(row.get("perplexity_passed")),
+                novelty_passed: Some(row.get("novelty_passed")),
             })
             .collect())
     }
@@ -7563,7 +7623,13 @@ impl PgBackend {
                 "SELECT EXISTS(SELECT 1 FROM trace_submission_sessions m
              WHERE m.tenant_id=$1 AND m.submission_id=$2 AND NOT EXISTS (
                 SELECT 1 FROM trace_account_principals p WHERE p.tenant_id=m.tenant_id
-                AND p.account_id=m.account_id AND p.principal_ref=$3))",
+                AND p.account_id=m.account_id
+                AND (p.principal_ref=$3 OR EXISTS (
+                    SELECT 1 FROM trace_device_upload_principals u
+                    WHERE u.tenant_id=p.tenant_id
+                      AND u.device_principal_ref=p.principal_ref
+                      AND u.upload_principal_ref=$3
+                ))))",
                 &[
                     &submission.tenant_id,
                     &submission.submission_id,

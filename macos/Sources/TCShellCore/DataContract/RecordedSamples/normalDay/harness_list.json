@@ -28,6 +28,20 @@
       "last_call_at": null,
       "can_connect": true,
       "can_disconnect": false
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "installed": true,
+      "connected": false,
+      "config_path": "/Users/sample/.config/opencode/opencode.json",
+      "connect_command": "",
+      "family": "openai",
+      "answers_at": null,
+      "state": "not_connected",
+      "last_call_at": null,
+      "can_connect": true,
+      "can_disconnect": false
     }
   ],
   "activity": {

@@ -1,10 +1,16 @@
-//! The user's goals, the lever's feedback and the week whose summary card was
-//! last opened, in one file beside the in-process Insights store's index.
+//! The lever's feedback and the week whose summary card was last opened, in
+//! one file beside the in-process Insights store's index. The file keeps its
+//! name and schema from when it also held the user's threshold goals.
 //!
-//! Only rule IDs (pattern kinds), ISO weeks (their Mondays), goal kinds,
-//! source labels and the user's own thresholds are kept: no figure, no path,
-//! no session. Goals and the lever are evaluated against feed T, whose rows
-//! live in the daemon; this store never holds a figure from them.
+//! Only rule IDs (pattern kinds) and ISO weeks (their Mondays) are kept: no
+//! figure, no path, no session. The lever is evaluated against feed T, whose
+//! rows live in the daemon; this store never holds a figure from them.
+//!
+//! The threshold goals left Insights (product owner, 2026-10-29): Goals are
+//! now the `/goal` goals set in Claude and Codex (`slash_goals`). A file
+//! written before still holds them under `goals`; they are ignored on read,
+//! whatever their shape, and never fail the store, and the next write leaves
+//! the list empty.
 //!
 //! Every write takes the store lock and replaces the file atomically. A file
 //! that cannot be read is an error, never an empty list, and a write refuses
@@ -15,32 +21,21 @@ use chrono::{Datelike, NaiveDate, Weekday};
 use serde::{Deserialize, Serialize};
 
 use super::LocalInsightStore;
-use super::goals::Goal;
 use super::lever::{LeverDismissal, LeverReenable};
 use super::patterns::PatternKind;
 
 /// The file, in the Insights store directory.
 pub const GOALS_FILE: &str = "analytics-goals.json";
 pub const GOAL_STORE_SCHEMA: &str = "trace_commons.insights_goals.v1";
-/// Goals one store holds. A bound on the store, not an analytics constant.
-pub const MAX_GOALS: usize = 8;
 /// "Not useful" and re-enable entries kept, newest weeks first. A bound on
 /// the store, not an analytics constant.
 pub const MAX_LEVER_FEEDBACK: usize = 64;
-/// The largest per mille a cache-share goal may name.
-const MAX_PERMILLE: u64 = 1_000;
 
 /// Fixed labels for a goal store refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalStoreError {
     /// The file cannot be read. Nothing is shown in its place.
     Unreadable,
-    /// A threshold outside its range.
-    GoalInvalid,
-    /// [`MAX_GOALS`] are already set.
-    Full,
-    /// No goal has that ID.
-    NotFound,
     /// A week that is not a Monday.
     WeekInvalid,
 }
@@ -49,23 +44,12 @@ impl std::fmt::Display for GoalStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Unreadable => "insights_goals_unreadable",
-            Self::GoalInvalid => "insights_goal_invalid",
-            Self::Full => "insights_goal_limit",
-            Self::NotFound => "insights_goal_not_found",
             Self::WeekInvalid => "insights_week_invalid",
         })
     }
 }
 
 impl std::error::Error for GoalStoreError {}
-
-/// One goal and the ID it is deleted by.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoredGoal {
-    pub id: String,
-    pub goal: Goal,
-}
 
 /// What "Not useful" did, or what turned a kind back on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,7 +63,6 @@ pub enum LeverFeedbackAction {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalState {
-    pub goals: Vec<StoredGoal>,
     pub lever_dismissals: Vec<LeverDismissal>,
     pub lever_reenables: Vec<LeverReenable>,
     /// The lever's card was switched off in Settings
@@ -95,8 +78,11 @@ pub struct GoalState {
 #[serde(deny_unknown_fields)]
 struct GoalFile {
     schema: String,
+    /// Kept as read, for an older build that still reads the file.
     next_id: u64,
-    goals: Vec<StoredGoal>,
+    /// The retired threshold goals: read and ignored, written empty.
+    #[serde(default)]
+    goals: RetiredGoals,
     lever_dismissals: Vec<LeverDismissal>,
     lever_reenables: Vec<LeverReenable>,
     #[serde(default)]
@@ -104,28 +90,33 @@ struct GoalFile {
     recap_opened_week: Option<NaiveDate>,
 }
 
+/// Whatever a file holds under `goals`, dropped on read; always written as
+/// an empty list, so a build from before still reads the file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RetiredGoals;
+
+impl Serialize for RetiredGoals {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(std::iter::empty::<()>())
+    }
+}
+
+impl<'de> Deserialize<'de> for RetiredGoals {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(RetiredGoals)
+    }
+}
+
 impl GoalFile {
     fn state(&self) -> GoalState {
         GoalState {
-            goals: self.goals.clone(),
             lever_dismissals: self.lever_dismissals.clone(),
             lever_reenables: self.lever_reenables.clone(),
             lever_card_off: self.lever_card_off,
             recap_opened_week: self.recap_opened_week,
         }
     }
-}
-
-/// A goal's threshold is in range: a share from 1 to 1,000 per mille, or a
-/// token count above zero.
-pub fn validate_goal(goal: &Goal) -> Result<(), GoalStoreError> {
-    let valid = match goal {
-        Goal::CacheShareAtLeast { permille, .. } => (1..=MAX_PERMILLE).contains(permille),
-        Goal::RepeatedReadsUnder { tokens }
-        | Goal::LongContextUnder { tokens }
-        | Goal::WeeklyTokensUnder { tokens, .. } => *tokens > 0,
-    };
-    valid.then_some(()).ok_or(GoalStoreError::GoalInvalid)
 }
 
 fn monday(week_start: NaiveDate) -> Result<NaiveDate, GoalStoreError> {
@@ -155,7 +146,7 @@ impl LocalInsightStore {
                 return Ok(GoalFile {
                     schema: GOAL_STORE_SCHEMA.to_string(),
                     next_id: 0,
-                    goals: Vec::new(),
+                    goals: RetiredGoals,
                     lever_dismissals: Vec::new(),
                     lever_reenables: Vec::new(),
                     lever_card_off: false,
@@ -166,19 +157,13 @@ impl LocalInsightStore {
         };
         let file: GoalFile =
             serde_json::from_slice(&bytes).map_err(|_| anyhow!(GoalStoreError::Unreadable))?;
-        if file.schema != GOAL_STORE_SCHEMA
-            || file.goals.len() > MAX_GOALS
-            || file
-                .goals
-                .iter()
-                .any(|stored| validate_goal(&stored.goal).is_err())
-        {
+        if file.schema != GOAL_STORE_SCHEMA {
             bail!(GoalStoreError::Unreadable);
         }
         Ok(file)
     }
 
-    /// The goals, the lever's feedback and the last opened summary week.
+    /// The lever's feedback and the last opened summary week.
     pub fn goal_state(&self) -> Result<GoalState> {
         Ok(self.read_goal_file()?.state())
     }
@@ -195,45 +180,6 @@ impl LocalInsightStore {
         )
         .map_err(|_| anyhow!(super::InsightsStoreError::Unavailable))?;
         Ok(file.state())
-    }
-
-    /// Add a goal, or replace the one with `id`.
-    pub fn goal_set(&self, id: Option<&str>, goal: Goal) -> Result<GoalState> {
-        validate_goal(&goal)?;
-        self.update_goals(|file| {
-            match id {
-                Some(id) => {
-                    let stored = file
-                        .goals
-                        .iter_mut()
-                        .find(|stored| stored.id == id)
-                        .ok_or(GoalStoreError::NotFound)?;
-                    stored.goal = goal;
-                }
-                None => {
-                    if file.goals.len() >= MAX_GOALS {
-                        bail!(GoalStoreError::Full);
-                    }
-                    file.next_id += 1;
-                    file.goals.push(StoredGoal {
-                        id: format!("goal-{}", file.next_id),
-                        goal,
-                    });
-                }
-            }
-            Ok(())
-        })
-    }
-
-    pub fn goal_delete(&self, id: &str) -> Result<GoalState> {
-        self.update_goals(|file| {
-            let before = file.goals.len();
-            file.goals.retain(|stored| stored.id != id);
-            if file.goals.len() == before {
-                bail!(GoalStoreError::NotFound);
-            }
-            Ok(())
-        })
     }
 
     /// "Not useful" on the lever's kind in `week_start`, or a kind turned
@@ -300,7 +246,6 @@ impl LocalInsightStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::insights::week_rollup::AnalyticsSource;
     use trace_commons_protocol::insights_usage_series::InMemoryDigestKeyStore;
 
     fn store() -> (tempfile::TempDir, LocalInsightStore) {
@@ -324,81 +269,11 @@ mod tests {
             .expect("a goal store label")
     }
 
-    const UNDER: Goal = Goal::RepeatedReadsUnder { tokens: 50_000 };
-
     #[test]
     fn an_absent_store_reads_empty_and_is_not_created() {
         let (_dir, store) = store();
         assert_eq!(store.goal_state().unwrap(), GoalState::default());
         assert!(!store.dir.join(GOALS_FILE).exists());
-    }
-
-    #[test]
-    fn goals_are_added_replaced_and_deleted_by_id() {
-        let (_dir, store) = store();
-        let state = store.goal_set(None, UNDER).unwrap();
-        assert_eq!(state.goals.len(), 1);
-        let id = state.goals[0].id.clone();
-        let share = Goal::CacheShareAtLeast {
-            source: AnalyticsSource::ClaudeCode,
-            permille: 600,
-        };
-        let state = store.goal_set(Some(&id), share.clone()).unwrap();
-        assert_eq!(
-            state.goals,
-            vec![StoredGoal {
-                id: id.clone(),
-                goal: share
-            }]
-        );
-        assert_eq!(store.goal_state().unwrap(), state);
-        let state = store.goal_delete(&id).unwrap();
-        assert!(state.goals.is_empty());
-        assert_eq!(
-            label(store.goal_delete(&id).unwrap_err()),
-            GoalStoreError::NotFound
-        );
-        assert_eq!(
-            label(store.goal_set(Some("goal-99"), UNDER).unwrap_err()),
-            GoalStoreError::NotFound
-        );
-        // IDs are never reused.
-        let state = store.goal_set(None, UNDER).unwrap();
-        assert_ne!(state.goals[0].id, id);
-    }
-
-    #[test]
-    fn goals_are_bounded_and_their_thresholds_checked() {
-        let (_dir, store) = store();
-        for _ in 0..MAX_GOALS {
-            store.goal_set(None, UNDER).unwrap();
-        }
-        assert_eq!(
-            label(store.goal_set(None, UNDER).unwrap_err()),
-            GoalStoreError::Full
-        );
-        for bad in [
-            Goal::CacheShareAtLeast {
-                source: AnalyticsSource::Codex,
-                permille: 0,
-            },
-            Goal::CacheShareAtLeast {
-                source: AnalyticsSource::Codex,
-                permille: 1_001,
-            },
-            Goal::RepeatedReadsUnder { tokens: 0 },
-            Goal::LongContextUnder { tokens: 0 },
-            Goal::WeeklyTokensUnder {
-                source: AnalyticsSource::ClaudeCode,
-                tokens: 0,
-            },
-        ] {
-            assert_eq!(
-                validate_goal(&bad),
-                Err(GoalStoreError::GoalInvalid),
-                "{bad:?}"
-            );
-        }
     }
 
     #[test]
@@ -590,13 +465,32 @@ mod tests {
         assert!(!store.goal_state().unwrap().lever_card_off);
     }
 
+    /// The threshold goals left Insights: a file that still holds them,
+    /// of any kind or shape, loads without them and is not unreadable, and
+    /// the next write leaves the list empty, keeping the file readable by a
+    /// build from before.
+    #[test]
+    fn stored_threshold_goals_are_ignored_and_never_fail_the_store() {
+        let (_dir, store) = store();
+        std::fs::write(
+            store.dir.join(GOALS_FILE),
+            br#"{"schema":"trace_commons.insights_goals.v1","next_id":4,"goals":[{"id":"goal-1","goal":{"kind":"repeated_reads_under","tokens":50000}},{"id":"goal-2","goal":{"kind":"weekly_tokens_under","source":"codex","tokens":9000}},{"id":"goal-3","goal":{"kind":"cache_share_at_least","source":"claude_code","permille":0}},{"id":"goal-4","goal":{"kind":"something_else"},"extra":true}],"lever_dismissals":[],"lever_reenables":[],"recap_opened_week":null}"#,
+        )
+        .unwrap();
+        assert_eq!(store.goal_state().unwrap(), GoalState::default());
+        store.recap_opened(monday_at(0)).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.dir.join(GOALS_FILE)).unwrap()).unwrap();
+        assert_eq!(written["goals"], serde_json::json!([]));
+        assert_eq!(written["next_id"], 4);
+    }
+
     #[test]
     fn an_unreadable_file_is_an_error_and_is_never_replaced() {
         let (_dir, store) = store();
         for bytes in [
             &b"not json"[..],
             br#"{"schema":"other","next_id":0,"goals":[],"lever_dismissals":[],"lever_reenables":[],"recap_opened_week":null}"#,
-            br#"{"schema":"trace_commons.insights_goals.v1","next_id":0,"goals":[{"id":"goal-1","goal":{"kind":"long_context_under","tokens":0}}],"lever_dismissals":[],"lever_reenables":[],"recap_opened_week":null}"#,
             br#"{"schema":"trace_commons.insights_goals.v1","next_id":0,"goals":[],"lever_dismissals":[],"lever_reenables":[],"recap_opened_week":null,"path":"/x"}"#,
         ] {
             std::fs::write(store.dir.join(GOALS_FILE), bytes).unwrap();
@@ -605,7 +499,7 @@ mod tests {
                 GoalStoreError::Unreadable
             );
             assert_eq!(
-                label(store.goal_set(None, UNDER).unwrap_err()),
+                label(store.recap_opened(monday_at(0)).unwrap_err()),
                 GoalStoreError::Unreadable
             );
             assert_eq!(std::fs::read(store.dir.join(GOALS_FILE)).unwrap(), bytes);

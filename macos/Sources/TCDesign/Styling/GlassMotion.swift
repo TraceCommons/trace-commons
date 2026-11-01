@@ -25,4 +25,25 @@ public enum GlassMotion {
     public static func standard(_ reduceMotion: Bool) -> Animation? {
         reduceMotion ? nil : curve(GlassTokens.Motion.standard)
     }
+
+    /// The curve at a duration of the caller's: the first run's longer
+    /// choreography (a 0.52s step thread, a 1s marker draw). None under
+    /// Reduce Motion.
+    public static func timed(_ reduceMotion: Bool, duration: Double) -> Animation? {
+        reduceMotion ? nil : curve(duration)
+    }
+
+    /// The first run's actors moving between steps (Ron's 2026-10-21
+    /// canvas, the NEAR DS `spring-spatial-slow`): a slow spring that
+    /// settles without overshoot to speak of. None under Reduce Motion.
+    public static func spatial(_ reduceMotion: Bool, duration: Double = 0.9) -> Animation? {
+        reduceMotion ? nil : .spring(duration: duration, bounce: 0.04)
+    }
+
+    /// A tile bursting out of the N, or a thumbs-up popping in (the NEAR DS
+    /// `spring-expressive`): it overshoots and settles. None under Reduce
+    /// Motion.
+    public static func expressive(_ reduceMotion: Bool, duration: Double = 0.78) -> Animation? {
+        reduceMotion ? nil : .spring(duration: duration, bounce: 0.32)
+    }
 }

@@ -113,16 +113,18 @@ final class InferenceParityTests: XCTestCase {
         stateTone: { TCPrivateInference.stateTone(state: $0) },
         servingLine: { TCPrivateInference.servingLine(port: $0) },
         shouldOffer: { TCPrivateInference.shouldOffer(answered: $0, on: $1) },
-        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) })
+        quitNeedsNotice: { TCPrivateInference.quitNeedsNotice(on: $0, state: $1) },
+        menuWord: { TCPrivateInference.menuWord(state: $0) },
+        menuTone: { TCPrivateInference.menuTone(state: $0) })
 
-    /// The state label reads the listener's report alone: a refusal asks,
+    /// The state label reads the listener's report alone: a refusal is red,
     /// an unreported state is never on, and a line the core could not give
     /// falls back to its unknown sentence.
     func test_theStateLabelReadsTheReportNeverTheSwitch() throws {
         let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
         let refused = PrivateAISwitchCard.stateLabel(
             state: PrivateInferenceState(label: "port_in_use", port: nil), copy: copy, calls: Self.coreCalls)
-        XCTAssertEqual(refused.status, .ask)
+        XCTAssertEqual(refused.status, .outside)
         XCTAssertEqual(refused.line, TCPrivateInference.stateLine(state: "port_in_use"))
         let unreported = PrivateAISwitchCard.stateLabel(
             state: PrivateInferenceState(label: "", port: nil), copy: copy, calls: Self.coreCalls)
@@ -192,7 +194,7 @@ final class InferenceParityTests: XCTestCase {
                        "CredentialSurface.actionExplains(", "CredentialSurface.actionLabel(", "BalanceSurface.actionToDraw(",
                        "Self.providerOptions(copy)", "copy.credentialWalletNotice", "model.startNearAiCredential(provider:",
                        "model.cancelNearAiCredential()", "model.forgetNearAiCredential()", "model.migrateNearAiCredential()",
-                       "model.refreshNearAiCredential()", "pollInterval", "model.credentialBusy",
+                       "model.credentialBusy",
                        "actionButton(balanceAction)"] {
             XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
         }
@@ -203,8 +205,8 @@ final class InferenceParityTests: XCTestCase {
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
         // Each card under its icon (owner, 2026-10-10); the billing card
         // draws its own.
-        for needle in ["PrivateAIBalanceCard(copy: copy)", "                FundingRow(copy: copy)\n",
-                       "BalanceRow(copy: copy, showsScope: false)", "action: { model.refreshNearAiBalance(fresh: true) })",
+        for needle in ["PrivateAIBalanceCard(copy: copy)",
+                       "BalanceRow(copy: copy)", "action: { model.refreshNearAiBalanceFromButton() })",
                        "systemImage: \"dollarsign.circle\"", "systemImage: \"gearshape\""] {
             XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
         }
@@ -229,27 +231,42 @@ final class InferenceParityTests: XCTestCase {
                            + "                        .accessibilityHidden(true)",
                        ".buttonStyle(GlassButtonStyle(prominent && action == .obtain ? .primary : .glass))\n"
                            + "                .disabled(model.credentialBusy)",
-                       // The poll sits on the card's always-present stack,
-                       // never on a branch that may not be drawn.
-                       "            actionButton(balanceAction)\n        }\n        .task(id: action) {\n",
-                       "while action == .cancel, !Task.isCancelled {",
-                       "try? await Task.sleep(for: Self.pollInterval)"] {
+                       ] {
             XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
         }
-        XCTAssertEqual(source.components(separatedBy: ".task(").count - 1, 1, "the card has exactly one poll")
+        // The sign-in poll is the model's (#1535): it runs whichever view
+        // started the sign-in, so the card owns no loop of its own.
+        XCTAssertEqual(source.components(separatedBy: ".task(").count - 1, 0, "the card owns no poll")
+        XCTAssertFalse(source.contains("pollInterval"))
+        XCTAssertTrue(try Self.text("AppModel.swift").contains("credentialPollInterval"))
         XCTAssertFalse(source.contains("palette("), "the card reads the glass status, not the TC palette")
         let balance = try Self.text("Views/BalanceRow.swift")
         for needle in ["GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))",
-                       "BalanceSurface.showsFigures(status, calls: model.balanceCalls)", "Text(copy.balanceWhat)"] {
+                       "BalanceSurface.showsFigures(status, calls: model.balanceCalls)"] {
             XCTAssertTrue(balance.contains(needle), "BalanceRow.swift lacks \(needle)")
         }
+        XCTAssertFalse(balance.contains("Text(copy.balanceWhat)"))
+        let account = try Self.text("Views/Monitor/InferenceAccount.swift")
+        XCTAssertFalse(account.contains("subtitle: [copy.balanceWhat]"))
+        // Billing's card stays in Settings (#1638); the balance card carries
+        // only its Add funds button (owner, 2026-10-27), after the balance.
+        XCTAssertFalse(account.contains("FundingRow(copy: copy)"))
+        let card = try XCTUnwrap(account.range(of: "struct PrivateAIBalanceCard: View {"))
+        let cardSource = String(account[card.lowerBound...])
+        let row = try XCTUnwrap(cardSource.range(of: "BalanceRow(copy: copy)"))
+        let addFunds = try XCTUnwrap(cardSource.range(of: "FundingRow(copy: copy, style: .addFunds)"))
+        XCTAssertLessThan(row.lowerBound, addFunds.lowerBound, "Add funds follows the balance")
+        let settings = try Self.text("Views/Settings/PrivateAISection.swift")
+        XCTAssertEqual(settings.components(separatedBy: "FundingRow(copy: copy)").count - 1, 1)
         XCTAssertFalse(balance.contains("Button("), "the balance's sign-in is the credential card's, never a second one")
         XCTAssertFalse(balance.contains("palette("), "the balance reads the glass status, not the TC palette")
         let funding = try Self.text("Views/FundingRow.swift")
-        for needle in ["subtitle: [status?.view.message ?? copy.fundingUnavailable],", "info: copy.fundingWhat,",
+        for needle in ["?? status?.view.message ?? copy.fundingUnavailable",
+                       "NearAiSignInOffer.billingOffers(",
+                       "state: status?.state, failed: model.nearAiSignInFailed)", "model.signInToNearAI()", "info: copy.fundingWhat,",
                        "GlassIconCard(\n            systemImage: \"creditcard\", title: copy.fundingTitle,",
-                       "Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
-                       ".disabled(model.credentialBusy || request != nil)",
+                       ": status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
+                       ".disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn)",
                        ".onReceive(model.$credentialBusy.removeDuplicates().dropFirst())",
                        ".onReceive(model.$credentialStatus.map(\\.sessionState).removeDuplicates().dropFirst())"] {
             XCTAssertTrue(funding.contains(needle), "FundingRow.swift lacks \(needle)")
@@ -272,20 +289,26 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(source.contains("wallet?.commons ?? \"\""), "an absent word must not draw an unlabelled field")
     }
 
-    /// The window's Inference dot, the map's Private AI segment and the
-    /// inspector's Status row take #1146's rule: on while working, outside
-    /// (red) for every other tone, never grey.
+    /// Every Private AI dot takes one rule (owner, 2026-10-29): the tab,
+    /// the map, the heading and the menu bar paint one state one colour.
     func test_theDotReadsTheIndicator() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains(
-            "return PrivateInferenceIndicator.dotStatus(PrivateInferenceSurface.tone(state, calls: calls))"))
-        XCTAssertEqual(PrivateInferenceIndicator.dotStatus(.clear), .on)
-        for tone: PrivateInferenceTone in [.neutral, .held, .attention, .refused] {
-            XCTAssertEqual(PrivateInferenceIndicator.dotStatus(tone), .outside, "\(tone)")
+        XCTAssertTrue(window.contains("return PrivateInferenceIndicator.dot(state, calls: calls)"))
+        XCTAssertFalse(window.contains("PrivateInferenceSurface.tone("),
+                       "the tab's dot reads the listener tone table again, not the heading's")
+        let expected: [(PrivateInferenceTone, GlassStatus)] = [
+            (.clear, .on), (.attention, .ask), (.refused, .outside), (.neutral, .off), (.held, .off),
+        ]
+        for (tone, status) in expected {
+            XCTAssertEqual(PrivateInferenceIndicator.status(tone), status, "\(tone)")
+            XCTAssertEqual(MenuPanelStatus.privateAIDot(tone), status, "\(tone)")
         }
         let inspector = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(inspector.contains(
-            "status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))"))
+            "Self.statusRow(store.privateAI?.state, copy: copy, calls: model.privateInferenceCalls)"))
+        XCTAssertTrue(inspector.contains("MenuPanelStatus.privateAIDot(menu.tone)"))
+        XCTAssertFalse(inspector.contains("PrivateInferenceSurface.tone("),
+                       "the Status row reads a second tone table")
     }
 
     /// No write without the preview, and a first connect asks the exposure
@@ -427,7 +450,7 @@ final class InferenceParityTests: XCTestCase {
     func test_theMainPaneCarriesTheAccountTheSwitchAndTheTools() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(views.contains("InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)"))
-        for needle in ["case .needsRoots", "OnboardingCoordinatorView(startAt: .folders, takesInvites: false, onComplete: {})", "case .refused(let",
+        for needle in ["case .needsRoots", "OnboardingCoordinatorView(startAt: .tools, takesInvites: false, onComplete: {})", "case .refused(let",
                        "GlassHealthBanner(banner:", "model.refreshAll()"] {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
@@ -448,9 +471,10 @@ final class InferenceParityTests: XCTestCase {
     /// P24, as the owner revised it on 2026-10-09, 2026-10-10, 2026-10-12
     /// and 2026-10-19: the page leads with the Private AI switch (it was the
     /// status row), then the managed cards, then the calls, then balance
-    /// and funding, and last the card that opens Settings. The offer and
+    /// and last the card that opens Settings. Billing lives in Settings. The offer and
     /// the NEAR AI sign-in are popover notices over the tab, not cards in
-    /// it (`MonitorNotices`). No subtitle and no Inference access / Runtime
+    /// it (`MonitorNotices`). No subtitle on the main pane (the inspector summary
+    /// draws it, owner 2026-10-27) and no Inference access / Runtime
     /// pair. The "Standard settings" heading, the tools, the switch and
     /// sign-in are the Settings panels', in that order; the managed cards
     /// (no #1146 panel, O3) are never under that heading: it says
@@ -458,11 +482,10 @@ final class InferenceParityTests: XCTestCase {
     /// do not.
     func test_theMainPaneFollowsThePrivateAIPageOrder() throws {
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
-        XCTAssertFalse(account.contains("Text(copy.subtitle)"), "the subtitle is drawn again")
+        XCTAssertFalse(account.contains("Text(copy.subtitle)"), "the main pane draws the subtitle again; it belongs to the inspector summary")
         XCTAssertFalse(account.contains("PrivateAIStatCard("), "the Inference access / Runtime pair is drawn again")
         let order = ["PrivateAISettingsLinkCard(copy: copy, onOpen: onOpenSettings)",
                      "struct InferenceBalanceSection", "PrivateAIBalanceCard(copy: copy)",
-                     "FundingRow(copy: copy)",
                      "struct PrivateAISettingsPanels", "ManagedGlobalSettingsHeader()",
                      "eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,",
                      "HarnessListSection(copy: copy, titled: false)", "PrivateAISwitchCard(",
@@ -482,14 +505,17 @@ final class InferenceParityTests: XCTestCase {
         let calls = try XCTUnwrap(views.range(of: "                ledgerSections\n"))
         let page = try XCTUnwrap(views.range(of: "InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)"))
         let balance = try XCTUnwrap(views.range(of: "                InferenceBalanceSection()\n"))
-        // The switch leads the page, then the balance with billing under
-        // it (owner, 2026-10-19), then the managed cards.
+        // The step-by-step card leads, then the status, then the managed
+        // cards with the tool buttons, then the calls, then the balance
+        // with billing under it (product owner, 2026-10-28).
         let scroll = try XCTUnwrap(views.range(of: "        ScrollView {\n"))
-        XCTAssertLessThan(scroll.lowerBound, toggle.lowerBound)
-        XCTAssertLessThan(toggle.lowerBound, balance.lowerBound, "the status leads the page")
-        XCTAssertLessThan(balance.lowerBound, managed.lowerBound, "the balance sits under the switch")
-        XCTAssertLessThan(managed.lowerBound, calls.lowerBound, "the calls follow the managed cards")
-        XCTAssertLessThan(calls.lowerBound, page.lowerBound, "the account cards follow the calls")
+        let guide = try XCTUnwrap(views.range(of: "                PrivateAIGuideCard()\n"))
+        XCTAssertLessThan(scroll.lowerBound, guide.lowerBound)
+        XCTAssertLessThan(guide.lowerBound, toggle.lowerBound, "the step-by-step card leads the page")
+        XCTAssertLessThan(toggle.lowerBound, managed.lowerBound, "the status follows the steps")
+        XCTAssertLessThan(managed.lowerBound, calls.lowerBound, "the tool buttons sit under the status")
+        XCTAssertLessThan(calls.lowerBound, balance.lowerBound, "the balance follows the calls")
+        XCTAssertLessThan(balance.lowerBound, page.lowerBound, "the account cards follow the balance")
         XCTAssertFalse(views.contains("InspectorPrompts("), "the prompts are drawn inline again")
         // The balance card is the account section's alone.
         XCTAssertEqual(views.components(separatedBy: "PrivateAIBalanceCard(").count - 1, 0, "the balance card is drawn twice")
@@ -543,16 +569,27 @@ final class InferenceParityTests: XCTestCase {
         }
     }
 
-    /// P25, as the owner revised it on 2026-10-12: the summary is the
-    /// Status row alone. The NEAR AI credential row, the Connected tools
-    /// row, the connected / not connected pair and the unreadable ledger's
-    /// lone Calls dash under them are gone.
+    /// P25, as the owner revised it on 2026-10-12 and 2026-10-27: the
+    /// summary is the Status row, then the core's subtitle (the owner put
+    /// the subtitle back on 2026-10-27, here and not on the main pane). The
+    /// NEAR AI credential row, the Connected tools row, the connected / not
+    /// connected pair and the unreadable ledger's lone Calls dash under
+    /// them are gone.
     func test_theInspectorSummaryIsTheStatusRowAlone() throws {
         let views = try Self.text("Views/Monitor/InferenceViews.swift")
         // The status is the tab's heading row (owner, 2026-10-19): the
         // shared heading over the core's dot and sentence.
-        XCTAssertTrue(views.contains("return GlassTabHeading(copy.inspectorStatus) {"))
-        XCTAssertTrue(views.contains("GlassStatusLabel(state.line, status: Self.statusDot("))
+        XCTAssertTrue(views.contains("GlassTabHeading(copy.inspectorStatus) {"))
+        // The core's subtitle sits under the Status row, once (owner, 2026-10-27).
+        // Through `subtitle(_:state:)`, which adds the credit sentence only
+        // while NEAR AI answers (2026-10-28).
+        XCTAssertEqual(views.components(separatedBy: "Text(Self.subtitle(copy, state: store.privateAI?.state))").count - 1, 1,
+                       "the inspector summary draws the core's subtitle once")
+        // One word and the menu bar's dot, the full sentence as help and
+        // hint (2026-10-28).
+        XCTAssertTrue(views.contains("GlassStatusLabel(status.word, status: status.dot)"))
+        XCTAssertTrue(views.contains(".help(status.sentence)"))
+        XCTAssertTrue(views.contains(".accessibilityHint(status.sentence)"))
         XCTAssertEqual(views.components(separatedBy: "GlassTabHeading(").count - 1, 1,
                        "the summary draws a row besides Status")
         for needle in ["copy.inspectorCredential", "copy.inspectorConnectedTools", "copy.inspectorConnected,",
@@ -639,7 +676,7 @@ final class InferenceParityTests: XCTestCase {
     }
 
     /// The tab reads the daemon's startup as the legacy destination did:
-    /// the first run's Folders step when folders are owed (outside the ledger's scroll,
+    /// the first run's Tools step when folders are owed (outside the ledger's scroll,
     /// so it never nests one), a spinner while starting, the core's down
     /// title over the refusal's sentence, the ledger only while running;
     /// and the refresh sits on the always-present stack. The account, whose
@@ -649,10 +686,10 @@ final class InferenceParityTests: XCTestCase {
         for needle in ["        VStack(alignment: .leading, spacing: 0) {\n"
                            + "            switch model.startup {\n"
                            + "            case .needsRoots:\n"
-                           + "                // Ron's 450pt first-run pane, centred, not the window's width.\n"
-                           + "                OnboardingCoordinatorView(startAt: .folders, takesInvites: false, onComplete: {})\n"
-                           + "                    .frame(width: FirstRunProgress.paneWidth)\n"
-                           + "                    .frame(maxWidth: .infinity)\n"
+                           + "                // The first run's Tools step on its own stage, scaled down to\n"
+                           + "                // fit the tab (`FirstRunStageFit`).\n"
+                           + "                OnboardingCoordinatorView(startAt: .tools, takesInvites: false, onComplete: {})\n"
+                           + "                    .frame(maxWidth: .infinity, maxHeight: .infinity)\n"
                            + "            case .starting:\n"
                            + "                SettingsAwaiting().frame(maxWidth: .infinity)\n"
                            + "            case .refused(let sentence):\n"
@@ -710,4 +747,33 @@ final class InferenceParityTests: XCTestCase {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
     }
+
+    /// The credit sentence follows the subtitle only while NEAR AI answers
+    /// calls; with NEAR AI not connected, calls use the tools' own accounts.
+    func testTheSubtitleSaysCreditOnlyWhileNearAIAnswers() throws {
+        let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+        let running = DaemonData.PrivateInferenceState(state: "running", port: 1)
+        let elsewhere = DaemonData.PrivateInferenceState(state: "running_answered_elsewhere", port: 1)
+        XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: running), copy.subtitle + " " + copy.subtitleCredit)
+        XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: elsewhere), copy.subtitle)
+        XCTAssertEqual(PrivateAIInspectorView.subtitle(copy, state: nil), copy.subtitle)
+    }
+
+    /// The step-by-step card explains and is not a button: no action.
+    func testTheGuideCardIsNotAButton() throws {
+        let views = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/InferenceViews.swift"), encoding: .utf8)
+        let guide = try XCTUnwrap(views.range(of: "struct PrivateAIGuideCard: View {"))
+        let next = try XCTUnwrap(views.range(of: "struct PrivateAIInspectorView: View {"))
+        let card = String(views[guide.lowerBound..<next.lowerBound])
+        XCTAssertFalse(card.contains("action:"), "the guide card has no action")
+        XCTAssertTrue(card.contains("closeLabel: MonitorWords.close"))
+        let hero = try String(contentsOf: URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TCDesign/Components/HeroCard.swift"), encoding: .utf8)
+        XCTAssertTrue(hero.contains("if let action {"))
+        XCTAssertTrue(hero.contains("card.accessibilityElement(children: .combine)"))
+    }
+
 }

@@ -95,6 +95,10 @@ struct ComputeContent: View {
                     if model.controlsBusy { SettingsAwaiting() }
                 }
                 .buttonStyle(GlassButtonStyle(.glass))
+            } else if let sentence = model.refusalSentence {
+                // The channel check refused: the startup sentence, as the
+                // daemon's pane says it, and no Retry, which cannot succeed.
+                refusal(sentence)
             } else if model.failureLabel != nil {
                 // Failed: the core's sentence for it, else its unknown word;
                 // never a spinner, which would read as working.

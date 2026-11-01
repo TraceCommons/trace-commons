@@ -38,3 +38,18 @@ pub mod receipt;
 /// a client nonce. Ungated, like [`eip191`]: verifying a quote before
 /// sending anything needs it.
 pub mod report_data;
+/// The signed NEAR AI pin-set format a staging build takes its measurement
+/// sets from, and its verifier.
+///
+/// Behind the `near-ai-staging` feature: a default build compiles no code
+/// that reads a signed pin set.
+#[cfg(feature = "near-ai-staging")]
+pub mod staging_pins;
+/// The RTMR3 event-log replay and the compose-manager check a staging build
+/// makes before it trusts a model key, and the allowlist both are checked
+/// against (owner decision S16).
+///
+/// Behind the `near-ai-staging` feature, with [`staging_pins`], whose v2
+/// payload carries the allowlist.
+#[cfg(feature = "near-ai-staging")]
+pub mod staging_replay;

@@ -78,7 +78,7 @@ public struct GlassPopover<Content: View>: View {
     }
 }
 
-/// A sheet's body: "Exactly what would be sent" and the passkey steps. A
+/// A sheet's body, such as "Exactly what would be sent". A
 /// padded column inside the pane or modal that holds it, with no tier of
 /// its own (#1146 `.tc-sheet`): never a pane on a pane.
 public struct GlassSheet<Content: View>: View {

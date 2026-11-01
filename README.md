@@ -48,6 +48,11 @@ session traces. Ironclaw is a separate, TEE-hosted trace source with its
 own client integration; the shared protocol DTOs live in
 `crates/trace-commons-protocol`.
 
+The contributor's private-inference router is IronWire, a git dependency on
+[nearai/ironwire](https://github.com/nearai/ironwire). It routes isolated
+Claude Code and Codex subscription logins, each as itself; see
+[multi-subscription routing](docs/multi-subscription-routing.md).
+
 ## Status: Pilot Deployment
 
 TraceCommons is **in pilot deployment as of May 2026**. What that means
@@ -189,6 +194,9 @@ cargo test -p trace-commons-server --test trace_corpus_pg_store
 ```
 
 ### Contributor CLI
+
+For AI agents, see [Configure the app with an AI agent](docs/agent-configuration.md)
+and the [copyable sample prompt](docs/examples/agent-configuration-prompt.md).
 
 Signed binaries are published per release, so contributors do not need this
 repository or a Rust toolchain. https://tracecommons.ai/install/ is the fuller
@@ -461,7 +469,7 @@ outbound one and what that means for you.
 
 Branch protection on `main` requires:
 
-- **Eleven** required status checks green, and they must be green on a
+- **Thirteen** required status checks green, and they must be green on a
   branch that is up to date with `main`:
 
   | | |
@@ -471,10 +479,11 @@ Branch protection on `main` requires:
   | `cargo check (near-ai-scorer)` | `pilot-bootstrap smoke` |
   | `cargo check (local-gpu-models, non-CUDA)` | `database suites against a real PostgreSQL` |
   | `cargo check (permissive crates, standalone)` | `builds at the declared MSRV floor` |
-  | `trace-commons-ingest tests, whole bin, against PostgreSQL` | |
+  | `trace-commons-ingest tests, whole bin, against PostgreSQL` | `staging channel tests` |
+  | `wallet SDK and production CSP` | |
 
-  `.github/workflows/ci.yml` holds more jobs than this (nineteen as of
-  2026-10-01); the others run on every PR but do not block the merge. The
+  `.github/workflows/ci.yml` holds more jobs than this (twenty-three as of
+  2026-10-30); the others run on every PR but do not block the merge. The
   client shells -- the macOS app, the Windows app, installer, named-pipe ACL
   and update conformance, and the Linux GTK shell -- live in
   `.github/workflows/clients.yml` since 2026-09-22. They run on every push to

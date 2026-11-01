@@ -4,11 +4,13 @@
 //! is a provisional session boundary, never an inferred completed task.
 pub mod analytics_constants;
 pub mod analytics_copy;
+pub mod benchmarks;
 pub mod cache_share;
 pub mod card_presentation;
 pub mod card_store;
 pub mod cards;
 pub mod claude_task_attribution;
+pub mod codex_series;
 #[cfg(test)]
 pub(crate) mod comparison_estimator;
 pub(crate) mod comparison_exact;
@@ -23,6 +25,7 @@ pub mod goals;
 pub mod ledger_series;
 pub mod lever;
 pub mod markers;
+pub mod model_answers;
 pub mod models;
 pub mod outcomes;
 pub mod patterns;
@@ -31,10 +34,15 @@ pub mod provider;
 pub mod recap;
 pub mod service;
 pub mod session_drill;
+pub mod session_facts;
 pub mod session_identity;
+pub mod session_labels;
+pub mod session_pricing;
 pub mod session_sparkline;
+pub mod slash_goals;
 pub mod summary;
 pub mod task_attribution;
+pub mod task_classifier;
 pub mod time_evidence;
 pub mod turn_series;
 pub mod usage;
@@ -55,12 +63,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use trace_commons_contributor_platform::os_secret_store::KeychainIdentity;
 use trace_commons_protocol::insights::{
     Coverage, EvidenceRef, InsightReport, MetricId, ProviderManifest,
 };
 use trace_commons_protocol::insights_usage_series::DigestKeyStore;
 
-const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+/// The most bytes one file's analysis reads; a larger file is refused
+/// (`insights_source_too_large`).
+pub const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 // Advanced to 11 for model-observation schemas 2 and 3. A nested schema bump
 // without one here lets an older client accept the store and then reject
 // individual snapshots, with no diagnosable event and no downgrade path.
@@ -806,8 +817,18 @@ impl Drop for StoreLock {
 }
 
 impl LocalInsightStore {
+    /// Open a store whose digest key, if one is ever needed, is refused: no
+    /// keychain namespace was named. Reading, listing and deleting never
+    /// need the key; saving a snapshot with a turn series does, and records
+    /// the series as unknown. Hosts that save use [`LocalInsightStore::open_for`].
     pub fn open(dir: &Path) -> Result<Self> {
-        Self::open_with(dir, None)
+        Self::open_with(dir, None, None)
+    }
+
+    /// [`LocalInsightStore::open`] with the keychain namespace of the build's
+    /// channel, where the OS-held digest key lives.
+    pub fn open_for(dir: &Path, keychain: KeychainIdentity) -> Result<Self> {
+        Self::open_with(dir, None, Some(keychain))
     }
 
     /// [`LocalInsightStore::open`] with an explicit digest key store, for a
@@ -817,12 +838,13 @@ impl LocalInsightStore {
         dir: &Path,
         digest_keys: Box<dyn DigestKeyStore + Send + Sync>,
     ) -> Result<Self> {
-        Self::open_with(dir, Some(digest_keys))
+        Self::open_with(dir, Some(digest_keys), None)
     }
 
     fn open_with(
         dir: &Path,
         digest_keys: Option<Box<dyn DigestKeyStore + Send + Sync>>,
+        keychain: Option<KeychainIdentity>,
     ) -> Result<Self> {
         // The caller selects the directory, so resolve its ancestor aliases
         // (notably macOS /tmp and /var). Never follow the store leaf itself.
@@ -860,8 +882,8 @@ impl LocalInsightStore {
             .canonicalize()
             .map_err(|_| anyhow!(InsightsStoreError::Unavailable))?;
         reject_symlinks(&dir)?;
-        let digest_keys =
-            digest_keys.unwrap_or_else(|| turn_series::default_digest_key_store(dir.clone()));
+        let digest_keys = digest_keys
+            .unwrap_or_else(|| turn_series::default_digest_key_store(dir.clone(), keychain));
         Ok(Self {
             dir,
             digest_keys,

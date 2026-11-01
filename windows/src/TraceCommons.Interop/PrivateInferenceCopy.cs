@@ -91,6 +91,15 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("subtitle")]
     public string Subtitle { get; init; } = string.Empty;
 
+    /// <summary>
+    /// Said after <see cref="Subtitle"/> only while NEAR AI answers calls
+    /// (<c>running</c>); with NEAR AI not connected, calls use the tools'
+    /// own accounts. Decoded so the field set matches the Rust; this shell
+    /// does not draw it yet.
+    /// </summary>
+    [JsonPropertyName("subtitle_credit")]
+    public string SubtitleCredit { get; init; } = string.Empty;
+
     [JsonPropertyName("settings_title")]
     public string SettingsTitle { get; init; } = string.Empty;
 
@@ -649,6 +658,10 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("funding_unavailable")]
     public string FundingUnavailable { get; init; } = string.Empty;
 
+    /// <summary>The NEAR AI balance card's button to billing.</summary>
+    [JsonPropertyName("balance_add_funds")]
+    public string BalanceAddFunds { get; init; } = string.Empty;
+
     /// <summary>What the figures on the row are a fact about.</summary>
     [JsonPropertyName("balance_what")]
     public string BalanceWhat { get; init; } = string.Empty;
@@ -764,6 +777,7 @@ public sealed record PrivateInferenceCopy
             OfferAskedOnce,
             Destination,
             Subtitle,
+            SubtitleCredit,
             SettingsTitle,
             SettingsToggle,
             SettingsAppliesAtOnce,
@@ -888,6 +902,7 @@ public sealed record PrivateInferenceCopy
             FundingManage,
             FundingRefresh,
             FundingUnavailable,
+            BalanceAddFunds,
             BalanceWhat,
             BalanceNoSession,
             BalanceSessionExpired,

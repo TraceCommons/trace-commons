@@ -7,13 +7,15 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
-use trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER;
 use trace_commons_protocol::public_run::{
     PublicRunContributionStatus, PublicRunPage, PublicRunPublishRequest, PublicRunSessionRecord,
     PublicRunUnpublishResult,
 };
 use trace_commons_protocol::trace_contribution::{
     TaskSuccess, TraceAllowedUse, TraceContributionEventType, UserFeedback,
+};
+use trace_commons_protocol::{
+    ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER, ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
 };
 
 use crate::config::allowlist_for;
@@ -66,7 +68,7 @@ pub enum PublicRunClientError {
 
 pub struct AccountCall<T> {
     pub result: Result<T, PublicRunClientError>,
-    pub rotated_token: Option<String>,
+    pub rotated_token: Option<crate::account_auth::RotatedToken>,
 }
 
 fn client(
@@ -98,12 +100,13 @@ pub async fn call_session_detail(
     };
     let path = format!("/v1/account/traces/{submission_id}/session-detail");
     let response = client
-        .call_json_with_response_header::<(), PublicRunSessionRecord>(
+        .call_json_with_response_headers::<(), PublicRunSessionRecord>(
             Method::GET,
             &path,
             &[],
             None,
             ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+            ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
         )
         .await;
     let result = response
@@ -112,7 +115,10 @@ pub async fn call_session_detail(
         .map_err(|error| classify(&error));
     AccountCall {
         result,
-        rotated_token: response.response_header,
+        rotated_token: crate::account_auth::RotatedToken::from_headers(
+            response.response_header,
+            response.companion_header,
+        ),
     }
 }
 
@@ -140,17 +146,21 @@ pub async fn call_publish(
     };
     let path = format!("/v1/account/traces/{submission_id}/publication");
     let response = client
-        .call_json_with_response_header::<PublicRunPublishRequest, PublicRunPage>(
+        .call_json_with_response_headers::<PublicRunPublishRequest, PublicRunPage>(
             Method::PUT,
             &path,
             &[],
             Some(request),
             ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+            ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
         )
         .await;
     AccountCall {
         result: response.result.map_err(|error| classify(&error)),
-        rotated_token: response.response_header,
+        rotated_token: crate::account_auth::RotatedToken::from_headers(
+            response.response_header,
+            response.companion_header,
+        ),
     }
 }
 
@@ -171,17 +181,21 @@ pub async fn call_unpublish(
     };
     let path = format!("/v1/account/traces/{submission_id}/publication");
     let response = client
-        .call_json_with_response_header::<(), PublicRunUnpublishResult>(
+        .call_json_with_response_headers::<(), PublicRunUnpublishResult>(
             Method::DELETE,
             &path,
             &[],
             None,
             ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+            ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
         )
         .await;
     AccountCall {
         result: response.result.map_err(|error| classify(&error)),
-        rotated_token: response.response_header,
+        rotated_token: crate::account_auth::RotatedToken::from_headers(
+            response.response_header,
+            response.companion_header,
+        ),
     }
 }
 
@@ -671,6 +685,7 @@ mod tests {
             status,
             label: label.to_string(),
             body: String::new(),
+            retry_after: None,
         };
         assert_eq!(
             classify(&labeled(
@@ -715,6 +730,7 @@ mod tests {
             url: "https://ingest.example/v1/account/traces/id/publication".to_string(),
             status: reqwest::StatusCode::NOT_FOUND,
             body: String::new(),
+            retry_after: None,
         };
         assert_eq!(classify(&untyped), PublicRunClientError::NotFound);
     }

@@ -28,7 +28,7 @@
 //! Nothing here logs a token, an account name, or an organization id. The
 //! states are labels, and the numbers are numbers.
 
-use super::api::{CloudApi, OrganizationBalance, OrganizationModelUsage};
+use super::api::{AccountOrganization, CloudApi, OrganizationBalance, OrganizationModelUsage};
 use super::loopback::SessionTokens;
 use crate::daemon::ipc::DaemonShared;
 use crate::daemon::settings::NearAiSession;
@@ -184,6 +184,16 @@ impl BalanceReport {
             "total_requests": serde_json::Value::Null,
             "total_tokens": serde_json::Value::Null,
             "observed_at": serde_json::Value::Null,
+            // Filled in by `arrivals::balance_value` for a known balance.
+            "change_24h_nanos": serde_json::Value::Null,
+            "change_24h_direction": serde_json::Value::Null,
+            "change_24h_text": serde_json::Value::Null,
+            "received_total_nanos": serde_json::Value::Null,
+            "change_24h_unavailable_text": serde_json::Value::Null,
+            "received_24h_nanos": serde_json::Value::Null,
+            "received_24h_text": serde_json::Value::Null,
+            "received_24h_checked_at": serde_json::Value::Null,
+            "received_24h_unavailable_text": serde_json::Value::Null,
         });
         if let Self::Known(reading) = self
             && let Some(object) = value.as_object_mut()
@@ -206,10 +216,14 @@ struct Cached {
     access_token: Option<(String, Instant)>,
     balance: Option<(BalanceReading, Instant)>,
     model_spend: Option<(serde_json::Value, Instant)>,
+    /// The account's active organizations, for choosing which one to spend
+    /// from. Cached like the balance and dropped with it when the stored
+    /// connection changes -- which a switch of organization does.
+    organizations: Option<(Vec<AccountOrganization>, Instant)>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct Connection {
+pub(super) struct Connection {
     session: NearAiSession,
     organization: Option<String>,
 }
@@ -341,12 +355,18 @@ pub async fn read(shared: &DaemonShared, fresh: bool) -> BalanceReport {
 /// stub rather than asserted about by reading it. `read` is the only shipping
 /// caller and it passes the pinned live client.
 async fn read_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
-    balance_report(read_account(shared, api, false, BALANCE_TTL).await)
+    balance_report(read_account(shared, api, Want::Balance, BALANCE_TTL).await)
+}
+
+/// [`read_with`] for another module of this one: the credit-arrival poll
+/// takes its samples through the same lock and cache.
+pub(super) async fn read_via(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
+    read_with(shared, api).await
 }
 
 /// [`read_with`] for a fresh read: see [`read`].
 async fn read_fresh_with(shared: &DaemonShared, api: &CloudApi) -> BalanceReport {
-    balance_report(read_account(shared, api, false, FRESH_READ_FLOOR).await)
+    balance_report(read_account(shared, api, Want::Balance, FRESH_READ_FLOOR).await)
 }
 
 fn balance_report(reading: Result<AccountReading, BalanceReport>) -> BalanceReport {
@@ -360,17 +380,50 @@ fn balance_report(reading: Result<AccountReading, BalanceReport>) -> BalanceRepo
 enum AccountReading {
     Balance(BalanceReading),
     Models(serde_json::Value),
+    /// The active organizations, and the organization the stored key spends
+    /// from (`None` for a session-only installation).
+    Organizations(Vec<AccountOrganization>, Option<String>),
 }
 
 enum Fetched {
     Balance(OrganizationBalance),
     Models(OrganizationModelUsage),
+    Organizations(Vec<AccountOrganization>),
 }
+
+/// Which reading a call to [`read_account`] is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Want {
+    Balance,
+    Models,
+    Organizations,
+}
+
+/// The account's active organizations and the one the stored key spends
+/// from, read under the same lock, token reuse and single retry as the
+/// balance -- so a listing can never race a balance read for the rotating
+/// refresh token. `max_age` bounds how old a cached listing may be.
+pub(super) async fn read_organizations(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    max_age: Duration,
+) -> Result<(Vec<AccountOrganization>, Option<String>), BalanceReport> {
+    match read_account(shared, api, Want::Organizations, max_age).await {
+        Ok(AccountReading::Organizations(listed, current)) => Ok((listed, current)),
+        Err(report) => Err(report),
+        _ => Err(BalanceReport::Unavailable),
+    }
+}
+
+/// A fresh listing's floor, as [`FRESH_READ_FLOOR`] is the balance's.
+pub(super) const ORGANIZATIONS_FRESH_FLOOR: Duration = FRESH_READ_FLOOR;
+/// An ordinary listing's cache lifetime, as [`BALANCE_TTL`] is the balance's.
+pub(super) const ORGANIZATIONS_TTL: Duration = BALANCE_TTL;
 
 async fn read_account(
     shared: &DaemonShared,
     api: &CloudApi,
-    models: bool,
+    want: Want,
     // How young a cached balance must be to be served instead of fetched.
     balance_max_age: Duration,
 ) -> Result<AccountReading, BalanceReport> {
@@ -394,7 +447,7 @@ async fn read_account(
         *entry = Cached::default();
     }
 
-    if !models
+    if want == Want::Balance
         && let Some((reading, at)) = entry.balance
         && serves_cached(at, opened, Instant::now())
         && at.elapsed() < balance_max_age
@@ -405,15 +458,27 @@ async fn read_account(
     // returns. Cleared here rather than on each failure path so no branch can
     // forget to, which is the mistake the ironwire spend figure was written to
     // avoid.
-    if models {
-        if let Some((reading, at)) = &entry.model_spend
-            && at.elapsed() < BALANCE_TTL
-        {
-            return Ok(AccountReading::Models(reading.clone()));
+    match want {
+        Want::Models => {
+            if let Some((reading, at)) = &entry.model_spend
+                && at.elapsed() < BALANCE_TTL
+            {
+                return Ok(AccountReading::Models(reading.clone()));
+            }
+            entry.model_spend = None;
         }
-        entry.model_spend = None;
-    } else {
-        entry.balance = None;
+        Want::Organizations => {
+            if let Some((listed, at)) = &entry.organizations
+                && at.elapsed() < balance_max_age
+            {
+                return Ok(AccountReading::Organizations(
+                    listed.clone(),
+                    connection.organization.clone(),
+                ));
+            }
+            entry.organizations = None;
+        }
+        Want::Balance => entry.balance = None,
     }
 
     // A refresh token whose recorded expiry has passed is still offered to the
@@ -442,7 +507,7 @@ async fn read_account(
             // access token, and this field exists only because the type does.
             refresh_token: String::new(),
         };
-        match fetch(api, &session, connection.organization.as_deref(), models).await {
+        match fetch(api, &session, connection.organization.as_deref(), want).await {
             Ok(balance) => {
                 // A network result belongs to the connection that requested
                 // it, even if a browser changed accounts while it was pending.
@@ -461,16 +526,29 @@ async fn read_account(
                         observed_at: Utc::now(),
                     }),
                     Fetched::Models(usage) => AccountReading::Models(model_spend_value(usage)),
+                    Fetched::Organizations(listed) => {
+                        AccountReading::Organizations(listed, connection.organization.clone())
+                    }
                 };
                 let entry = map.entry(shared.store.dir().to_path_buf()).or_default();
                 entry.connection = Some(connection.clone());
                 entry.access_token = Some((access_token, Instant::now()));
                 match &reading {
                     AccountReading::Balance(value) => {
-                        entry.balance = Some((*value, Instant::now()))
+                        entry.balance = Some((*value, Instant::now()));
+                        // Every balance read is a sample for the 24-hour
+                        // change, the app's as well as the poll's.
+                        super::arrivals::note_balance(
+                            shared,
+                            connection.organization.as_deref(),
+                            value,
+                        );
                     }
                     AccountReading::Models(value) => {
                         entry.model_spend = Some((value.clone(), Instant::now()))
+                    }
+                    AccountReading::Organizations(listed, _) => {
+                        entry.organizations = Some((listed.clone(), Instant::now()))
                     }
                 }
                 return Ok(reading);
@@ -504,8 +582,15 @@ async fn fetch(
     api: &CloudApi,
     session: &SessionTokens,
     organization: Option<&str>,
-    models: bool,
+    want: Want,
 ) -> Result<Fetched> {
+    if want == Want::Organizations {
+        return api
+            .list_organizations(session)
+            .await
+            .map(Fetched::Organizations);
+    }
+    let models = want == Want::Models;
     let organization = match organization {
         Some(organization) => organization.to_owned(),
         None => api.first_active_organization(session).await?,
@@ -518,6 +603,121 @@ async fn fetch(
         api.organization_balance(session, &organization)
             .await
             .map(Fetched::Balance)
+    }
+}
+
+/// Run one management operation on the stored session, under the same lock,
+/// access-token reuse and single re-exchange as every balance read.
+///
+/// The lock is the point. The refresh token rotates on every exchange, and a
+/// second path that exchanged on its own would race a balance read for it --
+/// the class of failure #1586 fixed for enrollment. `op` may be called twice:
+/// once, and again after one re-exchange if it answers
+/// `near_ai_credential_session_expired`, so it must be safe to repeat.
+///
+/// Whatever `op` changed, figures cached under a different stored connection
+/// are not served again: a switch of organization changes the connection,
+/// and the next balance read goes back to the service.
+pub(super) async fn with_management_session<T, F, Fut>(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    mut op: F,
+) -> Result<T>
+where
+    F: FnMut(SessionTokens) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    management_session(shared, api, false, |tokens, _retained| op(tokens)).await
+}
+
+/// A payout org read needs a newly exchanged token for its one-use proof.
+/// It still owns the same coordinator as balance and spending-org reads, so
+/// the fresh exchange cannot invalidate another management read in flight.
+/// The callback receives the retained session paired with that exact token,
+/// so its post-read guard never binds an old token to a replacement login.
+/// The proof token is dropped after the operation, never kept in the cache.
+pub(in crate::daemon) async fn with_fresh_management_session<T, F, Fut>(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    op: F,
+) -> Result<T>
+where
+    F: FnMut(SessionTokens, NearAiSession) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    management_session(shared, api, true, op).await
+}
+
+async fn management_session<T, F, Fut>(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    fresh: bool,
+    mut op: F,
+) -> Result<T>
+where
+    F: FnMut(SessionTokens, NearAiSession) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let dir = shared.store.dir().to_path_buf();
+    let mut map = cache().lock().await;
+    let mut connection = stored_connection(shared)?
+        .ok_or_else(|| anyhow::anyhow!("near_ai_credential_session_missing"))?;
+    let cached = {
+        let entry = map.entry(dir.clone()).or_default();
+        if entry.connection.as_ref() != Some(&connection) {
+            *entry = Cached::default();
+        }
+        entry.access_token.take()
+    };
+    let mut access_token = match cached {
+        Some((token, at)) if !fresh && at.elapsed() < ACCESS_TOKEN_REUSE => token,
+        _ => {
+            let rotated =
+                crate::daemon::nearai_credential::exchange(shared, api, &connection.session)
+                    .await?;
+            connection.session = rotated.retained;
+            rotated.access_token
+        }
+    };
+    let mut refreshed_once = false;
+    loop {
+        let tokens = SessionTokens {
+            access_token: access_token.clone(),
+            refresh_token: String::new(),
+        };
+        match op(tokens, connection.session.clone()).await {
+            Ok(value) => {
+                let entry = map.entry(dir.clone()).or_default();
+                match stored_connection(shared) {
+                    Ok(Some(current)) if current == connection => {
+                        entry.connection = Some(current);
+                        entry.access_token = (!fresh).then_some((access_token, Instant::now()));
+                    }
+                    // The operation replaced the stored credential (or the
+                    // running daemon has not taken it up yet). The session
+                    // is the same one, so the access token is kept for it,
+                    // but no figure read under the old key is served again.
+                    Ok(Some(current)) if current.session == connection.session => {
+                        *entry = Cached::default();
+                        entry.connection = Some(current);
+                        entry.access_token = (!fresh).then_some((access_token, Instant::now()));
+                    }
+                    _ => *entry = Cached::default(),
+                }
+                return Ok(value);
+            }
+            Err(error)
+                if !refreshed_once && error.to_string() == "near_ai_credential_session_expired" =>
+            {
+                refreshed_once = true;
+                let rotated =
+                    crate::daemon::nearai_credential::exchange(shared, api, &connection.session)
+                        .await?;
+                connection.session = rotated.retained;
+                access_token = rotated.access_token;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -909,13 +1109,9 @@ mod tests {
     async fn a_service_that_does_not_answer_is_unavailable_rather_than_a_figure() {
         let s = shared();
         with_session(&s, "rt_first");
-        // Bound and immediately dropped: a port nothing is listening on.
-        let dead = {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            drop(listener);
-            format!("http://{address}")
-        };
+        // A port nothing is listening on.
+        let address = crate::config::tests_support::refusing_addr();
+        let dead = format!("http://{address}");
         let api = CloudApi::for_test(&dead).unwrap();
         let report = read_with(&s, &api).await;
         assert_eq!(report.state(), "unavailable");
@@ -1011,6 +1207,9 @@ mod tests {
                 "total_requests",
                 "total_tokens",
                 "observed_at",
+                "change_24h_nanos",
+                "change_24h_text",
+                "received_total_nanos",
             ] {
                 assert!(body.get(key).is_some(), "{key} absent in {body}");
                 assert!(body[key].is_null(), "{key} is {body}");
@@ -1099,7 +1298,7 @@ pub async fn read_model_spend(shared: &DaemonShared) -> serde_json::Value {
 }
 
 async fn read_model_spend_with(shared: &DaemonShared, api: &CloudApi) -> serde_json::Value {
-    match read_account(shared, api, true, BALANCE_TTL).await {
+    match read_account(shared, api, Want::Models, BALANCE_TTL).await {
         Ok(AccountReading::Models(value)) => value,
         Err(report) => unknown_model_spend(report),
         _ => unknown_model_spend(BalanceReport::Unavailable),

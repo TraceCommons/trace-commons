@@ -2,7 +2,7 @@
 name = "trace-commons-contributor-insights"
 # Released in lockstep with trace-commons-contributor, which re-exports this
 # crate's `insights` module at its old path.
-version = "0.20.6"
+version = "0.21.0"
 edition.workspace = true
 rust-version.workspace = true
 # MIT OR Apache-2.0, like the contributor that embeds it. This crate must

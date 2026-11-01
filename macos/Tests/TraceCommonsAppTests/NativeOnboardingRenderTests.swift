@@ -59,6 +59,30 @@ final class NativeOnboardingRenderTests: XCTestCase {
     }
 
     @MainActor
+    func testDataUseChoicesRenderAtDefaultWindowSize() async throws {
+        let copy = try XCTUnwrap(TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode))
+        let model = AppModel()
+        let config = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: config) }
+        model.setConfigDirectoryForTesting(config.path)
+        model.setClientForTesting(DaemonClient(daemon: ConsentPresentationDaemon()))
+        model.refreshConsentOptions()
+        for _ in 0..<100 where model.consentScopes.count != 5 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.consentScopes.count, 5)
+        let runner = FirstRunRunner(state: FirstRunState(step: .uses), daemon: RecordingFirstRunDaemon())
+        let directory = ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"]
+            .map(URL.init(fileURLWithPath:)) ?? FileManager.default.temporaryDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try render(UsesScreen(copy: copy, runner: runner).environmentObject(model)
+            .environment(\.colorScheme, .light),
+            size: CGSize(width: 860, height: 760), to: directory.appendingPathComponent("data-uses-default.png"))
+        XCTAssertTrue(runner.state.scopes.isSubset(of: ["debugging_evaluation"]))
+    }
+
+    @MainActor
     private func render<V: View>(_ view: V, size: CGSize, to url: URL) throws {
         // ImageRenderer cannot draw AppKit-backed TextFields: it emits a
         // yellow placeholder instead. Host the real native hierarchy so this
@@ -89,6 +113,24 @@ private final class AccountPreviewDaemon: DaemonCalling {
     init(state: String) { self.state = state }
     func call(_ method: String, params paramsJSON: String) -> String {
         "{\"id\":1,\"result\":{\"state\":\"\(state)\",\"session_state\":\"\(state)\"}}"
+    }
+    func searchOriginal(entryID: String, needle: String) -> Int? { nil }
+    func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
+}
+
+/// Fixed display data only: renders never start a daemon or submit a trace.
+private final class ConsentPresentationDaemon: DaemonCalling {
+    func call(_ method: String, params paramsJSON: String) -> String {
+        guard method == "consent_options" else { return #"{"id":1,"result":{}}"# }
+        let scopes: [[String: Any]] = [
+            ["name": "debugging_evaluation", "title": "Debugging and evaluation", "description": "Researchers can read your traces to study errors and compare coding agents.", "always_on": true, "grants_data_use": true],
+            ["name": "benchmark_only", "title": "Create benchmarks", "description": "Turn parts of your traces into tests for coding agents.", "always_on": false, "grants_data_use": true],
+            ["name": "ranking_training", "title": "Train evaluators", "description": "Train models that rank or grade coding-agent answers.", "always_on": false, "grants_data_use": true],
+            ["name": "model_training", "title": "Train coding models", "description": "Train models that write code, including commercial models.", "always_on": false, "grants_data_use": true],
+            ["name": "public_attribution", "title": "List my handle publicly as a contributor", "description": "Does not change data uses.", "always_on": false, "grants_data_use": false],
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: ["id": 1, "result": ["scopes": scopes]])
+        return String(decoding: data, as: UTF8.self)
     }
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
     func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }

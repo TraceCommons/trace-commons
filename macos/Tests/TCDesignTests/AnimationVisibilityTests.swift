@@ -125,6 +125,7 @@ final class AnimationVisibilityTests: XCTestCase {
     /// The station's per-frame turn with its constant cosines and sines
     /// worked out once gives exactly the figures the per-corner version
     /// gave, so the picture is unchanged.
+    @MainActor
     func test_stationTurnIsUnchangedByHoistedTrig() {
         func original(_ p: SIMD3<Double>, angle: Double) -> SIMD3<Double> {
             let cy = cos(angle), sy = sin(angle)
@@ -145,6 +146,7 @@ final class AnimationVisibilityTests: XCTestCase {
 
     /// The station's angle runs from its rest angle through one turn per
     /// `turnSeconds`, and holds at rest under Reduce Motion.
+    @MainActor
     func test_stationAngle() {
         let rest = GlassLibraryStation.restAngle
         XCTAssertEqual(GlassLibraryStation.angle(at: 0, reduceMotion: false), rest, accuracy: 1e-12)

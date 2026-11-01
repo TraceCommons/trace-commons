@@ -37,7 +37,7 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
 }
 
 /// A bounded label: 1 to 64 lowercase ASCII letters, digits, `_`, `-`, or `.`.
-fn is_safe_identifier(value: &str) -> bool {
+pub(crate) fn is_safe_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_INSTRUMENT_ID_LEN
         && value.bytes().all(|byte| {
@@ -974,6 +974,18 @@ pub enum ContractError {
     InvalidTenantStorageRef,
     #[error("an award adjustment is malformed")]
     InvalidAwardAdjustment,
+    #[error("payout rail identifier is not a bounded safe label")]
+    InvalidRailId,
+    #[error("payout recipient kind is not a bounded safe label")]
+    InvalidRecipientKind,
+    #[error("payout rail rate needs positive terms and a safe version label")]
+    InvalidRailRate,
+    #[error("payout recipient reference is empty or too long")]
+    InvalidRecipientRef,
+    #[error("payout rail line is malformed")]
+    InvalidRailLine,
+    #[error("payout rail descriptor is malformed")]
+    InvalidRailDescriptor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

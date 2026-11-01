@@ -3,10 +3,8 @@ import TCBridge
 import TCDesign
 import TCShellCore
 
-/// The Private AI tab's account cards, after the Private AI summary and the
-/// calls: the balance and the funding, then the card that opens the Private
-/// AI section of Settings. The managed cards lead the tab instead (owner,
-/// 2026-10-12: `InferenceTabView`).
+/// The Private AI tab's link to Settings. Balance stays on the tab; billing,
+/// the standard tool settings, and the connection controls live in Settings.
 /// The standard settings, the local tools and the connection (the switch,
 /// then sign-in) are in that section (owner, 2026-10-10:
 /// `PrivateAISettingsPanels`).
@@ -43,18 +41,14 @@ struct InferenceAccountSection: View {
     }
 }
 
-/// The NEAR AI balance and, under it, billing (owner, 2026-10-19: moved to
-/// the top of the Private AI tab, under the Private AI switch). Nothing is
-/// drawn until the core's Private AI words arrive.
+/// The NEAR AI balance near the top of Private AI. Billing lives in Settings.
+/// Nothing is drawn until the core's Private AI words arrive.
 struct InferenceBalanceSection: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         if let copy = model.privateInferenceCopy {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                PrivateAIBalanceCard(copy: copy)
-                FundingRow(copy: copy)
-            }
+            PrivateAIBalanceCard(copy: copy)
         }
     }
 }
@@ -120,7 +114,7 @@ struct PrivateAISettingsPanels: View {
 /// The card at the foot of the Private AI tab that opens the Private AI
 /// section of Settings, where the standard settings, the local tools and
 /// the connection are (owner, 2026-10-10): a medium gear on the left, the
-/// title over its sentence, and a chevron on the right, centred on the
+/// title and a chevron on the right, centred on the
 /// card's height. The whole card opens the section, as Home's cards do
 /// (owner, 2026-10-10: a chevron, no Open button); VoiceOver hears the
 /// core's name for where it goes. Every word is the core's.
@@ -131,7 +125,7 @@ struct PrivateAISettingsLinkCard: View {
     var body: some View {
         Button(action: onOpen) {
             GlassIconCard(
-                systemImage: "gearshape", title: copy.panelSettingsTitle, subtitle: [copy.panelSettingsBody],
+                systemImage: "gearshape", title: copy.panelSettingsTitle, subtitle: [],
                 interactive: true,
                 trailing: {
                     // Home's chevron (`HomeChevron`), drawn here too.
@@ -146,8 +140,7 @@ struct PrivateAISettingsLinkCard: View {
     }
 }
 
-/// A Private AI panel's header, as #1146's panels draw it: an eyebrow over
-/// the panel's heading, and a re-read icon on the right (owner,
+/// A Private AI panel's single heading and a re-read icon beside it (owner,
 /// 2026-10-10: an icon, not a link), named for assistive tech in the
 /// core's words for that panel ("Refresh your tools") so the panels' icons
 /// are told apart.
@@ -160,19 +153,12 @@ struct PrivateAIPanelHeader: View {
     let onRefresh: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Text(eyebrow)
-                    .glassType(GlassTokens.TypeScale.eyebrow)
-                    .foregroundStyle(GlassColor.textTertiary)
-                if let title {
-                    Text(title)
-                        .glassType(GlassTokens.TypeScale.title)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityAddTraits(.isHeader)
-                }
-            }
+        HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+            Text(title ?? eyebrow)
+                .glassType(GlassTokens.TypeScale.title)
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: GlassTokens.Space.s4)
             GlassRefreshButton(refresh, action: onRefresh)
                 .disabled(disabled)
@@ -210,20 +196,30 @@ struct PrivateAIStatCard: View {
 
 /// #1146's `PrivateAiBalancePanel`, drawn in the main pane and in the
 /// inspector: the balance eyebrow and heading with its own re-read link, then
-/// the balance row's sentence or figures. Its sign-in button is the
-/// credential card's, never a second one here.
+/// the balance row's sentence or figures. When the NEAR AI login is not
+/// usable it also draws the Private AI tab's Sign in, which opens the browser
+/// (the Settings credential card keeps its own, with the provider chooser).
 struct PrivateAIBalanceCard: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
 
     /// Under its icon (owner, 2026-10-10): the heading with its re-read
-    /// icon, what the figures cover, and the state or the figures under it.
+    /// icon and the state or the figures under it.
     var body: some View {
         GlassIconCard(
-            systemImage: "dollarsign.circle", title: copy.balanceTitle, subtitle: [copy.balanceWhat],
+            systemImage: "dollarsign.circle", title: copy.balanceTitle,
             refresh: .init(
                 copy.panelBalanceRefreshAccessibility,
-                isDisabled: model.credentialBusy, action: { model.refreshNearAiBalance(fresh: true) }),
-            content: { BalanceRow(copy: copy, showsScope: false) })
+                isDisabled: model.credentialBusy, isRefreshing: model.balanceRefreshing,
+                action: { model.refreshNearAiBalanceFromButton() }),
+            content: {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    BalanceRow(copy: copy)
+                    // To billing, verified, as Settings' Manage billing
+                    // (owner, 2026-10-27); hidden while a sign-in is needed.
+                    FundingRow(copy: copy, style: .addFunds)
+                    NearAiSignInControl(copy: copy)
+                }
+            })
     }
 }

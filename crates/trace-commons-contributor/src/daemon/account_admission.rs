@@ -29,7 +29,10 @@
 //! apply to it), a dry run (which sends nothing), or no armed folder and no
 //! automatic grant that could arm one. Each read keeps the account session
 //! alive on the server, so asking every minute for nothing would also defeat
-//! its idle expiry.
+//! its idle expiry. The sibling upload-allowance refresh shares this armed
+//! intent check, also permits an explicitly approved queue (without the R3
+//! namespace constraint), and skips pause/quiesce/dry-run before using this
+//! module's cached session loader.
 //!
 //! The token is the account session from `account_auth`, the same one
 //! withdrawal presents; the device key gains no new authority here. The
@@ -125,6 +128,10 @@ pub struct AccountAdmissionState {
     observed_scope: Mutex<Option<String>>,
     answer: Mutex<Option<Answer>>,
     session: Arc<SessionCache>,
+    /// The last full pass that asked found no usable account session.
+    /// Taken by the supervisor, which starts a renewal off the pass
+    /// (`account_session_renewal::renew_off_pass`).
+    session_missing: AtomicBool,
 }
 
 /// The fields of the status body this client reads. Everything else is
@@ -142,7 +149,7 @@ struct StatusReply {
     /// The body, for exactly HTTP 200 and nothing else.
     body: Option<StatusBody>,
     /// A rotated account session, whatever the status.
-    rotated_token: Option<String>,
+    rotated_token: Option<crate::account_auth::RotatedToken>,
 }
 
 /// When a spent allowance may be asked about again: `retry_after_seconds`
@@ -161,7 +168,7 @@ fn hold_until(now: DateTime<Utc>, retry_after_seconds: i64) -> Option<DateTime<U
 
 /// The tenant a native account session names, or `None` for anything that
 /// is not one.
-fn session_tenant(token: &str) -> Option<String> {
+pub(super) fn session_tenant(token: &str) -> Option<String> {
     use base64::Engine;
     let body = token.strip_prefix(NATIVE_TOKEN_PREFIX)?;
     let (tenant, secret) = body.split_once('.')?;
@@ -177,7 +184,7 @@ fn session_tenant(token: &str) -> Option<String> {
 /// Whether anything could be approved unattended: an armed folder, or an
 /// automatic grant, which can arm a folder during the very pass that finds
 /// it.
-fn anything_armed(shared: &DaemonShared) -> bool {
+pub(super) fn anything_armed(shared: &DaemonShared) -> bool {
     let policy = shared.policy.lock().expect("policy lock");
     policy.automatic_grant.is_some()
         || policy
@@ -259,7 +266,7 @@ impl AccountAdmissionState {
     /// while the local credential snapshot still matches it, and a fresh read
     /// of the OS store otherwise. `None` for no usable session, a store that
     /// cannot be read, or one that did not answer in time.
-    async fn session(&self, shared: &DaemonShared) -> Option<LoadedAccountSession> {
+    pub(super) async fn session(&self, shared: &DaemonShared) -> Option<LoadedAccountSession> {
         let store = shared.store.clone();
         // Local files only, never the OS store.
         let current = super::run_blocking(|| {
@@ -302,7 +309,13 @@ impl AccountAdmissionState {
         }
     }
 
-    fn drop_session(&self) {
+    /// Whether the last pass that asked found no usable account session,
+    /// once: the flag is cleared by the read.
+    pub(super) fn take_session_missing(&self) -> bool {
+        self.session_missing.swap(false, Ordering::SeqCst)
+    }
+
+    pub(super) fn drop_session(&self) {
         *self.session.loaded.lock().expect("session lock") = None;
     }
 
@@ -381,6 +394,10 @@ pub async fn refresh(shared: &DaemonShared, now: DateTime<Utc>, dry_run: bool) {
         return;
     }
     let Some(session) = state.session(shared).await else {
+        // The 12-hour session of a NEAR AI-provisioned account ran out, or
+        // the person signed out: the supervisor asks for a renewal off the
+        // pass, which renews only the former.
+        state.session_missing.store(true, Ordering::SeqCst);
         state.record(key, None, now);
         return;
     };
@@ -425,12 +442,13 @@ async fn fetch_status(cfg: &ContributorConfig, token: &str) -> StatusReply {
         };
     };
     let response = client
-        .call_json_with_response_header::<(), StatusBody>(
+        .call_json_with_response_headers::<(), StatusBody>(
             Method::GET,
             "/v1/account/contribution-status",
             &[],
             None,
             trace_commons_protocol::ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
+            trace_commons_protocol::ACCOUNT_NATIVE_SESSION_EXPIRES_AT_HEADER,
         )
         .await;
     StatusReply {
@@ -440,7 +458,10 @@ async fn fetch_status(cfg: &ContributorConfig, token: &str) -> StatusReply {
             Some(reqwest::StatusCode::OK) => response.result.ok(),
             _ => None,
         },
-        rotated_token: response.response_header,
+        rotated_token: crate::account_auth::RotatedToken::from_headers(
+            response.response_header,
+            response.companion_header,
+        ),
     }
 }
 

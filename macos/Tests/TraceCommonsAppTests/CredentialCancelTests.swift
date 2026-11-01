@@ -1,3 +1,4 @@
+import os
 import TCBridge
 import TCShellCore
 import XCTest
@@ -12,34 +13,30 @@ private final class RecordingDaemon: DaemonCalling {
     /// `Array.append` under that corrupts the buffer's refcount and takes
     /// the whole test process down with SIGSEGV, after every test has
     /// reported passing. The lock is what makes the recording safe.
-    private let lock = NSLock()
-    private var recorded: [(method: String, params: String)] = []
-    private var responseValue = #"{"id":1,"result":{}}"#
+    private struct State: Sendable {
+        var recorded: [(method: String, params: String)] = []
+        var response = #"{"id":1,"result":{}}"#
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     var calls: [(method: String, params: String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     var response: String {
         get {
-            lock.lock()
-            defer { lock.unlock() }
-            return responseValue
+            state.withLock { $0.response }
         }
         set {
-            lock.lock()
-            defer { lock.unlock() }
-            responseValue = newValue
+            state.withLock { $0.response = newValue }
         }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append((method: method, params: paramsJSON))
-        return responseValue
+        state.withLock {
+            $0.recorded.append((method: method, params: paramsJSON))
+            return $0.response
+        }
     }
 
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }

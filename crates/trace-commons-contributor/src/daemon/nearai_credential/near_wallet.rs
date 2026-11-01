@@ -23,7 +23,7 @@ pub const DEPOSIT_PATH: &str = "/near-ai/near-wallet/result";
 pub const MAX_CALLBACK_BYTES: usize = 2048;
 pub const MAX_AGE_MS: u64 = 300_000;
 const MESSAGE: &str = "Sign in to NEAR AI Cloud";
-const RECIPIENT: &str = "cloud.near.ai";
+pub(crate) const RECIPIENT: &str = crate::channel::NEAR_AI_WALLET_RECIPIENT;
 const NEP_413_TAG: u32 = (1 << 31) + 413;
 
 /// Fieldless errors cannot leak a wallet callback, account or signature.

@@ -4,41 +4,33 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// The host-side rules for Ron's first run (#1030): where a host starts it,
+/// The host-side rules for the animated first run: where a host starts it,
 /// when a window shows it, and what an invite link does to it. The rules
 /// between its steps are `FirstRunNavigation`'s and are tested there.
 @MainActor
 final class OnboardingNavigationTests: XCTestCase {
     private typealias Step = OnboardingCoordinatorView.Step
 
-    /// The first run starts at the step the host names, in the tier that
-    /// step belongs to.
+    /// The first run starts at the step the host names: Welcome in the
+    /// first-run window, Tools in the Private AI tab.
     func test_theFirstRunStartsWhereTheHostSays() {
-        let join = OnboardingNavigation.initialState(startAt: .join, daemonRunning: false, enrolled: false)
-        XCTAssertEqual(join.step, .join)
-        XCTAssertEqual(join.tier, .quick)
-
-        let folders = OnboardingNavigation.initialState(startAt: .folders, daemonRunning: false, enrolled: false)
-        XCTAssertEqual(folders.step, .folders)
-        XCTAssertEqual(folders.tier, .quick)
-
-        for step: Step in [.tools, .rules] {
-            let custom = OnboardingNavigation.initialState(startAt: step, daemonRunning: false, enrolled: false)
-            XCTAssertEqual(custom.step, step)
-            XCTAssertEqual(custom.tier, .custom, "\(step) is a Custom step")
+        for step: Step in FirstRunNavigation.steps {
+            XCTAssertEqual(
+                OnboardingNavigation.initialState(startAt: step, daemonRunning: false, enrolled: false).step, step)
         }
+        XCTAssertEqual(OnboardingCoordinatorView(onComplete: {}).startAt, .welcome)
     }
 
     /// A daemon already running (a returning person whose first run did
     /// not finish) is not started again: its declaration is re-sent whole,
     /// since what it holds is unknown here.
     func test_aRunningDaemonIsNotStartedAgain() throws {
-        var state = OnboardingNavigation.initialState(startAt: .folders, daemonRunning: true, enrolled: false)
+        var state = OnboardingNavigation.initialState(startAt: .tools, daemonRunning: true, enrolled: false)
         XCTAssertTrue(state.daemonStarted)
         XCTAssertNil(state.startedSettingsJSON)
         state.answer(.claudeCode, .off)
         state.answer(.codex, .off)
-        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        let calls = FirstRunPlan.calls(for: state, at: .leaveTools)
         XCTAssertFalse(calls.contains { if case .startDaemon = $0 { return true } else { return false } })
         XCTAssertTrue(calls.contains { if case .setSourceSettings = $0 { return true } else { return false } })
 
@@ -51,35 +43,33 @@ final class OnboardingNavigationTests: XCTestCase {
     /// up nor joined again (its last use may be spent), and Automatic stays
     /// on offer. The app needs a NEAR AI account (owner, 2026-10-12:
     /// sign-in required) and this enrollment's account is not known here,
-    /// so Continue waits for near.ai to be chosen beside it, which signs in
-    /// to the enrollment's account and joins nothing.
+    /// so Start sharing waits for near.ai to sign in beside it, which signs
+    /// in to the enrollment's account and joins nothing.
     func test_anEnrolledResumeJoinsNothingAgain() throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         var state = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: true)
         XCTAssertEqual(state.account, .enrolled)
         XCTAssertFalse(JoinScreenLayout.inviteIsEditable(state), "no second invite over the enrolment")
-        XCTAssertEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.frame.continueButton)
+        XCTAssertEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.uses.start)
         XCTAssertNil(JoinScreenLayout.footerNote(state, copy: copy))
         XCTAssertFalse(JoinScreenLayout.canForward(state))
         XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(state))
 
-        state = JoinScreenLayout.toggleNearAI(state)
+        state = JoinScreenLayout.chooseNearAI(state)
         XCTAssertEqual(state.account, .nearAI)
-        XCTAssertTrue(JoinScreenLayout.canForward(state))
+        XCTAssertFalse(JoinScreenLayout.canForward(state), "not until the sign-in finished")
         XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(state))
-        state = JoinScreenLayout.forward(state)
-        XCTAssertEqual(state.account, .nearAI, "Continue keeps the account")
-        XCTAssertEqual(state.step, .folders)
         state.answer(.claudeCode, .off)
         state.answer(.codex, .off)
-        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        let calls = FirstRunPlan.calls(for: state, at: .signIn)
         XCTAssertFalse(calls.contains { if case .lookupInvite = $0 { return true } else { return false } })
         XCTAssertFalse(calls.contains { if case .enroll = $0 { return true } else { return false } })
         XCTAssertTrue(calls.contains(.signInNearAI))
         XCTAssertFalse(calls.contains(.enrollNearAI))
-        XCTAssertFalse(calls.contains(.openPasskeySheets))
 
-        state.step = .uses
+        state.signedIn = true
+        XCTAssertTrue(JoinScreenLayout.canForward(state))
+        XCTAssertEqual(JoinScreenLayout.readyToStart(state).account, .nearAI, "Start keeps the account")
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start).last, .markComplete,
             "an enrolment finishes on its tenant's marker")
 
@@ -126,12 +116,12 @@ final class OnboardingNavigationTests: XCTestCase {
         else { return XCTFail("the parked link is applied first") }
         filled.answer(.claudeCode, .off)
         filled.answer(.codex, .off)
-        filled.step = .folders
+        filled.step = .join
 
         let recorded = OnboardingNavigation.recordEnrolment(filled)
         XCTAssertEqual(recorded.account, .enrolled)
         XCTAssertFalse(JoinScreenLayout.inviteIsEditable(recorded))
-        let calls = FirstRunPlan.calls(for: recorded, at: .leaveRoots)
+        let calls = FirstRunPlan.calls(for: recorded, at: .signIn)
         XCTAssertFalse(calls.contains { if case .lookupInvite = $0 { return true } else { return false } })
         XCTAssertFalse(calls.contains { if case .enroll = $0 { return true } else { return false } })
 
@@ -145,7 +135,7 @@ final class OnboardingNavigationTests: XCTestCase {
 
     /// Review Focus 1 at the host: a start that fails from inside the first
     /// run flips the core's startup to refused, and the first run stays on
-    /// screen (where Folders shows the core's watcher line, the invite
+    /// screen (where Tools shows the core's watcher line, every answer
     /// kept). A refusal at launch, before the first run was shown, is the
     /// startup notice's.
     func test_aFailedStartKeepsTheFirstRunOnScreen() {
@@ -163,17 +153,18 @@ final class OnboardingNavigationTests: XCTestCase {
             startup: .running, requiresOnboarding: false, entered: true))
     }
 
-    /// An invite link fills Join and brings it up, as Connect did; it never
-    /// joins by itself.
-    func test_anInviteLinkFillsJoin() throws {
-        var state = FirstRunState(step: .folders, account: .watchOnly)
+    /// An invite link fills Join's invite and leaves the step where it is:
+    /// Join is the last step, and the daemon Join's sign-in needs starts on
+    /// Tools. It never joins by itself.
+    func test_anInviteLinkFillsJoinWithoutSkippingAhead() throws {
+        var state = FirstRunState(step: .tools, account: .watchOnly)
         state.answer(.claudeCode, .off)
         guard case .apply(let received, let failure) = OnboardingNavigation.receive(
             invite: "https://issuer.example/i#CODE", in: state, failure: nil, isCommitting: false,
             host: { _ in "issuer.example" })
         else { return XCTFail("the link is applied") }
         XCTAssertNil(failure)
-        XCTAssertEqual(received.step, .join)
+        XCTAssertEqual(received.step, .tools)
         XCTAssertEqual(received.invite, "https://issuer.example/i#CODE")
         XCTAssertEqual(received.issuerHost, "issuer.example")
         XCTAssertEqual(received.account, .none, "an invite takes back watch only, as Look up does")
@@ -196,10 +187,10 @@ final class OnboardingNavigationTests: XCTestCase {
     }
 
     /// A host whose runner does not last the whole first run (Private AI's
-    /// Folders step) leaves the link parked for the main window's.
+    /// Tools step) leaves the link parked for the main window's.
     func test_aHostThatDoesNotTakeInvitesLeavesThemParked() {
         XCTAssertEqual(OnboardingNavigation.receive(
-            invite: "https://issuer.example/i#CODE", in: FirstRunState(step: .folders), failure: nil,
+            invite: "https://issuer.example/i#CODE", in: FirstRunState(step: .tools), failure: nil,
             isCommitting: false, hostTakesInvites: false, host: { _ in "issuer.example" }), .leaveParked)
     }
 
@@ -217,13 +208,12 @@ final class OnboardingNavigationTests: XCTestCase {
             startup: model.startup, requiresOnboarding: model.requiresOnboarding, entered: true))
 
         var state = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: false)
-        XCTAssertEqual(JoinScreenLayout.forward(state), state, "Join has no Skip")
+        XCTAssertEqual(JoinScreenLayout.readyToStart(state), state, "Join has no Skip")
+        XCTAssertFalse(JoinScreenLayout.canForward(state))
         state.account = .watchOnly
-        state.step = .folders
         state.answer(.claudeCode, .off)
         state.answer(.codex, .off)
         state.startedSettingsJSON = state.sessionRoots.settingsJSON()
-        state.step = .uses
         state.scopes = ["required"]
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [.markWatchOnlyComplete])
         let runner = FirstRunRunner(state: state, daemon: model)

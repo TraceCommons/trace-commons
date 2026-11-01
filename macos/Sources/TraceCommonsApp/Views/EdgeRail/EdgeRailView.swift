@@ -109,10 +109,10 @@ struct EdgeRailView: View {
                 setOpen(false)
                 OpenMonitor.request(nil)
             } label: {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .frame(width: GlassTokens.Size.edgeRailTile - GlassTokens.Space.s7,
-                           height: GlassTokens.Size.edgeRailTile - GlassTokens.Space.s7)
+                // The NEAR AI mark in the brand blue (owner, 2026-10-22), in
+                // place of the app icon.
+                GlassNearMark()
+                    .frame(width: Self.markSide, height: Self.markSide)
             }
             .help(rail?.openApp ?? "")
             .accessibilityLabel(rail?.openApp ?? "")
@@ -121,6 +121,9 @@ struct EdgeRailView: View {
         .frame(width: GlassTokens.Size.edgeRailWidth)
         .glassTier(.pane)
     }
+
+    /// The N mark's side on the app's tile: the size of the tiles' glyphs.
+    static let markSide: CGFloat = 20
 }
 
 /// One icon on the rail (`GlassRailTile`). Hovering it shows its peek, as
@@ -136,12 +139,10 @@ private struct EdgeRailTile: View {
             switch icon {
             case .symbol(let name):
                 Image(systemName: name).glassGlyph(17, weight: .regular)
-            case .traceMark:
-                // Solid, in the tile's own ink (owner, 2026-10-12): white
-                // in the dark theme, selected or not. The mark fills about 60% of its square: 30pt draws it the
-                // size of the tiles' 17pt glyphs.
-                GlassTraceMark(ink: selected ? GlassTokens.Color.textOnSelected.color : GlassColor.textPrimary)
-                    .frame(width: 30, height: 30)
+            case .traceNodes:
+                // In the tile's own ink, the size of the tiles' glyphs.
+                GlassTraceNodesGlyph(ink: selected ? GlassTokens.Color.textOnSelected.color : GlassColor.textPrimary)
+                    .frame(width: EdgeRailView.markSide, height: EdgeRailView.markSide)
             }
         }
         .onHover { if $0 { select() } }
@@ -151,7 +152,7 @@ private struct EdgeRailTile: View {
 }
 
 /// The rail's own reads: the Traces tree and status, the Private AI calls
-/// and tools, and Home's status, rollup, credit and history.
+/// and tools, and Home's rollup and credit for the Account tiles.
 @MainActor
 final class EdgeRailData {
     let traces: TracesStore
@@ -178,9 +179,9 @@ final class EdgeRailData {
     }
 }
 
-/// The hovered icon's peek: its tab's name, a compact summary of the tab in
-/// the tab's own cards, and a link into it. The open rail's height
-/// (`edgeRailOpenHeight`) holds the tallest.
+/// The hovered icon's peek: its tab's name and a compact summary of the tab
+/// in the tab's own cards; no link or line under them (owner, 2026-10-22).
+/// The open rail's height (`edgeRailOpenHeight`) holds the tallest.
 private struct EdgeRailPeekCard: View {
     let peek: EdgeRailPeek
     let data: EdgeRailData
@@ -188,220 +189,98 @@ private struct EdgeRailPeekCard: View {
 
     @EnvironmentObject private var model: AppModel
 
-    private var rail: MonitorEdgeRailCopy? { MonitorWords.table?.edgeRail }
     private var shell: MonitorShellCopy? { MonitorWords.table?.shell }
     private var nav: MonitorSettingsNavCopy? { MonitorWords.table?.settingsNav }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            Text(peek.name(nav: nav, shell: shell))
-                .glassType(GlassTokens.TypeScale.heading)
-                .foregroundStyle(GlassColor.textPrimary)
-                .accessibilityAddTraits(.isHeader)
+            header
             content
                 .frame(maxWidth: .infinity, alignment: .leading)
-            link
         }
         .padding(GlassTokens.Space.panePadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassTier(.pane)
     }
 
+    /// The peek's title, with Private AI's On or Off right after it, and
+    /// the menu-bar popover's buttons in the top right corner (owner,
+    /// 2026-10-22): Private AI's Settings, which opens Settings at Private
+    /// AI, and Quit; Traces' Watching, Settings and Quit.
+    private var header: some View {
+        HStack(spacing: GlassTokens.Space.s2) {
+            Text(peek.name(nav: nav, shell: shell))
+                .glassType(GlassTokens.TypeScale.heading)
+                .foregroundStyle(GlassColor.textPrimary)
+                .lineLimit(1)
+                .accessibilityAddTraits(.isHeader)
+            if peek == .privateAI, model.privateInferenceCopy != nil {
+                PrivateAIStatusLabel()
+                    .padding(.leading, GlassTokens.Space.s4)
+            }
+            Spacer(minLength: GlassTokens.Space.s4)
+            if peek == .traces {
+                WatchingMenuButton()
+            }
+            GlassRoundButton(MonitorWords.table?.settingsTitle ?? MenuWords.settings, icon: .glyph(.gear)) {
+                open(.settings(EdgeRailSettings.section(peek)))
+            }
+            GlassRoundButton(MenuWords.quit, systemImage: "power") { NSApp.terminate(nil) }
+        }
+    }
+
     @ViewBuilder
     private var content: some View {
         switch peek {
-        case .home: home
         case .privateAI: privateAI
         case .traces: traces
         }
     }
 
-    // MARK: Home
-
-    /// Home, compact: its status card, its three figures, and its Missions
-    /// and History cards as heads only, each opening its page.
-    private var home: some View {
-        let words = MonitorWords.table?.homeHistory
-        let rollup = SummaryFacts.fresh(data.home.rollup, unless: data.home.failures["history_rollup"])
-        let credit = SummaryFacts.fresh(data.home.credit, unless: data.home.failures["commons_credit_summary"])
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            Button { open(.traces(entryId: nil)) } label: {
-                GlassCard(interactive: true) {
-                    HStack(spacing: GlassTokens.Space.s6) {
-                        // Home's status card: the waiting line starts under
-                        // the status words, after the dot.
-                        VStack(alignment: .homeStatusText, spacing: GlassTokens.Space.s1) {
-                            HomeStatusLine(store: data.home)
-                                .glassType(GlassTokens.TypeScale.bodyStrong)
-                            if let line = HomeFormat.waitingLine(
-                                data.traces.decisionsOwed, sessions: data.traces.tree.allSessions) {
-                                Text(line)
-                                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                                    .foregroundStyle(GlassColor.textSecondary)
-                                    .alignmentGuide(.homeStatusText) { $0[.leading] }
-                            }
-                        }
-                        Spacer(minLength: 0)
-                        GlassChevron()
-                    }
-                    .foregroundStyle(GlassColor.textPrimary)
-                }
-            }
-            .buttonStyle(GlassPressStyle())
-            .accessibilityElement(children: .combine)
-            .accessibilityHint(HomeFormat.openTracesWord)
-            HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                GlassStatCard(MonitorWords.waiting, value: HomeFormat.count(data.traces.decisionsOwed))
-                GlassStatCard(MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))
-                GlassStatCard(HomeFormat.creditPendingWord, value: HomeFormat.pendingFigure(
-                    rollup?.creditPending, condition: HomeFormat.pendingCondition(credit)))
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            if model.missionsShown {
-                headCard(
-                    systemImage: HomeOverviewIcons.missions, title: MonitorWords.missions,
-                    subtitle: words?.missionsSubtitle, promo: GlassPromoTreatment.stored,
-                    destination: .home(.missionDrafts))
-            }
-            headCard(
-                systemImage: HomeOverviewIcons.history, title: MonitorWords.history,
-                subtitle: words?.historyDescription, destination: .home(.history))
-        }
-    }
-
-    /// A Home card as a head only: icon, title, subtitle and chevron.
-    private func headCard(
-        systemImage: String, title: String, subtitle: String?, promo: GlassPromoTreatment? = nil,
-        destination: MonitorDestination
-    ) -> some View {
-        Button { open(destination) } label: {
-            GlassIconCard(
-                systemImage: systemImage, title: title, subtitle: subtitle.map { [$0] } ?? [],
-                interactive: true, promo: promo, chevron: true, trailing: { EmptyView() })
-        }
-        .buttonStyle(GlassPressStyle())
-    }
-
     // MARK: Private AI
 
-    /// Private AI, compact: the tab's summary (its status row),
-    /// its window's totals and calls by day, and the balance card.
-    @ViewBuilder
+    /// Private AI, compact (owner, 2026-10-22): the NEAR AI tools, one
+    /// button each, while signed in and a tool can be started (a button
+    /// opens the Private AI tab at that tool's launch dialog, as the
+    /// popover's do); Home's Credit and Balance tiles under them; and a
+    /// small Private AI map at the foot.
     private var privateAI: some View {
-        if let copy = model.privateInferenceCopy {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                PrivateAIInspectorView(store: data.inference)
-                if let page = data.inference.calls, page.readable {
-                    let totals = InferenceTabView.totals(
-                        page, summary: data.inference.summary, destinations: data.inference.destinations)
-                    GlassCard {
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                            Text(InferenceTabView.windowLine(page, destinations: data.inference.destinations))
-                                .glassType(GlassTokens.TypeScale.caption)
-                                .foregroundStyle(GlassColor.textTertiary)
-                            HStack(spacing: GlassTokens.Space.s3) {
-                                GlassLegendCell(MonitorWords.calls, value: totals.calls.map(String.init) ?? "—", status: .shared)
-                                GlassLegendCell(InferenceWords.proof(.verified), value: totals.verified.map(String.init) ?? "—", status: .on)
-                                GlassLegendCell(MonitorWords.priced, value: totals.priced, status: .kept)
-                            }
-                            EdgeRailCallsGraph(page: page)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            if let snapshot = model.managedSnapshot, snapshot.nearAiSignedIn, MenuPanelStatus.showsToolButtons(snapshot) {
+                HistoryFilterFlow(spacing: GlassTokens.Space.s3) {
+                    ForEach(snapshot.signInStartTools, id: \.self) { tool in
+                        ManagedToolButton(tool: tool) {
+                            model.pendingManagedLaunch = tool
+                            open(.inference)
                         }
                     }
                 }
-                PrivateAIBalanceCard(copy: copy)
+                .disabled(model.managedBusy)
+            }
+            HomeAccountTiles(store: data.home) { open(.inference) }
+                // Over the map, so the Balance tile's coins fall over it.
+                .zIndex(1)
+            if let label = model.privateInferenceCopy?.destination {
+                EdgeRailPrivateAIMap(data: data, label: label)
             }
         }
     }
 
     // MARK: Traces
 
-    /// Traces, compact: what is where (waiting here, sent, the watcher with
-    /// its pause), the first watched directories as the tree draws them,
-    /// and the shared and kept graph.
+    /// Traces, compact (owner, 2026-10-22): the watched directories as the
+    /// tree draws them, every one, in a list that scrolls, each with its
+    /// Submit split button and its "..." menu; then the shared and kept
+    /// graph. The card of what is where and the watcher's switch are gone:
+    /// Watching is in the header.
     private var traces: some View {
-        let paused = model.status.paused
-        let words = data.traces.words
-        let folders = Array(data.traces.tree.folders.filter { $0.mode != .ignore }.prefix(Self.foldersShown))
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            GlassCard {
-                VStack(alignment: .leading, spacing: 0) {
-                    placeRow(rail?.onThisMac ?? "", status: .kept,
-                             line: rail?.onThisMac(count: model.pending.count) ?? "", first: true)
-                    placeRow(rail?.inTheLibrary ?? "", status: .shared,
-                             line: rail?.inTheLibrary(count: model.history.count) ?? "")
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        GlassStatusLabel(paused ? shell?.watcherPaused ?? "" : shell?.watcherWatching ?? "",
-                                         status: paused ? .off : .on)
-                        Spacer(minLength: 0)
-                        Button(paused ? MenuBarWords.resume : MenuBarWords.pause) {
-                            if paused { model.resume() } else { model.pause(until: nil) }
-                        }
-                        .buttonStyle(GlassButtonStyle(.glass, small: true))
-                    }
-                    .padding(.top, GlassTokens.Space.s4)
-                    .overlay(alignment: .top) { GlassHairline(GlassColor.hairline) }
-                }
-            }
-            if let words, !folders.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(words.tree.treeTitle)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .accessibilityAddTraits(.isHeader)
-                        .padding(.bottom, GlassTokens.Space.s2)
-                    ForEach(folders) { folder in
-                        GlassListRow(
-                            depth: .folder, tile: .folder, title: folder.label,
-                            sub: TracesTreeView.folderSub(
-                                folder, words: words, modeLabels: data.traces.disclosure?.folderModeLabels ?? [:]),
-                            onSelect: { open(.traces(entryId: nil)) })
-                            // Its own height: the peek's spare room is not the rows'.
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .environment(\.glassTreeRoot, .folder)
-            }
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            EdgeRailFolderList(store: data.traces, open: open)
             EdgeRailTracesGraph(data: data)
         }
     }
 
-    /// The watched directories a Traces peek lists; the tab has the rest.
-    static let foldersShown = 3
-
-    private func placeRow(_ title: String, status: GlassStatus, line: String, first: Bool = false) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
-            GlassStatusLabel(title, status: status)
-                .frame(width: GlassTokens.Size.edgeRailPeekWidth / 3, alignment: .leading)
-            Text(line)
-                .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                .foregroundStyle(GlassColor.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.top, first ? 0 : 7)
-        .padding(.bottom, 7)
-        .overlay(alignment: .top) { if !first { GlassHairline(GlassColor.hairline) } }
-    }
-
     // MARK: Shared
-
-    /// The peek's link: the tab's name.
-    private var link: some View {
-        let words = rail?.open(section: peek.name(nav: nav, shell: shell))
-        return HStack {
-            Button { open(peek.destination) } label: {
-                HStack(spacing: GlassTokens.Space.s2) {
-                    Text(words?.text ?? "")
-                    Image(systemName: "arrow.right").glassGlyph(10, weight: .semibold)
-                }
-            }
-            .buttonStyle(GlassButtonStyle(.link))
-            .accessibilityLabel(words?.label ?? "")
-            Spacer(minLength: 0)
-            Text(rail?.nothingSent ?? "")
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textTertiary)
-        }
-    }
 
     /// Opens the app at a destination and puts the rail away.
     private func open(_ destination: MonitorDestination) {
@@ -467,4 +346,242 @@ enum EdgeRailGraph {
     /// A peek's graph height: the bars and their day labels, which draw
     /// below the bars, so the frame holds both.
     static let height: CGFloat = 110
+    /// The Private AI peek's map height.
+    static let mapHeight: CGFloat = 190
+}
+
+/// Where a peek's Settings button opens Settings: Private AI's own section
+/// from its peek (owner, 2026-10-22), General from Traces', as the
+/// popover's opens.
+enum EdgeRailSettings {
+    static func section(_ peek: EdgeRailPeek) -> SettingsSection {
+        peek == .privateAI ? .privateAI : .general
+    }
+}
+
+/// The Traces peek's folder list's height: a row's height, and the list's
+/// tallest, seven rows; more scroll.
+enum EdgeRailFolderListHeights {
+    static let rowPitch: CGFloat = GlassTokens.Size.listRow + 2
+    static let maxHeight: CGFloat = 7 * rowPitch
+
+    /// The list's height for `count` rows: all of them up to seven.
+    static func height(rows count: Int) -> CGFloat {
+        min(CGFloat(count) * rowPitch, maxHeight)
+    }
+
+    /// How many rows the list draws: every folder, and the sessions of the
+    /// open ones.
+    static func rows(_ folders: [TracesTree.FolderNode], expanded: Set<String>) -> Int {
+        folders.reduce(0) { $0 + 1 + (expanded.contains($1.id) ? $1.sessions.count : 0) }
+    }
+}
+
+/// The Private AI peek's map (owner, 2026-10-22): the window's Private AI
+/// map (`PrivateAIFlowMap`), small, on a card.
+private struct EdgeRailPrivateAIMap: View {
+    let data: EdgeRailData
+    let label: String
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        GeometryReader { proxy in
+            PrivateAIFlowMap(
+                traces: data.traces, inference: data.inference, label: label,
+                sentence: { MonitorWindowView.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) },
+                space: FlowMapScene.space(for: proxy.size))
+        }
+        .frame(height: EdgeRailGraph.mapHeight)
+        .glassTier(.card)
+    }
+}
+
+/// The Traces peek's watched directories (owner, 2026-10-22): every one
+/// the tree draws, as its rows draw them, in a list that scrolls, each with
+/// its disclosure chevron opening its sessions under it, its Submit split
+/// button and its "..." menu, which float over what is below as the tree's
+/// do. Submit sends the folder at once, as the tree's does. A session's
+/// Review, Submit all as, and a rule change that asks first open the
+/// Traces tab, where their reviews and dialogs are: the rail holds none.
+struct EdgeRailFolderList: View {
+    let store: TracesStore
+    let open: (MonitorDestination) -> Void
+    @State private var rowMenu: TracesTreeView.RowMenu?
+    /// The folders open to show their sessions; none at first.
+    @State private var expanded: Set<String> = []
+
+    /// Flat children let the lazy stack defer individual sessions, even
+    /// when a folder contains most of the queue.
+    static func drawnRows(_ folders: [TracesTree.FolderNode], expanded: Set<String>) -> [TracesTreeView.DrawnRow] {
+        folders.flatMap { folder in
+            [.folder(folder)] + (expanded.contains(folder.id)
+                ? folder.sessions.map { .session($0, off: folder.mode == .ignore) } : [])
+        }
+    }
+
+    var body: some View {
+        let folders = store.tree.folders.filter { $0.mode != .ignore }
+        if let words = store.words, !folders.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(words.tree.treeTitle)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .accessibilityAddTraits(.isHeader)
+                    .padding(.bottom, GlassTokens.Space.s2)
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(Self.drawnRows(folders, expanded: expanded)) { drawn in
+                            switch drawn {
+                            case .folder(let folder): row(folder, words: words)
+                            case .session(let entry, let off): sessionRow(entry, off: off, words: words)
+                            }
+                        }
+                    }
+                    .environment(\.glassTreeRoot, .folder)
+                }
+                .scrollIndicators(.automatic)
+                .frame(height: EdgeRailFolderListHeights.height(rows: EdgeRailFolderListHeights.rows(folders, expanded: expanded)))
+                // Over the list, not inside it, so a menu at its last row is
+                // not cut off at the list's foot.
+                .overlayPreferenceValue(TracesMenuAnchors.self, alignment: .topLeading) { anchors in
+                    GeometryReader { space in menus(anchors, in: space, words: words) }
+                }
+            }
+        }
+    }
+
+    /// A folder row as the tree's: its Submit, as the split button while
+    /// the core's outcome words are read, and its "..." menu when it has a
+    /// rule to change or can be ignored.
+    @ViewBuilder
+    private func row(_ folder: TracesTree.FolderNode, words: MonitorTracesCopy) -> some View {
+        #if DEBUG
+        let _ = OtherCollectionRowBodies.record("railFolders", folder.id)
+        #endif
+        let offer = store.groupOffer(folder)
+        let submits = offer.offersContribute && store.mayContributeFolder(folder)
+        let busy = store.submittingFolder == folder.id
+        let switchable = folder.mode != nil && folder.offerableModes.contains(.ignore)
+        let menu = (folder.mode != nil && !folder.offerableModes.isEmpty) || (switchable && folder.mode != .ignore)
+        let outcome = store.disclosure?.outcome
+        let split = submits && outcome != nil
+        let title = busy ? words.tree.submitting : TracesTreeView.submitTitle(offer.count, words: words)
+        let writing = store.writing.contains(folder.id)
+        let submitTip = submits ? TracesTreeView.submitHelp(offer.withheldLine, words: words) : ""
+        let floats = rowMenu == .folder(folder.id) || rowMenu == .submit(folder.id)
+        GlassListRow(
+            depth: .folder, tile: .folder, title: folder.label,
+            sub: TracesTreeView.folderSub(folder, words: words, modeLabels: store.disclosure?.folderModeLabels ?? [:]),
+            off: folder.mode == .ignore,
+            expanded: folder.sessions.isEmpty ? nil : expanded.contains(folder.id),
+            submitTitle: submits && !split ? title : nil,
+            submitHelp: submitTip,
+            accessory: split ? AnyView(
+                GlassSplitButton(title, menuLabel: outcome?.submitAllAs ?? "", menuOpen: rowMenu == .submit(folder.id),
+                                 onMenu: { rowMenu = TracesTreeView.toggled(.submit(folder.id), current: rowMenu) }) {
+                    submit(folder)
+                }
+                .actionHelp(submitTip)
+                .disabled(busy)) : nil,
+            expandLabel: folder.label,
+            menuLabel: menu ? words.tree.folderMenu : "",
+            menuOpen: rowMenu == .folder(folder.id),
+            onToggleExpand: { toggle(folder.id) },
+            onSelect: { open(.traces(entryId: nil)) },
+            onSubmit: submits && !busy ? { submit(folder) } : nil,
+            onMenu: menu ? { rowMenu = TracesTreeView.toggled(.folder(folder.id), current: rowMenu) } : nil)
+            // Its own height: the list's spare room is not the rows'.
+            .fixedSize(horizontal: false, vertical: true)
+            .disabled(writing)
+            .opacity(writing ? TracesRowBusy.opacity : 1)
+            .anchorPreference(key: TracesMenuAnchors.self, value: .bounds) {
+                floats ? [TracesTreeView.rowID(.folder(projectID: folder.id)): $0] : [:]
+            }
+    }
+
+    /// A session under its open folder, as the tree's row draws it: its
+    /// tool, when, its state, and Submit, which sends it at once as the
+    /// tree's does (owner, 2026-10-22). The row itself opens it in the
+    /// Traces tab, where its review is. No "..." menu: Dismiss asks first,
+    /// and the rail holds no dialog.
+    private func sessionRow(_ entry: DaemonData.QueueEntry, off: Bool, words: MonitorTracesCopy) -> some View {
+        #if DEBUG
+        OtherCollectionRowBodies.record("railSessions", entry.entryId)
+        #endif
+        let lines = store.lines(entry)
+        return GlassListRow(
+            depth: .session, tile: TracesTreeView.sessionTile(entry), title: TracesTreeView.when(entry),
+            sub: TracesTreeView.sub(entry, held: words.held, ineligible: lines.ineligible,
+                                    attestation: lines.attestation, words: words),
+            flag: TracesTreeView.flag(entry, ineligible: lines.ineligible != nil, attestation: lines.tone),
+            off: off,
+            submitTitle: words.tree.submit,
+            // On the pill, which sends it; the row's click opens it.
+            submitHelp: words.tree.submitTraceTip,
+            onSelect: { open(.traces(entryId: entry.entryId)) },
+            onSubmit: store.maySubmitSession(entry, folderIgnored: off)
+                ? { Task { await store.submitSession(entry, folderIgnored: off) } } : nil)
+            .fixedSize(horizontal: false, vertical: true)
+            .disabled(store.acting.contains(entry.entryId))
+            .opacity(store.acting.contains(entry.entryId) ? TracesRowBusy.opacity : 1)
+    }
+
+    /// Opens a folder to show its sessions, or closes it, at once: nothing
+    /// in the rail's view animates a change of its size (#1517).
+    private func toggle(_ id: String) {
+        expanded.formSymmetricDifference([id])
+    }
+
+    /// The open menu, at its row: the folder's rule and Ignore, or Submit
+    /// all as.
+    @ViewBuilder
+    private func menus(_ anchors: [String: Anchor<CGRect>], in space: GeometryProxy, words: MonitorTracesCopy) -> some View {
+        if let menu = rowMenu, let id = TracesTreeView.folderID(of: menu),
+           let anchor = anchors[TracesTreeView.rowID(.folder(projectID: id))],
+           let folder = store.tree.folders.first(where: { $0.id == id }) {
+            let rect = space[anchor]
+            let ignorable = folder.mode != nil && folder.offerableModes.contains(.ignore) && folder.mode != .ignore
+            Group {
+                if menu == .folder(id) {
+                    TracesFolderMenu(
+                        folder: folder, ruleTitle: words.inspector.contributionRule,
+                        ignoreLabel: ignorable ? words.tree.ignoreFolder : nil,
+                        onRule: { mode in
+                            rowMenu = nil
+                            change(folder, mode)
+                        },
+                        onIgnore: {
+                            rowMenu = nil
+                            change(folder, .ignore)
+                        },
+                        onDismiss: { rowMenu = nil })
+                } else if let outcome = store.disclosure?.outcome {
+                    TracesSubmitMenu(
+                        label: outcome.submitAllAs, tip: outcome.submitAllAsTooltip,
+                        onPick: {
+                            rowMenu = nil
+                            open(.traces(entryId: nil))
+                        },
+                        onDismiss: { rowMenu = nil })
+                        .offset(TracesSubmitMenu.offset)
+                }
+            }
+            .frame(width: rect.width, height: rect.height, alignment: .topTrailing)
+            .offset(x: rect.minX, y: rect.minY)
+        }
+    }
+
+    /// A rule change: made here when it needs no confirmation, as the
+    /// tree's is; one that asks first opens the Traces tab.
+    private func change(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) {
+        switch TracesTreeView.modeChange(folder, mode) {
+        case .noop, .unavailable: return
+        case .apply: Task { await store.setFolderMode(folder, mode, promised: folder.sessions.count) }
+        case .confirm: open(.traces(entryId: nil))
+        }
+    }
+
+    private func submit(_ folder: TracesTree.FolderNode) {
+        Task { await store.contributeFolder(folder, verdict: nil) }
+    }
 }

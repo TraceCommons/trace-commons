@@ -26,19 +26,26 @@ public enum TCInsights {
             throw InsightsError.service(code)
         }
         guard let result, let text = String(validatingCString: result) else { throw InsightsError.operationFailed }
+        return try decode(Data(text.utf8), for: request.operation)
+    }
+
+    /// The service's answer to `operation`, decoded and checked exactly as
+    /// `call` checks the core's: a debug build's sample answers come through
+    /// here too, so neither shows an answer the other would refuse.
+    public static func decode(_ data: Data, for operation: InsightsRequest.Operation) throws -> InsightsResponse {
         do {
-            let response = try JSONDecoder().decode(InsightsResponse.self, from: Data(text.utf8))
+            let response = try JSONDecoder().decode(InsightsResponse.self, from: data)
             try response.insight?.validateSupportedEvidence()
             for snapshot in response.insights ?? [] { try snapshot.validateSupportedEvidence() }
             try response.task?.validateSupportedSchema()
-            try response.comparisonTaskDetail?.validateSupportedSchema(expectedID: request.operation.id)
+            try response.comparisonTaskDetail?.validateSupportedSchema(expectedID: operation.id)
             for task in response.tasks ?? [] { try task.validateSupportedSchema() }
             try response.specification?.validateStructure()
             for specification in response.specifications ?? [] { try specification.validateStructure() }
             try response.comparisonResult?.validateStructure(expectedSpecification: response.specification)
-            if request.operation.type == "question_cards" {
+            if operation.type == "question_cards" {
                 guard response.type == "question_cards", let result = response.result,
-                      response.text != nil, let questions = request.operation.questions else {
+                      response.text != nil, let questions = operation.questions else {
                     throw InsightsError.invalidResponse
                 }
                 try result.validateSupportedSchema(expectedQuestions: questions)
@@ -88,15 +95,12 @@ public struct InsightsRequest: Encodable, Sendable {
         /// `pattern_sessions`: which card's sessions.
         public var weeks: Int?
         public var pattern: String?
-        /// `session_drill`: the saved snapshot to show turn by turn.
-        public var snapshot_id: String?
         /// `comparisons`: the daemon's weekly figures, passed through
         /// unchanged (absent under feed S), and its summary-card switch.
         public var counter_weeks: [InsightsWeekFigures]?
         public var recap_card_enabled: Bool?
-        /// `goal_set`: the goal. `lever_feedback`: the lever's kind and
-        /// `not_useful` or `reenable`.
-        public var goal: InsightsGoal?
+        /// `lever_feedback`: the lever's kind and `not_useful` or
+        /// `reenable`.
         public var kind: String?
         public var action: String?
         /// `lever_card`: the Settings switch for the lever's card.
@@ -111,9 +115,9 @@ public struct InsightsRequest: Encodable, Sendable {
                     input: ComparisonSpecificationDraftInput? = nil,
                     specificationID: String? = nil, auditDigest: String? = nil,
                     weekStart: String? = nil, tz: Int32? = nil, card: String? = nil,
-                    weeks: Int? = nil, pattern: String? = nil, snapshotID: String? = nil,
+                    weeks: Int? = nil, pattern: String? = nil,
                     counterWeeks: [InsightsWeekFigures]? = nil, recapCardEnabled: Bool? = nil,
-                    goal: InsightsGoal? = nil, kind: String? = nil, action: String? = nil,
+                    kind: String? = nil, action: String? = nil,
                     enabled: Bool? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
@@ -125,9 +129,9 @@ public struct InsightsRequest: Encodable, Sendable {
             self.input = input
             self.specification_id = specificationID; self.audit_digest = auditDigest
             self.week_start = weekStart; self.tz = tz; self.card = card
-            self.weeks = weeks; self.pattern = pattern; self.snapshot_id = snapshotID
+            self.weeks = weeks; self.pattern = pattern
             self.counter_weeks = counterWeeks; self.recap_card_enabled = recapCardEnabled
-            self.goal = goal; self.kind = kind; self.action = action
+            self.kind = kind; self.action = action
             self.enabled = enabled
         }
     }
@@ -144,9 +148,8 @@ public struct InsightsResponse: Decodable, Sendable {
     public let copy: [String: String]?
     public let summary: SavedInsightsSummary?
     public let mutation_effects: InsightMutationEffects?
+    /// `episode_create`'s group, which a comparison task is made from.
     public let episode: LocalEpisode?
-    public let episodes: [EpisodeListEntry]?
-    public let detail: EpisodeDetail?
     public let result: InsightCardResult?
     public let text: String?
     public let task: LocalComparisonTask?
@@ -159,16 +162,14 @@ public struct InsightsResponse: Decodable, Sendable {
     public let inputs: InsightsCardInputs?
     public let patterns: InsightsWeekPatterns?
     public let pattern_sessions: InsightsPatternSessions?
-    public let session: InsightsSessionDrill?
     public let comparisons: InsightsComparisons?
     public let state: InsightsGoalState?
-    public var invalidatedEpisodeIDs: [String] { mutation_effects?.invalidated_episode_ids ?? [] }
     public var staleComparisonTaskIDs: [String] { mutation_effects?.stale_comparison_task_ids ?? [] }
 
     private enum CodingKeys: String, CodingKey {
-        case type, insight, insights, deleted, copy, summary, mutation_effects, episode, episodes
+        case type, insight, insights, deleted, copy, summary, mutation_effects, episode
         case detail, result, text, task, tasks, specification, specifications
-        case overview, inputs, patterns, pattern_sessions, session, comparisons, state
+        case overview, inputs, patterns, pattern_sessions, comparisons, state
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -180,14 +181,8 @@ public struct InsightsResponse: Decodable, Sendable {
         summary = try values.decodeIfPresent(SavedInsightsSummary.self, forKey: .summary)
         mutation_effects = try values.decodeIfPresent(InsightMutationEffects.self, forKey: .mutation_effects)
         episode = try values.decodeIfPresent(LocalEpisode.self, forKey: .episode)
-        episodes = try values.decodeIfPresent([EpisodeListEntry].self, forKey: .episodes)
-        if type == "comparison_task_explain" {
-            detail = nil
-            comparisonTaskDetail = try values.decodeIfPresent(ComparisonTaskDetail.self, forKey: .detail)
-        } else {
-            detail = try values.decodeIfPresent(EpisodeDetail.self, forKey: .detail)
-            comparisonTaskDetail = nil
-        }
+        comparisonTaskDetail = type == "comparison_task_explain"
+            ? try values.decodeIfPresent(ComparisonTaskDetail.self, forKey: .detail) : nil
         if type == "comparison_preview_spec" || type == "comparison_result" {
             result = nil
             comparisonResult = try values.decodeIfPresent(DescriptiveComparisonResult.self, forKey: .result)
@@ -204,7 +199,6 @@ public struct InsightsResponse: Decodable, Sendable {
         inputs = try values.decodeIfPresent(InsightsCardInputs.self, forKey: .inputs)
         patterns = try values.decodeIfPresent(InsightsWeekPatterns.self, forKey: .patterns)
         pattern_sessions = try values.decodeIfPresent(InsightsPatternSessions.self, forKey: .pattern_sessions)
-        session = try values.decodeIfPresent(InsightsSessionDrill.self, forKey: .session)
         comparisons = try values.decodeIfPresent(InsightsComparisons.self, forKey: .comparisons)
         state = try values.decodeIfPresent(InsightsGoalState.self, forKey: .state)
     }
@@ -339,32 +333,6 @@ public struct EpisodeAssessment: Decodable, Sendable, Equatable {
     public let category, outcome, provenance, recorded_at: String
     public let membership_revision: UInt64
     public let members_digest: String
-}
-public struct EpisodeListEntry: Decodable, Sendable, Identifiable, Equatable {
-    public let episode: LocalEpisode
-    public let overlapping_episode_ids: [String]
-    public var id: String { episode.id }
-}
-public struct EpisodeOverlap: Decodable, Sendable, Equatable {
-    public let snapshot_id: String
-    public let episode_ids: [String]
-}
-public struct EpisodeDetail: Decodable, Sendable {
-    public let episode: LocalEpisode
-    public let members: [LocalInsight]
-    public let overlap: [EpisodeOverlap]
-    public let resolved_at: String
-    public func validateSupportedSchema(expectedID: String? = nil) throws {
-        try episode.validateSupportedSchema()
-        if let expectedID, episode.id != expectedID { throw InsightsError.invalidResponse }
-        let memberIDs = Set(episode.members.map(\.snapshot_id))
-        let overlapIDs = overlap.map(\.snapshot_id)
-        guard Set(members.map(\.id)) == memberIDs,
-              Set(overlapIDs).isSubset(of: memberIDs), Set(overlapIDs).count == overlapIDs.count else {
-            throw InsightsError.invalidResponse
-        }
-        for member in members { try member.validateSupportedEvidence() }
-    }
 }
 public struct LocalInsight: Decodable, Sendable, Identifiable {
     public let id, source_format, boundary, analyzed_at: String

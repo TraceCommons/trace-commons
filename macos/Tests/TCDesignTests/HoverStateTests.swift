@@ -14,6 +14,7 @@ final class HoverStateTests: XCTestCase {
     /// The glass pill and the destructive pill take the control hover; a
     /// selected glass button keeps its purple; the CTAs, the submit pill and
     /// the link have none (the link underlines).
+    @MainActor
     func test_buttonHoverFills() {
         XCTAssertEqual(GlassButtonStyle.hoverFill(.glass), GlassTokens.Color.controlHover)
         XCTAssertEqual(GlassButtonStyle.hoverFill(.destructive), GlassTokens.Color.controlHover)
@@ -26,6 +27,7 @@ final class HoverStateTests: XCTestCase {
     /// Every button kind dims by the one shared disabled opacity but the
     /// submit pill, which #1146 dims to 0.55; checkboxes and radios dim to
     /// 0.7 (#1146 `.tc-btn--submit:disabled`, `.tc-checkbox:disabled`).
+    @MainActor
     func test_everyKindDimsByTheSharedDisabledOpacity() {
         for kind: GlassButtonKind in [.primary, .secondary, .glass, .link, .destructive] {
             XCTAssertEqual(GlassButtonStyle.disabledOpacity(kind), GlassTokens.Opacity.disabled, "\(kind)")
@@ -61,6 +63,7 @@ final class HoverStateTests: XCTestCase {
     }
 
     /// The submit pill keeps its statusOff ink when it cannot be used.
+    @MainActor
     func test_theSubmitInk() {
         XCTAssertEqual(GlassButtonStyle.submitInk(done: false, enabled: false), GlassTokens.Color.statusOff)
         XCTAssertEqual(GlassButtonStyle.submitInk(done: false, enabled: true), GlassTokens.Color.textPrimary)
@@ -69,6 +72,7 @@ final class HoverStateTests: XCTestCase {
 
     /// The destructive label clears text contrast on the control fill over
     /// the pane, in both appearances.
+    @MainActor
     func test_theDestructiveLabelClearsTextContrast() {
         let fill = GlassTokens.Gradient.controlFill.stops[0].color
         let ink = GlassButtonStyle.destructiveInk
@@ -78,12 +82,14 @@ final class HoverStateTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(SwitchContrastTests.contrast(ink.light, light), 4.5)
     }
 
+    @MainActor
     func test_theToolbarButtonsExpandedFill() {
         XCTAssertEqual(GlassToolbarButton.fill(expanded: true), GlassTokens.Color.toolbarExpanded)
         XCTAssertNil(GlassToolbarButton.fill(expanded: false))
         XCTAssertNil(GlassToolbarButton.fill(expanded: nil))
     }
 
+    @MainActor
     func test_theKebabLightsOpenOrUnderThePointer() {
         XCTAssertTrue(GlassKebab.lit(open: true, hovering: false))
         XCTAssertTrue(GlassKebab.lit(open: false, hovering: true))
@@ -91,12 +97,14 @@ final class HoverStateTests: XCTestCase {
     }
 
     /// A row's hover never draws over its selection.
+    @MainActor
     func test_aListRowsHoverNeverCoversTheSelection() {
         XCTAssertEqual(GlassListRow.fill(selected: true, hovering: true), GlassTokens.Color.selection)
         XCTAssertEqual(GlassListRow.fill(selected: false, hovering: true), GlassTokens.Color.rowHover)
         XCTAssertNil(GlassListRow.fill(selected: false, hovering: false))
     }
 
+    @MainActor
     func test_onlyAnInteractiveCardLifts() {
         XCTAssertEqual(GlassCard<EmptyView>.hoverFill(interactive: true), GlassTokens.Color.cardHover)
         XCTAssertNil(GlassCard<EmptyView>.hoverFill(interactive: false))
@@ -104,6 +112,7 @@ final class HoverStateTests: XCTestCase {
 
     /// A notice is a tinted box with its tone's icon, its title 4pt over
     /// its body (owner, 2026-10-12: notices read as notifications).
+    @MainActor
     func test_theNoticeIsAnIconBox() {
         XCTAssertEqual(GlassNotice<EmptyView>.titleGap, 4)
         XCTAssertEqual(GlassNotice<EmptyView>.icon(.outside), "exclamationmark.triangle.fill")

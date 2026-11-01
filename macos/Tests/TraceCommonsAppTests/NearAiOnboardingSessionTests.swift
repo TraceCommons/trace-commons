@@ -1,6 +1,7 @@
 // INTEGRATION: run with the sessionState onboarding changes and their matching FFI dylib.
 import AppKit
 import Combine
+import os
 import SwiftUI
 import TCBridge
 import TCShellCore
@@ -8,15 +9,17 @@ import XCTest
 @testable import TraceCommonsApp
 
 private final class OnboardingSessionDaemon: DaemonCalling {
-    struct Call {
+    struct Call: Sendable {
         let method: String
         let params: String
     }
 
-    private enum Phase { case legacyKey, waiting, signedIn, storageUnavailable }
-    private let lock = NSLock()
-    private var phase: Phase = .legacyKey
-    private var recorded: [Call] = []
+    private enum Phase: Sendable { case legacyKey, waiting, signedIn, storageUnavailable }
+    private struct State: Sendable {
+        var phase: Phase = .legacyKey
+        var recorded: [Call] = []
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
     private let unexpectedCall: XCTestExpectation
 
     init(unexpectedCall: XCTestExpectation) {
@@ -24,49 +27,47 @@ private final class OnboardingSessionDaemon: DaemonCalling {
     }
 
     var calls: [Call] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        state.withLock { $0.recorded }
     }
 
     func completeSignIn() {
-        lock.lock()
-        defer { lock.unlock() }
-        phase = .signedIn
+        state.withLock { $0.phase = .signedIn }
     }
 
     func makeStorageUnavailable() {
-        lock.lock()
-        defer { lock.unlock() }
-        phase = .storageUnavailable
+        state.withLock { $0.phase = .storageUnavailable }
     }
 
     func call(_ method: String, params paramsJSON: String) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        recorded.append(Call(method: method, params: paramsJSON))
-        switch method {
-        case "near_ai_credential_status":
-            switch phase {
-            case .legacyKey:
-                return #"{"id":1,"result":{"state":"present","session_state":"absent"}}"#
-            case .waiting:
-                return #"{"id":1,"result":{"state":"obtaining","session_state":"obtaining","attempt_id":"synthetic-attempt","attempt_status":"waiting_for_browser"}}"#
-            case .signedIn:
-                return #"{"id":1,"result":{"state":"present","session_state":"present"}}"#
-            case .storageUnavailable:
-                return #"{"id":1,"result":{"state":"storage_unavailable","session_state":"storage_unavailable"}}"#
+        state.withLock { state in
+            state.recorded.append(Call(method: method, params: paramsJSON))
+            switch method {
+            case "near_ai_credential_status":
+                switch state.phase {
+                case .legacyKey:
+                    return #"{"id":1,"result":{"state":"present","session_state":"absent"}}"#
+                case .waiting:
+                    return #"{"id":1,"result":{"state":"obtaining","session_state":"obtaining","attempt_id":"synthetic-attempt","attempt_status":"waiting_for_browser"}}"#
+                case .signedIn:
+                    return #"{"id":1,"result":{"state":"present","session_state":"present"}}"#
+                case .storageUnavailable:
+                    return #"{"id":1,"result":{"state":"storage_unavailable","session_state":"storage_unavailable"}}"#
+                }
+            case "near_ai_balance":
+                return #"{"id":1,"result":{"state":"no_session","remaining_nanos":null,"spend_limit_nanos":null,"total_spent_nanos":null,"scale":9,"observed_at":null}}"#
+            case "near_ai_credential_start":
+                state.phase = .waiting
+                return #"{"id":1,"result":{"attempt_id":"synthetic-attempt","browser_url":"https://cloud.example.invalid/native-login","status":"waiting_for_browser"}}"#
+            case "get_settings", "harness_list", "managed_snapshot":
+                // What the key is behind is read again once a sign-in lands.
+                // Reads only; the reply is a refusal, so nothing is published.
+                return #"{"id":1,"error":{"code":"unavailable","message":"synthetic_refusal"}}"#
+            default:
+                // Enrollment, wallet requests and consent writes are forbidden in
+                // these tests. Record and fail them even if the caller ignores errors.
+                unexpectedCall.fulfill()
+                return #"{"id":1,"error":{"code":"unavailable","message":"unexpected_test_method"}}"#
             }
-        case "near_ai_balance":
-            return #"{"id":1,"result":{"state":"no_session","remaining_nanos":null,"spend_limit_nanos":null,"total_spent_nanos":null,"scale":9,"observed_at":null}}"#
-        case "near_ai_credential_start":
-            phase = .waiting
-            return #"{"id":1,"result":{"attempt_id":"synthetic-attempt","browser_url":"https://cloud.example.invalid/native-login","status":"waiting_for_browser"}}"#
-        default:
-            // Enrollment, wallet requests and consent writes are forbidden in
-            // these tests. Record and fail them even if the caller ignores errors.
-            unexpectedCall.fulfill()
-            return #"{"id":1,"error":{"code":"unavailable","message":"unexpected_test_method"}}"#
         }
     }
 
@@ -79,7 +80,7 @@ private final class OnboardingSessionDaemon: DaemonCalling {
 /// Holds the credential section's provider choice outside the view, so a test
 /// can see and make the change the picker makes.
 private final class ProviderSelection: ObservableObject {
-    @Published var provider = "near"
+    @Published var provider = LinkedChannel.channel.nearAiSignInProviders.first ?? ""
 }
 
 private struct ProviderSelectionHost: View {
@@ -108,10 +109,23 @@ final class NearAiOnboardingSessionTests: XCTestCase {
             CredentialSurface.action(CredentialStatus(state: model.credentialStatus.sessionState),
                                      calls: model.credentialCalls),
             .obtain)
+        // The picker offers what the linked core offers, in its order:
+        // production's NEAR wallet first, staging's NEAR AI Google login
+        // alone.
         let options = CredentialSection.providerOptions(copy)
-        XCTAssertEqual(options.map(\.title),
-                       [copy.credentialProviderNear, copy.credentialProviderGithub, copy.credentialProviderGoogle])
-        XCTAssertEqual(options.map(\.tag), ["near", "github", "google"])
+        XCTAssertEqual(options.map(\.tag), LinkedChannel.channel.nearAiSignInProviders)
+        if LinkedChannel.isStaging {
+            XCTAssertEqual(options.map(\.title), [copy.credentialProviderGoogle])
+            XCTAssertEqual(options.map(\.tag), ["google"])
+        } else {
+            XCTAssertEqual(options.map(\.title),
+                           [copy.credentialProviderNear, copy.credentialProviderGithub, copy.credentialProviderGoogle])
+            XCTAssertEqual(options.map(\.tag), ["near", "github", "google"])
+        }
+        // Production chooses the NEAR wallet, as before; staging, which has
+        // one provider, chooses Google, its only one.
+        let target = LinkedChannel.isStaging ? "google" : "near"
+        let targetTitle = try XCTUnwrap(options.first { $0.tag == target }).title
 
         let selection = ProviderSelection()
         let content = ProviderSelectionHost(selection: selection, copy: copy)
@@ -136,11 +150,11 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         // what must not start a sign-in.
         if let picker = descendants(hosting).compactMap({ $0 as? NSPopUpButton }).first {
             XCTAssertEqual(picker.itemTitles, options.map(\.title))
-            picker.selectItem(at: 2)
+            picker.selectItem(withTitle: targetTitle)
             picker.sendAction(picker.action, to: picker.target)
             await Task.yield()
             hosting.layoutSubtreeIfNeeded()
-            XCTAssertEqual(picker.titleOfSelectedItem, copy.credentialProviderNear)
+            XCTAssertEqual(picker.titleOfSelectedItem, targetTitle)
             // The popup's own selection moves, but on the macos-26 runner the
             // action on an offscreen popup did not reach SwiftUI's binding
             // (CI read "github" here), and the version of this test before it
@@ -148,21 +162,21 @@ final class NearAiOnboardingSessionTests: XCTestCase {
             // still has not arrived, make the same change through the
             // binding, so the no-sign-in check below always follows a real
             // change of selection on both render paths.
-            for _ in 0..<10 where selection.provider != "near" {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            for _ in 0..<10 where selection.provider != target {
+                try await Task.sleep(for: .milliseconds(20))
                 await Task.yield()
             }
-            if selection.provider != "near" {
-                selection.provider = "near"
+            if selection.provider != target {
+                selection.provider = target
                 await Task.yield()
                 hosting.layoutSubtreeIfNeeded()
             }
         } else {
-            selection.provider = "near"
+            selection.provider = target
             await Task.yield()
             hosting.layoutSubtreeIfNeeded()
         }
-        XCTAssertEqual(selection.provider, "near")
+        XCTAssertEqual(selection.provider, target)
         // A sign-in the change started would be a Task, not a synchronous
         // call: give it time to reach the daemon before asserting it did not.
         await fulfillment(of: [unexpected], timeout: 0.2)
@@ -269,7 +283,11 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         let start = try XCTUnwrap(starts.first)
         let params = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(start.params.utf8)) as? [String: Any])
         XCTAssertTrue(params.isEmpty, "Sign-in must not carry enrollment or consent parameters")
-        XCTAssertEqual(Set(daemon.calls.map(\.method)), ["near_ai_credential_start", "near_ai_credential_status", "near_ai_balance"])
+        XCTAssertEqual(
+            Set(daemon.calls.map(\.method)),
+            ["near_ai_credential_start", "near_ai_credential_status", "near_ai_balance",
+             "get_settings", "harness_list", "managed_snapshot"],
+            "The landed sign-in re-reads what the key is behind, and writes nothing else")
     }
 
     @MainActor
