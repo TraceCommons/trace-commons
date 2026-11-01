@@ -9501,11 +9501,21 @@ AI does not list as a chat model is refused when the proxy starts, with
 `managed-model-unavailable`: at `managed_launch_redeem` on the sign-in, in the
 launcher on a saved key.
 
-- `managed_model_catalogue {tool}` (async only) answers
+- `managed_model_catalogue {tool, cache_only?}` (async only) answers
   `{models: [{id, name?}], default: string | null}`: NEAR AI's chat models in
   its order, and the model `tool` gets when a launch names none. The catalogue
   is public; no key is read or sent. `managed-model-unavailable` when NEAR AI
-  cannot be read; `managed-invalid-request` for other parameters. It also
+  cannot be read; `managed-invalid-request` for other parameters. The
+  catalogue comes from the daemon's one cache (`managed/catalogue_cache.rs`),
+  shared with the favorites check: a copy under 15 minutes old answers with
+  no read; an older one still answers at once while one refresh runs in the
+  background; only with no copy at all does the call wait on NEAR AI. The
+  last copy is kept in `managed-model-catalogue.json` in the config
+  directory (ids, names, tiers and token limits only, mode 0600), so a
+  restart or an offline start has it too. With `cache_only: true` (default
+  false) the call reads that cache and nothing else, never waits on or starts
+  a read, and fails with `managed-model-unavailable` when it holds nothing:
+  for a row that only wants display names. It also
   carries `favorites` (`[string]`): the starred models NEAR AI offers `tool`,
   in its order; and `unavailable_favorites` (`[string]`): the starred ids
   NEAR AI no longer lists for any tool. A starred model it lists but `tool`

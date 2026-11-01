@@ -928,6 +928,9 @@ pub struct GateHeld {
 /// `status_value`, `publish_if_decisions_owed_changed`), or a
 /// temporary in a `match` scrutinee, which lives for the whole `match`.
 pub struct DaemonShared {
+    /// NEAR AI's chat-model catalogue, shared by every reader (a leaf lock).
+    /// See `managed::catalogue_cache`.
+    pub(crate) model_catalogue: crate::managed::catalogue_cache::CatalogueCache,
     pub(crate) managed: Mutex<Result<super::managed::ManagedService, crate::managed::ManagedError>>,
     pub store: ConfigStore,
     pub(crate) subscription_usage: Arc<super::subscription_usage::UsageService>,
@@ -1520,9 +1523,12 @@ impl DaemonShared {
         let paused = state.paused;
         let pin_store = store.clone();
         let managed = Mutex::new(super::managed::ManagedService::open(&store));
+        let model_catalogue =
+            crate::managed::catalogue_cache::CatalogueCache::open(Some(store.dir()));
         let insights_counter = super::insights_week::CounterPass::for_store(&store);
         Ok(Self {
             managed,
+            model_catalogue,
             store,
             queue: Mutex::new(queue),
             policy: Mutex::new(policy),

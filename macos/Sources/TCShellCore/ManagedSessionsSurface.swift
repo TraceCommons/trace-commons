@@ -402,6 +402,12 @@ public struct ManagedModel: Decodable, Equatable, Identifiable, Sendable {
     /// NEAR AI's privacy tier (`incognito`, `near_ai`, `external`) that the
     /// picker groups by; absent from an older daemon or an unlabelled entry.
     public let tier: String?
+
+    /// What a picker or a row calls the model: NEAR AI's display name, or
+    /// the id when it gives none. The id stays the value and the tooltip.
+    public var label: String {
+        name.map { $0.trimmingCharacters(in: .whitespaces) }.flatMap { $0.isEmpty ? nil : $0 } ?? id
+    }
 }
 
 /// `managed_model_catalogue`'s answer: NEAR AI's chat models in its order,
@@ -578,6 +584,9 @@ public struct ManagedModelOption: Equatable, Sendable {
     /// model wherever no heading above it says the tier; none when `tier`
     /// is none or the copy has no heading for it.
     public var tierHeading: String? = nil
+    /// The model's id when `title` is its display name, for a tooltip;
+    /// none when the title already is the id.
+    public var help: String? = nil
 
     /// What `tier` means, for a shell to draw: none for an unknown tier.
     public var privacy: ManagedModelPrivacy? { ManagedSurface.modelPrivacy(tier) }
@@ -631,9 +640,10 @@ public extension ManagedSurface {
     /// NEAR AI does not list is not shown. With no catalogue, only the
     /// default.
     static func modelOptions(_ catalogue: ManagedModelCatalogue?, copy: (String) -> String) -> [ManagedModelOption] {
-        let first = catalogue?.default.map { copy("model_default").replacingOccurrences(of: "{model}", with: $0) }
-            ?? copy("model_default_unknown")
         let models = catalogue?.models ?? []
+        let first = catalogue?.default.map { id in
+            copy("model_default").replacingOccurrences(of: "{model}", with: models.first { $0.id == id }?.label ?? id)
+        } ?? copy("model_default_unknown")
         let order = catalogue?.tierOrder ?? []
         let favorites = Set(catalogue?.favorites ?? [])
         // A tier's place in the order and its heading; a heading the copy
@@ -656,13 +666,15 @@ public extension ManagedSurface {
             let index = place(model)
             let tier = index.map { order[$0] }
             let tierHeading = index.flatMap(heading)
+            let title = model.label
+            let help = title == model.id ? nil : model.id
             if favorites.contains(model.id) {
-                favored.append(ManagedModelOption(title: model.id, value: model.id, tier: tier, tierHeading: tierHeading))
+                favored.append(ManagedModelOption(title: title, value: model.id, tier: tier, tierHeading: tierHeading, help: help))
             } else if let index {
                 byTier[index].append(ManagedModelOption(
-                    title: model.id, value: model.id, section: tierHeading, tier: tier, tierHeading: tierHeading))
+                    title: title, value: model.id, section: tierHeading, tier: tier, tierHeading: tierHeading, help: help))
             } else {
-                rest.append(ManagedModelOption(title: model.id, value: model.id))
+                rest.append(ManagedModelOption(title: title, value: model.id, help: help))
             }
         }
         return [head] + favored + byTier.flatMap { $0 } + rest
