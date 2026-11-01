@@ -2006,8 +2006,14 @@ impl TraceUploadClaimIssuerState {
                 .await
                 .map_err(|_| JudgementClaimRefusal::IssueFailed)?;
         // The upload route backfills a NEAR AI sign-up grant for a device
-        // with none before it checks grants; so does this one.
-        if grants.is_empty()
+        // with no active contributor grant before it checks grants; so does
+        // this one, on the same trigger, so a device holding only another
+        // role is admitted by both routes or by neither.
+        let has_contributor_grant = grants.iter().any(|grant| {
+            grant.status == TraceTenantAccessGrantStatus::Active
+                && grant.role == TraceTenantAccessGrantRole::Contributor
+        });
+        if !has_contributor_grant
             && self
                 .backfill_near_ai_signup_grant(db.as_ref(), tenant_id, device_key_id, now)
                 .await

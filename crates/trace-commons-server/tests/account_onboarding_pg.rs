@@ -2791,6 +2791,38 @@ async fn a_judgement_claim_backfills_the_near_ai_signup_grant_like_an_upload_cla
             .await
             .is_empty()
     );
+    // An active grant of another role is not a contributor grant: the
+    // upload route still backfills, and so must this one.
+    {
+        use trace_commons_server::trace_corpus_storage::{
+            TraceCorpusStore as _, TraceTenantAccessGrantRole, TraceTenantAccessGrantStatus,
+            TraceTenantAccessGrantWrite,
+        };
+        db.upsert_trace_tenant_access_grant(TraceTenantAccessGrantWrite {
+            tenant_id: account.tenant_id.clone(),
+            grant_id: uuid::Uuid::new_v4(),
+            principal_ref: trace_commons_server::account_trust::device_principal_ref(
+                &account.tenant_id,
+                &account.device_key_id,
+            ),
+            role: TraceTenantAccessGrantRole::Reviewer,
+            status: TraceTenantAccessGrantStatus::Active,
+            allowed_consent_scopes: Vec::new(),
+            allowed_uses: Vec::new(),
+            issuer: None,
+            audience: None,
+            subject: None,
+            issued_at: Utc::now(),
+            expires_at: None,
+            revoked_at: None,
+            created_by_principal_ref: None,
+            revoked_by_principal_ref: None,
+            reason: None,
+            metadata: Default::default(),
+        })
+        .await
+        .expect("reviewer grant");
+    }
 
     // Without the sign-up template there is nothing to backfill, so the
     // grant rule refuses.
