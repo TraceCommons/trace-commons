@@ -9478,8 +9478,10 @@ prompt may hold input not yet run.
   process unless the parent disclaims it, and nothing here does. In the
   macOS app the daemon runs inside the app's own process (`tc_daemon_start`),
   so the prompts, and the entries under System Settings > Privacy &
-  Security > Automation and > Accessibility, name Trace Commons. A daemon
-  the app attached to instead (`near-ai daemon run` in a terminal, or one
+  Security > Automation and > Accessibility, name the app as installed:
+  "Near.ai" (its `CFBundleName` and `CFBundleDisplayName`; bundle id
+  `ai.tracecommons.shell`), or "Near.ai Staging" for the staging build. A
+  daemon the app attached to instead (`near-ai daemon run` in a terminal, or one
   under a service manager) is attributed to whatever started it: Terminal,
   or that daemon's own binary. A grant is tied to the code signature it was
   given to, so a differently signed build asks again. Refusing either

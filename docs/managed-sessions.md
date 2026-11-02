@@ -44,7 +44,7 @@ in its window, while Terminal still has that window and macOS allows the
 Command-T keystroke; otherwise in a new window. The keystroke needs macOS's
 Automation (of System Events) and Accessibility permissions. In the app, the
 daemon runs inside the app, so macOS's own prompts and the System Settings >
-Privacy & Security entries name Trace Commons; refusing either opens Start
+Privacy & Security entries name the app, "Near.ai"; refusing either opens Start
 again and Resume in a new window, with no message in the app. Nothing is typed into an existing
 tab. See `docs/contributor-daemon-ipc-v1_1.md` for the checks.
 Stop signals only the tool process the launcher supervises: SIGTERM, then
