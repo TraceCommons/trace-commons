@@ -41,7 +41,11 @@ opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
 Start again and Resume open in a new Terminal tab beside the ended session,
 in its window, while Terminal still has that window and macOS allows the
-Command-T keystroke (Accessibility); otherwise in a new window. Nothing is typed into an existing
+Command-T keystroke; otherwise in a new window. The keystroke needs macOS's
+Automation (of System Events) and Accessibility permissions. In the app, the
+daemon runs inside the app, so macOS's own prompts and the System Settings >
+Privacy & Security entries name Trace Commons; refusing either opens Start
+again and Resume in a new window, with no message in the app. Nothing is typed into an existing
 tab. See `docs/contributor-daemon-ipc-v1_1.md` for the checks.
 Stop signals only the tool process the launcher supervises: SIGTERM, then
 SIGKILL after a bounded wait. Processes the tool itself started (a shell

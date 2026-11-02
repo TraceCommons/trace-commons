@@ -9470,10 +9470,23 @@ prompt may hold input not yet run.
 - The window comes to the front, and Terminal becomes the frontmost app with
   that window in front, within about a second.
 - Terminal has no scripting command for a new tab, so the daemon presses
-  Command-T through System Events. macOS allows that only once the app has
-  Accessibility access, and asks with its own prompt. The first event to
-  System Events can also wait on macOS's Automation consent prompt; the
-  keystroke is given 2 seconds, so that wait ends in a new window rather
+  Command-T through System Events, from the same `osascript` it runs every
+  Terminal launch with (owner, 2026-11-02). That needs two macOS
+  permissions: Automation of System Events and Accessibility. macOS asks
+  for each with its own prompt, which names the process TCC holds
+  responsible for `osascript`. A process inherits its parent's responsible
+  process unless the parent disclaims it, and nothing here does. In the
+  macOS app the daemon runs inside the app's own process (`tc_daemon_start`),
+  so the prompts, and the entries under System Settings > Privacy &
+  Security > Automation and > Accessibility, name Trace Commons. A daemon
+  the app attached to instead (`near-ai daemon run` in a terminal, or one
+  under a service manager) is attributed to whatever started it: Terminal,
+  or that daemon's own binary. A grant is tied to the code signature it was
+  given to, so a differently signed build asks again. Refusing either
+  permission makes the keystroke fail, which the script catches, and the
+  launch opens a new window; nothing in the app says so. The first event to
+  System Events can also wait on the Automation prompt; the keystroke is
+  given 2 seconds, so that wait ends in a new window rather
   than a stalled launch. The new tab is the one tab whose tty was not there
   before the keystroke, in whichever window it landed, waited for up to 3
   seconds; with none, or more than one, the launch opens a new window, and
