@@ -21,6 +21,9 @@
 //!   never degrades to sending unfiltered text.
 
 pub mod account_admission;
+pub(crate) mod account_attention;
+#[cfg(test)]
+mod account_attention_tests;
 pub mod account_onboarding;
 pub(crate) mod account_session_renewal;
 pub mod activity_missions;

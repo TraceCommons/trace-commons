@@ -3703,6 +3703,49 @@ pub unsafe extern "C" fn tc_legacy_migration_notice(notice_json: *const c_char) 
     })
 }
 
+/// The account section's status while this app's account needs attention
+/// (#1836 F1), from a `status` object -- the whole status, or an object
+/// holding its `account_state`, `account_state_reason` and
+/// `near_ai_login_unconfirmed` keys -- passed as JSON.
+///
+/// Returns an owned JSON object whose keys are `AccountAttentionCopy`'s
+/// fields -- `title`, `body` (the reason's sentence, or null for a reason
+/// this build does not know), `private_ai` (null unless a NEAR AI login is
+/// stored) and `action`, the "Set up again" button -- free it with
+/// [`tc_string_free`]. The button unenrolls (`unenroll`), then the first
+/// run starts.
+///
+/// THE BRANCH CROSSES, NOT ONLY THE WORDS: a shell does not read
+/// `account_state_reason` to choose a sentence. Returns NULL while there is
+/// nothing to show (`account_state` is `ok`, absent or anything else), for a
+/// NULL, non-UTF-8 or unparseable argument, anything that is not an object,
+/// and on a caught panic.
+///
+/// # Safety
+/// `status_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_account_attention_copy_json(status_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        if status_json.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+        let Ok(text) = (unsafe { borrow_str(status_json) }) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            return Ok(std::ptr::null_mut());
+        };
+        let Some(copy) =
+            trace_commons_contributor::consent_copy::account_attention_for_wire(&value)
+        else {
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// The notice for approved sessions held because the privacy witness is
 /// busy, from `status`'s `witness_capacity` object, passed as the JSON the
 /// daemon sent.

@@ -1779,6 +1779,28 @@ char*       tc_grant_void_notice(const char* void_json);
  */
 char*       tc_legacy_migration_notice(const char* notice_json);
 
+/* The account section's status while this app's account needs attention
+ * (#1836 F1): its account record cannot be read, or the address it was set
+ * up with is refused. Signing in again does not fix it; setting up again
+ * does.
+ *
+ * status_json is status's object, passed through as the daemon sent it (or
+ * an object holding its account_state, account_state_reason and
+ * near_ai_login_unconfirmed keys). Returns an owned JSON object with title,
+ * body (null for a reason this build does not know), private_ai (null
+ * unless a NEAR AI login is stored) and action; free it with tc_string_free.
+ *
+ * THE BRANCH CROSSES, NOT ONLY THE WORDS. Do not read account_state_reason
+ * to choose words natively. Draw it in the account section, never as a
+ * banner or notification. The action calls unenroll, then starts the first
+ * run. While it is shown, do not mark the NEAR AI login as the account's.
+ *
+ * NULL while there is nothing to show (account_state ok, absent or anything
+ * else), for a NULL, non-UTF-8 or unparseable argument, anything that is not
+ * an object, and on a caught panic.
+ */
+char*       tc_account_attention_copy_json(const char* status_json);
+
 /* The notice for approved sessions held because the privacy witness is busy.
  *
  * capacity_json is status's witness_capacity object, passed through as the

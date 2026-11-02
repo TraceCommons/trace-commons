@@ -173,14 +173,14 @@ fn remember_if_revoked(store: &crate::config::ConfigStore, class: &str, device_k
 
 /// The stored account record, as `sign_in`, `renew` and
 /// [`check_fresh_login`] read it.
-struct AccountRecord {
+pub(super) struct AccountRecord {
     raw: Vec<u8>,
     previous: serde_json::Value,
     expected: commons_credentials::Snapshot,
 }
 
 /// Why the account record could not be read.
-enum AccountRecordError {
+pub(super) enum AccountRecordError {
     /// Credential storage did not answer (locked, a prompt): may pass.
     Storage,
     /// The record is stored but is not JSON: no retry fixes it.
@@ -189,7 +189,7 @@ enum AccountRecordError {
 
 /// Read the account record. `Ok(None)` when there is none (signed out).
 /// Blocking: credential storage can wait on a prompt.
-fn load_account_record(
+pub(super) fn load_account_record(
     store: &crate::config::ConfigStore,
 ) -> Result<Option<AccountRecord>, AccountRecordError> {
     let Some((raw, expected)) = commons_credentials::load_with_snapshot(store, Kind::Account)
@@ -851,7 +851,7 @@ pub(super) fn route_for_test(store: &crate::config::ConfigStore, origin: &str) {
 }
 
 #[cfg(test)]
-fn test_route(store: &crate::config::ConfigStore) -> Option<String> {
+pub(super) fn test_route(store: &crate::config::ConfigStore) -> Option<String> {
     TEST_ROUTES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)

@@ -2624,6 +2624,11 @@ impl DaemonShared {
         // Taken before the locks below for the same reason as `routing`:
         // one lock order everywhere.
         let account_scope = super::commons_credentials::account_scope(&self.store).ok();
+        // Before the locks below too: it takes the commit lock, as
+        // `account_scope` does, and `holds_near_ai_key` the settings lock.
+        let account_attention = super::account_attention::account_attention(&self.store);
+        let near_ai_login_unconfirmed =
+            account_attention.is_some() && self.holds_near_ai_key() == Some(true);
         let private_inference = self.private_inference_value();
         // Before the queue lock too: it takes the policy lock and then the
         // queue lock, the order `list_projects` takes them in.
@@ -2853,6 +2858,23 @@ impl DaemonShared {
             "logged_in": logged_in,
             "setup_complete": super::setup_completion::is_complete(&self.store, cfg.as_ref(), logged_in, setup_roots_declared),
             "account_scope": account_scope,
+            // Additive (#1836 F1). `ok`, or `needs_attention` while this
+            // app's account is locally broken in a way signing in again does
+            // not fix; then `account_state_reason` is
+            // `account_record_unreadable` or `account_address_refused`, and
+            // `null` otherwise. `near_ai_login_unconfirmed` is true while
+            // that holds and a NEAR AI login is stored: no Commons check
+            // could run for it, so no shell presents it as the account's.
+            // All three always present, so a shell can tell "nothing to
+            // say" from a daemon too old to say. Words:
+            // `consent_copy::account_attention_for_wire`.
+            "account_state": if account_attention.is_some() {
+                crate::consent_copy::ACCOUNT_STATE_NEEDS_ATTENTION
+            } else {
+                crate::consent_copy::ACCOUNT_STATE_OK
+            },
+            "account_state_reason": account_attention,
+            "near_ai_login_unconfirmed": near_ai_login_unconfirmed,
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             // Additive. `consent-scopes-not-chosen` while nothing may be sent

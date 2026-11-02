@@ -199,6 +199,30 @@ impl Snapshot {
             && self.config == other.config
             && self.kind == other.kind
     }
+
+    /// Whether a record is stored for this kind (files only, no OS read).
+    pub(crate) fn holds_record(&self) -> bool {
+        self.previous.is_some()
+    }
+
+    /// A digest of everything this snapshot read. The OS entry a record names
+    /// is immutable, so two equal digests name the same stored secret: a
+    /// reader may keep what it learned from that secret until this changes.
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        for part in [&self.generation, &self.config, &self.previous] {
+            match part {
+                Some(bytes) => {
+                    hash.update([1]);
+                    hash.update((bytes.len() as u64).to_be_bytes());
+                    hash.update(bytes);
+                }
+                None => hash.update([0]),
+            }
+        }
+        hash.update(self.kind.domain().as_bytes());
+        hash.finalize().into()
+    }
 }
 
 pub(crate) fn snapshot(store: &ConfigStore, kind: Kind) -> Result<Snapshot> {
