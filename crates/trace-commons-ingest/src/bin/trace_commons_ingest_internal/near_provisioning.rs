@@ -1263,8 +1263,11 @@ async fn near_ai_start(
     // The login path's own readiness, not the wallet's: `published_witness`
     // refuses without the NEP-413 sign-in config and the wallet redirect
     // origin, neither of which this ceremony has or needs.
-    if !ready_for(&state, contract, false) || limited(&headers, "near-ai-start") {
+    if !ready_for(&state, contract, false) {
         return None;
+    }
+    if limited(&headers, "near-ai-start") {
+        return Some(near_ai_sign_in_rate_limited());
     }
     let Json(body) = body.ok()?;
     let draw = NearAiCeremonyDraw::draw(body)?;
@@ -1287,9 +1290,12 @@ async fn near_ai_start(
         &draw.code_challenge,
         draw.expires_at,
     );
-    db.store_near_ai_login_ceremony(&draw.ceremony_hash(), &pending, draw.expires_at)
+    if let Err(error) = db
+        .store_near_ai_login_ceremony(&draw.ceremony_hash(), &pending, draw.expires_at)
         .await
-        .ok()?;
+    {
+        return near_ai_database_failure(&error);
+    }
     Some(draw.response(&signing_bytes))
 }
 
@@ -1373,14 +1379,65 @@ fn near_ai_verify_device_proof(
 async fn near_ai_introspect(
     state: &AppState,
     access_token: String,
-) -> Option<trace_commons_server::near_ai_login::VerifiedNearAiLogin> {
+) -> Result<
+    trace_commons_server::near_ai_login::VerifiedNearAiLogin,
+    trace_commons_server::near_ai_login::LoginIntrospectionFailure,
+> {
     trace_commons_server::near_ai_login::introspect_login(
         introspection_base_url(state),
         &secrecy::SecretString::from(access_token),
         NEAR_AI_INTROSPECTION_TIMEOUT,
     )
     .await
-    .ok()
+}
+
+/// The wire label of a NEAR AI sign-in ceremony that was not answered because
+/// the caller's address, or the deployment as a whole, is over its rate limit.
+pub(super) const NEAR_AI_SIGN_IN_RATE_LIMITED: &str = "near_ai_sign_in_rate_limited";
+
+/// The wire label of a NEAR AI sign-in ceremony that could not be answered
+/// now: the database or NEAR AI did not answer. One label for every cause, so
+/// the body never says which dependency is down; the cause is logged.
+pub(super) const NEAR_AI_SIGN_IN_UNAVAILABLE: &str = "near_ai_sign_in_unavailable";
+
+/// `429`, with `Retry-After`: a NEAR AI sign-in start or finish over the
+/// per-address or deployment-wide limit.
+///
+/// Not the uniform deny. A client reads that `400` as "refused", and on the
+/// sign-in check as "this login belongs to another account"; a busy commons
+/// must not say that. The limit is keyed on the caller's address and a fixed
+/// global key, never on an account, login or device, so this answer is the
+/// same whoever the request names.
+fn near_ai_sign_in_rate_limited() -> axum::response::Response {
+    no_store(api_error_response_with_retry_after(api_error_with_retry(
+        StatusCode::TOO_MANY_REQUESTS,
+        NEAR_AI_SIGN_IN_RATE_LIMITED,
+        Some(i64::try_from(ACCOUNT_RATE_WINDOW.as_secs()).unwrap_or(60)),
+    )))
+}
+
+/// `503`: a NEAR AI sign-in that could not be answered now. `cause` is a
+/// fixed label for the log line only (`database`, `near_ai_introspection`).
+fn near_ai_sign_in_unavailable(cause: &'static str) -> axum::response::Response {
+    tracing::warn!(
+        cause,
+        "NEAR AI sign-in answered unavailable; a dependency did not answer"
+    );
+    no_store(api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        NEAR_AI_SIGN_IN_UNAVAILABLE,
+    ))
+}
+
+/// A database error on a NEAR AI sign-in: `503` when the database did not
+/// answer, the uniform deny (`None`) for everything else. The predicate is
+/// narrow, so a refusal the database layer decided can never come out as
+/// `503`; see `is_transient_database_failure`.
+fn near_ai_database_failure(
+    error: &trace_commons_server::error::DatabaseError,
+) -> Option<axum::response::Response> {
+    trace_commons_server::account_onboarding::is_transient_database_failure(error)
+        .then(|| near_ai_sign_in_unavailable("database"))
 }
 
 async fn near_ai_finish(
@@ -1389,14 +1446,24 @@ async fn near_ai_finish(
     body: Result<Json<NearAiFinishRequest>, JsonRejection>,
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if !ready_for(&state, contract, false) || limited(&headers, "near-ai-finish") {
+    if !ready_for(&state, contract, false) {
         return None;
     }
+    if limited(&headers, "near-ai-finish") {
+        return Some(near_ai_sign_in_rate_limited());
+    }
     let Json(body) = body.ok()?;
+    // Its per-ceremony attempt cap stays the uniform deny: an honest client
+    // never finishes one ceremony twice (the take below consumes it), so a
+    // ceremony past its cap is refused, not busy, and "try again later" would
+    // be the wrong thing to tell the client.
     let (device, hash) = near_ai_finish_precheck(&body)?;
     let db = account_db(&state).ok()?;
     // Single use: the take deletes the row, so a replayed finish finds nothing.
-    let pending = db.take_near_ai_login_ceremony(&hash).await.ok()??;
+    let pending = match db.take_near_ai_login_ceremony(&hash).await {
+        Ok(pending) => pending?,
+        Err(error) => return near_ai_database_failure(&error),
+    };
     let nonce: [u8; 32] = hex::decode(&pending.nonce_hex).ok()?.try_into().ok()?;
     let signing_bytes = trace_commons_protocol::onboarding::near_ai_provisioning_device_bytes(
         &nonce,
@@ -1414,7 +1481,20 @@ async fn near_ai_finish(
     )?;
     // Only now, with the device proven and the ceremony consumed, is the token
     // spent.
-    let login = near_ai_introspect(&state, body.access_token).await?;
+    //
+    // NEAR AI not answering is `503`. It is reached only after the device
+    // proof and before anything is looked up by the login, and it is the same
+    // for every token at that moment, so it says nothing about whose login
+    // this is. NEAR AI's answer about the token stays the uniform deny.
+    let login = match near_ai_introspect(&state, body.access_token).await {
+        Ok(login) => login,
+        Err(trace_commons_server::near_ai_login::LoginIntrospectionFailure::Unavailable) => {
+            return Some(near_ai_sign_in_unavailable("near_ai_introspection"));
+        }
+        Err(trace_commons_server::near_ai_login::LoginIntrospectionFailure::Refused) => {
+            return None;
+        }
+    };
     let identity = state.near_account_identity.as_ref()?;
     let secret = generate_session_secret();
     let token_hash = hash_secret(&secret);
@@ -1441,7 +1521,11 @@ async fn near_ai_finish(
                 DEVICE_KEY_REVOKED,
             )));
         }
-        Err(_) => return None,
+        // Every decided refusal (the device key held by another account, the
+        // device principal bound to another account, the anchor race lost
+        // twice) stays the uniform deny; only the database not answering is
+        // `503`.
+        Err(error) => return near_ai_database_failure(&error),
     };
     let referral = signup_referral_outcome(
         &state,
