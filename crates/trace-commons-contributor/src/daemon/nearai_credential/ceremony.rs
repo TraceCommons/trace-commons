@@ -519,6 +519,16 @@ pub(super) async fn complete(
         .map_err(at(FailedStep::Mint))?;
     // From here on, every way out that does not store the key revokes it.
     let unstored = UnstoredKey::new(api, &session, &minted);
+    // The new login's identity, read once and recorded with the key, and
+    // the one recorded for the login it replaces. Best effort: unknown
+    // falls back to the organization listing and to tagging lazily.
+    let identities = match ConfigStore::open(dir.to_path_buf()) {
+        Ok(store) => SignInIdentities {
+            previous: super::spend_org::last_identity(&store),
+            new: super::spend_org::read_identity(&store, api, &session).await,
+        },
+        Err(_) => SignInIdentities::default(),
+    };
     // A device whose Trace Commons account signs in through NEAR AI asks the
     // commons about this login before it replaces the stored one (owner,
     // 2026-11-02).
@@ -539,11 +549,21 @@ pub(super) async fn complete(
         user_agent,
         preferred,
         preferred_listed,
+        identities,
         check,
         progress,
         unstored,
     )
     .await
+}
+
+/// The NEAR AI identities around a sign-in, as
+/// [`super::spend_org::identity_digest`]s: the one recorded for the stored
+/// login, and the new login's.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SignInIdentities {
+    pub(crate) previous: Option<String>,
+    pub(crate) new: Option<String>,
 }
 
 /// A key minted for a sign-in and not yet stored. Dropped while armed --
@@ -650,6 +670,7 @@ pub(crate) async fn settle(
     user_agent: String,
     preferred: Option<String>,
     preferred_listed: bool,
+    identities: SignInIdentities,
     check: crate::daemon::account_session_renewal::FreshLogin,
     progress: &Progress,
     unstored: UnstoredKey,
@@ -690,6 +711,7 @@ pub(crate) async fn settle(
     // authority over.
     let persist_dir = dir.to_path_buf();
     let persist_id = attempt_id.to_string();
+    let minted_key_id = minted.key_id.clone();
     let persist = move || -> Result<()> {
         persist_attempt(
             &persist_dir,
@@ -703,7 +725,14 @@ pub(crate) async fn settle(
         // A sign-in to another account forgets what belonged to the old one,
         // once its key is stored.
         if let Ok(store) = ConfigStore::open(persist_dir) {
-            super::spend_org::forget_other_account(&store, preferred.as_deref(), preferred_listed);
+            super::spend_org::forget_other_account(
+                &store,
+                preferred.as_deref(),
+                preferred_listed,
+                identities.previous.as_deref(),
+                identities.new.as_deref(),
+            );
+            super::spend_org::record_identity(&store, &minted_key_id, identities.new.as_deref());
         }
         Ok(())
     };
