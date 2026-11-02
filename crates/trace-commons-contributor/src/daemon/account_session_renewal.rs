@@ -516,6 +516,12 @@ pub(crate) enum FreshLogin {
     /// The commons accepted the login for the enrolled account; storing it
     /// renews that account's session too ([`commit_fresh_login`]).
     Accepted(Box<AcceptedLogin>),
+    /// Signed out of the account (no record) but still enrolled: the
+    /// commons answered for the enrolled tenant and this device's key, so
+    /// the login is this account's (owner, 2026-11-02: the connected
+    /// credentials name one account). It is stored; the account session the
+    /// answer carried is not, so the person is not signed back in.
+    Verified,
     /// The commons refused the login, or resolved it to another account:
     /// most often a different NEAR AI account from the one this device
     /// joined with. The stored login is kept.
@@ -572,10 +578,12 @@ pub(crate) async fn check_fresh_login_live(
 /// except the revoked-key marker [`sign_in`] and `renew` write too.
 ///
 /// Not bound, and stored as before: not enrolled, another tenant, a
-/// revoked device key, a device that joined by one-time code (it renews by
-/// device key and never took this ceremony), and a signed-out account (no
-/// record: a NEAR AI sign-in for Private AI does not sign the person back
-/// in). Unchecked, and stored but not recorded as the account's login: a
+/// revoked device key, and a device that joined by one-time code (it renews
+/// by device key and never took this ceremony). A signed-out account (no
+/// record) is checked like a signed-in one, against the enrolled tenant and
+/// this device's key, and is [`FreshLogin::Verified`] rather than accepted:
+/// a NEAR AI sign-in for Private AI does not sign the person back in.
+/// Unchecked, and stored but not recorded as the account's login: a
 /// malformed record or an enrolled address the allowlist refuses, where no
 /// retry can run the check and failing closed would block NEAR AI sign-in
 /// for good. Unavailable, and failing closed: anything that may pass -- a
@@ -603,9 +611,17 @@ pub(super) async fn check_fresh_login(
         Ok(None) => return FreshLogin::NotBound,
         Err(_) => return FreshLogin::Unavailable,
     };
-    let account = match super::run_blocking(|| load_account_record(store)) {
-        Ok(Some(account)) => account,
-        Ok(None) => return FreshLogin::NotBound,
+    let (previous, expected, signed_out) = match super::run_blocking(|| load_account_record(store))
+    {
+        Ok(Some(account)) => (Some(account.previous), account.expected, false),
+        // Signed out: no account to compare, so the answer is held to the
+        // enrolled tenant and this device's key alone.
+        Ok(None) => {
+            match super::run_blocking(|| commons_credentials::snapshot(store, Kind::Account)) {
+                Ok(expected) => (None, expected, true),
+                Err(_) => return FreshLogin::Unavailable,
+            }
+        }
         Err(AccountRecordError::Malformed) => {
             return FreshLogin::Unchecked(UNCHECKED_ACCOUNT_RECORD_MALFORMED);
         }
@@ -622,14 +638,16 @@ pub(super) async fn check_fresh_login(
             &commons,
             &cfg,
             &identity,
-            Some(account.previous),
-            account.expected,
+            previous,
+            expected,
             access_token,
         )
         .await
     })
     .await;
     let error = match checked {
+        // The answer's session is dropped unstored when signed out.
+        Ok(Ok(_)) if signed_out => return FreshLogin::Verified,
         Ok(Ok(checked)) => return FreshLogin::Accepted(Box::new(AcceptedLogin { checked })),
         Ok(Err(error)) => error,
         Err(_) => return FreshLogin::Unavailable,

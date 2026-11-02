@@ -1317,19 +1317,46 @@ async fn a_failed_read_of_the_configuration_fails_closed() {
     assert_eq!(fx.ceremonies(), (0, 0));
 }
 
-/// Signed out of the account (no record): a NEAR AI sign-in for Private AI
-/// does not sign the person back in. The commons is not asked, and no
-/// account session is written when the login is stored.
+/// Signed out of the account (no record) but still enrolled: the login
+/// is checked against the enrolled tenant and this device's key, as on a
+/// signed-in device (owner, 2026-11-02: the connected credentials name one
+/// account). The commons's answer is not stored, so a NEAR AI sign-in for
+/// Private AI does not sign the person back in.
 #[tokio::test]
-async fn a_signed_out_account_is_not_signed_back_in_by_a_near_ai_sign_in() {
+async fn a_signed_out_device_checks_the_login_without_signing_back_in() {
     let fx = Fixture::new(Session::Absent).await;
     assert!(fx.account_record().is_none());
     assert!(matches!(
         check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
-        FreshLogin::NotBound
+        FreshLogin::Verified
     ));
-    assert_eq!(fx.ceremonies(), (0, 0));
-    assert!(fx.account_record().is_none());
+    assert_eq!(fx.ceremonies(), (1, 1), "the commons is asked");
+    assert_eq!(fx.refreshes(), 0, "with the fresh login only");
+    assert!(fx.account_record().is_none(), "no session is written");
+    assert!(fx.renewal_log().is_empty(), "nothing is renewed");
+}
+
+/// Signed out, and the login is another account's: refused, as on a
+/// signed-in device -- whether the commons refuses it or answers for
+/// another tenant.
+#[tokio::test]
+async fn a_signed_out_device_refuses_another_accounts_login() {
+    for other_tenant in [false, true] {
+        let fx = Fixture::new(Session::Absent).await;
+        if other_tenant {
+            *fx.stub.state.tenant.lock().unwrap() = format!("nearai-{}", "cd".repeat(32));
+        } else {
+            *fx.stub.state.refuse.lock().unwrap() = true;
+        }
+        assert!(
+            matches!(
+                check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+                FreshLogin::Refused
+            ),
+            "other tenant: {other_tenant}"
+        );
+        assert!(fx.account_record().is_none());
+    }
 }
 
 /// A revoked device key is remembered, as `sign_in` and the renewal
@@ -1601,6 +1628,33 @@ mod settle_tests {
             crate::daemon::nearai_credential::ceremony::failure_fields(&error, "github").unwrap();
         assert_eq!(fields[1].1, "near_ai_credential_commons_unavailable");
         assert_eq!((stored(&fx), fx.account_record(), fx.config()), before);
+    }
+
+    /// Signed out and verified: the login is stored, and no account
+    /// session is written.
+    #[tokio::test]
+    async fn a_verified_login_on_a_signed_out_device_is_stored_without_a_session() {
+        let fx = Fixture::new(Session::Absent).await;
+        run(&fx, FreshLogin::Verified).await.unwrap();
+        assert_eq!(
+            stored(&fx),
+            (Some("key-fresh".into()), Some("rt-synthetic-fresh".into()))
+        );
+        assert!(fx.account_record().is_none());
+    }
+
+    /// Signed out and refused: nothing stored changes, and the minted key is
+    /// revoked.
+    #[tokio::test]
+    async fn a_refused_login_on_a_signed_out_device_stores_nothing() {
+        let fx = Fixture::new(Session::Absent).await;
+        *fx.stub.state.refuse.lock().unwrap() = true;
+        let before = (stored(&fx), fx.account_record(), fx.config());
+        let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
+        let error = run(&fx, check).await.unwrap_err();
+        assert_eq!(error.root_cause().to_string(), different_account_label());
+        assert_eq!((stored(&fx), fx.account_record(), fx.config()), before);
+        assert_eq!(revokes(&fx), 1);
     }
 
     /// Not bound (a first run): stored as it always was.

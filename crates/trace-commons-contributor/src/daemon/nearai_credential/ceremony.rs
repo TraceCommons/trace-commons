@@ -635,6 +635,8 @@ const COMMONS_UNAVAILABLE: &str = "near_ai_credential_commons_unavailable";
 /// What a minted login becomes, given what the commons made of it.
 ///
 /// Not bound (a first run, another tenant): stored as it always was.
+/// Verified (signed out, the commons answered for this account): stored,
+/// with no account session.
 /// Unchecked: stored, but never recorded as the account's login.
 /// Accepted: stored, then the account session it earned is stored too;
 /// the only branch that records a login as the one the commons accepted.
@@ -660,7 +662,8 @@ pub(crate) async fn settle(
     // another account's.
     let refused = |label: &'static str| at(FailedStep::Commons)(anyhow!(label));
     let accepted = match check {
-        FreshLogin::NotBound => None,
+        // Verified on a signed-out device: stored, with no account session.
+        FreshLogin::NotBound | FreshLogin::Verified => None,
         // Stored, never recorded as the account's login (no commit, no
         // record of an accepted login); one label line for now.
         FreshLogin::Unchecked(reason) => {
