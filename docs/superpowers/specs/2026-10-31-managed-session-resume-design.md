@@ -221,11 +221,13 @@ app; changing collection staging rules.
   A row whose collection plan names a process is not stuck (the plan path
   watches that process). Dismissing a stuck collecting row fails its
   collection, unless its launcher still reports a result.
-  Dismissing a stuck row also asks for a stop: if the daemon restarted
+  Dismissing a stuck row the app opened also asks for a stop: if the daemon restarted
   between the tool's spawn and its first report, the launcher's next
   heartbeat is answered with `stop: true` (which every launcher since
   `stop` obeys; an older one ignores it, as it ignored the refusal)
-  rather than refused, and the row stays ended and dismissed.
+  rather than refused, and the row stays ended and dismissed. A row
+  started from the command line is never stopped by the app (owner,
+  2026-11-02, as with Stop): its heartbeat is refused as before.
 - A launcher checks in (a `starting` report, no process) right before it
   spawns its tool, after its setup. The daemon takes the row back as
   starting with a fresh lease, so a launcher whose setup outlasted the

@@ -565,13 +565,15 @@ impl SessionRegistry {
     }
 
     /// Whether the launcher of `id` is to stop its tool now.
-    /// Also a row the person dismissed while it looked stuck, whose
-    /// launcher turns out to be running its tool ([`Self::dismiss`]).
+    /// Also a row the app opened that the person dismissed while it looked
+    /// stuck, whose launcher turns out to be running its tool
+    /// ([`Self::dismiss`]). Like Stop, never a row started from the command
+    /// line (owner, 2026-11-02).
     pub fn stop_requested(&self, id: Uuid) -> bool {
         self.data.entries.iter().any(|e| {
             e.view.id == id
                 && e.stop_requested
-                && (e.owned_running() || (e.dismissed && e.ended_by_daemon))
+                && (e.owned_running() || (e.launched && e.dismissed && e.ended_by_daemon))
         })
     }
 
@@ -1143,7 +1145,8 @@ impl SessionRegistry {
             // A row the person dismissed while it looked stuck, whose tool
             // runs after all: its heartbeat is answered, with a stop
             // ([`Self::stop_requested`]); the row stays ended.
-            if entry.dismissed
+            if entry.launched
+                && entry.dismissed
                 && entry.stop_requested
                 && entry.ended_by_daemon
                 && report.state == SessionState::Running
@@ -1448,10 +1451,12 @@ impl SessionRegistry {
             if stuck.contains(&entry.view.id) {
                 // No plan (it is stuck), so nothing will collect it. Its
                 // launcher may yet be running the tool, if the daemon
-                // restarted between its spawn and its first report: its
-                // next heartbeat is told to stop ([`Self::stop_requested`]).
+                // restarted between its spawn and its first report: if the
+                // app opened it, its next heartbeat is told to stop
+                // ([`Self::stop_requested`]); a command-line launch is never
+                // stopped by the app (owner, 2026-11-02).
                 entry.end_by_daemon(true);
-                entry.stop_requested = true;
+                entry.stop_requested = entry.launched;
             }
             entry.dismissed = true;
         }
@@ -3030,12 +3035,14 @@ mod tests {
 
     /// A row can look stuck while its tool runs: the launcher checked in
     /// and spawned, and the daemon restarted before it took a `running`
-    /// report. Dismissing it asks for a stop too, so the launcher's next
-    /// heartbeat is answered with a stop (which every launcher since `stop`
-    /// obeys) rather than refused and ignored; the row stays ended and
-    /// dismissed,
-    /// and its final report is still taken. A check-in from a dismissed
-    /// row is still refused, so a launcher still in its setup never spawns.
+    /// report. Dismissing a row the app opened asks for a stop too, so its
+    /// launcher's next heartbeat is answered with a stop (which every
+    /// launcher since `stop` obeys) rather than refused and ignored; the
+    /// row stays ended and dismissed, and its final report is still taken.
+    /// A row started from the command line is never stopped by the app
+    /// (owner, 2026-11-02, as with Stop): its heartbeat is refused as
+    /// before and its tool keeps running. A check-in from a dismissed row
+    /// is refused either way, so a launcher still in its setup never spawns.
     #[test]
     fn a_dismissed_row_whose_tool_runs_is_told_to_stop() {
         let home = tempfile::tempdir().unwrap();
@@ -3052,6 +3059,7 @@ mod tests {
         let context = registry
             .redeem(id, prepared.ticket.as_deref().unwrap())
             .unwrap();
+        registry.opened_in_terminal(id, None).unwrap();
         let report = |state, exit_code| LifecycleReport {
             model: None,
             collection: None,
@@ -3093,6 +3101,43 @@ mod tests {
             Some(SessionState::Exited)
         );
         assert!(!registry.stop_requested(id));
+    }
+
+    #[test]
+    fn a_dismissed_command_line_row_is_not_stopped_by_the_app() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        let id = prepared.session_id;
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        registry.dismiss(id).unwrap();
+        assert_eq!(
+            registry.report(LifecycleReport {
+                model: None,
+                collection: None,
+                session_id: id,
+                proof: context.proof.clone(),
+                state: SessionState::Running,
+                process_id: Some(42),
+                process_identity: Some("42:1".into()),
+                exit_code: None,
+            }),
+            Err(ManagedError::Conflict),
+            "refused, as before"
+        );
+        assert!(!registry.stop_requested(id), "never told to stop");
     }
 
     /// A restart fails a pending collection on an ended row with no plan,
