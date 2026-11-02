@@ -841,8 +841,6 @@ fn status_line(command: &mut std::process::Command, tool: super::ToolId, home: &
     }
 }
 
-/// Whether the daemon's answer to a running report asks for a stop. Only
-/// an explicit `true` does; anything else leaves the tool running.
 /// Whether the daemon refused this launcher's check-in before spawn: the
 /// row was ended (the person dismissed it) or is not this launcher's. Any
 /// other answer spawns, as before the check-in existed: an older daemon
@@ -852,6 +850,8 @@ fn check_in_refused(answer: &anyhow::Result<Value>) -> bool {
     matches!(answer, Err(error) if error.to_string() == "managed-conflict")
 }
 
+/// Whether the daemon's answer to a running report asks for a stop. Only
+/// an explicit `true` does; anything else leaves the tool running.
 fn stop_asked(answer: &anyhow::Result<Value>) -> bool {
     matches!(answer, Ok(value) if value.get("stop") == Some(&Value::Bool(true)))
 }

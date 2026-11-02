@@ -546,11 +546,14 @@ impl SessionRegistry {
     }
 
     /// Whether the launcher of `id` is to stop its tool now.
+    /// Also a row the person dismissed while it looked stuck, whose
+    /// launcher turns out to be running its tool ([`Self::dismiss`]).
     pub fn stop_requested(&self, id: Uuid) -> bool {
-        self.data
-            .entries
-            .iter()
-            .any(|e| e.view.id == id && e.stop_requested && e.owned_running())
+        self.data.entries.iter().any(|e| {
+            e.view.id == id
+                && e.stop_requested
+                && (e.owned_running() || (e.dismissed && e.ended_by_daemon))
+        })
     }
 
     /// The launch request that started an ended coding session, under a
@@ -695,7 +698,7 @@ impl SessionRegistry {
         e.view.state == SessionState::Unknown
             && e.proof_hash.is_some()
             && e.watched_process().is_none()
-            && super::collection_plan::read(&self.store, e.view.id).is_none()
+            && !super::collection_plan::exists(&self.store, e.view.id)
     }
 
     /// Fail unredeemed launches whose ticket expired, and lapse redeemed
@@ -1117,6 +1120,16 @@ impl SessionRegistry {
             return Err(ManagedError::Conflict);
         }
         if !entry.view.state.holds_profile() {
+            // A row the person dismissed while it looked stuck, whose tool
+            // runs after all: its heartbeat is answered, with a stop
+            // ([`Self::stop_requested`]); the row stays ended.
+            if entry.dismissed
+                && entry.stop_requested
+                && entry.ended_by_daemon
+                && report.state == SessionState::Running
+            {
+                return Ok(());
+            }
             // The daemon ended a sign-in session (sign-out, lapsed lease)
             // before its launcher said how it ended. The launcher's final
             // word is accepted and changes nothing, so its persisted exit
@@ -1394,32 +1407,26 @@ impl SessionRegistry {
             .find(|e| e.view.id == id)
             .ok_or(ManagedError::NotFound)?
             .root();
-        if self
-            .data
-            .entries
-            .iter()
-            .any(|e| e.root() == root && self.holds(e, true))
-        {
-            return Err(ManagedError::Conflict);
+        // The conversation's rows that hold it, each checked once: any that
+        // is not stuck refuses the dismissal.
+        let mut stuck = Vec::new();
+        for e in self.data.entries.iter().filter(|e| e.root() == root) {
+            if e.view.state.holds_profile() {
+                if !self.stuck(e) {
+                    return Err(ManagedError::Conflict);
+                }
+                stuck.push(e.view.id);
+            }
         }
-        // A stuck collecting row with no plan will never be collected; with
-        // one, the plan settles it.
-        let stuck: Vec<(Uuid, bool)> = self
-            .data
-            .entries
-            .iter()
-            .filter(|e| e.root() == root && self.stuck(e))
-            .map(|e| {
-                (
-                    e.view.id,
-                    !super::collection_plan::exists(&self.store, e.view.id),
-                )
-            })
-            .collect();
         let mut next = self.data.clone();
         for entry in next.entries.iter_mut().filter(|e| e.root() == root) {
-            if let Some((_, unplanned)) = stuck.iter().find(|(id, _)| *id == entry.view.id) {
-                entry.end_by_daemon(*unplanned);
+            if stuck.contains(&entry.view.id) {
+                // No plan (it is stuck), so nothing will collect it. Its
+                // launcher may yet be running the tool, if the daemon
+                // restarted between its spawn and its first report: its
+                // next heartbeat is told to stop ([`Self::stop_requested`]).
+                entry.end_by_daemon(true);
+                entry.stop_requested = true;
             }
             entry.dismissed = true;
         }
@@ -2990,6 +2997,72 @@ mod tests {
             }),
             Err(ManagedError::InvalidRequest)
         );
+    }
+
+    /// A row can look stuck while its tool runs: the launcher checked in
+    /// and spawned, and the daemon restarted before it took a `running`
+    /// report. Dismissing it asks for a stop too, so the launcher's next
+    /// heartbeat is answered with a stop (which every launcher obeys)
+    /// rather than refused and ignored; the row stays ended and dismissed,
+    /// and its final report is still taken. A check-in from a dismissed
+    /// row is still refused, so a launcher still in its setup never spawns.
+    #[test]
+    fn a_dismissed_row_whose_tool_runs_is_told_to_stop() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        let id = prepared.session_id;
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let report = |state, exit_code| LifecycleReport {
+            model: None,
+            collection: None,
+            session_id: id,
+            proof: context.proof.clone(),
+            state,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code,
+        };
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        registry.dismiss(id).unwrap();
+
+        assert_eq!(registry.report(report(SessionState::Running, None)), Ok(()));
+        assert!(registry.stop_requested(id), "told to stop");
+        assert_eq!(
+            registry.describe(id).map(|(_, s)| s),
+            Some(SessionState::Failed),
+            "still ended"
+        );
+        assert!(registry.views().unwrap().is_empty(), "still dismissed");
+        assert_eq!(
+            registry.report(LifecycleReport {
+                state: SessionState::Starting,
+                process_id: None,
+                process_identity: None,
+                ..report(SessionState::Starting, None)
+            }),
+            Err(ManagedError::Conflict),
+            "a check-in is refused"
+        );
+        registry
+            .report(report(SessionState::Exited, Some(143)))
+            .unwrap();
+        assert_eq!(
+            registry.describe(id).map(|(_, s)| s),
+            Some(SessionState::Exited)
+        );
+        assert!(!registry.stop_requested(id));
     }
 
     /// The list and the one-session-per-conversation lock group rows by the

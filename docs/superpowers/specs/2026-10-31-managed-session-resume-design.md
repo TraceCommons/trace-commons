@@ -219,6 +219,10 @@ app; changing collection staging rules.
   A row whose collection plan names a process is not stuck (the plan path
   watches that process). Dismissing a stuck collecting row fails its
   collection, unless its launcher still reports a result.
+  Dismissing a stuck row also asks for a stop: if the daemon restarted
+  between the tool's spawn and its first report, the launcher's next
+  heartbeat is answered with `stop: true` (which every launcher obeys)
+  rather than refused, and the row stays ended and dismissed.
 - A launcher checks in (a `starting` report, no process) right before it
   spawns its tool, after its setup. The daemon takes the row back as
   starting with a fresh lease, so a launcher whose setup outlasted the
