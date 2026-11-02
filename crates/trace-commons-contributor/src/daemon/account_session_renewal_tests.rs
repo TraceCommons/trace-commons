@@ -1467,11 +1467,60 @@ mod settle_tests {
             "Mozilla/5.0 Test".into(),
             None,
             false,
+            crate::daemon::nearai_credential::ceremony::SignInIdentities::default(),
             check,
             &crate::daemon::nearai_credential::ceremony::Progress::new(),
             unstored,
         )
         .await
+    }
+
+    /// A stored sign-in records the new login's identity against the key it
+    /// minted, and a choice made under another identity is forgotten even
+    /// when the organization listing could not tell.
+    #[tokio::test]
+    async fn a_stored_sign_in_records_its_identity_and_compares_identities() {
+        use crate::daemon::nearai_credential::spend_org;
+        let fx = Fixture::with_tenant(Session::Expired, "tenant-a").await;
+        fx.shared
+            .store
+            .write_daemon_file(
+                spend_org::SPEND_ORG_FILE,
+                br#"{"chosen_organization_id":"org-old"}"#,
+            )
+            .unwrap();
+        mark_waiting_for_test(fx.shared.store.dir(), "attempt-fresh");
+        let unstored = crate::daemon::nearai_credential::ceremony::UnstoredKey::new(
+            &fx.api,
+            &fresh_session(),
+            &minted(),
+        );
+        settle(
+            fx.shared.store.dir(),
+            "attempt-fresh",
+            minted(),
+            fresh_session(),
+            None,
+            "Mozilla/5.0 Test".into(),
+            Some("org-old".into()),
+            // The listing says the old organization is there...
+            true,
+            // ...but the identities differ.
+            crate::daemon::nearai_credential::ceremony::SignInIdentities {
+                previous: Some("sha256:previous".into()),
+                new: Some("sha256:new".into()),
+            },
+            FreshLogin::NotBound,
+            &crate::daemon::nearai_credential::ceremony::Progress::new(),
+            unstored,
+        )
+        .await
+        .unwrap();
+        let record = spend_org::load(&fx.shared.store).unwrap();
+        assert_eq!(record.chosen_organization_id, None);
+        let identity = record.session_identity.unwrap();
+        assert_eq!(identity.key_id, "key-fresh");
+        assert_eq!(identity.digest, "sha256:new");
     }
 
     /// Accepted: the new key and login are stored, and so is the account
@@ -1547,6 +1596,7 @@ mod settle_tests {
             "Mozilla/5.0 Test".into(),
             None,
             false,
+            crate::daemon::nearai_credential::ceremony::SignInIdentities::default(),
             check,
             &crate::daemon::nearai_credential::ceremony::Progress::new(),
             unstored,
