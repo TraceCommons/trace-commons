@@ -519,27 +519,26 @@ pub(super) async fn complete(
         .map_err(at(FailedStep::Mint))?;
     // From here on, every way out that does not store the key revokes it.
     let unstored = UnstoredKey::new(api, &session, &minted);
-    // The new login's identity, read once and recorded with the key, and
-    // the one recorded for the login it replaces. Best effort: unknown
-    // falls back to the organization listing and to tagging lazily.
-    let identities = match ConfigStore::open(dir.to_path_buf()) {
-        Ok(store) => SignInIdentities {
-            previous: super::spend_org::last_identity(&store),
-            new: super::spend_org::read_identity(&store, api, &session).await,
-        },
-        Err(_) => SignInIdentities::default(),
-    };
     // A device whose Trace Commons account signs in through NEAR AI asks the
     // commons about this login before it replaces the stored one (owner,
-    // 2026-11-02).
+    // 2026-11-02). Beside it, and in the same step, the new login's identity
+    // is read once (one `GET /v1/users/me`) to be recorded with the key.
+    // Best effort: unknown falls back to the organization listing and to
+    // tagging lazily, and never fails the sign-in.
     progress.set(FailedStep::Commons);
     let store = ConfigStore::open(dir.to_path_buf()).map_err(at(FailedStep::Commons))?;
-    let check = crate::daemon::account_session_renewal::check_fresh_login_live(
-        &store,
-        api,
-        &session.access_token,
-    )
-    .await;
+    let (check, new_identity) = tokio::join!(
+        crate::daemon::account_session_renewal::check_fresh_login_live(
+            &store,
+            api,
+            &session.access_token,
+        ),
+        super::spend_org::read_identity(&store, api, &session),
+    );
+    let identities = SignInIdentities {
+        previous: super::spend_org::last_identity(&store),
+        new: new_identity,
+    };
     settle(
         dir,
         attempt_id,
@@ -732,7 +731,11 @@ pub(crate) async fn settle(
                 identities.previous.as_deref(),
                 identities.new.as_deref(),
             );
-            super::spend_org::record_identity(&store, &minted_key_id, identities.new.as_deref());
+            // An unread identity leaves the recorded one alone: it names the
+            // replaced key, so it can never be taken for this login's.
+            if let Some(new) = identities.new.as_deref() {
+                super::spend_org::record_identity(&store, &minted_key_id, new);
+            }
         }
         Ok(())
     };
