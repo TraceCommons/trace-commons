@@ -80,8 +80,50 @@ public sealed partial class SettingsView : UserControl
     /// </summary>
     public event EventHandler? SetUpAgainRequested;
 
+    private bool _setUpAgainDialogOpen;
+
+    /// <summary>
+    /// "Set up again" asks first, in the Rust's words. Only the primary
+    /// button unenrolls; Cancel, Escape, Enter and a dialog that never
+    /// appeared change nothing.
+    /// </summary>
     private async void OnSetUpAgain(object sender, RoutedEventArgs e)
     {
+        if (_setUpAgainDialogOpen || !Settings.HasAccountAttention)
+        {
+            return;
+        }
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = Settings.AccountAttentionConfirmTitle,
+            Content = new TextBlock
+            {
+                Text = Settings.AccountAttentionConfirmBody,
+                TextWrapping = TextWrapping.Wrap,
+            },
+            PrimaryButtonText = Settings.AccountAttentionConfirmAction,
+            CloseButtonText = Settings.AccountAttentionConfirmCancel,
+
+            // Keeping the enrollment is what Enter and Escape both do: this
+            // signs out of NEAR AI and drops the enrollment.
+            DefaultButton = ContentDialogButton.Close,
+        };
+
+        _setUpAgainDialogOpen = true;
+        try
+        {
+            if (await DialogGuard.ShowOnceAsync(dialog) != ContentDialogResult.Primary)
+            {
+                return;
+            }
+        }
+        finally
+        {
+            _setUpAgainDialogOpen = false;
+        }
+
         if (await Settings.SetUpAgainAsync())
         {
             SetUpAgainRequested?.Invoke(this, EventArgs.Empty);

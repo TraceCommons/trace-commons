@@ -74,6 +74,10 @@ pub struct SettingsView {
     /// status block and its "Set up again" button, empty otherwise. A
     /// status in this section, never a banner or notification.
     account_attention: gtk::Box,
+    /// What "Set up again" is doing. Kept here, not on the button: the block
+    /// is rebuilt on every daemon event, and a fresh button must not start a
+    /// second unenroll while one is running.
+    set_up_again: std::cell::Cell<SetUpAgain>,
     /// The three check rows of §5.4's Connection section. Filled from
     /// `get_settings`, never from a guess.
     connection_checks: gtk::Box,
@@ -691,6 +695,7 @@ impl SettingsView {
             connection,
             connection_chip,
             account_attention,
+            set_up_again: std::cell::Cell::new(SetUpAgain::Idle),
             connection_checks,
             pause_button,
             projects,
@@ -1045,10 +1050,48 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
     render_routing_status(app, status);
 }
 
+/// What the account status's "Set up again" is doing (#1836 F1), across
+/// the block's rebuilds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SetUpAgain {
+    #[default]
+    Idle,
+    /// `unenroll` is in flight: the button is insensitive and a second
+    /// confirmation runs nothing.
+    Running,
+    /// The daemon refused: the core's `failed` line shows until the next try.
+    Failed,
+}
+
+impl SetUpAgain {
+    /// Start a run; `false` while one is already running.
+    pub(crate) fn begin(&mut self) -> bool {
+        if *self == Self::Running {
+            return false;
+        }
+        *self = Self::Running;
+        true
+    }
+
+    /// The daemon answered.
+    pub(crate) fn finish(&mut self, unenrolled: bool) {
+        *self = if unenrolled { Self::Idle } else { Self::Failed };
+    }
+
+    pub(crate) fn button_sensitive(self) -> bool {
+        self != Self::Running
+    }
+
+    pub(crate) fn shows_failure(self) -> bool {
+        self == Self::Failed
+    }
+}
+
 /// The account's status while it needs to be set up again (#1836 F1), in
-/// the core's words. "Set up again" unenrolls this device, then opens the
-/// first run, which starts with a NEAR AI sign-in. The daemon never
-/// unenrolls on its own; only this button asks it to.
+/// the core's words. "Set up again" asks first (`confirm_*`); only the
+/// confirmation unenrolls this device, then opens the first run, which
+/// starts with a NEAR AI sign-in. The daemon never unenrolls on its own;
+/// only this button asks it to.
 fn render_account_attention(app: &Rc<App>, status: &Status) {
     let view = &app.settings.account_attention;
     while let Some(child) = view.first_child() {
@@ -1068,22 +1111,66 @@ fn render_account_attention(app: &Rc<App>, status: &Status) {
     if let Some(private_ai) = copy.private_ai {
         style::append_body(view, private_ai);
     }
+    let state = app.settings.set_up_again.get();
     let set_up_again = gtk::Button::with_label(copy.action);
     set_up_again.set_halign(gtk::Align::Start);
+    set_up_again.set_sensitive(state.button_sensitive());
     let a = Rc::clone(app);
-    set_up_again.connect_clicked(move |button| {
-        button.set_sensitive(false);
-        let button = button.clone();
-        a.call("unenroll", serde_json::json!({}), move |app, result| {
-            button.set_sensitive(true);
-            if result.is_ok() {
-                super::onboarding::present_after_unenroll(app);
-            }
-            app.refresh();
-        });
-    });
+    set_up_again.connect_clicked(move |button| confirm_set_up_again(&a, button, copy));
     view.append(&set_up_again);
+    if state.shows_failure() {
+        style::append_body(view, copy.failed);
+    }
     view.set_visible(true);
+}
+
+/// The confirmation before "Set up again" runs, in the core's words.
+fn confirm_set_up_again(
+    app: &Rc<App>,
+    button: &gtk::Button,
+    copy: trace_commons_contributor::consent_copy::AccountAttentionCopy,
+) {
+    let dialog = adw::MessageDialog::new(
+        Some(&app.window),
+        Some(copy.confirm_title),
+        Some(copy.confirm_body),
+    );
+    dialog.add_responses(&[
+        ("cancel", copy.confirm_cancel),
+        ("confirm", copy.confirm_action),
+    ]);
+    dialog.set_close_response("cancel");
+    let a = Rc::clone(app);
+    let button = button.clone();
+    dialog.connect_response(None, move |dialog, response| {
+        dialog.close();
+        if response == "confirm" {
+            set_up_again(&a, &button);
+        }
+    });
+    dialog.present();
+}
+
+/// Unenroll, then open the first run. One run at a time, whatever buttons
+/// the block's rebuilds made meanwhile.
+fn set_up_again(app: &Rc<App>, button: &gtk::Button) {
+    let mut state = app.settings.set_up_again.get();
+    if !state.begin() {
+        return;
+    }
+    app.settings.set_up_again.set(state);
+    button.set_sensitive(false);
+    app.call("unenroll", serde_json::json!({}), move |app, result| {
+        let mut state = app.settings.set_up_again.get();
+        state.finish(result.is_ok());
+        app.settings.set_up_again.set(state);
+        if result.is_ok() {
+            super::onboarding::present_after_unenroll(app);
+        }
+        // Re-renders the block: the button sensitive again, and the
+        // failure line on a refusal.
+        app.refresh();
+    });
 }
 
 /// The two session-source rows: the sentence, and whether the tone is the
@@ -3590,6 +3677,38 @@ fn wire_witness(app: &Rc<App>) {
         }
         render_witness(&a);
     });
+}
+
+#[cfg(test)]
+mod set_up_again_tests {
+    use super::SetUpAgain;
+
+    /// One run at a time: a second confirmation while `unenroll` is in
+    /// flight runs nothing, and the rebuilt button stays insensitive.
+    #[test]
+    fn a_second_press_while_running_runs_nothing() {
+        let mut state = SetUpAgain::default();
+        assert!(state.button_sensitive());
+        assert!(state.begin());
+        assert!(!state.button_sensitive());
+        assert!(!state.begin(), "a second run while one is in flight");
+        state.finish(true);
+        assert_eq!(state, SetUpAgain::Idle);
+        assert!(state.button_sensitive());
+        assert!(!state.shows_failure());
+    }
+
+    /// A refusal shows the core's failure line until the next attempt.
+    #[test]
+    fn a_refusal_shows_the_failure_until_the_next_try() {
+        let mut state = SetUpAgain::default();
+        assert!(state.begin());
+        state.finish(false);
+        assert!(state.shows_failure());
+        assert!(state.button_sensitive());
+        assert!(state.begin());
+        assert!(!state.shows_failure());
+    }
 }
 
 #[cfg(test)]

@@ -368,6 +368,11 @@ final class AppModel: ObservableObject {
     var accountAttentionWording: (String) -> String? = TCConsentCopy.accountAttentionJSON(forStatus:)
     /// "Set up again" is running.
     @Published private(set) var settingUpAgain = false
+    /// The daemon refused the last "Set up again"; cleared by the next one.
+    @Published private(set) var setUpAgainFailed = false
+    /// Replaces the unenroll "Set up again" runs, for tests only; nil runs
+    /// the daemon's.
+    var setUpAgainUnenroll: (() async -> Bool)?
     /// Words `status.legacy_invite_migration.notice`. The ABI in the app;
     /// replaced only by tests.
     var legacyMigrationWording: (String) -> String? = TCConsentCopy.legacyMigrationNoticeJSON(
@@ -4641,16 +4646,24 @@ extension AppModel: FirstRunDaemon {
         return true
     }
 
-    /// "Set up again" (#1836 F1): the daemon drops this Mac's enrollment,
-    /// then the first run opens, which starts with a NEAR AI sign-in. The
-    /// daemon never does this on its own; only the button asks.
-    func setUpAgain() async {
-        guard !settingUpAgain else { return }
+    /// "Set up again" (#1836 F1), once confirmed: the daemon drops this Mac's
+    /// enrollment. True when it did; the caller then opens the first run
+    /// window itself, which does not depend on the status read after the
+    /// unenroll answering. A second call while one runs does nothing. The
+    /// daemon never does this on its own; only the confirmed button asks.
+    func setUpAgain() async -> Bool {
+        guard !settingUpAgain else { return false }
         settingUpAgain = true
+        setUpAgainFailed = false
         defer { settingUpAgain = false }
-        if await unenroll() {
-            OpenMonitor.request()
+        let done: Bool
+        if let replaced = setUpAgainUnenroll {
+            done = await replaced()
+        } else {
+            done = await unenroll()
         }
+        setUpAgainFailed = !done
+        return done
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.

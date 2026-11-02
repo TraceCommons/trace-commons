@@ -30,7 +30,7 @@ final class AccountAttentionModelTests: XCTestCase {
 
     func testTheKeysDecode() throws {
         let wire = try status(unreadable).accountAttention
-        XCTAssertTrue(wire.needsAttention)
+        XCTAssertEqual(wire.state, "needs_attention")
         XCTAssertEqual(wire.reason, "account_record_unreadable")
         XCTAssertTrue(wire.nearAILoginUnconfirmed)
     }
@@ -43,7 +43,7 @@ final class AccountAttentionModelTests: XCTestCase {
         model.accountAttentionWording = { wire in
             calls += 1
             guard wire.contains("needs_attention") else { return nil }
-            return #"{"title":"T","body":"B","private_ai":"P","action":"A"}"#
+            return #"{"title":"T","body":"B","private_ai":"P","action":"A","confirm_title":"CT","confirm_body":"CB","confirm_action":"CA","confirm_cancel":"CC","failed":"F"}"#
         }
         model.setStatusForTesting(try status(unreadable))
         XCTAssertEqual(model.accountAttention?.title, "T")
@@ -72,6 +72,42 @@ final class AccountAttentionModelTests: XCTestCase {
         let refused = try XCTUnwrap(model.accountAttention)
         XCTAssertEqual(AccountAttentionBlock.lines(refused), [try XCTUnwrap(refused.body)])
         XCTAssertNotEqual(refused.body, attention.body)
+    }
+
+    /// The refusal line shows only while the last attempt failed.
+    @MainActor
+    func testTheFailureLineFollowsTheLastAttempt() throws {
+        let model = AppModel()
+        model.setStatusForTesting(try status(unreadable))
+        let attention = try XCTUnwrap(model.accountAttention)
+        XCTAssertFalse(AccountAttentionBlock.lines(attention).contains(attention.failed))
+        XCTAssertEqual(AccountAttentionBlock.lines(attention, failed: true).last, attention.failed)
+    }
+
+    /// A refused unenroll is said, and the next attempt clears it; a second
+    /// press while one runs does nothing.
+    @MainActor
+    func testSetUpAgainReportsARefusalAndRunsOnce() async throws {
+        let model = AppModel()
+        var runs = 0
+        var answer = false
+        model.setUpAgainUnenroll = {
+            runs += 1
+            await Task.yield()
+            return answer
+        }
+        let first = await model.setUpAgain()
+        XCTAssertFalse(first)
+        XCTAssertTrue(model.setUpAgainFailed)
+        XCTAssertFalse(model.settingUpAgain)
+
+        answer = true
+        async let a = model.setUpAgain()
+        async let b = model.setUpAgain()
+        let results = await [a, b]
+        XCTAssertEqual(results.filter { $0 }.count, 1, "one run, one first-run window")
+        XCTAssertEqual(runs, 2)
+        XCTAssertFalse(model.setUpAgainFailed)
     }
 
     @MainActor

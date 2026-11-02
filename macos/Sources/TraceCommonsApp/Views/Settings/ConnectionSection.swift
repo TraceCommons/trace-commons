@@ -164,15 +164,22 @@ struct ContributionAccountCard: View {
 
 /// This app's account needs attention (#1836 F1): its record cannot be read,
 /// or the address it was set up with is refused. Every word is the Rust's
-/// (`AppModel.accountAttention`). The button unenrolls, then the first run
-/// opens. Nothing here marks the NEAR AI login as the account's.
+/// (`AppModel.accountAttention`). The button asks first; only the
+/// confirmation's own button unenrolls, then the first run window opens.
 struct AccountAttentionCard: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         if let attention = model.accountAttention {
-            AccountAttentionBlock(attention: attention, busy: model.settingUpAgain) {
-                Task { await model.setUpAgain() }
+            AccountAttentionBlock(
+                attention: attention, busy: model.settingUpAgain, failed: model.setUpAgainFailed
+            ) {
+                Task {
+                    if await model.setUpAgain() {
+                        openWindow(id: WindowID.firstRun)
+                    }
+                }
             }
         }
     }
@@ -182,26 +189,36 @@ struct AccountAttentionCard: View {
 struct AccountAttentionBlock: View {
     let attention: AccountAttention
     let busy: Bool
+    let failed: Bool
+    /// Runs only from the confirmation's own button.
     let setUpAgain: () -> Void
+    @State private var confirming = false
 
-    /// The lines under the title, in order: the reason, then Private AI.
-    static func lines(_ attention: AccountAttention) -> [String] {
-        [attention.body, attention.privateAI].compactMap { $0 }
+    /// The lines under the title, in order: the reason, then Private AI,
+    /// then the refusal while the last attempt failed.
+    static func lines(_ attention: AccountAttention, failed: Bool = false) -> [String] {
+        [attention.body, attention.privateAI, failed ? attention.failed : nil].compactMap { $0 }
     }
 
     var body: some View {
         GlassEyebrowCard(attention.title, title: attention.title) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                ForEach(Self.lines(attention), id: \.self) { line in
+                ForEach(Self.lines(attention, failed: failed), id: \.self) { line in
                     Text(line)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Button(attention.action, action: setUpAgain)
+                Button(attention.action) { confirming = true }
                     .buttonStyle(GlassButtonStyle(.glass))
                     .disabled(busy)
             }
+        }
+        .alert(attention.confirmTitle, isPresented: $confirming) {
+            Button(attention.confirmAction, role: .destructive, action: setUpAgain)
+            Button(attention.confirmCancel, role: .cancel) {}
+        } message: {
+            Text(attention.confirmBody)
         }
     }
 }

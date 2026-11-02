@@ -956,6 +956,11 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             }
 
             _accountAttention = value;
+            if (value is null)
+            {
+                AccountAttentionFailedLine = string.Empty;
+            }
+
             Raise(nameof(AccountAttention));
             Raise(nameof(HasAccountAttention));
             Raise(nameof(AccountAttentionTitle));
@@ -981,6 +986,45 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public string AccountAttentionAction => AccountAttention?.Action ?? string.Empty;
 
+    public string AccountAttentionConfirmTitle => AccountAttention?.ConfirmTitle ?? string.Empty;
+
+    public string AccountAttentionConfirmBody => AccountAttention?.ConfirmBody ?? string.Empty;
+
+    public string AccountAttentionConfirmAction => AccountAttention?.ConfirmAction ?? string.Empty;
+
+    public string AccountAttentionConfirmCancel => AccountAttention?.ConfirmCancel ?? string.Empty;
+
+    private string _accountAttentionFailedLine = string.Empty;
+
+    /// <summary>
+    /// The block's failure line (the Rust's <c>failed</c>), shown after the
+    /// daemon refused to set up again; empty otherwise.
+    /// </summary>
+    public string AccountAttentionFailedLine
+    {
+        get => _accountAttentionFailedLine;
+        private set
+        {
+            if (_accountAttentionFailedLine == value)
+            {
+                return;
+            }
+
+            _accountAttentionFailedLine = value;
+            Raise(nameof(AccountAttentionFailedLine));
+            Raise(nameof(HasAccountAttentionFailedLine));
+        }
+    }
+
+    public bool HasAccountAttentionFailedLine => !string.IsNullOrEmpty(AccountAttentionFailedLine);
+
+    /// <summary>
+    /// The three status keys last handed to the ABI, so an event that did
+    /// not change them words nothing.
+    /// </summary>
+    private string? _accountAttentionKeys;
+    private bool _accountAttentionKeysRead;
+
     /// <summary>
     /// Words the attention block from a status reply. An error frame leaves
     /// the block as it was: a daemon that could not answer has not said the
@@ -993,18 +1037,33 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             return;
         }
 
-        AccountAttention = AccountAttentions.For(result.GetRawText());
+        string? keys = AccountAttentions.Keys(result);
+        if (_accountAttentionKeysRead && keys == _accountAttentionKeys)
+        {
+            return;
+        }
+
+        _accountAttentionKeysRead = true;
+        _accountAttentionKeys = keys;
+        AccountAttention = AccountAttentions.For(keys);
     }
 
     /// <summary>
-    /// The attention block's button: the daemon drops this device's enrollment
-    /// (<c>unenroll</c>). True only once it confirmed; the caller then
-    /// starts the first run, which begins with a fresh NEAR AI sign-in. The
-    /// daemon never does this on its own.
+    /// The confirmation's primary button: the daemon drops this device's
+    /// enrollment (<c>unenroll</c>). True only once it confirmed; the caller
+    /// then starts the first run, which begins with a fresh NEAR AI sign-in.
+    /// A refusal shows the block's failure line. The daemon never does this
+    /// on its own.
     /// </summary>
     public async Task<bool> SetUpAgainAsync()
     {
+        if (IsBusy)
+        {
+            return false;
+        }
+
         IsBusy = true;
+        AccountAttentionFailedLine = string.Empty;
         try
         {
             DaemonResponse response = await _host
@@ -1012,6 +1071,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             if (response.IsError)
             {
+                AccountAttentionFailedLine = AccountAttention?.Failed ?? string.Empty;
                 return false;
             }
 

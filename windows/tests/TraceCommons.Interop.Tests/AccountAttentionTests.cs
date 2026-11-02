@@ -21,6 +21,11 @@ public sealed class AccountAttentionTests
         "{\"logged_in\":true,\"account_state\":\"needs_attention\","
         + "\"account_state_reason\":\"account_address_refused\",\"near_ai_login_unconfirmed\":true}";
 
+    private const string Whole =
+        "{\"title\":\"T\",\"body\":\"B\",\"private_ai\":null,\"action\":\"A\","
+        + "\"confirm_title\":\"CT\",\"confirm_body\":\"CB\",\"confirm_action\":\"CA\","
+        + "\"confirm_cancel\":\"CC\",\"failed\":\"F\"}";
+
     [Fact]
     public void TheStatusGoesToTheAbiVerbatim()
     {
@@ -28,7 +33,7 @@ public sealed class AccountAttentionTests
         AccountAttention? attention = AccountAttentions.For(Unreadable, wire =>
         {
             seen.Add(wire);
-            return "{\"title\":\"T\",\"body\":\"B\",\"private_ai\":null,\"action\":\"A\"}";
+            return Whole;
         });
 
         Assert.NotNull(attention);
@@ -36,14 +41,42 @@ public sealed class AccountAttentionTests
         Assert.Equal("B", attention.Body);
         Assert.Null(attention.PrivateAi);
         Assert.Equal("A", attention.Action);
+        Assert.Equal("CT", attention.ConfirmTitle);
+        Assert.Equal("CB", attention.ConfirmBody);
+        Assert.Equal("CA", attention.ConfirmAction);
+        Assert.Equal("CC", attention.ConfirmCancel);
+        Assert.Equal("F", attention.Failed);
         Assert.Equal(Unreadable, Assert.Single(seen));
+    }
+
+    /// <summary>
+    /// Only the three account keys reach the ABI, never the whole status,
+    /// and a status without them sends nothing.
+    /// </summary>
+    [Fact]
+    public void OnlyTheThreeKeysAreSent()
+    {
+        using JsonDocument status = JsonDocument.Parse(
+            "{\"logged_in\":true,\"queue_depth\":4,\"account_state\":\"needs_attention\","
+            + "\"account_state_reason\":\"account_record_unreadable\",\"near_ai_login_unconfirmed\":true}");
+        string keys = Assert.IsType<string>(AccountAttentions.Keys(status.RootElement));
+        var names = JsonDocument.Parse(keys).RootElement.EnumerateObject().Select(p => p.Name).OrderBy(k => k);
+        Assert.Equal(AccountAttentions.StatusKeys.OrderBy(k => k), names);
+        Assert.NotNull(AccountAttentions.For(keys));
+
+        using JsonDocument old = JsonDocument.Parse("{\"logged_in\":true,\"paused\":false}");
+        Assert.Null(AccountAttentions.Keys(old.RootElement));
+        using JsonDocument notObject = JsonDocument.Parse("[]");
+        Assert.Null(AccountAttentions.Keys(notObject.RootElement));
     }
 
     [Fact]
     public void ABlockWithoutTitleOrButtonIsNotShown()
     {
-        Assert.Null(AccountAttentions.For(Unreadable, _ => "{\"title\":\"\",\"action\":\"A\"}"));
-        Assert.Null(AccountAttentions.For(Unreadable, _ => "{\"title\":\"T\",\"action\":\"\"}"));
+        Assert.Null(AccountAttentions.For(Unreadable, _ => Whole.Replace("\"title\":\"T\"", "\"title\":\"\"")));
+        Assert.Null(AccountAttentions.For(Unreadable, _ => Whole.Replace("\"action\":\"A\"", "\"action\":\"\"")));
+        Assert.Null(AccountAttentions.For(Unreadable, _ => Whole.Replace("\"confirm_body\":\"CB\"", "\"confirm_body\":\"\"")));
+        Assert.Null(AccountAttentions.For(Unreadable, _ => Whole.Replace("\"failed\":\"F\",", "").Replace(",\"failed\":\"F\"", "")));
         Assert.Null(AccountAttentions.For(Unreadable, _ => "not json"));
         Assert.Null(AccountAttentions.For(Unreadable, _ => null));
         Assert.Null(AccountAttentions.For(null, _ => throw new InvalidOperationException()));
@@ -62,7 +95,7 @@ public sealed class AccountAttentionTests
         Assert.Equal("This app's account needs attention", unreadable.Title);
         Assert.Equal(unreadable.Title, refused.Title);
         Assert.Equal(
-            "This app can't read its account details on this Mac. Set it up again to keep sending traces.",
+            "This app can't read its account details on this computer. Set it up again to keep sending traces.",
             unreadable.Body);
         Assert.Equal(
             "This app can no longer reach the service it was set up with. Update the app, or set it up again.",
@@ -70,6 +103,23 @@ public sealed class AccountAttentionTests
         Assert.Null(unreadable.PrivateAi);
         Assert.Equal("Private AI still works with your NEAR AI account.", refused.PrivateAi);
         Assert.Equal("Set up again", unreadable.Action);
+    }
+
+    /// <summary>
+    /// Through the real ABI: the owner-approved confirmation and the
+    /// failure line arrive with the block.
+    /// </summary>
+    [Fact]
+    public void TheLiveAbiCarriesTheConfirmationAndFailureLine()
+    {
+        AccountAttention attention = Assert.IsType<AccountAttention>(AccountAttentions.For(Unreadable));
+        Assert.Equal("Set up this app again?", attention.ConfirmTitle);
+        Assert.Equal(
+            "This signs out of NEAR AI on this computer. You'll sign in again to keep sending traces.",
+            attention.ConfirmBody);
+        Assert.Equal("Set up again", attention.ConfirmAction);
+        Assert.Equal("Cancel", attention.ConfirmCancel);
+        Assert.Equal("Nothing changed. Try again.", attention.Failed);
     }
 
     /// <summary>

@@ -81,8 +81,9 @@
                     This app's account needs attention: its record cannot be
                     read, or the address it was set up with is refused. A
                     status in the account section, never a banner. Every
-                    string is bound, from the Rust. Set up again unenrolls,
-                    then the first run starts.
+                    string is bound, from the Rust. Set up again asks first;
+                    only its confirmation unenrolls, then the first run
+                    starts. A refusal shows the failure line under the button.
                 -->
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
                         BorderBrush="{ThemeResource TcHairlineBrush}"
@@ -105,6 +106,10 @@
                         <Button Content="{x:Bind Settings.AccountAttentionAction, Mode=OneWay}"
                                 IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
                                 Click="OnSetUpAgain" />
+                        <TextBlock Text="{x:Bind Settings.AccountAttentionFailedLine, Mode=OneWay}"
+                                   Visibility="{x:Bind Settings.HasAccountAttentionFailedLine, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>
 

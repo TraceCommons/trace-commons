@@ -20,6 +20,19 @@ final class AccountAttentionBridgeTests: XCTestCase {
         XCTAssertNil(unreadable.privateAI)
         XCTAssertNotNil(refused.privateAI)
         XCTAssertFalse(unreadable.action.isEmpty)
+        XCTAssertFalse(unreadable.body?.contains("Mac") ?? true, "the sentence names no platform")
+    }
+
+    /// Setting up again is confirmed first, in the Rust's words, and its
+    /// failure line is the Rust's too.
+    func testTheConfirmationAndFailureAreTheRusts() throws {
+        let copy = try XCTUnwrap(words(AccountAttentionWire(
+            state: "needs_attention", reason: "account_record_unreadable", nearAILoginUnconfirmed: false)))
+        XCTAssertEqual(copy.confirmTitle, "Set up this app again?")
+        XCTAssertEqual(copy.confirmAction, copy.action)
+        XCTAssertNotEqual(copy.confirmCancel, copy.confirmAction)
+        XCTAssertFalse(copy.confirmBody.isEmpty)
+        XCTAssertFalse(copy.failed.isEmpty)
     }
 
     func testAHealthyAccountShowsNothing() {

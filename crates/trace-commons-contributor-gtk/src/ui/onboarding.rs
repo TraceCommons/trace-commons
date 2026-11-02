@@ -240,8 +240,15 @@ pub fn set_pending_invite(invite: String) {
 /// unenrolled this device (#1836 F1). Takes the once-per-launch latch, so
 /// the `status` read that follows does not open a second window; a run
 /// already shown this launch would otherwise keep it from opening at all.
+///
+/// A first run already open is brought forward rather than opened twice.
 pub fn present_after_unenroll(app: &Rc<App>) {
     PRESENTED.with(|p| p.set(true));
+    let open = AUTOMATIC_WINDOW.with(|current| current.borrow().as_ref().and_then(|w| w.upgrade()));
+    if let Some(window) = open {
+        window.present();
+        return;
+    }
     present(app);
 }
 

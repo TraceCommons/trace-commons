@@ -20,10 +20,6 @@ public struct AccountAttentionWire: Equatable, Sendable {
         self.nearAILoginUnconfirmed = nearAILoginUnconfirmed
     }
 
-    /// Whether the daemon says the account needs attention. Also what keeps
-    /// the NEAR AI login from being presented as the account's.
-    public var needsAttention: Bool { state == "needs_attention" }
-
     /// The three keys as the ABI takes them, or nil when the daemon did not
     /// say (an older daemon).
     public var wireJSON: String? {
@@ -49,29 +45,48 @@ public struct AccountAttention: Decodable, Equatable, Sendable {
     public let body: String?
     /// Only while a NEAR AI login is stored.
     public let privateAI: String?
-    /// "Set up again": unenroll, then the first run.
+    /// "Set up again": opens the confirmation below; nothing runs yet.
     public let action: String
+    /// The confirmation. Only `confirmAction` unenrolls, then the first run
+    /// opens.
+    public let confirmTitle: String
+    public let confirmBody: String
+    public let confirmAction: String
+    public let confirmCancel: String
+    /// Shown under the button when the daemon refused to set up again.
+    public let failed: String
 
     enum CodingKeys: String, CodingKey {
         case title
         case body
         case privateAI = "private_ai"
         case action
+        case confirmTitle = "confirm_title"
+        case confirmBody = "confirm_body"
+        case confirmAction = "confirm_action"
+        case confirmCancel = "confirm_cancel"
+        case failed
     }
 
     /// The payload fields this shell decodes, by wire name. Compared against
     /// the live export by `TCBridgeTests`.
-    public static let consumedFields = ["title", "body", "private_ai", "action"]
+    public static let consumedFields = [
+        "title", "body", "private_ai", "action", "confirm_title", "confirm_body", "confirm_action",
+        "confirm_cancel", "failed",
+    ]
 
-    /// Decode the payload, or nil if it will not parse or the title or button
-    /// is empty.
+    /// Decode the payload, or nil if it will not parse or any word other than
+    /// the two optional lines is empty: shown whole or not at all.
     public static func decode(fromJSON json: String) -> AccountAttention? {
         guard let data = json.data(using: .utf8),
-            let copy = try? JSONDecoder().decode(AccountAttention.self, from: data),
-            !copy.title.isEmpty, !copy.action.isEmpty
+            let copy = try? JSONDecoder().decode(AccountAttention.self, from: data)
         else {
             return nil
         }
-        return copy
+        let words = [
+            copy.title, copy.action, copy.confirmTitle, copy.confirmBody, copy.confirmAction,
+            copy.confirmCancel, copy.failed,
+        ]
+        return words.contains(where: \.isEmpty) ? nil : copy
     }
 }
