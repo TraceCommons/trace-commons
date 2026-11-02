@@ -58,6 +58,16 @@ struct TracesTreeView: View, Equatable {
     /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
     /// session in it is selected from elsewhere (#1146 `reveal`).
     @State private var expanded: Set<String> = []
+    /// A folder being dragged into place (owner, 2026-11-02, as the tabs
+    /// are dragged): which one, and how far its middle sits from the
+    /// pointer, so it stays where it was grabbed.
+    @State private var draggingFolder: String?
+    @State private var dragGrab: CGFloat = 0
+    /// How far the dragged folder sits from its slot.
+    @State private var dragOffset: CGFloat = 0
+    /// Each drawn folder row's frame in the tree, for the drag.
+    @State private var folderFrames: [String: CGRect] = [:]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// The folders the search opened that were not open already: they
     /// close again when the search is cleared. A folder the person opens or
     /// closes by hand leaves this set and stays as they left it.
@@ -301,6 +311,8 @@ struct TracesTreeView: View, Equatable {
                 }
                 // Folders are the top level: no tool level to indent past.
                 .environment(\.glassTreeRoot, .folder)
+                .coordinateSpace(.named(Self.foldersSpace))
+                .onPreferenceChange(TracesFolderFrames.self) { folderFrames = $0 }
                 .overlayPreferenceValue(TracesMenuAnchors.self, alignment: .topLeading) { anchors in
                     GeometryReader { space in openMenus(anchors, in: space) }
                 }
@@ -697,6 +709,76 @@ struct TracesTreeView: View, Equatable {
         )
         .equatable()
         .id(Self.rowID(.folder(projectID: folder.id)))
+        // Dragged as the tabs are (owner, 2026-11-02): the folder follows
+        // the pointer, and trades places with the folder above or below
+        // once past its middle. The list is then in the person's order.
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: TracesFolderFrames.self,
+                    value: [folder.id: proxy.frame(in: .named(Self.foldersSpace))])
+            }
+        }
+        .offset(y: draggingFolder == folder.id ? dragOffset : 0)
+        .zIndex(draggingFolder == folder.id ? 1 : 0)
+        .simultaneousGesture(folderDrag(folder.id))
+        .modifier(FolderMoveActions(store: store, id: folder.id))
+    }
+
+    /// The tree's space, where folder rows and the drag are measured.
+    static let foldersSpace = "tracesFolders"
+    /// How far the pointer travels before a press on a folder becomes a
+    /// drag, as for the tabs.
+    static let folderDragThreshold: CGFloat = 6
+
+    /// The folder a folder dragged to `center` trades places with: the one
+    /// above once its middle is passed going up, the one below going down;
+    /// nil while it is between them.
+    nonisolated static func folderSwap(
+        center: CGFloat, above: (id: String, midY: CGFloat)?, below: (id: String, midY: CGFloat)?
+    ) -> String? {
+        if let above, center < above.midY { return above.id }
+        if let below, center > below.midY { return below.id }
+        return nil
+    }
+
+    private func folderDrag(_ id: String) -> some Gesture {
+        DragGesture(minimumDistance: Self.folderDragThreshold, coordinateSpace: .named(Self.foldersSpace))
+            .onChanged { gesture in
+                guard let frame = folderFrames[id] else { return }
+                if draggingFolder != id {
+                    draggingFolder = id
+                    dragGrab = gesture.startLocation.y - frame.midY
+                }
+                // Where the dragged folder's middle would be under the
+                // pointer, against the slot it holds now.
+                let center = gesture.location.y - dragGrab
+                let shown = store.shownTree.folders.map(\.id)
+                if let index = shown.firstIndex(of: id) {
+                    let above = index > 0 ? folderFrames[shown[index - 1]].map { (shown[index - 1], $0.midY) } : nil
+                    let below = index + 1 < shown.count ? folderFrames[shown[index + 1]].map { (shown[index + 1], $0.midY) } : nil
+                    if let other = Self.folderSwap(center: center, above: above, below: below) {
+                        store.moveFolder(id, onto: other)
+                        // The rows trade places next pass; until then the
+                        // dragged one is measured from where it lands.
+                        if let otherFrame = folderFrames[other] {
+                            let landed = other == above?.0
+                                ? otherFrame.minY + frame.height / 2
+                                : otherFrame.maxY - frame.height / 2
+                            folderFrames[id] = CGRect(x: frame.minX, y: landed - frame.height / 2,
+                                                      width: frame.width, height: frame.height)
+                        }
+                    }
+                }
+                dragOffset = center - (folderFrames[id]?.midY ?? frame.midY)
+            }
+            .onEnded { _ in
+                withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85)) {
+                    dragOffset = 0
+                }
+                // Cleared after the click the drag's release delivers.
+                DispatchQueue.main.async { draggingFolder = nil }
+            }
     }
 
     /// A session row's values, worked out here and handed to its own view.
@@ -1483,5 +1565,28 @@ struct TracesColumnTitles: View {
         .padding(.trailing, 6)
         .padding(.bottom, GlassTokens.Space.s2)
         .accessibilityHidden(true)
+    }
+}
+
+/// A folder row's Move up and Move down, in the core's words: the drag's
+/// order without dragging, for VoiceOver and the keyboard. Nothing without
+/// the words, and none past either end.
+private struct FolderMoveActions: ViewModifier {
+    let store: TracesStore
+    let id: String
+
+    func body(content: Content) -> some View {
+        let copy = store.nudgeCopy
+        content
+            .accessibilityAction(named: Text(copy?[.listOrderMoveUp] ?? "")) { store.moveFolder(id, by: -1) }
+            .accessibilityAction(named: Text(copy?[.listOrderMoveDown] ?? "")) { store.moveFolder(id, by: 1) }
+    }
+}
+
+/// Each drawn folder row's frame in the tree, for dragging folders.
+private struct TracesFolderFrames: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { $1 }
     }
 }

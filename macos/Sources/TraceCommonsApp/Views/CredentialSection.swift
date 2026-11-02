@@ -48,11 +48,11 @@ struct CredentialSection: View {
     /// The providers this build offers, as the core reports them
     /// (`tc_build_channel_json`): a staging build offers NEAR AI's Google
     /// login only.
-    static var offeredProviders: [String] { BuildChannelGate.dylibChannel?.nearAiSignInProviders ?? [] }
+    nonisolated static var offeredProviders: [String] { BuildChannelGate.dylibChannel?.nearAiSignInProviders ?? [] }
 
     /// `offered`, in its order, with the core's title for each. A provider
     /// this build has no title for is not drawn.
-    static func providerOptions(
+    nonisolated static func providerOptions(
         _ copy: PrivateInferenceCopy, offered: [String] = CredentialSection.offeredProviders
     ) -> [ProviderOption] {
         offered.compactMap { tag in
