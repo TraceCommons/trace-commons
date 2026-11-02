@@ -325,6 +325,84 @@ pub fn near_ai_recipient_ref(idempotency_key: Uuid, organization_id: Uuid) -> St
     )
 }
 
+/// `POST` here records the NEAR AI login the token belongs to as the
+/// account's NEAR AI login anchor (owner decision 2026-11-02, option (a) on
+/// #1841): a payout link needs one, and an account made from a NEAR wallet
+/// has none. Trust on first use. Account session only.
+pub const NEAR_AI_LOGIN_RECORD_PATH: &str = "/v1/account/near-ai-login";
+
+/// The body of a record call: a fresh NEAR AI access token, spent once on
+/// NEAR AI's `/users/me` and dropped.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NearAiLoginRecordRequest {
+    pub near_ai_access_token: String,
+}
+
+impl NearAiLoginRecordRequest {
+    /// The token is present and within [`MAX_NEAR_AI_ACCESS_TOKEN_LEN`].
+    pub fn validate(&self) -> Result<(), PayoutLinkRequestInvalid> {
+        let token = self.near_ai_access_token.trim();
+        if token.is_empty() || token.len() > MAX_NEAR_AI_ACCESS_TOKEN_LEN {
+            return Err(PayoutLinkRequestInvalid::TokenMissingOrTooLong);
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for NearAiLoginRecordRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NearAiLoginRecordRequest")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Every label the record route answers with: a success as `outcome`, a
+/// refusal as the `error` of an error body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NearAiLoginRecordOutcome {
+    /// The login is now the account's.
+    Recorded,
+    /// It already was. Nothing changed.
+    AlreadyRecorded,
+    /// NEAR AI did not say whose token this is.
+    NearAiLoginUnverified,
+    /// The login belongs to another account, or this account already has
+    /// another. One label for both.
+    NearAiLoginUnavailable,
+    /// The account is closed or cannot take a NEAR AI login.
+    NearAiLoginAccountIneligible,
+    /// The body was malformed.
+    InvalidNearAiLoginRequest,
+    /// Anything on the server's side.
+    NearAiLoginRecordUnavailable,
+}
+
+impl NearAiLoginRecordOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::AlreadyRecorded => "already_recorded",
+            Self::NearAiLoginUnverified => "near_ai_login_unverified",
+            Self::NearAiLoginUnavailable => "near_ai_login_unavailable",
+            Self::NearAiLoginAccountIneligible => "near_ai_login_account_ineligible",
+            Self::InvalidNearAiLoginRequest => "invalid_near_ai_login_request",
+            Self::NearAiLoginRecordUnavailable => "near_ai_login_record_unavailable",
+        }
+    }
+}
+
+/// The answer to a record call that recorded, or found already recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NearAiLoginRecorded {
+    pub contract_version: String,
+    /// `recorded` or `already_recorded`.
+    pub outcome: NearAiLoginRecordOutcome,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +418,52 @@ mod tests {
             "expected_current_version": 2,
             "proof": {"rail": "near_ai", "organization_id": ORG, "near_ai_access_token": TOKEN},
         })
+    }
+
+    #[test]
+    fn a_record_request_keeps_its_token_out_of_debug_and_refuses_extras() {
+        let request: NearAiLoginRecordRequest =
+            serde_json::from_value(serde_json::json!({"near_ai_access_token": "SENTINEL"}))
+                .unwrap();
+        assert!(request.validate().is_ok());
+        assert!(!format!("{request:?}").contains("SENTINEL"));
+        assert!(
+            serde_json::from_value::<NearAiLoginRecordRequest>(
+                serde_json::json!({"near_ai_access_token": "t", "account_id": "x"})
+            )
+            .is_err()
+        );
+        for token in [
+            String::new(),
+            "   ".into(),
+            "t".repeat(MAX_NEAR_AI_ACCESS_TOKEN_LEN + 1),
+        ] {
+            assert!(
+                NearAiLoginRecordRequest {
+                    near_ai_access_token: token
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn record_outcome_labels_match_their_serde_names() {
+        for outcome in [
+            NearAiLoginRecordOutcome::Recorded,
+            NearAiLoginRecordOutcome::AlreadyRecorded,
+            NearAiLoginRecordOutcome::NearAiLoginUnverified,
+            NearAiLoginRecordOutcome::NearAiLoginUnavailable,
+            NearAiLoginRecordOutcome::NearAiLoginAccountIneligible,
+            NearAiLoginRecordOutcome::InvalidNearAiLoginRequest,
+            NearAiLoginRecordOutcome::NearAiLoginRecordUnavailable,
+        ] {
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                serde_json::Value::String(outcome.as_str().to_owned())
+            );
+        }
     }
 
     #[test]

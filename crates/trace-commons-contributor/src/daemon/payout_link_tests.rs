@@ -836,3 +836,98 @@ async fn status_passes_each_stream_through_and_leaves_none_out() {
     let with = status(&f).await;
     assert_eq!(with["rails"][0]["streams"], streams);
 }
+
+// --- near_ai_login_record (#1841 option (a), owner decision 2026-11-02) ---
+
+async fn record(f: &Fixture, cloud: &Cloud) -> Response {
+    record_near_ai_login(
+        &f.shared,
+        &req("near_ai_login_record", json!({})),
+        &cloud.api,
+    )
+    .await
+}
+
+fn record_calls(f: &Fixture) -> Vec<ingest::Seen> {
+    f.seen()
+        .into_iter()
+        .filter(|seen| seen.path == "/v1/account/near-ai-login")
+        .collect()
+}
+
+#[tokio::test]
+async fn record_sends_a_fresh_token_once_and_keeps_only_a_label() {
+    let f = Fixture::new(true).await;
+    let cloud = Cloud::start(vec![]).await;
+    let value = ok(record(&f, &cloud).await);
+    assert_eq!(value["outcome"], "recorded");
+    let calls = record_calls(&f);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].auth, format!("Bearer {SESSION}"));
+    let body: Value = serde_json::from_str(&calls[0].body).unwrap();
+    assert_eq!(
+        body,
+        json!({ "near_ai_access_token": format!("{TOKEN_MARK}-1") })
+    );
+    assert!(!f.files().contains(TOKEN_MARK), "the token is never stored");
+    assert!(
+        f.audit_rows()
+            .contains(&(AUDIT_NEAR_AI_LOGIN_RECORDED.to_string(), None))
+    );
+
+    // Already recorded: answered, no second audit row.
+    f.ingest.stub.lock().unwrap().record_reply = Some((
+        StatusCode::OK,
+        json!({ "contract_version": "payout-link-v1", "outcome": "already_recorded" }),
+    ));
+    let value = ok(record(&f, &cloud).await);
+    assert_eq!(value["outcome"], "already_recorded");
+    let rows = f
+        .audit_rows()
+        .into_iter()
+        .filter(|(action, _)| action == AUDIT_NEAR_AI_LOGIN_RECORDED)
+        .count();
+    assert_eq!(rows, 1);
+}
+
+#[tokio::test]
+async fn record_refusals_keep_the_server_label_the_shells_will_route_on() {
+    use trace_commons_protocol::payout_link::NearAiLoginRecordOutcome as Outcome;
+    let f = Fixture::new(true).await;
+    let cloud = Cloud::start(vec![]).await;
+    for (status, outcome) in [
+        (StatusCode::FORBIDDEN, Outcome::NearAiLoginUnverified),
+        (StatusCode::CONFLICT, Outcome::NearAiLoginUnavailable),
+        (StatusCode::FORBIDDEN, Outcome::NearAiLoginAccountIneligible),
+        (StatusCode::BAD_REQUEST, Outcome::InvalidNearAiLoginRequest),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Outcome::NearAiLoginRecordUnavailable,
+        ),
+    ] {
+        f.ingest.stub.lock().unwrap().record_reply =
+            Some((status, json!({ "error": outcome.as_str() })));
+        let label = refusal(record(&f, &cloud).await);
+        assert_eq!(label, outcome.as_str());
+        assert!(
+            NEAR_AI_LOGIN_RECORD_REFUSALS.contains(&label.as_str()),
+            "{label} is missing from the shells' seam"
+        );
+    }
+    assert!(
+        !f.audit_rows()
+            .iter()
+            .any(|(action, _)| action == AUDIT_NEAR_AI_LOGIN_RECORDED)
+    );
+}
+
+#[tokio::test]
+async fn record_without_a_near_ai_session_asks_for_sign_in_and_sends_nothing() {
+    let f = Fixture::new(false).await;
+    let cloud = Cloud::start(vec![]).await;
+    assert_eq!(
+        refusal(record(&f, &cloud).await),
+        ERR_NEAR_AI_SIGN_IN_REQUIRED
+    );
+    assert!(record_calls(&f).is_empty());
+}

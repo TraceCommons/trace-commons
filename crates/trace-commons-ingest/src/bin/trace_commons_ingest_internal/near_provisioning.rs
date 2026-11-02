@@ -1090,7 +1090,8 @@ const NEAR_AI_LOGIN_CEREMONY_TTL_SECONDS: i64 =
 /// A hung dependency must not hang a request that is holding a pooled
 /// connection, and this path is not on the submission hot path -- it runs once
 /// per contributor per device -- so the bound can be short.
-const NEAR_AI_INTROSPECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(super) const NEAR_AI_INTROSPECTION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
 
 // Where `GET /me` lives: `trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL`,
 // imported above. A compiled-in constant with no environment override: there
@@ -1129,12 +1130,12 @@ fn near_ai_nonce_wire(nonce: &[u8; 32]) -> String {
 /// `finish`, so before this nothing could drive the handler far enough to
 /// reach `provision_near_ai_login` and the anchor row it writes.
 #[cfg(not(test))]
-fn introspection_base_url(_state: &AppState) -> &str {
+pub(super) fn introspection_base_url(_state: &AppState) -> &str {
     NEAR_AI_API_BASE_URL
 }
 
 #[cfg(test)]
-fn introspection_base_url(state: &AppState) -> &str {
+pub(super) fn introspection_base_url(state: &AppState) -> &str {
     state
         .near_ai_introspection_base_url
         .as_deref()

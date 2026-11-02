@@ -33,6 +33,8 @@ mod inference_connection_routes;
 mod legacy_invite_link_routes;
 #[path = "trace_commons_ingest_internal/model_training_consent.rs"]
 mod model_training_consent;
+#[path = "trace_commons_ingest_internal/near_ai_login_record.rs"]
+mod near_ai_login_record_routes;
 #[path = "trace_commons_ingest_internal/payout_link.rs"]
 mod payout_link_routes;
 #[path = "trace_commons_ingest_internal/payout_rails.rs"]
@@ -8604,6 +8606,9 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         // status on the signed-in account session; no passkey (owner,
         // 2026-10-23).
         .merge(payout_link_routes::routes())
+        // Recording the NEAR AI login on an existing account, which a payout
+        // link is proved against (#1841, owner decision 2026-11-02).
+        .merge(near_ai_login_record_routes::routes())
         // Referral codes and applying one (referral spec section 6), on the
         // signed-in account session as the payout links are.
         .merge(referral_routes::routes())

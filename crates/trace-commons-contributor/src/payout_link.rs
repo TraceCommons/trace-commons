@@ -30,8 +30,9 @@ use uuid::Uuid;
 
 use trace_commons_operator_client::{Client, Error as OcError};
 use trace_commons_protocol::payout_link::{
-    PAYOUT_LINK_CONTRACT_VERSION, PayoutLinkAction, PayoutLinkConfirmed, PayoutLinkOutcome,
-    PayoutLinkProof, PayoutLinkRequest, PayoutLinkStarted, PayoutRailsStatus,
+    NEAR_AI_LOGIN_RECORD_PATH, NearAiLoginRecordOutcome, NearAiLoginRecordRequest,
+    NearAiLoginRecorded, PAYOUT_LINK_CONTRACT_VERSION, PayoutLinkAction, PayoutLinkConfirmed,
+    PayoutLinkOutcome, PayoutLinkProof, PayoutLinkRequest, PayoutLinkStarted, PayoutRailsStatus,
     near_ai_recipient_ref,
 };
 use trace_commons_protocol::{
@@ -81,6 +82,8 @@ pub enum PayoutLinkError {
     SessionInvalid,
     /// The server refused with one of the protocol's outcome labels.
     Refused(PayoutLinkOutcome),
+    /// Recording the NEAR AI login was refused with one of its labels.
+    LoginRecordRefused(NearAiLoginRecordOutcome),
     /// The request was malformed before it left the machine.
     RequestInvalid,
     /// A success response that failed validation or did not match the
@@ -100,6 +103,7 @@ impl PayoutLinkError {
         match self {
             Self::SessionInvalid => "account-session-required",
             Self::Refused(outcome) => outcome.as_str(),
+            Self::LoginRecordRefused(outcome) => outcome.as_str(),
             Self::RequestInvalid => "payout-link-request-invalid",
             Self::ResponseInvalid => "payout-link-response-invalid",
             Self::RecipientMismatch => "payout-link-recipient-mismatch",
@@ -342,6 +346,41 @@ pub async fn confirm(
     })
 }
 
+/// Record the NEAR AI login `near_ai_access_token` belongs to as this
+/// account's (`POST /v1/account/near-ai-login`). The token is sent once and
+/// dropped. Answers `recorded` or `already_recorded`; a refusal keeps the
+/// server's label ([`PayoutLinkError::LoginRecordRefused`]).
+pub async fn record_near_ai_login(
+    endpoint: &Endpoint<'_>,
+    near_ai_access_token: String,
+) -> PayoutCall<NearAiLoginRecordOutcome> {
+    let request = NearAiLoginRecordRequest {
+        near_ai_access_token,
+    };
+    if request.validate().is_err() {
+        return PayoutCall::refused(PayoutLinkError::RequestInvalid);
+    }
+    let call = endpoint
+        .call::<NearAiLoginRecordRequest, NearAiLoginRecorded>(
+            Method::POST,
+            NEAR_AI_LOGIN_RECORD_PATH,
+            Some(&request),
+        )
+        .await;
+    drop(request);
+    then(call, |recorded| {
+        if recorded.contract_version != PAYOUT_LINK_CONTRACT_VERSION
+            || !matches!(
+                recorded.outcome,
+                NearAiLoginRecordOutcome::Recorded | NearAiLoginRecordOutcome::AlreadyRecorded
+            )
+        {
+            return Err(PayoutLinkError::ResponseInvalid);
+        }
+        Ok(recorded.outcome)
+    })
+}
+
 fn classify(error: &OcError) -> PayoutLinkError {
     let status = match error {
         OcError::ServerLabel { status, .. } | OcError::HttpFailure { status, .. } => *status,
@@ -364,6 +403,23 @@ fn classify(error: &OcError) -> PayoutLinkError {
         })
     {
         return PayoutLinkError::Refused(outcome);
+    }
+    if let Some(outcome) = error
+        .server_label()
+        .and_then(|label| {
+            serde_json::from_value::<NearAiLoginRecordOutcome>(serde_json::Value::String(
+                label.to_owned(),
+            ))
+            .ok()
+        })
+        .filter(|outcome| {
+            !matches!(
+                outcome,
+                NearAiLoginRecordOutcome::Recorded | NearAiLoginRecordOutcome::AlreadyRecorded
+            )
+        })
+    {
+        return PayoutLinkError::LoginRecordRefused(outcome);
     }
     match status.as_u16() {
         // 401 is an expired or revoked session; 403 otherwise is a device
@@ -420,6 +476,8 @@ pub(crate) mod test_support {
         pub rotate_to: Option<String>,
         /// The `near_ai` rail's `streams`, when the stub reports any.
         pub streams: Option<serde_json::Value>,
+        /// Overrides the NEAR AI login record answer (default `recorded`).
+        pub record_reply: Option<(StatusCode, serde_json::Value)>,
     }
 
     impl Default for Stub {
@@ -434,6 +492,7 @@ pub(crate) mod test_support {
                 started: None,
                 rotate_to: None,
                 streams: None,
+                record_reply: None,
             }
         }
     }
@@ -467,6 +526,29 @@ pub(crate) mod test_support {
         let stub = Arc::new(Mutex::new(Stub::default()));
         let seen: Arc<Mutex<Vec<Seen>>> = Arc::new(Mutex::new(Vec::new()));
         let app = Router::new()
+            .route(
+                "/v1/account/near-ai-login",
+                post({
+                    let (stub, seen) = (Arc::clone(&stub), Arc::clone(&seen));
+                    move |headers: HeaderMap, body: String| async move {
+                        seen.lock().unwrap().push(Seen {
+                            method: "POST",
+                            path: "/v1/account/near-ai-login".into(),
+                            auth: auth(&headers),
+                            body,
+                        });
+                        let stub = stub.lock().unwrap();
+                        let (status, value) = stub.record_reply.clone().unwrap_or((
+                            StatusCode::OK,
+                            serde_json::json!({
+                                "contract_version": PAYOUT_LINK_CONTRACT_VERSION,
+                                "outcome": "recorded",
+                            }),
+                        ));
+                        reply(&stub, status, value)
+                    }
+                }),
+            )
             .route(
                 "/v1/account/payout-rails",
                 get({

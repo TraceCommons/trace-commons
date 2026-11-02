@@ -1210,6 +1210,31 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Record a verified NEAR AI login as the NEAR AI login anchor of an
+    /// existing account, which the caller's account session names (owner
+    /// decision 2026-11-02, option (a) on #1841). Trust on first use: an
+    /// account takes one login, and a login anchors one account.
+    ///
+    /// Only for an open account in a NEAR account tenant (`near-` or
+    /// `nearai-`). Once recorded, a NEAR AI sign-in with that login resolves
+    /// to this account and attaches its device in this tenant; in any other
+    /// tenant that device would fail account-admission readiness
+    /// (`trace_account_admission_linkage_ready`), so those accounts are
+    /// refused. Writes a hash-only audit row when it records. The default
+    /// refuses: a backend without it has not configured login anchors.
+    async fn record_near_ai_login_anchor(
+        &self,
+        _tenant: &str,
+        _account: Uuid,
+        _actor_ref: &str,
+        _login: &crate::near_ai_login::VerifiedNearAiLogin,
+        _identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::NearAiLoginRecord, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "near_ai_login_provisioning_unconfigured".into(),
+        ))
+    }
+
     /// Write the NEAR AI sign-up contributor grant for a device NEAR AI
     /// provisioned before sign-up wrote one (owner decision 2026-10-24).
     ///

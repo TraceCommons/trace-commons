@@ -18,6 +18,8 @@ mod mission_catalog_tests;
 mod model_training_consent_tests;
 #[path = "tests/native_session_sliding_expiry_tests.rs"]
 mod native_session_sliding_expiry_tests;
+#[path = "tests/near_ai_login_record_tests.rs"]
+mod near_ai_login_record_tests;
 #[path = "tests/near_ai_provisioning_tests.rs"]
 mod near_ai_provisioning_tests;
 #[path = "tests/passkey_removal_tests.rs"]

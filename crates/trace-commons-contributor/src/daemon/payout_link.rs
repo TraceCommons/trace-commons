@@ -68,7 +68,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use trace_commons_protocol::payout_link::{
-    NEAR_AI_PAYOUT_RAIL_ID, PayoutLinkAction, PayoutLinkOutcome, near_ai_recipient_ref,
+    NEAR_AI_PAYOUT_RAIL_ID, NearAiLoginRecordOutcome, PayoutLinkAction, PayoutLinkOutcome,
+    near_ai_recipient_ref,
 };
 
 use super::account_session_renewal::{RenewVia, account_session};
@@ -88,6 +89,22 @@ pub const AUDIT_LINK_STARTED: &str = "payout-link-started";
 pub const AUDIT_LINK_CONFIRMED: &str = "payout-link-confirmed";
 pub const AUDIT_UNLINK_STARTED: &str = "payout-unlink-started";
 pub const AUDIT_UNLINK_CONFIRMED: &str = "payout-unlink-confirmed";
+/// `near_ai_login_record` recorded the NEAR AI login on the account.
+/// Label-only, like the rows above.
+pub const AUDIT_NEAR_AI_LOGIN_RECORDED: &str = "near-ai-login-recorded";
+
+/// The refusals `near_ai_login_record` answers on top of the session and
+/// NEAR AI sign-in labels this module shares: the server's own labels, kept
+/// by name. This is the seam for the shells. Their wording waits on the
+/// owner's approval (#1841, finding 2), and until then each shell shows its
+/// generic failure for them. No text lives here.
+pub const NEAR_AI_LOGIN_RECORD_REFUSALS: &[&str] = &[
+    "near_ai_login_unverified",
+    "near_ai_login_unavailable",
+    "near_ai_login_account_ineligible",
+    "invalid_near_ai_login_request",
+    "near_ai_login_record_unavailable",
+];
 
 /// `payout_link_confirm` was called without a top-level `confirmed: true`.
 pub const ERR_CONFIRMATION_REQUIRED: &str = "payout-link-confirmation-required";
@@ -337,6 +354,27 @@ async fn owned_orgs_with_fresh_token(
                 anyhow::bail!("near_ai_credential_session_changed");
             }
             Ok((orgs, tokens.access_token))
+        },
+    )
+    .await
+    .map_err(|error| near_ai_label(&error))
+}
+
+/// A fresh NEAR AI access token from the retained session, bound to that
+/// login: if it was replaced or forgotten while the token was minted, the
+/// token is dropped and the call refused.
+async fn fresh_near_ai_token(
+    shared: &DaemonShared,
+    api: &CloudApi,
+) -> Result<String, &'static str> {
+    super::nearai_credential::balance::with_fresh_management_session(
+        shared,
+        api,
+        |tokens, retained| async move {
+            if retained_near_ai_session(shared)? != retained {
+                anyhow::bail!("near_ai_credential_session_changed");
+            }
+            Ok(tokens.access_token)
         },
     )
     .await
@@ -778,6 +816,49 @@ pub(super) async fn start(shared: &DaemonShared, req: &Request, api: &CloudApi) 
             "organization_name": chosen.name,
             "expires_at": started.expires_at,
         }),
+        persisted,
+    )
+}
+
+/// `near_ai_login_record`, against the live NEAR AI service.
+pub(super) async fn handle_record_near_ai_login(shared: &DaemonShared, req: &Request) -> Response {
+    match CloudApi::live() {
+        Ok(api) => record_near_ai_login(shared, req, &api).await,
+        Err(_) => Response::err(req.id, ERR_UNAVAILABLE, ERR_NEAR_AI_UNAVAILABLE),
+    }
+}
+
+/// Record the NEAR AI login this daemon holds as the signed-in account's
+/// (owner decision 2026-11-02, option (a) on #1841), so the account can link
+/// a payout recipient. The shell passes nothing: the daemon mints a fresh
+/// token from its own NEAR AI session, sends it once and drops it. The
+/// server is the record; nothing is kept here but a label-only audit row.
+pub(super) async fn record_near_ai_login(
+    shared: &DaemonShared,
+    req: &Request,
+    api: &CloudApi,
+) -> Response {
+    let (mut session, cfg) = match session_and_config(shared, req, Some(&RenewVia::live(api))).await
+    {
+        Ok(pair) => pair,
+        Err(response) => return *response,
+    };
+    let token = match fresh_near_ai_token(shared, api).await {
+        Ok(token) => token,
+        Err(label) => return Response::err(req.id, ERR_UNAVAILABLE, label),
+    };
+    let call = client::record_near_ai_login(&endpoint(&cfg, &session), token).await;
+    let persisted = keep_rotated_token(shared, &mut session, call.rotated_token);
+    let outcome = match call.result {
+        Ok(outcome) => outcome,
+        Err(error) => return refused(req, error),
+    };
+    if outcome == NearAiLoginRecordOutcome::Recorded {
+        audit_row(shared, AUDIT_NEAR_AI_LOGIN_RECORDED);
+    }
+    finish(
+        req,
+        serde_json::json!({ "outcome": outcome.as_str() }),
         persisted,
     )
 }

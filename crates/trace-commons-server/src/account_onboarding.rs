@@ -187,6 +187,23 @@ pub fn is_device_key_revoked(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REVOKED)
 }
 
+/// What recording a NEAR AI login on an existing account did
+/// ([`crate::db::Database::record_near_ai_login_anchor`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NearAiLoginRecord {
+    /// The login is now the account's NEAR AI login anchor.
+    Recorded,
+    /// The account was already anchored on this login. Nothing written.
+    AlreadyRecorded,
+    /// The login anchors another account, or this account is anchored on
+    /// another login. One answer for both, so the route says nothing about
+    /// which. Nothing written.
+    Unavailable,
+    /// The account is closed, or is not in a NEAR account tenant
+    /// (`near-` / `nearai-`). Nothing written.
+    AccountIneligible,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProvisionedNearAccount {
     pub tenant_id: String,

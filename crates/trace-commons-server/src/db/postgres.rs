@@ -4081,6 +4081,18 @@ impl Database for PgBackend {
             .await
     }
 
+    async fn record_near_ai_login_anchor(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        actor_ref: &str,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::NearAiLoginRecord, DatabaseError> {
+        self.near_ai_login_record(tenant, account, actor_ref, login, identity)
+            .await
+    }
+
     async fn backfill_near_ai_signup_device_grant(
         &self,
         tenant_id: &str,

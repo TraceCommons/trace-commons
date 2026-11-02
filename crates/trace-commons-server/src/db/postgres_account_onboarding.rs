@@ -153,6 +153,21 @@ async fn link_provisioned_principal(
     }
 }
 
+/// A tenant made for a NEAR account: `near-` (wallet) or `nearai-` (NEAR AI
+/// login), then 64 lowercase hex. The same namespace
+/// `trace_account_admission_linkage_ready` (V81) treats as NEAR-provisioned.
+fn is_near_account_tenant(tenant: &str) -> bool {
+    let hex = tenant
+        .strip_prefix("nearai-")
+        .or_else(|| tenant.strip_prefix("near-"));
+    hex.is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
 /// The anchor inputs a verified NEAR AI login produces, computed once for
 /// provisioning.
 ///
@@ -656,6 +671,86 @@ impl PgBackend {
             device_key_id: device,
             anchor_hash: anchor_hash.to_string(),
         }))
+    }
+
+    /// Record a verified NEAR AI login on an existing account. See
+    /// [`crate::db::Database::record_near_ai_login_anchor`].
+    ///
+    /// One transaction in the account's tenant, under forced RLS. It takes
+    /// the same per-anchor advisory lock login provisioning takes, so a
+    /// NEAR AI sign-in minting a fresh account for this login waits for it
+    /// (or this waits for that), and locks the account row, so two records
+    /// on one account cannot both take a first login. `anchor_hash` is
+    /// globally unique: a login anchored in any other tenant makes the
+    /// insert write nothing, which RLS does not hide.
+    pub(super) async fn near_ai_login_record(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        actor_ref: &str,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        identity: &NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::NearAiLoginRecord, DatabaseError> {
+        use crate::account_onboarding::NearAiLoginRecord;
+        if !is_near_account_tenant(tenant) {
+            return Ok(NearAiLoginRecord::AccountIneligible);
+        }
+        let NearAiAnchorMaterial {
+            anchor_hash,
+            sealed_json,
+            pepper_ref,
+            key_ref,
+        } = NearAiAnchorMaterial::for_login(login, identity)?;
+        let provider = login.auth_provider().to_string();
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            &[&anchor_hash],
+        )
+        .await?;
+        let open = tx
+            .query_opt(
+                "SELECT 1 FROM trace_accounts
+                  WHERE tenant_id = $1 AND account_id = $2 AND closed_at IS NULL
+                  FOR UPDATE",
+                &[&tenant, &account],
+            )
+            .await?
+            .is_some();
+        if !open {
+            tx.commit().await?;
+            return Ok(NearAiLoginRecord::AccountIneligible);
+        }
+        let existing: Vec<String> = tx
+            .query(
+                "SELECT anchor_hash FROM trace_near_account_anchors
+                  WHERE tenant_id = $1 AND account_id = $2
+                    AND identity_source = 'near_ai_login'",
+                &[&tenant, &account],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        if !existing.is_empty() {
+            tx.commit().await?;
+            return Ok(if existing.contains(&anchor_hash) {
+                NearAiLoginRecord::AlreadyRecorded
+            } else {
+                NearAiLoginRecord::Unavailable
+            });
+        }
+        let claimed = tx.execute("INSERT INTO trace_near_account_anchors(tenant_id,anchor_hash,account_id,sealed_account_name,index_pepper_ref,account_name_key_ref,identity_source,auth_provider) VALUES($1,$2,$3,$4,$5,$6,'near_ai_login',$7) ON CONFLICT (anchor_hash) DO NOTHING", &[&tenant,&anchor_hash,&account,&sealed_json,&pepper_ref,&key_ref,&provider]).await?;
+        if claimed == 0 {
+            tx.commit().await?;
+            return Ok(NearAiLoginRecord::Unavailable);
+        }
+        // Hash-only, like the provisioning row: the identity system and
+        // nothing else. No subject, no provider label, no token.
+        tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES($1,'near_ai_login_recorded',$2,'success',$3)", &[&tenant,&actor_ref,&serde_json::json!({"identity":"near_ai_login"})]).await?;
+        tx.commit().await?;
+        Ok(NearAiLoginRecord::Recorded)
     }
 
     /// The issuer's backfill of the sign-up grant for a NEAR AI device

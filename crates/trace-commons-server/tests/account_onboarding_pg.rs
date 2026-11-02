@@ -2679,3 +2679,264 @@ async fn each_listed_device_says_what_it_has_contributed() {
     task.abort();
     other_task.abort();
 }
+
+// --- Recording a NEAR AI login on an existing account (#1841 option (a)) ---
+//
+// An account made from a NEAR wallet has no NEAR AI login anchor, so it
+// links no payout organization (#1841). The owner chose, on 2026-11-02, to
+// let the account's own session record one: trust on first use, one login
+// per account, one account per login, and only in a NEAR account tenant.
+
+/// An open account in a fresh `near-` (wallet) tenant, made past RLS.
+async fn seed_wallet_account(admin: &deadpool_postgres::Object) -> (String, uuid::Uuid) {
+    seed_account_in(
+        admin,
+        &trace_commons_server::near_account_identity::random_near_tenant_id(),
+    )
+    .await
+}
+
+async fn seed_account_in(admin: &deadpool_postgres::Object, tenant: &str) -> (String, uuid::Uuid) {
+    let account = uuid::Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_tenants(tenant_id) VALUES($1) ON CONFLICT DO NOTHING",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_accounts(tenant_id,account_id) VALUES($1,$2)",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap();
+    (tenant.to_owned(), account)
+}
+
+/// The account's NEAR AI login anchors as `(anchor_hash, auth_provider)`.
+async fn login_anchors(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+    account: uuid::Uuid,
+) -> Vec<(String, Option<String>)> {
+    admin
+        .query(
+            "SELECT anchor_hash, auth_provider FROM trace_near_account_anchors
+              WHERE tenant_id=$1 AND account_id=$2 AND identity_source='near_ai_login'",
+            &[&tenant, &account],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect()
+}
+
+/// Every table-wide row count provisioning and recording could change.
+async fn unchanged(admin: &deadpool_postgres::Object) -> Vec<i64> {
+    provisioning_snapshot(admin, &fresh_keypair()).await.0
+}
+
+/// `(actor_ref, outcome, safe_metadata)` of each `near_ai_login_recorded`
+/// row in `tenant`.
+async fn record_audit(
+    admin: &deadpool_postgres::Object,
+    tenant: &str,
+) -> Vec<(String, String, serde_json::Value)> {
+    admin
+        .query(
+            "SELECT actor_ref, outcome, safe_metadata FROM trace_account_audit
+              WHERE tenant_id=$1 AND action='near_ai_login_recorded'",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_wallet_account_records_its_near_ai_login_once_and_sign_in_then_finds_it() {
+    use trace_commons_server::account_onboarding::NearAiLoginRecord;
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let (tenant, account) = seed_wallet_account(&admin).await;
+    let (login, task) = stub_near_ai_login("record").await;
+    let actor = "account-actor:fixture";
+
+    assert_eq!(
+        db.record_near_ai_login_anchor(&tenant, account, actor, &login, &identity())
+            .await
+            .unwrap(),
+        NearAiLoginRecord::Recorded
+    );
+    let anchors = login_anchors(&admin, &tenant, account).await;
+    assert_eq!(
+        anchors,
+        vec![(
+            identity().login_index_label(login.subject_id()),
+            Some("google".to_string())
+        )]
+    );
+    // The row is the blind index, never the subject.
+    assert!(!anchors[0].0.contains(login.subject_id()));
+    let audit = record_audit(&admin, &tenant).await;
+    assert_eq!(
+        audit,
+        vec![(
+            actor.to_string(),
+            "success".to_string(),
+            serde_json::json!({"identity": "near_ai_login"})
+        )]
+    );
+    // The payout store sees it: #1841's check now passes for this login.
+    let payout_anchors =
+        trace_commons_server::db::PayoutStore::payout_account_login_anchors(&db, &tenant, account)
+            .await
+            .unwrap();
+    assert_eq!(payout_anchors, vec![anchors[0].0.clone()]);
+
+    // Again: nothing more is written.
+    let before = provisioning_snapshot(&admin, &fresh_keypair()).await.0;
+    assert_eq!(
+        db.record_near_ai_login_anchor(&tenant, account, actor, &login, &identity())
+            .await
+            .unwrap(),
+        NearAiLoginRecord::AlreadyRecorded
+    );
+    assert_eq!(
+        provisioning_snapshot(&admin, &fresh_keypair()).await.0,
+        before
+    );
+
+    // A NEAR AI sign-in with that login now lands on this account, in this
+    // tenant, instead of minting a separate one.
+    let device = fresh_keypair();
+    let t = session_hash("record-then-sign-in");
+    let signed_in = db
+        .provision_near_ai_login(
+            &login,
+            &device_bytes(&device),
+            native_session(&t),
+            &identity(),
+            None,
+        )
+        .await
+        .expect("sign-in with the recorded login provisions");
+    assert_eq!(signed_in.tenant_id, tenant);
+    assert_eq!(signed_in.account_id, account);
+    task.abort();
+}
+
+#[tokio::test]
+async fn recording_refuses_a_taken_login_a_second_login_and_ineligible_accounts() {
+    use trace_commons_server::account_onboarding::NearAiLoginRecord;
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(url.contains("127.0.0.1"));
+    let (db, admin) = provisioning_fixture(&url).await;
+    let actor = "account-actor:fixture";
+
+    // A login that already made its own NEAR AI account, in another tenant.
+    let (taken, task_taken) = stub_near_ai_login("record-taken").await;
+    let t = session_hash("record-taken");
+    db.provision_near_ai_login(
+        &taken,
+        &device_bytes(&fresh_keypair()),
+        native_session(&t),
+        &identity(),
+        None,
+    )
+    .await
+    .unwrap();
+    let (tenant, account) = seed_wallet_account(&admin).await;
+    let before = unchanged(&admin).await;
+    assert_eq!(
+        db.record_near_ai_login_anchor(&tenant, account, actor, &taken, &identity())
+            .await
+            .unwrap(),
+        NearAiLoginRecord::Unavailable
+    );
+    assert_eq!(unchanged(&admin).await, before);
+
+    // One login per account: a second, different login is refused.
+    let (first, task_first) = stub_near_ai_login("record-first").await;
+    let (second, task_second) = stub_near_ai_login("record-second").await;
+    assert_eq!(
+        db.record_near_ai_login_anchor(&tenant, account, actor, &first, &identity())
+            .await
+            .unwrap(),
+        NearAiLoginRecord::Recorded
+    );
+    let before = unchanged(&admin).await;
+    assert_eq!(
+        db.record_near_ai_login_anchor(&tenant, account, actor, &second, &identity())
+            .await
+            .unwrap(),
+        NearAiLoginRecord::Unavailable
+    );
+    assert_eq!(unchanged(&admin).await, before);
+    assert_eq!(login_anchors(&admin, &tenant, account).await.len(), 1);
+
+    // Ineligible: a closed account, and accounts outside the NEAR account
+    // namespace (a legacy invite tenant, a pooled one included).
+    let (closed_tenant, closed) = seed_wallet_account(&admin).await;
+    admin
+        .execute(
+            "UPDATE trace_accounts SET closed_at=now() WHERE tenant_id=$1 AND account_id=$2",
+            &[&closed_tenant, &closed],
+        )
+        .await
+        .unwrap();
+    let legacy = format!("tenant-legacy-{}", uuid::Uuid::new_v4().simple());
+    let (legacy_tenant, legacy_account) = seed_account_in(&admin, &legacy).await;
+    let pooled = format!("tenant-pooled-{}", uuid::Uuid::new_v4().simple());
+    let (pooled_tenant, pooled_account) = seed_account_in(&admin, &pooled).await;
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_invite_pooled_tenants(tenant_id,reason_label) VALUES($1,'shared')",
+            &[&pooled_tenant],
+        )
+        .await
+        .unwrap();
+    let before = unchanged(&admin).await;
+    for (tenant, account) in [
+        (&closed_tenant, closed),
+        (&legacy_tenant, legacy_account),
+        (&pooled_tenant, pooled_account),
+    ] {
+        assert_eq!(
+            db.record_near_ai_login_anchor(tenant, account, actor, &second, &identity())
+                .await
+                .unwrap(),
+            NearAiLoginRecord::AccountIneligible,
+            "{tenant}"
+        );
+    }
+    assert_eq!(unchanged(&admin).await, before);
+
+    // An account id from another tenant is not found under this one.
+    let (other_tenant, _) = seed_wallet_account(&admin).await;
+    let before = unchanged(&admin).await;
+    assert_eq!(
+        db.record_near_ai_login_anchor(&other_tenant, account, actor, &second, &identity())
+            .await
+            .unwrap(),
+        NearAiLoginRecord::AccountIneligible
+    );
+    assert_eq!(unchanged(&admin).await, before);
+    for task in [task_taken, task_first, task_second] {
+        task.abort();
+    }
+}

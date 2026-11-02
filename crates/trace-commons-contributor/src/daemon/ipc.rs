@@ -451,6 +451,7 @@ pub const METHODS: &[&str] = &[
     "payout_link_start",
     "payout_link_confirm",
     "payout_link_unlink",
+    "near_ai_login_record",
     "referral_codes_list",
     "referral_codes_create",
     "referral_codes_disable",
@@ -3790,6 +3791,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("payout_link_start", "payout-link-requires-async"),
     ("payout_link_confirm", "payout-link-requires-async"),
     ("payout_link_unlink", "payout-link-requires-async"),
+    ("near_ai_login_record", "payout-link-requires-async"),
     ("referral_codes_list", "referral-requires-async"),
     ("referral_codes_create", "referral-requires-async"),
     ("referral_codes_disable", "referral-requires-async"),
@@ -6967,6 +6969,9 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "payout_rails_status" => super::payout_link::handle_status(shared, req).await,
         "payout_link_orgs" => super::payout_link::handle_orgs(shared, req).await,
         "payout_link_start" => super::payout_link::handle_start(shared, req).await,
+        "near_ai_login_record" => {
+            super::payout_link::handle_record_near_ai_login(shared, req).await
+        }
         "payout_link_confirm" => super::payout_link::handle_confirm(shared, req).await,
         "payout_link_unlink" => super::payout_link::handle_unlink(shared, req).await,
         "referral_codes_list" => super::referral::handle_list(shared, req).await,
@@ -18839,7 +18844,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 74);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 75);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -19323,7 +19328,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 108, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 81, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 82, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
