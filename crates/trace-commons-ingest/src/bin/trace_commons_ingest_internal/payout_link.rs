@@ -7,7 +7,8 @@
 //!
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests` starts a link
 //!   or an unlink. Local refusals come first (session kind, rail, body,
-//!   account standing, the "changed since shown" version); only then does a
+//!   account standing, the "changed since shown" version, and for a `link`
+//!   an account with no NEAR AI login anchor); only then does a
 //!   `link` spend the person's NEAR AI token on the rail's recipient-proof
 //!   verifier (`/users/me`, then a zero-target probe). The verified org is
 //!   sealed and stored on a request that changes nothing yet, with a 5
@@ -15,8 +16,8 @@
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm`
 //!   takes the request from the same account and, in one transaction, writes
 //!   the `waiting` link (or the unlink mark) and its audit rows, refusing if
-//!   the link changed since the request, a newer request superseded it, or
-//!   it expired. A confirmed change wakes the rail.
+//!   the link changed since the request, a newer request superseded it, it
+//!   expired, or (for a link) the account's NEAR AI login anchor is gone. A confirmed change wakes the rail.
 //! - `GET /v1/account/payout-rails` lists each rail that is not `disabled`:
 //!   link state, version and recipient ref, never a recipient or a name.
 //!
@@ -284,6 +285,22 @@ pub(super) async fn start_handler(
                 .payout_account_login_anchors(tenant, account)
                 .await
                 .map_err(store_failed)?;
+            // An account with no NEAR AI login (a wallet-origin account)
+            // links nothing until its login is recorded (owner decision
+            // 2026-11-02): no subject could match. Refused here, before the
+            // token leaves this machine, as the generic `subject_mismatch`
+            // every shipped app already shows; the log line tells the two
+            // causes apart. Existing links are left alone, and unlink is
+            // not refused.
+            if anchors.is_empty() {
+                tracing::info!(
+                    rail = %rail_id,
+                    outcome = RecipientProofRefusal::SubjectMismatch.label(),
+                    reason = "no_near_ai_login",
+                    "payout link refused"
+                );
+                return Err(proof_refusal(RecipientProofRefusal::SubjectMismatch));
+            }
             // The token becomes a secret here and is dropped inside verify.
             let proof = RecipientProof::from(proof);
             let verifier = NearAiOrgVerifier::new(
@@ -443,6 +460,10 @@ pub(super) async fn confirm_handler(
             PayoutLinkOutcome::PayoutLinkChangePending,
         ),
         PayoutLinkConfirm::NotLinked => (StatusCode::CONFLICT, PayoutLinkOutcome::PayoutNotLinked),
+        // The generic refusal shipped apps already show (see the start).
+        PayoutLinkConfirm::NoLoginAnchor => {
+            (StatusCode::FORBIDDEN, PayoutLinkOutcome::SubjectMismatch)
+        }
     };
     tracing::info!(
         rail = %entry.rail_id(),

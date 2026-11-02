@@ -9,8 +9,9 @@
 //! is an org id and a fresh NEAR AI access token. [`NearAiOrgVerifier`]
 //! spends the token on one `GET {base}/users/me`, reads only the subject id
 //! and each org's `id`, `role` and `is_active` (never a name), checks the
-//! subject against the account's NEAR AI login anchor when it has one, and
-//! checks the org is in the list, active, and owned. It then asks the rail
+//! subject against the account's NEAR AI login anchors, and checks the org
+//! is in the list, active, and owned. An account with no NEAR AI login
+//! anchor is refused before the token is spent. It then asks the rail
 //! whether the org can receive (`probe_recipient`: a zero cumulative send on
 //! the probe program, which writes nothing). The token is dropped when the
 //! call returns; it is never stored, logged or placed in an error.
@@ -86,7 +87,8 @@ impl std::fmt::Debug for VerifiedRecipient {
 pub enum RecipientProofRefusal {
     /// NEAR AI did not answer who the token belongs to.
     LoginUnverified,
-    /// The account is anchored on another NEAR AI subject.
+    /// The account is anchored on another NEAR AI subject, or on none (a
+    /// wallet-origin account has no NEAR AI login to match).
     SubjectMismatch,
     /// The org is not in the list, not active, or not owned.
     OrgNotOwned,
@@ -116,7 +118,7 @@ impl RecipientProofRefusal {
 pub trait RecipientProofVerifier: Send + Sync {
     /// `login_anchors` are the account's NEAR AI login anchors
     /// (`trace_near_account_anchors.anchor_hash` with `identity_source =
-    /// 'near_ai_login'`); empty for an account with none.
+    /// 'near_ai_login'`). An empty set is refused as `SubjectMismatch`.
     async fn verify(
         &self,
         proof: RecipientProof,
@@ -218,12 +220,17 @@ impl RecipientProofVerifier for NearAiOrgVerifier {
             organization_id,
             access_token,
         } = proof;
+        // An account with no NEAR AI login (a wallet-origin account) has no
+        // subject a proof could match, so it links nothing until its login
+        // is recorded (owner decision 2026-11-02). Refused before the token
+        // is spent.
+        if login_anchors.is_empty() {
+            return Err(RecipientProofRefusal::SubjectMismatch);
+        }
         let user = self.users_me(&access_token).await?;
         drop(access_token);
         let subject_id = Zeroizing::new(user.id.trim().to_owned());
-        if !login_anchors.is_empty()
-            && !login_anchors.contains(&self.identity.login_index_label(&subject_id))
-        {
+        if !login_anchors.contains(&self.identity.login_index_label(&subject_id)) {
             return Err(RecipientProofRefusal::SubjectMismatch);
         }
         let owned = user.organizations.unwrap_or_default().iter().any(|org| {
@@ -379,6 +386,33 @@ mod tests {
         }
     }
 
+    /// The account's login anchors when it is anchored on the token's
+    /// subject.
+    fn anchored() -> Vec<String> {
+        vec![identity().login_index_label(SUBJECT)]
+    }
+
+    /// An account with no NEAR AI login anchor (a wallet-origin account)
+    /// links nothing, and the token is never spent (owner decision
+    /// 2026-11-02, B9 in the one-connected-account spec).
+    #[tokio::test]
+    async fn an_account_with_no_login_anchor_is_refused_before_users_me() {
+        let (base, mock) = serve(Mock {
+            users_me: Some((200, me(owned_org("owner", true)))),
+            probe: Some(no_op()),
+            ..Mock::default()
+        })
+        .await;
+        assert_eq!(
+            verifier(&base).verify(proof(), &[]).await.unwrap_err(),
+            RecipientProofRefusal::SubjectMismatch
+        );
+        let mock = mock.lock().unwrap();
+        assert_eq!(mock.users_me_calls, 0);
+        assert!(mock.bearer_seen.is_empty());
+        assert!(mock.probe_bodies.is_empty());
+    }
+
     #[tokio::test]
     async fn an_owned_active_org_passes_and_is_probed_once() {
         let (base, mock) = serve(Mock {
@@ -387,7 +421,7 @@ mod tests {
             ..Mock::default()
         })
         .await;
-        let verified = verifier(&base).verify(proof(), &[]).await.unwrap();
+        let verified = verifier(&base).verify(proof(), &anchored()).await.unwrap();
         assert_eq!(verified.recipient.expose(), org().to_string());
         assert_eq!(verified.subject_id.as_str(), SUBJECT);
         assert!(!format!("{verified:?}").contains(SUBJECT));
@@ -419,7 +453,10 @@ mod tests {
             })
             .await;
             assert_eq!(
-                verifier(&base).verify(proof(), &[]).await.unwrap_err(),
+                verifier(&base)
+                    .verify(proof(), &anchored())
+                    .await
+                    .unwrap_err(),
                 RecipientProofRefusal::OrgNotOwned,
                 "{orgs}"
             );
@@ -460,7 +497,10 @@ mod tests {
             })
             .await;
             assert_eq!(
-                verifier(&base).verify(proof(), &[]).await.unwrap_err(),
+                verifier(&base)
+                    .verify(proof(), &anchored())
+                    .await
+                    .unwrap_err(),
                 RecipientProofRefusal::LoginUnverified,
                 "{status} {body}"
             );
@@ -497,7 +537,10 @@ mod tests {
             })
             .await;
             assert_eq!(
-                verifier(&base).verify(proof(), &[]).await.unwrap_err(),
+                verifier(&base)
+                    .verify(proof(), &anchored())
+                    .await
+                    .unwrap_err(),
                 want,
                 "{status} {code}"
             );

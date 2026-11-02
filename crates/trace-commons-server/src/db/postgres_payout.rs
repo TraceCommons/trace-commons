@@ -1520,6 +1520,23 @@ impl PayoutStore for PgBackend {
                     tx.commit().await?;
                     return Ok(PayoutLinkConfirm::ChangePending);
                 }
+                // The start checked the account's NEAR AI login; it may have
+                // gone since. An account with none links nothing (owner
+                // decision 2026-11-02).
+                let anchored: bool = tx
+                    .query_one(
+                        "SELECT EXISTS (
+                             SELECT 1 FROM trace_near_account_anchors
+                              WHERE tenant_id = $1 AND account_id = $2
+                                AND identity_source = 'near_ai_login')",
+                        &[&tenant, &account],
+                    )
+                    .await?
+                    .get(0);
+                if !anchored {
+                    tx.commit().await?;
+                    return Ok(PayoutLinkConfirm::NoLoginAnchor);
+                }
                 let kind: Option<String> = row.get(2);
                 let kind =
                     parse_recipient_kind(kind.ok_or_else(|| {
