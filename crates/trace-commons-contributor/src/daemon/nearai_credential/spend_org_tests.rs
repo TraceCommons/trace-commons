@@ -766,35 +766,30 @@ async fn choosing_ends_the_prompt_on_the_next_read_without_waiting_out_the_cache
 // ---- Owner rule 2026-11-02: a sign-in to another account switches organization ----
 
 /// What the sign-in ceremony does once it has stored a key minted in
-/// `minted`: the key replaces the stored one, then a choice left behind is
-/// forgotten.
-fn sign_in_stored(fixture: &Fixture, remembered: Option<&str>, minted: &str) {
+/// `minted`: the key replaces the stored one, then what belonged to another
+/// account is forgotten. `listed`: the account lists the remembered
+/// organization, active or not.
+fn sign_in_stored(fixture: &Fixture, remembered: Option<&str>, listed: bool, minted: &str) {
     {
         let mut settings = fixture.shared.settings.lock().unwrap();
         settings.near_ai_inference = Some(key("key-new", minted));
         settings.save_for_test(&fixture.shared.store).unwrap();
     }
-    forget_choice_left_behind(&fixture.shared.store, remembered, minted);
+    forget_other_account(&fixture.shared.store, remembered, listed);
 }
 
 #[test]
-fn a_choice_is_left_behind_only_when_the_key_landed_elsewhere() {
+fn the_account_changed_only_when_the_remembered_organization_is_not_listed() {
     assert!(
-        !choice_left_behind(None, "org-a"),
+        !account_changed(None, false),
         "no choice, nothing to forget"
     );
-    assert!(
-        !choice_left_behind(Some("org-a"), "org-a"),
-        "the same account"
-    );
-    assert!(
-        choice_left_behind(Some("org-old"), "org-a"),
-        "another account"
-    );
+    assert!(!account_changed(Some("org-a"), true), "the same account");
+    assert!(account_changed(Some("org-old"), false), "another account");
 }
 
 /// Signing in again to the same account lands in the remembered
-/// organization, and the choice stands: no prompt.
+/// organization, and the choice and its revocations stand: no prompt.
 #[tokio::test]
 async fn a_sign_in_to_the_same_account_keeps_the_choice() {
     let fixture = Fixture::signed_in("org-b");
@@ -805,7 +800,7 @@ async fn a_sign_in_to_the_same_account_keeps_the_choice() {
         &[PendingRevocation::new("ws-org-a", "key-older")],
     )
     .unwrap();
-    sign_in_stored(&fixture, Some("org-b"), "org-b");
+    sign_in_stored(&fixture, Some("org-b"), true, "org-b");
     assert_eq!(
         chosen_organization(&fixture.shared.store).as_deref(),
         Some("org-b")
@@ -824,6 +819,24 @@ async fn a_sign_in_to_the_same_account_keeps_the_choice() {
     assert_eq!(value["prompt"], false);
 }
 
+/// The chosen organization is inactive for now, so the key lands in
+/// another one of the same account. The account still lists it: the
+/// choice and the revocations stand.
+#[tokio::test]
+async fn an_inactive_chosen_organization_in_the_same_account_keeps_the_choice() {
+    let fixture = Fixture::signed_in("org-b");
+    remember_choice(&fixture.shared.store, "org-b").unwrap();
+    record_pending(
+        &fixture.shared.store,
+        &[PendingRevocation::new("ws-org-a", "key-older")],
+    )
+    .unwrap();
+    sign_in_stored(&fixture, Some("org-b"), true, "org-a");
+    let record = load(&fixture.shared.store).unwrap();
+    assert_eq!(record.chosen_organization_id.as_deref(), Some("org-b"));
+    assert_eq!(record.pending_revocations.len(), 1);
+}
+
 /// Another account with one organization: the key is there, the old choice
 /// is forgotten, and nothing is asked.
 #[tokio::test]
@@ -831,7 +844,7 @@ async fn a_sign_in_to_another_account_with_one_organization_uses_it() {
     let fixture = Fixture::signed_in("org-old");
     let (api, _) = start(listing(vec![org("org-a", "Only example org")])).await;
     remember_choice(&fixture.shared.store, "org-old").unwrap();
-    sign_in_stored(&fixture, Some("org-old"), "org-a");
+    sign_in_stored(&fixture, Some("org-old"), false, "org-a");
     assert_eq!(chosen_organization(&fixture.shared.store), None);
     let value = organizations_with(&fixture.shared, &api, true)
         .await
@@ -842,35 +855,75 @@ async fn a_sign_in_to_another_account_with_one_organization_uses_it() {
 }
 
 /// Another account with several organizations: the key is in the first
-/// active one, the old choice is forgotten, and the chooser asks. Revocations
-/// still pending are kept.
+/// active one, the old choice is forgotten, and the chooser asks. The old
+/// account's revocations are set aside: the new session cannot revoke them,
+/// so no revoke is attempted and none is reported pending.
 #[tokio::test]
 async fn a_sign_in_to_another_account_with_several_organizations_prompts() {
     let fixture = Fixture::signed_in("org-old");
-    let (api, _) = start(two_orgs()).await;
+    let (api, service) = start(two_orgs()).await;
     remember_choice(&fixture.shared.store, "org-old").unwrap();
     record_pending(
         &fixture.shared.store,
         &[PendingRevocation::new("ws-org-old", "key-older")],
     )
     .unwrap();
-    sign_in_stored(&fixture, Some("org-old"), "org-a");
+    sign_in_stored(&fixture, Some("org-old"), false, "org-a");
     let record = load(&fixture.shared.store).unwrap();
     assert_eq!(record.chosen_organization_id, None);
-    assert_eq!(record.pending_revocations.len(), 1);
+    assert!(record.pending_revocations.is_empty());
     let value = organizations_with(&fixture.shared, &api, true)
         .await
         .to_value();
     assert_eq!(value["current_organization_id"], "org-a");
     assert_eq!(value["chosen"], false);
     assert_eq!(value["prompt"], true);
+    assert_eq!(value["revoke_pending"], false);
+    assert!(
+        !service
+            .requests()
+            .iter()
+            .any(|line| line.starts_with("DELETE ")),
+        "no revoke is sent with the new account's session"
+    );
 }
 
-/// A new GitHub or Google NEAR AI account with no active organization, or
-/// one with no active workspace, fails the mint with its own control name,
-/// which the sign-in's failure line carries.
+/// The sign-in's mint reports whether the account lists the remembered
+/// organization at all: inactive is listed, absent is not.
 #[tokio::test]
-async fn an_account_without_an_organization_or_workspace_is_labelled() {
+async fn the_mint_reports_whether_the_remembered_organization_is_listed() {
+    let session = crate::daemon::nearai_credential::loopback::SessionTokens {
+        access_token: "session-jwt".into(),
+        refresh_token: "rt_example".into(),
+    };
+    let mut inactive = org("org-b", "Paused example org");
+    inactive["is_active"] = serde_json::json!(false);
+    let (api, _) = start(listing(vec![org("org-a", "First example org"), inactive])).await;
+    let (minted, listed) = api
+        .mint_inference_key_listing(
+            &session,
+            "trace-commons-test",
+            OrganizationChoice::Prefer("org-b"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(minted.organization_id, "org-a");
+    assert!(listed, "an inactive organization is still the account's");
+    let (_, listed) = api
+        .mint_inference_key_listing(
+            &session,
+            "trace-commons-test",
+            OrganizationChoice::Prefer("org-old"),
+        )
+        .await
+        .unwrap();
+    assert!(!listed, "another account does not list it");
+}
+
+/// A new GitHub or Google NEAR AI account with no active organization fails
+/// the mint with its own control name, which the sign-in's line carries.
+#[tokio::test]
+async fn an_account_without_an_organization_is_labelled() {
     let (api, _) = start(listing(vec![])).await;
     let session = crate::daemon::nearai_credential::loopback::SessionTokens {
         access_token: "session-jwt".into(),
@@ -885,14 +938,11 @@ async fn an_account_without_an_organization_or_workspace_is_labelled() {
         .await
         .map_err(|error| error.context(super::super::ceremony::FailedStep::Mint))
         .unwrap_err();
-    assert_eq!(
-        super::super::ceremony::failure_labels(&error),
-        Some(("mint", "near_ai_credential_no_organization"))
-    );
+    let fields = super::super::ceremony::failure_fields(&error, "github").unwrap();
+    assert_eq!(fields[0].1, "mint");
+    assert_eq!(fields[1].1, "near_ai_credential_no_organization");
     let no_workspace = anyhow!("near_ai_credential_no_workspace")
         .context(super::super::ceremony::FailedStep::Mint);
-    assert_eq!(
-        super::super::ceremony::failure_labels(&no_workspace),
-        Some(("mint", "near_ai_credential_no_workspace"))
-    );
+    let fields = super::super::ceremony::failure_fields(&no_workspace, "google").unwrap();
+    assert_eq!(fields[1].1, "near_ai_credential_no_workspace");
 }

@@ -1347,7 +1347,9 @@ mod settle_tests {
             None,
             "Mozilla/5.0 Test".into(),
             None,
+            false,
             check,
+            &crate::daemon::nearai_credential::ceremony::Progress::new(),
         )
         .await
     }
@@ -1383,10 +1385,10 @@ mod settle_tests {
         let error = run(&fx, check).await.unwrap_err();
 
         assert_eq!(error.root_cause().to_string(), different_account_label());
-        assert_eq!(
-            crate::daemon::nearai_credential::ceremony::failure_labels(&error),
-            Some(("commons", different_account_label()))
-        );
+        let fields =
+            crate::daemon::nearai_credential::ceremony::failure_fields(&error, "github").unwrap();
+        assert_eq!(fields[0].1, "commons");
+        assert_eq!(fields[1].1, different_account_label());
         assert_eq!((stored(&fx), fx.account_record(), fx.config()), before);
     }
 
@@ -1410,10 +1412,10 @@ mod settle_tests {
         let fx = Fixture::new(Session::Expired).await;
         let before = stored(&fx);
         let error = run(&fx, FreshLogin::Unavailable).await.unwrap_err();
-        assert_eq!(
-            crate::daemon::nearai_credential::ceremony::failure_labels(&error),
-            Some(("commons", "near_ai_credential_commons_unavailable"))
-        );
+        let fields =
+            crate::daemon::nearai_credential::ceremony::failure_fields(&error, "github").unwrap();
+        assert_eq!(fields[0].1, "commons");
+        assert_eq!(fields[1].1, "near_ai_credential_commons_unavailable");
         assert_eq!(stored(&fx), before);
     }
 }

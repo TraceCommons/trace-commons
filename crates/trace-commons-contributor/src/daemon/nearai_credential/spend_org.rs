@@ -162,37 +162,59 @@ pub(crate) fn chosen_organization(store: &ConfigStore) -> Option<String> {
         .and_then(|record| record.chosen_organization_id)
 }
 
-/// Whether a sign-in left the remembered choice behind (owner, 2026-11-02:
+/// Whether a sign-in landed in another NEAR AI account (owner, 2026-11-02:
 /// signing in to a different account with a different NEAR AI organization
 /// switches to its organization if it has one, or asks).
 ///
-/// The sign-in mints with [`OrganizationChoice::Prefer`], which lands in the
-/// remembered organization whenever the account has it active. A key minted
-/// anywhere else therefore means this account has no such active
-/// organization: most often a different NEAR AI account (a GitHub or Google
-/// login beside a wallet one). No identity is read for this; the minted
-/// key's organization is the signal, compared in memory and never logged.
-pub(crate) fn choice_left_behind(remembered: Option<&str>, minted_organization: &str) -> bool {
-    remembered.is_some_and(|remembered| remembered != minted_organization)
+/// The signal is the organization listing the sign-in's mint reads anyway
+/// ([`super::api::CloudApi::mint_inference_key_listing`]): a choice is
+/// remembered and the account does not list that organization at all --
+/// most often a GitHub or Google login beside a wallet one. An organization
+/// the account still lists but that is inactive for now is the same
+/// account, and the choice stands. No identity is read; ids are compared in
+/// memory and never logged.
+pub(crate) fn account_changed(remembered: Option<&str>, remembered_listed: bool) -> bool {
+    remembered.is_some() && !remembered_listed
 }
 
-/// After a sign-in stored a key minted in `minted_organization`: when the
-/// remembered choice was left behind, forget it, so the account's own
-/// organization stands. With one organization nothing is asked; with
-/// several, [`OrganizationsReport::prompt`] asks again, since no choice is
-/// recorded for this account. Pending revocations are kept. Best effort: a
-/// record that cannot be written keeps the old preference, which the mint
-/// already falls back from.
-pub(crate) fn forget_choice_left_behind(
+/// After a sign-in to another account stored its key: forget what belonged
+/// to the old one, so the new account's organization stands. With one
+/// organization nothing is asked; with several,
+/// [`OrganizationsReport::prompt`] asks again, since no choice is recorded
+/// for this account.
+///
+/// Pending revocations are set aside too. They name keys in the old
+/// account, which only that account's session can revoke, and this install
+/// no longer holds it: kept, every listing would retry them with the new
+/// account's session and be refused, `revoke_pending` would never clear, and
+/// at [`MAX_PENDING`] every switch would be refused. The keys stay at NEAR
+/// AI in the old account, where they can be revoked, as after a forget.
+/// Best effort: a record that cannot be written keeps the old preference,
+/// which the mint already falls back from.
+pub(crate) fn forget_other_account(
     store: &ConfigStore,
     remembered: Option<&str>,
-    minted_organization: &str,
+    remembered_listed: bool,
 ) {
-    if !choice_left_behind(remembered, minted_organization) {
+    if !account_changed(remembered, remembered_listed) {
         return;
     }
-    if update(store, |record| record.chosen_organization_id = None).is_err() {
-        tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_choice_not_cleared");
+    let mut set_aside = false;
+    let updated = update(store, |record| {
+        record.chosen_organization_id = None;
+        set_aside = !record.pending_revocations.is_empty();
+        record.pending_revocations.clear();
+    });
+    match updated {
+        Err(_) => {
+            tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_choice_not_cleared")
+        }
+        Ok(()) if set_aside => crate::daemon::diagnostics_log::record_labels(
+            tracing::Level::WARN,
+            "near_ai_spend_org_revocations_set_aside",
+            &[("reason", "account_changed")],
+        ),
+        Ok(()) => {}
     }
 }
 
