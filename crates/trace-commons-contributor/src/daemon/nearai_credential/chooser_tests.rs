@@ -624,6 +624,10 @@ async fn a_second_pick_after_the_first_ends_the_attempt_at_once() {
             ["HTTP/1.1 404 Not Found", "HTTP/1.1 400 Bad Request"].contains(&status(&forged)),
             "{first}: {forged}"
         );
+        assert!(
+            !forged.contains(crate::private_inference_copy::NEAR_AI_SIGN_IN_ENDED),
+            "{first}: {forged}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(
             crate::daemon::nearai_credential::ceremony::status(store.dir(), Some(&id))
@@ -645,7 +649,10 @@ async fn a_second_pick_after_the_first_ends_the_attempt_at_once() {
         )
         .await;
         assert_eq!(status(&stale), "HTTP/1.1 400 Bad Request", "{first}");
-        assert!(stale.ends_with("Not accepted."), "{first}: {stale}");
+        assert!(
+            stale.ends_with(crate::private_inference_copy::NEAR_AI_SIGN_IN_ENDED),
+            "{first}: {stale}"
+        );
         assert_eq!(settled_status(&store, &id).await, "failed", "{first}");
     }
 }
@@ -687,9 +694,27 @@ async fn the_page_fetched_again_after_a_pick_ends_the_attempt_at_once() {
         )
         .await;
         assert_eq!(status(&again), "HTTP/1.1 400 Bad Request", "{first}");
-        assert!(again.ends_with("Not accepted."), "{first}: {again}");
+        assert!(
+            again.ends_with(crate::private_inference_copy::NEAR_AI_SIGN_IN_ENDED),
+            "{first}: {again}"
+        );
         assert_eq!(settled_status(&store, &id).await, "failed", "{first}");
     }
+}
+
+/// The ended-sign-in sentence is the owner's, word for word (2026-11-02),
+/// and never names the Commons.
+#[test]
+fn the_ended_sign_in_sentence_is_the_approved_one() {
+    assert_eq!(
+        crate::private_inference_copy::NEAR_AI_SIGN_IN_ENDED,
+        "This sign-in has ended. Start again from the app."
+    );
+    assert_eq!(
+        STALE_CHOICE_BODY,
+        crate::private_inference_copy::NEAR_AI_SIGN_IN_ENDED
+    );
+    assert!(!STALE_CHOICE_BODY.contains(crate::brand::COMMONS_NAME));
 }
 
 /// A second pick is the person's own doing, like a cancel: it ends the

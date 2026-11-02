@@ -177,12 +177,18 @@ impl NearWalletListener {
                     let ends = stale
                         .as_ref()
                         .is_some_and(|stale| stale.matches(&head, &body, &authority));
+                    // The ended-sign-in sentence only when it is true; any
+                    // other request here gets the usual refusal.
                     respond(
                         &mut stream,
                         deadline,
                         false,
                         "text/plain; charset=utf-8",
-                        super::chooser::STALE_CHOICE_BODY,
+                        if ends {
+                            super::chooser::STALE_CHOICE_BODY
+                        } else {
+                            "Not accepted."
+                        },
                     )
                     .await;
                     if ends {

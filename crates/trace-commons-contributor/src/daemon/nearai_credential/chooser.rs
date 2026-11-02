@@ -195,9 +195,9 @@ impl Chosen {
 /// login: the person went Back. A browser that kept the page in its
 /// back/forward cache posts a second choice; one that did not (the page is
 /// `no-store`) fetches the page's address again. The leg cannot switch, so
-/// the listener answers with the page's existing refusal and ends the
-/// attempt, and the app can start a new one at once instead of waiting out
-/// the timeout.
+/// the listener says that sign-in has ended ([`STALE_CHOICE_BODY`]) and ends
+/// the attempt, and the app can start a new one at once instead of waiting
+/// out the timeout.
 ///
 /// Recognized only by this attempt's state: the page's exact address, or a
 /// choice by the same rules as a first one (this listener's origin, a login
@@ -206,8 +206,8 @@ pub(crate) struct StaleChoice {
     state: String,
 }
 
-/// What the listener answers a stale choice with: the chooser's own refusal.
-pub(super) const STALE_CHOICE_BODY: &str = "Not accepted.";
+/// What the listener answers a stale choice with.
+pub(super) const STALE_CHOICE_BODY: &str = crate::private_inference_copy::NEAR_AI_SIGN_IN_ENDED;
 
 /// The control name an attempt ended by a stale choice fails with.
 pub(super) const STALE_CHOICE: &str = "near_ai_credential_choice_stale";

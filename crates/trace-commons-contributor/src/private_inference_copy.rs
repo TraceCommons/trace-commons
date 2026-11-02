@@ -1235,6 +1235,13 @@ pub const NEAR_AI_SIGN_IN_PAGE_HEADING: &str = "Sign in to NEAR AI";
 /// which people signing in do not know by name.
 pub const NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN: &str = "You used this login last time";
 
+/// What the browser shows when the login page comes back after a login was
+/// already picked (Back, then a second pick or a reload): that sign-in has
+/// ended, and the app starts a new one. Only this response; every other
+/// refusal on the sign-in pages keeps "Not accepted.". Owner-approved
+/// 2026-11-02.
+pub const NEAR_AI_SIGN_IN_ENDED: &str = "This sign-in has ended. Start again from the app.";
+
 /// The button title for one of `channel::NEAR_AI_SIGN_IN_PROVIDERS`, or
 /// `None` for a tag with no title yet. A new login (near.com, say) is a
 /// channel entry, a title here, and a ceremony arm; the browser page and
