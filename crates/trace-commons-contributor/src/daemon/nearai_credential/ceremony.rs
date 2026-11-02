@@ -475,6 +475,7 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
                         .mint_inference_key_in(&session, &key_name(finished_id), choice)
                         .await
                         .map_err(at(FailedStep::Mint))?;
+                    let minted_organization = minted.organization_id.clone();
                     // The session is kept, not dropped. Inference does not need it --
                     // the key above is non-expiring and self-sufficient -- but the
                     // balance does: every management route on cloud-api is
@@ -490,7 +491,17 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
                             session.refresh_token,
                             expires_at,
                             user_agent,
-                        )
+                        )?;
+                        // A sign-in to another account forgets the choice
+                        // made in the old one, once its key is stored.
+                        if let Ok(store) = ConfigStore::open(persist_dir) {
+                            super::spend_org::forget_choice_left_behind(
+                                &store,
+                                preferred.as_deref(),
+                                &minted_organization,
+                            );
+                        }
+                        Ok(())
                     })
                     .await
                     .map_err(|_| anyhow!("near_ai_credential_unavailable"))
@@ -1429,6 +1440,10 @@ mod tests {
             ".map_err(at(FailedStep::Persist))",
             "at(FailedStep::Timeout)",
             "record_failure(error, provider_label);",
+            // After the key is stored, a choice made in another account is
+            // forgotten (owner, 2026-11-02).
+            ")?;\n                        // A sign-in to another account forgets the choice",
+            "super::spend_org::forget_choice_left_behind(",
         ] {
             assert!(body.contains(tag), "begin lost {tag}");
         }

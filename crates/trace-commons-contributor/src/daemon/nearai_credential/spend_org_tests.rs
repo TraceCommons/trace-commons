@@ -762,3 +762,137 @@ async fn choosing_ends_the_prompt_on_the_next_read_without_waiting_out_the_cache
         .to_value();
     assert_eq!(after["prompt"], false);
 }
+
+// ---- Owner rule 2026-11-02: a sign-in to another account switches organization ----
+
+/// What the sign-in ceremony does once it has stored a key minted in
+/// `minted`: the key replaces the stored one, then a choice left behind is
+/// forgotten.
+fn sign_in_stored(fixture: &Fixture, remembered: Option<&str>, minted: &str) {
+    {
+        let mut settings = fixture.shared.settings.lock().unwrap();
+        settings.near_ai_inference = Some(key("key-new", minted));
+        settings.save_for_test(&fixture.shared.store).unwrap();
+    }
+    forget_choice_left_behind(&fixture.shared.store, remembered, minted);
+}
+
+#[test]
+fn a_choice_is_left_behind_only_when_the_key_landed_elsewhere() {
+    assert!(
+        !choice_left_behind(None, "org-a"),
+        "no choice, nothing to forget"
+    );
+    assert!(
+        !choice_left_behind(Some("org-a"), "org-a"),
+        "the same account"
+    );
+    assert!(
+        choice_left_behind(Some("org-old"), "org-a"),
+        "another account"
+    );
+}
+
+/// Signing in again to the same account lands in the remembered
+/// organization, and the choice stands: no prompt.
+#[tokio::test]
+async fn a_sign_in_to_the_same_account_keeps_the_choice() {
+    let fixture = Fixture::signed_in("org-b");
+    let (api, _) = start(two_orgs()).await;
+    remember_choice(&fixture.shared.store, "org-b").unwrap();
+    record_pending(
+        &fixture.shared.store,
+        &[PendingRevocation::new("ws-org-a", "key-older")],
+    )
+    .unwrap();
+    sign_in_stored(&fixture, Some("org-b"), "org-b");
+    assert_eq!(
+        chosen_organization(&fixture.shared.store).as_deref(),
+        Some("org-b")
+    );
+    assert_eq!(
+        load(&fixture.shared.store)
+            .unwrap()
+            .pending_revocations
+            .len(),
+        1
+    );
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(value["chosen"], true);
+    assert_eq!(value["prompt"], false);
+}
+
+/// Another account with one organization: the key is there, the old choice
+/// is forgotten, and nothing is asked.
+#[tokio::test]
+async fn a_sign_in_to_another_account_with_one_organization_uses_it() {
+    let fixture = Fixture::signed_in("org-old");
+    let (api, _) = start(listing(vec![org("org-a", "Only example org")])).await;
+    remember_choice(&fixture.shared.store, "org-old").unwrap();
+    sign_in_stored(&fixture, Some("org-old"), "org-a");
+    assert_eq!(chosen_organization(&fixture.shared.store), None);
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(value["current_organization_id"], "org-a");
+    assert_eq!(value["multiple"], false);
+    assert_eq!(value["prompt"], false);
+}
+
+/// Another account with several organizations: the key is in the first
+/// active one, the old choice is forgotten, and the chooser asks. Revocations
+/// still pending are kept.
+#[tokio::test]
+async fn a_sign_in_to_another_account_with_several_organizations_prompts() {
+    let fixture = Fixture::signed_in("org-old");
+    let (api, _) = start(two_orgs()).await;
+    remember_choice(&fixture.shared.store, "org-old").unwrap();
+    record_pending(
+        &fixture.shared.store,
+        &[PendingRevocation::new("ws-org-old", "key-older")],
+    )
+    .unwrap();
+    sign_in_stored(&fixture, Some("org-old"), "org-a");
+    let record = load(&fixture.shared.store).unwrap();
+    assert_eq!(record.chosen_organization_id, None);
+    assert_eq!(record.pending_revocations.len(), 1);
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(value["current_organization_id"], "org-a");
+    assert_eq!(value["chosen"], false);
+    assert_eq!(value["prompt"], true);
+}
+
+/// A new GitHub or Google NEAR AI account with no active organization, or
+/// one with no active workspace, fails the mint with its own control name,
+/// which the sign-in's failure line carries.
+#[tokio::test]
+async fn an_account_without_an_organization_or_workspace_is_labelled() {
+    let (api, _) = start(listing(vec![])).await;
+    let session = crate::daemon::nearai_credential::loopback::SessionTokens {
+        access_token: "session-jwt".into(),
+        refresh_token: "rt_example".into(),
+    };
+    let error = api
+        .mint_inference_key_in(
+            &session,
+            "trace-commons-test",
+            OrganizationChoice::Prefer("org-old"),
+        )
+        .await
+        .map_err(|error| error.context(super::super::ceremony::FailedStep::Mint))
+        .unwrap_err();
+    assert_eq!(
+        super::super::ceremony::failure_labels(&error),
+        Some(("mint", "near_ai_credential_no_organization"))
+    );
+    let no_workspace = anyhow!("near_ai_credential_no_workspace")
+        .context(super::super::ceremony::FailedStep::Mint);
+    assert_eq!(
+        super::super::ceremony::failure_labels(&no_workspace),
+        Some(("mint", "near_ai_credential_no_workspace"))
+    );
+}

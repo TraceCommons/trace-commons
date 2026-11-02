@@ -162,6 +162,40 @@ pub(crate) fn chosen_organization(store: &ConfigStore) -> Option<String> {
         .and_then(|record| record.chosen_organization_id)
 }
 
+/// Whether a sign-in left the remembered choice behind (owner, 2026-11-02:
+/// signing in to a different account with a different NEAR AI organization
+/// switches to its organization if it has one, or asks).
+///
+/// The sign-in mints with [`OrganizationChoice::Prefer`], which lands in the
+/// remembered organization whenever the account has it active. A key minted
+/// anywhere else therefore means this account has no such active
+/// organization: most often a different NEAR AI account (a GitHub or Google
+/// login beside a wallet one). No identity is read for this; the minted
+/// key's organization is the signal, compared in memory and never logged.
+pub(crate) fn choice_left_behind(remembered: Option<&str>, minted_organization: &str) -> bool {
+    remembered.is_some_and(|remembered| remembered != minted_organization)
+}
+
+/// After a sign-in stored a key minted in `minted_organization`: when the
+/// remembered choice was left behind, forget it, so the account's own
+/// organization stands. With one organization nothing is asked; with
+/// several, [`OrganizationsReport::prompt`] asks again, since no choice is
+/// recorded for this account. Pending revocations are kept. Best effort: a
+/// record that cannot be written keeps the old preference, which the mint
+/// already falls back from.
+pub(crate) fn forget_choice_left_behind(
+    store: &ConfigStore,
+    remembered: Option<&str>,
+    minted_organization: &str,
+) {
+    if !choice_left_behind(remembered, minted_organization) {
+        return;
+    }
+    if update(store, |record| record.chosen_organization_id = None).is_err() {
+        tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_choice_not_cleared");
+    }
+}
+
 /// Forget the record. The caller holds the credential commit lock: this is
 /// the forget path's, which removes the session every revoke needs, and the
 /// forget sentence already says keys are not revoked at NEAR AI. Best
