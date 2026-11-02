@@ -26,9 +26,12 @@
 //!   marked detached while its lock is still held, and a caller that finds
 //!   a detached (or retired) handle looks the tenant up again, so a write
 //!   never lands on a handle nothing will save, and a detached handle is
-//!   never saved again. At most `max_open` evicted handles whose flush
-//!   failed wait in `evicting`; past that, a miss first retries their
-//!   flushes and then refuses to open another tenant.
+//!   never saved again. Once `max_open` evicted handles whose flush failed
+//!   wait in `evicting`, a miss first retries their flushes (one caller at
+//!   a time) and then refuses to open another tenant. The cap is checked
+//!   before a miss's own eviction flush runs, so concurrent misses can each
+//!   add one more failure: the bound is `max_open` plus the number of
+//!   concurrent misses.
 //! - Lock order is tenant lock, then cache lock. Nothing takes a tenant lock
 //!   while holding the cache lock.
 //! - Cosine metric over **L2-normalized** vectors. Callers are responsible for
@@ -164,6 +167,29 @@ const MAX_HANDLE_ATTEMPTS: usize = 8;
 /// owning `UsearchVectorIndex` is gone.
 struct IndexInner {
     open_indexes: Mutex<OpenIndexes>,
+    /// Set while one caller retries the failed eviction flushes, so
+    /// concurrent misses refuse at once instead of each rewriting every
+    /// failed tenant file on a disk that is still failing.
+    draining: AtomicBool,
+}
+
+/// Clears a tenant's `deleting` tombstone when dropped, so an early return
+/// or a panic in `delete_tenant_index_file` cannot leave the tenant refused
+/// for the rest of the process.
+struct DeletingTombstone<'a> {
+    inner: &'a IndexInner,
+    tenant_storage_ref: &'a str,
+}
+
+impl Drop for DeletingTombstone<'_> {
+    fn drop(&mut self) {
+        self.inner
+            .open_indexes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deleting
+            .remove(self.tenant_storage_ref);
+    }
 }
 
 /// Background periodic flusher. Dropping it stops the thread.
@@ -271,6 +297,7 @@ impl UsearchVectorIndex {
         }
         let cap = NonZeroUsize::new(max_open).expect("max_open > 0 just checked");
         let inner = Arc::new(IndexInner {
+            draining: AtomicBool::new(false),
             open_indexes: Mutex::new(OpenIndexes {
                 lru: LruCache::new(cap),
                 evicting: HashMap::new(),
@@ -377,7 +404,12 @@ impl UsearchVectorIndex {
                                  failed to save; refusing to open another until they are saved"
                             );
                             drop(open);
-                            drain_failed_evictions(&self.inner);
+                            anyhow::ensure!(
+                                drain_failed_evictions(&self.inner),
+                                "UsearchVectorIndex has {failed} evicted tenant indexes that \
+                                 failed to save and another caller is retrying them; refusing \
+                                 to open another until they are saved"
+                            );
                             drained = true;
                             continue;
                         }
@@ -508,6 +540,10 @@ impl UsearchVectorIndex {
                     .map(|entry| entry.handle)
             })
         };
+        let _tombstone = DeletingTombstone {
+            inner: &self.inner,
+            tenant_storage_ref,
+        };
         // Retire it so an eviction flush still running cannot save its
         // contents back after the file is gone, and a caller holding it
         // looks the tenant up again. Holding the lock across the removal
@@ -527,7 +563,7 @@ impl UsearchVectorIndex {
                 .unwrap_or("<unknown>");
             name.to_string()
         };
-        let removed = match std::fs::remove_file(&path) {
+        match std::fs::remove_file(&path) {
             Ok(()) => {
                 tracing::info!(
                     target: "trace_commons_vector_replay",
@@ -547,14 +583,7 @@ impl UsearchVectorIndex {
             Err(e) => Err(anyhow!(
                 "VectorReplayResetTenantIndex: failed to remove tenant index file {file_hash}: {e}"
             )),
-        };
-        self.inner
-            .open_indexes
-            .lock()
-            .expect("UsearchVectorIndex lru mutex poisoned")
-            .deleting
-            .remove(tenant_storage_ref);
-        removed
+        }
     }
 
     /// Return the live entry count for `tenant_storage_ref`. Opens (or
@@ -740,7 +769,23 @@ fn flush_handle_arc(handle: &SharedTenantHandle) -> anyhow::Result<()> {
 
 /// Retry the flush of every evicted handle whose last flush failed. Errors
 /// are already recorded on the entries; the caller re-reads the backlog.
-fn drain_failed_evictions(inner: &IndexInner) {
+/// Returns `false`, without retrying anything, when another caller is
+/// already draining.
+fn drain_failed_evictions(inner: &IndexInner) -> bool {
+    if inner
+        .draining
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    struct Release<'a>(&'a AtomicBool);
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _release = Release(&inner.draining);
     let failed: Vec<(String, u64, SharedTenantHandle)> = {
         let open = inner
             .open_indexes
@@ -755,6 +800,7 @@ fn drain_failed_evictions(inner: &IndexInner) {
     for (key, sequence, handle) in failed {
         let _ = flush_evicted(inner, &key, sequence, &handle);
     }
+    true
 }
 
 /// Flush a handle evicted from the LRU as eviction `sequence`, and release
@@ -1671,10 +1717,20 @@ mod tests {
             "a refused miss evicts nothing"
         );
 
-        // The disk recovers: the next miss drains the backlog itself, with
-        // no `flush_all`, and opens.
+        // The disk recovers. While another caller is draining, a miss
+        // refuses at once instead of retrying the saves itself.
         std::fs::create_dir_all(&missing_dir).unwrap();
+        idx.inner.draining.store(true, Ordering::SeqCst);
+        let Err(err) = idx.handle_for("tenant_c") else {
+            panic!("a miss must not drain while another caller is");
+        };
+        assert!(format!("{err:#}").contains("another caller"), "{err:#}");
+        idx.inner.draining.store(false, Ordering::SeqCst);
+
+        // Then the next miss drains the backlog itself, with no
+        // `flush_all`, and opens.
         idx.handle_for("tenant_c").unwrap();
+        assert!(!idx.inner.draining.load(Ordering::SeqCst));
         assert!(
             !idx.inner
                 .open_indexes

@@ -396,8 +396,12 @@ pub const POOL_RECYCLE_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// The create timeout for a pool on `config`. Without a URL
 /// `connect_timeout` it is [`POOL_CREATE_TIMEOUT`]. With one, it is that
 /// timeout once per configured host, plus [`POOL_CREATE_TIMEOUT`].
-/// `tokio_postgres` applies `connect_timeout` to each host's TCP connect in
-/// turn, so a bound below that would cut off failover to a second host. The
+/// `tokio_postgres` applies `connect_timeout` to the TCP connect of each
+/// resolved address in turn, so a bound below that would cut off failover
+/// to a second host. The budget counts configured hosts, not addresses: a
+/// host that resolves to several addresses (`localhost`, a dual-stack name)
+/// gets one `connect_timeout` plus the shared pad, which covers a second
+/// address that fails fast but not one that also hangs. The
 /// TLS handshake, authentication and startup that follow have no timeout of
 /// their own, so the create is always bounded: a server that accepts the
 /// socket and then stalls must not hold a caller until TCP keepalive gives
