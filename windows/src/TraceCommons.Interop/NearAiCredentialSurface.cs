@@ -72,27 +72,11 @@ public readonly record struct NearAiCredentialStatus(
 /// </summary>
 public static class NearAiCredentialSurface
 {
-    public const string ProviderGithub = "github";
-    public const string ProviderGoogle = "google";
-    public const string ProviderNear = "near";
-
-    public sealed record ProviderChoice(string Id, string Label);
-
-    public static ProviderChoice[] Providers(PrivateInferenceCopy copy) =>
-    [
-        new(ProviderNear, copy.CredentialProviderNear),
-        new(ProviderGithub, copy.CredentialProviderGithub),
-        new(ProviderGoogle, copy.CredentialProviderGoogle),
-    ];
-
-    public static bool IsProvider(string? provider) =>
-        provider is ProviderGithub or ProviderGoogle or ProviderNear;
-
-    public static string SerializeStart(string provider)
-    {
-        if (!IsProvider(provider)) throw new ArgumentException(null, nameof(provider));
-        return JsonSerializer.Serialize(new { provider });
-    }
+    /// <summary>
+    /// The start request: no provider. The person picks a login on the page
+    /// the daemon opens in the browser, so no shell names one.
+    /// </summary>
+    public const string StartRequest = "{}";
 
     /// <summary>
     /// What the daemon reported, or <see cref="NearAiCredentialStatus.Unreported"/>

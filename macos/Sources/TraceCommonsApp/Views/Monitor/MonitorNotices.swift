@@ -720,14 +720,12 @@ struct MonitorNotices: View {
                 } summary: {
                     Text(model.managedText("sign_in_needed"))
                 } details: { EmptyView() } actions: {
-                    // Every login the build offers, as Settings offers them.
                     NearAiSignInButton(
                         title: model.managedText("sign_in_near_ai"),
                         accessibilityName: model.managedText("sign_in_near_ai_accessibility"),
-                        choice: NearAiSignInChoice.of(model.privateInferenceCopy),
                         style: GlassButtonStyle(.glass)
-                    ) { provider in
-                        NearAiSignIn.begin(model, provider: provider, openURL: openURL)
+                    ) {
+                        NearAiSignIn.begin(model, openURL: openURL)
                     }
                     .lineLimit(1)
                     .disabled(model.credentialBusy)
@@ -741,25 +739,21 @@ struct MonitorNotices: View {
 /// The NEAR AI sign-in, begun as Settings > Private AI begins it: the
 /// daemon starts the ceremony and the browser finishes it. A browser that
 /// never opened leaves a ceremony nobody can finish, so it is stopped
-/// rather than left to time out. `provider` is the login the person chose
-/// from `NearAiSignInChoice` (owner, 2026-11-01: every NEAR AI login, not
-/// the wallet alone); nil only when the build offers none to choose, and
-/// the daemon then starts its default
-/// (`channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER`).
+/// rather than left to time out. It names no provider; the daemon's
+/// browser page lists the build's logins and the person picks one there
+/// (owner, 2026-11-02).
 @MainActor
 enum NearAiSignIn {
-    static func begin(
-        _ model: AppModel, provider: String?, openURL: OpenURLAction, then: (() -> Void)? = nil
-    ) {
+    static func begin(_ model: AppModel, openURL: OpenURLAction, then: (() -> Void)? = nil) {
         Task {
-            await run(model, provider: provider, open: { url in await openURL.opened(url) })
+            await run(model, open: { url in await openURL.opened(url) })
             then?()
         }
     }
 
     /// `begin`'s work, with the browser as a seam for tests.
-    static func run(_ model: AppModel, provider: String?, open: (URL) async -> Bool) async {
-        guard let url = await model.startNearAiCredential(provider: provider) else { return }
+    static func run(_ model: AppModel, open: (URL) async -> Bool) async {
+        guard let url = await model.startNearAiCredential() else { return }
         let accepted = await open(url)
         if !accepted { model.cancelNearAiCredential() }
     }

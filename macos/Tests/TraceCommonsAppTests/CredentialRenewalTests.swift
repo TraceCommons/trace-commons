@@ -24,7 +24,7 @@ private final class RenewalDaemon: DaemonCalling {
 
 final class CredentialRenewalTests: XCTestCase {
     @MainActor
-    func testExpiredSessionRetainsKeyAndShowsProviderChoice() async throws {
+    func testExpiredSessionRetainsKeyAndOffersSignInWithoutAChooser() async throws {
         let model = AppModel()
         defer { model.shutdown() }
         model.setClientForTesting(DaemonClient(daemon: RenewalDaemon()))
@@ -52,8 +52,12 @@ final class CredentialRenewalTests: XCTestCase {
         request.recognitionLevel = .accurate
         try VNImageRequestHandler(cgImage: XCTUnwrap(bitmap.cgImage)).perform([request])
         let words = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
-        XCTAssertTrue(words.contains(copy.credentialProviderLabel),
-                      "Renewing an expired session must expose the provider chooser")
+        let signIn = try XCTUnwrap(CredentialSurface.actionLabel(.obtain, copy: copy))
+        XCTAssertTrue(words.contains(signIn), "Renewing an expired session must offer Sign in: \(words)")
+        // The login is chosen on the daemon's browser page (owner,
+        // 2026-11-02), so no chooser is drawn here.
+        XCTAssertFalse(words.contains(copy.credentialProviderLabel),
+                       "Renewal draws a provider chooser again: \(words)")
         XCTAssertEqual(CredentialSurface.action(model.credentialStatus, calls: model.credentialCalls), .forget,
                        "Renewal must preserve the retained inference key")
     }
