@@ -22,4 +22,15 @@ final class ManagedRowClickTests: XCTestCase {
         XCTAssertFalse(ManagedRowClick.holdsWindow(elsewhere))
         XCTAssertFalse(ManagedRowClick.acts(elsewhere, busy: false))
     }
+
+    /// #1853 review: VoiceOver's named actions ignore `.disabled`, so while
+    /// another request runs they are not offered rather than dropped.
+    func testVoiceOverActionsAreNotOfferedWhileBusy() {
+        let menu: [ManagedSessionAction] = [.show, .stop]
+        XCTAssertTrue(ManagedRowClick.offers(.show, menu: menu, busy: false))
+        XCTAssertTrue(ManagedRowClick.offers(.stop, menu: menu, busy: false))
+        XCTAssertFalse(ManagedRowClick.offers(.show, menu: menu, busy: true))
+        XCTAssertFalse(ManagedRowClick.offers(.stop, menu: menu, busy: true))
+        XCTAssertFalse(ManagedRowClick.offers(.show, menu: [.stop], busy: false))
+    }
 }

@@ -71,6 +71,40 @@ final class HoldsWindowStillTests: XCTestCase {
         XCTAssertTrue(window.isMovableByWindowBackground, "scrolled away, held once")
     }
 
+    /// #1853 review: something that makes the window movable again while
+    /// two views hold it does not reset the count: the window stays held
+    /// until the last view lets go.
+    func testAMovableResetWhileHeldDoesNotDropTheOtherHold() throws {
+        let window = window()
+        let first = view(in: window)
+        let second = view(in: window, y: 20)
+        first.mouseEntered(with: try event(.mouseEntered, window))
+        window.isMovableByWindowBackground = true
+        second.mouseEntered(with: try event(.mouseEntered, window))
+        first.mouseExited(with: try event(.mouseExited, window))
+        XCTAssertFalse(window.isMovableByWindowBackground, "still over the second view")
+        second.mouseExited(with: try event(.mouseExited, window))
+        XCTAssertTrue(window.isMovableByWindowBackground)
+    }
+
+    /// #1853 review: turning a view's hold off lets go in place, and on
+    /// again holds by where the pointer is, with the same view kept.
+    func testTurningTheHoldOffLetsGoAndOnHoldsAgain() throws {
+        let window = window()
+        let view = view(in: window)
+        view.mouseEntered(with: try event(.mouseEntered, window))
+        view.isEnabled = false
+        XCTAssertTrue(window.isMovableByWindowBackground)
+        view.mouseEntered(with: try event(.mouseEntered, window))
+        XCTAssertTrue(window.isMovableByWindowBackground, "off: holds nothing")
+        view.settle(pointerInside: false)
+        view.isEnabled = true
+        view.settle(pointerInside: true)
+        XCTAssertFalse(window.isMovableByWindowBackground)
+        view.settle(pointerInside: false)
+        XCTAssertTrue(window.isMovableByWindowBackground)
+    }
+
     /// A window something else holds still is left as it is.
     func testAWindowHeldStillElsewhereIsNotLetGo() throws {
         let window = window()

@@ -952,20 +952,20 @@ struct ManagedSessionRowActions<Content: View>: View {
         } else {
             content
                 .contentShape(Rectangle())
-                .holdsWindowStill(when: ManagedRowClick.holdsWindow(session))
+                .holdsWindowStill(enabled: ManagedRowClick.holdsWindow(session))
                 // Off while another request runs, as the row's buttons are.
                 .gesture(
                     TapGesture().onEnded { model.showManagedSession(session.id) },
                     including: ManagedRowClick.acts(session, busy: model.managedBusy) ? .all : .subviews)
                 .accessibilityElement(children: .contain)
+                // Named actions ignore `.disabled`, so while another request
+                // runs they are not offered at all, rather than dropped.
                 .accessibilityActions {
-                    if menu.contains(.show) {
+                    if ManagedRowClick.offers(.show, menu: menu, busy: model.managedBusy) {
                         Button(model.managedText("show")) { model.showManagedSession(session.id) }
-                            .disabled(model.managedBusy)
                     }
-                    if menu.contains(.stop) {
+                    if ManagedRowClick.offers(.stop, menu: menu, busy: model.managedBusy) {
                         Button(model.managedText("stop")) { onStop() }
-                            .disabled(model.managedBusy)
                     }
                 }
         }
@@ -989,13 +989,11 @@ enum ManagedRowClick {
     static func acts(_ session: ManagedSession, busy: Bool) -> Bool {
         ManagedSurface.clickShows(session) && !busy
     }
-}
 
-private extension View {
-    /// `holdsWindowStill()` only `when` true. A row that turns clickable
-    /// gets its hold then, which checks where the pointer already is.
-    @ViewBuilder func holdsWindowStill(when: Bool) -> some View {
-        if when { holdsWindowStill() } else { self }
+    /// Whether the row's VoiceOver action is offered: in the row's menu,
+    /// and not while another request runs.
+    static func offers(_ action: ManagedSessionAction, menu: [ManagedSessionAction], busy: Bool) -> Bool {
+        menu.contains(action) && !busy
     }
 }
 

@@ -7,14 +7,22 @@ extension View {
     /// otherwise moves by a drag anywhere in its background (owner,
     /// 2026-11-02: dragging a Traces folder moved the window, and a click
     /// on a running Private AI session did not show its terminal).
-    public func holdsWindowStill() -> some View {
-        background(GlassHoldWindow())
+    ///
+    /// `enabled` turns the hold on and off in place, so the view it is
+    /// attached to keeps its identity and state when it does.
+    public func holdsWindowStill(enabled: Bool = true) -> some View {
+        background(GlassHoldWindow(enabled: enabled))
     }
 }
 
 private struct GlassHoldWindow: NSViewRepresentable {
-    func makeNSView(context: Context) -> GlassHoldWindowView { GlassHoldWindowView() }
-    func updateNSView(_ view: GlassHoldWindowView, context: Context) {}
+    let enabled: Bool
+    func makeNSView(context: Context) -> GlassHoldWindowView {
+        let view = GlassHoldWindowView()
+        view.isEnabled = enabled
+        return view
+    }
+    func updateNSView(_ view: GlassHoldWindowView, context: Context) { view.isEnabled = enabled }
 }
 
 /// Watched by a tracking area, so it takes no clicks of its own.
@@ -34,8 +42,18 @@ final class GlassHoldWindowView: NSView {
     /// leaves or the view does.
     private weak var held: NSWindow?
 
-    /// How many of these views hold each window still.
-    @MainActor private static var holds: [ObjectIdentifier: Int] = [:]
+    /// How many of these views hold each window still, by window, held
+    /// weakly: a window that goes takes its count with it.
+    @MainActor private static let holds = NSMapTable<NSWindow, NSNumber>.weakToStrongObjects()
+
+    /// Off, the view holds nothing and lets go of what it held; turned on,
+    /// it holds when the pointer is already over it.
+    var isEnabled = true {
+        didSet {
+            guard isEnabled != oldValue else { return }
+            if isEnabled { settleByPointer() } else { release() }
+        }
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -46,6 +64,10 @@ final class GlassHoldWindowView: NSView {
             rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
         addTrackingArea(area)
         tracking = area
+        settleByPointer()
+    }
+
+    private func settleByPointer() {
         guard let window else { return }
         let pointer = convert(window.mouseLocationOutsideOfEventStream, from: nil)
         settle(pointerInside: visibleRect.contains(pointer))
@@ -67,29 +89,27 @@ final class GlassHoldWindowView: NSView {
     }
 
     private func hold() {
-        guard held == nil, let window else { return }
-        let key = ObjectIdentifier(window)
-        // A count while the window moves again is a gone window's whose
-        // identifier this one now has: this window starts its own.
-        if window.isMovableByWindowBackground { Self.holds[key] = nil }
-        if Self.holds[key] == nil {
+        guard isEnabled, held == nil, let window else { return }
+        let count = Self.holds.object(forKey: window)?.intValue ?? 0
+        if count == 0 {
             // Held still by something else: not ours to let go of.
             guard window.isMovableByWindowBackground else { return }
-            window.isMovableByWindowBackground = false
         }
-        Self.holds[key, default: 0] += 1
+        // Set on every hold, not only the first: anything that made the
+        // window movable again while held is overruled while a view holds.
+        window.isMovableByWindowBackground = false
+        Self.holds.setObject(NSNumber(value: count + 1), forKey: window)
         held = window
     }
 
     private func release() {
         guard let window = held else { return }
         held = nil
-        let key = ObjectIdentifier(window)
-        let left = (Self.holds[key] ?? 1) - 1
+        let left = (Self.holds.object(forKey: window)?.intValue ?? 1) - 1
         if left > 0 {
-            Self.holds[key] = left
+            Self.holds.setObject(NSNumber(value: left), forKey: window)
         } else {
-            Self.holds[key] = nil
+            Self.holds.removeObject(forKey: window)
             window.isMovableByWindowBackground = true
         }
     }

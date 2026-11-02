@@ -9462,21 +9462,28 @@ prompt may hold input not yet run.
   `in_window_of` field, which is still accepted so that app keeps launching,
   and ignored.
 - The daemon opened that row itself, its tool started (it was redeemed), and
-  it has ended. No other session that still holds its account has the same
-  tab.
-- That tab is still the one the row ran in. A tty alone does not say so:
-  macOS hands a closed tab's tty to the next tab opened. When it opens a
-  Terminal tab the daemon records the pid and start time of the one process
-  on that tty whose parent is not on it (the tab's `login`), and before
-  using the tab's window it reads them again and requires the same.
-- Terminal still has that tab; its window, kept by id, is brought to the
-  front, and Terminal becomes the frontmost app with that window in front
-  within about a second.
+  it has ended.
+- That row's launch read back the id of the Terminal window holding its tab,
+  and Terminal still has a window with that id. A window id Terminal has
+  since given another window at worst puts the new tab there; nothing is
+  typed into an existing tab either way.
+- The window comes to the front, and Terminal becomes the frontmost app with
+  that window in front, within about a second.
 - Terminal has no scripting command for a new tab, so the daemon presses
   Command-T through System Events. macOS allows that only once the app has
-  Accessibility access, and asks with its own prompt. Refused, or with no
-  new tab in that window within about a second, the launch opens a new
-  window. The new tab's tty, and its `login`, become the session's handle.
+  Accessibility access, and asks with its own prompt. The first event to
+  System Events can also wait on macOS's Automation consent prompt; the
+  keystroke is given 2 seconds, so that wait ends in a new window rather
+  than a stalled launch. The new tab is the one tab whose tty was not there
+  before the keystroke, in whichever window it landed, waited for up to 3
+  seconds; with none, or more than one, the launch opens a new window, and
+  so it does if Terminal refuses to run the command in the new tab. The new
+  tab's tty and window id become the session's handle.
+
+The terminal opens with the daemon's managed state unlocked: the launch is
+held first (a second `managed_terminal_launch` with the same ticket is
+refused with `managed-conflict`), and recorded after. A launch whose terminal
+did not open is released, and its ticket stands until it lapses.
 
 When `managed_launch_prepare` or `managed_session_start_again` passes the
 checks that come before preparing, other than the tool's version, and would
