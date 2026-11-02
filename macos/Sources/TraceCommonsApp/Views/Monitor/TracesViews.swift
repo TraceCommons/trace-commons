@@ -59,10 +59,9 @@ struct TracesTreeView: View, Equatable {
     /// session in it is selected from elsewhere (#1146 `reveal`).
     @State private var expanded: Set<String> = []
     /// A folder being dragged into place (owner, 2026-11-02, as the tabs
-    /// are dragged): which one, and how far its middle sits from the
-    /// pointer, so it stays where it was grabbed.
+    /// are dragged): which one, and where its middle was when grabbed.
     @State private var draggingFolder: String?
-    @State private var dragGrab: CGFloat = 0
+    @State private var dragStartMid: CGFloat = 0
     /// How far the dragged folder sits from its slot.
     @State private var dragOffset: CGFloat = 0
     /// Each drawn folder row's frame in the tree, for the drag.
@@ -712,6 +711,9 @@ struct TracesTreeView: View, Equatable {
         // Dragged as the tabs are (owner, 2026-11-02): the folder follows
         // the pointer, and trades places with the folder above or below
         // once past its middle. The list is then in the person's order.
+        .offset(y: draggingFolder == folder.id ? dragOffset : 0)
+        // Measured outside the offset, so the frame is the slot the
+        // folder holds, not where the drag has moved it to.
         .background {
             GeometryReader { proxy in
                 Color.clear.preference(
@@ -719,7 +721,6 @@ struct TracesTreeView: View, Equatable {
                     value: [folder.id: proxy.frame(in: .named(Self.foldersSpace))])
             }
         }
-        .offset(y: draggingFolder == folder.id ? dragOffset : 0)
         .zIndex(draggingFolder == folder.id ? 1 : 0)
         .simultaneousGesture(folderDrag(folder.id))
         .modifier(FolderMoveActions(store: store, id: folder.id))
@@ -743,16 +744,18 @@ struct TracesTreeView: View, Equatable {
     }
 
     private func folderDrag(_ id: String) -> some Gesture {
-        DragGesture(minimumDistance: Self.folderDragThreshold, coordinateSpace: .named(Self.foldersSpace))
+        // As the tabs: the pointer's travel, not its place in the tree,
+        // which moves under it as the folder is offset.
+        DragGesture(minimumDistance: Self.folderDragThreshold, coordinateSpace: .global)
             .onChanged { gesture in
                 guard let frame = folderFrames[id] else { return }
                 if draggingFolder != id {
                     draggingFolder = id
-                    dragGrab = gesture.startLocation.y - frame.midY
+                    dragStartMid = frame.midY
                 }
-                // Where the dragged folder's middle would be under the
-                // pointer, against the slot it holds now.
-                let center = gesture.location.y - dragGrab
+                // Where the dragged folder's middle is under the pointer,
+                // against the slot it holds now.
+                let center = dragStartMid + gesture.translation.height
                 let shown = store.shownTree.folders.map(\.id)
                 if let index = shown.firstIndex(of: id) {
                     let above = index > 0 ? folderFrames[shown[index - 1]].map { (shown[index - 1], $0.midY) } : nil
