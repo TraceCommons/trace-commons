@@ -301,6 +301,19 @@ pub(crate) fn load_with_snapshot(
     store: &ConfigStore,
     kind: Kind,
 ) -> Result<Option<(Vec<u8>, Snapshot)>> {
+    Ok(match load_or_snapshot(store, kind)? {
+        (Some(payload), expected) => Some((payload, expected)),
+        (None, _) => None,
+    })
+}
+
+/// [`load_with_snapshot`], answering the snapshot when nothing is stored
+/// too, so a caller that writes against an absent record needs no second
+/// read of credential storage.
+pub(crate) fn load_or_snapshot(
+    store: &ConfigStore,
+    kind: Kind,
+) -> Result<(Option<Vec<u8>>, Snapshot)> {
     load_observed(store, kind).map_err(LoadFailure::into_error)
 }
 
@@ -321,9 +334,9 @@ pub(crate) enum AccountLoadFailure {
 /// it found for [`observed_account_read`].
 pub(crate) fn load_account(
     store: &ConfigStore,
-) -> std::result::Result<Option<(Vec<u8>, Snapshot)>, AccountLoadFailure> {
+) -> std::result::Result<(Option<Vec<u8>>, Snapshot), AccountLoadFailure> {
     match load_observed(store, Kind::Account) {
-        Ok(Some((payload, _))) if !payload_is_json(&payload) => Err(AccountLoadFailure::Unreadable),
+        Ok((Some(payload), _)) if !payload_is_json(&payload) => Err(AccountLoadFailure::Unreadable),
         Ok(loaded) => Ok(loaded),
         Err(LoadFailure::Permanent(..)) => Err(AccountLoadFailure::Unreadable),
         Err(LoadFailure::Transient(_)) => Err(AccountLoadFailure::Storage),
@@ -383,15 +396,15 @@ impl LoadFailure {
 fn load_observed(
     store: &ConfigStore,
     kind: Kind,
-) -> std::result::Result<Option<(Vec<u8>, Snapshot)>, LoadFailure> {
+) -> std::result::Result<(Option<Vec<u8>>, Snapshot), LoadFailure> {
     let loaded = load_inner(store, kind);
     if kind == Kind::Account {
         match &loaded {
-            Ok(Some((payload, snapshot))) => {
+            Ok((Some(payload), snapshot)) => {
                 observe_account(store, snapshot.digest(), !payload_is_json(payload));
             }
             Err(LoadFailure::Permanent(_, digest)) => observe_account(store, *digest, true),
-            Ok(None) | Err(LoadFailure::Transient(_)) => {}
+            Ok((None, _)) | Err(LoadFailure::Transient(_)) => {}
         }
     }
     loaded
@@ -400,7 +413,7 @@ fn load_observed(
 fn load_inner(
     store: &ConfigStore,
     kind: Kind,
-) -> std::result::Result<Option<(Vec<u8>, Snapshot)>, LoadFailure> {
+) -> std::result::Result<(Option<Vec<u8>>, Snapshot), LoadFailure> {
     if needs_native_thread() {
         return std::thread::scope(|scope| {
             scope
@@ -414,7 +427,7 @@ fn load_inner(
     let digest = expected.digest();
     let permanent = |error: anyhow::Error| LoadFailure::Permanent(error, digest);
     let Some(bytes) = &expected.previous else {
-        return Ok(None);
+        return Ok((None, expected));
     };
     let Some(record) = record(bytes).map_err(permanent)? else {
         // Migration keeps the original file intact until an immutable OS entry
@@ -448,7 +461,7 @@ fn load_inner(
     let locks = coordination(store.dir()).map_err(transient)?;
     let _commit = locks.commit.lock().map_err(transient)?;
     ensure_current(store, &expected).map_err(transient)?;
-    Ok(Some((payload, expected)))
+    Ok((Some(payload), expected))
 }
 
 /// Publish a secret, optionally publishing its first enrollment config in the
@@ -700,6 +713,17 @@ fn test_backend(store: &ConfigStore) -> Arc<dyn SecretBackend> {
         .entry(store.dir().to_path_buf())
         .or_insert_with(|| Arc::new(super::cloud_credential_test_support::MemoryBackend::default()))
         .clone()
+}
+
+/// Delete the OS entry `kind`'s record names, leaving the record: what a
+/// keychain entry removed behind the app's back looks like.
+#[cfg(test)]
+pub(crate) fn remove_os_entry_for_test(store: &ConfigStore, kind: Kind) {
+    let bytes = std::fs::read(kind.file(store)).expect("a record is stored");
+    let record = record(&bytes)
+        .unwrap()
+        .expect("a credential record, not a legacy file");
+    native(store).unwrap().delete(&record.reference).unwrap();
 }
 
 #[cfg(test)]
