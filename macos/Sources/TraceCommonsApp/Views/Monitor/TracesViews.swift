@@ -311,6 +311,9 @@ struct TracesTreeView: View, Equatable {
                 // Folders are the top level: no tool level to indent past.
                 .environment(\.glassTreeRoot, .folder)
                 .coordinateSpace(.named(Self.foldersSpace))
+                // A folder dragged into place must not take the window with
+                // it (owner, 2026-11-02): the window moves by its background.
+                .background(TracesHoldWindow())
                 .onPreferenceChange(TracesFolderFrames.self) { folderFrames = $0 }
                 .overlayPreferenceValue(TracesMenuAnchors.self, alignment: .topLeading) { anchors in
                     GeometryReader { space in openMenus(anchors, in: space) }
@@ -1591,5 +1594,50 @@ private struct TracesFolderFrames: PreferenceKey {
     static let defaultValue: [String: CGRect] = [:]
     static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue()) { $1 }
+    }
+}
+
+/// Holds the window still while the pointer is over the tree, so a press
+/// on a folder row drags the folder, not the window, which is otherwise
+/// moved by a drag anywhere in its background. Watched by a tracking area,
+/// so it takes no clicks of its own.
+private struct TracesHoldWindow: NSViewRepresentable {
+    func makeNSView(context: Context) -> TracesHoldWindowView { TracesHoldWindowView() }
+    func updateNSView(_ view: TracesHoldWindowView, context: Context) {}
+}
+
+final class TracesHoldWindowView: NSView {
+    private var tracking: NSTrackingArea?
+    /// The window this view held still, to let go of when the pointer
+    /// leaves or the view does.
+    private weak var held: NSWindow?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(
+            rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard let window, window.isMovableByWindowBackground else { return }
+        window.isMovableByWindowBackground = false
+        held = window
+    }
+
+    override func mouseExited(with event: NSEvent) { release() }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow !== held { release() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    private func release() {
+        held?.isMovableByWindowBackground = true
+        held = nil
     }
 }
