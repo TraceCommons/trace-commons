@@ -281,13 +281,13 @@ struct Entry {
     )]
     terminal: Option<TerminalHandle>,
     /// The id of the Terminal window `terminal`'s tab was in when the
-    /// launch read it back: where Start again and Resume open a new tab.
-    /// A row written without it opens them in a new window.
+    /// launch read it back, for a launch that places itself beside it
+    /// (#1852). A row written before it has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     terminal_window: Option<u32>,
     /// The ended row Start again or Resume prepared this one from. Set by
-    /// the daemon, never by a request: its window is the only one this
-    /// session's launch may open a tab in.
+    /// the daemon, never by a request, so no shell names a row to place a
+    /// launch beside.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     again_of: Option<Uuid>,
     /// A stop was asked for; the launcher is told on its next report.
@@ -504,8 +504,10 @@ impl SessionRegistry {
         Ok(cwd)
     }
 
-    /// The terminal for `id`'s held launch did not open: the launch is
-    /// released as if never begun, so its ticket stands until it lapses.
+    /// The terminal for `id`'s held launch was refused before anything ran
+    /// (never for `LaunchUnknown`, whose command may be running): the
+    /// launch is released as if never begun, so its ticket stands until it
+    /// lapses.
     pub fn terminal_launch_failed(&mut self, id: Uuid) -> Result<(), ManagedError> {
         let mut next = self.data.clone();
         let Some(entry) = next
@@ -554,13 +556,13 @@ impl SessionRegistry {
         }
     }
 
-    /// The Terminal window session `id` opens a new tab in: the one the
-    /// row it was started again or resumed from ran in. Only for a row the
-    /// daemon opened, that started, and that has ended. None otherwise, and
-    /// for any session not prepared by Start again or Resume: that launch
-    /// opens a new window. A window id Terminal has since given another
-    /// window at worst puts the new tab there; nothing is typed into an
-    /// existing tab either way.
+    /// The Terminal window the row session `id` was started again or
+    /// resumed from ran in: only for a row the daemon opened, that started,
+    /// and that has ended. None otherwise, and for any session not prepared
+    /// by Start again or Resume. Start again and Resume still open a new
+    /// window (owner, 2026-11-02); this is kept for a launch that places
+    /// itself beside an earlier one (#1852). Terminal may have given the id
+    /// to another window since.
     pub fn again_window(&self, id: Uuid) -> Option<u32> {
         let entries = &self.data.entries;
         let source_id = entries.iter().find(|e| e.view.id == id)?.again_of?;
@@ -800,8 +802,8 @@ impl SessionRegistry {
     }
 
     /// [`Self::prepare`], for Start again and Resume: `again_of` is the
-    /// ended row the request came from, kept on the new row so its launch
-    /// finds that row's window itself ([`Self::again_window`]). A replay
+    /// ended row the request came from, kept on the new row
+    /// ([`Self::again_window`]). A replay
     /// returns the row first prepared, unchanged.
     pub fn prepare_again(
         &mut self,
@@ -3238,8 +3240,8 @@ mod tests {
     /// finds its window from the row it was prepared from, recorded by the
     /// daemon and kept across a restart, and only for a row that ended. A
     /// row written without a window id (#1839's) offers none. A launch that
-    /// is not a Start again or Resume has none. Another session in the same
-    /// window does not matter: a new tab opens beside it.
+    /// is not a Start again or Resume has none. Another session running in
+    /// the same window does not matter.
     #[test]
     fn start_again_offers_the_ended_rows_window_only() {
         let home = tempfile::tempdir().unwrap();

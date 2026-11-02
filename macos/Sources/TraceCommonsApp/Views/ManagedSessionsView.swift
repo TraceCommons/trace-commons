@@ -895,9 +895,8 @@ struct ManagedSessionActions: View {
             }
     }
 
-    /// The conversation continues. In Terminal it opens in a new tab of
-    /// this row's window while that window is still there, otherwise in a
-    /// new window, as for any launch; the daemon decides.
+    /// The conversation continues; the terminal opens in a new window, as
+    /// for any launch.
     private func resume() {
         model.managedAction(
             "managed_session_resume",
@@ -923,10 +922,8 @@ struct ManagedSessionActions: View {
             userInfo: [.announcement: model.managedText("copied"), .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
 
-    /// Same tool, account and folder, with no folder chooser. In Terminal
-    /// it opens in a new tab of this row's window while that window is
-    /// still there, otherwise in a new window, as for any launch; the
-    /// daemon decides.
+    /// Same tool, account and folder, with no folder chooser; the terminal
+    /// opens in a new window, as for any launch.
     private func startAgain() {
         model.managedAction(
             "managed_session_start_again",

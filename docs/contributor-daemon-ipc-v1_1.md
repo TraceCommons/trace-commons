@@ -9450,55 +9450,29 @@ focusable or stoppable.
   folder, `managed-not-found` for a removed account, and
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.
 
-`managed_terminal_launch {session_id, ticket}` for a session that
-`managed_session_start_again` or `managed_session_resume` prepared opens it, in
-Terminal on macOS, in a new tab of the window holding the tab the ended row ran
-in (owner, 2026-11-02), when all of these hold; otherwise it opens a new
-window, as any launch does. Nothing is ever typed into an existing tab, whose
-prompt may hold input not yet run.
+`managed_terminal_launch {session_id, ticket}` opens a session prepared by
+`managed_session_start_again` or `managed_session_resume` in a new window, as
+any launch does (owner, 2026-11-02). Nothing is typed into, or opened in, an
+existing terminal window or tab, and the launch asks macOS for no permission
+beyond the Automation of Terminal every Terminal launch already needs.
 
-- The daemon recorded, when it prepared the session, which row it came from.
+- The daemon records, when it prepares the session, which row it came from.
   The shell names nothing: the macOS app built from #1839 sent an
   `in_window_of` field, which is still accepted so that app keeps launching,
   and ignored.
-- The daemon opened that row itself, its tool started (it was redeemed), and
-  it has ended.
-- That row's launch read back the id of the Terminal window holding its tab,
-  and Terminal still has a window with that id. A window id Terminal has
-  since given another window at worst puts the new tab there; nothing is
-  typed into an existing tab either way.
-- The window comes to the front, and Terminal becomes the frontmost app with
-  that window in front, within about a second.
-- Terminal has no scripting command for a new tab, so the daemon presses
-  Command-T through System Events, from the same `osascript` it runs every
-  Terminal launch with (owner, 2026-11-02). That needs two macOS
-  permissions: Automation of System Events and Accessibility. macOS asks
-  for each with its own prompt, which names the process TCC holds
-  responsible for `osascript`. A process inherits its parent's responsible
-  process unless the parent disclaims it, and nothing here does. In the
-  macOS app the daemon runs inside the app's own process (`tc_daemon_start`),
-  so the prompts, and the entries under System Settings > Privacy &
-  Security > Automation and > Accessibility, name the app as installed:
-  "Near.ai" (its `CFBundleName` and `CFBundleDisplayName`; bundle id
-  `ai.tracecommons.shell`), or "Near.ai Staging" for the staging build. A
-  daemon the app attached to instead (`near-ai daemon run` in a terminal, or one
-  under a service manager) is attributed to whatever started it: Terminal,
-  or that daemon's own binary. A grant is tied to the code signature it was
-  given to, so a differently signed build asks again. Refusing either
-  permission makes the keystroke fail, which the script catches, and the
-  launch opens a new window; nothing in the app says so. The first event to
-  System Events can also wait on the Automation prompt; the keystroke is
-  given 2 seconds, so that wait ends in a new window rather
-  than a stalled launch. The new tab is the one tab whose tty was not there
-  before the keystroke, in whichever window it landed, waited for up to 3
-  seconds; with none, or more than one, the launch opens a new window, and
-  so it does if Terminal refuses to run the command in the new tab. The new
-  tab's tty and window id become the session's handle.
+- Every Terminal launch reads back its tab's tty and, on the next line, the
+  id of the window holding it, and the row keeps both. The window id is for
+  a later launch that places itself beside an earlier one (#1852); nothing
+  uses it yet. A window line that cannot be read leaves the row with its tab
+  and no window.
 
-The terminal opens with the daemon's managed state unlocked: the launch is
-held first (a second `managed_terminal_launch` with the same ticket is
-refused with `managed-conflict`), and recorded after. A launch whose terminal
-did not open is released, and its ticket stands until it lapses.
+The terminal opens with the daemon's managed state unlocked and off its async
+workers: the launch is held first (a second `managed_terminal_launch` with the
+same ticket is refused with `managed-conflict`), and recorded after. A launch
+refused before anything ran (the terminal app not found, an invalid request)
+is released, and its ticket can launch again while it lasts.
+`managed-launch-unknown`, where the command may already have been typed, keeps
+the launch held until its tool reports or the ticket lapses.
 
 When `managed_launch_prepare` or `managed_session_start_again` passes the
 checks that come before preparing, other than the tool's version, and would

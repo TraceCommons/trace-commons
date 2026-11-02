@@ -60,7 +60,6 @@ type LaunchTerminal = fn(
     &std::path::Path,
     Uuid,
     &str,
-    Option<u32>,
 ) -> Result<Option<TerminalTab>, ManagedError>;
 
 /// A terminal launch the daemon holds ([`ManagedService::begin_terminal_launch`]),
@@ -73,13 +72,12 @@ struct TerminalLaunch {
     cwd: std::path::PathBuf,
     session_id: Uuid,
     ticket: String,
-    window: Option<u32>,
 }
 
 impl TerminalLaunch {
-    /// Open the terminal. Run without the service locked: the first
-    /// Command-T can wait on a macOS consent prompt, and every other
-    /// managed request would wait with it.
+    /// Open the terminal. Run without the service locked, and off the
+    /// async workers: `osascript` can take up to its 10 s bound, and every
+    /// other managed request would wait with it.
     fn open(&self) -> Result<Option<TerminalTab>, ManagedError> {
         (self.launch)(
             self.choice,
@@ -88,7 +86,6 @@ impl TerminalLaunch {
             &self.cwd,
             self.session_id,
             &self.ticket,
-            self.window,
         )
     }
 }
@@ -158,11 +155,8 @@ impl ManagedService {
         let cwd = self
             .sessions
             .begin_terminal_launch(p.session_id, &p.ticket)?;
-        // Start again and Resume open a new tab in the ended row's Terminal
-        // window (owner, 2026-11-02).
-        let window = (choice.app() == Some(TerminalApp::Terminal))
-            .then(|| self.sessions.again_window(p.session_id))
-            .flatten();
+        // Start again and Resume open a new window like any launch (owner,
+        // 2026-11-02): nothing is typed into, or opened in, an existing one.
         Ok(TerminalLaunch {
             launch: self.launch_terminal,
             choice,
@@ -171,12 +165,14 @@ impl ManagedService {
             cwd,
             session_id: p.session_id,
             ticket: p.ticket,
-            window,
         })
     }
 
     /// Record what [`TerminalLaunch::open`] did: the tab and window it
-    /// opened, or, when it failed, release the held launch.
+    /// opened. A refusal from before anything ran releases the held launch,
+    /// so its ticket can launch again. `LaunchUnknown` does not: the
+    /// command may already be typed and its tool about to redeem, so the
+    /// launch stays held until the tool reports or the ticket lapses.
     fn finish_terminal_launch(
         &mut self,
         launch: &TerminalLaunch,
@@ -192,6 +188,7 @@ impl ManagedService {
                     .opened_in_terminal(launch.session_id, handle, window)?;
                 Ok(json!({"opened":true,"destination":terminal::destination(launch.choice)}))
             }
+            Err(ManagedError::LaunchUnknown) => Err(ManagedError::LaunchUnknown),
             Err(error) => {
                 self.sessions.terminal_launch_failed(launch.session_id)?;
                 Err(error)
@@ -1024,8 +1021,8 @@ where
 }
 
 /// `managed_terminal_launch` with the service locked only to hold the
-/// launch and to record it: the terminal opens in between, unlocked, since
-/// it can wait on a macOS consent prompt for seconds.
+/// launch and to record it: the terminal opens in between, unlocked and off
+/// the async workers, since `osascript` can take seconds.
 fn terminal_launch(shared: &DaemonShared, request: &Request) -> Response {
     let choice = terminal_choice(shared).setting;
     let launch = match with_service(shared, |service| {
@@ -1034,7 +1031,7 @@ fn terminal_launch(shared: &DaemonShared, request: &Request) -> Response {
         Ok(launch) => launch,
         Err(refusal) => return respond(request, Err(refusal)),
     };
-    let opened = launch.open();
+    let opened = crate::daemon::run_blocking(|| launch.open());
     let result = with_service(shared, |service| {
         service.finish_terminal_launch(&launch, opened)
     });
@@ -2792,10 +2789,8 @@ mod tests {
         assert!(retried.ticket.is_none());
     }
 
-    static LAUNCHED: std::sync::Mutex<Vec<(Uuid, Option<u32>)>> = std::sync::Mutex::new(vec![]);
-
-    /// Records the window each launch was given and answers with a new tab
-    /// in it, or in a new window, 77. Tests never open a real terminal.
+    /// Answers every launch with a new window, numbered from 100 by
+    /// session. Tests never open a real terminal.
     fn record_launch(
         _: TerminalSetting,
         _: &[TerminalApp],
@@ -2803,22 +2798,17 @@ mod tests {
         _: &std::path::Path,
         session: Uuid,
         _: &str,
-        window: Option<u32>,
     ) -> Result<Option<TerminalTab>, ManagedError> {
-        let mut launched = LAUNCHED.lock().unwrap();
-        launched.push((session, window));
         Ok(Some(TerminalTab {
             handle: TerminalHandle::AppleTerminal {
-                tty: format!("/dev/ttys{:03}", launched.len() % 1000),
+                tty: "/dev/ttys042".into(),
             },
-            window: Some(window.unwrap_or(77)),
+            window: Some(window_of(session)),
         }))
     }
 
-    fn launched_in(session: Uuid) -> Option<u32> {
-        let launched = LAUNCHED.lock().unwrap();
-        let (_, window) = launched.iter().find(|(id, _)| *id == session).unwrap();
-        *window
+    fn window_of(session: Uuid) -> u32 {
+        100 + u32::from(session.as_bytes()[0])
     }
 
     /// Launch `prepared` through the daemon with `extra` launch fields,
@@ -2845,14 +2835,14 @@ mod tests {
         id
     }
 
-    /// #1839 review, findings 1, 2, 11 and 13, and #1853 review: Start
-    /// again opens a new tab in the ended row's window, which the daemon
-    /// finds from the row it prepared the session from and the window id
-    /// that row's launch printed; the app names nothing. An app built from
-    /// #1839 that still names a row is not refused, and what it names is
-    /// ignored. Another terminal app gets no window.
+    /// #1839 review, findings 2 and 11, and the owner's decision
+    /// (2026-11-02): Start again opens a new window like any launch. The
+    /// daemon records the row it came from, and each row keeps the window
+    /// id its launch printed, for #1852 to place launches beside; the app
+    /// names nothing. An app built from #1839 that still names a row is
+    /// not refused, and what it names is ignored.
     #[test]
-    fn start_again_opens_beside_the_window_the_daemon_recorded() {
+    fn start_again_opens_a_new_window_and_the_daemon_records_where_from() {
         let (home, _store, mut service) = service();
         service.launch_terminal = record_launch;
         let account = service
@@ -2863,61 +2853,58 @@ mod tests {
             serde_json::from_value(launch(ToolId::Claude, home.path())).unwrap();
         request.connection = ConnectionKind::Subscription;
         request.account_id = account.id;
-        let fresh = |service: &mut ManagedService, request: &LaunchRequest| {
-            let mut request = request.clone();
-            request.request_id = Uuid::new_v4();
-            call(service, "managed_launch_prepare", json!(request), false).unwrap()
-        };
-        let again = |service: &mut ManagedService, id: Uuid| {
-            call(
-                service,
-                "managed_session_start_again",
-                json!({"session_id":id,"request_id":Uuid::new_v4()}),
-                false,
-            )
-            .unwrap()
-        };
-
-        let prepared = fresh(&mut service, &request);
-        let first = opened_and_ended(&mut service, prepared, json!({}));
-        assert_eq!(launched_in(first), None, "a launch opens a new window");
-
-        let prepared = again(&mut service, first);
-        let second = opened_and_ended(&mut service, prepared, json!({}));
-        assert_eq!(launched_in(second), Some(77));
-
-        let prepared = fresh(&mut service, &request);
-        let third = opened_and_ended(&mut service, prepared, json!({"in_window_of": first}));
-        assert_eq!(launched_in(third), None, "what an app names is ignored");
-
-        let prepared: PreparedLaunch = serde_json::from_value(again(&mut service, second)).unwrap();
-        call_with(
+        let prepared = call(
             &mut service,
-            "managed_terminal_launch",
-            json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()}),
+            "managed_launch_prepare",
+            json!(request),
             false,
-            TerminalSetting::Ghostty,
         )
         .unwrap();
-        assert_eq!(launched_in(prepared.session_id), None, "not Terminal");
+        let first = opened_and_ended(&mut service, prepared, json!({}));
+
+        let prepared = call(
+            &mut service,
+            "managed_session_start_again",
+            json!({"session_id":first,"request_id":Uuid::new_v4()}),
+            false,
+        )
+        .unwrap();
+        let second = opened_and_ended(&mut service, prepared, json!({"in_window_of": first}));
+        assert_eq!(
+            service.sessions.again_window(second),
+            Some(window_of(first))
+        );
+        assert_eq!(service.sessions.again_window(first), None);
     }
 
-    fn refuse_launch(
+    fn refuse_unknown(
         _: TerminalSetting,
         _: &[TerminalApp],
         _: &std::path::Path,
         _: &std::path::Path,
         _: Uuid,
         _: &str,
-        _: Option<u32>,
     ) -> Result<Option<TerminalTab>, ManagedError> {
         Err(ManagedError::LaunchUnknown)
     }
 
-    /// #1853 review: a launch whose terminal did not open is released, so
-    /// the same ticket can launch again while it lasts.
+    fn refuse_missing(
+        _: TerminalSetting,
+        _: &[TerminalApp],
+        _: &std::path::Path,
+        _: &std::path::Path,
+        _: Uuid,
+        _: &str,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        Err(ManagedError::TerminalNotFound)
+    }
+
+    /// #1853 review: a launch refused before anything ran is released, so
+    /// the same ticket can launch again. One that may have run
+    /// (`LaunchUnknown`) stays held: a second terminal with the same ticket
+    /// is refused.
     #[test]
-    fn a_launch_that_did_not_open_can_be_tried_again() {
+    fn only_a_launch_refused_before_it_ran_can_be_tried_again() {
         let (home, _store, mut service) = service();
         let account = service
             .accounts
@@ -2938,7 +2925,17 @@ mod tests {
         )
         .unwrap();
         let params = json!({"session_id":prepared.session_id,"ticket":prepared.ticket.unwrap()});
-        service.launch_terminal = refuse_launch;
+        service.launch_terminal = refuse_missing;
+        assert_eq!(
+            call(
+                &mut service,
+                "managed_terminal_launch",
+                params.clone(),
+                false
+            ),
+            Err(ManagedError::TerminalNotFound)
+        );
+        service.launch_terminal = refuse_unknown;
         assert_eq!(
             call(
                 &mut service,
@@ -2949,16 +2946,10 @@ mod tests {
             Err(ManagedError::LaunchUnknown)
         );
         service.launch_terminal = record_launch;
-        call(
-            &mut service,
-            "managed_terminal_launch",
-            params.clone(),
-            false,
-        )
-        .unwrap();
         assert_eq!(
             call(&mut service, "managed_terminal_launch", params, false),
-            Err(ManagedError::Conflict)
+            Err(ManagedError::Conflict),
+            "may already be running"
         );
     }
 
