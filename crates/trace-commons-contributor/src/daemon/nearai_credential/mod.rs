@@ -109,7 +109,10 @@ pub const LABEL_CREDENTIAL_CLEANUP_REQUIRED: &str = "cleanup_required";
 fn state_from(attempt: Option<&str>, stored: bool) -> &'static str {
     match attempt {
         Some("starting" | "waiting_for_browser") => LABEL_CREDENTIAL_OBTAINING,
-        Some("failed") => LABEL_CREDENTIAL_FAILED,
+        // A login the enrolled commons refused (`different_account`) is a
+        // sign-in that did not finish, as far as any shell has words for
+        // today; the attempt word is what a distinct message keys on.
+        Some("failed" | ceremony::STATUS_DIFFERENT_ACCOUNT) => LABEL_CREDENTIAL_FAILED,
         _ if stored => LABEL_CREDENTIAL_PRESENT,
         Some("cancelled") => LABEL_CREDENTIAL_CANCELLED,
         _ => LABEL_CREDENTIAL_ABSENT,
@@ -860,6 +863,16 @@ mod tests {
         // A failed re-sign-in must remain visible even with an older key.
         assert_eq!(state_from(Some("failed"), false), LABEL_CREDENTIAL_FAILED);
         assert_eq!(state_from(Some("failed"), true), LABEL_CREDENTIAL_FAILED);
+        // A login the commons refused kept the older key, and still reads
+        // as a sign-in that did not finish.
+        assert_eq!(
+            state_from(Some("different_account"), true),
+            LABEL_CREDENTIAL_FAILED
+        );
+        assert_eq!(
+            state_from(Some("different_account"), false),
+            LABEL_CREDENTIAL_FAILED
+        );
         assert_eq!(
             state_from(Some("cancelled"), false),
             LABEL_CREDENTIAL_CANCELLED
@@ -905,7 +918,13 @@ mod tests {
         let resting = serde_json::json!({ "state": LABEL_CREDENTIAL_ABSENT });
         assert!(!reports_a_finished_ceremony(&Response::ok(1, resting)));
 
-        for word in ["starting", "waiting_for_browser", "failed", "cancelled"] {
+        for word in [
+            "starting",
+            "waiting_for_browser",
+            "failed",
+            "cancelled",
+            "different_account",
+        ] {
             let mut body = serde_json::json!({ "state": LABEL_CREDENTIAL_OBTAINING });
             body[ATTEMPT_STATUS_FIELD] = serde_json::Value::String(word.to_string());
             assert!(
