@@ -358,8 +358,12 @@ it already lives.
 `commons_login` (`near` | `github` | `google`) in the daemon file
 `near-ai-login.json`
 (`crates/trace-commons-contributor/src/daemon/nearai_credential/login_record.rs`),
-written whenever the Commons accepts a NEAR AI login (first enrollment,
-renewal, and the in-ceremony accept). The chooser page's mark reads it.
+written on first enrollment and on renewals that use the stored NEAR AI
+login, and removed by unenroll. It also records `stored_login`, the
+provider of the NEAR AI session the daemon currently holds; a
+`stored_login` that differs from `commons_login` is a provider-level
+mismatch the daemon can see without any network call. The chooser page's
+mark reads `commons_login`.
 This spec reuses that record and adds one field to it:
 
 - `subject_digest`: a keyed digest of the NEAR AI subject id, read by the
