@@ -177,20 +177,19 @@ pub(crate) fn account_changed(remembered: Option<&str>, remembered_listed: bool)
     remembered.is_some() && !remembered_listed
 }
 
-/// After a sign-in to another account stored its key: forget what belonged
-/// to the old one, so the new account's organization stands. With one
+/// After a sign-in to another account stored its key: forget the choice
+/// made in the old one, so the new account's organization stands. With one
 /// organization nothing is asked; with several,
 /// [`OrganizationsReport::prompt`] asks again, since no choice is recorded
 /// for this account.
 ///
-/// Pending revocations are set aside too. They name keys in the old
-/// account, which only that account's session can revoke, and this install
-/// no longer holds it: kept, every listing would retry them with the new
-/// account's session and be refused, `revoke_pending` would never clear, and
-/// at [`MAX_PENDING`] every switch would be refused. The keys stay at NEAR
-/// AI in the old account, where they can be revoked, as after a forget.
-/// Best effort: a record that cannot be written keeps the old preference,
-/// which the mint already falls back from.
+/// Pending revocations are kept: a missing organization is not proof of
+/// another account (it may have been deleted or left in the same one), and
+/// those keys may still be revocable. The sweep drops an entry the service
+/// answers `403` for ([`RevokeOutcome::NotThisAccount`]), so an old
+/// account's keys cannot hold `revoke_pending` or the [`MAX_PENDING`] limit
+/// for good. Best effort: a record that cannot be written keeps the old
+/// preference, which the mint already falls back from.
 pub(crate) fn forget_other_account(
     store: &ConfigStore,
     remembered: Option<&str>,
@@ -199,22 +198,8 @@ pub(crate) fn forget_other_account(
     if !account_changed(remembered, remembered_listed) {
         return;
     }
-    let mut set_aside = false;
-    let updated = update(store, |record| {
-        record.chosen_organization_id = None;
-        set_aside = !record.pending_revocations.is_empty();
-        record.pending_revocations.clear();
-    });
-    match updated {
-        Err(_) => {
-            tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_choice_not_cleared")
-        }
-        Ok(()) if set_aside => crate::daemon::diagnostics_log::record_labels(
-            tracing::Level::WARN,
-            "near_ai_spend_org_revocations_set_aside",
-            &[("reason", "account_changed")],
-        ),
-        Ok(()) => {}
+    if update(store, |record| record.chosen_organization_id = None).is_err() {
+        tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_choice_not_cleared");
     }
 }
 
@@ -451,6 +436,17 @@ async fn sweep(shared: &DaemonShared, api: &CloudApi, tokens: SessionTokens) -> 
             .await
         {
             Ok(RevokeOutcome::Revoked | RevokeOutcome::AlreadyGone) => settled.push(entry),
+            // Another account's key: this session can never revoke it, and
+            // keeping it would hold `revoke_pending` and the limit forever.
+            // The key stays at NEAR AI in that account, as after a forget.
+            Ok(RevokeOutcome::NotThisAccount) => {
+                crate::daemon::diagnostics_log::record_labels(
+                    tracing::Level::WARN,
+                    "near_ai_spend_org_revocation_dropped",
+                    &[("reason", "not_this_account")],
+                );
+                settled.push(entry);
+            }
             Err(_) => {
                 tracing::warn!(target: "near_ai_spend_org", "near_ai_key_revoke_deferred");
                 remaining = true;

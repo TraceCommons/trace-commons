@@ -856,12 +856,14 @@ async fn a_sign_in_to_another_account_with_one_organization_uses_it() {
 
 /// Another account with several organizations: the key is in the first
 /// active one, the old choice is forgotten, and the chooser asks. The old
-/// account's revocations are set aside: the new session cannot revoke them,
-/// so no revoke is attempted and none is reported pending.
+/// account's revocations are kept, since they may still be revocable; the
+/// first sweep sends each once, and one the service answers `403` for --
+/// another account's key -- is dropped, so `revoke_pending` clears.
 #[tokio::test]
 async fn a_sign_in_to_another_account_with_several_organizations_prompts() {
     let fixture = Fixture::signed_in("org-old");
     let (api, service) = start(two_orgs()).await;
+    *service.revoke_status.lock().unwrap() = Some(StatusCode::FORBIDDEN);
     remember_choice(&fixture.shared.store, "org-old").unwrap();
     record_pending(
         &fixture.shared.store,
@@ -871,7 +873,7 @@ async fn a_sign_in_to_another_account_with_several_organizations_prompts() {
     sign_in_stored(&fixture, Some("org-old"), false, "org-a");
     let record = load(&fixture.shared.store).unwrap();
     assert_eq!(record.chosen_organization_id, None);
-    assert!(record.pending_revocations.is_empty());
+    assert_eq!(record.pending_revocations.len(), 1, "kept for the sweep");
     let value = organizations_with(&fixture.shared, &api, true)
         .await
         .to_value();
@@ -880,12 +882,65 @@ async fn a_sign_in_to_another_account_with_several_organizations_prompts() {
     assert_eq!(value["prompt"], true);
     assert_eq!(value["revoke_pending"], false);
     assert!(
-        !service
+        load(&fixture.shared.store)
+            .unwrap()
+            .pending_revocations
+            .is_empty()
+    );
+    assert_eq!(
+        service
             .requests()
             .iter()
-            .any(|line| line.starts_with("DELETE ")),
-        "no revoke is sent with the new account's session"
+            .filter(|line| line.starts_with("DELETE "))
+            .count(),
+        1
     );
+}
+
+/// A revoke refused for another reason stays pending and is retried.
+#[tokio::test]
+async fn a_revoke_refused_for_another_reason_stays_pending() {
+    let fixture = Fixture::signed_in("org-a");
+    let (api, service) = start(two_orgs()).await;
+    *service.revoke_status.lock().unwrap() = Some(StatusCode::INTERNAL_SERVER_ERROR);
+    record_pending(
+        &fixture.shared.store,
+        &[PendingRevocation::new("ws-org-b", "key-older")],
+    )
+    .unwrap();
+    let value = organizations_with(&fixture.shared, &api, true)
+        .await
+        .to_value();
+    assert_eq!(value["revoke_pending"], true);
+    assert_eq!(
+        load(&fixture.shared.store)
+            .unwrap()
+            .pending_revocations
+            .len(),
+        1
+    );
+}
+
+/// A listing page that did not carry every organization cannot show the
+/// remembered one is absent: it counts as listed.
+#[tokio::test]
+async fn a_short_listing_page_counts_the_remembered_organization_as_listed() {
+    let session = crate::daemon::nearai_credential::loopback::SessionTokens {
+        access_token: "session-jwt".into(),
+        refresh_token: "rt_example".into(),
+    };
+    let mut page = listing(vec![org("org-a", "First example org")]);
+    page["total"] = serde_json::json!(250);
+    let (api, _) = start(page).await;
+    let (_, listed) = api
+        .mint_inference_key_listing(
+            &session,
+            "trace-commons-test",
+            OrganizationChoice::Prefer("org-far"),
+        )
+        .await
+        .unwrap();
+    assert!(listed);
 }
 
 /// The sign-in's mint reports whether the account lists the remembered
