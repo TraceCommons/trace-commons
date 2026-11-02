@@ -57345,60 +57345,64 @@ async fn evaluate_and_record_gate(
     } else {
         decision.dedup_signal_version.clone()
     };
-    let signals = db.list_dedup_signals(i64::MAX).await.unwrap_or_default();
-    let mut sizes: std::collections::HashMap<uuid::Uuid, i64> = std::collections::HashMap::new();
-    // One candidate per CLUSTER, keyed by the cluster's REPRESENTATIVE
-    // simhash — not one candidate per member decision. `list_dedup_signals`
-    // returns rows in `decided_at ASC` order, so the first-seen simhash per
-    // `cluster_id` here is the earliest-decided member, i.e. the
-    // representative. This matches the batch route
-    // (`run_recluster_dedup_pass`), which also assigns against one
-    // representative-keyed candidate per cluster; without this, inline and
-    // batch clustering could disagree on membership.
-    //
-    // The representative carries its own signal version alongside its
-    // simhash, for the same reason: a cluster's version is the version of the
-    // row that created it, and a row may only join a cluster derived the same
-    // way it was. Borrowed from `signals`, which outlives every map built
-    // from it — the stamp is a short fixed name and copying it once per
-    // cluster bought nothing.
-    let mut reps: std::collections::HashMap<uuid::Uuid, (i64, &str)> =
-        std::collections::HashMap::new();
-    for s in &signals {
-        if let (Some(cid), Some(sh)) = (s.dedup_cluster_id, s.dedup_simhash) {
-            reps.entry(cid)
-                .or_insert((sh, s.effective_signal_version()));
-            *sizes.entry(cid).or_insert(0) += 1;
-        }
-    }
-    // No version filter here: `assign_cluster` refuses a differently stamped
-    // candidate itself, so the gate is in one place and a new call site
-    // cannot forget it.
-    let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> = reps
-        .iter()
-        .map(|(cluster_id, (simhash, version))| {
-            trace_commons_server::dedup_assign::ClusterCandidate {
-                cluster_id: *cluster_id,
-                size: *sizes.get(cluster_id).unwrap_or(&0),
-                simhash: *simhash as u64,
-                embed_cosine_micros: None,
-                signal_version: version,
-            }
-        })
-        .collect();
     // The constants belong to the algorithm that derived the value: the
     // gate service stamped `ACTIVE_DEDUP_ALGORITHM`, so its tau applies.
+    let dedup_constants = trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM.constants();
+    // One candidate per CLUSTER, keyed by the cluster's REPRESENTATIVE (its
+    // earliest-decided member) simhash, with the cluster's size across every
+    // tenant -- the same candidates the batch route
+    // (`run_recluster_dedup_pass`) assigns against, so inline and batch
+    // clustering cannot disagree on membership.
+    //
+    // Read from the cluster table (V145) and only within tau: no candidate
+    // past tau can match, because the embedding signal is `None` here, so
+    // the assignment below is exactly what a full enumeration would give.
+    // Before V145 this enumerated every gate decision ever recorded on every
+    // submission. A failed read still clusters against nothing, as it did,
+    // but now says so.
+    //
+    // Each candidate carries its representative's stamp: a row may only join
+    // a cluster derived the same way it was. No version filter here --
+    // `assign_cluster` refuses a differently stamped candidate itself, so the
+    // gate is in one place and a new call site cannot forget it.
+    let cluster_rows = match db
+        .list_dedup_cluster_candidates(dedup_simhash, dedup_constants.tau_hamming)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                tenant_hash = %sha256_prefixed(tenant_id),
+                error_hash = %safe_display_error_hash(&error),
+                "dedup cluster candidate read failed; clustering against no candidates"
+            );
+            Vec::new()
+        }
+    };
+    let candidates: Vec<trace_commons_server::dedup_assign::ClusterCandidate<'_>> = cluster_rows
+        .iter()
+        .map(|row| trace_commons_server::dedup_assign::ClusterCandidate {
+            cluster_id: row.dedup_cluster_id,
+            size: row.member_count,
+            simhash: row.representative_simhash as u64,
+            embed_cosine_micros: None,
+            signal_version: row.effective_signal_version(),
+        })
+        .collect();
     let cluster_id = match trace_commons_server::dedup_assign::assign_cluster(
         dedup_simhash as u64,
         &dedup_signal_version,
         &candidates,
-        trace_commons_server::dedup_simhash::ACTIVE_DEDUP_ALGORITHM.constants(),
+        dedup_constants,
     ) {
         trace_commons_server::dedup_assign::ClusterAssignment::Existing(id) => id,
         trace_commons_server::dedup_assign::ClusterAssignment::New => uuid::Uuid::new_v4(),
     };
-    let new_size =
-        i32::try_from(sizes.get(&cluster_id).copied().unwrap_or(0) + 1).unwrap_or(i32::MAX);
+    let existing_size = cluster_rows
+        .iter()
+        .find(|row| row.dedup_cluster_id == cluster_id)
+        .map_or(0, |row| row.member_count);
+    let new_size = i32::try_from(existing_size + 1).unwrap_or(i32::MAX);
     // Inline only sets THIS row's size snapshot; existing members' sizes are
     // refreshed by the Task 7 batch route.
     if let Err(error) = db
