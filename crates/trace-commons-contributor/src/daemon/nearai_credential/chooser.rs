@@ -82,11 +82,11 @@ fn escape(text: &str) -> String {
 /// The page: one button per offered login, in the build's order, with the
 /// wallet notice under the NEAR wallet button.
 ///
-/// With `account_login` -- the login the device's Trace Commons account was
-/// last accepted with (`login_record::commons_login`) -- that login comes
-/// first, marked as the account's, and the others follow under their own
-/// line. A remembered login this build does not offer is ignored and the
-/// page is drawn as if none were remembered.
+/// With `account_login` -- the login this device's account was last
+/// accepted with (`login_record::commons_login`) -- that login comes first,
+/// marked as connected to this app, and the others follow. A remembered
+/// login this build does not offer is ignored and the page is drawn as if
+/// none were remembered.
 ///
 /// Fails closed on a login with no title: a button with no name, or with the
 /// raw tag, is not something to show a person.
@@ -107,12 +107,6 @@ pub(super) fn render(
         options.push_str(&note(copy::NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN));
         if let Some(path) = change_account_path() {
             options.push_str(&path);
-        }
-        if offered.len() > 1 {
-            options.push_str(&format!(
-                "<p class=\"others\">{}</p>\n",
-                escape(copy::NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS)
-            ));
         }
     }
     for tag in offered.iter().filter(|tag| Some(**tag) != marked) {

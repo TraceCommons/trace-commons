@@ -2,7 +2,6 @@ use super::*;
 use crate::private_inference_copy::{
     CREDENTIAL_PROVIDER_GITHUB, CREDENTIAL_PROVIDER_GOOGLE, CREDENTIAL_PROVIDER_NEAR,
     CREDENTIAL_WALLET_NOTICE, NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN, NEAR_AI_SIGN_IN_PAGE_HEADING,
-    NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS,
 };
 
 const STATE: &str = "s7aTe_-0123456789abcdefghijklmnopqrstuvwxyzA";
@@ -49,7 +48,6 @@ fn the_page_lists_exactly_the_offered_logins_in_order() {
 fn with_nothing_remembered_the_page_marks_no_login() {
     let page = render(&["near", "github", "google"], None, STATE, NONCE).unwrap();
     assert!(!page.contains(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN));
-    assert!(!page.contains(NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS));
     // Identical to a remembered login this build does not offer.
     assert_eq!(
         page,
@@ -69,9 +67,11 @@ fn the_accounts_login_comes_first_and_is_marked() {
     assert_eq!(buttons(&page), ["github", "near", "google"]);
     let github = page.find(">GitHub</button>").unwrap();
     let mark = page.find(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN).unwrap();
-    let others = page.find(NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS).unwrap();
     let wallet = page.find(">NEAR wallet</button>").unwrap();
-    assert!(github < mark && mark < others && others < wallet, "{page}");
+    assert!(github < mark && mark < wallet, "{page}");
+    // The people signing in do not know the Commons by name (owner,
+    // 2026-11-02): the page never names it.
+    assert!(!page.contains(crate::brand::COMMONS_NAME), "{page}");
     assert_eq!(page.matches(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN).count(), 1);
     // The wallet keeps its notice wherever it is listed.
     assert!(page.find(CREDENTIAL_WALLET_NOTICE).unwrap() > wallet);
@@ -84,10 +84,9 @@ fn the_accounts_login_comes_first_and_is_marked() {
     let github = page.find(">GitHub</button>").unwrap();
     assert!(notice < mark && mark < github, "{page}");
 
-    // Alone, it is marked with no "other logins" line beneath it.
+    // Alone, it is still marked.
     let page = render(&["google"], Some("google"), STATE, NONCE).unwrap();
     assert!(page.contains(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN));
-    assert!(!page.contains(NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS));
 }
 
 #[test]
