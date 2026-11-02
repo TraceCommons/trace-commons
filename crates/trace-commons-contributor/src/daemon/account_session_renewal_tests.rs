@@ -42,6 +42,10 @@ struct Commons {
     refuse: Mutex<bool>,
     /// The label a refused finish carries.
     refuse_label: Mutex<String>,
+    /// The status a refused finish answers with.
+    refuse_status: Mutex<u16>,
+    /// The status the start answers with, when not 200.
+    start_status: Mutex<u16>,
     starts: Mutex<u32>,
     finishes: Mutex<u32>,
     refreshes: Mutex<u32>,
@@ -77,6 +81,8 @@ async fn spawn(device_public_key: String) -> Stub {
         account: Mutex::new(ACCOUNT.to_string()),
         refuse: Mutex::new(false),
         refuse_label: Mutex::new("refused".into()),
+        refuse_status: Mutex::new(400),
+        start_status: Mutex::new(200),
         starts: Mutex::new(0),
         finishes: Mutex::new(0),
         refreshes: Mutex::new(0),
@@ -125,11 +131,21 @@ async fn spawn(device_public_key: String) -> Stub {
                     }
                     assert_eq!(body["device_public_key"], state.device_public_key.as_str());
                     *challenge.lock().unwrap() = body["code_challenge"].as_str().unwrap().into();
-                    Json(json!({
-                        "ceremony_id": "renewal-ceremony",
-                        "nonce": base64::engine::general_purpose::STANDARD.encode(NONCE),
-                        "expires_at": expires,
-                    }))
+                    let status = *state.start_status.lock().unwrap();
+                    if status != 200 {
+                        return (
+                            StatusCode::from_u16(status).unwrap(),
+                            Json(json!({"error": "refused"})),
+                        );
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "ceremony_id": "renewal-ceremony",
+                            "nonce": base64::engine::general_purpose::STANDARD.encode(NONCE),
+                            "expires_at": expires,
+                        })),
+                    )
                 }
             }),
         )
@@ -162,7 +178,11 @@ async fn spawn(device_public_key: String) -> Stub {
                     assert!(body["access_token"].as_str().unwrap().starts_with("near-access-"));
                     if *state.refuse.lock().unwrap() {
                         let label = state.refuse_label.lock().unwrap().clone();
-                        return (StatusCode::BAD_REQUEST, Json(json!({"error": label})));
+                        let status = *state.refuse_status.lock().unwrap();
+                        return (
+                            StatusCode::from_u16(status).unwrap(),
+                            Json(json!({"error": label})),
+                        );
                     }
                     let device_key_id =
                         trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
@@ -1361,7 +1381,66 @@ async fn a_signed_out_device_refuses_another_accounts_login() {
             "refused by the commons, not before it"
         );
         assert!(fx.account_record().is_none());
+        assert!(
+            fx.renewal_log().is_empty(),
+            "no account session was wanted, so nothing is logged as renewal"
+        );
     }
+}
+
+/// A commons that answers the start and does not answer the finish -- a
+/// server error, a rate limit said with `429` -- does not block a signed-out
+/// device, and is never read as another account. A signed-in device fails
+/// closed, still not as another account.
+#[tokio::test]
+async fn a_finish_the_commons_does_not_answer_is_not_another_account() {
+    for status in [503u16, 429] {
+        let fx = Fixture::new(Session::Absent).await;
+        *fx.stub.state.refuse.lock().unwrap() = true;
+        *fx.stub.state.refuse_status.lock().unwrap() = status;
+        assert!(
+            matches!(
+                check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+                FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+            ),
+            "signed out, finish {status}"
+        );
+        assert_eq!(fx.ceremonies(), (1, 1));
+        assert!(fx.renewal_log().is_empty());
+
+        let fx = Fixture::new(Session::Expired).await;
+        *fx.stub.state.refuse.lock().unwrap() = true;
+        *fx.stub.state.refuse_status.lock().unwrap() = status;
+        assert!(
+            matches!(
+                check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+                FreshLogin::Unavailable
+            ),
+            "signed in, finish {status}"
+        );
+    }
+}
+
+/// A start the commons answered with something unusable -- a client error
+/// -- is an answer, not an unreachable commons: a signed-out device fails
+/// closed rather than storing the login as unreachable. A start it did not
+/// answer (a server error) is unreachable.
+#[tokio::test]
+async fn a_start_the_commons_refuses_fails_closed_when_signed_out() {
+    let fx = Fixture::new(Session::Absent).await;
+    *fx.stub.state.start_status.lock().unwrap() = 400;
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unavailable
+    ));
+    assert_eq!(fx.ceremonies(), (1, 0));
+
+    let fx = Fixture::new(Session::Absent).await;
+    *fx.stub.state.start_status.lock().unwrap() = 503;
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+    ));
 }
 
 /// Signed out, and the commons cannot be asked: the login is stored
