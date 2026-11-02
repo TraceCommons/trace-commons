@@ -13,49 +13,20 @@ struct ManagedTerminalPicker: View {
 
     var body: some View {
         let label = model.managedText("terminal_choice")
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
-                Text(label)
-                Spacer(minLength: 0)
-                GlassPicker(
-                    label,
-                    selection: Binding<String?>(
-                        get: { snapshot.capabilities.terminalCurrent },
-                        set: { wanted in
-                            guard let wanted, wanted != snapshot.capabilities.terminalCurrent else { return }
-                            model.setManagedTerminal(wanted)
-                        }),
-                    options: snapshot.terminalChoices.map { GlassPickerOption($0.name, value: $0.id) },
-                    placeholder: snapshot.capabilities.terminalDestination ?? "")
-                .disabled(model.managedBusy)
-            }
-            if let tabs = Self.tabsSwitch(snapshot) {
-                tabsToggle(tabs)
-            }
-        }
-    }
-
-    /// The switch's value when it is drawn: only for Terminal, the one
-    /// app the daemon opens tabs in, and only from a daemon that sends it.
-    static func tabsSwitch(_ snapshot: ManagedSnapshot) -> Bool? {
-        snapshot.capabilities.terminalCurrent == "terminal" ? snapshot.capabilities.terminalTabs : nil
-    }
-
-    /// "Open new sessions as tabs" (owner, 2026-11-02): moved only by a
-    /// write the daemon accepted.
-    @ViewBuilder
-    private func tabsToggle(_ on: Bool) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            Toggle(model.managedText("terminal_tabs"), isOn: Binding(
-                get: { on },
-                set: { model.setManagedTerminalTabs($0) }
-            ))
-            .toggleStyle(GlassToggleStyle(.settings))
+        HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
+            Text(label)
+            Spacer(minLength: 0)
+            GlassPicker(
+                label,
+                selection: Binding<String?>(
+                    get: { snapshot.capabilities.terminalCurrent },
+                    set: { wanted in
+                        guard let wanted, wanted != snapshot.capabilities.terminalCurrent else { return }
+                        model.setManagedTerminal(wanted)
+                    }),
+                options: snapshot.terminalChoices.map { GlassPickerOption($0.name, value: $0.id) },
+                placeholder: snapshot.capabilities.terminalDestination ?? "")
             .disabled(model.managedBusy)
-            Text(model.managedText("terminal_tabs_detail"))
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

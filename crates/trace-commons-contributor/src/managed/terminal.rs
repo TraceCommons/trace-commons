@@ -202,111 +202,50 @@ impl TerminalApp {
         }
     }
 
-    /// Terminal's lines for a launch placed among the sessions already
-    /// open (owner, 2026-11-02), else in a new window as [`Self::script`]:
-    /// - Start again and Resume run in the ended session's tab, `reuse`,
-    ///   when Terminal still has it open and idle.
-    /// - Otherwise the session opens as a new tab in the window holding
-    ///   one of `beside`, the tabs of other sessions. Terminal has no
-    ///   command for a new tab, so it presses Command-T, which macOS lets
-    ///   only an app with Accessibility access do; refused, or with
-    ///   Terminal not in front, it opens a new window as before.
-    ///
-    /// The tab's tty is printed either way. Terminal only: no other app
-    /// here can name a tab. A tty that is not one is left out.
+    /// Terminal's lines for Start again and Resume (owner, 2026-11-02):
+    /// `command` runs in the ended session's tab, `tty`, when that tab is
+    /// still open and idle, and that tab's window comes to the front;
+    /// otherwise in a new window, as [`Self::script`]. The tab's tty is
+    /// printed either way. Terminal only: no other app here can name a tab.
     #[cfg(any(target_os = "macos", all(test, unix)))]
-    fn script_placed(self, command: &str, reuse: Option<&str>, beside: &[String]) -> Vec<String> {
+    fn script_in(self, command: &str, tty: &str) -> Vec<String> {
         let literal = applescript_literal(command);
-        let reuse = reuse.filter(|tty| valid_tty(tty));
-        let beside: Vec<&String> = beside.iter().filter(|tty| valid_tty(tty)).collect();
-        let (TerminalApp::Terminal, Some(id)) = (self, self.bundle_id()) else {
+        let (TerminalApp::Terminal, Some(id), true) = (self, self.bundle_id(), valid_tty(tty))
+        else {
             return self.script(command);
         };
-        if reuse.is_none() && beside.is_empty() {
-            return self.script(command);
-        }
-        // Every tty passed `valid_tty`: only letters, digits and slashes.
-        let mut lines = vec![
+        // `tty` passed `valid_tty`: only letters, digits and slashes.
+        vec![
             format!("tell application id \"{id}\""),
             "set t to missing value".into(),
             "set tw to missing value".into(),
+            "repeat with w in windows".into(),
+            "repeat with x in tabs of w".into(),
+            format!("if tty of x is \"{tty}\" and not busy of x then"),
+            "set t to x".into(),
+            "set tw to w".into(),
+            "end if".into(),
+            "end repeat".into(),
+            "end repeat".into(),
+            // The tab is read before its window moves: AppleScript holds
+            // it by position, and bringing the window forward renumbers.
             "set found to \"\"".into(),
-        ];
-        if let Some(tty) = reuse {
-            lines.extend([
-                "repeat with w in windows".into(),
-                "repeat with x in tabs of w".into(),
-                format!("if tty of x is \"{tty}\" and not busy of x then"),
-                "set t to x".into(),
-                "set tw to w".into(),
-                "end if".into(),
-                "end repeat".into(),
-                "end repeat".into(),
-            ]);
-        }
-        // The reused tab is read before its window moves: AppleScript
-        // holds it by position, and bringing the window forward renumbers.
-        lines.extend([
-            "if t is not missing value then".into(),
-            format!("do script \"{literal}\" in t"),
-            "set found to tty of t".into(),
-            "set selected of t to true".into(),
-            "if miniaturized of tw then set miniaturized of tw to false".into(),
-            "set index of tw to 1".into(),
-            "else".into(),
-        ]);
-        if !beside.is_empty() {
-            let list = beside
-                .iter()
-                .map(|tty| format!("\"{tty}\""))
-                .collect::<Vec<_>>()
-                .join(", ");
-            lines.extend([
-                "repeat with w in windows".into(),
-                "repeat with x in tabs of w".into(),
-                format!("if {{{list}}} contains (tty of x) then set tw to w"),
-                "end repeat".into(),
-                "end repeat".into(),
-                "if tw is not missing value then".into(),
-                "set n to count of tabs of tw".into(),
-                "if miniaturized of tw then set miniaturized of tw to false".into(),
-                "set index of tw to 1".into(),
-                "activate".into(),
-                // Command-T reaches whichever app is in front, so only
-                // once Terminal is.
-                "repeat 20 times".into(),
-                "if frontmost then exit repeat".into(),
-                "delay 0.05".into(),
-                "end repeat".into(),
-                "if frontmost then".into(),
-                "try".into(),
-                "tell application \"System Events\" to keystroke \"t\" using command down".into(),
-                "repeat 20 times".into(),
-                "if (count of tabs of front window) > n then exit repeat".into(),
-                "delay 0.05".into(),
-                "end repeat".into(),
-                "if (count of tabs of front window) > n then set t to selected tab of front window"
-                    .into(),
-                "end try".into(),
-                "end if".into(),
-                "end if".into(),
-            ]);
-        }
-        lines.extend([
             "if t is missing value then".into(),
             format!("set t to do script \"{literal}\""),
-            "else".into(),
-            format!("do script \"{literal}\" in t"),
-            "end if".into(),
             "try".into(),
             "set found to tty of t".into(),
             "end try".into(),
+            "else".into(),
+            format!("do script \"{literal}\" in t"),
+            format!("set found to \"{tty}\""),
+            "set selected of t to true".into(),
+            "if miniaturized of tw then set miniaturized of tw to false".into(),
+            "set index of tw to 1".into(),
             "end if".into(),
             "activate".into(),
             "return found".into(),
             "end tell".into(),
-        ]);
-        lines
+        ]
     }
 }
 
@@ -979,15 +918,6 @@ pub fn launch_tool_setup(
 /// The handle names the window it opened in, when the terminal can say
 /// (Terminal's tab, by tty); a launch that cannot is still a launch, with no
 /// handle.
-/// Where in Terminal a launch opens, among the sessions already open: the
-/// ended session's tab for Start again and Resume (`in_tab`), else a new
-/// tab beside these (`beside`); with neither, a window of its own.
-#[derive(Default)]
-pub struct Placement<'a> {
-    pub in_tab: Option<&'a TerminalHandle>,
-    pub beside: &'a [TerminalHandle],
-}
-
 pub fn launch(
     choice: TerminalSetting,
     installed: &[TerminalApp],
@@ -995,7 +925,7 @@ pub fn launch(
     cwd: &Path,
     session: Uuid,
     ticket: &str,
-    placement: Placement<'_>,
+    in_tab: Option<&TerminalHandle>,
 ) -> Result<Option<TerminalHandle>, ManagedError> {
     #[cfg(target_os = "macos")]
     {
@@ -1004,23 +934,17 @@ pub fn launch(
         }
         let helper = helper_path()?;
         let command = shell_command(&helper, config, session, ticket)?;
-        // In Terminal, a session opens among the ones already open: Start
-        // again and Resume in the ended session's own tab, any other as a
-        // new tab beside them, rather than in a new window each time.
-        let tty = |h: &TerminalHandle| match h {
-            TerminalHandle::AppleTerminal { tty } => tty.clone(),
-        };
-        let reuse = placement.in_tab.map(tty);
-        let beside: Vec<String> = placement.beside.iter().map(tty).collect();
-        if choice.app() == Some(TerminalApp::Terminal) && (reuse.is_some() || !beside.is_empty()) {
+        // Start again and Resume run in the ended session's own tab when
+        // Terminal still has it, rather than in a new window.
+        if let (Some(TerminalHandle::AppleTerminal { tty }), Some(TerminalApp::Terminal)) =
+            (in_tab, choice.app())
+        {
             if !installed.contains(&TerminalApp::Terminal) {
                 return Err(ManagedError::TerminalNotFound);
             }
-            let printed = run_macos(MacosLaunch::Script(TerminalApp::Terminal.script_placed(
-                &command,
-                reuse.as_deref(),
-                &beside,
-            )))?;
+            let printed = run_macos(MacosLaunch::Script(
+                TerminalApp::Terminal.script_in(&command, tty),
+            ))?;
             return Ok(apple_terminal_tab(&printed));
         }
         let mut argv = vec![helper.into_os_string()];
@@ -1029,7 +953,7 @@ pub fn launch(
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
-        let _ = placement;
+        let _ = in_tab;
         if !supported() {
             return Err(ManagedError::UnsupportedVersion);
         }
@@ -1056,7 +980,7 @@ pub fn launch(
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
-        let _ = (choice, installed, config, cwd, session, ticket, placement);
+        let _ = (choice, installed, config, cwd, session, ticket, in_tab);
         Err(ManagedError::UnsupportedVersion)
     }
 }
@@ -1074,66 +998,30 @@ mod tests {
     use super::*;
 
     /// Start again in Terminal reuses the ended session's tab when it is
-    /// open and idle; a new session opens as a tab beside the open ones,
-    /// pressing Command-T only once Terminal is in front; either falls
-    /// back to a new window. A tty that is not one is never put in a
-    /// script, and with nothing to place among, it is the plain launch.
+    /// open and idle, and opens a new window otherwise; the command is in
+    /// the script once for each, and a tty that is not one is never put in
+    /// a script.
     #[cfg(unix)]
     #[test]
-    fn a_session_opens_among_the_ones_already_open() {
+    fn start_again_runs_in_the_ended_sessions_tab() {
         let command = hostile_command();
         let literal = applescript_literal(&command);
-        let beside = vec!["/dev/ttys011".to_string(), "/dev/ttys013".to_string()];
-
-        let again = TerminalApp::Terminal.script_placed(&command, Some("/dev/ttys011"), &beside);
+        let lines = TerminalApp::Terminal.script_in(&command, "/dev/ttys011");
         assert!(
-            again.contains(&"if tty of x is \"/dev/ttys011\" and not busy of x then".to_string())
+            lines.contains(&"if tty of x is \"/dev/ttys011\" and not busy of x then".to_string())
         );
-        assert!(
-            again.contains(
-                &"if {\"/dev/ttys011\", \"/dev/ttys013\"} contains (tty of x) then set tw to w"
-                    .to_string()
-            )
-        );
-        assert!(again.contains(&format!("set t to do script \"{literal}\"")));
-        assert_eq!(again.last().unwrap(), "end tell");
+        assert!(lines.contains(&format!("do script \"{literal}\" in t")));
+        assert!(lines.contains(&format!("set t to do script \"{literal}\"")));
+        assert_eq!(lines.iter().filter(|l| l.contains(&literal)).count(), 2);
+        assert_eq!(lines.last().unwrap(), "end tell");
 
-        let fresh = TerminalApp::Terminal.script_placed(&command, None, &beside);
-        assert!(!fresh.iter().any(|l| l.contains("not busy")));
-        let press = fresh
-            .iter()
-            .position(|l| l.contains("keystroke \"t\" using command down"))
-            .unwrap();
-        let front = fresh.iter().position(|l| l == "if frontmost then").unwrap();
-        assert!(front < press, "Command-T only once Terminal is in front");
-        assert!(fresh.contains(&format!("do script \"{literal}\" in t")));
-        assert!(fresh.contains(&format!("set t to do script \"{literal}\"")));
-
-        let plain = TerminalApp::Terminal.script(&command);
+        let fresh = TerminalApp::Terminal.script(&command);
         assert_eq!(
-            TerminalApp::Terminal.script_placed(&command, None, &[]),
-            plain
+            TerminalApp::Terminal.script_in(&command, "/dev/ttys011\"; beep"),
+            fresh
         );
         assert_eq!(
-            TerminalApp::Terminal.script_placed(
-                &command,
-                Some("/dev/ttys011\"; beep"),
-                &["x\"".into()]
-            ),
-            plain
-        );
-        let mixed = TerminalApp::Terminal.script_placed(
-            &command,
-            None,
-            &["/dev/ttys011\"; beep".into(), beside[1].clone()],
-        );
-        assert!(
-            mixed.contains(
-                &"if {\"/dev/ttys013\"} contains (tty of x) then set tw to w".to_string()
-            )
-        );
-        assert_eq!(
-            TerminalApp::Iterm2.script_placed(&command, Some("/dev/ttys011"), &beside),
+            TerminalApp::Iterm2.script_in(&command, "/dev/ttys011"),
             TerminalApp::Iterm2.script(&command)
         );
     }

@@ -37,14 +37,6 @@
 //!   `managed-terminal-not-found` ("not found", never "not installed");
 //!   it fills `{terminal}` from `capabilities.terminal_destination`.
 //!
-//! New sessions as tabs, in Settings > Private AI under the picker while
-//! Terminal is chosen (owner, 2026-11-02). DRAFT, NEEDS APPROVAL:
-//! - `terminal_tabs` "Open new sessions as tabs" -- the switch's label and
-//!   accessible name; it moves `capabilities.terminal_tabs`.
-//! - `terminal_tabs_detail` "New sessions open as tabs in the Terminal
-//!   window you already have open. macOS asks once to let Near.ai control
-//!   your computer." -- the caption under it.
-//!
 //! A session row's actions (Ron, #1407, 2026-10-14):
 //! - `show` "Show" and `stop` "Stop" -- the row menu's items and the row's
 //!   accessibility actions. Clicking a running row also shows it.
@@ -310,8 +302,6 @@ pub fn copy() -> serde_json::Value {
             "sign_in_near_ai_accessibility": "Sign in to NEAR AI",
             "terminal_choice": "Open sessions in",
             "terminal_not_found": "{terminal} wasn't found on this computer. Choose another in Settings.",
-            "terminal_tabs": "Open new sessions as tabs",
-            "terminal_tabs_detail": "New sessions open as tabs in the Terminal window you already have open. macOS asks once to let Near.ai control your computer.",
             "show": "Show",
             "stop": "Stop",
             "stop_question": "Stop this session?",

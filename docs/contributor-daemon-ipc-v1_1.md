@@ -691,7 +691,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `complete_setup` | `expected_scope` from `get_setup_status`; optional `scopes[]` of wire-name data uses | durable completion state for the same enrollment | agent-selected scopes use the existing validation/audit path; publishes `status_changed`; grants no automatic-upload permission |
 | `get_config_schema` | empty object | versioned settings-patch JSON Schema, effects and patch semantics | read-only; credentials and read-only settings are not settable properties |
 | `preview_settings` | partial object accepted by `set_settings` | versioned canonical before/after changes; redacted values remain hidden | read-only; validates without persistence or runtime effects |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_terminal_tabs`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `settlement_estimate_enabled`, `missions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -712,7 +712,6 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
 | `set_managed_terminal` | `terminal` (**required**: one of this platform's ids -- macOS `terminal`, `ghostty`, `iterm2`; Windows `windows_terminal`; Linux `gnome_terminal`, `konsole`, `ghostty`; anything else is `bad_params` / `terminal-unrecognized`) | `managed_terminal` | the terminal app managed sessions open in; writes `managed_terminal` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
-| `set_managed_terminal_tabs` | `on` (**required**: bool; anything else is `bad_params` / `on-required`) | `managed_terminal_tabs` | whether a new managed session opens as a tab beside the sessions already open, in Terminal; writes `managed_terminal_tabs` through `set_settings`, then publishes `managed_changed`; see "`set_settings`" below |
 | `managed_model_favorite_set` | `model` (**required**, a model id), `favorite` (**required**, boolean) | `favorites` (`[string]`, the stored list) | async only; stars or unstars one model for the Launch sheet's picker; writes `managed_favorite_models` through `set_settings`; see "Managed session model choice" below |
 | `managed_cli_model` | `tool` (**required**), `cli_options` (**required**, the session's CLI options text) | `model` (string or null) | local only, reads nothing from NEAR AI; the model the tool's own flag names in `cli_options` (Claude Code `--model`; Codex `-m`/`--model`), which the launcher runs instead of the picker's and weighs every secondary model against; options that do not parse name none. The macOS background picker reads `managed_model_catalogue`'s `background`/`background_sets` for this model |
 | `managed_cli_options_set` | `tool` (`claude`, `codex`, `opencode`), `options` (string) | `tool`, `options`, `revision` | validates and saves through `set_settings.managed_cli_options`; returns the current saved value and managed revision so older snapshots cannot undo an acknowledged save; invalid quoting or reserved flags return `managed-cli-options-invalid` |
@@ -5946,7 +5945,7 @@ Takes a JSON object whose top-level keys must come from
 `max_uploads_per_day` and `max_bytes_per_day` (retired: accepted and
 ignored, see below), `insights_ledger_feed`,
 `insights_context_threshold`, `insights_counter_pass`,
-`insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_terminal_tabs`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` --
+`insights_recap_card_enabled`, `subscription_usage_codex_enabled`, `subscription_usage_claude_on`, `subscription_usage_claude_enabled`, `managed_terminal`, `managed_favorite_models`, `managed_cli_options`, `managed_folder_settings` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -6027,16 +6026,6 @@ snapshot's `capabilities` carries `terminal_current` (the chosen id, or
 this computer; empty under Flatpak) and `terminal_destination` (the
 chosen app's name). A launch whose chosen app was not found is refused
 with `managed-terminal-not-found`.
-
-`managed_terminal_tabs` (bool, default `false`) opens a new managed session
-as a tab in the Terminal window that holds another listed session the daemon
-opened, rather than in a window of its own. Terminal has no scripting command
-for a new tab, so the launch presses Command-T through System Events, which
-macOS allows only with Accessibility access; only once Terminal is in front,
-and when it is refused, or no such window is open, the session opens in a new
-window as before. Only Terminal: the other apps open a window. The managed
-snapshot's `capabilities.terminal_tabs` carries it.
-`set_managed_terminal_tabs` writes the same setting.
 
 `managed_favorite_models` (object) stars or unstars NEAR AI models for the
 Launch sheet's model picker, merging like `notify`: `{"<model id>": true}`
@@ -9455,10 +9444,8 @@ focusable or stoppable.
 - `managed_session_start_again {session_id, request_id}` prepares the ended
   session's launch again (same tool, connection, account, folder, model and
   collection opt-in) and returns `managed_launch_prepare`'s answer; the shell
-  then calls `managed_terminal_launch`, passing the ended row as its
-  optional `in_window_of`: in Terminal the session then runs in that row's
-  tab when it is still open and idle (otherwise as any launch). The same
-  `request_id` twice is one session. Refused with `managed-conflict` while the session still holds its
+  then calls `managed_terminal_launch`. The same `request_id` twice is one
+  session. Refused with `managed-conflict` while the session still holds its
   account, `managed-invalid-request` for a sign-in (login) row or a missing
   folder, `managed-not-found` for a removed account, and
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.

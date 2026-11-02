@@ -51,10 +51,8 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // managed snapshot (`capabilities.terminal_current`), with the
             // installed choices beside it, and writes it with
             // `set_managed_terminal`. Whether it was chosen is read the same
-            // way (`capabilities.terminal_chosen`), and so is whether new
-            // sessions open as tabs (`capabilities.terminal_tabs`, written
-            // with `set_managed_terminal_tabs`).
-            "managed_terminal", "managed_terminal_chosen", "managed_terminal_tabs",
+            // way (`capabilities.terminal_chosen`).
+            "managed_terminal", "managed_terminal_chosen",
             // Favorite models: the Launch sheet's picker reads them from
             // `managed_model_catalogue`'s `favorites` and writes them with
             // `managed_model_favorite_set`.

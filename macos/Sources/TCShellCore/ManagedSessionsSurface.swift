@@ -148,10 +148,6 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         /// Whether the person has chosen the terminal; nil from an older
         /// daemon, which reads as chosen so nothing asks.
         public let terminalChosen: Bool?
-        /// Whether new sessions open as tabs beside the open ones
-        /// (`managed_terminal_tabs`); nil from an older daemon, which has
-        /// no such switch.
-        public let terminalTabs: Bool?
         /// The terminal apps installed on this Mac; absent from an older
         /// daemon.
         public let terminalChoices: [ManagedTerminalChoice]?
@@ -164,7 +160,6 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case nearAiSignin = "near_ai_signin"
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
             case terminalChosen = "terminal_chosen"
-            case terminalTabs = "terminal_tabs"
             case resume
         }
     }

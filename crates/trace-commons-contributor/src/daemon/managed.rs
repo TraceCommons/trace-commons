@@ -385,7 +385,7 @@ impl ManagedService {
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_tabs":terminal.tabs,"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
                 )
             }
             "managed_tool_setup" => {
@@ -447,11 +447,6 @@ impl ManagedService {
                 let tab = p
                     .in_window_of
                     .and_then(|id| self.sessions.ended_terminal(id));
-                let beside = if terminal.tabs {
-                    self.sessions.open_terminals()
-                } else {
-                    Vec::new()
-                };
                 let window = terminal::launch(
                     choice,
                     &installed,
@@ -459,10 +454,7 @@ impl ManagedService {
                     &cwd,
                     p.session_id,
                     &p.ticket,
-                    terminal::Placement {
-                        in_tab: tab.as_ref(),
-                        beside: &beside,
-                    },
+                    tab.as_ref(),
                 )?;
                 self.sessions.opened_in_terminal(p.session_id, window)?;
                 Ok(json!({"opened":true,"destination":terminal::destination(choice)}))
@@ -635,9 +627,6 @@ fn sign_in_key(shared: &DaemonShared) -> Option<String> {
 struct TerminalChoice {
     setting: TerminalSetting,
     chosen: bool,
-    /// New sessions open as tabs beside the open ones
-    /// (`managed_terminal_tabs`).
-    tabs: bool,
 }
 
 /// The terminal choice, read per request like the sign-in. Unreadable
@@ -649,12 +638,10 @@ fn terminal_choice(shared: &DaemonShared) -> TerminalChoice {
         .map(|s| TerminalChoice {
             setting: s.managed_terminal,
             chosen: s.managed_terminal_chosen,
-            tabs: s.managed_terminal_tabs,
         })
         .unwrap_or(TerminalChoice {
             setting: TerminalSetting::Unrecognized,
             chosen: true,
-            tabs: false,
         })
 }
 
@@ -1783,11 +1770,7 @@ mod tests {
                 params,
             },
             sign_in,
-            TerminalChoice {
-                setting,
-                chosen,
-                tabs: false,
-            },
+            TerminalChoice { setting, chosen },
         )
     }
 
