@@ -801,7 +801,7 @@ impl SessionRegistry {
 
     /// [`Self::prepare`], for Start again and Resume: `again_of` is the
     /// ended row the request came from, kept on the new row so its launch
-    /// finds that row's tab itself ([`Self::again_terminal`]). A replay
+    /// finds that row's window itself ([`Self::again_window`]). A replay
     /// returns the row first prepared, unchanged.
     pub fn prepare_again(
         &mut self,
