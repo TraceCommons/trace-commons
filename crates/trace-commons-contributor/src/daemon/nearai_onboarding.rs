@@ -552,6 +552,46 @@ async fn ceremony(
     identity: &DeviceIdentity,
     referral_code: Option<&str>,
 ) -> Result<Finished> {
+    let started = start_ceremony(commons, identity).await?;
+
+    // Spend the refresh token as late as possible, for the reason above. The
+    // rotation is persisted inside `exchange` before the JWT is used.
+    //
+    // NEAR AI refusing the login itself (a spent, revoked or agent-mismatched
+    // refresh token, or none stored) is told apart from NEAR AI being
+    // unreachable: no retry fixes the first, and the person has to sign in
+    // to NEAR AI again. Before this, both were `token_unavailable`, and a
+    // renewal that stopped here left only a start in the commons's log.
+    let access_token = exchange_following_rotation(shared, api, session, login)
+        .await
+        .map_err(|error| match error.to_string().as_str() {
+            "near_ai_credential_session_expired" | "near_ai_credential_session_missing" => {
+                anyhow!("near_ai_enroll_near_ai_sign_in_required")
+            }
+            _ => anyhow!("near_ai_enroll_token_unavailable"),
+        })?;
+    finish_ceremony(
+        commons,
+        identity,
+        started,
+        &access_token.access_token,
+        referral_code,
+    )
+    .await
+}
+
+/// A started ceremony and the proof its finish carries.
+struct StartedCeremony {
+    ceremony_id: String,
+    verifier: String,
+    device_signature: String,
+}
+
+/// The ceremony's start and the device proof over its answer.
+async fn start_ceremony(
+    commons: &trace_commons_operator_client::Client,
+    identity: &DeviceIdentity,
+) -> Result<StartedCeremony> {
     let verifier = random()?;
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(Sha256::digest(verifier.as_bytes()));
@@ -574,33 +614,41 @@ async fn ceremony(
         started.expires_at,
         Utc::now().timestamp(),
     )?;
+    Ok(StartedCeremony {
+        ceremony_id: started.ceremony_id,
+        verifier,
+        device_signature,
+    })
+}
 
-    // Spend the refresh token as late as possible, for the reason above. The
-    // rotation is persisted inside `exchange` before the JWT is used.
-    //
-    // NEAR AI refusing the login itself (a spent, revoked or agent-mismatched
-    // refresh token, or none stored) is told apart from NEAR AI being
-    // unreachable: no retry fixes the first, and the person has to sign in
-    // to NEAR AI again. Before this, both were `token_unavailable`, and a
-    // renewal that stopped here left only a start in the commons's log.
-    let access_token = exchange_following_rotation(shared, api, session, login)
-        .await
-        .map_err(|error| match error.to_string().as_str() {
-            "near_ai_credential_session_expired" | "near_ai_credential_session_missing" => {
-                anyhow!("near_ai_enroll_near_ai_sign_in_required")
-            }
-            _ => anyhow!("near_ai_enroll_token_unavailable"),
-        })?;
+/// The ceremony for a NEAR AI access token the caller already holds -- a
+/// sign-in's fresh one, not yet stored -- so nothing stored is exchanged or
+/// rotated. Not validated: the caller checks the answer.
+async fn ceremony_with_access_token(
+    commons: &trace_commons_operator_client::Client,
+    identity: &DeviceIdentity,
+    access_token: &str,
+) -> Result<Finished> {
+    let started = start_ceremony(commons, identity).await?;
+    finish_ceremony(commons, identity, started, access_token, None).await
+}
 
+async fn finish_ceremony(
+    commons: &trace_commons_operator_client::Client,
+    identity: &DeviceIdentity,
+    started: StartedCeremony,
+    access_token: &str,
+    referral_code: Option<&str>,
+) -> Result<Finished> {
     // The JWT rides in the body, never a header: we are not
     // authenticating to the commons with it, we are handing it over to
     // be introspected.
     let body = serde_json::json!({
         "ceremony_id": started.ceremony_id,
-        "code_verifier": verifier,
+        "code_verifier": started.verifier,
         "device_public_key": identity.public_key_b64,
-        "device_signature": device_signature,
-        "access_token": access_token.access_token,
+        "device_signature": started.device_signature,
+        "access_token": access_token,
     });
     let finish = |body: serde_json::Value| async move {
         commons
@@ -889,6 +937,28 @@ async fn store_renewed_session(
     finished: Finished,
     expected: super::commons_credentials::Snapshot,
 ) -> Result<()> {
+    let checked = check_renewal(cfg, identity, previous, account_id, finished, expected)?;
+    write_renewed_session(&shared.store, checked).await
+}
+
+/// A renewal's answer that passed [`check_renewal`], not yet stored.
+pub(super) struct CheckedRenewal {
+    payload: serde_json::Value,
+    expected: super::commons_credentials::Snapshot,
+}
+
+/// The checks [`store_renewed_session`] makes before it writes: the answer
+/// is well formed, for this device and the enrolled tenant, and names the
+/// stored record's account. A different account is
+/// `account-enrollment-mismatch`.
+fn check_renewal(
+    cfg: &ContributorConfig,
+    identity: &DeviceIdentity,
+    previous: Option<serde_json::Value>,
+    account_id: Option<String>,
+    finished: Finished,
+    expected: super::commons_credentials::Snapshot,
+) -> Result<CheckedRenewal> {
     validate_finished(&finished, identity)?;
     if finished.tenant_id != cfg.tenant_id
         || account_id
@@ -907,13 +977,44 @@ async fn store_renewed_session(
     payload["expires_at"] =
         serde_json::to_value(Utc::now() + chrono::Duration::seconds(finished.expires_in_secs))?;
     payload["account_id"] = serde_json::Value::String(account_id);
-    let body = serde_json::to_vec(&payload)?;
-    let store = shared.store.clone();
+    Ok(CheckedRenewal { payload, expected })
+}
+
+/// Store a checked renewal in place of the snapshot it was checked against.
+/// A record that changed since (a sign-out, another renewal) wins.
+pub(super) async fn write_renewed_session(
+    store: &crate::config::ConfigStore,
+    checked: CheckedRenewal,
+) -> Result<()> {
+    let body = serde_json::to_vec(&checked.payload)?;
+    let store = store.clone();
+    let expected = checked.expected;
     tokio::task::spawn_blocking(move || {
         super::commons_credentials::replace(&store, &expected, &body, None)
     })
     .await
     .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
+}
+
+/// Run the NEAR AI ceremony with a sign-in's fresh access token, before
+/// that login is stored, and check the answer as a renewal is checked
+/// (owner, 2026-11-02: the account tied to Trace Commons is kept). A login
+/// the commons refuses, or one it resolves to another account, is an
+/// error; nothing is written either way.
+pub(super) async fn check_fresh_login(
+    commons: &trace_commons_operator_client::Client,
+    cfg: &ContributorConfig,
+    identity: &DeviceIdentity,
+    previous: Option<serde_json::Value>,
+    expected: super::commons_credentials::Snapshot,
+    access_token: &str,
+) -> Result<CheckedRenewal> {
+    let account_id = previous_account_id(previous.as_ref())?;
+    if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
+        bail!("near_ai_enroll_invalid")
+    }
+    let finished = ceremony_with_access_token(commons, identity, access_token).await?;
+    check_renewal(cfg, identity, previous, account_id, finished, expected)
 }
 
 impl From<trace_commons_protocol::account_device_code::DeviceSignInResponse> for Finished {

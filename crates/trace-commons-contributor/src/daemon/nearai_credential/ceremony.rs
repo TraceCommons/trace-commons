@@ -294,6 +294,8 @@ pub(super) enum FailedStep {
     Persist,
     /// No sign-in arrived within the browser timeout.
     Timeout,
+    /// The enrolled commons refused the login, or could not be asked.
+    Commons,
 }
 
 impl FailedStep {
@@ -305,6 +307,7 @@ impl FailedStep {
             Self::Mint => "mint",
             Self::Persist => "persist",
             Self::Timeout => "timeout",
+            Self::Commons => "commons",
         }
     }
 }
@@ -342,6 +345,8 @@ const FAILURE_REASONS: &[&str] = &[
     "near_ai_credential_cleanup_invalid",
     "near_ai_credential_session_changed",
     "near_ai_credential_session_missing",
+    DIFFERENT_ACCOUNT,
+    COMMONS_UNAVAILABLE,
     "near_ai_wallet_invalid",
     "near_ai_wallet_expired",
     "near_ai_wallet_already_used",
@@ -351,7 +356,7 @@ const FAILURE_REASONS: &[&str] = &[
 /// The failed step and its reason, both fixed labels, or `None` for a
 /// cancel, which is not a failure. The error's text is compared against
 /// [`FAILURE_REASONS`] and never copied.
-pub(super) fn failure_labels(error: &anyhow::Error) -> Option<(&'static str, &'static str)> {
+pub(crate) fn failure_labels(error: &anyhow::Error) -> Option<(&'static str, &'static str)> {
     if error.downcast_ref::<NearWalletError>() == Some(&NearWalletError::Cancelled) {
         return None;
     }
@@ -388,6 +393,123 @@ fn record_failure(error: &anyhow::Error, provider: &'static str) {
             &[("step", step), ("reason", reason), ("provider", provider)],
         );
     }
+}
+
+/// The attempt word for a login the enrolled commons refused, most often a
+/// different NEAR AI account from the one this device joined with. The
+/// stored login is kept.
+pub const STATUS_DIFFERENT_ACCOUNT: &str = "different_account";
+
+/// The control name [`settle`] fails with for [`STATUS_DIFFERENT_ACCOUNT`].
+const DIFFERENT_ACCOUNT: &str = "near_ai_credential_different_account";
+
+/// The control name [`settle`] fails with when the commons could not be
+/// asked.
+const COMMONS_UNAVAILABLE: &str = "near_ai_credential_commons_unavailable";
+
+/// What a minted login becomes, given what the commons made of it.
+///
+/// Not bound (a first run, another tenant): stored as it always was.
+/// Accepted: stored, then the account session it earned is stored too.
+/// Refused or unasked: nothing is stored, the key just minted is revoked
+/// where NEAR AI allows, and the stored login stays as it was.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn settle(
+    api: &CloudApi,
+    dir: &std::path::Path,
+    attempt_id: &str,
+    minted: super::api::MintedKey,
+    session: loopback::SessionTokens,
+    expires_at: Option<DateTime<Utc>>,
+    user_agent: String,
+    preferred: Option<String>,
+    check: crate::daemon::account_session_renewal::FreshLogin,
+) -> Result<()> {
+    use crate::daemon::account_session_renewal::{FreshLogin, commit_fresh_login};
+    let accepted = match check {
+        FreshLogin::NotBound => None,
+        FreshLogin::Accepted(accepted) => Some(accepted),
+        FreshLogin::Refused | FreshLogin::Unavailable => {
+            let label = if matches!(check, FreshLogin::Refused) {
+                DIFFERENT_ACCOUNT
+            } else {
+                COMMONS_UNAVAILABLE
+            };
+            // Not recorded for a later sweep: that runs with the stored
+            // login's session, which is another account's.
+            if api
+                .revoke_inference_key(&session, &minted.workspace_id, &minted.key_id)
+                .await
+                .is_err()
+            {
+                tracing::warn!(target: "near_ai_credential", "near_ai_unbound_key_not_revoked");
+            }
+            return Err(at(FailedStep::Commons)(anyhow!(label)));
+        }
+    };
+    let minted_organization = minted.organization_id.clone();
+    // The session is kept, not dropped. Inference does not need it -- the
+    // key is non-expiring and self-sufficient -- but the balance does:
+    // every management route on cloud-api is session-only. What is retained
+    // is the refresh token alone, and `NearAiSession` states what that is
+    // authority over.
+    let persist_dir = dir.to_path_buf();
+    let persist_id = attempt_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        persist_attempt(
+            &persist_dir,
+            &persist_id,
+            minted,
+            session.refresh_token,
+            expires_at,
+            user_agent,
+        )?;
+        // A sign-in to another account forgets the choice made in the old
+        // one, once its key is stored.
+        if let Ok(store) = ConfigStore::open(persist_dir) {
+            super::spend_org::forget_choice_left_behind(
+                &store,
+                preferred.as_deref(),
+                &minted_organization,
+            );
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| anyhow!("near_ai_credential_unavailable"))
+    .and_then(|persisted| persisted)
+    .map_err(at(FailedStep::Persist))?;
+    if let Some(accepted) = accepted {
+        // Best effort: the NEAR AI login is stored, and Sign in again
+        // renews the account session with it if this write lost a race.
+        let store = ConfigStore::open(dir.to_path_buf()).map_err(at(FailedStep::Persist))?;
+        if commit_fresh_login(&store, *accepted).await.is_err() {
+            tracing::warn!(target: "near_ai_credential", "near_ai_account_session_not_stored");
+        }
+    }
+    Ok(())
+}
+
+/// Register `attempt_id` as this directory's waiting ceremony, as `begin`
+/// does, so a test can drive [`settle`] without a browser.
+#[cfg(test)]
+pub(crate) fn mark_waiting_for_test(dir: &std::path::Path, attempt_id: &str) {
+    attempts().lock().expect("ceremony state lock").insert(
+        dir.to_path_buf(),
+        Attempt {
+            state: Status {
+                attempt_id: attempt_id.into(),
+                status: "waiting_for_browser",
+            },
+            abort: None,
+        },
+    );
+}
+
+/// The control name a settled error failed with, for tests.
+#[cfg(test)]
+pub(crate) fn different_account_label() -> &'static str {
+    DIFFERENT_ACCOUNT
 }
 
 /// Begin a ceremony: bind the listener, hand back where to send the browser.
@@ -475,38 +597,28 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
                         .mint_inference_key_in(&session, &key_name(finished_id), choice)
                         .await
                         .map_err(at(FailedStep::Mint))?;
-                    let minted_organization = minted.organization_id.clone();
-                    // The session is kept, not dropped. Inference does not need it --
-                    // the key above is non-expiring and self-sufficient -- but the
-                    // balance does: every management route on cloud-api is
-                    // session-only. What is retained is the refresh token alone, and
-                    // `NearAiSession` states what that is authority over.
-                    let persist_dir = finished_dir.to_path_buf();
-                    let persist_id = finished_id.to_string();
-                    tokio::task::spawn_blocking(move || {
-                        persist_attempt(
-                            &persist_dir,
-                            &persist_id,
-                            minted,
-                            session.refresh_token,
-                            expires_at,
-                            user_agent,
-                        )?;
-                        // A sign-in to another account forgets the choice
-                        // made in the old one, once its key is stored.
-                        if let Ok(store) = ConfigStore::open(persist_dir) {
-                            super::spend_org::forget_choice_left_behind(
-                                &store,
-                                preferred.as_deref(),
-                                &minted_organization,
-                            );
-                        }
-                        Ok(())
-                    })
+                    // A device whose Trace Commons account signs in through
+                    // NEAR AI asks the commons about this login before it
+                    // replaces the stored one (owner, 2026-11-02).
+                    let check = crate::daemon::account_session_renewal::check_fresh_login_live(
+                        &ConfigStore::open(finished_dir.to_path_buf())
+                            .map_err(at(FailedStep::Commons))?,
+                        api_ref,
+                        &session.access_token,
+                    )
+                    .await;
+                    settle(
+                        api_ref,
+                        finished_dir,
+                        finished_id,
+                        minted,
+                        session,
+                        expires_at,
+                        user_agent,
+                        preferred,
+                        check,
+                    )
                     .await
-                    .map_err(|_| anyhow!("near_ai_credential_unavailable"))
-                    .and_then(|persisted| persisted)
-                    .map_err(at(FailedStep::Persist))
                 }),
             )
             .await
@@ -527,6 +639,9 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
                         == Some(&NearWalletError::Cancelled) =>
                 {
                     "cancelled"
+                }
+                Err(error) if error.root_cause().to_string() == DIFFERENT_ACCOUNT => {
+                    STATUS_DIFFERENT_ACCOUNT
                 }
                 Err(_) => "failed",
             };
@@ -1429,24 +1544,45 @@ mod tests {
     #[test]
     fn begin_tags_every_step() {
         let source = include_str!("ceremony.rs");
-        let body = source
-            .split("pub async fn begin(")
-            .nth(1)
-            .and_then(|rest| rest.split("\nfn persist_attempt(").next())
-            .unwrap();
+        let section = |from: &str, to: &str| {
+            source
+                .split(from)
+                .nth(1)
+                .and_then(|rest| rest.split(to).next())
+                .unwrap()
+                .to_owned()
+        };
+        let begin = section("pub async fn begin(", "\nfn persist_attempt(");
         for tag in [
             "CloudApi::live().map_err(at(FailedStep::Setup))?",
             ".map_err(at(FailedStep::Mint))?",
-            ".map_err(at(FailedStep::Persist))",
             "at(FailedStep::Timeout)",
             "record_failure(error, provider_label);",
+            // The commons is asked about the login before `settle` stores it
+            // (owner, 2026-11-02).
+            "account_session_renewal::check_fresh_login_live(",
+            "settle(",
+        ] {
+            assert!(begin.contains(tag), "begin lost {tag}");
+        }
+        let settle = section("pub(crate) async fn settle(", "\n/// Register `attempt_id`");
+        for tag in [
+            "FreshLogin::Refused | FreshLogin::Unavailable => {",
+            "return Err(at(FailedStep::Commons)(anyhow!(label)));",
+            ".map_err(at(FailedStep::Persist))?;",
             // After the key is stored, a choice made in another account is
             // forgotten (owner, 2026-11-02).
-            ")?;\n                        // A sign-in to another account forgets the choice",
+            ")?;\n        // A sign-in to another account forgets the choice",
             "super::spend_org::forget_choice_left_behind(",
+            "commit_fresh_login(&store, *accepted)",
         ] {
-            assert!(body.contains(tag), "begin lost {tag}");
+            assert!(settle.contains(tag), "settle lost {tag}");
         }
+        // Nothing is stored before the commons answered.
+        let refused = settle
+            .find("FreshLogin::Refused | FreshLogin::Unavailable")
+            .unwrap();
+        assert!(refused < settle.find("persist_attempt(").unwrap());
         assert!(source.contains(".map_err(at(FailedStep::Exchange))?;"));
     }
 

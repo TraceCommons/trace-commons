@@ -449,7 +449,7 @@ pub(super) async fn sign_in(
     };
     match result {
         Ok(()) => {
-            record(shared, Trigger::SignIn, None);
+            record(&shared.store, Trigger::SignIn, None);
             clear_failed(store.dir());
             super::commons_credit::forget(store.dir());
             super::withdraw::account_session(shared)
@@ -459,7 +459,7 @@ pub(super) async fn sign_in(
         }
         Err(error) => {
             let class = classify(&error);
-            record(shared, Trigger::SignIn, Some(class));
+            record(&shared.store, Trigger::SignIn, Some(class));
             failed(store.dir(), attempt_key(shared, &raw), class);
             remember_if_revoked(store, class, &identity.device_key_id);
             Err(match class {
@@ -467,6 +467,144 @@ pub(super) async fn sign_in(
                 FAILURE_DEVICE_KEY_REVOKED => FAILURE_DEVICE_KEY_REVOKED,
                 _ => "near_ai_sign_in_unavailable",
             })
+        }
+    }
+}
+
+// ---- A fresh NEAR AI sign-in, checked before it is stored ----
+
+/// How long the commons may take to answer a fresh login's check. The
+/// browser's sign-in tab waits on it.
+const FRESH_LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What the enrolled commons makes of a NEAR AI login a sign-in has just
+/// obtained, before that login replaces the stored one (owner, 2026-11-02:
+/// remember the account tied to Trace Commons and keep the contributor on
+/// it).
+pub(crate) enum FreshLogin {
+    /// No Trace Commons account on this device signs in through NEAR AI:
+    /// not enrolled (a first run), enrolled in another tenant, or a device
+    /// key its account revoked. The login is stored as it always was.
+    NotBound,
+    /// The commons accepted the login for the enrolled account; storing it
+    /// renews that account's session too ([`commit_fresh_login`]).
+    Accepted(Box<AcceptedLogin>),
+    /// The commons refused the login, or resolved it to another account:
+    /// most often a different NEAR AI account from the one this device
+    /// joined with. The stored login is kept.
+    Refused,
+    /// The commons could not be asked. Fail closed: the stored login is
+    /// kept.
+    Unavailable,
+}
+
+/// A login the commons accepted, and the account session it earned, held
+/// until the NEAR AI credentials are stored. The renewal turn is held with
+/// it, so no renewal runs on the old login in between.
+pub(crate) struct AcceptedLogin {
+    checked: super::nearai_onboarding::CheckedRenewal,
+    _turn: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// [`check_fresh_login`] against the enrolled commons (a test's stub under
+/// `cfg(test)` when one is routed for this directory).
+pub(crate) async fn check_fresh_login_live(
+    store: &crate::config::ConfigStore,
+    api: &CloudApi,
+    access_token: &str,
+) -> FreshLogin {
+    #[cfg(test)]
+    if let Some(origin) = test_route(store) {
+        let Ok(commons) = super::native_identity::client(&origin, "unauthenticated") else {
+            return FreshLogin::Unavailable;
+        };
+        return check_fresh_login(store, &RenewVia::at(api, commons), access_token).await;
+    }
+    check_fresh_login(store, &RenewVia::live(api), access_token).await
+}
+
+/// Ask the enrolled commons whether `access_token`, a fresh NEAR AI login
+/// not yet stored, signs in this device's account. Nothing is written.
+pub(super) async fn check_fresh_login(
+    store: &crate::config::ConfigStore,
+    via: &RenewVia<'_>,
+    access_token: &str,
+) -> FreshLogin {
+    let Ok(Some(cfg)) = store.load_config() else {
+        return FreshLogin::NotBound;
+    };
+    if !super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id) || key_revoked(store) {
+        return FreshLogin::NotBound;
+    }
+    let Ok(Some(identity)) = DeviceIdentity::load(store) else {
+        return FreshLogin::NotBound;
+    };
+    let turn = renewing(store.dir()).lock_owned().await;
+    let Ok(loaded) =
+        super::run_blocking(|| commons_credentials::load_with_snapshot(store, Kind::Account))
+    else {
+        return FreshLogin::Unavailable;
+    };
+    let (previous, expected) = match loaded {
+        Some((raw, expected)) => match serde_json::from_slice::<serde_json::Value>(&raw) {
+            Ok(previous) => (Some(previous), expected),
+            Err(_) => return FreshLogin::Unavailable,
+        },
+        None => match commons_credentials::snapshot(store, Kind::Account) {
+            Ok(expected) => (None, expected),
+            Err(_) => return FreshLogin::Unavailable,
+        },
+    };
+    let Ok(commons) = via.commons(&cfg) else {
+        return FreshLogin::Unavailable;
+    };
+    let checked = tokio::time::timeout(
+        FRESH_LOGIN_TIMEOUT,
+        super::nearai_onboarding::check_fresh_login(
+            &commons,
+            &cfg,
+            &identity,
+            previous,
+            expected,
+            access_token,
+        ),
+    )
+    .await;
+    match checked {
+        Ok(Ok(checked)) => FreshLogin::Accepted(Box::new(AcceptedLogin {
+            checked,
+            _turn: turn,
+        })),
+        Ok(Err(error)) => match classify(&error) {
+            "commons_refused" | "commons_answer_mismatch" => {
+                record(store, Trigger::SignIn, Some(classify(&error)));
+                FreshLogin::Refused
+            }
+            FAILURE_DEVICE_KEY_REVOKED => FreshLogin::NotBound,
+            _ => FreshLogin::Unavailable,
+        },
+        Err(_) => FreshLogin::Unavailable,
+    }
+}
+
+/// Store the account session an accepted login earned, once its NEAR AI
+/// credentials are stored, and lift any wait a refused renewal left. A
+/// record that changed meanwhile (a sign-out) wins.
+pub(crate) async fn commit_fresh_login(
+    store: &crate::config::ConfigStore,
+    accepted: AcceptedLogin,
+) -> anyhow::Result<()> {
+    let AcceptedLogin { checked, _turn } = accepted;
+    match super::nearai_onboarding::write_renewed_session(store, checked).await {
+        Ok(()) => {
+            record(store, Trigger::SignIn, None);
+            clear_failed(store.dir());
+            super::commons_credit::forget(store.dir());
+            Ok(())
+        }
+        Err(error) => {
+            record(store, Trigger::SignIn, Some(classify(&error)));
+            Err(error)
         }
     }
 }
@@ -530,7 +668,7 @@ enum Trigger {
 
 /// Append one label-only line to [`RENEWAL_LOG_FILE`], and the same to
 /// `tracing`. Best effort: a renewal is not refused for want of a log line.
-fn record(shared: &DaemonShared, trigger: Trigger, failure: Option<&'static str>) {
+fn record(store: &crate::config::ConfigStore, trigger: Trigger, failure: Option<&'static str>) {
     let trigger = match trigger {
         Trigger::Automatic => "automatic",
         Trigger::SignIn => "sign_in",
@@ -555,7 +693,6 @@ fn record(shared: &DaemonShared, trigger: Trigger, failure: Option<&'static str>
         "outcome": outcome,
         "failure": failure,
     });
-    let store = &shared.store;
     let mut lines: Vec<String> = store
         .read_daemon_file(RENEWAL_LOG_FILE)
         .ok()
@@ -717,14 +854,14 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
     };
     match renewed {
         Ok(()) => {
-            record(shared, Trigger::Automatic, None);
+            record(&shared.store, Trigger::Automatic, None);
             super::commons_credit::forget(store.dir());
             true
         }
         Err(error) => {
             // Label only: the errors underneath can quote a remote body.
             let class = classify(&error);
-            record(shared, Trigger::Automatic, Some(class));
+            record(&shared.store, Trigger::Automatic, Some(class));
             // Keyed after the attempt, so the NEAR AI rotation it made is
             // the login a retry would present.
             failed(store.dir(), attempt_key(shared, &raw), class);
