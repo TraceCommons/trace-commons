@@ -377,6 +377,35 @@ const LEADERBOARD_INPUTS_SQL: &str = "SELECT
                               >= NOW() - ($1 || ' days')::interval
                      ) >= $2";
 
+/// How long a caller waits for a free pooled connection before the pool
+/// refuses it. Without a bound, an exhausted pool queues every caller
+/// indefinitely: requests pile up holding their bodies and any permits taken
+/// earlier, and nothing tells a client to back off. A refusal surfaces as
+/// `DatabaseError::PoolRuntime`, which callers already treat as transient.
+pub const POOL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long opening a new connection may take, so an unreachable database
+/// fails a caller instead of holding it for the TCP timeout.
+pub const POOL_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the health check on a reused connection may take.
+pub const POOL_RECYCLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Builds a pool of at most `max_size` connections whose waits are bounded
+/// by the timeouts above. Every pool this backend opens goes through here.
+fn bounded_pool(
+    manager: deadpool_postgres::Manager,
+    max_size: usize,
+) -> Result<Pool, deadpool_postgres::BuildError> {
+    Pool::builder(manager)
+        .max_size(max_size)
+        .runtime(deadpool_postgres::Runtime::Tokio1)
+        .wait_timeout(Some(POOL_WAIT_TIMEOUT))
+        .create_timeout(Some(POOL_CREATE_TIMEOUT))
+        .recycle_timeout(Some(POOL_RECYCLE_TIMEOUT))
+        .build()
+}
+
 impl PgBackend {
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseError> {
         let pg_config = config
@@ -384,7 +413,7 @@ impl PgBackend {
             .parse::<tokio_postgres::Config>()
             .map_err(|e| DatabaseError::Pool(format!("invalid PostgreSQL URL: {e}")))?;
         let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
-        let pool = Pool::builder(manager).max_size(config.pool_size).build()?;
+        let pool = bounded_pool(manager, config.pool_size)?;
 
         // Build a SEPARATE, small resolver pool only when a distinct resolver
         // connection string is configured. This pool runs as the narrow
@@ -401,7 +430,7 @@ impl PgBackend {
                         })?;
                 let resolver_manager =
                     deadpool_postgres::Manager::new(resolver_config, tokio_postgres::NoTls);
-                let resolver_pool = Pool::builder(resolver_manager).max_size(2).build()?;
+                let resolver_pool = bounded_pool(resolver_manager, 2)?;
                 Some(resolver_pool)
             }
             None => None,
@@ -420,7 +449,7 @@ impl PgBackend {
                     })?;
                 let gate_driver_manager =
                     deadpool_postgres::Manager::new(gate_driver_config, tokio_postgres::NoTls);
-                let gate_driver_pool = Pool::builder(gate_driver_manager).max_size(2).build()?;
+                let gate_driver_pool = bounded_pool(gate_driver_manager, 2)?;
                 Some(gate_driver_pool)
             }
             None => None,
@@ -444,9 +473,7 @@ impl PgBackend {
                     pii_backstop_driver_config,
                     tokio_postgres::NoTls,
                 );
-                let pii_backstop_driver_pool = Pool::builder(pii_backstop_driver_manager)
-                    .max_size(2)
-                    .build()?;
+                let pii_backstop_driver_pool = bounded_pool(pii_backstop_driver_manager, 2)?;
                 Some(pii_backstop_driver_pool)
             }
             None => None,
@@ -465,8 +492,7 @@ impl PgBackend {
                     })?;
                 let invite_registry_manager =
                     deadpool_postgres::Manager::new(invite_registry_config, tokio_postgres::NoTls);
-                let invite_registry_pool =
-                    Pool::builder(invite_registry_manager).max_size(2).build()?;
+                let invite_registry_pool = bounded_pool(invite_registry_manager, 2)?;
                 Some(invite_registry_pool)
             }
             None => None,

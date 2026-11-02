@@ -74002,17 +74002,12 @@ fn latest_audit_event(
     if !path.exists() {
         return Ok(None);
     }
-    let body = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read audit log {}", path.display()))?;
-    let Some(line) = body
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
+    let Some(line) = read_last_nonempty_line(path)
+        .with_context(|| format!("failed to read audit log {}", path.display()))?
     else {
         return Ok(None);
     };
-    let event: TraceCommonsAuditEvent = serde_json::from_str(line).with_context(|| {
+    let event: TraceCommonsAuditEvent = serde_json::from_str(&line).with_context(|| {
         format!(
             "failed to parse latest audit event for hash chain {}",
             path.display()
@@ -74020,6 +74015,57 @@ fn latest_audit_event(
     })?;
     ensure_audit_event_tenant(&event, tenant_id)?;
     Ok(Some(event))
+}
+
+/// The last line of `path` that is not blank, trimmed, read from the end of
+/// the file. Every audit append reads the latest event (for its time, its
+/// chain hash, and the check before writing), under the tenant's append
+/// lock; reading the whole log each time made an append cost the size of
+/// the tenant's history. This reads back from the end in growing chunks
+/// until it holds one complete line, so an append reads about one event.
+fn read_last_nonempty_line(path: &Path) -> std::io::Result<Option<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    const FIRST_CHUNK: u64 = 8 * 1024;
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut start = len;
+    let mut chunk = FIRST_CHUNK;
+    // Bytes `start..len` of the file, in file order.
+    let mut tail: Vec<u8> = Vec::new();
+    loop {
+        if start == 0 && !tail.is_empty() {
+            break;
+        }
+        if start == 0 {
+            return Ok(None);
+        }
+        let take = chunk.min(start);
+        start -= take;
+        let mut read = vec![0_u8; usize::try_from(take).unwrap_or(usize::MAX)];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut read)?;
+        read.extend_from_slice(&tail);
+        tail = read;
+        chunk = chunk.saturating_mul(2);
+        // A line is complete once a newline precedes its last non-blank
+        // byte, or the read has reached the start of the file.
+        let Some(end) = tail.iter().rposition(|byte| !byte.is_ascii_whitespace()) else {
+            continue;
+        };
+        if tail[..end].contains(&b'\n') || start == 0 {
+            break;
+        }
+    }
+    let Some(end) = tail.iter().rposition(|byte| !byte.is_ascii_whitespace()) else {
+        return Ok(None);
+    };
+    let line_start = tail[..end]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    let line = std::str::from_utf8(&tail[line_start..=end])
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(Some(line.trim().to_string()))
 }
 
 fn compute_audit_event_hash(

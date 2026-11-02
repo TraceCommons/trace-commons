@@ -103297,3 +103297,38 @@ mod first_run_estimate_tests {
         );
     }
 }
+
+#[test]
+fn read_last_nonempty_line_matches_a_whole_file_scan() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("audit.jsonl");
+    let long_line = format!("{{\"pad\":\"{}\"}}", "x".repeat(50_000));
+    let cases: Vec<(String, Option<&str>)> = vec![
+        (String::new(), None),
+        ("\n\n  \n".to_string(), None),
+        ("only".to_string(), Some("only")),
+        ("first\nsecond\n".to_string(), Some("second")),
+        ("first\r\nsecond\r\n\r\n".to_string(), Some("second")),
+        ("first\n  second  \n \n\t\n".to_string(), Some("second")),
+        (format!("first\n{long_line}\n\n"), Some(long_line.as_str())),
+        (format!("{long_line}\nlast\n"), Some("last")),
+        (long_line.clone(), Some(long_line.as_str())),
+        (format!("first\n{}\n", " ".repeat(20_000)), Some("first")),
+        ("a\n\u{e9}t\u{e9}\n".to_string(), Some("\u{e9}t\u{e9}")),
+    ];
+    for (body, expected) in cases {
+        std::fs::write(&path, &body).expect("write");
+        let scanned = body
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty());
+        assert_eq!(scanned, expected, "whole-file scan disagrees with the case");
+        assert_eq!(
+            read_last_nonempty_line(&path).expect("read").as_deref(),
+            expected,
+            "tail read of a {}-byte body",
+            body.len()
+        );
+    }
+}
