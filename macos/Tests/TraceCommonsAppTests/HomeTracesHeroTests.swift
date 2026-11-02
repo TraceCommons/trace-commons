@@ -14,7 +14,7 @@ final class HomeTracesHeroTests: XCTestCase {
         XCTAssertEqual(words.tracesHeroTitle, "Contribute traces, earn credit, use Private AI")
         XCTAssertEqual(
             words.tracesHeroBody,
-            "Share the sessions from your AI coding tools with Trace Commons. Each accepted trace earns you credit.")
+            "Share the sessions from your AI coding tools. Each accepted trace earns you credit.")
         XCTAssertEqual(words.tracesHeroAction, "Start earning")
         XCTAssertEqual(words.tracesHeroStepContribute, "Contribute traces")
         XCTAssertEqual(words.tracesHeroStepContributeDetail, "Share the sessions from your AI coding tools")
