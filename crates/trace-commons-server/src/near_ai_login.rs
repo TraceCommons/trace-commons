@@ -25,18 +25,20 @@
 //! failed introspection and no cached positive: the answer is used once, to
 //! derive an anchor, and then the token is gone.
 //!
-//! The two variants say only whether NEAR AI *answered*:
+//! The variants say only whether NEAR AI *answered*:
 //!
 //! - [`LoginIntrospectionFailure::Refused`] -- NEAR AI answered and the answer
-//!   names no usable subject: a `4xx` other than `429`, an unparseable `2xx`
-//!   body, a subject that is missing or malformed. This is the fact about the
-//!   token, and it stays one label for every cause.
+//!   names no usable subject: a `4xx` other than `408`, `421`, `425` or `429`,
+//!   an unparseable `2xx` body, a subject that is missing or malformed. This
+//!   is the fact about the token, and it stays one label for every cause.
 //! - [`LoginIntrospectionFailure::Unavailable`] -- NEAR AI did not answer:
-//!   unreachable, slow, a body that stops arriving, a `5xx`, a `429`, `408`,
-//!   `421` or `425`, or no client could be built to ask it. This is a fact about NEAR AI
-//!   and the path to it, the same for every token at that moment, so telling
-//!   it apart says nothing about whose token this is. A caller uses it to say
-//!   "try again later" rather than "refused".
+//!   unreachable, slow, a body that stops arriving or runs past the cap, a
+//!   `5xx`, `429`, `408`, `421` or `425`. This is a fact about NEAR AI and the
+//!   path to it, the same for every token at that moment, so telling it apart
+//!   says nothing about whose token this is. A caller uses it to say "try
+//!   again later" rather than "refused".
+//! - [`LoginIntrospectionFailure::ClientUnbuildable`] -- this process could
+//!   not build a client to ask. A local fault, the same on every request.
 //!
 //! # The token is a bearer secret in transit
 //!
@@ -75,10 +77,24 @@ pub enum LoginIntrospectionFailure {
     /// NEAR AI answered, and the answer names no usable subject.
     #[error("near_ai_login_unverified")]
     Refused,
-    /// NEAR AI did not answer: unreachable, timed out, a `5xx`, or a `429`.
+    /// NEAR AI did not answer: unreachable, timed out, a body that stopped
+    /// arriving or ran past [`MAX_INTROSPECTION_BODY_BYTES`], a `5xx`, `429`,
+    /// `408`, `421` or `425`.
     #[error("near_ai_login_unavailable")]
     Unavailable,
+    /// This process could not build an HTTP client to ask NEAR AI (the TLS
+    /// backend or root store). A local fault, the same on every request,
+    /// kept apart so the caller logs it as one rather than as NEAR AI down.
+    #[error("near_ai_login_client_unbuildable")]
+    ClientUnbuildable,
 }
+
+/// The most of a `GET /users/me` body this reads. The response carries
+/// `organizations` and `workspaces` arrays whose size we do not control, and
+/// a cap that refused a heavy but genuine answer would turn into a refused
+/// sign-in, so it is generous: a few hundred bytes are used, and 256 KiB is
+/// far above any profile while still bounding what one finish can buffer.
+pub const MAX_INTROSPECTION_BODY_BYTES: usize = 256 * 1024;
 
 /// What `GET /me` tells us, and **nothing else**.
 ///
@@ -188,13 +204,12 @@ pub async fn introspect_login(
 ) -> Result<VerifiedNearAiLogin, LoginIntrospectionFailure> {
     let url = introspection_url(base_url);
     // A client that cannot be built (the TLS backend or root store) fails
-    // the same way on every request: deployment state, never an answer about
-    // this token, so it is `Unavailable` like the commons' other
-    // misconfigurations.
+    // the same way on every request: a local fault, never an answer about
+    // this token.
     let http = reqwest::Client::builder()
         .timeout(timeout)
         .build()
-        .map_err(|_| LoginIntrospectionFailure::Unavailable)?;
+        .map_err(|_| LoginIntrospectionFailure::ClientUnbuildable)?;
     // The one place the token appears. `bearer_auth` rather than a formatted
     // string so it is never a `String` this function owns and could log.
     let response = http
@@ -211,15 +226,32 @@ pub async fn introspect_login(
     // timeout running out, a reset after the headers) is NEAR AI not
     // answering; a body that arrived and does not parse is its answer.
     //
-    // Every error from `bytes()` is the first kind. reqwest reports any body
-    // read failure from it as `is_decode()` (it maps the collect error with
-    // `error::decode`), so that flag cannot tell the two apart; with no
-    // content decompression enabled in this crate, a `bytes()` error is
-    // always the body not arriving. The parse below is the only refusal.
-    let body = response
-        .bytes()
+    // Every read error is the first kind. reqwest has no content
+    // decompression enabled in this workspace, so a read error cannot be a
+    // corrupt compressed body; `a_compressed_body_is_never_decompressed`
+    // pins that, because a workspace crate turning on `gzip` would make a
+    // corrupt compressed answer read as NEAR AI not answering.
+    //
+    // Bounded: a body past the cap is not an answer we can read, so it is
+    // `Unavailable`, which only the token's holder ever sees.
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_INTROSPECTION_BODY_BYTES as u64)
+    {
+        return Err(LoginIntrospectionFailure::Unavailable);
+    }
+    let mut response = response;
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|_| LoginIntrospectionFailure::Unavailable)?;
+        .map_err(|_| LoginIntrospectionFailure::Unavailable)?
+    {
+        if body.len() + chunk.len() > MAX_INTROSPECTION_BODY_BYTES {
+            return Err(LoginIntrospectionFailure::Unavailable);
+        }
+        body.extend_from_slice(&chunk);
+    }
     let user: IntrospectedUser =
         serde_json::from_slice(&body).map_err(|_| LoginIntrospectionFailure::Refused)?;
     // A subject that is empty, or long enough to be something other than an
@@ -351,12 +383,14 @@ mod tests {
         let unavailable = LoginIntrospectionFailure::Unavailable;
         assert_eq!(unavailable.to_string(), "near_ai_login_unavailable");
         assert_eq!(format!("{unavailable:?}"), "Unavailable");
+        let unbuildable = LoginIntrospectionFailure::ClientUnbuildable;
+        assert_eq!(unbuildable.to_string(), "near_ai_login_client_unbuildable");
     }
 
     /// Only NEAR AI not handling the request is `Unavailable`. Every answer it gives
     /// about the token, whatever the status, stays the one refusal.
     #[test]
-    fn only_a_server_error_or_a_rate_limit_reads_as_unavailable() {
+    fn only_near_ai_not_handling_the_request_reads_as_unavailable() {
         use reqwest::StatusCode;
         for status in [
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -489,6 +523,81 @@ mod tests {
             introspect_login(&garbled, &token, short).await,
             Err(LoginIntrospectionFailure::Refused),
             "a complete body that does not parse"
+        );
+
+        // Past the cap, declared or streamed: not an answer we can read.
+        let declared = raw(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 999999999\r\n\r\n{",
+            true,
+        )
+        .await;
+        assert_eq!(
+            introspect_login(&declared, &token, short).await,
+            Err(LoginIntrospectionFailure::Unavailable),
+            "a declared length past the cap"
+        );
+        let streamed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request).await;
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\n\r\n")
+                    .await
+                    .unwrap();
+                let chunk = vec![b' '; 64 * 1024];
+                for _ in 0..8 {
+                    let head = format!("{:x}\r\n", chunk.len());
+                    if socket.write_all(head.as_bytes()).await.is_err()
+                        || socket.write_all(&chunk).await.is_err()
+                        || socket.write_all(b"\r\n").await.is_err()
+                    {
+                        return;
+                    }
+                }
+                let _ = socket.write_all(b"0\r\n\r\n").await;
+            });
+            base
+        };
+        assert_eq!(
+            introspect_login(&streamed, &token, Duration::from_secs(5)).await,
+            Err(LoginIntrospectionFailure::Unavailable),
+            "a chunked body that runs past the cap"
+        );
+    }
+
+    /// Pins that reqwest decompresses nothing here. A body labelled gzip that
+    /// is not gzip reaches the JSON parse as raw bytes and is refused. If a
+    /// crate in the workspace enabled reqwest's `gzip`, the decoder would
+    /// fail first, the read error would become `Unavailable`, and this test
+    /// would fail -- the cue to revisit the read-error mapping above.
+    #[tokio::test]
+    async fn a_compressed_body_is_never_decompressed() {
+        let router = axum::Router::new().route(
+            "/users/me",
+            axum::routing::get(|| async {
+                (
+                    [
+                        (axum::http::header::CONTENT_ENCODING, "gzip"),
+                        (axum::http::header::CONTENT_TYPE, "application/json"),
+                    ],
+                    "this is not gzip and not json",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        assert_eq!(
+            introspect_login(
+                &base,
+                &SecretString::from("fixture-token".to_string()),
+                Duration::from_secs(5)
+            )
+            .await,
+            Err(LoginIntrospectionFailure::Refused)
         );
     }
 }

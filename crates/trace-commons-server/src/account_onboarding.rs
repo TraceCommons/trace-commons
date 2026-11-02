@@ -23,6 +23,54 @@ pub const PROVISIONING_TTL_SECONDS: i64 = 300;
 #[error("near_provisioning_refused")]
 pub struct ProvisioningRefused;
 
+/// Why a wallet provisioning proof was not verified. Labels only.
+///
+/// `Refused` is every failure of the proof itself and every answer the NEAR
+/// RPC gave about the account. `Unavailable` is the NEAR RPC not answering
+/// (unreachable, timed out, a body that never arrived, a `5xx`, `429`, `408`,
+/// `421` or `425`), or this process unable to build a client to ask it: the
+/// same for every account at that moment. Both refuse provisioning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ProvisioningFailure {
+    #[error("near_provisioning_refused")]
+    Refused,
+    #[error("near_provisioning_rpc_unavailable")]
+    Unavailable,
+}
+
+/// How a failed NEAR RPC ownership check reads. An account that does not
+/// exist, or does not carry the key, is a `200` with a JSON-RPC error or a key
+/// list without it: `Ok(false)`, never here, so this cannot tell "no such
+/// account" from "key not on it". An error here is the RPC not answering,
+/// unless the RPC answered with a status about the request.
+fn ownership_check_failure(error: &anyhow::Error) -> ProvisioningFailure {
+    let Some(error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+    else {
+        return ProvisioningFailure::Refused;
+    };
+    match error.status() {
+        Some(status)
+            if status.is_server_error()
+                || matches!(
+                    status,
+                    reqwest::StatusCode::TOO_MANY_REQUESTS
+                        | reqwest::StatusCode::REQUEST_TIMEOUT
+                        | reqwest::StatusCode::MISDIRECTED_REQUEST
+                        | reqwest::StatusCode::TOO_EARLY
+                ) =>
+        {
+            ProvisioningFailure::Unavailable
+        }
+        Some(_) => ProvisioningFailure::Refused,
+        // No status: the request was not answered (connect, timeout, a body
+        // that stopped arriving, which `json()` reports as a decode error), or
+        // no client could be built.
+        None => ProvisioningFailure::Unavailable,
+    }
+}
+
 /// Public wallet-signing payload. It contains identity and is deliberately not Debug.
 pub struct ProvisioningChallenge<'a> {
     pub message: &'a str,
@@ -188,30 +236,39 @@ pub fn is_device_key_revoked(error: &crate::error::DatabaseError) -> bool {
 }
 
 /// Whether a provisioning error is the database unable to answer rather than
-/// a refusal. Two kinds, both deployment state, the same for every request:
+/// a refusal. `true` means the request was not decided, and the caller says
+/// "unavailable" (`503`); `false` means the uniform refusal.
 ///
-/// - **Not answering now**: the pool timed out or is closed, the connection
-///   could not be made or was lost (an I/O failure or a closed connection),
-///   or PostgreSQL said it is shutting down or out of resources.
+/// Three kinds are unavailable:
+///
+/// - **Down**: the pool timed out or is closed; the connection could not be
+///   made, was lost or timed out; or PostgreSQL said it is shutting down or
+///   out of resources.
 /// - **Misconfigured**: a pool that could not be built or run, credentials
 ///   PostgreSQL rejects (SQLSTATE class `28`, or a client-side
-///   authentication, TLS or configuration error), a database that does not
+///   authentication, TLS or configuration failure), a database that does not
 ///   exist or was dropped (`3D000`, `57P04`), or a required pool the
-///   deployment did not configure (a `missing-control:` label).
+///   deployment did not configure (a `missing-control:` label). These are
+///   deployment state: the same for every request.
+/// - **Contended**: a deadlock (`40P01`), a serialization failure (`40001`)
+///   or a cancelled statement (`57014`). On the provisioning paths the rows
+///   that can contend are the advisory lock on the login's anchor (reached
+///   only with a NEAR AI token for that login, introspected first), the
+///   device key's row (reached only with the device proof, verified first),
+///   and rows under the tenant those two decide. So only a requester already
+///   holding the key or the login can meet contention on them, and
+///   "unavailable" tells it nothing it did not hold. A `57014` from a query
+///   that is merely slow is not about any identity at all.
 ///
-/// What is **not** here, and so stays a refusal:
+/// What stays a refusal:
 ///
 /// - Every decided refusal: `DatabaseError::Pool(label)` (the refusal labels
 ///   above and in `db::postgres_account_onboarding`), `Query`, `Constraint`,
 ///   `Serialization`.
-/// - A client-side `tokio_postgres` error that follows the data (an
-///   unexpected row count, a column or type mismatch, a parameter that will
-///   not encode).
-/// - Lock contention: a deadlock (`40P01`), a serialization failure
-///   (`40001`) or a cancelled statement (`57014`) happens because another
-///   transaction holds the rows this request touches, which on these paths
-///   are keyed by the device key and the login's anchor. Answering those
-///   differently would describe that key or login.
+/// - A client-side `tokio_postgres` error that follows the data: a row count,
+///   a column, a type, a parameter count, an encode or parse failure, an
+///   unexpected message. These are classified by **kind**, never by whether
+///   the cause is an `io::Error` -- encode and parse failures box one too.
 /// - Any other server error (an integrity or permission violation).
 ///
 /// Anything not positively recognised stays a refusal.
@@ -228,12 +285,28 @@ pub fn is_database_unavailable(error: &crate::error::DatabaseError) -> bool {
     }
 }
 
-/// Whether a `tokio_postgres` error is PostgreSQL unable to answer: not
-/// answering now, or misconfigured. See [`is_database_unavailable`].
+/// The `Display` of each `tokio_postgres` client-side error kind that means
+/// PostgreSQL could not be reached or logged in to. `tokio_postgres` does not
+/// expose its error kind, and its `Display` prints the kind alone (never the
+/// cause), so the kind is read from it. Pinned against a real connection
+/// failure in `tests/account_onboarding_pg.rs`, so a release that rewords
+/// these fails there rather than silently reclassifying.
+const POSTGRES_UNAVAILABLE_KINDS: [&str; 8] = [
+    // Down.
+    "error communicating with the server",
+    "connection closed",
+    "error connecting to server",
+    "timeout waiting for server",
+    // Misconfigured.
+    "authentication error",
+    "error performing TLS handshake",
+    "invalid configuration",
+    "invalid connection string",
+];
+
+/// Whether a `tokio_postgres` error is PostgreSQL unable to answer. See
+/// [`is_database_unavailable`].
 fn postgres_unavailable(error: &tokio_postgres::Error) -> bool {
-    if error.is_closed() {
-        return true;
-    }
     if let Some(db) = error.as_db_error() {
         let code = db.code().code();
         // 28: invalid authorization (bad password, no such role).
@@ -242,7 +315,9 @@ fn postgres_unavailable(error: &tokio_postgres::Error) -> bool {
         // failure. 53000 / 53100 / 53200 / 53300: out of resources, disk,
         // memory, connections. 57P01 / 57P02 / 57P03 / 57P04: admin shutdown,
         // crash shutdown, cannot connect now, database dropped. 3D000: no
-        // such database.
+        // such database. 40P01 / 40001 / 57014: deadlock, serialization
+        // failure, statement cancelled (contention; see
+        // `is_database_unavailable`).
         return code.starts_with("28")
             || matches!(
                 code,
@@ -260,25 +335,57 @@ fn postgres_unavailable(error: &tokio_postgres::Error) -> bool {
                     | "57P03"
                     | "57P04"
                     | "3D000"
+                    | "40P01"
+                    | "40001"
+                    | "57014"
             );
     }
-    if std::error::Error::source(error).is_some_and(|cause| cause.is::<std::io::Error>()) {
-        return true;
+    POSTGRES_UNAVAILABLE_KINDS.contains(&error.to_string().as_str())
+}
+
+/// A label for a provisioning database error, safe for a log line: a fixed
+/// refusal label, a SQLSTATE, or a variant name. Never the error's text,
+/// which can carry a connection string or a wrapped error message.
+pub fn database_error_label(error: &crate::error::DatabaseError) -> String {
+    use crate::error::DatabaseError;
+    use deadpool_postgres::PoolError;
+    let postgres = |error: &tokio_postgres::Error| match error.as_db_error() {
+        Some(db) => format!("sqlstate_{}", db.code().code()),
+        None if POSTGRES_UNAVAILABLE_KINDS.contains(&error.to_string().as_str()) => {
+            "postgres_unreachable".to_string()
+        }
+        None => "postgres_client_error".to_string(),
+    };
+    match error {
+        DatabaseError::Pool(label) => {
+            let label_shaped = !label.is_empty()
+                && label.len() <= 64
+                && label.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b':')
+                });
+            if label_shaped {
+                label.clone()
+            } else if label.starts_with("missing-control:") {
+                "missing_control".to_string()
+            } else {
+                "pool_unlabelled".to_string()
+            }
+        }
+        DatabaseError::Postgres(error) => postgres(error),
+        DatabaseError::PoolRuntime(PoolError::Backend(error)) => postgres(error),
+        DatabaseError::PoolRuntime(PoolError::Timeout(_)) => "pool_timeout".to_string(),
+        DatabaseError::PoolRuntime(PoolError::Closed) => "pool_closed".to_string(),
+        DatabaseError::PoolRuntime(_) => "pool_runtime".to_string(),
+        DatabaseError::PoolBuild(_) => "pool_build".to_string(),
+        DatabaseError::Query(_) => "query".to_string(),
+        DatabaseError::Constraint(_) => "constraint".to_string(),
+        DatabaseError::Serialization(_) => "serialization".to_string(),
+        DatabaseError::NotFound { .. } => "not_found".to_string(),
+        DatabaseError::Migration(_) => "migration".to_string(),
+        DatabaseError::UploadPrincipalAuthenticationDenied => {
+            "upload_principal_authentication_denied".to_string()
+        }
     }
-    // The client-side kinds that mean the deployment cannot reach or log in
-    // to PostgreSQL. `tokio_postgres` does not expose its error kind, so it
-    // is read from `Display`, which prints the kind alone (never the cause).
-    // A kind not listed -- a row count, a column, a type, an encoding --
-    // follows the data and stays a refusal.
-    matches!(
-        error.to_string().as_str(),
-        "authentication error"
-            | "error performing TLS handshake"
-            | "invalid configuration"
-            | "invalid connection string"
-            | "error connecting to server"
-            | "timeout waiting for server"
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -443,6 +550,20 @@ impl PendingNearProvisioning {
         browser_binding: &[u8; 32],
         now: i64,
     ) -> Result<VerifiedNearProvisioning, ProvisioningRefused> {
+        self.verify_classified(cfg, assertion, browser_binding, now)
+            .await
+            .map_err(|_| ProvisioningRefused)
+    }
+
+    /// [`Self::verify`], saying whether a failure is the NEAR RPC not
+    /// answering ([`ProvisioningFailure::Unavailable`]) rather than a refusal.
+    pub async fn verify_classified(
+        self,
+        cfg: &NearConfig,
+        assertion: ProvisioningAssertion<'_>,
+        browser_binding: &[u8; 32],
+        now: i64,
+    ) -> Result<VerifiedNearProvisioning, ProvisioningFailure> {
         self.verify_using(cfg, assertion, browser_binding, now, |account, key| {
             near_account_has_full_access_key(cfg, account, key)
         })
@@ -456,7 +577,7 @@ impl PendingNearProvisioning {
         browser_binding: &[u8; 32],
         now: i64,
         ownership: F,
-    ) -> Result<VerifiedNearProvisioning, ProvisioningRefused>
+    ) -> Result<VerifiedNearProvisioning, ProvisioningFailure>
     where
         F: FnOnce(&'a str, &'a str) -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<bool>>,
@@ -466,7 +587,7 @@ impl PendingNearProvisioning {
             || self.config_hash != config_hash(cfg)
             || &self.browser_binding != browser_binding
         {
-            return Err(ProvisioningRefused);
+            return Err(ProvisioningFailure::Refused);
         }
         verify_nep413(
             assertion.wallet_public_key,
@@ -476,18 +597,19 @@ impl PendingNearProvisioning {
             self.callback_url.as_deref(),
             assertion.wallet_signature,
         )
-        .map_err(|_| ProvisioningRefused)?;
+        .map_err(|_| ProvisioningFailure::Refused)?;
         let signature = base64::engine::general_purpose::STANDARD
             .decode(assertion.device_signature)
-            .map_err(|_| ProvisioningRefused)?;
+            .map_err(|_| ProvisioningFailure::Refused)?;
         ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, self.device_public_key)
             .verify(&self.device_signing_bytes(), &signature)
-            .map_err(|_| ProvisioningRefused)?;
+            .map_err(|_| ProvisioningFailure::Refused)?;
+        // Last, because it is the only check that leaves this machine.
         if !ownership(&self.account_id, assertion.wallet_public_key)
             .await
-            .map_err(|_| ProvisioningRefused)?
+            .map_err(|error| ownership_check_failure(&error))?
         {
-            return Err(ProvisioningRefused);
+            return Err(ProvisioningFailure::Refused);
         }
         Ok(VerifiedNearProvisioning {
             account_id: self.account_id.clone(),
@@ -589,6 +711,91 @@ mod tests {
         assert!(is_database_unavailable(&DatabaseError::Pool(
             "missing-control: login-resolver-pool-unconfigured".into()
         )));
+    }
+
+    /// A log label never carries the error's text: a refusal label is kept,
+    /// anything else becomes a fixed name.
+    #[test]
+    fn a_database_error_label_is_label_only() {
+        use crate::error::DatabaseError;
+        assert_eq!(
+            database_error_label(&DatabaseError::Pool(DEVICE_KEY_REGISTERED_ELSEWHERE.into())),
+            DEVICE_KEY_REGISTERED_ELSEWHERE
+        );
+        for (error, label) in [
+            (
+                DatabaseError::Pool("connect to postgres://user:secret@host/db failed".into()),
+                "pool_unlabelled",
+            ),
+            (
+                DatabaseError::Pool("missing-control: login-resolver-pool-unconfigured".into()),
+                "missing_control",
+            ),
+            (
+                DatabaseError::Query("near_provisioning_ambiguous".into()),
+                "query",
+            ),
+            (DatabaseError::Constraint("detail".into()), "constraint"),
+            (
+                DatabaseError::PoolRuntime(deadpool_postgres::PoolError::Closed),
+                "pool_closed",
+            ),
+        ] {
+            assert_eq!(database_error_label(&error), label, "{error:?}");
+        }
+    }
+
+    /// A failed NEAR RPC ownership check is unavailable only when the RPC did
+    /// not answer; an answer about the request, or a failure with no HTTP
+    /// error in it, stays the refusal.
+    #[tokio::test]
+    async fn only_the_near_rpc_not_answering_reads_as_unavailable() {
+        let cfg_at = |rpc_url: String| NearConfig {
+            rpc_url,
+            network: "mainnet".into(),
+            recipient: "app.tracecommons.test".into(),
+        };
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            drop(listener);
+            url
+        };
+        let error = near_account_has_full_access_key(&cfg_at(closed), "alice.near", "ed25519:x")
+            .await
+            .expect_err("nothing listens");
+        assert_eq!(
+            ownership_check_failure(&error),
+            ProvisioningFailure::Unavailable
+        );
+        for (status, expected) in [
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                ProvisioningFailure::Unavailable,
+            ),
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                ProvisioningFailure::Unavailable,
+            ),
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                ProvisioningFailure::Refused,
+            ),
+        ] {
+            let router =
+                axum::Router::new().route("/", axum::routing::post(move || async move { status }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let error = near_account_has_full_access_key(&cfg_at(url), "alice.near", "ed25519:x")
+                .await
+                .expect_err("a non-success status");
+            assert_eq!(ownership_check_failure(&error), expected, "{status}");
+        }
+        assert_eq!(
+            ownership_check_failure(&anyhow::anyhow!("not an HTTP failure")),
+            ProvisioningFailure::Refused
+        );
     }
 
     fn cfg() -> NearConfig {

@@ -2680,15 +2680,18 @@ async fn each_listed_device_says_what_it_has_contributed() {
     other_task.abort();
 }
 
-/// `is_database_unavailable` against errors a real PostgreSQL and a
-/// real pool raise. Only the database not answering is transient: a pool
-/// that cannot connect at all (nothing listening). A missing database, an
-/// unexpected row count (a client-side error that follows the data) and a
-/// cancelled statement (lock contention, which follows the rows a request
-/// touches) are not.
+/// `is_database_unavailable` and `database_error_label` against errors a real
+/// PostgreSQL and a real pool raise, which also pins the `tokio_postgres`
+/// error-kind strings the predicate reads.
+///
+/// Unavailable: nothing listening, a database that does not exist, a
+/// statement cancelled by `statement_timeout`. A refusal: a `query_opt` that
+/// matches two rows, and a statement that fails to parse on the client --
+/// both follow the data, and the parse failure boxes an `io::Error` cause,
+/// which is why the predicate reads the kind and not the cause.
 #[tokio::test]
-async fn only_deployment_state_reads_as_the_database_unavailable() {
-    use trace_commons_server::account_onboarding::is_database_unavailable;
+async fn the_database_unavailable_predicate_reads_real_errors() {
+    use trace_commons_server::account_onboarding::{database_error_label, is_database_unavailable};
     use trace_commons_server::error::DatabaseError;
     let _serial = serial().lock().await;
     let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
@@ -2719,22 +2722,32 @@ async fn only_deployment_state_reads_as_the_database_unavailable() {
         .get()
         .await
         .expect_err("nothing listens");
-    assert!(
-        is_database_unavailable(&DatabaseError::PoolRuntime(unreachable)),
-        "a refused connection is the database not answering"
-    );
+    match &unreachable {
+        deadpool_postgres::PoolError::Backend(error) => {
+            assert!(error.as_db_error().is_none());
+            assert_eq!(
+                error.to_string(),
+                "error connecting to server",
+                "tokio_postgres reworded a kind the predicate reads"
+            );
+        }
+        other => panic!("expected a backend error, got {other:?}"),
+    }
+    let unreachable = DatabaseError::PoolRuntime(unreachable);
+    assert!(is_database_unavailable(&unreachable));
+    assert_eq!(database_error_label(&unreachable), "postgres_unreachable");
 
-    // The server answered, permanently: this database does not exist (3D000).
+    // Deployment state: this database does not exist (3D000).
     let mut missing = reqwest::Url::parse(&url).unwrap();
     missing.set_path(&format!("/no_such_db_{}", uuid::Uuid::new_v4().simple()));
-    let missing = pool_for(missing.as_str())
-        .get()
-        .await
-        .expect_err("no such database");
-    assert!(
-        is_database_unavailable(&DatabaseError::PoolRuntime(missing)),
-        "a missing database is deployment state, the same for every request"
+    let missing = DatabaseError::PoolRuntime(
+        pool_for(missing.as_str())
+            .get()
+            .await
+            .expect_err("no such database"),
     );
+    assert!(is_database_unavailable(&missing));
+    assert_eq!(database_error_label(&missing), "sqlstate_3D000");
 
     let client = pool_for(&url).get().await.expect("connect");
     // Client-side and data-dependent: more than one row for `query_opt`.
@@ -2743,9 +2756,22 @@ async fn only_deployment_state_reads_as_the_database_unavailable() {
         .await
         .expect_err("two rows");
     assert!(row_count.as_db_error().is_none(), "a client-side error");
-    assert!(!is_database_unavailable(&DatabaseError::Postgres(
-        row_count
-    )));
+    let row_count = DatabaseError::Postgres(row_count);
+    assert!(!is_database_unavailable(&row_count));
+    assert_eq!(database_error_label(&row_count), "postgres_client_error");
+
+    // Client-side parse failure, with an `io::Error` as its cause: still a
+    // refusal, because the predicate reads the kind.
+    let parse = client
+        .query("SELECT 1\0", &[])
+        .await
+        .expect_err("a NUL in the statement");
+    assert!(parse.as_db_error().is_none());
+    assert!(
+        std::error::Error::source(&parse).is_some_and(|cause| cause.is::<std::io::Error>()),
+        "the case an io-cause check gets wrong"
+    );
+    assert!(!is_database_unavailable(&DatabaseError::Postgres(parse)));
 
     // Contention-shaped: a statement cancelled by statement_timeout (57014).
     client
@@ -2760,7 +2786,7 @@ async fn only_deployment_state_reads_as_the_database_unavailable() {
         cancelled.code(),
         Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
     );
-    assert!(!is_database_unavailable(&DatabaseError::Postgres(
-        cancelled
-    )));
+    let cancelled = DatabaseError::Postgres(cancelled);
+    assert!(is_database_unavailable(&cancelled));
+    assert_eq!(database_error_label(&cancelled), "sqlstate_57014");
 }

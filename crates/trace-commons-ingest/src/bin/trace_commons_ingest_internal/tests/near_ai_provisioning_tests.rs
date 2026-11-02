@@ -231,6 +231,29 @@ struct Reply {
 }
 
 impl Reply {
+    /// The status, body and client-facing headers of a router answer.
+    async fn read(response: axum::response::Response) -> Self {
+        let header = |name: axum::http::HeaderName| {
+            response
+                .headers()
+                .get(name)
+                .map(|value| value.to_str().expect("ascii").to_string())
+        };
+        let cache_control = header(axum::http::header::CACHE_CONTROL);
+        let retry_after = header(axum::http::header::RETRY_AFTER);
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body")
+            .to_vec();
+        Self {
+            status,
+            bytes,
+            cache_control,
+            retry_after,
+        }
+    }
+
     fn json(&self) -> serde_json::Value {
         serde_json::from_slice(&self.bytes).unwrap_or_default()
     }
@@ -258,25 +281,7 @@ async fn send(
         .oneshot(builder.body(body).expect("request"))
         .await
         .expect("router is infallible");
-    let header = |name: axum::http::HeaderName| {
-        response
-            .headers()
-            .get(name)
-            .map(|value| value.to_str().expect("ascii").to_string())
-    };
-    let cache_control = header(axum::http::header::CACHE_CONTROL);
-    let retry_after = header(axum::http::header::RETRY_AFTER);
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("body")
-        .to_vec();
-    Reply {
-        status,
-        bytes,
-        cache_control,
-        retry_after,
-    }
+    Reply::read(response).await
 }
 
 /// A started ceremony as the client sees it.
@@ -1444,25 +1449,7 @@ async fn send_account(
         .oneshot(builder.body(body).expect("request"))
         .await
         .expect("router is infallible");
-    let header = |name: axum::http::HeaderName| {
-        response
-            .headers()
-            .get(name)
-            .map(|value| value.to_str().expect("ascii").to_string())
-    };
-    let cache_control = header(axum::http::header::CACHE_CONTROL);
-    let retry_after = header(axum::http::header::RETRY_AFTER);
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("body")
-        .to_vec();
-    Reply {
-        status,
-        bytes,
-        cache_control,
-        retry_after,
-    }
+    Reply::read(response).await
 }
 
 /// A session on `account` that no NEAR AI sign-in minted, inserted as a
