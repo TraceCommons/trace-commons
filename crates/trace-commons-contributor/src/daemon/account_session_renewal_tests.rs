@@ -46,6 +46,8 @@ struct Commons {
     refuse_status: Mutex<u16>,
     /// The status the start answers with, when not 200.
     start_status: Mutex<u16>,
+    /// The finish answers 200 with a body that does not parse.
+    finish_garbage: Mutex<bool>,
     starts: Mutex<u32>,
     finishes: Mutex<u32>,
     refreshes: Mutex<u32>,
@@ -80,9 +82,11 @@ async fn spawn(device_public_key: String) -> Stub {
         tenant: Mutex::new(tenant()),
         account: Mutex::new(ACCOUNT.to_string()),
         refuse: Mutex::new(false),
-        refuse_label: Mutex::new("refused".into()),
+        // The commons's real refusal: its uniform deny.
+        refuse_label: Mutex::new(super::super::nearai_onboarding::UNIFORM_FINISH_DENY.into()),
         refuse_status: Mutex::new(400),
         start_status: Mutex::new(200),
+        finish_garbage: Mutex::new(false),
         starts: Mutex::new(0),
         finishes: Mutex::new(0),
         refreshes: Mutex::new(0),
@@ -176,6 +180,9 @@ async fn spawn(device_public_key: String) -> Stub {
                         .verify(&preimage, &signature)
                         .unwrap();
                     assert!(body["access_token"].as_str().unwrap().starts_with("near-access-"));
+                    if *state.finish_garbage.lock().unwrap() {
+                        return (StatusCode::OK, Json(json!({"not": "a finish"})));
+                    }
                     if *state.refuse.lock().unwrap() {
                         let label = state.refuse_label.lock().unwrap().clone();
                         let status = *state.refuse_status.lock().unwrap();
@@ -1421,26 +1428,100 @@ async fn a_finish_the_commons_does_not_answer_is_not_another_account() {
     }
 }
 
-/// A start the commons answered with something unusable -- a client error
-/// -- is an answer, not an unreachable commons: a signed-out device fails
-/// closed rather than storing the login as unreachable. A start it did not
-/// answer (a server error) is unreachable.
+/// No start answer refuses a login -- only the finish can -- and the
+/// commons answers its own rate limit at the start with its uniform `400`.
+/// So any start failure leaves a signed-out device's login unchecked,
+/// never refused; a signed-in device fails closed.
 #[tokio::test]
-async fn a_start_the_commons_refuses_fails_closed_when_signed_out() {
-    let fx = Fixture::new(Session::Absent).await;
-    *fx.stub.state.start_status.lock().unwrap() = 400;
-    assert!(matches!(
-        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
-        FreshLogin::Unavailable
-    ));
-    assert_eq!(fx.ceremonies(), (1, 0));
+async fn a_start_answer_never_refuses_a_login() {
+    for status in [400u16, 503] {
+        let fx = Fixture::new(Session::Absent).await;
+        *fx.stub.state.start_status.lock().unwrap() = status;
+        assert!(
+            matches!(
+                check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+                FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+            ),
+            "signed out, start {status}"
+        );
+        assert_eq!(fx.ceremonies(), (1, 0));
 
-    let fx = Fixture::new(Session::Absent).await;
-    *fx.stub.state.start_status.lock().unwrap() = 503;
-    assert!(matches!(
-        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
-        FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
-    ));
+        let fx = Fixture::new(Session::Expired).await;
+        *fx.stub.state.start_status.lock().unwrap() = status;
+        assert!(
+            matches!(
+                check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+                FreshLogin::Unavailable
+            ),
+            "signed in, start {status}"
+        );
+    }
+}
+
+/// A finish answer that is neither of the commons's two refusals -- a
+/// proxy's or portal's `403`, `404` or `408`, a `200` that does not parse --
+/// says nothing about the login: unchecked when signed out, fail closed
+/// when signed in, and never another account.
+#[tokio::test]
+async fn an_unusable_finish_answer_is_not_another_account() {
+    for status in [403u16, 404, 408] {
+        for signed_out in [true, false] {
+            let fx = Fixture::new(if signed_out {
+                Session::Absent
+            } else {
+                Session::Expired
+            })
+            .await;
+            *fx.stub.state.refuse.lock().unwrap() = true;
+            *fx.stub.state.refuse_status.lock().unwrap() = status;
+            *fx.stub.state.refuse_label.lock().unwrap() = "Forbidden".into();
+            let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
+            if signed_out {
+                assert!(
+                    matches!(check, FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)),
+                    "signed out, finish {status}"
+                );
+            } else {
+                assert!(
+                    matches!(check, FreshLogin::Unavailable),
+                    "signed in, finish {status}"
+                );
+            }
+            assert_eq!(fx.ceremonies(), (1, 1));
+        }
+    }
+    for signed_out in [true, false] {
+        let fx = Fixture::new(if signed_out {
+            Session::Absent
+        } else {
+            Session::Expired
+        })
+        .await;
+        *fx.stub.state.finish_garbage.lock().unwrap() = true;
+        let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
+        if signed_out {
+            assert!(matches!(
+                check,
+                FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+            ));
+        } else {
+            assert!(matches!(check, FreshLogin::Unavailable));
+        }
+    }
+}
+
+/// The commons's uniform `400` deny at the finish is its refusal: another
+/// account, signed in or out.
+#[tokio::test]
+async fn the_uniform_finish_deny_is_another_account() {
+    for session in [Session::Absent, Session::Expired] {
+        let fx = Fixture::new(session).await;
+        *fx.stub.state.refuse.lock().unwrap() = true;
+        assert!(matches!(
+            check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+            FreshLogin::Refused
+        ));
+    }
 }
 
 /// Signed out, and the commons cannot be asked: the login is stored

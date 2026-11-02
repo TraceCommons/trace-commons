@@ -539,11 +539,13 @@ pub(crate) enum FreshLogin {
     /// most often a different NEAR AI account from the one this device
     /// joined with. The stored login is kept.
     Refused,
-    /// Signed in: the commons did not answer. Signed in or out: it answered
-    /// something this device could not verify as its account (a local check
-    /// failed: a clock to correct, say) or could not use, or a local step
-    /// failed. Fail closed: the stored login is kept. (A signed-out device
-    /// whose commons did not answer is [`FreshLogin::Unchecked`] instead.)
+    /// Signed in: the commons did not answer, or answered with something
+    /// other than a refusal. Signed in or out: a successful answer this
+    /// device could not verify as its account (a local check failed: a
+    /// clock to correct, say), or a local step failed. Fail closed: the
+    /// stored login is kept. (A signed-out device whose commons did not
+    /// answer, or answered with something other than a refusal, is
+    /// [`FreshLogin::Unchecked`] instead.)
     Unavailable,
     /// The account is bound, but its check did not run: the account record
     /// is malformed, the allowlist refuses the enrolled address, or (signed
@@ -564,7 +566,9 @@ pub(crate) const UNCHECKED_ACCOUNT_RECORD_MALFORMED: &str = "account_record_malf
 /// commons address.
 pub(crate) const UNCHECKED_COMMONS_ADDRESS_REFUSED: &str = "commons_address_refused";
 /// [`FreshLogin::Unchecked`]: a signed-out device's commons did not answer
-/// the start or the finish (no response, a server error, a `429`, or the
+/// the start or the finish, or answered with something other than a
+/// refusal (no response, a server error, a `429`, any start answer, a
+/// finish answer that is not its uniform deny or the revoked key, or the
 /// check's deadline).
 pub(crate) const UNCHECKED_COMMONS_UNREACHABLE: &str = "commons_unreachable";
 
@@ -609,25 +613,31 @@ pub(crate) async fn check_fresh_login_live(
 /// That check costs the commons one provisioning finish: it counts against
 /// the commons's provisioning rate limit, and the account session it issues
 /// on the server is dropped here unstored and expires on its own. One runs
-/// per NEAR AI sign-in, never per retry of a renewal. A commons that does not
-/// answer -- no response, a server error, a `429`, the deadline -- at the
-/// start or the finish does not block a signed-out device: its login is
-/// stored [`FreshLogin::Unchecked`] (`commons_unreachable`). A commons that
-/// answers its own rate limit or other transient trouble at the finish with
-/// its uniform `400` deny cannot be told from a refusal here, and reads as
-/// [`FreshLogin::Refused`]; telling them apart needs the commons to answer
-/// those with a `429` or `5xx`. A check that issues no session needs a
-/// commons endpoint that does not exist yet.
+/// per NEAR AI sign-in, never per retry of a renewal.
+///
+/// Only the finish can refuse a login, and the commons refuses one in
+/// exactly two ways: its uniform `400` deny, and the revoked-key `409`. Any
+/// other outcome -- no response, a server error, a `429`, the deadline, any
+/// start answer (the commons answers its own rate limit and other
+/// transient trouble at the start with its uniform `400` too), a finish
+/// answer that is neither refusal (a proxy's `403`, a body that does not
+/// parse) -- does not block a signed-out device: its login is stored
+/// [`FreshLogin::Unchecked`] (`commons_unreachable`). A signed-in device
+/// fails closed on those. A commons that answers its own transient trouble
+/// at the finish with the uniform `400` cannot be told from a refusal here,
+/// and reads as [`FreshLogin::Refused`]; telling them apart needs the
+/// commons to answer those with a `429` or `5xx`. A check that issues no
+/// session needs a commons endpoint that does not exist yet.
 ///
 /// Unchecked, and stored but not recorded as the account's login: a
 /// malformed record or an enrolled address the allowlist refuses, where no
 /// retry can run the check and failing closed would block NEAR AI sign-in
-/// for good, and a signed-out device whose commons could not be asked.
-/// Unavailable, and failing closed: on a signed-in device anything that may
-/// pass -- a read of configuration or credential storage, the commons
-/// unreachable -- and, signed in or out, an answer that fails a local check,
-/// where the commons spoke and this device could not verify it as its
-/// account.
+/// for good, and a signed-out device whose commons gave no refusal and no
+/// verdict. Unavailable, and failing closed: on a signed-in device anything
+/// that may pass -- a read of configuration or credential storage, a
+/// commons that gave no refusal and no verdict -- and, signed in or out, a
+/// successful answer that fails a local check, where the commons spoke and
+/// this device could not verify it as its account.
 pub(super) async fn check_fresh_login(
     store: &crate::config::ConfigStore,
     via: &RenewVia<'_>,
@@ -710,12 +720,13 @@ pub(super) async fn check_fresh_login(
             FreshLogin::NotBound
         }
         "commons_address_refused" => FreshLogin::Unchecked(UNCHECKED_COMMONS_ADDRESS_REFUSED),
-        // The commons did not answer the start or the finish: no response,
-        // a server error, a rate limit it said was one.
-        "commons_start_failed" | "commons_finish_unanswered" => unasked,
-        // Everything else fails closed, signed in or out: an answer this
-        // device could not verify as its account (owner, 2026-11-02), an
-        // answer it could not use, or a local failure.
+        // The commons did not answer the start or the finish, or answered
+        // with something other than a refusal. No start answer refuses a
+        // login, and only the finish's uniform deny or revoked key does.
+        "commons_start_failed" | "commons_start_refused" | "commons_finish_unanswered" => unasked,
+        // Everything else fails closed, signed in or out: a successful
+        // answer this device could not verify as its account (owner,
+        // 2026-11-02), or a local failure.
         _ => FreshLogin::Unavailable,
     }
 }

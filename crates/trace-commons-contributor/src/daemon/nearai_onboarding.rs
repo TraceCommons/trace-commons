@@ -588,7 +588,6 @@ struct StartedCeremony {
     device_signature: String,
 }
 
-/// The ceremony's start and the device proof over its answer.
 /// Which caller's labels a ceremony's commons failures take.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CeremonyFor {
@@ -603,9 +602,16 @@ enum CeremonyFor {
 /// The fresh-login check's label for a start the commons did not answer.
 pub(super) const FRESH_START_UNANSWERED: &str = "near_ai_enroll_start_failed";
 /// The fresh-login check's label for a start the commons answered with
-/// something unusable: a client error, or a body that does not parse.
+/// something unusable: a client error, or a body that does not parse. No
+/// start answer refuses a login -- only the finish can -- and the commons
+/// answers its own rate limit and other transient trouble at the start
+/// with its uniform `400` deny, so the check treats this like a start it
+/// did not answer.
 pub(super) const FRESH_START_REFUSED: &str = "near_ai_enroll_start_refused";
-/// The fresh-login check's label for a finish the commons did not answer.
+/// The fresh-login check's label for a finish the commons did not answer,
+/// or answered with something other than a refusal: no response, a server
+/// error, a `429`, a client error that is not its uniform deny (a proxy's
+/// `403` or `408`, say), or a body that does not parse.
 pub(super) const FRESH_FINISH_UNANSWERED: &str = "near_ai_enroll_finish_unanswered";
 
 /// Whether the commons did not answer: no response, a server error, or a
@@ -622,6 +628,7 @@ fn commons_unanswered(error: &trace_commons_operator_client::Error) -> bool {
     }
 }
 
+/// The ceremony's start and the device proof over its answer.
 async fn start_ceremony(
     commons: &trace_commons_operator_client::Client,
     identity: &DeviceIdentity,
@@ -690,8 +697,13 @@ async fn finish_ceremony(
     referral_code: Option<&str>,
     caller: CeremonyFor,
 ) -> Result<Finished> {
+    // The commons refuses a finish in exactly two ways: its uniform `400`
+    // deny, and the revoked-key `409`. For a fresh sign-in's check, only
+    // those are a refusal; any other answer says nothing about the login.
     let refusal = |error: trace_commons_operator_client::Error| {
-        if caller == CeremonyFor::FreshLogin && commons_unanswered(&error) {
+        let refused =
+            is_uniform_finish_deny(&error) || error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE);
+        if caller == CeremonyFor::FreshLogin && !refused {
             anyhow!(FRESH_FINISH_UNANSWERED)
         } else {
             finish_refusal(&error, "near_ai_enroll_verification_failed")
@@ -740,7 +752,7 @@ async fn finish_ceremony(
 
 /// The label of the 400 an ingest answers for any refused native finish,
 /// one whose body it could not parse included (`native_generic_deny`).
-const UNIFORM_FINISH_DENY: &str = "native sign-in could not be completed";
+pub(super) const UNIFORM_FINISH_DENY: &str = "native sign-in could not be completed";
 
 /// That uniform deny, and nothing else: not a revoked key, not a 5xx, not
 /// a transport failure.
