@@ -287,8 +287,8 @@ struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tab_shell: Option<String>,
     /// The ended row Start again or Resume prepared this one from. Set by
-    /// the daemon, never by a request: its tab is the only one this
-    /// session's launch may run in.
+    /// the daemon, never by a request: its tab's window is the only one
+    /// this session's launch may open a tab in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     again_of: Option<Uuid>,
     /// A stop was asked for; the launcher is told on its next report.
@@ -519,9 +519,9 @@ impl SessionRegistry {
         }
     }
 
-    /// The tab session `id` may be launched in: the one the row it was
-    /// started again or resumed from ran in, with what told that tab apart
-    /// then, for the caller to read again before using it. Only for a row
+    /// The tab whose window session `id` may open a new tab in: the one the
+    /// row it was started again or resumed from ran in, with what told that
+    /// tab apart then, for the caller to read again before using it. Only for a row
     /// the daemon opened, that started, and that has ended, and only while
     /// no other session holding its profile has the same tab. None
     /// otherwise, and for any session not prepared by Start again or

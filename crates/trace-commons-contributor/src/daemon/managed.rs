@@ -466,10 +466,11 @@ impl ManagedService {
                 let p: Params = parse(request)?;
                 let cwd = self.sessions.launch_cwd(p.session_id, &p.ticket)?;
                 let installed = self.installed_terminals(choice.app());
-                // Start again and Resume run in the ended row's own tab
-                // (owner, 2026-11-02), only while that tab is the one the
-                // row ran in: a tty macOS has since handed to another tab
-                // reads otherwise, and that launch opens a new window.
+                // Start again and Resume open a new tab in the ended row's
+                // window (owner, 2026-11-02), only while the row's tab is
+                // still the one it ran in: a tty macOS has since handed to
+                // another tab reads otherwise, and that launch opens a new
+                // window.
                 let tab_shell = self.tab_shell;
                 let tab = self
                     .sessions
@@ -2770,9 +2771,9 @@ mod tests {
         id
     }
 
-    /// #1839 review, findings 1, 2, 11 and 13: Start again runs in the
-    /// ended row's tab, which the daemon finds from the row it prepared the
-    /// session from; the app names nothing. An app built from #1839 that
+    /// #1839 review, findings 1, 2, 11 and 13: Start again opens beside
+    /// the ended row's tab, which the daemon finds from the row it prepared
+    /// the session from; the app names nothing. An app built from #1839 that
     /// still names a row is not refused, and what it names is ignored. A
     /// tab whose `login` reads otherwise now (its tty handed to a newer
     /// tab) is not used: that launch opens a new window.

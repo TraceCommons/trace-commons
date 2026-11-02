@@ -198,16 +198,18 @@ impl TerminalApp {
     }
 
     /// Terminal's lines for Start again and Resume (owner, 2026-11-02):
-    /// `command` runs in the ended session's tab, `tty`, when that tab is
-    /// still open and idle, and that tab's window comes to the front;
-    /// otherwise in a new window, as [`Self::script`]. The tab's tty is
-    /// printed either way. Terminal only: no other app here can name a tab.
+    /// `command` runs in a new tab of the window that holds the ended
+    /// session's tab, `tty`, and that window comes to the front; otherwise
+    /// in a new window, as [`Self::script`]. Nothing is ever typed into an
+    /// existing tab: its prompt may hold input not yet run.
     ///
-    /// The scan keeps the window by its id, which never changes, and stops
-    /// at the match. The tab is found again inside that window, idle, just
-    /// before the command is typed. A failure before that opens a new
-    /// window instead; nothing after it can fail the launch, which by then
-    /// has started.
+    /// Terminal has no command for a new tab, so it presses Command-T
+    /// through System Events, which macOS allows only an app with
+    /// Accessibility access, and only once Terminal is in front with that
+    /// window frontmost, since the keystroke reaches whatever is. Refused,
+    /// not in front, or no new tab within a second: a new window. The window
+    /// is kept by its id, which never changes. The new tab's tty is printed
+    /// either way. Terminal only: no other app here can name a tab.
     #[cfg(any(target_os = "macos", test))]
     fn script_in(self, command: &str, tty: &str) -> Vec<String> {
         let literal = applescript_literal(command);
@@ -224,18 +226,29 @@ impl TerminalApp {
                 "try".into(),
             ],
             find_window(tty),
-            find_tab(tty, true),
-            vec!["end try".into(), "if t is missing value then".into()],
+            vec![
+                "end try".into(),
+                "if wid is not missing value then".into(),
+                "try".into(),
+                "set tw to window id wid".into(),
+                "set n to count of tabs of tw".into(),
+                "if miniaturized of tw then set miniaturized of tw to false".into(),
+                "set index of tw to 1".into(),
+                "activate".into(),
+            ],
+            new_tab_in("tw"),
+            vec![
+                "end try".into(),
+                "end if".into(),
+                "if t is missing value then".into(),
+            ],
             open_window(&literal),
             vec![
                 "else".into(),
-                format!("set found to \"{tty}\""),
                 format!("do script \"{literal}\" in t"),
+                "set found to \"\"".into(),
                 "try".into(),
-            ],
-            raise_tab(),
-            vec![
-                "activate".into(),
+                "set found to tty of t".into(),
                 "end try".into(),
                 "end if".into(),
                 "return found".into(),
@@ -244,6 +257,31 @@ impl TerminalApp {
         ]
         .concat()
     }
+}
+
+/// Terminal's lines that open a new tab in `window`, already brought to the
+/// front with `n` tabs, and set `t` to it, or leave `t` `missing value`.
+/// Command-T reaches whichever app is in front, so it is pressed only once
+/// Terminal is, and its front window is `window`. The same shape as the
+/// placed launch's (#1852).
+#[cfg(any(target_os = "macos", test))]
+fn new_tab_in(window: &str) -> Vec<String> {
+    vec![
+        "repeat 20 times".into(),
+        "if frontmost then exit repeat".into(),
+        "delay 0.05".into(),
+        "end repeat".into(),
+        "if frontmost then".into(),
+        format!("if id of front window is id of {window} then"),
+        "tell application \"System Events\" to keystroke \"t\" using command down".into(),
+        "repeat 20 times".into(),
+        format!("if (count of tabs of {window}) > n then exit repeat"),
+        "delay 0.05".into(),
+        "end repeat".into(),
+        format!("if (count of tabs of {window}) > n then set t to selected tab of {window}"),
+        "end if".into(),
+        "end if".into(),
+    ]
 }
 
 /// Terminal's lines that set `wid` to the id of the window holding the tab
@@ -266,21 +304,15 @@ fn find_window(tty: &str) -> Vec<String> {
 }
 
 /// Terminal's lines that set `tw` to window `wid` and `t` to its tab on
-/// `tty`, and with `idle` only when that tab is not busy, or leave `t`
-/// `missing value`. Run just before `t` is used, so a window that moved
-/// since the scan cannot put another tab there.
+/// `tty`, or leave `t` `missing value`. Run just before `t` is used, so a
+/// window that moved since the scan cannot put another tab there.
 #[cfg(any(target_os = "macos", test))]
-fn find_tab(tty: &str, idle: bool) -> Vec<String> {
-    let test = if idle {
-        format!("tty of x is \"{tty}\" and not busy of x")
-    } else {
-        format!("tty of x is \"{tty}\"")
-    };
+fn find_tab(tty: &str) -> Vec<String> {
     vec![
         "if wid is not missing value then".into(),
         "set tw to window id wid".into(),
         "repeat with x in tabs of tw".into(),
-        format!("if {test} then"),
+        format!("if tty of x is \"{tty}\" then"),
         "set t to x".into(),
         "exit repeat".into(),
         "end if".into(),
@@ -331,7 +363,7 @@ fn focus_script(tty: &str) -> Vec<String> {
             "set t to missing value".into(),
         ],
         find_window(tty),
-        find_tab(tty, false),
+        find_tab(tty),
         vec!["if t is missing value then error \"no tab\"".into()],
         raise_tab(),
         vec!["activate".into(), "end tell".into()],
@@ -538,8 +570,9 @@ enum MacosLaunch {
 /// `command`, the one shell string; an argv app gets `argv` and `cwd`.
 /// `run` returns what was printed; only Terminal's script prints a tab,
 /// which is read back as a bare tty path and nothing else. `in_tab`, a tab
-/// an ended session ran in, is where Terminal runs `command` when that tab
-/// is still open and idle; every other app ignores it.
+/// an ended session ran in, is the tab whose window Terminal opens a new
+/// tab in for `command` ([`TerminalApp::script_in`]); every other app
+/// ignores it.
 #[cfg(target_os = "macos")]
 fn launch_macos(
     choice: TerminalSetting,
@@ -1049,10 +1082,11 @@ pub fn launch_tool_setup(
 /// handle.
 ///
 /// `in_tab` is the tab an ended session ran in, for Start again and Resume,
-/// already checked by the caller to be that same tab. Terminal runs the
-/// session there when the tab is still open and idle, and names it as the
-/// handle; otherwise, and in every other app or platform, the launch opens
-/// a new window as it would without it.
+/// already checked by the caller to be that same tab. Terminal opens the
+/// session in a new tab of that tab's window, and names the new tab as the
+/// handle; when it cannot, and in every other app or platform, the launch
+/// opens a new window as it would without it. Nothing is typed into an
+/// existing tab.
 pub fn launch(
     choice: TerminalSetting,
     installed: &[TerminalApp],
@@ -1127,19 +1161,17 @@ fn external_terminal(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// Start again in Terminal reuses the ended session's tab when it is
-    /// open and idle, and opens a new window otherwise; the command is in
-    /// the script once for each, and a tty that is not one is never put in
-    /// a script.
+    /// Start again in Terminal opens a new tab in the ended session's
+    /// window, and a new window otherwise; the command is in the script
+    /// once for each, never typed into the ended tab, and a tty that is not
+    /// one is never put in a script.
     #[cfg(unix)]
     #[test]
-    fn start_again_runs_in_the_ended_sessions_tab() {
+    fn start_again_runs_in_a_new_tab_of_the_ended_sessions_window() {
         let command = hostile_command();
         let literal = applescript_literal(&command);
         let lines = TerminalApp::Terminal.script_in(&command, "/dev/ttys011");
-        assert!(
-            lines.contains(&"if tty of x is \"/dev/ttys011\" and not busy of x then".to_string())
-        );
+        assert!(lines.contains(&"if tty of x is \"/dev/ttys011\" then".to_string()));
         assert!(lines.contains(&format!("do script \"{literal}\" in t")));
         assert!(lines.contains(&format!("set t to do script \"{literal}\"")));
         assert_eq!(lines.iter().filter(|l| l.contains(&literal)).count(), 2);
@@ -1156,44 +1188,61 @@ mod tests {
         );
     }
 
-    /// #1839 review, findings 6, 7 and 14: the reuse script keeps the
-    /// window by its id, stops scanning at the match, finds the idle tab
-    /// again inside that window just before typing, and nothing after the
-    /// command is typed can turn a started launch into a failure.
-    #[cfg(unix)]
+    /// #1839 review, finding 4 (owner, 2026-11-02): nothing is typed into
+    /// an existing tab. The only `t` the command is typed into is the tab
+    /// Command-T just made, and Command-T is pressed only after Terminal
+    /// is in front with the ended session's window, kept by id, frontmost.
+    /// Any failure on the way leaves `t` empty: a new window.
     #[test]
-    fn the_reused_tab_is_found_by_window_id_and_nothing_after_the_launch_fails_it() {
-        let command = hostile_command();
-        let literal = applescript_literal(&command);
-        let lines = TerminalApp::Terminal.script_in(&command, "/dev/ttys011");
-        let text = lines.join("\n");
-        assert!(text.contains("set wid to id of w"), "{text}");
-        assert!(text.contains("exit repeat"), "{text}");
-        assert!(text.contains("window id wid"), "{text}");
-        let typed = lines
+    fn start_again_presses_command_t_only_with_the_window_in_front() {
+        let lines = TerminalApp::Terminal.script_in("echo ok", "/dev/ttys011");
+        let at = |text: &str| {
+            lines
+                .iter()
+                .position(|l| l == text)
+                .unwrap_or_else(|| panic!("{text} in {lines:#?}"))
+        };
+        // `t` is set only from the new tab: never from the scan.
+        let sets_t: Vec<&String> = lines
             .iter()
-            .position(|l| l == &format!("do script \"{literal}\" in t"))
-            .unwrap();
-        let refind = lines
-            .iter()
-            .rposition(|l| l.contains("not busy of x"))
-            .unwrap();
-        assert!(refind < typed);
-        // Every line between the typing and the end of the branch is
-        // inside a `try`.
-        let after: Vec<&String> = lines[typed + 1..]
-            .iter()
-            .take_while(|l| *l != "end if")
+            .filter(|l| l.contains("set t to") && !l.contains("missing value"))
             .collect();
-        assert_eq!(after.first().map(|l| l.as_str()), Some("try"), "{after:?}");
+        assert_eq!(
+            sets_t,
+            [
+                "if (count of tabs of tw) > n then set t to selected tab of tw",
+                "set t to do script \"echo ok\"",
+            ]
+        );
+        assert!(!lines.iter().any(|l| l.contains("busy")));
+        let key = at("tell application \"System Events\" to keystroke \"t\" using command down");
+        assert!(at("set wid to id of w") < at("set tw to window id wid"));
+        assert!(at("set tw to window id wid") < at("set index of tw to 1"));
+        assert!(at("set index of tw to 1") < at("activate"));
+        assert!(at("if frontmost then") < key);
+        assert!(at("if id of front window is id of tw then") < key);
+        assert!(key < at("if (count of tabs of tw) > n then exit repeat"));
+        // The scan and the new tab are inside `try`s that fall through to
+        // a new window.
+        assert!(lines[..at("set tw to window id wid")].contains(&"try".to_string()));
+        assert!(at("if t is missing value then") > key);
+        assert!(at("set t to do script \"echo ok\"") > at("if t is missing value then"));
+        assert_eq!(
+            lines.iter().filter(|l| *l == "try").count(),
+            lines.iter().filter(|l| *l == "end try").count()
+        );
+        // The same Command-T lines as the placed launch (#1852).
+        for line in new_tab_in("tw") {
+            assert!(lines.contains(&line), "{line}");
+        }
     }
 
-    /// Show and the reuse script find the tab the same way: by window id,
-    /// stopping at the match, found again inside that window. Show needs
-    /// the tab only to exist; the reuse also needs it idle. Built on every
-    /// platform, so no builder is compiled for nothing.
+    /// Show and Start again find the window the same way: by window id,
+    /// stopping at the match. Show then finds the tab again inside that
+    /// window. Built on every platform, so no builder is compiled for
+    /// nothing.
     #[test]
-    fn show_and_reuse_share_the_tab_lines() {
+    fn show_and_start_again_share_the_window_lines() {
         let focus = focus_script("/dev/ttys011");
         assert_eq!(
             focus.first().unwrap(),
@@ -1203,19 +1252,18 @@ mod tests {
         assert!(focus.contains(&"set tw to window id wid".to_string()));
         assert!(focus.contains(&"if tty of x is \"/dev/ttys011\" then".to_string()));
         assert!(focus.contains(&"if t is missing value then error \"no tab\"".to_string()));
-        assert!(!focus.iter().any(|l| l.contains("busy")));
-        assert!(!focus.iter().any(|l| l.contains("do script")));
-        let reuse = TerminalApp::Terminal.script_in("echo ok", "/dev/ttys011");
+        assert!(
+            !focus
+                .iter()
+                .any(|l| l.contains("do script") || l.contains("keystroke"))
+        );
+        let again = TerminalApp::Terminal.script_in("echo ok", "/dev/ttys011");
         for line in find_window("/dev/ttys011")
             .into_iter()
-            .chain(raise_tab())
             .chain(open_window("echo ok"))
         {
-            assert!(reuse.contains(&line), "{line}");
+            assert!(again.contains(&line), "{line}");
         }
-        assert!(
-            reuse.contains(&"if tty of x is \"/dev/ttys011\" and not busy of x then".to_string())
-        );
         // A launch in a new window is the same lines as before.
         assert_eq!(
             TerminalApp::Terminal.script("echo ok"),

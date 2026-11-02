@@ -39,11 +39,11 @@ A session the app opened in Terminal can be shown (its tab brought to the
 front) and stopped from its row; a CLI launch cannot, because the app neither
 opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
-Start again and Resume run in the ended session's own Terminal tab while that
-tab is still open, idle, and the same tab (not a later tab macOS gave the same
-tty), and otherwise in a new window; see `docs/contributor-daemon-ipc-v1_1.md`
-for the checks. Input typed at that tab's prompt and not run is not cleared:
-the launch is typed after it.
+Start again and Resume open in a new Terminal tab beside the ended session,
+in its window, while that window still holds the same tab (not a later tab
+macOS gave the same tty) and macOS allows the Command-T keystroke
+(Accessibility); otherwise in a new window. Nothing is typed into an existing
+tab. See `docs/contributor-daemon-ipc-v1_1.md` for the checks.
 Stop signals only the tool process the launcher supervises: SIGTERM, then
 SIGKILL after a bounded wait. Processes the tool itself started (a shell
 command, a dev server) are not signalled and can outlive it.

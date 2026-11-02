@@ -9451,9 +9451,11 @@ focusable or stoppable.
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.
 
 `managed_terminal_launch {session_id, ticket}` for a session that
-`managed_session_start_again` or `managed_session_resume` prepared runs it, in
-Terminal on macOS, in the tab the ended row ran in (owner, 2026-11-02), when
-all of these hold; otherwise it opens a new window, as any launch does:
+`managed_session_start_again` or `managed_session_resume` prepared opens it, in
+Terminal on macOS, in a new tab of the window holding the tab the ended row ran
+in (owner, 2026-11-02), when all of these hold; otherwise it opens a new
+window, as any launch does. Nothing is ever typed into an existing tab, whose
+prompt may hold input not yet run.
 
 - The daemon recorded, when it prepared the session, which row it came from.
   The shell names nothing: the macOS app built from #1839 sent an
@@ -9466,15 +9468,15 @@ all of these hold; otherwise it opens a new window, as any launch does:
   macOS hands a closed tab's tty to the next tab opened. When it opens a
   Terminal tab the daemon records the pid and start time of the one process
   on that tty whose parent is not on it (the tab's `login`), and before
-  typing into the tab it reads them again and requires the same.
-- Terminal still has that tab, idle (not `busy`), when it is found again by
-  its window's id just before the command is typed.
-
-Terminal cannot say whether an idle tab's prompt holds half-typed input. The
-launch is typed after it, so such input, and whatever that shell has set
-since (its `PATH`, an activated environment), reach the launch. A launch
-swallowed that way never starts: its ticket lapses, the row reads Failed, and
-Start again on that row opens a new window, since its tool never started.
+  using the tab's window it reads them again and requires the same.
+- Terminal still has that tab; its window, kept by id, is brought to the
+  front, and Terminal becomes the frontmost app with that window in front
+  within about a second.
+- Terminal has no scripting command for a new tab, so the daemon presses
+  Command-T through System Events. macOS allows that only once the app has
+  Accessibility access, and asks with its own prompt. Refused, or with no
+  new tab in that window within about a second, the launch opens a new
+  window. The new tab's tty, and its `login`, become the session's handle.
 
 When `managed_launch_prepare` or `managed_session_start_again` passes the
 checks that come before preparing, other than the tool's version, and would

@@ -895,9 +895,9 @@ struct ManagedSessionActions: View {
             }
     }
 
-    /// The conversation continues. In Terminal it runs in this row's tab
-    /// while that tab is still open and idle, otherwise in a new window,
-    /// as for any launch; the daemon decides.
+    /// The conversation continues. In Terminal it opens in a new tab of
+    /// this row's window while that window is still there, otherwise in a
+    /// new window, as for any launch; the daemon decides.
     private func resume() {
         model.managedAction(
             "managed_session_resume",
@@ -924,8 +924,9 @@ struct ManagedSessionActions: View {
     }
 
     /// Same tool, account and folder, with no folder chooser. In Terminal
-    /// it runs in this row's tab while that tab is still open and idle,
-    /// otherwise in a new window, as for any launch; the daemon decides.
+    /// it opens in a new tab of this row's window while that window is
+    /// still there, otherwise in a new window, as for any launch; the
+    /// daemon decides.
     private func startAgain() {
         model.managedAction(
             "managed_session_start_again",

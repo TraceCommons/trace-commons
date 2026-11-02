@@ -188,9 +188,9 @@ final class AppModel: ObservableObject {
                           let ticket = response["ticket"] as? String else {
                         throw DaemonClient.Failure(code: "launch-unknown", message: "managed-launch-unknown")
                     }
-                    // Start again and Resume run in the ended row's own
-                    // tab when Terminal still has it (owner, 2026-11-02):
-                    // the daemon knows which row the session came from.
+                    // Start again and Resume open beside the ended row in
+                    // Terminal when it can (owner, 2026-11-02): the daemon
+                    // knows which row the session came from.
                     _ = try client.managedAction("managed_terminal_launch", params: ["session_id": session, "ticket": ticket])
                 }
                 return response["revision"] as? UInt64
