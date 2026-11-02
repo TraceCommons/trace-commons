@@ -1,6 +1,7 @@
 import AppKit
 import XCTest
 import TCBridge
+import TCDesign
 import TCShellCore
 @testable import TraceCommonsApp
 
@@ -87,7 +88,7 @@ final class TracesFolderOrderTests: XCTestCase {
         let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 200, height: 200),
                               styleMask: [.titled], backing: .buffered, defer: true)
         window.isMovableByWindowBackground = true
-        let view = TracesHoldWindowView(frame: .init(x: 0, y: 0, width: 200, height: 200))
+        let view = GlassHoldWindowView(frame: .init(x: 0, y: 0, width: 200, height: 200))
         window.contentView?.addSubview(view)
         let event = try XCTUnwrap(NSEvent.enterExitEvent(
             with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
