@@ -225,6 +225,9 @@ fn pkce() -> (String, String) {
 struct Reply {
     status: StatusCode,
     bytes: Vec<u8>,
+    /// The headers a client acts on: whether to cache, and when to retry.
+    cache_control: Option<String>,
+    retry_after: Option<String>,
 }
 
 impl Reply {
@@ -255,12 +258,25 @@ async fn send(
         .oneshot(builder.body(body).expect("request"))
         .await
         .expect("router is infallible");
+    let header = |name: axum::http::HeaderName| {
+        response
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().expect("ascii").to_string())
+    };
+    let cache_control = header(axum::http::header::CACHE_CONTROL);
+    let retry_after = header(axum::http::header::RETRY_AFTER);
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .expect("body")
         .to_vec();
-    Reply { status, bytes }
+    Reply {
+        status,
+        bytes,
+        cache_control,
+        retry_after,
+    }
 }
 
 /// A started ceremony as the client sees it.
@@ -1428,12 +1444,25 @@ async fn send_account(
         .oneshot(builder.body(body).expect("request"))
         .await
         .expect("router is infallible");
+    let header = |name: axum::http::HeaderName| {
+        response
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().expect("ascii").to_string())
+    };
+    let cache_control = header(axum::http::header::CACHE_CONTROL);
+    let retry_after = header(axum::http::header::RETRY_AFTER);
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .expect("body")
         .to_vec();
-    Reply { status, bytes }
+    Reply {
+        status,
+        bytes,
+        cache_control,
+        retry_after,
+    }
 }
 
 /// A session on `account` that no NEAR AI sign-in minted, inserted as a
@@ -1662,4 +1691,357 @@ async fn pg_a_near_ai_account_counts_its_login_once_and_reports_remaining_near_k
         .await
         .expect("cleanup");
     drop_tenants(&admin, &[&tenant]).await;
+}
+
+// --- Busy is not refused --------------------------------------------------------
+//
+// The contributor's NEAR AI sign-in check (#1840) runs this ceremony to ask
+// whether a new near.ai login belongs to the enrolled account, and reads the
+// uniform `400` as "it belongs to another one". A commons that is rate
+// limiting, or whose database or NEAR AI did not answer, must say so with
+// `429` or `503` instead, and every refusal must stay the one `400`.
+
+/// A NEAR AI stand-in that answers every `GET /users/me` with `status`.
+async fn stub_near_ai_status(status: StatusCode) -> String {
+    let router = axum::Router::new().route(
+        "/users/me",
+        axum::routing::get(move || async move { status }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stub");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(async move { axum::serve(listener, router).await.expect("stub") });
+    base
+}
+
+/// A base URL nothing listens on: the port was bound and released.
+async fn closed_base_url() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    drop(listener);
+    base
+}
+
+/// `state` with NEAR AI introspection pointed at `base`.
+fn with_near_ai(state: &Arc<AppState>, base: String) -> Arc<AppState> {
+    let mut state = state.clone();
+    Arc::make_mut(&mut state).near_ai_introspection_base_url = Some(base);
+    state
+}
+
+/// A finish body that passes every shape check, for a ceremony nobody
+/// started.
+fn well_formed_unknown_finish(device: &Device) -> serde_json::Value {
+    let (verifier, _) = pkce();
+    serde_json::json!({
+        "ceremony_id": format!("unknown-{}", Uuid::new_v4().simple()),
+        "code_verifier": verifier,
+        "device_public_key": device.public_b64(),
+        "device_signature": device.sign(b"not the ceremony"),
+        "access_token": "near-ai-access-token-fixture",
+    })
+}
+
+/// A `POST` of `body` to `uri`, unauthenticated.
+async fn post(state: &Arc<AppState>, uri: &str, body: &serde_json::Value) -> Reply {
+    send(state, "POST", uri, Some(body), None).await
+}
+
+/// The uniform deny, byte for byte, as the router answers it.
+fn uniform_deny_bytes() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "error": "native sign-in could not be completed"
+    }))
+    .expect("json")
+}
+
+fn assert_uniform_deny(answer: &Reply, cause: &str) {
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{cause}");
+    assert_eq!(answer.bytes, uniform_deny_bytes(), "{cause}");
+    assert_eq!(answer.cache_control.as_deref(), Some("no-store"), "{cause}");
+    assert_eq!(answer.retry_after, None, "{cause}");
+}
+
+fn assert_unavailable(answer: &Reply, cause: &str) {
+    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE, "{cause}");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&answer.bytes).expect("json"),
+        serde_json::json!({ "error": "near_ai_sign_in_unavailable" }),
+        "{cause}: one label, naming no dependency"
+    );
+    assert_eq!(answer.cache_control.as_deref(), Some("no-store"), "{cause}");
+}
+
+/// Over the per-address limit, a NEAR AI start and finish answer `429` with
+/// `Retry-After`, not the uniform deny the client reads as a refusal. Under
+/// it, a refused request is still that deny.
+#[tokio::test]
+async fn pg_a_rate_limited_near_ai_sign_in_answers_429_not_the_refusal() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    // The v1 routes run the same functions; this harness publishes no
+    // enrollment witness, so they are not ready here and answer the deny
+    // before the limit is counted.
+    for uri in [PROVISION_START, PROVISION_FINISH] {
+        reset_account_rate_limiter_for_db_test().await;
+        // An empty body is refused after the limit is counted, so each one
+        // spends a slot and answers the uniform deny until the limit is hit.
+        for attempt in 0..30 {
+            let answer = post(&h.state, uri, &serde_json::json!({})).await;
+            assert_uniform_deny(&answer, &format!("{uri} attempt {attempt}"));
+        }
+        let limited = post(&h.state, uri, &serde_json::json!({})).await;
+        assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS, "{uri}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&limited.bytes).expect("json"),
+            serde_json::json!({
+                "error": "near_ai_sign_in_rate_limited",
+                "retry_after_seconds": 60,
+            }),
+            "{uri}"
+        );
+        assert_eq!(limited.retry_after.as_deref(), Some("60"), "{uri}");
+        assert_eq!(limited.cache_control.as_deref(), Some("no-store"), "{uri}");
+    }
+    reset_account_rate_limiter_for_db_test().await;
+}
+
+/// A database that does not answer is `503` at start and at finish, not the
+/// uniform deny. The account registry here points at a port nothing listens
+/// on, so every connection the pool tries is refused.
+#[tokio::test]
+async fn pg_a_near_ai_sign_in_whose_database_does_not_answer_answers_503() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let closed = closed_base_url().await;
+    let port = closed.rsplit(':').next().expect("port");
+    let unreachable = Arc::new(
+        PgBackend::new(&DatabaseConfig {
+            url: SecretString::from(format!("postgres://nobody@127.0.0.1:{port}/nothing")),
+            pool_size: 1,
+            ssl_mode: trace_commons_server::config::SslMode::Disable,
+            login_resolver_url: None,
+            gate_driver_url: None,
+            pii_backstop_driver_url: None,
+            invite_registry_url: None,
+        })
+        .await
+        .expect("the pool is built lazily"),
+    );
+    let mut state = h.state.clone();
+    Arc::make_mut(&mut state).db_mirror = Some(unreachable as Arc<dyn Database>);
+    let device = Device::new();
+    let (_, challenge) = pkce();
+
+    let started = post(
+        &state,
+        PROVISION_START,
+        &serde_json::json!({
+            "device_public_key": device.public_b64(),
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }),
+    )
+    .await;
+    assert_unavailable(&started, "start, database down");
+
+    let finished = post(
+        &state,
+        PROVISION_FINISH,
+        &well_formed_unknown_finish(&device),
+    )
+    .await;
+    assert_unavailable(&finished, "finish, database down");
+    reset_account_rate_limiter_for_db_test().await;
+}
+
+/// NEAR AI not answering -- nothing listening, or a `503` of its own -- is
+/// `503` at finish, and writes nothing. The ceremony is still consumed, so
+/// a retry starts a new one.
+#[tokio::test]
+async fn pg_a_near_ai_finish_whose_near_ai_does_not_answer_answers_503() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let admin = h.admin().await;
+    for (cause, base) in [
+        ("near ai unreachable", closed_base_url().await),
+        (
+            "near ai 503",
+            stub_near_ai_status(StatusCode::SERVICE_UNAVAILABLE).await,
+        ),
+        (
+            "near ai 429",
+            stub_near_ai_status(StatusCode::TOO_MANY_REQUESTS).await,
+        ),
+    ] {
+        let state = with_near_ai(&h.state, base);
+        let device = Device::new();
+        let devices_before = count(
+            &admin,
+            "SELECT count(*)::bigint FROM device_keys WHERE public_key = $1",
+            &[&device.public_b64()],
+        )
+        .await;
+        let started = start(&state, PROVISION_START, None, &device).await;
+        let signature = device.sign(&started.signing_bytes);
+        let answer = finish(
+            &state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await;
+        assert_unavailable(&answer, cause);
+        assert_eq!(
+            count(
+                &admin,
+                "SELECT count(*)::bigint FROM device_keys WHERE public_key = $1",
+                &[&device.public_b64()],
+            )
+            .await,
+            devices_before,
+            "{cause}: an unanswered finish registered the device"
+        );
+        // Consumed: the same finish again is a replay, and a replay is refused.
+        let replay = finish(
+            &state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await;
+        assert_uniform_deny(&replay, &format!("{cause}, replayed"));
+    }
+    reset_account_rate_limiter_for_db_test().await;
+}
+
+/// Every way a finish is refused answers the same `400`, byte for byte, with
+/// the same headers -- including the one the sign-in check exists to find,
+/// a device whose key is held by the account of a different near.ai login.
+/// Telling busy from refused added no way to tell one refusal from another.
+#[tokio::test]
+async fn pg_every_near_ai_finish_refusal_is_the_identical_uniform_deny() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let admin = h.admin().await;
+    let mut answers: Vec<(&str, Reply)> = Vec::new();
+
+    // Not a finish body at all.
+    answers.push((
+        "malformed body",
+        post(&h.state, PROVISION_FINISH, &serde_json::json!({})).await,
+    ));
+
+    // A ceremony nobody started.
+    let stranger = Device::new();
+    answers.push((
+        "unknown ceremony",
+        post(
+            &h.state,
+            PROVISION_FINISH,
+            &well_formed_unknown_finish(&stranger),
+        )
+        .await,
+    ));
+
+    // A signature over something other than this ceremony's bytes.
+    let device = Device::new();
+    let started = start(&h.state, PROVISION_START, None, &device).await;
+    let wrong = device.sign(b"some other ceremony");
+    answers.push((
+        "wrong device signature",
+        finish(&h.state, PROVISION_FINISH, None, &started, &device, &wrong).await,
+    ));
+
+    // NEAR AI answered, and named no one: its 401.
+    let refusing = with_near_ai(
+        &h.state,
+        stub_near_ai_status(StatusCode::UNAUTHORIZED).await,
+    );
+    let device = Device::new();
+    let started = start(&refusing, PROVISION_START, None, &device).await;
+    let signature = device.sign(&started.signing_bytes);
+    answers.push((
+        "near ai 401",
+        finish(
+            &refusing,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await,
+    ));
+
+    // A replayed finish: the first one succeeded and consumed the ceremony.
+    let enrolled = Device::new();
+    let started = start(&h.state, PROVISION_START, None, &enrolled).await;
+    let signature = enrolled.sign(&started.signing_bytes);
+    let first = finish(
+        &h.state,
+        PROVISION_FINISH,
+        None,
+        &started,
+        &enrolled,
+        &signature,
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK, "{:?}", first.json());
+    let enrolled_tenant = first.json()["tenant_id"]
+        .as_str()
+        .expect("tenant")
+        .to_string();
+    answers.push((
+        "replayed ceremony",
+        finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &enrolled,
+            &signature,
+        )
+        .await,
+    ));
+
+    // The enrolled device, now signed in to near.ai as someone else: its key
+    // is held by the first login's account. This is the answer the sign-in
+    // check reads as "a different NEAR AI account".
+    h.sign_in_to_near_ai_as(&fresh_subject());
+    let started = start(&h.state, PROVISION_START, None, &enrolled).await;
+    let signature = enrolled.sign(&started.signing_bytes);
+    answers.push((
+        "device key held by another login's account",
+        finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &enrolled,
+            &signature,
+        )
+        .await,
+    ));
+
+    for (cause, answer) in &answers {
+        assert_uniform_deny(answer, cause);
+    }
+    assert_eq!(answers.len(), 6);
+    reset_account_rate_limiter_for_db_test().await;
+    drop_tenants(&admin, &[&enrolled_tenant]).await;
 }

@@ -696,6 +696,93 @@ async fn a_device_key_registered_to_another_tenant_is_refused() {
     assert_eq!(holders, vec![legacy_tenant]);
 }
 
+/// One full ceremony for `identity` against `state`: the client's start
+/// body, its device proof, and a finish carrying the stub's login.
+async fn run_ceremony(state: &Arc<AppState>, identity: &DeviceIdentity) -> (StatusCode, Vec<u8>) {
+    let (verifier, challenge) = challenge_pair();
+    let (status, body) = post_json(
+        state,
+        "/v1/account/near-ai/provision/start",
+        start_payload(&challenge, &identity.public_key_b64),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let started: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let signature = device_proof_for_ceremony(
+        identity,
+        started["ceremony_id"].as_str().unwrap(),
+        started["nonce"].as_str().unwrap(),
+        &challenge,
+        started["expires_at"].as_i64().unwrap(),
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("a valid proof");
+    post_json(
+        state,
+        "/v1/account/near-ai/provision/finish",
+        serde_json::json!({
+            "ceremony_id": started["ceremony_id"],
+            "code_verifier": verifier,
+            "device_public_key": identity.public_key_b64,
+            "device_signature": signature,
+            "access_token": "stub-near-ai-jwt",
+        }),
+    )
+    .await
+}
+
+/// The contract a signed-out contributor device relies on before it stores
+/// a NEAR AI login (contributor `account_session_renewal::check_fresh_login`,
+/// `FreshLogin::Verified`): a device key enrolled through one NEAR AI login
+/// stays bound to that account, so a finish with the same device key and a
+/// different NEAR AI login is refused, and the key stays with its tenant. The
+/// device holds no account id once signed out; this refusal is what makes
+/// "the answer names the enrolled tenant and this device's key" mean "the
+/// login is this account's".
+#[tokio::test]
+#[ignore = "requires isolated TRACE_COMMONS_ADMISSION_INGEST_PG_TEST_URL"]
+async fn a_device_key_enrolled_by_one_near_ai_login_refuses_another() {
+    let _serial = serial().lock().await;
+    let db = ceremony_pg_admin().await;
+    let (_dir, identity) = device();
+    let (enrolled_state, _enrolled_temp) =
+        ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (status, body) = run_ceremony(&enrolled_state, &identity).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let enrolled: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let tenant = enrolled["tenant_id"].as_str().unwrap().to_string();
+    let before = anchor_rows(&db).await;
+
+    // The same device key, a different NEAR AI login.
+    let (other_state, _other_temp) =
+        ceremony_state(db.clone(), stub_near_ai(stub_subject()).await).await;
+    let (status, body) = run_ceremony(&other_state, &identity).await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "another NEAR AI login was provisioned on an enrolled device key: {}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        anchor_rows(&db).await,
+        before,
+        "a refused finish wrote an anchor"
+    );
+    let device_key_id = enrolled["device_key_id"].as_str().unwrap().to_string();
+    let admin = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
+    let holders: Vec<String> = admin
+        .query(
+            "SELECT tenant_id FROM device_keys WHERE device_key_id=$1",
+            &[&device_key_id],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(holders, vec![tenant]);
+}
+
 /// A client-asserted account is refused at the parse boundary.
 ///
 /// The server half made this structural with `#[serde(deny_unknown_fields)]`
