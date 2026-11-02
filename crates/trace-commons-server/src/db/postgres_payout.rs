@@ -1437,6 +1437,25 @@ impl PayoutStore for PgBackend {
         Ok(rows.iter().map(|row| row.get(0)).collect())
     }
 
+    async fn payout_account_wallet_anchors(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<Vec<String>, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        let rows = tx
+            .query(
+                "SELECT anchor_hash FROM trace_near_account_anchors
+                  WHERE tenant_id = $1 AND account_id = $2
+                    AND identity_source = 'wallet'",
+                &[&tenant, &account],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
     async fn confirm_payout_link_request(
         &self,
         tenant: &str,

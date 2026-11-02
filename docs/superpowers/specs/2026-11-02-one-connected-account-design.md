@@ -80,7 +80,7 @@ Section 3 adds a local record.
 | B6 | **NEAR AI forget** (`mod.rs:362`, `:435`) | Clears #1/#2 locally; #5 keeps working until it expires, then renewal needs a sign-in. Visible (`near_ai_sign_in_required`), so it meets the invariant. But the key stays live at NEAR AI | Open (revocation) |
 | B7 | **Native sign-out** (`native_identity.rs:127`) | Clears #5 only; #1/#2 keep billing. Then B2 applies to the next sign-in | Open |
 | B8 | **Spend-org switch** across identities | #3's pending revocations belong to the old identity and are swept with the new session | #1833 keeps them; #1837 drops a 403 as "not this account". Partly covered |
-| B9 | **Payout link** for an account with no `near_ai_login` anchor (wallet-origin `near-` tenants) | The subject check is skipped (`payout_recipient_proof.rs:224`), so an organization owned by any NEAR AI identity can be linked | Open; server |
+| B9 | **Payout link** for an account with no `near_ai_login` anchor (wallet-origin `near-` tenants) | The subject check is skipped (`payout_recipient_proof.rs:224`), so an organization owned by any NEAR AI identity can be linked | Fixed by #1841 (F6). A wallet-origin account proves through its NEAR AI wallet sign-in; a principal-linked legacy or pilot account cannot link until F11 |
 | B10 | **Payout link after a change of account** (the change-account flow) | The link keeps the organization proved by the retired identity | Owner question in the change-account spec (Q5) |
 | B12 | **Locally broken Commons account, after #1837**: the account record is malformed, or the enrolled Commons address is now refused by this build's allowlist | #1837 treats both as "not bound" so NEAR AI sign-in is never blocked for good: the new NEAR AI login is stored with no Commons check, and no `commons_login` is recorded. The Commons session cannot renew either. Nothing tells the person; the app looks signed in to Private AI while uploads and account reads quietly fail | Known break once #1837 lands. Owner-approved fix (2026-11-02): a visible "needs attention" state in every shell (F1, section 3.2a) |
 | B11 | First run, legacy migration, renewal | Consistent by construction: each provisions or renews from the stored login (`legacy_migration.rs:186-189`; `renew_account_session`). Safe while #2 cannot change underneath them, which #1837 provides for B1 | Covered by B1's fix |
@@ -239,14 +239,16 @@ Each fits in one PR.
 | F3 | Check a sign-in on a signed-out but enrolled device against the config's tenant (the provisioning ceremony with the existing device key is the check); refuse to store on refusal | B2, B7's follow-on | Small, client; extends #1837's table | **In progress** (separate PR); #1837 marks it "not checked" |
 | F4 | Server route for a device that joined by code to ask "does this NEAR AI login belong to my account?" (native session plus token; answers yes or no, names nothing), and the client gate using it | B3 | Medium, server and client | None |
 | F5 | Tag pending revocations with the identity's digest; the sweep skips other identities' entries | B8 | Small, client | **In progress** (separate PR); #1833 kept them, #1837 drops 403s |
-| F6 | Payout link: refuse a link for an account with no `near_ai_login` anchor, or record the proving subject and require it to match the sign-in identity | B9 | Small, server | **In progress** (separate PR); refuse, per decision 3 |
+| F6 | Payout link: the proving login must be the account's own. It matches a `near_ai_login` anchor, or, for a NEAR AI wallet sign-in (provider `near`, login address `{account_id}@near`), the account's `wallet` anchor. An account with neither is refused | B9 | Small, server | **#1841**; refuse, per decision 3 |
 | F7 | The connected-account record and the `needs_sign_in` status check | Invariant detection | Medium, client and IPC | #1835's `commons_login` folds into it |
 | F8 | `commit_connected`, with #1837's ceremony moved onto it | Single commit point | Medium, client | #1837 is its first caller |
 | F9 | `account_disconnect` replacing forget, native sign-out and CLI logout's partial clears, with NEAR AI key revocation | B4, B6, B7 | Medium, client and every shell's sign-out | None |
 | F10 | The change-account flow (companion spec, slice 1) on top of F7 and F8 | Deliberate change | Large | This PR's other spec |
+| F11 | Give non-pooled, principal-linked legacy and pilot accounts (tenants outside `near-` / `nearai-`) an anchor a payout proof can match. Two candidate designs: **(a)** move each account onto a NEAR AI tenant, carrying its history, devices and credit, so it holds a `near_ai_login` anchor like any NEAR AI account; or **(b)** change `trace_account_admission_linkage_ready()` (V81) so a `near_ai` device in a legacy tenant does not fail readiness for the whole deployment, then let such an account record its NEAR AI login. Pooled Devfolio tenants (`trace_legacy_invite_pooled_tenants`) are excluded from payouts by design and need nothing | B9's remainder | Large, server and migration | None. **Prerequisite for turning production payouts on** (owner, 2026-11-02); not a blocker for #1841. See `docs/operator/automatic-credit-settlement.md`, "Before production payouts" |
 
 F1 should land with or straight after #1837, since #1837 is what makes B12 reachable silently. F2, F3 and F5 are independent and can land in any order. F8 depends on
-F7. F9 and F10 depend on F8.
+F7. F9 and F10 depend on F8. F11 must land before production payouts are
+turned on.
 
 ## 5. Wording
 

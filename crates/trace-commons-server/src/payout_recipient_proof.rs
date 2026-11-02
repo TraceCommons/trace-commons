@@ -8,9 +8,12 @@
 //! Each rail's recipient-link kind has a verifier. For `near_ai` the proof
 //! is an org id and a fresh NEAR AI access token. [`NearAiOrgVerifier`]
 //! spends the token on one `GET {base}/users/me`, reads only the subject id
-//! and each org's `id`, `role` and `is_active` (never a name), checks the
-//! subject against the account's NEAR AI login anchors, and checks the org
-//! is in the list, active, and owned. An account with no NEAR AI login
+//! and each org's `id`, `role` and `is_active` (never a name), checks that
+//! the login is the account's own, and checks the org is in the list,
+//! active, and owned. The login is the account's when its subject is one of
+//! the account's NEAR AI login anchors, or, for a NEAR AI user who signs in
+//! with a NEAR wallet, when that wallet is one of the account's wallet
+//! anchors (see [`wallet_account_id`]). An account with neither kind of
 //! anchor is refused before the token is spent. It then asks the rail
 //! whether the org can receive (`probe_recipient`: a zero cumulative send on
 //! the probe program, which writes nothing). The token is dropped when the
@@ -89,8 +92,9 @@ pub enum RecipientProofRefusal {
     LoginUnverified,
     /// The account is anchored on another NEAR AI subject.
     SubjectMismatch,
-    /// The account has no NEAR AI login anchor (a wallet-origin or
-    /// principal-linked account), so no subject could match. On the wire it
+    /// The account has no anchor a NEAR AI login could match: no NEAR AI
+    /// login anchor, and no wallet anchor (or no NEAR network to key one
+    /// under). A principal-linked legacy account is one. On the wire it
     /// is `subject_mismatch`, the generic refusal shipped apps already show;
     /// [`Self::log_reason`] tells the two apart in logs.
     NoLoginAnchor,
@@ -126,27 +130,84 @@ impl RecipientProofRefusal {
     }
 }
 
+/// The account's anchors a NEAR AI login can be matched against
+/// (`trace_near_account_anchors.anchor_hash`, by `identity_source`).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct AccountAnchors {
+    /// `near_ai_login` anchors: blind indexes of NEAR AI subjects.
+    pub login: Vec<String>,
+    /// `wallet` anchors: blind indexes of `(network, NEAR account)`.
+    pub wallet: Vec<String>,
+    /// The deployment's NEAR network, which wallet anchors are keyed under.
+    /// `None` means no wallet anchor can be matched.
+    pub network: Option<String>,
+}
+
+impl AccountAnchors {
+    /// Nothing a login could match, so the token need not be spent.
+    pub fn none_matchable(&self) -> bool {
+        self.login.is_empty() && (self.wallet.is_empty() || self.network.is_none())
+    }
+}
+
+impl std::fmt::Debug for AccountAnchors {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AccountAnchors(..)")
+    }
+}
+
 /// Proves a recipient for one rail.
 #[async_trait]
 pub trait RecipientProofVerifier: Send + Sync {
-    /// `login_anchors` are the account's NEAR AI login anchors
-    /// (`trace_near_account_anchors.anchor_hash` with `identity_source =
-    /// 'near_ai_login'`). An empty set is refused as `NoLoginAnchor`.
+    /// `anchors` are what the proving login must match. An account with
+    /// none it could match is refused as `NoLoginAnchor`.
     async fn verify(
         &self,
         proof: RecipientProof,
-        login_anchors: &[String],
+        anchors: &AccountAnchors,
     ) -> Result<VerifiedRecipient, RecipientProofRefusal>;
 }
 
 /// What `/users/me` is read into, and nothing else. `serde` drops every
 /// other field, so an org's name never becomes a value in this process. Do
 /// not add `name`, a `flatten` map or a `serde_json::Value` here.
+///
+/// `auth_provider` and `email` are read only to recover the NEAR account of
+/// a wallet sign-in ([`wallet_account_id`]); the address is taken out and
+/// zeroized before anything else is read, and never logged or stored.
 #[derive(Deserialize)]
 struct UsersMe {
     id: String,
     #[serde(default)]
+    auth_provider: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
     organizations: Option<Vec<UsersMeOrganization>>,
+}
+
+/// The NEAR account a NEAR AI wallet sign-in names, if this login is one.
+///
+/// NEAR AI signs a wallet in only after verifying a NEP-413 signature and
+/// the account's access key, and then stores the user with provider `near`
+/// and login address `{account_id}@near` (nearai/cloud-api
+/// `crates/services/src/auth/near.rs`, `crates/services/src/email.rs`;
+/// `/v1/users/me` documents the placeholder in `crates/api/src/models.rs`).
+/// The address is not editable, and a linked identity never rewrites it.
+/// Stricter than NEAR AI's own parser: exact `near` domain, and a NEAR
+/// account id's lowercase alphabet. A user whose primary sign-in is not the
+/// wallet names no wallet here, even if a wallet is linked to it.
+fn wallet_account_id<'a>(auth_provider: Option<&str>, email: &'a str) -> Option<&'a str> {
+    if auth_provider != Some("near") {
+        return None;
+    }
+    let (account, domain) = email.rsplit_once('@')?;
+    let valid = domain == "near"
+        && (2..=64).contains(&account.len())
+        && account.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        });
+    valid.then_some(account)
 }
 
 #[derive(Deserialize)]
@@ -227,23 +288,35 @@ impl RecipientProofVerifier for NearAiOrgVerifier {
     async fn verify(
         &self,
         proof: RecipientProof,
-        login_anchors: &[String],
+        anchors: &AccountAnchors,
     ) -> Result<VerifiedRecipient, RecipientProofRefusal> {
         let RecipientProof::NearAiOrg {
             organization_id,
             access_token,
         } = proof;
-        // An account with no NEAR AI login (a wallet-origin account) has no
-        // subject a proof could match, so it links nothing until its login
-        // is recorded (owner decision 2026-11-02). Refused before the token
-        // is spent.
-        if login_anchors.is_empty() {
+        // An account with nothing a login could match links nothing (owner
+        // decision 2026-11-02). Refused before the token is spent.
+        if anchors.none_matchable() {
             return Err(RecipientProofRefusal::NoLoginAnchor);
         }
-        let user = self.users_me(&access_token).await?;
+        let mut user = self.users_me(&access_token).await?;
         drop(access_token);
+        let email = Zeroizing::new(user.email.take().unwrap_or_default());
         let subject_id = Zeroizing::new(user.id.trim().to_owned());
-        if !login_anchors.contains(&self.identity.login_index_label(&subject_id)) {
+        let login_match = anchors
+            .login
+            .contains(&self.identity.login_index_label(&subject_id));
+        let wallet_match = match (
+            anchors.network.as_deref(),
+            wallet_account_id(user.auth_provider.as_deref(), &email),
+        ) {
+            (Some(network), Some(account)) => anchors
+                .wallet
+                .contains(&self.identity.index_label(network, account)),
+            _ => false,
+        };
+        drop(email);
+        if !(login_match || wallet_match) {
             return Err(RecipientProofRefusal::SubjectMismatch);
         }
         let owned = user.organizations.unwrap_or_default().iter().any(|org| {
@@ -401,8 +474,112 @@ mod tests {
 
     /// The account's login anchors when it is anchored on the token's
     /// subject.
-    fn anchored() -> Vec<String> {
-        vec![identity().login_index_label(SUBJECT)]
+    fn anchored() -> AccountAnchors {
+        AccountAnchors {
+            login: vec![identity().login_index_label(SUBJECT)],
+            ..AccountAnchors::default()
+        }
+    }
+
+    /// A wallet-origin account: one wallet anchor for `account` on mainnet,
+    /// no NEAR AI login anchor.
+    fn wallet_anchored(account: &str) -> AccountAnchors {
+        AccountAnchors {
+            login: Vec::new(),
+            wallet: vec![identity().index_label("mainnet", account)],
+            network: Some("mainnet".to_owned()),
+        }
+    }
+
+    /// `/users/me` as NEAR AI answers it for a user who signs in with a
+    /// NEAR wallet: provider `near`, login address `{account_id}@near`.
+    fn wallet_me(auth_provider: &str, email: &str) -> serde_json::Value {
+        let mut me = me(owned_org("owner", true));
+        me["auth_provider"] = serde_json::json!(auth_provider);
+        me["email"] = serde_json::json!(email);
+        me
+    }
+
+    /// A NEAR AI wallet sign-in is the wallet: its login address names the
+    /// NEAR account, and the account's wallet anchor is that account's
+    /// blind index. Nothing else names a wallet.
+    #[tokio::test]
+    async fn a_near_ai_wallet_login_matches_the_accounts_wallet_anchor() {
+        let (base, _mock) = serve(Mock {
+            users_me: Some((200, wallet_me("near", "alice.near@near"))),
+            probe: Some(no_op()),
+            ..Mock::default()
+        })
+        .await;
+        let verifier = verifier(&base);
+        verifier
+            .verify(proof(), &wallet_anchored("alice.near"))
+            .await
+            .unwrap();
+        // Another wallet's anchor does not match.
+        assert_eq!(
+            verifier
+                .verify(proof(), &wallet_anchored("bob.near"))
+                .await
+                .unwrap_err(),
+            RecipientProofRefusal::SubjectMismatch
+        );
+        // The same name keyed under another network does not match.
+        let mut testnet = wallet_anchored("alice.near");
+        testnet.wallet = vec![identity().index_label("testnet", "alice.near")];
+        assert_eq!(
+            verifier.verify(proof(), &testnet).await.unwrap_err(),
+            RecipientProofRefusal::SubjectMismatch
+        );
+    }
+
+    #[tokio::test]
+    async fn only_a_near_provider_placeholder_address_names_a_wallet() {
+        for (provider, email) in [
+            ("github", "alice.near@near"),
+            ("google", "alice.near@near"),
+            ("near", "alice.near@near.org"),
+            ("near", "alice.near@NEAR"),
+            ("near", "Alice.near@near"),
+            ("near", "@near"),
+            ("near", "alice near@near"),
+            ("near", "alice.near"),
+            ("", "alice.near@near"),
+        ] {
+            let (base, _mock) = serve(Mock {
+                users_me: Some((200, wallet_me(provider, email))),
+                probe: Some(no_op()),
+                ..Mock::default()
+            })
+            .await;
+            assert_eq!(
+                verifier(&base)
+                    .verify(proof(), &wallet_anchored("alice.near"))
+                    .await
+                    .unwrap_err(),
+                RecipientProofRefusal::SubjectMismatch,
+                "{provider} {email}"
+            );
+        }
+    }
+
+    /// Wallet anchors without the deployment's network cannot be matched:
+    /// with no login anchor either, the token is never spent.
+    #[tokio::test]
+    async fn wallet_anchors_without_a_network_are_no_anchor() {
+        let (base, mock) = serve(Mock {
+            users_me: Some((200, wallet_me("near", "alice.near@near"))),
+            probe: Some(no_op()),
+            ..Mock::default()
+        })
+        .await;
+        let mut anchors = wallet_anchored("alice.near");
+        anchors.network = None;
+        assert_eq!(
+            verifier(&base).verify(proof(), &anchors).await.unwrap_err(),
+            RecipientProofRefusal::NoLoginAnchor
+        );
+        assert_eq!(mock.lock().unwrap().users_me_calls, 0);
     }
 
     /// An account with no NEAR AI login anchor (a wallet-origin account)
@@ -417,7 +594,10 @@ mod tests {
         })
         .await;
         assert_eq!(
-            verifier(&base).verify(proof(), &[]).await.unwrap_err(),
+            verifier(&base)
+                .verify(proof(), &AccountAnchors::default())
+                .await
+                .unwrap_err(),
             RecipientProofRefusal::NoLoginAnchor
         );
         let mock = mock.lock().unwrap();
@@ -488,11 +668,29 @@ mod tests {
         let verifier = verifier(&base);
         let other = identity().login_index_label("another-subject");
         assert_eq!(
-            verifier.verify(proof(), &[other]).await.unwrap_err(),
+            verifier
+                .verify(
+                    proof(),
+                    &AccountAnchors {
+                        login: vec![other],
+                        ..AccountAnchors::default()
+                    }
+                )
+                .await
+                .unwrap_err(),
             RecipientProofRefusal::SubjectMismatch
         );
         let own = identity().login_index_label(SUBJECT);
-        verifier.verify(proof(), &[own]).await.unwrap();
+        verifier
+            .verify(
+                proof(),
+                &AccountAnchors {
+                    login: vec![own],
+                    ..AccountAnchors::default()
+                },
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

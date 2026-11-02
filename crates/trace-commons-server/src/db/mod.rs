@@ -3753,6 +3753,15 @@ pub trait PayoutStore: Send + Sync {
         account: Uuid,
     ) -> Result<Vec<String>, DatabaseError>;
 
+    /// The account's NEAR wallet anchors (`trace_near_account_anchors`
+    /// `identity_source = 'wallet'`): what a NEAR AI wallet sign-in is
+    /// matched against.
+    async fn payout_account_wallet_anchors(
+        &self,
+        tenant: &str,
+        account: Uuid,
+    ) -> Result<Vec<String>, DatabaseError>;
+
     /// Takes the account's request on `rail` with that handle hash and, in
     /// the same transaction, writes what it asks for: a `waiting` link
     /// carrying the request's sealed recipient, or the unlink mark on the

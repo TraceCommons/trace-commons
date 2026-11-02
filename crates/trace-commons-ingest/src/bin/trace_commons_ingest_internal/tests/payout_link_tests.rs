@@ -78,6 +78,10 @@ struct NearAiStub {
     orgs: Vec<(Uuid, &'static str, bool)>,
     /// The probe's reply: `None` is a 200 `no_op`.
     probe_error: Option<(u16, &'static str)>,
+    /// `auth_provider` and login address on `/users/me`: `github` and a
+    /// mailbox by default; `near` and `{account}@near` for a wallet sign-in.
+    auth_provider: &'static str,
+    email: String,
     users_me_calls: usize,
     probe_calls: usize,
 }
@@ -104,8 +108,8 @@ async fn stub_near_ai(stub: Stub) -> String {
                     })
                     .collect();
                 axum::Json(serde_json::json!({
-                    "id": stub.subject, "email": "synthetic@example.invalid",
-                    "username": NAME_SENTINEL, "auth_provider": "github",
+                    "id": stub.subject, "email": stub.email,
+                    "username": NAME_SENTINEL, "auth_provider": stub.auth_provider,
                     "organizations": orgs, "workspaces": [],
                 }))
             }
@@ -191,6 +195,8 @@ async fn harness_with(mode: PayoutMode) -> Option<Harness> {
         subject: format!("synthetic-subject-{}", Uuid::new_v4().simple()),
         orgs: vec![(org(1), "owner", true), (org(2), "owner", true)],
         probe_error: None,
+        auth_provider: "github",
+        email: "synthetic@example.invalid".to_owned(),
         users_me_calls: 0,
         probe_calls: 0,
     }));
@@ -303,6 +309,30 @@ impl Harness {
                     &serde_json::json!({"fixture": true}),
                     &identity_source,
                     &auth_provider,
+                ],
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Records a wallet anchor for NEAR account `near_account` on `network`,
+    /// as wallet provisioning does.
+    async fn insert_wallet_anchor(&self, account: &Account, network: &str, near_account: &str) {
+        self.backend
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO trace_near_account_anchors
+                    (tenant_id, account_id, anchor_hash, sealed_account_name, index_pepper_ref,
+                     account_name_key_ref, identity_source)
+                 VALUES ($1, $2, $3, $4, 'fixture-pepper', 'fixture-key', 'wallet')",
+                &[
+                    &account.tenant,
+                    &account.id,
+                    &identity().index_label(network, near_account),
+                    &serde_json::json!({"fixture": true}),
                 ],
             )
             .await
@@ -644,6 +674,78 @@ async fn an_account_with_no_near_ai_login_links_nothing() {
         h.links(&account, &[PayoutLinkState::Waiting]).await.len(),
         1
     );
+}
+
+/// A wallet-origin account links through its wallet: NEAR AI signs a NEAR
+/// wallet user in as provider `near` with login address `{account}@near`,
+/// and that names the account's wallet anchor (owner fact 2026-11-02: every
+/// NEAR wallet here is also a NEAR AI login). No other step is needed.
+#[tokio::test]
+async fn a_wallet_account_links_through_its_near_ai_wallet_sign_in() {
+    let Some(mut h) = harness().await else { return };
+    Arc::get_mut(&mut h.state).unwrap().account_near_config =
+        Some(Arc::new(trace_commons_server::config::NearConfig {
+            rpc_url: "http://near-rpc.invalid".to_owned(),
+            network: "mainnet".to_owned(),
+            recipient: "app.example.invalid".to_owned(),
+        }));
+    let account = h
+        .unanchored_account_in(
+            &trace_commons_server::near_account_identity::random_near_tenant_id(),
+        )
+        .await;
+    let wallet = format!("w{}.near", Uuid::new_v4().simple());
+    h.insert_wallet_anchor(&account, "mainnet", &wallet).await;
+
+    // A GitHub sign-in names no wallet.
+    let (status, body) = h
+        .start(&account, link_body(Uuid::new_v4(), org(1), 0))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "subject_mismatch", "{body}");
+    // Another wallet's sign-in does not match.
+    h.stub().auth_provider = "near";
+    h.stub().email = format!("other{}.near@near", Uuid::new_v4().simple());
+    let (status, body) = h
+        .start(&account, link_body(Uuid::new_v4(), org(1), 0))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "subject_mismatch", "{body}");
+    assert_eq!(h.request_rows(&account).await, 0);
+
+    // This wallet's own sign-in links, start to confirm.
+    h.stub().email = format!("{wallet}@near");
+    h.link(&account, org(1)).await;
+    assert_eq!(
+        h.links(&account, &[PayoutLinkState::Waiting]).await.len(),
+        1
+    );
+    // Neither the wallet nor the address is stored or logged in a row.
+    let dump = h.dump(&account.tenant).await;
+    assert!(!dump.contains(&wallet), "{dump}");
+}
+
+/// Wallet anchors are keyed under the deployment's NEAR network; without a
+/// NEAR configuration none can match, and the token is never spent.
+#[tokio::test]
+async fn a_wallet_account_without_a_near_network_links_nothing() {
+    let Some(h) = harness().await else { return };
+    assert!(h.state.account_near_config.is_none());
+    let account = h
+        .unanchored_account_in(
+            &trace_commons_server::near_account_identity::random_near_tenant_id(),
+        )
+        .await;
+    let wallet = format!("w{}.near", Uuid::new_v4().simple());
+    h.insert_wallet_anchor(&account, "mainnet", &wallet).await;
+    h.stub().auth_provider = "near";
+    h.stub().email = format!("{wallet}@near");
+    let (status, body) = h
+        .start(&account, link_body(Uuid::new_v4(), org(1), 0))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "subject_mismatch", "{body}");
+    assert_eq!(h.stub().users_me_calls, 0);
 }
 
 /// A link an unanchored account made before this check existed is left as

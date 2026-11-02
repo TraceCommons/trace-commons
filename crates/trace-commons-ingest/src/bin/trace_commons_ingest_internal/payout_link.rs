@@ -8,9 +8,12 @@
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests` starts a link
 //!   or an unlink. Local refusals come first (session kind, rail, body,
 //!   account standing, the "changed since shown" version); only then does a
-//!   `link` go to the rail's recipient-proof verifier, which refuses an
-//!   account with no NEAR AI login anchor before the token is spent, and
-//!   otherwise spends it (`/users/me`, then a zero-target probe). The verified org is
+//!   `link` go to the rail's recipient-proof verifier. That refuses an
+//!   account with no NEAR AI login anchor and no wallet anchor before the
+//!   token is spent, and otherwise spends it (`/users/me`, then a
+//!   zero-target probe): the login must be one of the account's NEAR AI
+//!   login anchors, or a NEAR AI wallet sign-in whose wallet is one of its
+//!   wallet anchors. The verified org is
 //!   sealed and stored on a request that changes nothing yet, with a 5
 //!   minute expiry and a handle.
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm`
@@ -52,8 +55,8 @@ use trace_commons_server::db::{
 use trace_commons_server::payout_pass::{stream_status_hold_label, stream_waiting};
 use trace_commons_server::payout_rate::PayoutMode;
 use trace_commons_server::payout_recipient_proof::{
-    NEAR_AI_USERS_ME_TIMEOUT, NearAiOrgVerifier, RecipientProof, RecipientProofRefusal,
-    RecipientProofVerifier,
+    AccountAnchors, NEAR_AI_USERS_ME_TIMEOUT, NearAiOrgVerifier, RecipientProof,
+    RecipientProofRefusal, RecipientProofVerifier,
 };
 use trace_commons_server::payout_recipient_seal::{payout_link_handle, seal_payout_recipient};
 use trace_commons_server::payout_worker::PayoutRailEntry;
@@ -284,10 +287,23 @@ pub(super) async fn start_handler(
                     organization_id, ..
                 } => *organization_id,
             };
-            let anchors = store
-                .payout_account_login_anchors(tenant, account)
-                .await
-                .map_err(store_failed)?;
+            // What the proving login must match: a NEAR AI login anchor, or
+            // for a NEAR AI wallet sign-in the account's wallet anchor, keyed
+            // under this deployment's NEAR network.
+            let anchors = AccountAnchors {
+                login: store
+                    .payout_account_login_anchors(tenant, account)
+                    .await
+                    .map_err(store_failed)?,
+                wallet: store
+                    .payout_account_wallet_anchors(tenant, account)
+                    .await
+                    .map_err(store_failed)?,
+                network: state
+                    .account_near_config
+                    .as_ref()
+                    .map(|config| config.network.clone()),
+            };
             // The token becomes a secret here and is dropped inside verify.
             let proof = RecipientProof::from(proof);
             let verifier = NearAiOrgVerifier::new(
