@@ -758,6 +758,13 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub managed_terminal_chosen: bool,
 
+    /// Whether a new managed session opens as a tab beside the sessions
+    /// already open, rather than in a window of its own (owner,
+    /// 2026-11-02). Terminal only, where it presses Command-T and so needs
+    /// macOS Accessibility access; off until the person turns it on.
+    #[serde(default)]
+    pub managed_terminal_tabs: bool,
+
     /// NEAR AI model ids the person starred, which the Launch sheet's model
     /// picker lists first (`managed_model_catalogue`'s `favorites`). Order
     /// is not meaningful: shells show them in NEAR AI's order. Written only
@@ -1419,6 +1426,7 @@ impl Default for DaemonSettings {
             menu_bar_mark_enabled: DEFAULT_MENU_BAR_MARK_ENABLED,
             managed_terminal: Default::default(),
             managed_terminal_chosen: false,
+            managed_terminal_tabs: false,
             managed_favorite_models: Vec::new(),
             managed_cli_options: Default::default(),
             managed_folder_settings: Default::default(),
@@ -2135,6 +2143,12 @@ pub fn apply_settings_object(
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?
                     .into();
                 settings.managed_terminal_chosen = true;
+            }
+            // New managed sessions as tabs beside the open ones. Also
+            // reachable as `set_managed_terminal_tabs`.
+            "managed_terminal_tabs" => {
+                settings.managed_terminal_tabs =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             // Favorite models merge like `notify`: `{"<id>": true}` stars an
             // id, `false` unstars it, omitted ids stay. One bad entry, or a

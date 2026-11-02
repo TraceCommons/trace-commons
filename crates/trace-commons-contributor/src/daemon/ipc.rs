@@ -408,6 +408,7 @@ pub const METHODS: &[&str] = &[
     "set_notifications_enabled",
     "set_notify_kind",
     "set_managed_terminal",
+    "set_managed_terminal_tabs",
     "enroll",
     "prepare_admission_session",
     "near_account_capabilities",
@@ -605,6 +606,7 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "set_notify_kind",
     // Writes only the settings file, through `set_settings`.
     "set_managed_terminal",
+    "set_managed_terminal_tabs",
     // `auto_upload` is refused inside these two; the other modes only stop
     // sends.
     "set_project_mode",
@@ -3980,6 +3982,13 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "set_notify_kind" => handle_set_notify_kind(shared, req),
         "set_managed_terminal" => handle_set_managed_terminal(shared, req),
+        "set_managed_terminal_tabs" => {
+            let response = handle_set_bool_setting(shared, req, "managed_terminal_tabs");
+            if response.error.is_none() {
+                super::managed::terminal_changed(shared);
+            }
+            response
+        }
         "set_project_mode" => handle_set_project_mode(shared, req),
         "set_contribution_override" => handle_set_contribution_override(shared, req),
         "clear_contribution_override" => handle_clear_contribution_override(shared, req),
@@ -19322,7 +19331,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 108, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 109, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 81, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -21488,6 +21497,42 @@ mod tests {
         /// The managed-session terminal: one of three ids, persisted
         /// through `set_settings`, reported by `get_settings` and the
         /// managed snapshot, and announced as `managed_changed`. Anything
+        /// New sessions as tabs (owner, 2026-11-02): off until turned on,
+        /// saved, sent in the snapshot, and the snapshot moves; anything but
+        /// a bool is refused.
+        #[test]
+        fn opening_sessions_as_tabs_is_off_until_turned_on() {
+            let s = live();
+            let snapshot = |s: &DaemonShared| {
+                handle_request(s, &req("managed_snapshot", serde_json::json!({})))
+                    .result
+                    .expect("snapshot")
+            };
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_tabs"], false);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req("set_managed_terminal_tabs", serde_json::json!({"on": true})),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+            let mut saw = false;
+            while let Ok(event) = rx.try_recv() {
+                saw |= event.event == "managed_changed";
+            }
+            assert!(saw, "the snapshot moves");
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_tabs"], true);
+            assert!(
+                crate::daemon::settings::DaemonSettings::load(&s.store)
+                    .unwrap()
+                    .managed_terminal_tabs
+            );
+            for bad in [serde_json::json!({}), serde_json::json!({"on": "yes"})] {
+                let r = handle_request(&s, &req("set_managed_terminal_tabs", bad));
+                assert!(r.error.is_some());
+            }
+            assert_eq!(snapshot(&s)["capabilities"]["terminal_tabs"], true);
+        }
+
         /// else is refused before a write.
         #[test]
         fn the_managed_terminal_persists_and_moves_the_snapshot() {

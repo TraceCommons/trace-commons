@@ -40,6 +40,18 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(missing.proposedTerminal, "kitty")
     }
 
+    /// Whether new sessions open as tabs is the daemon's; an older daemon
+    /// sends nothing, which reads as no switch at all.
+    func testSnapshotCarriesWhetherSessionsOpenAsTabs() throws {
+        func capabilities(_ extra: String) throws -> ManagedSnapshot.Capabilities {
+            let json = #"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_current":"terminal"\#(extra)}}"#
+            return try JSONDecoder().decode(ManagedSnapshot.self, from: Data(json.utf8)).capabilities
+        }
+        XCTAssertEqual(try capabilities(#","terminal_tabs":true"#).terminalTabs, true)
+        XCTAssertEqual(try capabilities(#","terminal_tabs":false"#).terminalTabs, false)
+        XCTAssertNil(try capabilities("").terminalTabs)
+    }
+
     func testAnOlderSnapshotOffersNoTerminalChoice() throws {
         let snapshot = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(#"{"revision":1,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,"terminal_destination":"Terminal"}}"#.utf8))
         XCTAssertNil(snapshot.capabilities.terminalCurrent)

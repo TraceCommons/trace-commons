@@ -54,6 +54,7 @@
   "menu_bar_mark_enabled": true,
   "managed_terminal": "terminal",
   "managed_terminal_chosen": false,
+  "managed_terminal_tabs": false,
   "managed_favorite_models": [],
   "managed_cli_options": {},
   "managed_folder_settings": [],

@@ -54,6 +54,10 @@ pub(crate) fn schema() -> Value {
         ("notifications_enabled", "Master switch for notifications."),
         ("menu_bar_mark_enabled", "Show the menu-bar news mark."),
         (
+            "managed_terminal_tabs",
+            "Open each new managed session as a tab beside the open ones, in Terminal; needs macOS Accessibility access.",
+        ),
+        (
             "verdicts_offer_pending",
             "Whether the one-time verdict notification offer remains pending.",
         ),

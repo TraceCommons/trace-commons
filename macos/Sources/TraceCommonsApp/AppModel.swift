@@ -126,6 +126,11 @@ final class AppModel: ObservableObject {
         managedAction("set_managed_terminal", params: ["terminal": id])
     }
 
+    /// New Private AI sessions as tabs beside the open ones, in Terminal.
+    func setManagedTerminalTabs(_ on: Bool) {
+        managedAction("set_managed_terminal_tabs", params: ["on": on])
+    }
+
     /// Only a named tool and setup action cross the RPC boundary. Setup needs
     /// no sign-in, managed account, profile, session, or working directory.
     func setupManagedTool(_ tool: String, action: String) {

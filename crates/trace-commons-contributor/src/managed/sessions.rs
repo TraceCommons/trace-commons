@@ -514,6 +514,21 @@ impl SessionRegistry {
             .flatten()
     }
 
+    /// The tabs of the listed sessions the daemon opened, newest first,
+    /// for a new session to open beside as a tab (owner, 2026-11-02).
+    /// Terminal may have closed some or given their tty to other tabs;
+    /// the launch looks for them and opens a window when none is there.
+    pub fn open_terminals(&self) -> Vec<TerminalHandle> {
+        let mut tabs: Vec<TerminalHandle> = Vec::new();
+        let listed = self.data.entries.iter().rev().filter(|e| !e.dismissed);
+        for tab in listed.filter_map(|e| e.terminal.as_ref()) {
+            if !tabs.contains(tab) {
+                tabs.push(tab.clone());
+            }
+        }
+        tabs
+    }
+
     /// The window of a running session the daemon opened, or a refusal.
     pub fn terminal_for(&self, id: Uuid) -> Result<TerminalHandle, ManagedError> {
         self.owned(id)?
