@@ -468,8 +468,8 @@ account, or use a different one. The strings match the drafts in the
 sign-in chooser work (#1835) and the refusal wording elsewhere:
 "This app is connected to a different NEAR AI account. Sign in with that
 account again." and the action "Use a different account". The page
-marker's wording is being re-picked by the owner (candidates "You used
-this login last time" and "Last used with this app"), so it is PENDING.
+marker is "You used this login last time" (owner-APPROVED 2026-11-02,
+replacing "Connected to this app").
 
 ### 5.1 Signing in again with the connected account
 
@@ -480,7 +480,7 @@ remembered provider (`commons_login`) and the chooser page marks it.
 | --- | --- |
 | `account.login.connected` | Connected with {provider} |
 | `account.sign_in.button` | Sign in |
-| `chooser.mark.connected` | PENDING owner choice: "You used this login last time" or "Last used with this app" (replaces "Connected to this app") |
+| `chooser.mark.connected` | You used this login last time (APPROVED 2026-11-02) |
 
 `{provider}` is NEAR wallet, GitHub or Google. An `unknown` provider shows
 no provider line.
