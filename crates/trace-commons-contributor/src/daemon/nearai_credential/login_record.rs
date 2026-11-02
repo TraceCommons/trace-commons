@@ -20,8 +20,12 @@
 //!   AI login -- first enrollment, a renewal with the stored login, or a
 //!   sign-in checked before it was stored ([`accepted_by_commons`]).
 //!
-//! The file is one of the enrollment's (`config::ENROLLMENT_FILES`), so
-//! unenrolling and logging out remove both.
+//! Unenrolling clears the account's login ([`forget_commons_login`]) and
+//! keeps the stored session's, because it keeps that session. Logging out
+//! removes the file ([`remove`]). Both go through this module's lock, and the
+//! account's login is written only while this device is enrolled, so a write
+//! in flight cannot bring a removed account's login back. Once unenrolling
+//! clears the NEAR AI session too (#1843), the two cases are the same.
 //!
 //! It is its own file, not part of the settings document, for `spend_org`'s
 //! reason: preference writers save the in-memory settings snapshot they hold,
@@ -29,7 +33,7 @@
 //! toggle. Every function here does file I/O: call it off an async runtime.
 //! Writes are best effort. A lost write leaves a tag unknown, never wrong.
 
-use crate::config::{ConfigStore, DAEMON_NEAR_AI_LOGIN_FILE};
+use crate::config::{CONFIG_FILE, ConfigStore, DAEMON_NEAR_AI_LOGIN_FILE};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
@@ -38,7 +42,7 @@ use std::sync::Mutex;
 #[path = "login_record_tests.rs"]
 mod tests;
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, PartialEq, Eq, Serialize, Deserialize)]
 struct LoginRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stored: Option<StoredLogin>,
@@ -46,7 +50,7 @@ struct LoginRecord {
     commons_login: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
 struct StoredLogin {
     provider: String,
     /// [`sign_in_digest`] of the inference key minted with the session.
@@ -84,12 +88,21 @@ fn load(store: &ConfigStore) -> LoginRecord {
         .unwrap_or_default()
 }
 
+/// Change the record under [`WRITE`]. A change that leaves nothing to keep
+/// never creates the file.
 fn update(store: &ConfigStore, change: impl FnOnce(&mut LoginRecord)) {
     let Ok(_write) = WRITE.lock() else {
         return;
     };
+    write_locked(store, change);
+}
+
+fn write_locked(store: &ConfigStore, change: impl FnOnce(&mut LoginRecord)) {
     let mut record = load(store);
     change(&mut record);
+    if record == LoginRecord::default() && !store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists() {
+        return;
+    }
     let saved = serde_json::to_vec_pretty(&record)
         .ok()
         .is_some_and(|bytes| {
@@ -100,6 +113,11 @@ fn update(store: &ConfigStore, change: impl FnOnce(&mut LoginRecord)) {
     if !saved {
         tracing::warn!(target: "near_ai_login_record", "near_ai_login_record_unsaved");
     }
+}
+
+/// Whether this device is enrolled: the account's login is kept only then.
+fn enrolled(store: &ConfigStore) -> bool {
+    store.dir().join(CONFIG_FILE).exists()
 }
 
 /// The session just stored comes from `provider`, and was minted with the
@@ -132,10 +150,53 @@ pub(crate) fn clear_stored_login(store: &ConfigStore) {
 /// The account accepted a NEAR AI login made with `provider`. `None` (a
 /// login whose provider is not known) changes nothing: an old tag is better
 /// than a guess.
+///
+/// Checked under the record's lock: on a device no longer enrolled -- an
+/// unenroll or a logout that landed while this was in flight -- nothing is
+/// written, so the next account is never shown this one's login.
 pub(crate) fn accepted_by_commons(store: &ConfigStore, provider: Option<&str>) {
-    if let Some(tag) = offered(provider) {
-        update(store, |record| record.commons_login = Some(tag.to_owned()));
+    let Some(tag) = offered(provider) else {
+        return;
+    };
+    let Ok(_write) = WRITE.lock() else {
+        return;
+    };
+    if enrolled(store) {
+        write_locked(store, |record| record.commons_login = Some(tag.to_owned()));
     }
+}
+
+/// The device left its account (unenroll): no login goes with one any more.
+/// The stored session's login stays with the session.
+pub(crate) fn forget_commons_login(store: &ConfigStore) {
+    update(store, |record| record.commons_login = None);
+}
+
+/// Remove the whole record (logout), under the record's lock so a write in
+/// flight finishes first and cannot recreate it afterwards.
+pub(crate) fn remove(store: &ConfigStore) -> anyhow::Result<()> {
+    let _write = WRITE
+        .lock()
+        .map_err(|_| anyhow::anyhow!("near_ai_login_record_unavailable"))?;
+    match std::fs::remove_file(store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // And any temp file a crashed atomic write left behind.
+    let prefix = format!(".{DAEMON_NEAR_AI_LOGIN_FILE}.tmp-");
+    let entries = match std::fs::read_dir(store.dir()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// The login the account last accepted, if known.

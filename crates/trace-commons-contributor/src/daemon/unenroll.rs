@@ -172,6 +172,10 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
         shared.store.remove_enrollment_files()
     })
     .map_err(|_| (ERR_UNAVAILABLE, ERR_UNENROLL_FAILED))?;
+    // No account any more, so no login goes with one. The stored NEAR AI
+    // session's login stays with the session, which unenrolling keeps
+    // (until #1843 clears the session too).
+    super::nearai_credential::login_record::forget_commons_login(&shared.store);
     let insights_cleanup = clear_insights_counter(shared);
     for id in &approved {
         queue.revoke_approval(*id, super::preview::REASON_INPUTS_CHANGED);

@@ -223,6 +223,22 @@ where
     F: FnOnce(BrowserSession) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
+    receive_session_after(listener, state, None, finish).await
+}
+
+/// [`receive_session`] on the listener the chooser was served from: another
+/// choice from that page (`stale`) ends the attempt with the chooser's own
+/// refusal rather than leaving it to time out.
+pub(super) async fn receive_session_after<T, F, Fut>(
+    listener: tokio::net::TcpListener,
+    state: &str,
+    stale: Option<&super::chooser::StaleChoice>,
+    finish: F,
+) -> Result<T>
+where
+    F: FnOnce(BrowserSession) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
     let page = bounce_page(state)?;
     let authority = format!("127.0.0.1:{}", listener.local_addr()?.port());
     loop {
@@ -233,11 +249,23 @@ where
         )
         .await
         {
-            Ok(Ok((head, body))) => Incoming {
-                method: head.method,
-                path: head.target,
-                body: String::from_utf8_lossy(&body).into_owned(),
-            },
+            Ok(Ok((head, body))) => {
+                if stale.is_some_and(|stale| stale.matches(&head, &body, &authority)) {
+                    respond(
+                        &mut stream,
+                        "400 Bad Request",
+                        "text/plain; charset=utf-8",
+                        super::chooser::STALE_CHOICE_BODY,
+                    )
+                    .await;
+                    bail!(super::chooser::STALE_CHOICE)
+                }
+                Incoming {
+                    method: head.method,
+                    path: head.target,
+                    body: String::from_utf8_lossy(&body).into_owned(),
+                }
+            }
             Ok(Err(_)) => {
                 respond(
                     &mut stream,

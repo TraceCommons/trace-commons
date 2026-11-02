@@ -241,6 +241,8 @@ enum Ready {
         /// URL.
         state: String,
         provider: &'static str,
+        /// Another choice from the login page this listener served first.
+        stale: Option<chooser::StaleChoice>,
     },
     Near(NearWalletListener),
 }
@@ -254,14 +256,17 @@ impl Ready {
     }
 
     /// `provider` on `listener`: the wallet page served on it, or an OAuth
-    /// login returning to it with a fresh deposit secret.
+    /// login returning to it with a fresh deposit secret. `stale`, after the
+    /// login page, recognizes another choice from that page, which ends the
+    /// attempt instead of leaving it to time out.
     fn on(
         api: &CloudApi,
         provider: &'static str,
         listener: std::net::TcpListener,
+        stale: Option<chooser::StaleChoice>,
     ) -> Result<(String, Self)> {
         if provider == "near" {
-            let (url, listener) = near_wallet_loopback::adopt(listener)?;
+            let (url, listener) = near_wallet_loopback::adopt(listener, stale)?;
             return Ok((url, Self::Near(listener)));
         }
         let url = api.authorize_url(provider, listener.local_addr()?.port())?;
@@ -271,6 +276,7 @@ impl Ready {
                 listener,
                 state: loopback::random_state()?,
                 provider,
+                stale,
             },
         ))
     }
@@ -309,7 +315,7 @@ impl BrowserSignIn {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await?
             .into_std()?;
-        let (url, ready) = Ready::on(api, provider, listener)?;
+        let (url, ready) = Ready::on(api, provider, listener, None)?;
         Ok((url, Self::Ready(ready)))
     }
 
@@ -335,7 +341,14 @@ impl BrowserSignIn {
         let next = listener
             .into_std()
             .map_err(anyhow::Error::from)
-            .and_then(|listener| Ready::on(api, choice.provider, listener));
+            .and_then(|listener| {
+                Ready::on(
+                    api,
+                    choice.provider,
+                    listener,
+                    Some(chooser::StaleChoice::new(state)),
+                )
+            });
         match next {
             Ok((location, ready)) => {
                 // A browser never sent on cannot finish: fail now, not when
@@ -370,10 +383,13 @@ impl BrowserSignIn {
         progress.set_provider(ready.provider());
         match ready {
             Ready::OAuth {
-                listener, state, ..
+                listener,
+                state,
+                stale,
+                ..
             } => {
                 let listener = tokio::net::TcpListener::from_std(listener)?;
-                loopback::receive_session(listener, &state, |session| {
+                loopback::receive_session_after(listener, &state, stale.as_ref(), |session| {
                     finish(session.tokens, None, session.user_agent)
                 })
                 .await

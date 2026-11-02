@@ -1,7 +1,10 @@
 use super::*;
 
-fn store() -> (tempfile::TempDir, ConfigStore) {
-    crate::config::tests_support::temp_store()
+/// An enrolled device's store: the account's login is kept only on one.
+fn enrolled() -> (tempfile::TempDir, ConfigStore) {
+    let (dir, store) = crate::config::tests_support::temp_store();
+    std::fs::write(store.dir().join(CONFIG_FILE), b"{}").unwrap();
+    (dir, store)
 }
 
 fn login() -> &'static str {
@@ -10,14 +13,14 @@ fn login() -> &'static str {
 
 #[test]
 fn nothing_is_remembered_at_first() {
-    let (_dir, store) = store();
+    let (_dir, store) = enrolled();
     assert_eq!(stored_login(&store, "key-1"), None);
     assert_eq!(commons_login(&store), None);
 }
 
 #[test]
 fn the_stored_login_is_read_only_for_the_sign_in_it_was_written_for() {
-    let (_dir, store) = store();
+    let (_dir, store) = enrolled();
     record_stored_login(&store, login(), "key-1");
     assert_eq!(stored_login(&store, "key-1"), Some(login()));
     // Another sign-in (another key) never reads this one's login: a tag that
@@ -31,7 +34,7 @@ fn the_stored_login_is_read_only_for_the_sign_in_it_was_written_for() {
 
 #[test]
 fn signing_out_forgets_the_stored_login_and_keeps_the_accounts() {
-    let (_dir, store) = store();
+    let (_dir, store) = enrolled();
     record_stored_login(&store, login(), "key-1");
     accepted_by_commons(&store, Some(login()));
     clear_stored_login(&store);
@@ -41,7 +44,7 @@ fn signing_out_forgets_the_stored_login_and_keeps_the_accounts() {
 
 #[test]
 fn an_unknown_login_changes_nothing_it_should_not() {
-    let (_dir, store) = store();
+    let (_dir, store) = enrolled();
     accepted_by_commons(&store, Some(login()));
     accepted_by_commons(&store, None);
     accepted_by_commons(&store, Some("bitbucket"));
@@ -56,7 +59,7 @@ fn an_unknown_login_changes_nothing_it_should_not() {
 
 #[test]
 fn a_tag_this_build_does_not_offer_reads_as_none() {
-    let (_dir, store) = store();
+    let (_dir, store) = enrolled();
     store
         .write_daemon_file(
             DAEMON_NEAR_AI_LOGIN_FILE,
@@ -78,7 +81,7 @@ fn a_tag_this_build_does_not_offer_reads_as_none() {
 
 #[test]
 fn the_record_holds_tags_and_a_digest_only() {
-    let (_dir, store) = store();
+    let (_dir, store) = enrolled();
     record_stored_login(&store, login(), "key-1");
     accepted_by_commons(&store, Some(login()));
     let bytes = store
@@ -97,14 +100,80 @@ fn the_record_holds_tags_and_a_digest_only() {
     );
 }
 
+/// Unenrolling forgets the account's login and keeps the stored session's,
+/// because it keeps that session (until #1843 clears it too).
 #[test]
-fn logging_out_and_unenrolling_remove_the_record() {
-    let (_dir, store) = store();
+fn unenrolling_forgets_the_accounts_login_and_keeps_the_sessions() {
+    let (_dir, store) = enrolled();
+    record_stored_login(&store, login(), "key-1");
     accepted_by_commons(&store, Some(login()));
     store.remove_enrollment_files().unwrap();
+    forget_commons_login(&store);
     assert_eq!(commons_login(&store), None);
+    assert_eq!(stored_login(&store, "key-1"), Some(login()));
+}
 
+/// Logging out removes the whole record, and any temp file a crashed write
+/// left behind.
+#[test]
+fn logging_out_removes_the_record() {
+    let (_dir, store) = enrolled();
+    record_stored_login(&store, login(), "key-1");
     accepted_by_commons(&store, Some(login()));
+    let orphan = store
+        .dir()
+        .join(format!(".{DAEMON_NEAR_AI_LOGIN_FILE}.tmp-orphan"));
+    std::fs::write(&orphan, b"{}").unwrap();
     store.wipe().unwrap();
+    assert!(!store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists());
+    assert!(!orphan.exists());
     assert_eq!(commons_login(&store), None);
+    assert_eq!(stored_login(&store, "key-1"), None);
+}
+
+/// An acceptance that lands after the device left its account -- an unenroll
+/// or a logout that ran while it was in flight -- writes nothing, so the
+/// record cannot come back with the old account's login.
+#[test]
+fn an_acceptance_after_leaving_the_account_writes_nothing() {
+    let (_dir, store) = enrolled();
+    store.wipe().unwrap();
+    accepted_by_commons(&store, Some(login()));
+    assert!(!store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists());
+
+    let (_dir, store) = enrolled();
+    accepted_by_commons(&store, Some(login()));
+    store.remove_enrollment_files().unwrap();
+    forget_commons_login(&store);
+    accepted_by_commons(&store, Some(login()));
+    assert_eq!(commons_login(&store), None);
+}
+
+/// Removal waits for a write already holding the record's lock, and that
+/// write cannot recreate the file once removal has run.
+#[test]
+fn removal_is_ordered_against_a_write_in_flight() {
+    let (_dir, store) = enrolled();
+    accepted_by_commons(&store, Some(login()));
+    let held = WRITE.lock().unwrap();
+    let remover = std::thread::spawn({
+        let store = store.clone();
+        move || remove(&store).unwrap()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Removal has not run while the lock is held.
+    assert!(store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists());
+    drop(held);
+    remover.join().unwrap();
+    assert!(!store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists());
+}
+
+/// Nothing to keep is never written: forgetting on a device with no record
+/// creates none.
+#[test]
+fn an_empty_change_creates_no_file() {
+    let (_dir, store) = enrolled();
+    forget_commons_login(&store);
+    clear_stored_login(&store);
+    assert!(!store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists());
 }

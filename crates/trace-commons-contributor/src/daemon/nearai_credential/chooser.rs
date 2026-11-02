@@ -191,6 +191,48 @@ impl Chosen {
     }
 }
 
+/// A second choice from this attempt's page, arriving after the listener
+/// moved on to the first one's login: the person went Back to the page and
+/// picked again. The leg cannot switch, so the listener answers with the
+/// page's existing refusal and ends the attempt, and the app can start a
+/// new one at once instead of waiting out the timeout.
+///
+/// Recognized only by the same rules as a first choice -- this attempt's
+/// state, this listener's origin, a login this build offers -- so a page
+/// elsewhere cannot end someone's sign-in.
+pub(crate) struct StaleChoice {
+    state: String,
+}
+
+/// What the listener answers a stale choice with: the chooser's own refusal.
+pub(super) const STALE_CHOICE_BODY: &str = "Not accepted.";
+
+/// The control name an attempt ended by a stale choice fails with.
+pub(super) const STALE_CHOICE: &str = "near_ai_credential_choice_stale";
+
+impl StaleChoice {
+    pub(super) fn new(state: String) -> Self {
+        Self { state }
+    }
+
+    /// Whether `head` and `body`, sent to `authority`, are another choice
+    /// from this attempt's page.
+    pub(super) fn matches(&self, head: &Head, body: &[u8], authority: &str) -> bool {
+        head.method == "POST"
+            && head.target == CHOOSE_PATH
+            && matches!(
+                choice(
+                    head,
+                    body,
+                    authority,
+                    &self.state,
+                    crate::channel::NEAR_AI_SIGN_IN_PROVIDERS
+                ),
+                Route::Choice(_)
+            )
+    }
+}
+
 /// Serve the page until a valid choice arrives.
 ///
 /// Like the other loopback listeners, an unrelated or refused request is

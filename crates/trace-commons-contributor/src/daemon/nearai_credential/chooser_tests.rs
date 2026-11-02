@@ -476,6 +476,8 @@ async fn a_single_login_build_skips_the_page() {
 #[tokio::test]
 async fn the_page_marks_the_login_the_commons_last_accepted() {
     let (_directory, store) = crate::config::tests_support::temp_store();
+    // An enrolled device: the account's login is kept only on one.
+    std::fs::write(store.dir().join(crate::config::CONFIG_FILE), b"{}").unwrap();
     crate::daemon::nearai_credential::login_record::accepted_by_commons(&store, Some("google"));
     let started = crate::daemon::nearai_credential::ceremony::begin_in_browser(&store)
         .await
@@ -567,4 +569,83 @@ async fn a_redirect_that_was_not_written_says_so() {
     let mut response = Vec::new();
     client.read_to_end(&mut response).await.unwrap();
     assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 303 See Other"));
+}
+
+/// The attempt's status word, waited on until it leaves `waiting_for_browser`
+/// or five seconds pass.
+#[cfg(not(feature = "near-ai-staging"))]
+async fn settled_status(store: &crate::config::ConfigStore, id: &str) -> &'static str {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status = crate::daemon::nearai_credential::ceremony::status(store.dir(), Some(id))
+            .map(|status| status.status)
+            .unwrap_or("none");
+        if status != "waiting_for_browser" || std::time::Instant::now() >= deadline {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Back to the login page after a pick, and a second pick: the listener has
+/// moved on to the first login and cannot switch. It answers with the page's
+/// own refusal and ends the attempt at once, so the app can start a new one,
+/// on the OAuth leg and the wallet's alike. A post that is not this page's
+/// own choice is refused and ends nothing.
+#[cfg(not(feature = "near-ai-staging"))]
+#[tokio::test]
+async fn a_second_pick_after_the_first_ends_the_attempt_at_once() {
+    for (first, second) in [("github", "google"), ("near", "github")] {
+        let (_directory, store) = crate::config::tests_support::temp_store();
+        let (url, _location, port, id) = choose_in_browser(&store, first).await;
+        let state = url
+            .query_pairs()
+            .find(|(name, _)| name == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let address: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+        let authority = format!("127.0.0.1:{port}");
+        let own = format!("http://{authority}");
+
+        // Not this page's choice: refused as any unknown request is (404 on
+        // the OAuth leg, 400 on the wallet's), and the sign-in goes on.
+        let forged = send(
+            address,
+            post(
+                &authority,
+                Some(&own),
+                "",
+                &format!("state=other&provider={second}"),
+            ),
+        )
+        .await;
+        assert!(
+            ["HTTP/1.1 404 Not Found", "HTTP/1.1 400 Bad Request"].contains(&status(&forged)),
+            "{first}: {forged}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            crate::daemon::nearai_credential::ceremony::status(store.dir(), Some(&id))
+                .unwrap()
+                .status,
+            "waiting_for_browser",
+            "{first}"
+        );
+
+        // The page's own second choice: refused with its text, attempt over.
+        let stale = send(
+            address,
+            post(
+                &authority,
+                Some(&own),
+                "",
+                &format!("state={state}&provider={second}"),
+            ),
+        )
+        .await;
+        assert_eq!(status(&stale), "HTTP/1.1 400 Bad Request", "{first}");
+        assert!(stale.ends_with("Not accepted."), "{first}: {stale}");
+        assert_eq!(settled_status(&store, &id).await, "failed", "{first}");
+    }
 }

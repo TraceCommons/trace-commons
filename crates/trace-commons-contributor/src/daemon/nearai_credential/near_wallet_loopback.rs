@@ -30,6 +30,8 @@ pub(crate) struct NearWalletListener {
     challenge: NearWalletChallenge,
     authority: String,
     deadline: Instant,
+    /// Set when the login page was served from this listener first.
+    stale: Option<super::chooser::StaleChoice>,
 }
 
 pub(crate) async fn bind() -> Result<(String, NearWalletListener), NearWalletError> {
@@ -38,15 +40,18 @@ pub(crate) async fn bind() -> Result<(String, NearWalletListener), NearWalletErr
         .map_err(|_| NearWalletError::Unavailable)?
         .into_std()
         .map_err(|_| NearWalletError::Unavailable)?;
-    adopt(listener)
+    adopt(listener, None)
 }
 
 /// Serve the wallet sign-in on a loopback listener this process already
 /// holds: the one the in-browser login chooser was served from. Same port,
 /// so the chooser's redirect stays same-origin and a forwarded port (the
 /// CLI's remote sign-in) still reaches the wallet page.
+///
+/// `stale` recognizes another choice from that page, which ends the attempt.
 pub(crate) fn adopt(
     listener: std::net::TcpListener,
+    stale: Option<super::chooser::StaleChoice>,
 ) -> Result<(String, NearWalletListener), NearWalletError> {
     let address = listener
         .local_addr()
@@ -67,6 +72,7 @@ pub(crate) fn adopt(
             challenge,
             authority: format!("127.0.0.1:{port}"),
             deadline,
+            stale,
         },
     ))
 }
@@ -77,7 +83,13 @@ impl NearWalletListener {
             TcpListener::from_std(self.listener).map_err(|_| NearWalletError::Unavailable)?;
         timeout_at(
             self.deadline,
-            Self::receive(listener, self.challenge, self.authority, self.deadline),
+            Self::receive(
+                listener,
+                self.challenge,
+                self.authority,
+                self.deadline,
+                self.stale,
+            ),
         )
         .await
         .map_err(|_| NearWalletError::Expired)?
@@ -88,6 +100,7 @@ impl NearWalletListener {
         mut challenge: NearWalletChallenge,
         authority: String,
         attempt_deadline: Instant,
+        stale: Option<super::chooser::StaleChoice>,
     ) -> Result<VerifiedNearWalletSignIn, NearWalletError> {
         let page = near_wallet_page::render(&challenge)?;
         let mut assets = Assets::new()?;
@@ -160,6 +173,22 @@ impl NearWalletListener {
                         Err(error) => return Err(error),
                     }
                 }
+                Ok(Ok(Request::StaleChoice(head, body))) => {
+                    let ends = stale
+                        .as_ref()
+                        .is_some_and(|stale| stale.matches(&head, &body, &authority));
+                    respond(
+                        &mut stream,
+                        deadline,
+                        false,
+                        "text/plain; charset=utf-8",
+                        super::chooser::STALE_CHOICE_BODY,
+                    )
+                    .await;
+                    if ends {
+                        return Err(NearWalletError::StaleChoice);
+                    }
+                }
                 _ => {
                     respond(
                         &mut stream,
@@ -187,10 +216,13 @@ fn unix_millis() -> Result<u64, NearWalletError> {
 enum Route {
     Callback,
     Deposit,
+    /// A post to the login page's choice path: judged once its body is read.
+    StaleChoice,
     Asset(String),
 }
 
 enum Request {
+    StaleChoice(loopback_http::Head, Vec<u8>),
     Callback,
     Deposit(String),
     Asset(String),
@@ -204,6 +236,7 @@ fn parse_head(bytes: &[u8], authority: &str) -> Result<(Route, usize), NearWalle
     let route = match (head.method.as_str(), head.target.as_str()) {
         ("GET", target) if target == CALLBACK_PATH => Route::Callback,
         ("POST", target) if target == DEPOSIT_PATH => Route::Deposit,
+        ("POST", target) if target == super::chooser::CHOOSE_PATH => Route::StaleChoice,
         ("GET", target) => Route::Asset(
             near_wallet_page::asset_path(target)
                 .ok_or(NearWalletError::Invalid)?
@@ -214,6 +247,7 @@ fn parse_head(bytes: &[u8], authority: &str) -> Result<(Route, usize), NearWalle
     let size = head.body_len();
     match &route {
         Route::Callback | Route::Asset(_) if size == 0 => {}
+        Route::StaleChoice => {}
         Route::Deposit
             if head.length.is_some()
                 && (1..=MAX_CALLBACK_BYTES).contains(&size)
@@ -252,6 +286,9 @@ async fn read_request(stream: &mut TcpStream, authority: &str) -> Result<Request
         .await
         .map_err(|_| NearWalletError::Invalid)?;
     match route {
+        Route::StaleChoice => loopback_http::parse_head(&head, authority, MAX_CALLBACK_BYTES)
+            .map(|head| Request::StaleChoice(head, body))
+            .map_err(|_| NearWalletError::Invalid),
         Route::Callback => Ok(Request::Callback),
         Route::Asset(path) => Ok(Request::Asset(path)),
         Route::Deposit => String::from_utf8(body)

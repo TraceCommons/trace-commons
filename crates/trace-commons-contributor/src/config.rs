@@ -111,9 +111,12 @@ pub const DEVICE_KEY_REVOKED_FILE: &str = "device-key-revoked";
 
 /// Which NEAR AI login this device's account was last accepted with, and
 /// which one the stored session came from
-/// (`daemon::nearai_credential::login_record`). Tags only. It goes with the
-/// enrollment, so unenrolling and logging out both remove it: a next account
-/// on this machine is never shown the last one's login.
+/// (`daemon::nearai_credential::login_record`). Tags only. Not one of the
+/// [`ENROLLMENT_FILES`]: half of it describes the NEAR AI session, which
+/// unenrolling keeps. Unenrolling clears the account's half, logging out
+/// removes the file, both through `login_record` under its own lock. Once
+/// unenrolling clears the NEAR AI session as well (#1843), the two cases are
+/// the same.
 pub const DAEMON_NEAR_AI_LOGIN_FILE: &str = "near-ai-login.json";
 
 /// The plain files that belong to one enrollment, apart from the credential
@@ -125,7 +128,7 @@ pub const DAEMON_NEAR_AI_LOGIN_FILE: &str = "near-ai-login.json";
 /// record of what this device did, and the audit log records the unenroll
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), and the NEAR AI notice marker.
-pub(crate) const ENROLLMENT_FILES: [&str; 12] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 11] = [
     CONFIG_FILE,
     DAEMON_SETUP_COMPLETION_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
@@ -137,7 +140,6 @@ pub(crate) const ENROLLMENT_FILES: [&str; 12] = [
     LEGACY_INVITE_REFUSAL_FILE,
     JOINED_BY_CODE_FILE,
     DEVICE_KEY_REVOKED_FILE,
-    DAEMON_NEAR_AI_LOGIN_FILE,
 ];
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
@@ -1531,6 +1533,9 @@ impl ConfigStore {
         // Everything an enrollment owns goes first, through the one list
         // `unenroll` uses, so a file added there can never survive a logout.
         self.remove_enrollment_files()?;
+        // The NEAR AI login record, under its own lock, so a write in flight
+        // cannot bring it back.
+        crate::daemon::nearai_credential::login_record::remove(self)?;
         // Token review payloads belong to this enrollment. Never traverse a
         // substituted link into an agent's session directory. Remaining raw
         // capture leases expire independently in Ironwire's bounded spool.
