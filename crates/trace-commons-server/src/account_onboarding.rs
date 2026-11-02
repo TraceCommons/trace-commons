@@ -187,6 +187,46 @@ pub fn is_device_key_revoked(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REVOKED)
 }
 
+/// Whether a provisioning error is the database failing to answer rather than
+/// a refusal: no connection from the pool, a connection lost or timed out, or
+/// PostgreSQL itself out of resources, shutting down, cancelling the
+/// statement, or aborting it on a serialization failure or deadlock.
+///
+/// Narrow on purpose. Every decided refusal on these paths is carried as
+/// `DatabaseError::Pool(label)` (the refusal labels above and in
+/// `db::postgres_account_onboarding`), and that variant is never transient
+/// here, nor are `Query`, `Constraint`, `Serialization`, or a PostgreSQL
+/// error with any other SQLSTATE (an integrity or permission violation). So
+/// a refusal cannot read as "unavailable": anything not positively
+/// recognised as the database not answering stays a refusal. None of the
+/// recognised causes depends on whose account, login or key the request
+/// names.
+pub fn is_transient_database_failure(error: &crate::error::DatabaseError) -> bool {
+    use crate::error::DatabaseError;
+    match error {
+        DatabaseError::PoolRuntime(_) | DatabaseError::PoolBuild(_) => true,
+        DatabaseError::Postgres(error) => match error.code() {
+            // No SQLSTATE: the server never answered the statement (I/O
+            // failure, closed connection, connect timeout).
+            None => error.as_db_error().is_none(),
+            Some(code) => {
+                let code = code.code();
+                // 08: connection exception. 53: insufficient resources.
+                // 57P: operator intervention (shutdown, cannot connect now).
+                // 57014: statement cancelled (statement_timeout).
+                // 40001 / 40P01: serialization failure, deadlock detected.
+                code.starts_with("08")
+                    || code.starts_with("53")
+                    || code.starts_with("57P")
+                    || code == "57014"
+                    || code == "40001"
+                    || code == "40P01"
+            }
+        },
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProvisionedNearAccount {
     pub tenant_id: String,
@@ -450,6 +490,42 @@ mod tests {
     use super::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// No decided refusal reads as the database not answering. Each label the
+    /// provisioning code refuses with is listed, so a new one has to be
+    /// looked at here; the pool-runtime case is the transient one.
+    #[test]
+    fn no_refusal_reads_as_a_transient_database_failure() {
+        use crate::error::DatabaseError;
+        for label in [
+            DEVICE_KEY_REGISTERED_ELSEWHERE,
+            DEVICE_KEY_REVOKED,
+            "near_provisioning_refused",
+            "near_provisioning_wallet_key_registered_elsewhere",
+            "near_provisioning_device_bound_to_other_account",
+            "missing-control: login-resolver-pool-unconfigured",
+        ] {
+            assert!(
+                !is_transient_database_failure(&DatabaseError::Pool(label.into())),
+                "{label}"
+            );
+        }
+        for refusal in [
+            DatabaseError::Query("near_provisioning_ambiguous".into()),
+            DatabaseError::Constraint("unique".into()),
+            DatabaseError::Serialization("payload".into()),
+            DatabaseError::NotFound {
+                entity: "ceremony".into(),
+                id: "x".into(),
+            },
+            DatabaseError::UploadPrincipalAuthenticationDenied,
+        ] {
+            assert!(!is_transient_database_failure(&refusal), "{refusal:?}");
+        }
+        assert!(is_transient_database_failure(&DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Closed
+        )));
+    }
 
     fn cfg() -> NearConfig {
         NearConfig {
