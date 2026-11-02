@@ -201,6 +201,52 @@ impl TerminalApp {
             _ => vec![],
         }
     }
+
+    /// Terminal's lines for Start again and Resume (owner, 2026-11-02):
+    /// `command` runs in the ended session's tab, `tty`, when that tab is
+    /// still open and idle, and that tab's window comes to the front;
+    /// otherwise in a new window, as [`Self::script`]. The tab's tty is
+    /// printed either way. Terminal only: no other app here can name a tab.
+    #[cfg(any(target_os = "macos", all(test, unix)))]
+    fn script_in(self, command: &str, tty: &str) -> Vec<String> {
+        let literal = applescript_literal(command);
+        let (TerminalApp::Terminal, Some(id), true) = (self, self.bundle_id(), valid_tty(tty))
+        else {
+            return self.script(command);
+        };
+        // `tty` passed `valid_tty`: only letters, digits and slashes.
+        vec![
+            format!("tell application id \"{id}\""),
+            "set t to missing value".into(),
+            "set tw to missing value".into(),
+            "repeat with w in windows".into(),
+            "repeat with x in tabs of w".into(),
+            format!("if tty of x is \"{tty}\" and not busy of x then"),
+            "set t to x".into(),
+            "set tw to w".into(),
+            "end if".into(),
+            "end repeat".into(),
+            "end repeat".into(),
+            // The tab is read before its window moves: AppleScript holds
+            // it by position, and bringing the window forward renumbers.
+            "set found to \"\"".into(),
+            "if t is missing value then".into(),
+            format!("set t to do script \"{literal}\""),
+            "try".into(),
+            "set found to tty of t".into(),
+            "end try".into(),
+            "else".into(),
+            format!("do script \"{literal}\" in t"),
+            format!("set found to \"{tty}\""),
+            "set selected of t to true".into(),
+            "if miniaturized of tw then set miniaturized of tw to false".into(),
+            "set index of tw to 1".into(),
+            "end if".into(),
+            "activate".into(),
+            "return found".into(),
+            "end tell".into(),
+        ]
+    }
 }
 
 /// The stored choice (`managed_terminal` in the settings file). A value
@@ -879,6 +925,7 @@ pub fn launch(
     cwd: &Path,
     session: Uuid,
     ticket: &str,
+    in_tab: Option<&TerminalHandle>,
 ) -> Result<Option<TerminalHandle>, ManagedError> {
     #[cfg(target_os = "macos")]
     {
@@ -887,12 +934,26 @@ pub fn launch(
         }
         let helper = helper_path()?;
         let command = shell_command(&helper, config, session, ticket)?;
+        // Start again and Resume run in the ended session's own tab when
+        // Terminal still has it, rather than in a new window.
+        if let (Some(TerminalHandle::AppleTerminal { tty }), Some(TerminalApp::Terminal)) =
+            (in_tab, choice.app())
+        {
+            if !installed.contains(&TerminalApp::Terminal) {
+                return Err(ManagedError::TerminalNotFound);
+            }
+            let printed = run_macos(MacosLaunch::Script(
+                TerminalApp::Terminal.script_in(&command, tty),
+            ))?;
+            return Ok(apple_terminal_tab(&printed));
+        }
         let mut argv = vec![helper.into_os_string()];
         argv.extend(helper_args(config, session, ticket));
         launch_macos(choice, installed, &command, argv, Some(cwd), run_macos)
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
+        let _ = in_tab;
         if !supported() {
             return Err(ManagedError::UnsupportedVersion);
         }
@@ -919,7 +980,7 @@ pub fn launch(
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
-        let _ = (choice, installed, config, cwd, session, ticket);
+        let _ = (choice, installed, config, cwd, session, ticket, in_tab);
         Err(ManagedError::UnsupportedVersion)
     }
 }
@@ -935,6 +996,35 @@ fn external_terminal(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Start again in Terminal reuses the ended session's tab when it is
+    /// open and idle, and opens a new window otherwise; the command is in
+    /// the script once for each, and a tty that is not one is never put in
+    /// a script.
+    #[cfg(unix)]
+    #[test]
+    fn start_again_runs_in_the_ended_sessions_tab() {
+        let command = hostile_command();
+        let literal = applescript_literal(&command);
+        let lines = TerminalApp::Terminal.script_in(&command, "/dev/ttys011");
+        assert!(
+            lines.contains(&"if tty of x is \"/dev/ttys011\" and not busy of x then".to_string())
+        );
+        assert!(lines.contains(&format!("do script \"{literal}\" in t")));
+        assert!(lines.contains(&format!("set t to do script \"{literal}\"")));
+        assert_eq!(lines.iter().filter(|l| l.contains(&literal)).count(), 2);
+        assert_eq!(lines.last().unwrap(), "end tell");
+
+        let fresh = TerminalApp::Terminal.script(&command);
+        assert_eq!(
+            TerminalApp::Terminal.script_in(&command, "/dev/ttys011\"; beep"),
+            fresh
+        );
+        assert_eq!(
+            TerminalApp::Iterm2.script_in(&command, "/dev/ttys011"),
+            TerminalApp::Iterm2.script(&command)
+        );
+    }
 
     #[test]
     fn setup_is_one_quoted_shell_invocation_and_keeps_the_terminal_open() {
