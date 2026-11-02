@@ -173,10 +173,7 @@ impl TerminalApp {
             // device path. Any failure there prints nothing: the launch
             // stands and the session simply cannot be shown.
             TerminalApp::Terminal => [
-                vec![
-                    format!("tell application id \"{id}\""),
-                    "set found to \"\"".into(),
-                ],
+                vec![format!("tell application id \"{id}\"")],
                 open_window(&literal),
                 vec!["return found".into(), "end tell".into()],
             ]
@@ -222,7 +219,6 @@ impl TerminalApp {
         [
             vec![
                 format!("tell application id \"{id}\""),
-                "set found to \"\"".into(),
                 "set wid to missing value".into(),
                 "set t to missing value".into(),
                 "try".into(),
@@ -313,6 +309,7 @@ fn open_window(literal: &str) -> Vec<String> {
     vec![
         format!("set t to do script \"{literal}\""),
         "activate".into(),
+        "set found to \"\"".into(),
         "try".into(),
         "set found to tty of t".into(),
         "end try".into(),
@@ -1224,9 +1221,9 @@ mod tests {
             TerminalApp::Terminal.script("echo ok"),
             vec![
                 "tell application id \"com.apple.Terminal\"",
-                "set found to \"\"",
                 "set t to do script \"echo ok\"",
                 "activate",
+                "set found to \"\"",
                 "try",
                 "set found to tty of t",
                 "end try",
