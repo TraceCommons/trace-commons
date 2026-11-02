@@ -40,6 +40,10 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     /// The ended session can be resumed: its conversation continues. False
     /// from an older daemon.
     public let canResume: Bool
+    /// The row can be dismissed even though it holds its account: it is
+    /// stuck unknown, its launcher gone before its first report (owner,
+    /// 2026-11-02). False from an older daemon.
+    public let canDismiss: Bool
     /// For a resumed row, when its conversation's root row started; nil for
     /// a fresh row, from an older daemon, or when unreadable.
     public let resumedFrom: Date?
@@ -49,7 +53,7 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id, tool, connection, cwd, state, purpose, model, collection
         case accountID = "account_id", accountLabel = "account_label", projectLabel = "project_label", exitCode = "exit_code"
-        case canFocus = "can_focus", canStop = "can_stop", canStartAgain = "can_start_again", canResume = "can_resume", resumedFrom = "resumed_from", startedAt = "started_at"
+        case canFocus = "can_focus", canStop = "can_stop", canStartAgain = "can_start_again", canResume = "can_resume", canDismiss = "can_dismiss", resumedFrom = "resumed_from", startedAt = "started_at"
     }
 
     /// Decodes its own timestamp, as `PastSession` does: chrono writes
@@ -72,6 +76,7 @@ public struct ManagedSession: Decodable, Equatable, Identifiable, Sendable {
         canStop = try c.decodeIfPresent(Bool.self, forKey: .canStop) ?? false
         canStartAgain = try c.decodeIfPresent(Bool.self, forKey: .canStartAgain) ?? false
         canResume = try c.decodeIfPresent(Bool.self, forKey: .canResume) ?? false
+        canDismiss = try c.decodeIfPresent(Bool.self, forKey: .canDismiss) ?? false
         resumedFrom = try c.decodeIfPresent(String.self, forKey: .resumedFrom).flatMap(SourceCandidate.Wire.parseTimestamp)
         startedAt = try c.decodeIfPresent(String.self, forKey: .startedAt).flatMap(SourceCandidate.Wire.parseTimestamp)
     }
@@ -304,9 +309,10 @@ public extension ManagedSurface {
     /// The one visible action on the row (owner, 2026-11-01: fewer things on
     /// a crowded row): an ended row's Resume, or Start again when it has no
     /// Resume, or Dismiss when nothing else is offered. Everything else is in
-    /// the menu (`rowMenuItems`). A row that holds its account draws none.
+    /// the menu (`rowMenuItems`). A row that holds its account draws none,
+    /// except Dismiss on one the daemon says is stuck (`canDismiss`).
     static func rowButtons(_ session: ManagedSession, terminalLaunch: Bool, resumeCapable: Bool = false) -> [ManagedSessionAction] {
-        guard !session.holdsAccount else { return [] }
+        guard !session.holdsAccount else { return session.canDismiss ? [.dismiss] : [] }
         if offersResume(session, terminalLaunch: terminalLaunch, resumeCapable: resumeCapable) { return [.resume] }
         return [session.canStartAgain && terminalLaunch ? .startAgain : .dismiss]
     }

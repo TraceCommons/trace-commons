@@ -181,5 +181,28 @@ app; changing collection staging rules.
   "Copied" with a neutral dot for 2 s;
   resumed rows show "Resumed · Continues <time>" (`SessionView.resumed_from`,
   stored at prepare time).
+- One row per conversation (#1838, rule settled in its follow-up): the
+  snapshot, and the Monitor and Traces maps that read the same list
+  (`tool_destinations.managed_sessions`), show a conversation (rows sharing
+  a root) once, as its latest row that stands for it. The root always
+  stands for it; a resume does while it holds the conversation (starting,
+  running or unknown) or once its launcher redeemed its ticket. A resume
+  whose ticket expired unredeemed therefore gives the row that ran back,
+  with its Start again and Resume. Dismiss is the conversation's: it marks
+  every row of the root, and is refused while any of them holds the
+  conversation. The list passes over dismissed rows, so a v0.21.0-0.21.2
+  registry, where rows were dismissed one at a time, shows the latest row
+  the person kept.
+- A quiet row (unknown: its launcher stopped reporting) that has no
+  collection plan ends once the tool process its launcher named is gone,
+  on the daemon's lease tick (`collect_abandoned`); before, only a
+  collecting row ended this way, and a non-collecting resume held its
+  conversation, refusing Resume, for good.
+- A row whose launcher redeemed its ticket and went quiet before its first
+  report names no process, so nothing above ends it. It is never ended on a
+  timer (owner, 2026-11-02): the row says `can_dismiss`, the shell shows
+  Dismiss on it, and dismissing ends it (failed, as `tool_exited` does, so
+  a late final report is still taken) and dismisses its conversation.
+  `can_dismiss` is false while any other row of the conversation holds it.
 - New OpenCode sessions on NEAR AI are titled "NEAR AI private session"
   (shown as `OC | NEAR AI private session`); others keep "Managed session".
