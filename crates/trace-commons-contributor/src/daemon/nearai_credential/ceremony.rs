@@ -221,12 +221,8 @@ enum BrowserSignIn {
 }
 
 impl BrowserSignIn {
-    async fn prepare(api: &CloudApi, provider: &str) -> Result<(String, Self)> {
-        // Only what this build offers (`channel::NEAR_AI_SIGN_IN_PROVIDERS`):
-        // a staging build has no NEAR wallet ceremony to begin.
-        if !crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&provider) {
-            bail!("near_ai_credential_provider_unknown")
-        }
+    /// `provider` is one this build offers ([`offered_provider`]).
+    async fn prepare(api: &CloudApi, provider: &'static str) -> Result<(String, Self)> {
         if provider == "near" {
             let (url, listener) = near_wallet_loopback::bind().await?;
             return Ok((url, Self::Near(listener)));
@@ -247,7 +243,10 @@ impl BrowserSignIn {
     /// that difference is the point: the OAuth redirect is completed by the
     /// browser, so the browser's agent is what cloud-api recorded, while the
     /// NEAR wallet sign-in is a request this client makes itself.
-    async fn finish<F, Fut>(self, api: &CloudApi, finish: F) -> Result<()>
+    ///
+    /// `progress` is set to [`FailedStep::Exchange`] while the wallet proof
+    /// is traded for a session.
+    async fn finish<F, Fut>(self, api: &CloudApi, progress: &Progress, finish: F) -> Result<()>
     where
         F: FnOnce(loopback::SessionTokens, Option<DateTime<Utc>>, String) -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
@@ -261,8 +260,10 @@ impl BrowserSignIn {
                 .await
             }
             Self::Near(listener) => {
+                let proof = listener.wait().await?;
+                progress.set(FailedStep::Exchange);
                 let authenticated = api
-                    .sign_in_near(listener.wait().await?)
+                    .sign_in_near(proof)
                     .await
                     .map_err(at(FailedStep::Exchange))?;
                 finish(
@@ -315,66 +316,106 @@ impl std::fmt::Display for FailedStep {
     }
 }
 
+/// The step a ceremony is in, so a timeout names the step it interrupted:
+/// a mint or a persist that ran past the deadline is not a sign-in that
+/// never arrived. Starts at [`FailedStep::Callback`], the browser wait.
+#[derive(Clone)]
+pub(super) struct Progress(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl Progress {
+    const STEPS: [FailedStep; 6] = [
+        FailedStep::Setup,
+        FailedStep::Callback,
+        FailedStep::Exchange,
+        FailedStep::Mint,
+        FailedStep::Persist,
+        FailedStep::Timeout,
+    ];
+
+    pub(super) fn new() -> Self {
+        let progress = Self(Default::default());
+        progress.set(FailedStep::Callback);
+        progress
+    }
+
+    pub(super) fn set(&self, step: FailedStep) {
+        let index = Self::STEPS.iter().position(|s| *s == step).unwrap_or(1);
+        self.0
+            .store(index as u8, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn get(&self) -> FailedStep {
+        Self::STEPS[usize::from(self.0.load(std::sync::atomic::Ordering::SeqCst))
+            .min(Self::STEPS.len() - 1)]
+    }
+
+    /// The error a timeout ends the ceremony with: [`FailedStep::Timeout`]
+    /// while the browser had not answered, else the step it interrupted.
+    pub(super) fn timed_out(&self) -> anyhow::Error {
+        let step = match self.get() {
+            FailedStep::Callback => FailedStep::Timeout,
+            step => step,
+        };
+        at(step)(anyhow!("near_ai_credential_expired"))
+    }
+}
+
 /// Tag an error with the step it came from.
 fn at(step: FailedStep) -> impl FnOnce(anyhow::Error) -> anyhow::Error {
     move |error| error.context(step)
 }
 
-/// The control names a failed step may carry into the log. Each is a fixed
-/// label the code bails with, never a remote body; anything else is logged
-/// as `other`.
-const FAILURE_REASONS: &[&str] = &[
-    "near_ai_credential_unavailable",
-    "near_ai_credential_unexpected",
-    "near_ai_credential_refused",
-    "near_ai_credential_session_expired",
-    "near_ai_credential_no_organization",
-    "near_ai_credential_no_workspace",
-    "near_ai_credential_not_returned",
-    "near_ai_credential_invalid",
-    "near_ai_credential_expired",
-    "near_ai_credential_callback_invalid",
-    "near_ai_credential_storage_unentitled",
-    "near_ai_credential_storage_unavailable",
-    "near_ai_credential_storage_mixed_record",
-    "near_ai_credential_endpoint_refused",
-    "near_ai_credential_cleanup_required",
-    "near_ai_credential_cleanup_invalid",
-    "near_ai_credential_session_changed",
-    "near_ai_credential_session_missing",
-    "near_ai_wallet_invalid",
-    "near_ai_wallet_expired",
-    "near_ai_wallet_already_used",
-    "near_ai_wallet_unavailable",
-];
+/// The reason a failed step logs: the error's control name when it is
+/// one -- every label this crate fails with is `near_ai_` and lowercase
+/// letters and `_` -- else `other`. Checked by shape rather than against a
+/// copied list, so a label added later is logged as itself; remote text is
+/// never shaped like one, and the error log checks every value again.
+fn failure_reason(root: &str) -> &str {
+    let shaped = root.len() <= 64
+        && root.strip_prefix("near_ai_").is_some_and(|rest| {
+            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        });
+    if shaped { root } else { "other" }
+}
 
-/// The failed step and its reason, both fixed labels, or `None` for a
-/// cancel, which is not a failure. The error's text is compared against
-/// [`FAILURE_REASONS`] and never copied.
-pub(super) fn failure_labels(error: &anyhow::Error) -> Option<(&'static str, &'static str)> {
+/// The event a failed sign-in logs.
+const FAILURE_EVENT: &str = "near_ai_sign_in_failed";
+
+/// The label line's fields for a failed sign-in -- step, reason, provider
+/// -- or `None` for a cancel, which is not a failure: the wallet's own
+/// cancel, or a cancel or forget that won the race with the persist
+/// (`near_ai_credential_cancelled`). The error's text is checked
+/// ([`failure_reason`]) and never copied otherwise.
+pub(super) fn failure_fields(
+    error: &anyhow::Error,
+    provider: &'static str,
+) -> Option<[(&'static str, String); 3]> {
     if error.downcast_ref::<NearWalletError>() == Some(&NearWalletError::Cancelled) {
+        return None;
+    }
+    let root = error.root_cause().to_string();
+    if root == "near_ai_credential_cancelled" {
         return None;
     }
     let step = error
         .downcast_ref::<FailedStep>()
         .copied()
         .unwrap_or(FailedStep::Callback);
-    let root = error.root_cause().to_string();
-    let reason = FAILURE_REASONS
-        .iter()
-        .find(|reason| **reason == root)
-        .copied()
-        .unwrap_or("other");
-    Some((step.label(), reason))
+    Some([
+        ("step", step.label().to_owned()),
+        ("reason", failure_reason(&root).to_owned()),
+        ("provider", provider.to_owned()),
+    ])
 }
 
-/// The line [`record_failure`] writes, for tests.
+/// The line [`record_failure`] writes for `error`, without its timestamp.
 #[cfg(test)]
 pub(super) fn failure_line(error: &anyhow::Error, provider: &'static str) -> Option<String> {
-    let (step, reason) = failure_labels(error)?;
+    let fields = failure_fields(error, provider)?;
     Some(crate::daemon::diagnostics_log::labels_line(
-        "near_ai_sign_in_failed",
-        &[("step", step), ("reason", reason), ("provider", provider)],
+        tracing::Level::WARN,
+        FAILURE_EVENT,
+        &fields.each_ref().map(|(key, value)| (*key, value.as_str())),
     ))
 }
 
@@ -382,12 +423,96 @@ pub(super) fn failure_line(error: &anyhow::Error, provider: &'static str) -> Opt
 /// naming the step a sign-in failed at. The shells say only that the
 /// sign-in did not finish; this says where.
 fn record_failure(error: &anyhow::Error, provider: &'static str) {
-    if let Some((step, reason)) = failure_labels(error) {
+    if let Some(fields) = failure_fields(error, provider) {
         crate::daemon::diagnostics_log::record_labels(
-            "near_ai_sign_in_failed",
-            &[("step", step), ("reason", reason), ("provider", provider)],
+            tracing::Level::WARN,
+            FAILURE_EVENT,
+            &fields.each_ref().map(|(key, value)| (*key, value.as_str())),
         );
     }
+}
+
+/// `provider` as this build offers it (`channel::NEAR_AI_SIGN_IN_PROVIDERS`),
+/// or `None`. A staging build has no NEAR wallet ceremony to begin.
+fn offered_provider(provider: &str) -> Option<&'static str> {
+    crate::channel::NEAR_AI_SIGN_IN_PROVIDERS
+        .iter()
+        .find(|offered| **offered == provider)
+        .copied()
+}
+
+/// What a sign-in does once the browser handed over a session: mint this
+/// device's key and store it with the session. `progress` follows each
+/// step, so a timeout names the one it interrupted.
+pub(super) async fn complete(
+    api: &CloudApi,
+    dir: &std::path::Path,
+    attempt_id: &str,
+    session: loopback::SessionTokens,
+    expires_at: Option<DateTime<Utc>>,
+    user_agent: String,
+    progress: &Progress,
+) -> Result<()> {
+    progress.set(FailedStep::Mint);
+    // A remembered spending organization is preferred when the account
+    // still has it, so signing in again lands where the contributor chose.
+    // The listing is the one the mint already makes: no extra call, and no
+    // new way for a sign-in to fail.
+    let preferred = ConfigStore::open(dir.to_path_buf())
+        .ok()
+        .and_then(|store| super::spend_org::chosen_organization(&store));
+    let choice = match preferred.as_deref() {
+        Some(preferred) => super::api::OrganizationChoice::Prefer(preferred),
+        None => super::api::OrganizationChoice::FirstActive,
+    };
+    let (minted, preferred_listed) = api
+        .mint_inference_key_listing(&session, &key_name(attempt_id), choice)
+        .await
+        .map_err(at(FailedStep::Mint))?;
+    progress.set(FailedStep::Persist);
+    // The session is kept, not dropped. Inference does not need it -- the
+    // key is non-expiring and self-sufficient -- but the balance does:
+    // every management route on cloud-api is session-only. What is retained
+    // is the refresh token alone, and `NearAiSession` states what that is
+    // authority over.
+    let persist_dir = dir.to_path_buf();
+    let persist_id = attempt_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        persist_attempt(
+            &persist_dir,
+            &persist_id,
+            minted,
+            session.refresh_token,
+            expires_at,
+            user_agent,
+        )?;
+        // A sign-in to another account forgets what belonged to the old one,
+        // once its key is stored.
+        if let Ok(store) = ConfigStore::open(persist_dir) {
+            super::spend_org::forget_other_account(&store, preferred.as_deref(), preferred_listed);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| anyhow!("near_ai_credential_unavailable"))
+    .and_then(|persisted| persisted)
+    .map_err(at(FailedStep::Persist))
+}
+
+/// Register `attempt_id` as this directory's waiting ceremony, as `begin`
+/// does, so a test can drive [`complete`] without a browser.
+#[cfg(test)]
+pub(crate) fn mark_waiting_for_test(dir: &std::path::Path, attempt_id: &str) {
+    attempts().lock().expect("ceremony state lock").insert(
+        dir.to_path_buf(),
+        Attempt {
+            state: Status {
+                attempt_id: attempt_id.into(),
+                status: "waiting_for_browser",
+            },
+            abort: None,
+        },
+    );
 }
 
 /// Begin a ceremony: bind the listener, hand back where to send the browser.
@@ -397,13 +522,11 @@ fn record_failure(error: &anyhow::Error, provider: &'static str) {
 /// binding afterwards would leave a window in which another process could take
 /// the port and receive the session.
 pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Value> {
-    // The provider as this build lists it, so the failure line carries a
-    // fixed label and never the caller's text. `prepare` refuses any other.
-    let provider_label = crate::channel::NEAR_AI_SIGN_IN_PROVIDERS
-        .iter()
-        .find(|offered| **offered == provider)
-        .copied()
-        .unwrap_or("other");
+    // One lookup: the provider as this build lists it, which `prepare` and
+    // the failure line both take, so neither carries the caller's text.
+    let Some(provider) = offered_provider(provider) else {
+        bail!("near_ai_credential_provider_unknown")
+    };
     // Before anything that reaches the network or a browser: a ceremony this
     // process could not store is a wasted sign-in at the service. The probe
     // is an OS read that can wait on a prompt or a locked store, so it runs
@@ -455,66 +578,28 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
             let api_ref = &api;
             let finished_id = &finished_id;
             let finished_dir = &finished_dir;
+            let progress = Progress::new();
+            let progress_ref = &progress;
             tokio::time::timeout(
                 BROWSER_TIMEOUT,
-                sign_in.finish(&api, |session, expires_at, user_agent| async move {
-                    // A fresh client, on this runtime: never a connection pool
-                    // attached to the reactor the caller may already have dropped.
-                    // A remembered spending organization is preferred when the
-                    // account still has it, so signing in again lands where the
-                    // contributor chose. The listing is the one the mint already
-                    // makes: no extra call, and no new way for a sign-in to fail.
-                    let preferred = ConfigStore::open(finished_dir.to_path_buf())
-                        .ok()
-                        .and_then(|store| super::spend_org::chosen_organization(&store));
-                    let choice = match preferred.as_deref() {
-                        Some(preferred) => super::api::OrganizationChoice::Prefer(preferred),
-                        None => super::api::OrganizationChoice::FirstActive,
-                    };
-                    let minted = api_ref
-                        .mint_inference_key_in(&session, &key_name(finished_id), choice)
-                        .await
-                        .map_err(at(FailedStep::Mint))?;
-                    let minted_organization = minted.organization_id.clone();
-                    // The session is kept, not dropped. Inference does not need it --
-                    // the key above is non-expiring and self-sufficient -- but the
-                    // balance does: every management route on cloud-api is
-                    // session-only. What is retained is the refresh token alone, and
-                    // `NearAiSession` states what that is authority over.
-                    let persist_dir = finished_dir.to_path_buf();
-                    let persist_id = finished_id.to_string();
-                    tokio::task::spawn_blocking(move || {
-                        persist_attempt(
-                            &persist_dir,
-                            &persist_id,
-                            minted,
-                            session.refresh_token,
-                            expires_at,
-                            user_agent,
-                        )?;
-                        // A sign-in to another account forgets the choice
-                        // made in the old one, once its key is stored.
-                        if let Ok(store) = ConfigStore::open(persist_dir) {
-                            super::spend_org::forget_choice_left_behind(
-                                &store,
-                                preferred.as_deref(),
-                                &minted_organization,
-                            );
-                        }
-                        Ok(())
-                    })
-                    .await
-                    .map_err(|_| anyhow!("near_ai_credential_unavailable"))
-                    .and_then(|persisted| persisted)
-                    .map_err(at(FailedStep::Persist))
+                sign_in.finish(&api, &progress, |session, expires_at, user_agent| {
+                    complete(
+                        api_ref,
+                        finished_dir,
+                        finished_id,
+                        session,
+                        expires_at,
+                        user_agent,
+                        progress_ref,
+                    )
                 }),
             )
             .await
-            .map_err(|_| at(FailedStep::Timeout)(anyhow!("near_ai_credential_expired")))?
+            .map_err(|_| progress.timed_out())?
         }
         .await;
         if let Err(error) = &outcome {
-            record_failure(error, provider_label);
+            record_failure(error, provider);
         }
         let mut map = attempts().lock().expect("ceremony state lock");
         if let Some(entry) = map.get_mut(&finished_dir).filter(|a| {
@@ -1354,8 +1439,12 @@ mod tests {
     /// carry: a remote body, a token, an organization id.
     const SECRET: &str = "rt_SECRET-org_1234-user@example.com";
 
+    fn line(error: &anyhow::Error, provider: &'static str) -> Option<String> {
+        failure_line(error, provider)
+    }
+
     /// Each step's failure is logged with its own label and the error's
-    /// fixed control name, and nothing of the error's text.
+    /// control name, and nothing of any other error text.
     #[test]
     fn each_failed_step_logs_its_label_and_no_error_text() {
         for (step, label) in [
@@ -1365,51 +1454,70 @@ mod tests {
             (FailedStep::Persist, "persist"),
             (FailedStep::Timeout, "timeout"),
         ] {
-            let known = at(step)(anyhow!("near_ai_credential_no_organization"));
             assert_eq!(
-                failure_labels(&known),
-                Some((label, "near_ai_credential_no_organization"))
-            );
-            assert_eq!(
-                failure_line(&known, "github").unwrap(),
+                line(
+                    &at(step)(anyhow!("near_ai_credential_no_organization")),
+                    "github"
+                )
+                .unwrap(),
                 format!(
                     "WARN near_ai_sign_in_failed step={label} \
                      reason=near_ai_credential_no_organization provider=github"
                 )
             );
-            let unknown = at(step)(anyhow!("{SECRET}"));
-            let line = failure_line(&unknown, "google").unwrap();
+            let unknown = line(&at(step)(anyhow!("{SECRET}")), "google").unwrap();
             assert_eq!(
-                line,
+                unknown,
                 format!("WARN near_ai_sign_in_failed step={label} reason=other provider=google")
             );
-            assert!(
-                !line.contains("SECRET") && !line.contains("org_1234"),
-                "{line}"
-            );
+            assert!(!unknown.contains("SECRET") && !unknown.contains("org_1234"));
         }
     }
 
-    /// An error no step tagged is the browser leg's; a cancel is not a
-    /// failure and logs nothing, even under a step's tag.
+    /// The reason is any `near_ai_` control name, by shape, so a storage
+    /// label from the platform crate is logged as itself; anything not
+    /// shaped like one is `other`.
+    #[test]
+    fn the_reason_is_any_control_name_and_nothing_else() {
+        for label in [
+            "near_ai_credential_storage_verification_failed",
+            "near_ai_credential_storage_binding_mismatch",
+            "near_ai_credential_migration_unsupported",
+            "near_ai_wallet_already_used",
+        ] {
+            assert_eq!(failure_reason(label), label);
+        }
+        for text in [
+            SECRET,
+            "near_ai_Credential",
+            "near_ai_credential-x",
+            "near_ai_key_1234",
+            "near_ai_",
+            "storage_unavailable",
+            &format!("near_ai_{}", "a".repeat(64)),
+        ] {
+            assert_eq!(failure_reason(text), "other", "{text}");
+        }
+    }
+
+    /// An error no step tagged is the browser leg's. A cancel is not a
+    /// failure and logs nothing: the wallet's own, or a cancel or forget
+    /// that won the race with the persist.
     #[test]
     fn an_untagged_error_is_the_callback_and_a_cancel_logs_nothing() {
-        let untagged = anyhow!("near_ai_credential_callback_invalid");
         assert_eq!(
-            failure_labels(&untagged),
-            Some(("callback", "near_ai_credential_callback_invalid"))
+            line(&anyhow!("near_ai_credential_callback_invalid"), "near").unwrap(),
+            "WARN near_ai_sign_in_failed step=callback \
+             reason=near_ai_credential_callback_invalid provider=near"
         );
-        assert_eq!(
-            failure_labels(&anyhow!(SECRET)),
-            Some(("callback", "other"))
-        );
-        assert_eq!(failure_labels(&NearWalletError::Cancelled.into()), None);
         let wallet: anyhow::Error = NearWalletError::Cancelled.into();
-        assert_eq!(failure_labels(&at(FailedStep::Exchange)(wallet)), None);
-        let refused: anyhow::Error = NearWalletError::AlreadyUsed.into();
+        assert_eq!(line(&at(FailedStep::Exchange)(wallet), "near"), None);
         assert_eq!(
-            failure_labels(&at(FailedStep::Exchange)(refused)),
-            Some(("exchange", "near_ai_wallet_already_used"))
+            line(
+                &at(FailedStep::Persist)(anyhow!("near_ai_credential_cancelled")),
+                "github"
+            ),
+            None
         );
     }
 
@@ -1425,67 +1533,229 @@ mod tests {
         );
     }
 
-    /// Every step after the browser was sent out is tagged in `begin`.
+    /// A timeout while the browser had not answered is `timeout`; one that
+    /// interrupted a step names that step.
     #[test]
-    fn begin_tags_every_step() {
-        // A Windows checkout has CRLF line endings; every match below is
-        // written with `\n`.
-        let source = include_str!("ceremony.rs").replace("\r\n", "\n");
-        let body = source
-            .split("pub async fn begin(")
-            .nth(1)
-            .and_then(|rest| rest.split("\nfn persist_attempt(").next())
+    fn a_timeout_names_the_step_it_interrupted() {
+        let progress = Progress::new();
+        assert_eq!(
+            line(&progress.timed_out(), "near").unwrap(),
+            "WARN near_ai_sign_in_failed step=timeout reason=near_ai_credential_expired provider=near"
+        );
+        for (step, label) in [
+            (FailedStep::Exchange, "exchange"),
+            (FailedStep::Mint, "mint"),
+            (FailedStep::Persist, "persist"),
+        ] {
+            progress.set(step);
+            assert!(
+                line(&progress.timed_out(), "near")
+                    .unwrap()
+                    .contains(&format!("step={label} ")),
+                "{label}"
+            );
+        }
+    }
+
+    /// A NEAR AI stub for the mint: the organizations listed, and how long
+    /// the key mint takes.
+    async fn mint_stub(organizations: Vec<(&'static str, bool)>, mint_delay: Duration) -> CloudApi {
+        use axum::{
+            Json, Router,
+            extract::Path,
+            routing::{get, post},
+        };
+        let listing = serde_json::json!({
+            "organizations": organizations.iter().map(|(id, active)| serde_json::json!({
+                "id": id, "name": "Example org", "role": "owner", "is_active": active,
+                "owner_id": "u", "settings": {},
+                "created_at": "2026-09-08T00:00:00Z", "updated_at": "2026-09-08T00:00:00Z",
+            })).collect::<Vec<_>>(),
+            "total": organizations.len(), "limit": 100, "offset": 0,
+        });
+        let router = Router::new()
+            .route(
+                "/v1/organizations",
+                get(move || {
+                    let listing = listing.clone();
+                    async move { Json(listing) }
+                }),
+            )
+            .route(
+                "/v1/organizations/{org}/workspaces",
+                get(|Path(org): Path<String>| async move {
+                    Json(serde_json::json!({
+                        "workspaces": [{
+                            "id": format!("ws-{org}"), "name": "default", "organization_id": org,
+                            "created_by_user_id": "u", "is_active": true,
+                            "created_at": "2026-09-08T00:00:00Z", "updated_at": "2026-09-08T00:00:00Z",
+                        }],
+                        "total": 1, "limit": 50, "offset": 0,
+                    }))
+                }),
+            )
+            .route(
+                "/v1/workspaces/{workspace}/api-keys",
+                post(move |Path(workspace): Path<String>| async move {
+                    tokio::time::sleep(mint_delay).await;
+                    Json(serde_json::json!({
+                        "id": format!("key-{workspace}"), "key": "sk-minted-secret",
+                        "key_prefix": "sk-min", "workspace_id": workspace,
+                        "created_by_user_id": "u", "created_at": "2026-09-08T00:00:00Z",
+                        "is_active": true,
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        CloudApi::for_test(&origin).unwrap()
+    }
+
+    fn browser_session() -> loopback::SessionTokens {
+        loopback::SessionTokens {
+            access_token: "session-jwt".into(),
+            refresh_token: "rt_synthetic_new".into(),
+        }
+    }
+
+    async fn run_complete(
+        api: &CloudApi,
+        dir: &std::path::Path,
+        progress: &Progress,
+    ) -> Result<()> {
+        complete(
+            api,
+            dir,
+            "attempt-labels",
+            browser_session(),
+            None,
+            "Mozilla/5.0 Test".into(),
+            progress,
+        )
+        .await
+    }
+
+    /// A sign-in whose account has no organization fails at the mint, and
+    /// the line says so.
+    #[tokio::test]
+    async fn an_account_without_an_organization_logs_the_mint() {
+        let (_dir, store) = temp_store();
+        mark_waiting_for_test(store.dir(), "attempt-labels");
+        let api = mint_stub(vec![], Duration::ZERO).await;
+        let error = run_complete(&api, store.dir(), &Progress::new())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            line(&error, "github").unwrap(),
+            "WARN near_ai_sign_in_failed step=mint \
+             reason=near_ai_credential_no_organization provider=github"
+        );
+    }
+
+    /// A cancel that landed while the mint was in flight refuses the
+    /// persist, and logs nothing.
+    #[tokio::test]
+    async fn a_cancel_that_wins_the_race_with_the_persist_logs_nothing() {
+        let (_dir, store) = temp_store();
+        mark_waiting_for_test(store.dir(), "attempt-labels");
+        cancel(store.dir(), Some("attempt-labels"));
+        let api = mint_stub(vec![("org-a", true)], Duration::ZERO).await;
+        let error = run_complete(&api, store.dir(), &Progress::new())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.root_cause().to_string(),
+            "near_ai_credential_cancelled"
+        );
+        assert_eq!(line(&error, "github"), None);
+    }
+
+    /// A mint that runs past the deadline is logged as the mint, not as a
+    /// sign-in that never arrived.
+    #[tokio::test]
+    async fn a_slow_mint_past_the_deadline_is_logged_as_the_mint() {
+        let (_dir, store) = temp_store();
+        mark_waiting_for_test(store.dir(), "attempt-labels");
+        let api = mint_stub(vec![("org-a", true)], Duration::from_secs(5)).await;
+        let progress = Progress::new();
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(200),
+            run_complete(&api, store.dir(), &progress),
+        )
+        .await;
+        assert!(outcome.is_err(), "the deadline fired");
+        assert!(
+            line(&progress.timed_out(), "google")
+                .unwrap()
+                .contains("step=mint ")
+        );
+    }
+
+    /// A completed sign-in stores the key and logs nothing.
+    #[tokio::test]
+    async fn a_completed_sign_in_stores_the_key() {
+        let (_dir, store) = temp_store();
+        mark_waiting_for_test(store.dir(), "attempt-labels");
+        let api = mint_stub(vec![("org-a", true)], Duration::ZERO).await;
+        run_complete(&api, store.dir(), &Progress::new())
+            .await
             .unwrap();
+        let settings =
+            crate::daemon::settings::DaemonSettings::load_with_cloud_credentials(&store).unwrap();
+        assert_eq!(settings.near_ai_inference.unwrap().organization_id, "org-a");
+    }
+
+    /// The tags `complete` cannot show: the client the ceremony builds, the
+    /// wallet exchange, and the timeout and the failure line in `begin`.
+    /// Matched on the source with its line endings normalized (a Windows
+    /// checkout has CRLF), each within its own function or impl, so no
+    /// match can be this test's own text.
+    #[test]
+    fn begin_and_the_wallet_leg_tag_their_steps() {
+        let source = include_str!("ceremony.rs").replace("\r\n", "\n");
+        let section = |from: &str, to: &str| {
+            source
+                .split(from)
+                .nth(1)
+                .and_then(|rest| rest.split(to).next())
+                .unwrap()
+                .to_owned()
+        };
+        let begin = section("pub async fn begin(", "\nfn persist_attempt(");
         for tag in [
             "CloudApi::live().map_err(at(FailedStep::Setup))?",
-            ".map_err(at(FailedStep::Mint))?",
-            ".map_err(at(FailedStep::Persist))",
-            "at(FailedStep::Timeout)",
-            "record_failure(error, provider_label);",
-            // After the key is stored, a choice made in another account is
-            // forgotten (owner, 2026-11-02).
-            ")?;\n                        // A sign-in to another account forgets the choice",
-            "super::spend_org::forget_choice_left_behind(",
+            ".map_err(|_| progress.timed_out())?",
+            "record_failure(error, provider);",
+            "complete(",
         ] {
-            assert!(body.contains(tag), "begin lost {tag}");
+            assert!(begin.contains(tag), "begin lost {tag}");
         }
-        // Scoped to the wallet leg's impl, so the match cannot be this
-        // test's own line.
-        let browser_sign_in = source
-            .split("impl BrowserSignIn {")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}\n").next())
-            .unwrap();
-        assert!(browser_sign_in.contains(".map_err(at(FailedStep::Exchange))?;"));
+        let wallet = section("impl BrowserSignIn {", "\n}\n");
+        assert!(wallet.contains("progress.set(FailedStep::Exchange);"));
+        assert!(wallet.contains(".map_err(at(FailedStep::Exchange))?;"));
     }
 
     /// The label line lands in the warn/error log with a timestamp, and
-    /// carries only the fixed labels.
+    /// carries only label-shaped values.
     #[test]
     fn the_label_line_is_appended_to_the_error_log() {
         let dir = tempfile::tempdir().unwrap();
-        let log = crate::daemon::diagnostics_log::DiagnosticsLog::new(
-            dir.path()
-                .join(crate::daemon::diagnostics_log::DIAGNOSTICS_LOG_FILE),
-            1024 * 1024,
-        );
+        let path = dir
+            .path()
+            .join(crate::daemon::diagnostics_log::DIAGNOSTICS_LOG_FILE);
+        let log = crate::daemon::diagnostics_log::DiagnosticsLog::new(path.clone(), 1024 * 1024);
         crate::daemon::diagnostics_log::record_labels_to(
             &log,
+            tracing::Level::WARN,
             "near_ai_sign_in_failed",
-            &[
-                ("step", "mint"),
-                ("reason", "other"),
-                ("provider", "github"),
-            ],
+            &[("step", "mint"), ("reason", "other"), ("provider", SECRET)],
         );
-        let written = std::fs::read_to_string(
-            dir.path()
-                .join(crate::daemon::diagnostics_log::DIAGNOSTICS_LOG_FILE),
-        )
-        .unwrap();
+        let written = std::fs::read_to_string(path).unwrap();
         assert!(
-            written
-                .ends_with(" WARN near_ai_sign_in_failed step=mint reason=other provider=github\n"),
+            written.ends_with(
+                " WARN near_ai_sign_in_failed step=mint reason=other provider=invalid\n"
+            ),
             "{written}"
         );
     }

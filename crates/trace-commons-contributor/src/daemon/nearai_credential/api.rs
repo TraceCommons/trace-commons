@@ -564,12 +564,36 @@ impl CloudApi {
         key_name: &str,
         choice: OrganizationChoice<'_>,
     ) -> Result<MintedKey> {
+        Ok(self
+            .mint_inference_key_listing(session, key_name, choice)
+            .await?
+            .0)
+    }
+
+    /// [`Self::mint_inference_key_in`], also answering whether the account
+    /// lists the [`OrganizationChoice::Prefer`] organization at all, active
+    /// or not. Read from the listing the mint makes anyway. A sign-in uses it
+    /// to tell another account (the organization is not there) from the same
+    /// account whose chosen organization is inactive for now.
+    pub async fn mint_inference_key_listing(
+        &self,
+        session: &SessionTokens,
+        key_name: &str,
+        choice: OrganizationChoice<'_>,
+    ) -> Result<(MintedKey, bool)> {
         if key_name.trim().is_empty() || key_name.len() > 128 {
             bail!("near_ai_credential_invalid")
         }
         let organizations: Organizations = self
             .call(reqwest::Method::GET, "/v1/organizations", session, None)
             .await?;
+        let preferred_listed = match choice {
+            OrganizationChoice::Prefer(preferred) => organizations
+                .organizations
+                .iter()
+                .any(|organization| organization.id == preferred),
+            _ => false,
+        };
         let mut active = organizations
             .organizations
             .into_iter()
@@ -615,13 +639,16 @@ impl CloudApi {
         // The service tells us which workspace it actually minted in. Believe
         // it over the one we asked for, so a stored key is never attributed to
         // a workspace it does not belong to.
-        Ok(MintedKey {
-            key,
-            key_id: minted.id,
-            key_prefix: minted.key_prefix,
-            organization_id: organization.id,
-            workspace_id: minted.workspace_id,
-        })
+        Ok((
+            MintedKey {
+                key,
+                key_id: minted.id,
+                key_prefix: minted.key_prefix,
+                organization_id: organization.id,
+                workspace_id: minted.workspace_id,
+            },
+            preferred_listed,
+        ))
     }
 
     /// Trade a refresh token for a fresh access token, and a fresh refresh
