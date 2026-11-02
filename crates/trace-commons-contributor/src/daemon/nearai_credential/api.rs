@@ -1008,6 +1008,20 @@ impl CloudApi {
     }
 }
 
+impl CloudApi {
+    /// The NEAR AI user this session belongs to: `GET /v1/users/me`'s `id`.
+    /// Only for a local digest ([`super::spend_org::identity_digest`]): the
+    /// id is never logged, stored or sent anywhere.
+    pub async fn current_user_id(&self, session: &SessionTokens) -> Result<String> {
+        let me: UsersMe = self
+            .call(reqwest::Method::GET, "/v1/users/me", session, None)
+            .await?;
+        me.id
+            .filter(|id| !id.is_empty() && id.len() <= 256)
+            .ok_or_else(|| anyhow!("near_ai_credential_unexpected"))
+    }
+}
+
 /// The NEAR AI role that may direct credit to an org.
 const OWNER_ROLE: &str = "owner";
 /// More organizations than this is not a `/users/me` this client reads.
@@ -1015,9 +1029,12 @@ const MAX_USER_ORGANIZATIONS: usize = 256;
 /// The longest organization name shown.
 const MAX_ORGANIZATION_NAME_BYTES: usize = 256;
 
-/// `GET /v1/users/me`, read for its organizations and nothing else.
+/// `GET /v1/users/me`, read for its organizations, and for the user's id
+/// where a local identity digest needs it.
 #[derive(Deserialize)]
 struct UsersMe {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     organizations: Option<Vec<UsersMeOrganization>>,
 }
