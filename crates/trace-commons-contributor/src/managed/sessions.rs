@@ -430,23 +430,27 @@ impl SessionRegistry {
     pub fn views(&mut self) -> Result<Vec<SessionView>, ManagedError> {
         self.reconcile_receipts()?;
         self.sweep(Utc::now())?;
-        // One row per conversation: its latest. A resume is a new row on
-        // the same conversation, and listing the rows it continues beside
-        // it showed the conversation once per resume, each with its own
-        // Resume. Counted over dismissed rows too, so dismissing the
-        // latest does not bring back the one before it.
+        // One row per conversation: the latest row that stands for it. A
+        // resume is a new row on the same conversation, and listing the
+        // rows it continues beside it showed the conversation once per
+        // resume, each with its own Resume. A resume stands for the
+        // conversation only while it holds it or once its ticket was
+        // redeemed, so one never redeemed does not hide the row that ran. Dismissal
+        // is the conversation's ([`Self::dismiss`]); a row dismissed alone
+        // (v0.21.0-0.21.2 dismissed rows one at a time) is passed over, so
+        // such a registry reads as the person left it.
         let mut latest = std::collections::BTreeMap::new();
         for (index, e) in self.data.entries.iter().enumerate() {
-            latest.insert(e.request.resume_of.unwrap_or(e.view.id), index);
+            if !e.dismissed && e.stands_for_conversation() {
+                latest.insert(e.root(), index);
+            }
         }
         Ok(self
             .data
             .entries
             .iter()
             .enumerate()
-            .filter(|(index, e)| {
-                !e.dismissed && latest.get(&e.request.resume_of.unwrap_or(e.view.id)) == Some(index)
-            })
+            .filter(|(index, e)| latest.get(&e.root()) == Some(index))
             .map(|(_, e)| e)
             .map(|e| {
                 let mut view = e.view.clone();
@@ -492,7 +496,6 @@ impl SessionRegistry {
         }
     }
 
-    /// The window of a running session the daemon opened, or a refusal.
     /// The tab an ended session the daemon opened ran in, for Start again
     /// and Resume to run in. None while it runs: that tab is in use.
     pub fn ended_terminal(&self, id: Uuid) -> Option<TerminalHandle> {
@@ -502,6 +505,7 @@ impl SessionRegistry {
             .flatten()
     }
 
+    /// The window of a running session the daemon opened, or a refusal.
     pub fn terminal_for(&self, id: Uuid) -> Result<TerminalHandle, ManagedError> {
         self.owned(id)?
             .terminal
@@ -580,7 +584,7 @@ impl SessionRegistry {
             .find(|e| e.view.id == id)
             .ok_or(ManagedError::NotFound)?;
         let resumed = LaunchRequest {
-            resume_of: Some(entry.request.resume_of.unwrap_or(id)),
+            resume_of: Some(entry.root()),
             ..again
         };
         // A retry of a resume already prepared is that same session, even
@@ -599,7 +603,7 @@ impl SessionRegistry {
     /// conversation would interleave its transcript.
     pub fn resume_root(&self, id: Uuid) -> Option<Uuid> {
         let entry = self.data.entries.iter().find(|e| e.view.id == id)?;
-        let root = entry.request.resume_of.unwrap_or(id);
+        let root = entry.root();
         (self
             .data
             .entries
@@ -613,13 +617,12 @@ impl SessionRegistry {
     /// snapshot: each row whose conversation can be continued now, with
     /// that conversation's root.
     pub fn resume_roots(&self) -> std::collections::BTreeMap<Uuid, Uuid> {
-        let root_of = |e: &Entry| e.request.resume_of.unwrap_or(e.view.id);
         let in_use: std::collections::BTreeSet<Uuid> = self
             .data
             .entries
             .iter()
             .filter(|e| e.view.state.holds_profile())
-            .map(root_of)
+            .map(Entry::root)
             .collect();
         let started: std::collections::BTreeSet<Uuid> = self
             .data
@@ -631,7 +634,7 @@ impl SessionRegistry {
         self.data
             .entries
             .iter()
-            .map(|e| (e.view.id, root_of(e)))
+            .map(|e| (e.view.id, e.root()))
             .filter(|(_, root)| started.contains(root) && !in_use.contains(root))
             .collect()
     }
@@ -644,9 +647,10 @@ impl SessionRegistry {
     /// Whether a row on the conversation `root` started (the root itself,
     /// or a resume of it) still holds its profile.
     fn conversation_in_use(&self, root: Uuid) -> bool {
-        self.data.entries.iter().any(|e| {
-            e.request.resume_of.unwrap_or(e.view.id) == root && e.view.state.holds_profile()
-        })
+        self.data
+            .entries
+            .iter()
+            .any(|e| e.root() == root && e.view.state.holds_profile())
     }
 
     /// Fail unredeemed launches whose ticket expired, and lapse redeemed
@@ -1225,6 +1229,18 @@ impl SessionRegistry {
         self.commit(next)
     }
 
+    /// The rows whose launcher went quiet (unknown) that named their
+    /// tool's process, with that process (`<pid>:<start time>`), so the
+    /// daemon can see whether the tool is gone ([`Self::tool_exited`]).
+    pub fn quiet_tools(&self) -> Vec<(Uuid, String)> {
+        self.data
+            .entries
+            .iter()
+            .filter(|e| e.view.state == SessionState::Unknown)
+            .filter_map(|e| Some((e.view.id, e.process_identity.clone()?)))
+            .collect()
+    }
+
     /// Record the default model of a daemon-hosted proxy for a session on the
     /// NEAR AI sign-in, so its row can show it. A session that asked for a
     /// model keeps it: a different one is a conflict.
@@ -1268,18 +1284,22 @@ impl SessionRegistry {
         self.commit(next)
     }
 
+    /// Dismiss the conversation of row `id`: every row of it, so no
+    /// earlier row comes back in its place. Refused while a row of it
+    /// still holds its profile.
     pub fn dismiss(&mut self, id: Uuid) -> Result<(), ManagedError> {
-        let entry = self
+        let root = self
             .data
             .entries
             .iter()
             .find(|e| e.view.id == id)
-            .ok_or(ManagedError::NotFound)?;
-        if entry.view.state.holds_profile() {
+            .ok_or(ManagedError::NotFound)?
+            .root();
+        if self.conversation_in_use(root) {
             return Err(ManagedError::Conflict);
         }
         let mut next = self.data.clone();
-        if let Some(entry) = next.entries.iter_mut().find(|e| e.view.id == id) {
+        for entry in next.entries.iter_mut().filter(|e| e.root() == root) {
             entry.dismissed = true;
         }
         self.commit(next)
@@ -1306,6 +1326,20 @@ impl SessionRegistry {
     }
 }
 impl Entry {
+    /// The root row of this row's conversation: the row it resumed, or
+    /// itself. Rows sharing a root are one conversation, listed once and
+    /// run by one session at a time.
+    fn root(&self) -> Uuid {
+        self.request.resume_of.unwrap_or(self.view.id)
+    }
+
+    /// Whether this row is listed for its conversation when it is the
+    /// latest: the root always; a resume while it holds the conversation
+    /// or once its ticket was redeemed.
+    fn stands_for_conversation(&self) -> bool {
+        self.root() == self.view.id || self.view.state.holds_profile() || self.proof_hash.is_some()
+    }
+
     /// The daemon opened this session itself and its launcher reports the
     /// tool running, under the proof only that launcher holds.
     fn owned_running(&self) -> bool {
@@ -2296,9 +2330,24 @@ mod tests {
         agrees(&registry);
     }
 
+    /// Set the stored `dismissed` flag of the rows at `indexes` directly in
+    /// the registry file, as a v0.21.0-0.21.2 daemon left it when the person
+    /// dismissed those rows one at a time.
+    fn dismissed_on_disk(store: &ConfigStore, indexes: &[usize], dismissed: bool) {
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&store.read_daemon_file(FILE).unwrap().unwrap()).unwrap();
+        for index in indexes {
+            raw["entries"][*index]["dismissed"] = serde_json::json!(dismissed);
+        }
+        store
+            .write_daemon_file(FILE, &serde_json::to_vec(&raw).unwrap())
+            .unwrap();
+    }
+
     /// A resumed row says when its conversation's root row started; a
     /// fresh row says nothing; a chain points at the root; and the marker
-    /// survives the root being dismissed and a restart.
+    /// survives the root row alone being dismissed (as a v0.21.x daemon
+    /// did) and a restart.
     #[test]
     fn a_resumed_row_says_when_its_root_started() {
         let home = tempfile::tempdir().unwrap();
@@ -2318,19 +2367,164 @@ mod tests {
         let request = registry.resume_request(resumed, Uuid::new_v4()).unwrap();
         let chained = ended(&mut registry, request, &account);
 
-        registry.dismiss(root).unwrap();
-        let reopened = SessionRegistry::open(&store).unwrap();
-        let mut reopened = reopened;
+        dismissed_on_disk(&store, &[0], true);
+        let mut reopened = SessionRegistry::open(&store).unwrap();
+        assert!(reopened.data.entries[0].dismissed, "the root is dismissed");
         let views = reopened.views().unwrap();
-        let find = |id: Uuid| views.iter().find(|v| v.id == id).unwrap();
-        assert!(views.iter().all(|v| v.id != root), "the root is dismissed");
-        assert!(
-            views.iter().all(|v| v.id != resumed),
-            "the conversation is listed as its latest row"
-        );
-        assert_eq!(find(chained).resumed_from, Some(root_started));
-        let json = serde_json::to_value(find(chained)).unwrap();
+        let ids: Vec<Uuid> = views.iter().map(|v| v.id).collect();
+        assert_eq!(ids, vec![chained], "listed once, as its latest row");
+        assert_eq!(views[0].resumed_from, Some(root_started));
+        let json = serde_json::to_value(&views[0]).unwrap();
         assert!(json["resumed_from"].is_string(), "{json}");
+    }
+
+    /// Dismiss is the conversation's: dismissing any of its rows dismisses
+    /// every row of it, the flag is stored on each and survives a restart,
+    /// and nothing of it is listed after. A fresh launch is untouched.
+    #[test]
+    fn dismissing_a_conversation_dismisses_every_row_of_it() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let root = ended(&mut registry, coding(&account, home.path()), &account);
+        let request = registry.resume_request(root, Uuid::new_v4()).unwrap();
+        let resumed = ended(&mut registry, request, &account);
+        let fresh = ended(&mut registry, coding(&account, home.path()), &account);
+
+        registry.dismiss(resumed).unwrap();
+        let mut reopened = SessionRegistry::open(&store).unwrap();
+        let flags: Vec<(Uuid, bool)> = reopened
+            .data
+            .entries
+            .iter()
+            .map(|e| (e.view.id, e.dismissed))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![(root, true), (resumed, true), (fresh, false)],
+            "stored on every row of the conversation"
+        );
+        let ids: Vec<Uuid> = reopened.views().unwrap().iter().map(|v| v.id).collect();
+        assert_eq!(ids, vec![fresh]);
+    }
+
+    /// A registry from v0.21.0-0.21.2, where every row was listed and the
+    /// person dismissed rows one at a time, reads as they left it: the
+    /// conversation is listed as its latest row they did not dismiss, and
+    /// is gone once they dismissed every row of it.
+    #[test]
+    fn a_v0_21_registry_with_rows_dismissed_one_at_a_time_reads_as_meant() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let root = ended(&mut registry, coding(&account, home.path()), &account);
+        let request = registry.resume_request(root, Uuid::new_v4()).unwrap();
+        let resumed = ended(&mut registry, request, &account);
+        drop(registry);
+        let listed = || -> Vec<Uuid> {
+            SessionRegistry::open(&store)
+                .unwrap()
+                .views()
+                .unwrap()
+                .iter()
+                .map(|v| v.id)
+                .collect()
+        };
+
+        dismissed_on_disk(&store, &[1], true);
+        assert_eq!(listed(), vec![root], "the resume alone was dismissed");
+        dismissed_on_disk(&store, &[0], true);
+        assert_eq!(listed(), Vec::<Uuid>::new(), "every row was dismissed");
+        dismissed_on_disk(&store, &[1], false);
+        assert_eq!(listed(), vec![resumed], "the root alone was dismissed");
+    }
+
+    /// A resume whose tool never started (its ticket expired) does not
+    /// hide the row that ran: the conversation is listed as that row, and
+    /// dismissing it dismisses the conversation. While the resume is only
+    /// prepared it holds the conversation, and it is the row listed.
+    #[test]
+    fn a_resume_that_never_started_does_not_hide_the_row_that_ran() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let root = ended(&mut registry, coding(&account, home.path()), &account);
+        let request = registry.resume_request(root, Uuid::new_v4()).unwrap();
+        let resumed = ended(&mut registry, request, &account);
+        let request = registry.resume_request(resumed, Uuid::new_v4()).unwrap();
+        let prepared = registry.prepare(request, &account).unwrap();
+        let ids = |registry: &mut SessionRegistry| -> Vec<Uuid> {
+            registry.views().unwrap().iter().map(|v| v.id).collect()
+        };
+        assert_eq!(ids(&mut registry), vec![prepared.session_id], "starting");
+
+        registry.sweep(Utc::now() + Duration::seconds(121)).unwrap();
+        assert_eq!(
+            registry.describe(prepared.session_id).map(|(_, s)| s),
+            Some(SessionState::Failed)
+        );
+        assert_eq!(ids(&mut registry), vec![resumed], "the row that ran");
+        assert_eq!(registry.resume_root(resumed), Some(root));
+
+        registry.dismiss(resumed).unwrap();
+        assert_eq!(ids(&mut registry), Vec::<Uuid>::new());
+    }
+
+    /// The list and the one-session-per-conversation lock group rows by the
+    /// same conversation: whenever a conversation is in use, the row listed
+    /// for it is the one holding it.
+    #[test]
+    fn the_list_and_the_conversation_lock_group_rows_alike() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let root = ended(&mut registry, coding(&account, home.path()), &account);
+        let request = registry.resume_request(root, Uuid::new_v4()).unwrap();
+        let resumed = ended(&mut registry, request, &account);
+        let fresh = ended(&mut registry, coding(&account, home.path()), &account);
+        let request = registry.resume_request(resumed, Uuid::new_v4()).unwrap();
+        let running = registry.prepare(request, &account).unwrap().session_id;
+
+        let views = registry.views().unwrap();
+        assert_eq!(
+            views.iter().map(|v| v.id).collect::<Vec<_>>(),
+            vec![fresh, running],
+            "one row per conversation"
+        );
+        for view in &views {
+            let entry = registry
+                .data
+                .entries
+                .iter()
+                .find(|e| e.view.id == view.id)
+                .unwrap();
+            assert_eq!(
+                registry.conversation_in_use(entry.root()),
+                view.state.holds_profile(),
+                "{}",
+                view.id
+            );
+        }
+        for e in &registry.data.entries {
+            let expected = if e.view.id == fresh { fresh } else { root };
+            assert_eq!(e.root(), expected, "{}", e.view.id);
+        }
     }
 
     /// A row that still holds its profile, a sign-in row, and a row whose
