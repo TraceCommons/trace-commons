@@ -172,17 +172,15 @@ impl TerminalApp {
             // The new tab's tty is printed, and read back only as a bare
             // device path. Any failure there prints nothing: the launch
             // stands and the session simply cannot be shown.
-            TerminalApp::Terminal => vec![
-                format!("tell application id \"{id}\""),
-                format!("set t to do script \"{literal}\""),
-                "activate".into(),
-                "set found to \"\"".into(),
-                "try".into(),
-                "set found to tty of t".into(),
-                "end try".into(),
-                "return found".into(),
-                "end tell".into(),
-            ],
+            TerminalApp::Terminal => [
+                vec![
+                    format!("tell application id \"{id}\""),
+                    "set found to \"\"".into(),
+                ],
+                open_window(&literal),
+                vec!["return found".into(), "end tell".into()],
+            ]
+            .concat(),
             TerminalApp::Ghostty => vec![
                 format!("tell application id \"{id}\""),
                 "set sessionConfiguration to new surface configuration".into(),
@@ -207,7 +205,13 @@ impl TerminalApp {
     /// still open and idle, and that tab's window comes to the front;
     /// otherwise in a new window, as [`Self::script`]. The tab's tty is
     /// printed either way. Terminal only: no other app here can name a tab.
-    #[cfg(any(target_os = "macos", all(test, unix)))]
+    ///
+    /// The scan keeps the window by its id, which never changes, and stops
+    /// at the match. The tab is found again inside that window, idle, just
+    /// before the command is typed. A failure before that opens a new
+    /// window instead; nothing after it can fail the launch, which by then
+    /// has started.
+    #[cfg(any(target_os = "macos", test))]
     fn script_in(self, command: &str, tty: &str) -> Vec<String> {
         let literal = applescript_literal(command);
         let (TerminalApp::Terminal, Some(id), true) = (self, self.bundle_id(), valid_tty(tty))
@@ -215,38 +219,127 @@ impl TerminalApp {
             return self.script(command);
         };
         // `tty` passed `valid_tty`: only letters, digits and slashes.
+        [
+            vec![
+                format!("tell application id \"{id}\""),
+                "set found to \"\"".into(),
+                "set wid to missing value".into(),
+                "set t to missing value".into(),
+                "try".into(),
+            ],
+            find_window(tty),
+            find_tab(tty, true),
+            vec!["end try".into(), "if t is missing value then".into()],
+            open_window(&literal),
+            vec![
+                "else".into(),
+                format!("set found to \"{tty}\""),
+                format!("do script \"{literal}\" in t"),
+                "try".into(),
+            ],
+            raise_tab(),
+            vec![
+                "activate".into(),
+                "end try".into(),
+                "end if".into(),
+                "return found".into(),
+                "end tell".into(),
+            ],
+        ]
+        .concat()
+    }
+}
+
+/// Terminal's lines that set `wid` to the id of the window holding the tab
+/// on `tty`, stopping at the first match, or leave it `missing value`. A
+/// window's id never changes; its position does, whenever one comes
+/// forward. `tty` has passed `valid_tty`.
+#[cfg(any(target_os = "macos", test))]
+fn find_window(tty: &str) -> Vec<String> {
+    vec![
+        "repeat with w in windows".into(),
+        "repeat with x in tabs of w".into(),
+        format!("if tty of x is \"{tty}\" then"),
+        "set wid to id of w".into(),
+        "exit repeat".into(),
+        "end if".into(),
+        "end repeat".into(),
+        "if wid is not missing value then exit repeat".into(),
+        "end repeat".into(),
+    ]
+}
+
+/// Terminal's lines that set `tw` to window `wid` and `t` to its tab on
+/// `tty`, and with `idle` only when that tab is not busy, or leave `t`
+/// `missing value`. Run just before `t` is used, so a window that moved
+/// since the scan cannot put another tab there.
+#[cfg(any(target_os = "macos", test))]
+fn find_tab(tty: &str, idle: bool) -> Vec<String> {
+    let test = if idle {
+        format!("tty of x is \"{tty}\" and not busy of x")
+    } else {
+        format!("tty of x is \"{tty}\"")
+    };
+    vec![
+        "if wid is not missing value then".into(),
+        "set tw to window id wid".into(),
+        "repeat with x in tabs of tw".into(),
+        format!("if {test} then"),
+        "set t to x".into(),
+        "exit repeat".into(),
+        "end if".into(),
+        "end repeat".into(),
+        "end if".into(),
+    ]
+}
+
+/// Terminal's lines that select tab `t` and bring its window, `tw`,
+/// forward.
+#[cfg(any(target_os = "macos", test))]
+fn raise_tab() -> Vec<String> {
+    vec![
+        "set selected of t to true".into(),
+        "if miniaturized of tw then set miniaturized of tw to false".into(),
+        "set index of tw to 1".into(),
+    ]
+}
+
+/// Terminal's lines that run the AppleScript literal `literal` in a new
+/// window and set `found` to its tab's tty. Any failure reading the tty
+/// prints nothing: the launch stands and the session simply cannot be
+/// shown.
+#[cfg(any(target_os = "macos", test))]
+fn open_window(literal: &str) -> Vec<String> {
+    vec![
+        format!("set t to do script \"{literal}\""),
+        "activate".into(),
+        "try".into(),
+        "set found to tty of t".into(),
+        "end try".into(),
+    ]
+}
+
+/// Terminal's lines that bring the tab on `tty` to the front, in whichever
+/// window holds it now, or fail when it is gone. `tty` has passed
+/// `valid_tty`.
+#[cfg(any(target_os = "macos", test))]
+fn focus_script(tty: &str) -> Vec<String> {
+    let id = TerminalApp::Terminal
+        .bundle_id()
+        .unwrap_or("com.apple.Terminal");
+    [
         vec![
             format!("tell application id \"{id}\""),
+            "set wid to missing value".into(),
             "set t to missing value".into(),
-            "set tw to missing value".into(),
-            "repeat with w in windows".into(),
-            "repeat with x in tabs of w".into(),
-            format!("if tty of x is \"{tty}\" and not busy of x then"),
-            "set t to x".into(),
-            "set tw to w".into(),
-            "end if".into(),
-            "end repeat".into(),
-            "end repeat".into(),
-            // The tab is read before its window moves: AppleScript holds
-            // it by position, and bringing the window forward renumbers.
-            "set found to \"\"".into(),
-            "if t is missing value then".into(),
-            format!("set t to do script \"{literal}\""),
-            "try".into(),
-            "set found to tty of t".into(),
-            "end try".into(),
-            "else".into(),
-            format!("do script \"{literal}\" in t"),
-            format!("set found to \"{tty}\""),
-            "set selected of t to true".into(),
-            "if miniaturized of tw then set miniaturized of tw to false".into(),
-            "set index of tw to 1".into(),
-            "end if".into(),
-            "activate".into(),
-            "return found".into(),
-            "end tell".into(),
-        ]
-    }
+        ],
+        find_window(tty),
+        find_tab(tty, false),
+        vec!["if t is missing value then error \"no tab\"".into()],
+        raise_tab(),
+        vec!["activate".into(), "end tell".into()],
+    ]
+    .concat()
 }
 
 /// The stored choice (`managed_terminal` in the settings file). A value
@@ -447,7 +540,9 @@ enum MacosLaunch {
 /// anything. Never falls back to another app. A scripted app gets
 /// `command`, the one shell string; an argv app gets `argv` and `cwd`.
 /// `run` returns what was printed; only Terminal's script prints a tab,
-/// which is read back as a bare tty path and nothing else.
+/// which is read back as a bare tty path and nothing else. `in_tab`, a tab
+/// an ended session ran in, is where Terminal runs `command` when that tab
+/// is still open and idle; every other app ignores it.
 #[cfg(target_os = "macos")]
 fn launch_macos(
     choice: TerminalSetting,
@@ -455,15 +550,19 @@ fn launch_macos(
     command: &str,
     argv: Vec<std::ffi::OsString>,
     cwd: Option<&Path>,
+    in_tab: Option<&TerminalHandle>,
     run: impl FnOnce(MacosLaunch) -> Result<Vec<u8>, ManagedError>,
 ) -> Result<Option<TerminalHandle>, ManagedError> {
     let app = choice.app().ok_or(ManagedError::InvalidRequest)?;
     if !installed.contains(&app) {
         return Err(ManagedError::TerminalNotFound);
     }
-    let how = match open_plan(app, cwd, argv) {
-        Some(plan) => MacosLaunch::Open(plan),
-        None => MacosLaunch::Script(app.script(command)),
+    let how = match (open_plan(app, cwd, argv), in_tab) {
+        (Some(plan), _) => MacosLaunch::Open(plan),
+        (None, Some(TerminalHandle::AppleTerminal { tty })) => {
+            MacosLaunch::Script(app.script_in(command, tty))
+        }
+        (None, None) => MacosLaunch::Script(app.script(command)),
     };
     let printed = run(how)?;
     Ok(match app {
@@ -724,6 +823,55 @@ pub fn apple_terminal_tab(output: &[u8]) -> Option<TerminalHandle> {
     })
 }
 
+/// What tells the Terminal tab on `tty` apart from any later tab given the
+/// same tty: the pid and start time of the one process on that tty whose
+/// parent is not on it. That is the tab's `login`, which Terminal starts
+/// for each tab and which ends when the tab closes. macOS hands a closed
+/// tab's tty to the next tab opened, whose `login` is another process. None
+/// when the listing cannot be read or does not name exactly one.
+pub fn tab_shell(tty: &str) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let name = tty.strip_prefix("/dev/").filter(|_| valid_tty(tty))?;
+        let mut ps = std::process::Command::new("/bin/ps");
+        ps.env("LC_ALL", "C")
+            .args(["-t", name, "-o", "pid=,ppid=,lstart="]);
+        let output = super::profiles::bounded_output(ps).ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        tab_leader(std::str::from_utf8(&output.stdout).ok()?)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = tty;
+        None
+    }
+}
+
+/// [`tab_shell`]'s reading of `ps -o pid=,ppid=,lstart=`: `<pid>:<start>`
+/// of the one row whose parent is not listed. Any row that does not read
+/// as one, or a second such row, is none.
+#[cfg(any(target_os = "macos", test))]
+fn tab_leader(listing: &str) -> Option<String> {
+    let number = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    let mut rows = Vec::new();
+    for line in listing.lines().filter(|line| !line.trim().is_empty()) {
+        let mut parts = line.split_whitespace();
+        let (pid, ppid) = (parts.next()?, parts.next()?);
+        let started = parts.collect::<Vec<_>>().join(" ");
+        if !number(pid) || !number(ppid) || started.is_empty() {
+            return None;
+        }
+        rows.push((pid, ppid, started));
+    }
+    let mut leaders = rows
+        .iter()
+        .filter(|(_, ppid, _)| !rows.iter().any(|(pid, _, _)| pid == ppid));
+    let (pid, _, started) = leaders.next()?;
+    leaders.next().is_none().then(|| format!("{pid}:{started}"))
+}
+
 /// Bring a session's tab to the front, in whichever window holds it now.
 /// Refused when the tab is gone or this build cannot script the terminal
 /// that holds it.
@@ -736,27 +884,10 @@ pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
             }
             // `tty` passed `valid_tty`, so the script holds only letters,
             // digits and slashes from it.
-            let script = format!(
-                "tell application \"Terminal\"\n\
-                 set done to false\n\
-                 repeat with w in windows\n\
-                 repeat with t in tabs of w\n\
-                 if tty of t is \"{tty}\" then\n\
-                 set selected of t to true\n\
-                 if miniaturized of w then set miniaturized of w to false\n\
-                 set index of w to 1\n\
-                 set done to true\n\
-                 exit repeat\n\
-                 end if\n\
-                 end repeat\n\
-                 if done then exit repeat\n\
-                 end repeat\n\
-                 if not done then error \"no tab\"\n\
-                 activate\n\
-                 end tell"
-            );
             let mut command = std::process::Command::new("/usr/bin/osascript");
-            command.args(["-e", &script]);
+            for line in focus_script(tty) {
+                command.args(["-e", &line]);
+            }
             let output = super::profiles::bounded_output(command)?;
             if output.status.success() {
                 Ok(())
@@ -898,6 +1029,7 @@ pub fn launch_tool_setup(
             &command,
             setup_argv(body)?,
             None,
+            None,
             |how| run_macos(how).map_err(|_| ManagedError::LaunchUnknown),
         )?;
         Ok(())
@@ -934,22 +1066,17 @@ pub fn launch(
         }
         let helper = helper_path()?;
         let command = shell_command(&helper, config, session, ticket)?;
-        // Start again and Resume run in the ended session's own tab when
-        // Terminal still has it, rather than in a new window.
-        if let (Some(TerminalHandle::AppleTerminal { tty }), Some(TerminalApp::Terminal)) =
-            (in_tab, choice.app())
-        {
-            if !installed.contains(&TerminalApp::Terminal) {
-                return Err(ManagedError::TerminalNotFound);
-            }
-            let printed = run_macos(MacosLaunch::Script(
-                TerminalApp::Terminal.script_in(&command, tty),
-            ))?;
-            return Ok(apple_terminal_tab(&printed));
-        }
         let mut argv = vec![helper.into_os_string()];
         argv.extend(helper_args(config, session, ticket));
-        launch_macos(choice, installed, &command, argv, Some(cwd), run_macos)
+        launch_macos(
+            choice,
+            installed,
+            &command,
+            argv,
+            Some(cwd),
+            in_tab,
+            run_macos,
+        )
     }
     #[cfg(any(windows, target_os = "linux"))]
     {
@@ -1023,6 +1150,177 @@ mod tests {
         assert_eq!(
             TerminalApp::Iterm2.script_in(&command, "/dev/ttys011"),
             TerminalApp::Iterm2.script(&command)
+        );
+    }
+
+    /// #1839 review, findings 6, 7 and 14: the reuse script keeps the
+    /// window by its id, stops scanning at the match, finds the idle tab
+    /// again inside that window just before typing, and nothing after the
+    /// command is typed can turn a started launch into a failure.
+    #[cfg(unix)]
+    #[test]
+    fn the_reused_tab_is_found_by_window_id_and_nothing_after_the_launch_fails_it() {
+        let command = hostile_command();
+        let literal = applescript_literal(&command);
+        let lines = TerminalApp::Terminal.script_in(&command, "/dev/ttys011");
+        let text = lines.join("\n");
+        assert!(text.contains("set wid to id of w"), "{text}");
+        assert!(text.contains("exit repeat"), "{text}");
+        assert!(text.contains("window id wid"), "{text}");
+        let typed = lines
+            .iter()
+            .position(|l| l == &format!("do script \"{literal}\" in t"))
+            .unwrap();
+        let refind = lines
+            .iter()
+            .rposition(|l| l.contains("not busy of x"))
+            .unwrap();
+        assert!(refind < typed);
+        // Every line between the typing and the end of the branch is
+        // inside a `try`.
+        let after: Vec<&String> = lines[typed + 1..]
+            .iter()
+            .take_while(|l| *l != "end if")
+            .collect();
+        assert_eq!(after.first().map(|l| l.as_str()), Some("try"), "{after:?}");
+    }
+
+    /// Show and the reuse script find the tab the same way: by window id,
+    /// stopping at the match, found again inside that window. Show needs
+    /// the tab only to exist; the reuse also needs it idle. Built on every
+    /// platform, so no builder is compiled for nothing.
+    #[test]
+    fn show_and_reuse_share_the_tab_lines() {
+        let focus = focus_script("/dev/ttys011");
+        assert_eq!(
+            focus.first().unwrap(),
+            "tell application id \"com.apple.Terminal\""
+        );
+        assert!(focus.contains(&"set wid to id of w".to_string()));
+        assert!(focus.contains(&"set tw to window id wid".to_string()));
+        assert!(focus.contains(&"if tty of x is \"/dev/ttys011\" then".to_string()));
+        assert!(focus.contains(&"if t is missing value then error \"no tab\"".to_string()));
+        assert!(!focus.iter().any(|l| l.contains("busy")));
+        assert!(!focus.iter().any(|l| l.contains("do script")));
+        let reuse = TerminalApp::Terminal.script_in("echo ok", "/dev/ttys011");
+        for line in find_window("/dev/ttys011")
+            .into_iter()
+            .chain(raise_tab())
+            .chain(open_window("echo ok"))
+        {
+            assert!(reuse.contains(&line), "{line}");
+        }
+        assert!(
+            reuse.contains(&"if tty of x is \"/dev/ttys011\" and not busy of x then".to_string())
+        );
+        // A launch in a new window is the same lines as before.
+        assert_eq!(
+            TerminalApp::Terminal.script("echo ok"),
+            vec![
+                "tell application id \"com.apple.Terminal\"",
+                "set found to \"\"",
+                "set t to do script \"echo ok\"",
+                "activate",
+                "try",
+                "set found to tty of t",
+                "end try",
+                "return found",
+                "end tell",
+            ]
+        );
+    }
+
+    /// #1839 review, finding 1: a tab is told apart from a later tab with
+    /// the same tty by its one process whose parent is not on the tty.
+    #[test]
+    fn a_tab_is_known_by_its_login_process() {
+        let listing = "20450 20435 Mon Nov  2 09:23:12 2026    \n\
+                       20473 20450 Mon Nov  2 09:23:12 2026    \n\
+                       20999 20473 Mon Nov  2 10:00:00 2026\n";
+        assert_eq!(
+            tab_leader(listing).as_deref(),
+            Some("20450:Mon Nov 2 09:23:12 2026")
+        );
+        // The same tty given to a new tab: another login.
+        let later = "31000 20435 Mon Nov  2 11:00:00 2026\n31001 31000 Mon Nov  2 11:00:00 2026\n";
+        assert_ne!(tab_leader(later), tab_leader(listing));
+        for unreadable in [
+            "",
+            "\n",
+            "20450\n",
+            "20450 20435\n",
+            "x 20435 Mon Nov  2 09:23:12 2026\n",
+            // Two processes whose parent is not on the tty: not one tab's.
+            "20450 1 Mon Nov  2 09:23:12 2026\n20451 1 Mon Nov  2 09:23:12 2026\n",
+        ] {
+            assert_eq!(tab_leader(unreadable), None, "{unreadable:?}");
+        }
+    }
+
+    /// #1839 review, finding 13: the tab an ended session ran in reaches
+    /// Terminal through the same launch as every other, behind the same
+    /// refusals; another app opens a new window as before.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_ended_sessions_tab_goes_through_the_one_macos_launch() {
+        let tab = TerminalHandle::AppleTerminal {
+            tty: "/dev/ttys011".into(),
+        };
+        let argv = || vec![std::ffi::OsString::from("/x/near-ai")];
+        let cwd = Some(Path::new("/Users/x/app"));
+        let mut ran = None;
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Terminal,
+                &[TerminalApp::Terminal],
+                "'/x/near-ai'",
+                argv(),
+                cwd,
+                Some(&tab),
+                |how| {
+                    ran = Some(how);
+                    Ok(b"/dev/ttys011\n".to_vec())
+                },
+            ),
+            Ok(Some(tab.clone()))
+        );
+        assert_eq!(
+            ran,
+            Some(MacosLaunch::Script(
+                TerminalApp::Terminal.script_in("'/x/near-ai'", "/dev/ttys011")
+            ))
+        );
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Terminal,
+                &[TerminalApp::Ghostty],
+                "'/x/near-ai'",
+                argv(),
+                cwd,
+                Some(&tab),
+                |_| panic!("nothing runs when Terminal is missing"),
+            ),
+            Err(ManagedError::TerminalNotFound)
+        );
+        let mut ran = None;
+        launch_macos(
+            TerminalSetting::Ghostty,
+            &[TerminalApp::Ghostty],
+            "'/x/near-ai'",
+            argv(),
+            cwd,
+            Some(&tab),
+            |how| {
+                ran = Some(how);
+                Ok(vec![])
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ran,
+            Some(MacosLaunch::Script(
+                TerminalApp::Ghostty.script("'/x/near-ai'")
+            ))
         );
     }
 
@@ -1297,6 +1595,7 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
+                None,
                 never
             ),
             Err(ManagedError::TerminalNotFound)
@@ -1308,6 +1607,7 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
+                None,
                 never
             ),
             Err(ManagedError::TerminalNotFound)
@@ -1319,6 +1619,7 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
+                None,
                 never
             ),
             Err(ManagedError::TerminalNotFound)
@@ -1330,6 +1631,7 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
+                None,
                 never
             ),
             Err(ManagedError::InvalidRequest)
@@ -1341,6 +1643,7 @@ mod tests {
             "'/x/near-ai'",
             argv(),
             cwd,
+            None,
             |how| {
                 ran = Some(how);
                 // Whatever another app printed is never read as a tab.
@@ -1362,6 +1665,7 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
+                None,
                 |how| {
                     ran = Some(how);
                     Ok(b"/dev/ttys001\n".to_vec())
@@ -1382,6 +1686,7 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
+                None,
                 |_| Ok(b"/dev/ttys001\n".to_vec())
             ),
             Ok(Some(TerminalHandle::AppleTerminal {
@@ -1395,6 +1700,7 @@ mod tests {
                 "'/x/near-ai'",
                 argv(),
                 cwd,
+                None,
                 |_| Ok(b"not a tty".to_vec())
             ),
             Ok(None)

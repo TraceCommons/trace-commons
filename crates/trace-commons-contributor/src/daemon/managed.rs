@@ -47,7 +47,24 @@ pub struct ManagedService {
     /// the call rather than drive a real terminal.
     focus: fn(&TerminalHandle) -> Result<(), ManagedError>,
     setup_terminal: fn(TerminalSetting, &[TerminalApp], &str) -> Result<(), ManagedError>,
+    /// Opens a session in a terminal ([`terminal::launch`]). A field so
+    /// tests record the call rather than open a real terminal.
+    launch_terminal: LaunchTerminal,
+    /// Reads what tells a Terminal tab apart ([`terminal::tab_shell`]). A
+    /// field so tests answer it without listing real processes.
+    tab_shell: fn(&str) -> Option<String>,
 }
+
+/// [`terminal::launch`]'s shape.
+type LaunchTerminal = fn(
+    TerminalSetting,
+    &[TerminalApp],
+    &std::path::Path,
+    &std::path::Path,
+    Uuid,
+    &str,
+    Option<&TerminalHandle>,
+) -> Result<Option<TerminalHandle>, ManagedError>;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +94,8 @@ impl ManagedService {
             installed_cache: terminal::InstalledCache::default(),
             focus: crate::managed::terminal::focus,
             setup_terminal: terminal::launch_tool_setup,
+            launch_terminal: terminal::launch,
+            tab_shell: terminal::tab_shell,
         })
     }
 
@@ -124,9 +143,9 @@ impl ManagedService {
     fn prepare_launch(&mut self, request: &Request, sign_in: bool) -> Result<Value, ManagedError> {
         match self.resolve_launch(request, sign_in, true)? {
             Resolved::Replayed(existing) => Ok(json!(existing)),
-            Resolved::Launch(launch, account) => {
-                Ok(json!(self.sessions.prepare(launch, &account)?))
-            }
+            Resolved::Launch(launch, account, again_of) => Ok(json!(
+                self.sessions.prepare_again(launch, &account, again_of)?
+            )),
         }
     }
 
@@ -170,7 +189,7 @@ impl ManagedService {
                 if verify {
                     verify_visible_version(&self.profiles, &account)?;
                 }
-                Ok(Resolved::Launch(p, account))
+                Ok(Resolved::Launch(p, account, None))
             }
             "managed_session_start_again" | "managed_session_resume" => {
                 #[derive(Deserialize)]
@@ -199,7 +218,7 @@ impl ManagedService {
                     return Err(ManagedError::InvalidRequest);
                 }
                 again.expected_generation = self.accounts.generation(again.tool);
-                Ok(Resolved::Launch(again, account))
+                Ok(Resolved::Launch(again, account, Some(p.session_id)))
             }
             _ => Err(ManagedError::InvalidRequest),
         }
@@ -211,7 +230,7 @@ impl ManagedService {
     /// again when it is handled.
     fn prepares_on_sign_in(&self, request: &Request, sign_in: bool) -> bool {
         match self.resolve_launch(request, sign_in, false) {
-            Ok(Resolved::Launch(launch, account)) => {
+            Ok(Resolved::Launch(launch, account, _)) => {
                 launch.connection == ConnectionKind::NearAiSignIn
                     && self.sessions.would_prepare_new(launch, &account)
             }
@@ -442,18 +461,30 @@ impl ManagedService {
                 struct Params {
                     session_id: Uuid,
                     ticket: String,
-                    /// Start again and Resume: the ended row whose tab the
-                    /// launch runs in, when Terminal still has it idle.
-                    #[serde(default)]
-                    in_window_of: Option<Uuid>,
+                    /// Sent by the macOS app built from #1839 (2026-11-02),
+                    /// naming the row Start again or Resume came from.
+                    /// Accepted so that app still launches, and ignored: the
+                    /// daemon recorded that row itself when it prepared the
+                    /// session, and the app no longer sends it.
+                    #[serde(default, rename = "in_window_of")]
+                    _in_window_of: Option<serde::de::IgnoredAny>,
                 }
                 let p: Params = parse(request)?;
                 let cwd = self.sessions.launch_cwd(p.session_id, &p.ticket)?;
                 let installed = self.installed_terminals(choice.app());
-                let tab = p
-                    .in_window_of
-                    .and_then(|id| self.sessions.ended_terminal(id));
-                let window = terminal::launch(
+                // Start again and Resume run in the ended row's own tab
+                // (owner, 2026-11-02), only while that tab is the one the
+                // row ran in: a tty macOS has since handed to another tab
+                // reads otherwise, and that launch opens a new window.
+                let tab_shell = self.tab_shell;
+                let tab = self
+                    .sessions
+                    .again_terminal(p.session_id)
+                    .filter(|(TerminalHandle::AppleTerminal { tty }, shell)| {
+                        tab_shell(tty).as_ref() == Some(shell)
+                    })
+                    .map(|(handle, _)| handle);
+                let window = (self.launch_terminal)(
                     choice,
                     &installed,
                     &self.config_dir,
@@ -462,7 +493,11 @@ impl ManagedService {
                     &p.ticket,
                     tab.as_ref(),
                 )?;
-                self.sessions.opened_in_terminal(p.session_id, window)?;
+                let shell = window
+                    .as_ref()
+                    .and_then(|TerminalHandle::AppleTerminal { tty }| tab_shell(tty));
+                self.sessions
+                    .opened_in_terminal(p.session_id, window, shell)?;
                 Ok(json!({"opened":true,"destination":terminal::destination(choice)}))
             }
             "managed_launch_redeem" => {
@@ -749,8 +784,9 @@ fn remember_prepared(
 
 /// What a prepare or start-again request resolves to.
 enum Resolved {
-    /// A new launch, checked and ready to prepare.
-    Launch(LaunchRequest, AccountView),
+    /// A new launch, checked and ready to prepare, with the ended row Start
+    /// again or Resume prepares it from.
+    Launch(LaunchRequest, AccountView, Option<Uuid>),
     /// The session this request id already prepared.
     Replayed(crate::managed::sessions::PreparedLaunch),
 }
@@ -2429,7 +2465,7 @@ mod tests {
         };
         service
             .sessions
-            .opened_in_terminal(prepared.session_id, Some(handle.clone()))
+            .opened_in_terminal(prepared.session_id, Some(handle.clone()), None)
             .unwrap();
         // Not running yet: nothing to show or stop.
         let starting = row(&mut service, prepared.session_id, false);
@@ -2522,7 +2558,7 @@ mod tests {
         .unwrap();
         service
             .sessions
-            .opened_in_terminal(prepared.session_id, None)
+            .opened_in_terminal(prepared.session_id, None, None)
             .unwrap();
         let context = service
             .sessions
@@ -2670,6 +2706,115 @@ mod tests {
         assert!(retried.ticket.is_none());
     }
 
+    static LAUNCHED: std::sync::Mutex<Vec<(Uuid, Option<TerminalHandle>)>> =
+        std::sync::Mutex::new(vec![]);
+
+    /// Records the tab each launch was given, and answers with that tab, or
+    /// a new window's. Tests never open a real terminal.
+    fn record_launch(
+        _: TerminalSetting,
+        _: &[TerminalApp],
+        _: &std::path::Path,
+        _: &std::path::Path,
+        session: Uuid,
+        _: &str,
+        tab: Option<&TerminalHandle>,
+    ) -> Result<Option<TerminalHandle>, ManagedError> {
+        LAUNCHED.lock().unwrap().push((session, tab.cloned()));
+        Ok(Some(tab.cloned().unwrap_or(
+            TerminalHandle::AppleTerminal {
+                tty: "/dev/ttys042".into(),
+            },
+        )))
+    }
+
+    fn launched_in(session: Uuid) -> Option<TerminalHandle> {
+        let launched = LAUNCHED.lock().unwrap();
+        let (_, tab) = launched.iter().find(|(id, _)| *id == session).unwrap();
+        tab.clone()
+    }
+
+    fn first_tab(tty: &str) -> Option<String> {
+        (tty == "/dev/ttys042").then(|| "100:Mon Nov 2 09:00:00 2026".into())
+    }
+
+    /// The same tty, in a tab opened since: another `login`.
+    fn later_tab(tty: &str) -> Option<String> {
+        (tty == "/dev/ttys042").then(|| "200:Mon Nov 2 11:00:00 2026".into())
+    }
+
+    /// Launch `prepared` through the daemon with `extra` launch fields,
+    /// start it, and end it.
+    fn opened_and_ended(service: &mut ManagedService, prepared: Value, extra: Value) -> Uuid {
+        let prepared: PreparedLaunch = serde_json::from_value(prepared).unwrap();
+        let id = prepared.session_id;
+        let ticket = prepared.ticket.unwrap();
+        let mut params = json!({"session_id":id,"ticket":ticket});
+        for (key, value) in extra.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        call(service, "managed_terminal_launch", params, false).unwrap();
+        let context = service.sessions.redeem(id, &ticket).unwrap();
+        report(service, id, &context.proof, "running", None).unwrap();
+        report(service, id, &context.proof, "exited", Some(0)).unwrap();
+        id
+    }
+
+    /// #1839 review, findings 1, 2, 11 and 13: Start again runs in the
+    /// ended row's tab, which the daemon finds from the row it prepared the
+    /// session from; the app names nothing. An app built from #1839 that
+    /// still names a row is not refused, and what it names is ignored. A
+    /// tab whose `login` reads otherwise now (its tty handed to a newer
+    /// tab) is not used: that launch opens a new window.
+    #[test]
+    fn start_again_runs_in_the_tab_the_daemon_recorded_and_checked() {
+        let (home, _store, mut service) = service();
+        service.launch_terminal = record_launch;
+        service.tab_shell = first_tab;
+        let account = service
+            .accounts
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Work")
+            .unwrap();
+        let mut request: LaunchRequest =
+            serde_json::from_value(launch(ToolId::Claude, home.path())).unwrap();
+        request.connection = ConnectionKind::Subscription;
+        request.account_id = account.id;
+        let fresh = |service: &mut ManagedService, request: &LaunchRequest| {
+            let mut request = request.clone();
+            request.request_id = Uuid::new_v4();
+            call(service, "managed_launch_prepare", json!(request), false).unwrap()
+        };
+        let again = |service: &mut ManagedService, id: Uuid| {
+            call(
+                service,
+                "managed_session_start_again",
+                json!({"session_id":id,"request_id":Uuid::new_v4()}),
+                false,
+            )
+            .unwrap()
+        };
+        let tab = TerminalHandle::AppleTerminal {
+            tty: "/dev/ttys042".into(),
+        };
+
+        let prepared = fresh(&mut service, &request);
+        let first = opened_and_ended(&mut service, prepared, json!({}));
+        assert_eq!(launched_in(first), None, "a launch opens a new window");
+
+        let prepared = again(&mut service, first);
+        let second = opened_and_ended(&mut service, prepared, json!({}));
+        assert_eq!(launched_in(second), Some(tab.clone()));
+
+        let prepared = fresh(&mut service, &request);
+        let third = opened_and_ended(&mut service, prepared, json!({"in_window_of": first}));
+        assert_eq!(launched_in(third), None, "what an app names is ignored");
+
+        service.tab_shell = later_tab;
+        let prepared = again(&mut service, second);
+        let fourth = opened_and_ended(&mut service, prepared, json!({}));
+        assert_eq!(launched_in(fourth), None, "the tty names another tab now");
+    }
+
     #[test]
     fn a_second_terminal_launch_for_one_session_is_refused() {
         let (home, _store, mut service) = service();
@@ -2698,7 +2843,7 @@ mod tests {
             .unwrap();
         service
             .sessions
-            .opened_in_terminal(prepared.session_id, None)
+            .opened_in_terminal(prepared.session_id, None, None)
             .unwrap();
         assert_eq!(
             service
