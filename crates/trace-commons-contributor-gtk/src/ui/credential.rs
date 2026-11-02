@@ -312,20 +312,7 @@ pub fn render(app: &Rc<App>, state: &str) {
             style::append_body(&view.action, explains);
         }
         if action == CredentialAction::Obtain {
-            let providers = ProviderSelector::new(view.provider.get());
-            providers.root.set_sensitive(!view.pending.get());
-            providers.selector.connect_selected_notify({
-                let app = Rc::clone(app);
-                move |selector| {
-                    let view = &app.private_inference.credential;
-                    if view.pending.get() {
-                        selector.set_selected(view.provider.get());
-                    } else {
-                        view.provider.set(selector.selected());
-                    }
-                }
-            });
-            view.action.append(&providers.root);
+            view.action.append(&shared_provider_selector(app));
         }
         let button = gtk::Button::with_label(label);
         button.set_halign(gtk::Align::Start);
@@ -359,6 +346,28 @@ pub fn render(app: &Rc<App>, state: &str) {
 /// a sign-in, so the balance's button comes here rather than opening a
 /// second ceremony path with a second in-flight guard. One press at a time,
 /// wherever it was pressed.
+/// The provider selector bound to this section's choice, which every Sign in
+/// on the Private AI screen starts ([`act`]). Drawn beside whichever Sign in
+/// is on screen: this section's, or the balance row's, which shows only
+/// while this section offers no sign-in of its own.
+pub(super) fn shared_provider_selector(app: &Rc<App>) -> gtk::Box {
+    let view = &app.private_inference.credential;
+    let providers = ProviderSelector::new(view.provider.get());
+    providers.root.set_sensitive(!view.pending.get());
+    providers.selector.connect_selected_notify({
+        let app = Rc::clone(app);
+        move |selector| {
+            let view = &app.private_inference.credential;
+            if view.pending.get() {
+                selector.set_selected(view.provider.get());
+            } else {
+                view.provider.set(selector.selected());
+            }
+        }
+    });
+    providers.root
+}
+
 pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
     act_with_provider(
         app,
