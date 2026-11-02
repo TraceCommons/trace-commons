@@ -25,8 +25,10 @@
 //!   the flush has not finished writing. Once the flush lands the handle is
 //!   marked detached while its lock is still held, and a caller that finds
 //!   a detached (or retired) handle looks the tenant up again, so a write
-//!   never lands on a handle nothing will save. At most `max_open` handles
-//!   wait in `evicting`; past that, opening another tenant is refused.
+//!   never lands on a handle nothing will save, and a detached handle is
+//!   never saved again. At most `max_open` evicted handles whose flush
+//!   failed wait in `evicting`; past that, a miss first retries their
+//!   flushes and then refuses to open another tenant.
 //! - Lock order is tenant lock, then cache lock. Nothing takes a tenant lock
 //!   while holding the cache lock.
 //! - Cosine metric over **L2-normalized** vectors. Callers are responsible for
@@ -65,7 +67,7 @@
 
 #![cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,12 +123,34 @@ type SharedTenantHandle = Arc<Mutex<TenantHandle>>;
 /// I/O and no tenant lock is ever taken while it is held.
 struct OpenIndexes {
     lru: LruCache<String, SharedTenantHandle>,
-    /// Handles evicted from `lru` whose flush has not landed, by tenant, with
-    /// the eviction's sequence number. A miss for one of these tenants takes
-    /// the handle back. A failed flush leaves the handle here, in memory,
-    /// for the next miss to take back and for `flush_all` to retry.
-    evicting: HashMap<String, (u64, SharedTenantHandle)>,
+    /// Handles evicted from `lru` whose flush has not landed, by tenant. A
+    /// miss for one of these tenants takes the handle back. A failed flush
+    /// leaves the handle here, in memory, for the next miss to take back and
+    /// for `flush_all` to retry.
+    evicting: HashMap<String, Evicting>,
     next_eviction: u64,
+    /// Tenants whose file `delete_tenant_index_file` is removing. A miss for
+    /// one is refused until the removal returns, so no new handle can load
+    /// the file being deleted and save it back.
+    deleting: HashSet<String>,
+}
+
+impl OpenIndexes {
+    fn failed_evictions(&self) -> usize {
+        self.evicting.values().filter(|entry| entry.failed).count()
+    }
+}
+
+/// One handle evicted from the LRU.
+struct Evicting {
+    /// Identifies this eviction, so a flush that lands releases only its
+    /// own entry: a miss may have taken the handle back, and a later
+    /// eviction may own the slot now.
+    sequence: u64,
+    handle: SharedTenantHandle,
+    /// Its last flush failed. Only these count against the backlog cap; a
+    /// flush still running does not.
+    failed: bool,
 }
 
 /// How many times an operation looks a tenant up again after finding its
@@ -251,6 +275,7 @@ impl UsearchVectorIndex {
                 lru: LruCache::new(cap),
                 evicting: HashMap::new(),
                 next_eviction: 0,
+                deleting: HashSet::new(),
             }),
         });
         let periodic_flusher =
@@ -321,27 +346,41 @@ impl UsearchVectorIndex {
     /// this caller (so the evaluation fails closed) and the victim stays in
     /// memory, where the next miss takes it back and `flush_all` retries it.
     /// While `max_open` failed evictions are waiting, a miss that would evict
-    /// another tenant is refused, so memory stays bounded.
+    /// another tenant first retries their flushes, and is refused if none
+    /// lands, so memory stays bounded. A tenant whose file is being deleted
+    /// is refused.
     fn handle_for(&self, tenant_storage_ref: &str) -> anyhow::Result<SharedTenantHandle> {
-        let (handle, evicted) = {
-            let mut open = self
-                .inner
-                .open_indexes
-                .lock()
-                .expect("UsearchVectorIndex lru mutex poisoned");
-            if let Some(existing) = open.lru.get(tenant_storage_ref) {
-                (Arc::clone(existing), None)
-            } else {
+        let mut drained = false;
+        loop {
+            let (handle, evicted) = {
+                let mut open = self
+                    .inner
+                    .open_indexes
+                    .lock()
+                    .expect("UsearchVectorIndex lru mutex poisoned");
+                anyhow::ensure!(
+                    !open.deleting.contains(tenant_storage_ref),
+                    "UsearchVectorIndex tenant index is being deleted; retry once it is gone"
+                );
+                if let Some(existing) = open.lru.get(tenant_storage_ref) {
+                    return Ok(Arc::clone(existing));
+                }
                 let handle = match open.evicting.remove(tenant_storage_ref) {
-                    Some((_, taken_back)) => taken_back,
+                    Some(entry) => entry.handle,
                     None => {
-                        let would_evict = open.lru.len() >= open.lru.cap().get();
-                        anyhow::ensure!(
-                            !would_evict || open.evicting.len() < open.lru.cap().get(),
-                            "UsearchVectorIndex has {} evicted tenant indexes waiting to be \
-                             saved; refusing to open another until they are",
-                            open.evicting.len()
-                        );
+                        let cap = open.lru.cap().get();
+                        let failed = open.failed_evictions();
+                        if open.lru.len() >= cap && failed >= cap {
+                            anyhow::ensure!(
+                                !drained,
+                                "UsearchVectorIndex has {failed} evicted tenant indexes that \
+                                 failed to save; refusing to open another until they are saved"
+                            );
+                            drop(open);
+                            drain_failed_evictions(&self.inner);
+                            drained = true;
+                            continue;
+                        }
                         Arc::new(Mutex::new(TenantHandle {
                             index: None,
                             dirty_writes: 0,
@@ -357,19 +396,25 @@ impl UsearchVectorIndex {
                 let evicted = evicted.map(|(key, victim)| {
                     let sequence = open.next_eviction;
                     open.next_eviction = open.next_eviction.wrapping_add(1);
-                    open.evicting
-                        .insert(key.clone(), (sequence, Arc::clone(&victim)));
+                    open.evicting.insert(
+                        key.clone(),
+                        Evicting {
+                            sequence,
+                            handle: Arc::clone(&victim),
+                            failed: false,
+                        },
+                    );
                     (key, sequence, victim)
                 });
                 (handle, evicted)
-            }
-        };
+            };
 
-        if let Some((key, sequence, victim)) = evicted {
-            flush_evicted(&self.inner, &key, sequence, &victim)
-                .context("UsearchVectorIndex eviction flush failed; victim kept in memory")?;
+            if let Some((key, sequence, victim)) = evicted {
+                flush_evicted(&self.inner, &key, sequence, &victim)
+                    .context("UsearchVectorIndex eviction flush failed; victim kept in memory")?;
+            }
+            return Ok(handle);
         }
-        Ok(handle)
     }
 
     /// Run `op` on the tenant's loaded index under the tenant's lock.
@@ -444,17 +489,23 @@ impl UsearchVectorIndex {
         // Drop any in-memory handle first so a subsequent insert doesn't
         // unintentionally re-flush the stale handle's in-memory contents
         // back to disk after we've removed the file.
+        // The tombstone, set in the same critical section, keeps a miss from
+        // creating a fresh handle that loads the file before it is removed.
         let dropped = {
             let mut open = self
                 .inner
                 .open_indexes
                 .lock()
                 .expect("UsearchVectorIndex lru mutex poisoned");
+            anyhow::ensure!(
+                open.deleting.insert(tenant_storage_ref.to_string()),
+                "UsearchVectorIndex tenant index is already being deleted"
+            );
             // A tenant is in at most one of the two maps.
             open.lru.pop(tenant_storage_ref).or_else(|| {
                 open.evicting
                     .remove(tenant_storage_ref)
-                    .map(|(_, handle)| handle)
+                    .map(|entry| entry.handle)
             })
         };
         // Retire it so an eviction flush still running cannot save its
@@ -476,7 +527,7 @@ impl UsearchVectorIndex {
                 .unwrap_or("<unknown>");
             name.to_string()
         };
-        match std::fs::remove_file(&path) {
+        let removed = match std::fs::remove_file(&path) {
             Ok(()) => {
                 tracing::info!(
                     target: "trace_commons_vector_replay",
@@ -496,7 +547,14 @@ impl UsearchVectorIndex {
             Err(e) => Err(anyhow!(
                 "VectorReplayResetTenantIndex: failed to remove tenant index file {file_hash}: {e}"
             )),
-        }
+        };
+        self.inner
+            .open_indexes
+            .lock()
+            .expect("UsearchVectorIndex lru mutex poisoned")
+            .deleting
+            .remove(tenant_storage_ref);
+        removed
     }
 
     /// Return the live entry count for `tenant_storage_ref`. Opens (or
@@ -540,7 +598,7 @@ impl UsearchVectorIndex {
                 open.lru.peek(tenant_storage_ref).map(Arc::clone),
                 open.evicting
                     .get(tenant_storage_ref)
-                    .map(|(sequence, handle)| (*sequence, Arc::clone(handle))),
+                    .map(|entry| (entry.sequence, Arc::clone(&entry.handle))),
             )
         };
         if let Some(handle) = cached {
@@ -573,7 +631,7 @@ fn flush_inner(inner: &IndexInner) -> anyhow::Result<()> {
             open.lru.iter().map(|(_, v)| Arc::clone(v)).collect(),
             open.evicting
                 .iter()
-                .map(|(key, (sequence, v))| (key.clone(), *sequence, Arc::clone(v)))
+                .map(|(key, entry)| (key.clone(), entry.sequence, Arc::clone(&entry.handle)))
                 .collect(),
         )
     };
@@ -680,6 +738,25 @@ fn flush_handle_arc(handle: &SharedTenantHandle) -> anyhow::Result<()> {
     flush_handle_locked(&mut guard)
 }
 
+/// Retry the flush of every evicted handle whose last flush failed. Errors
+/// are already recorded on the entries; the caller re-reads the backlog.
+fn drain_failed_evictions(inner: &IndexInner) {
+    let failed: Vec<(String, u64, SharedTenantHandle)> = {
+        let open = inner
+            .open_indexes
+            .lock()
+            .expect("UsearchVectorIndex lru mutex poisoned");
+        open.evicting
+            .iter()
+            .filter(|(_, entry)| entry.failed)
+            .map(|(key, entry)| (key.clone(), entry.sequence, Arc::clone(&entry.handle)))
+            .collect()
+    };
+    for (key, sequence, handle) in failed {
+        let _ = flush_evicted(inner, &key, sequence, &handle);
+    }
+}
+
 /// Flush a handle evicted from the LRU as eviction `sequence`, and release
 /// it once the save lands.
 ///
@@ -687,7 +764,8 @@ fn flush_handle_arc(handle: &SharedTenantHandle) -> anyhow::Result<()> {
 /// caller can lock the handle between the save and the release. The
 /// `evicting` entry is removed, and the handle marked detached, only when
 /// it is still this eviction's: a miss may have taken the handle back into
-/// the LRU, and then it is live and stays attached.
+/// the LRU, and then it is live and stays attached. A failed flush marks
+/// this eviction's entry failed, so it counts against the backlog cap.
 fn flush_evicted(
     inner: &IndexInner,
     key: &str,
@@ -697,26 +775,32 @@ fn flush_evicted(
     let mut guard = victim
         .lock()
         .expect("UsearchVectorIndex tenant mutex poisoned");
-    flush_handle_locked(&mut guard)?;
+    let flushed = flush_handle_locked(&mut guard);
     let mut open = inner
         .open_indexes
         .lock()
         .expect("UsearchVectorIndex lru mutex poisoned");
-    if open
+    let ours = open
         .evicting
         .get(key)
-        .is_some_and(|(current, _)| *current == sequence)
-    {
-        open.evicting.remove(key);
-        guard.detached = true;
+        .is_some_and(|entry| entry.sequence == sequence);
+    if ours {
+        if flushed.is_ok() {
+            open.evicting.remove(key);
+            guard.detached = true;
+        } else if let Some(entry) = open.evicting.get_mut(key) {
+            entry.failed = true;
+        }
     }
-    Ok(())
+    flushed
 }
 
 fn flush_handle_locked(handle: &mut TenantHandle) -> anyhow::Result<()> {
     // Never loaded: nothing in memory to save. Retired: the file was
-    // deleted on purpose and must stay deleted.
-    if handle.retired {
+    // deleted on purpose and must stay deleted. Detached: its contents are
+    // already on disk, and a newer handle may own the file now, so saving
+    // it again could overwrite (or tear) the newer handle's save.
+    if handle.retired || handle.detached {
         return Ok(());
     }
     let Some(index) = handle.index.as_ref() else {
@@ -1428,7 +1512,14 @@ mod tests {
         {
             let mut open = idx.inner.open_indexes.lock().unwrap();
             let (key, victim) = open.lru.pop_lru().unwrap();
-            open.evicting.insert(key, (0, victim));
+            open.evicting.insert(
+                key,
+                Evicting {
+                    sequence: 0,
+                    handle: victim,
+                    failed: false,
+                },
+            );
         }
         assert!(!idx.tenant_file_path("tenant_a").exists());
 
@@ -1453,16 +1544,6 @@ mod tests {
             !idx.tenant_file_path("tenant").exists(),
             "a retired handle must not save the deleted tenant back"
         );
-    }
-
-    fn unloaded_handle(idx: &UsearchVectorIndex, tenant: &str) -> SharedTenantHandle {
-        Arc::new(Mutex::new(TenantHandle {
-            index: None,
-            dirty_writes: 0,
-            file_path: idx.tenant_file_path(tenant),
-            retired: false,
-            detached: false,
-        }))
     }
 
     /// A caller that looked a tenant up just before its eviction flush
@@ -1529,11 +1610,12 @@ mod tests {
         assert!(idx.snapshot("tenant").is_none());
     }
 
-    /// Evicted handles waiting to be saved are bounded by `max_open`. Past
-    /// that, a miss that would evict another tenant is refused, and
-    /// `flush_all` releases the ones it manages to save.
+    /// Evicted handles whose flush failed are bounded by `max_open`. Past
+    /// that, a miss that would evict another tenant first retries their
+    /// flushes, and is refused only if none lands. A flush that is merely
+    /// still running does not count.
     #[test]
-    fn evicted_handles_waiting_to_be_saved_are_bounded() {
+    fn evicted_handles_that_failed_to_save_are_bounded() {
         let tmp = tempdir().unwrap();
         let idx = UsearchVectorIndex::try_new(
             tmp.path(),
@@ -1546,23 +1628,39 @@ mod tests {
         .unwrap();
         idx.insert(Uuid::new_v4(), "tenant_a", &norm(vec![1.0, 0.0, 0.0, 0.0]))
             .unwrap();
-        // Stage one eviction whose flush has not landed, as a failed one
-        // leaves it.
-        let ghost = unloaded_handle(&idx, "tenant_ghost");
-        idx.inner
-            .open_indexes
-            .lock()
-            .unwrap()
-            .evicting
-            .insert("tenant_ghost".to_string(), (u64::MAX, Arc::clone(&ghost)));
-
-        let Err(err) = idx.handle_for("tenant_c") else {
-            panic!("a full eviction backlog refuses another eviction");
+        // A loaded handle whose save fails: its directory does not exist.
+        let missing_dir = tmp.path().join("missing");
+        let ghost_path = missing_dir.join("ghost.usearch");
+        let ghost = Arc::new(Mutex::new(TenantHandle {
+            index: Some(idx.load_index(&ghost_path).unwrap()),
+            dirty_writes: 1,
+            file_path: ghost_path,
+            retired: false,
+            detached: false,
+        }));
+        let stage = |failed: bool| {
+            idx.inner.open_indexes.lock().unwrap().evicting.insert(
+                "tenant_ghost".to_string(),
+                Evicting {
+                    sequence: u64::MAX,
+                    handle: Arc::clone(&ghost),
+                    failed,
+                },
+            );
         };
-        assert!(
-            format!("{err:#}").contains("waiting to be saved"),
-            "{err:#}"
-        );
+
+        // Still running, not failed: does not block a miss.
+        stage(false);
+        idx.handle_for("tenant_b").unwrap();
+        idx.handle_for("tenant_a").unwrap();
+
+        // Failed, and still failing on the retry: the miss is refused and
+        // evicts nothing.
+        stage(true);
+        let Err(err) = idx.handle_for("tenant_c") else {
+            panic!("a full backlog of failed saves refuses another eviction");
+        };
+        assert!(format!("{err:#}").contains("failed to save"), "{err:#}");
         assert!(
             idx.inner
                 .open_indexes
@@ -1573,10 +1671,87 @@ mod tests {
             "a refused miss evicts nothing"
         );
 
-        idx.flush_all().unwrap();
-        assert!(idx.inner.open_indexes.lock().unwrap().evicting.is_empty());
-        assert!(ghost.lock().unwrap().detached);
+        // The disk recovers: the next miss drains the backlog itself, with
+        // no `flush_all`, and opens.
+        std::fs::create_dir_all(&missing_dir).unwrap();
         idx.handle_for("tenant_c").unwrap();
+        assert!(
+            !idx.inner
+                .open_indexes
+                .lock()
+                .unwrap()
+                .evicting
+                .contains_key("tenant_ghost")
+        );
+        assert!(ghost.lock().unwrap().detached);
+    }
+
+    /// A detached handle is never saved again: a newer handle owns the
+    /// file, and a stale save would overwrite or tear it.
+    #[test]
+    fn a_detached_handle_is_never_saved_again() {
+        let tmp = tempdir().unwrap();
+        let idx = UsearchVectorIndex::try_new(
+            tmp.path(),
+            UsearchVectorIndexConfig {
+                max_open: 1,
+                flush_every: 1024,
+                ..test_config(4)
+            },
+        )
+        .unwrap();
+        idx.insert(Uuid::new_v4(), "tenant_a", &norm(vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        let stale = idx.handle_for("tenant_a").unwrap();
+        idx.handle_for("tenant_b").unwrap();
+        assert!(stale.lock().unwrap().detached);
+
+        let newer = Uuid::new_v4();
+        idx.insert(newer, "tenant_a", &norm(vec![0.0, 1.0, 0.0, 0.0]))
+            .unwrap();
+        idx.flush_tenant("tenant_a").unwrap();
+        flush_handle_arc(&stale).unwrap();
+
+        let reopened = build_index(&tmp.path().join("reopen-check"), 4);
+        let index = reopened
+            .load_index(&idx.tenant_file_path("tenant_a"))
+            .unwrap();
+        assert!(
+            index.contains(UsearchVectorIndex::uuid_to_key(newer)),
+            "the stale handle overwrote the newer save"
+        );
+    }
+
+    /// While a tenant's file is being deleted, a miss for it is refused, so
+    /// no fresh handle can load the file and save it back.
+    #[test]
+    fn a_tenant_being_deleted_is_not_reopened() {
+        let tmp = tempdir().unwrap();
+        let idx = build_index(tmp.path(), 4);
+        idx.inner
+            .open_indexes
+            .lock()
+            .unwrap()
+            .deleting
+            .insert("tenant".to_string());
+        let Err(err) = idx.handle_for("tenant") else {
+            panic!("a tenant being deleted must not be reopened");
+        };
+        assert!(format!("{err:#}").contains("being deleted"), "{err:#}");
+        assert!(idx.delete_tenant_index_file("tenant").is_err());
+
+        idx.inner
+            .open_indexes
+            .lock()
+            .unwrap()
+            .deleting
+            .remove("tenant");
+        idx.delete_tenant_index_file("tenant").unwrap();
+        assert!(
+            idx.inner.open_indexes.lock().unwrap().deleting.is_empty(),
+            "the tombstone is cleared once the file is gone"
+        );
+        idx.handle_for("tenant").unwrap();
     }
 
     /// Phase A audit fix: when an LRU eviction is triggered AND the victim
