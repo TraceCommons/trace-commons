@@ -82,6 +82,7 @@ Section 3 adds a local record.
 | B8 | **Spend-org switch** across identities | #3's pending revocations belong to the old identity and are swept with the new session | #1833 keeps them; #1837 drops a 403 as "not this account". Partly covered |
 | B9 | **Payout link** for an account with no `near_ai_login` anchor (wallet-origin `near-` tenants) | The subject check is skipped (`payout_recipient_proof.rs:224`), so an organization owned by any NEAR AI identity can be linked | Open; server |
 | B10 | **Payout link after a change of account** (the change-account flow) | The link keeps the organization proved by the retired identity | Owner question in the change-account spec (Q5) |
+| B12 | **Locally broken Commons account, after #1837**: the account record is malformed, or the enrolled Commons address is now refused by this build's allowlist | #1837 treats both as "not bound" so NEAR AI sign-in is never blocked for good: the new NEAR AI login is stored with no Commons check, and no `commons_login` is recorded. The Commons session cannot renew either. Nothing tells the person; the app looks signed in to Private AI while uploads and account reads quietly fail | Known break once #1837 lands. Owner-approved fix (2026-11-02): a visible "needs attention" state in every shell (F1, section 3.2a) |
 | B11 | First run, legacy migration, renewal | Consistent by construction: each provisions or renews from the stored login (`legacy_migration.rs:186-189`; `renew_account_session`). Safe while #2 cannot change underneath them, which #1837 provides for B1 | Covered by B1's fix |
 
 ## 3. Design: change them together
@@ -154,6 +155,37 @@ commit_connected(staged: { cloud: Option<bundle>, account: Option<record> },
 #1837's ceremony is steps 1-3 for sign-in, without the record. It moves
 onto this function unchanged in behaviour.
 
+### 3.2a The "needs attention" state (B12)
+
+Owner-approved on 2026-11-02 as a surface; its wording is DRAFT (section
+5).
+
+- **Daemon.** When the account record fails to parse, or the enrolled
+  Commons address is refused by the allowlist, status carries
+  `account_state: "needs_attention"` with a fixed reason label:
+  `account_record_unreadable` or `account_address_refused`. These are the
+  two #1837 cases it calls "not bound" (its table: "malformed account
+  record, an enrolled address the allowlist refuses"). The state is
+  computed on every status build from the same `load_account_record` and
+  allowlist check #1837 uses, so it appears whether or not a sign-in has
+  happened. It is distinct from `needs_sign_in`: signing in again does not
+  fix it.
+- **What it says about Private AI.** While the state holds, a NEAR AI
+  login stored without the check is marked `near_ai_login_unconfirmed:
+  true`, so the shells do not present it as the account's login (no
+  "Connected with {provider}" line, no chooser mark).
+- **The way out.** `account_record_unreadable`: sign out and set up again
+  (unenroll, then first run, which provisions from the stored NEAR AI
+  login; consistent by construction, B11). `account_address_refused`: the
+  same, or update the app if the address was dropped from this build by
+  mistake. The daemon offers the action; it never unenrolls on its own.
+- **Every shell.** The state and reason cross IPC and the C ABI as two
+  status fields (both header copies). macOS renders it in the account
+  section where "Connected with" would be; GTK, Windows and Tauri render
+  the same strings in their account sections. This is the one place in
+  this design where all four shells must change in the same release, since
+  a shell that ignores the field shows a working account.
+
 ### 3.3 Sign-out clears the whole set
 
 One verb, `account_disconnect`, replaces the three partial clears (B4, B6,
@@ -186,7 +218,8 @@ Each fits in one PR.
 
 | Rank | Fix | Covers | Size | Existing work |
 | --- | --- | --- | --- | --- |
-| F1 | Gate the sign-in persist on Commons acceptance | B1 | -- | **#1837** (open) |
+| F0 | Gate the sign-in persist on Commons acceptance | B1 | -- | **#1837** (open); prerequisite, not counted |
+| F1 | The "needs attention" state for a locally broken Commons account: daemon status fields, C ABI, and the surface in all four shells | B12 | Small daemon change, one surface per shell | Owner-approved 2026-11-02; follows #1837, whose "not bound" cases it reports |
 | F2 | CLI logout and unenroll stop orphaning the NEAR AI keychain bundle: journal its reference before the wipe; add `near-ai-spend-org.json` and `near-ai-login.json` to the wipe list | B4, part of B5 | Small, client | None |
 | F3 | Check a sign-in on a signed-out but enrolled device against the config's tenant (the provisioning ceremony with the existing device key is the check); refuse to store on refusal | B2, B7's follow-on | Small, client; extends #1837's table | #1837 marks it "not checked" |
 | F4 | Server route for a device that joined by code to ask "does this NEAR AI login belong to my account?" (native session plus token; answers yes or no, names nothing), and the client gate using it | B3 | Medium, server and client | None |
@@ -197,7 +230,7 @@ Each fits in one PR.
 | F9 | `account_disconnect` replacing forget, native sign-out and CLI logout's partial clears, with NEAR AI key revocation | B4, B6, B7 | Medium, client and every shell's sign-out | None |
 | F10 | The change-account flow (companion spec, slice 1) on top of F7 and F8 | Deliberate change | Large | This PR's other spec |
 
-F2, F3 and F5 are independent and can land in any order. F8 depends on
+F1 should land with or straight after #1837, since #1837 is what makes B12 reachable silently. F2, F3 and F5 are independent and can land in any order. F8 depends on
 F7. F9 and F10 depend on F8.
 
 ## 5. Wording
@@ -211,7 +244,23 @@ its DRAFT wording is approved. Two DRAFT strings, if the owner wants them:
 | `account.disconnect.button` | Sign out |
 | `account.disconnect.body` | Signs out of NEAR AI on this Mac. Private AI and uploads stop until you sign in again. |
 
-Neither is a notice. A notice that the app found mismatched credentials
+The "needs attention" surface (section 3.2a). The owner approved the
+surface on 2026-11-02; every string below is DRAFT and needs approval of
+its wording. No string names Trace Commons.
+
+| Key | DRAFT text |
+| --- | --- |
+| `account.attention.title` | This app's account needs attention |
+| `account.attention.record_unreadable` | This app can't read its account details on this Mac. Sign out and set it up again to keep sending traces. |
+| `account.attention.address_refused` | This app can no longer reach the service it was set up with. Update the app, or sign out and set it up again. |
+| `account.attention.private_ai` | Private AI still works with your NEAR AI account. |
+| `account.attention.sign_out` | Sign out |
+
+`account.attention.private_ai` is shown only when a NEAR AI login is
+stored. The attention block is a status in the account section, not a
+banner or notification.
+
+The two sign-out strings are not notices. A notice that the app found mismatched credentials
 would need approval (copy guide rule 9); this design does not propose one.
 
 ## 6. Open questions for the owner
