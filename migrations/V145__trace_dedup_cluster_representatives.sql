@@ -27,6 +27,13 @@
 -- left the cluster. trace_dedup_cluster_rebuild() regenerates the whole table
 -- and is what backfills it below.
 --
+-- Writes that skip triggers leave the table behind: session_replication_role
+-- = replica, pg_restore --disable-triggers, a logical-replication subscriber,
+-- ALTER TABLE ... DISABLE TRIGGER. A cluster with at most 1024 members gets
+-- its count back the next time its representative is looked up again (see
+-- trace_dedup_cluster_apply). Anything else stays wrong until the rebuild
+-- runs, so a restore or bulk load that skips triggers must be followed by one.
+--
 -- Applied by a non-superuser CREATEROLE migrator, as V101 and V114 are: it
 -- holds the owning guard just long enough to own the functions and run the
 -- backfill, then relinquishes it.
@@ -119,8 +126,15 @@ DROP FUNCTION IF EXISTS trace_dedup_cluster_rebuild();
 -- Cost. The representative only changes when the old one left or an earlier
 -- member arrived, so the common case reads and writes one row. Only when the
 -- representative left is it looked up again, by one probe of the members
--- index; the members are recounted only if the count reached zero while
--- members remain, which the triggers never produce.
+-- index.
+--
+-- Self-heal. That re-lookup also recounts the members, reading at most 1025
+-- index entries, so a cluster of up to 1024 members that drifted (a write
+-- that skipped the triggers) is corrected. A bigger cluster keeps its delta
+-- count unless that count is itself 1024 or less, which is then provably
+-- wrong and gets a full recount. The cap keeps a recluster that moves a big
+-- cluster's members out in representative order from paying a full count on
+-- every move.
 CREATE FUNCTION trace_dedup_cluster_apply(
     p_cluster     UUID,
     p_delta       BIGINT,
@@ -134,6 +148,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
     r     public.trace_dedup_cluster_representatives%ROWTYPE;
     v_count BIGINT;
+    v_seen  BIGINT;
     v_id  UUID;
     v_at  TIMESTAMPTZ;
     v_sh  BIGINT;
@@ -157,7 +172,13 @@ BEGIN
                      WHERE dedup_cluster_id = p_cluster;
                     RETURN;
                 END IF;
-                IF v_count <= 0 THEN
+                SELECT pg_catalog.count(*) INTO v_seen
+                  FROM (SELECT 1 FROM public.trace_gate_decisions g
+                         WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL
+                         LIMIT 1025) m;
+                IF v_seen <= 1024 THEN
+                    v_count := v_seen;
+                ELSIF v_count <= 1024 THEN
                     SELECT pg_catalog.count(*) INTO v_count
                       FROM public.trace_gate_decisions g
                      WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL;
@@ -204,22 +225,41 @@ END $$;
 -- ascending order, so two statements touching the same clusters lock them in
 -- the same order and cannot deadlock on each other. (Two statements in one
 -- transaction are still locked statement by statement.)
+--
+-- A trigger with transition tables can take neither a column list nor a WHEN
+-- clause, so it fires for every statement, and Postgres captures the changed
+-- rows whether or not this function reads them. What the function can avoid
+-- is its own work: a statement with no member rows on either side (a decision
+-- insert, which never sets the dedup columns, or an update of a non-member)
+-- returns after one scan of the captured rows. An update of members that
+-- leaves the dedup columns alone still runs the join below and finds nothing.
+--
+-- jit = off: a query here keeps the transition tables' row counts from its
+-- session's first call, since they are fixed when the query is parsed. After
+-- one 200k-row UPDATE, every later single-row UPDATE in that session was
+-- costed as 200k rows and JIT-compiled, about 40 ms each, locally. With JIT
+-- off it was about 0.14 ms. The plans themselves (sorts, merge and hash
+-- steps) hold up at either size; reparsing each call through EXECUTE costs
+-- about 0.7 ms.
 CREATE FUNCTION trace_dedup_cluster_track() RETURNS TRIGGER
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog SET jit = off AS $$
 DECLARE
     c RECORD;
 BEGIN
     IF TG_OP = 'INSERT' THEN
+        IF NOT EXISTS (SELECT 1 FROM dedup_new n
+                        WHERE n.dedup_cluster_id IS NOT NULL AND n.dedup_simhash IS NOT NULL) THEN
+            RETURN NULL;
+        END IF;
         FOR c IN
             WITH ch AS (
-                SELECT n.dedup_cluster_id AS cluster, 1 AS s, n.decision_id, n.decided_at,
+                SELECT n.dedup_cluster_id AS cluster, n.decision_id, n.decided_at,
                        n.dedup_simhash AS simhash, n.dedup_signal_version AS ver
                   FROM dedup_new n
                  WHERE n.dedup_cluster_id IS NOT NULL AND n.dedup_simhash IS NOT NULL
             )
-            SELECT a.cluster, a.delta, a.removed, b.decision_id, b.decided_at, b.simhash, b.ver
-              FROM (SELECT ch.cluster, pg_catalog.sum(ch.s)::BIGINT AS delta,
-                           '{}'::UUID[] AS removed
+            SELECT a.cluster, a.delta, b.decision_id, b.decided_at, b.simhash, b.ver
+              FROM (SELECT ch.cluster, pg_catalog.count(*) AS delta
                       FROM ch GROUP BY ch.cluster) a
               JOIN (SELECT DISTINCT ON (ch.cluster) ch.cluster, ch.decision_id, ch.decided_at,
                            ch.simhash, ch.ver
@@ -227,7 +267,7 @@ BEGIN
                 ON b.cluster = a.cluster
              ORDER BY a.cluster
         LOOP
-            PERFORM public.trace_dedup_cluster_apply(c.cluster, c.delta, c.removed,
+            PERFORM public.trace_dedup_cluster_apply(c.cluster, c.delta, '{}'::UUID[],
                 c.decision_id, c.decided_at, c.simhash, c.ver);
         END LOOP;
     ELSIF TG_OP = 'DELETE' THEN
@@ -243,32 +283,30 @@ BEGIN
                 NULL, NULL, NULL, NULL);
         END LOOP;
     ELSE
+        IF NOT EXISTS (SELECT 1 FROM dedup_old o
+                        WHERE o.dedup_cluster_id IS NOT NULL AND o.dedup_simhash IS NOT NULL)
+           AND NOT EXISTS (SELECT 1 FROM dedup_new n
+                            WHERE n.dedup_cluster_id IS NOT NULL AND n.dedup_simhash IS NOT NULL) THEN
+            RETURN NULL;
+        END IF;
+        -- Each changed row's old side leaves (-1) and its new side joins (+1).
+        -- The FULL JOIN also covers an update that changes the key itself.
         FOR c IN
-            WITH unchanged AS (
-                SELECT o.tenant_id, o.decision_id
+            WITH ch AS (
+                SELECT v.cluster, v.s, v.decision_id, v.decided_at, v.simhash, v.ver
                   FROM dedup_old o
-                  JOIN dedup_new n
+                  FULL JOIN dedup_new n
                     ON n.tenant_id = o.tenant_id AND n.decision_id = o.decision_id
+                 CROSS JOIN LATERAL (VALUES
+                       (o.dedup_cluster_id, -1, o.decision_id, o.decided_at,
+                        o.dedup_simhash, o.dedup_signal_version),
+                       (n.dedup_cluster_id, 1, n.decision_id, n.decided_at,
+                        n.dedup_simhash, n.dedup_signal_version)
+                   ) AS v (cluster, s, decision_id, decided_at, simhash, ver)
                  WHERE (o.decided_at, o.dedup_cluster_id, o.dedup_simhash, o.dedup_signal_version)
-                       IS NOT DISTINCT FROM
+                       IS DISTINCT FROM
                        (n.decided_at, n.dedup_cluster_id, n.dedup_simhash, n.dedup_signal_version)
-            ),
-            ch AS (
-                SELECT o.dedup_cluster_id AS cluster, -1 AS s, o.decision_id, o.decided_at,
-                       o.dedup_simhash AS simhash, o.dedup_signal_version AS ver
-                  FROM dedup_old o
-                 WHERE o.dedup_cluster_id IS NOT NULL AND o.dedup_simhash IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM unchanged u
-                                    WHERE u.tenant_id = o.tenant_id
-                                      AND u.decision_id = o.decision_id)
-                UNION ALL
-                SELECT n.dedup_cluster_id, 1, n.decision_id, n.decided_at,
-                       n.dedup_simhash, n.dedup_signal_version
-                  FROM dedup_new n
-                 WHERE n.dedup_cluster_id IS NOT NULL AND n.dedup_simhash IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM unchanged u
-                                    WHERE u.tenant_id = n.tenant_id
-                                      AND u.decision_id = n.decision_id)
+                   AND v.cluster IS NOT NULL AND v.simhash IS NOT NULL
             )
             SELECT a.cluster, a.delta, a.removed, b.decision_id, b.decided_at, b.simhash, b.ver
               FROM (SELECT ch.cluster, pg_catalog.sum(ch.s)::BIGINT AS delta,

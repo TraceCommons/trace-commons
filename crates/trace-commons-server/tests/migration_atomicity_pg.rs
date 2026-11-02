@@ -2528,6 +2528,118 @@ async fn v145_tracks_dedup_clusters_across_tenants_as_a_non_superuser_owner() {
             ));
         }
 
+        // An UPDATE of members that leaves the dedup columns alone changes
+        // nothing, and one of non-members returns early.
+        let untouched = v145_as_tenant(
+            &mut owner,
+            t2,
+            "UPDATE trace_gate_decisions SET perplexity_micros = perplexity_micros + 1",
+            vec![],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        if untouched.is_err() || now != truth {
+            problems.push(format!(
+                "after an UPDATE of non-dedup columns: {untouched:?}, read {now:?}, \
+                 not {truth:?}"
+            ));
+        }
+
+        // Concurrent writers, each on its own owner connection. `holder`
+        // writes and keeps its transaction open; `waiter` must queue behind
+        // it on the cluster row and then apply its own change on top.
+        let owner_url = with_user(&with_database(&url, DB), OWNER, "probe");
+        let holder = connect(&owner_url).await;
+        let waiter = connect(&owner_url).await;
+
+        // Two READ COMMITTED writers joining one existing cluster.
+        let raced = v145_race(
+            &seed,
+            &holder,
+            waiter,
+            OWNER,
+            &v145_insert(t1, c1, 300, 1),
+            &v145_insert(t2, c1, 301, 2),
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if raced.is_err() || now != truth {
+            problems.push(format!(
+                "after two writers joined one cluster at once: {raced:?}, read {now:?}, \
+                 a full recompute reads {truth:?}"
+            ));
+        }
+
+        // Two writers creating the same new cluster: the second one's insert
+        // waits on the first's, finds the row, and locks it.
+        let c4 = uuid::Uuid::new_v4();
+        let waiter = connect(&owner_url).await;
+        let created = v145_race(
+            &seed,
+            &holder,
+            waiter,
+            OWNER,
+            &v145_insert(t1, c4, 400, 3),
+            &v145_insert(t2, c4, 401, 4),
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c4_row = now.iter().find(|row| row.0 == c4).copied();
+        if created.is_err() || now != truth || c4_row != Some((c4, 400, 2)) {
+            problems.push(format!(
+                "after two writers created one cluster at once: {created:?}, read {now:?}, \
+                 a full recompute reads {truth:?}"
+            ));
+        }
+
+        // A REPEATABLE READ writer whose snapshot predates another writer's
+        // commit to the same cluster fails instead of building on it.
+        let stale = v145_stale_snapshot(
+            &holder,
+            &mut owner,
+            t1,
+            &v145_insert(t2, c1, 500, 5),
+            &v145_insert(t1, c1, 501, 6),
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if stale.as_deref() != Some(SERIALIZATION_FAILURE) || now != truth {
+            problems.push(format!(
+                "a REPEATABLE READ writer with a stale snapshot got {stale:?}, not a \
+                 serialization failure; read {now:?}, a full recompute reads {truth:?}"
+            ));
+        }
+        drop(holder);
+
+        // A write that skips the triggers leaves the count behind until the
+        // cluster's representative is looked up again, which recounts it.
+        seed.batch_execute(&format!(
+            "SET session_replication_role = replica; {}; SET session_replication_role = origin;",
+            v145_insert(t2, c4, 402, 7)
+        ))
+        .await
+        .expect("insert a member with the triggers skipped");
+        let drifted = v145_cluster_table(&seed).await;
+        let healed = v145_as_tenant(
+            &mut owner,
+            t1,
+            "DELETE FROM trace_gate_decisions WHERE dedup_simhash = 400",
+            vec![],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c4_row = now.iter().find(|row| row.0 == c4).copied();
+        if healed.is_err() || now != truth || c4_row != Some((c4, 401, 2)) {
+            problems.push(format!(
+                "after a trigger-skipping insert ({drifted:?}) and a representative \
+                 delete: {healed:?}, read {now:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
         // Nobody but the guard and the gate driver sees the table, and the
         // migrator gave the guard back.
         let visible: i64 = owner
@@ -2589,6 +2701,136 @@ async fn v145_tracks_dedup_clusters_across_tenants_as_a_non_superuser_owner() {
         !role_exists(&url, OWNER).await,
         "{OWNER} is per server and must not outlive the test (#1335)"
     );
+}
+
+const SERIALIZATION_FAILURE: &str = "40001";
+
+/// A member insert as SQL with literals, for the raw-transaction helpers.
+fn v145_insert(tenant: &str, cluster: uuid::Uuid, simhash: i64, secs: i64) -> String {
+    format!(
+        "INSERT INTO trace_gate_decisions
+            (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+             perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+             nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+             attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+             dedup_signal_version)
+         VALUES ('{tenant}', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v', 1, 1, TRUE,
+                 1, 'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                 TIMESTAMPTZ '2026-03-01T00:00:00Z' + make_interval(secs => {secs}),
+                 '{cluster}', {simhash}, 'stamp')"
+    )
+}
+
+fn v145_tenant_tx(tenant: &str, isolation: &str, statement: &str) -> String {
+    format!(
+        "BEGIN ISOLATION LEVEL {isolation};
+         SELECT set_config('trace_commons.trace_tenant_id', '{tenant}', true);
+         {statement};"
+    )
+}
+
+fn v145_tenant_of(statement: &str) -> &str {
+    statement
+        .split("VALUES ('")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').next())
+        .expect("the insert names its tenant")
+}
+
+/// `holder` runs `first` and keeps its transaction open; `waiter` runs
+/// `second` in its own transaction, which must block on a lock (seen from
+/// `seed` in pg_stat_activity) until `holder` commits, then succeed.
+async fn v145_race(
+    seed: &tokio_postgres::Client,
+    holder: &tokio_postgres::Client,
+    waiter: tokio_postgres::Client,
+    owner: &str,
+    first: &str,
+    second: &str,
+) -> Result<(), String> {
+    holder
+        .batch_execute(&v145_tenant_tx(
+            v145_tenant_of(first),
+            "READ COMMITTED",
+            first,
+        ))
+        .await
+        .map_err(|e| format!("holder: {e:?}"))?;
+    let second = format!(
+        "{} COMMIT;",
+        v145_tenant_tx(v145_tenant_of(second), "READ COMMITTED", second)
+    );
+    let blocked = tokio::spawn(async move {
+        let result = waiter.batch_execute(&second).await;
+        drop(waiter);
+        result.map_err(|e| format!("waiter: {e:?}"))
+    });
+    let mut waited = false;
+    for _ in 0..100 {
+        let n: i64 = seed
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity
+                  WHERE usename = $1 AND wait_event_type = 'Lock'",
+                &[&owner],
+            )
+            .await
+            .expect("read pg_stat_activity")
+            .get(0);
+        if n > 0 {
+            waited = true;
+            break;
+        }
+        if blocked.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    holder
+        .batch_execute("COMMIT")
+        .await
+        .map_err(|e| format!("holder commit: {e:?}"))?;
+    blocked.await.map_err(|e| format!("join: {e:?}"))??;
+    if waited {
+        Ok(())
+    } else {
+        Err("the second writer never waited on the first".into())
+    }
+}
+
+/// `stale` opens a REPEATABLE READ transaction and takes its snapshot; then
+/// `other` commits `first`; then `stale` runs `second`. Returns the SQLSTATE
+/// `second` failed with, or None if it succeeded.
+async fn v145_stale_snapshot(
+    other: &tokio_postgres::Client,
+    stale: &mut tokio_postgres::Client,
+    stale_tenant: &str,
+    first: &str,
+    second: &str,
+) -> Option<String> {
+    stale
+        .batch_execute(&format!(
+            "BEGIN ISOLATION LEVEL REPEATABLE READ;
+             SELECT set_config('trace_commons.trace_tenant_id', '{stale_tenant}', true);"
+        ))
+        .await
+        .expect("open the REPEATABLE READ transaction");
+    other
+        .batch_execute(&format!(
+            "{} COMMIT;",
+            v145_tenant_tx(v145_tenant_of(first), "READ COMMITTED", first)
+        ))
+        .await
+        .expect("commit the other writer");
+    let result = stale.batch_execute(second).await;
+    let code = match &result {
+        Ok(()) => None,
+        Err(e) => Some(e.code().map(|c| c.code().to_string()).unwrap_or_default()),
+    };
+    stale
+        .batch_execute(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })
+        .await
+        .expect("end the REPEATABLE READ transaction");
+    code
 }
 
 /// One statement in a tenant-scoped transaction, the way the runtime writes.
