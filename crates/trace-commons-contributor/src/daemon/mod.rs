@@ -602,6 +602,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     // At most one abandoned-collection pass at a time; a slow one is not
     // started again until it finished.
     let mut collection_pass: Option<tokio::task::JoinHandle<()>> = None;
+    let mut lease_pass = tokio::task::JoinSet::new();
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
     // The published estimate table's fetch schedule (OWNER DECISION E11).
     // A local of this loop, so nothing that answers a request can reach it.
@@ -650,14 +651,21 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                 });
             }
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
-            _ = managed_lease_tick.tick() => {
-                managed::sweep(shared, Utc::now()).await;
-                managed::end_quiet_rows(shared, Utc::now()).await;
-                // Detached: a collection is recorded when it finishes.
-                if collection_pass.as_ref().is_none_or(|pass| pass.is_finished()) {
+            // Detached, so the loop never waits on its scan; one at a time.
+            _ = managed_lease_tick.tick(), if lease_pass.is_empty() => {
+                let shared = Arc::clone(shared);
+                lease_pass.spawn(async move { managed::lease_pass(&shared, Utc::now()).await });
+            }
+            Some(done) = lease_pass.join_next(), if !lease_pass.is_empty() => {
+                // Detached too: a collection is recorded when it finishes,
+                // and a long one holds back no later lease tick.
+                let plans = done.unwrap_or_default();
+                if !plans.is_empty()
+                    && collection_pass.as_ref().is_none_or(|pass| pass.is_finished())
+                {
                     let shared = Arc::clone(shared);
                     collection_pass = Some(tokio::spawn(async move {
-                        managed::collect_abandoned(&shared, Utc::now()).await;
+                        managed::collect_abandoned_rows(&shared, plans, Utc::now()).await;
                     }));
                 }
             }

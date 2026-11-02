@@ -296,6 +296,12 @@ struct Entry {
     /// the launcher's final report, which is then taken as how it ended.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     ended_by_daemon: bool,
+    /// The daemon failed this row's pending collection when it ended the
+    /// row, because nothing it knows of will collect it. A launcher that
+    /// did collect still says so, in a late report or its exit receipt,
+    /// and that result is taken over this one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    collection_by_daemon: bool,
     ticket_hash: Option<String>,
     ticket_expires: DateTime<Utc>,
     proof_hash: Option<String>,
@@ -444,36 +450,25 @@ impl SessionRegistry {
         // conversation only while it holds it or once its ticket was
         // redeemed, so one never redeemed does not hide the row that ran.
         //
-        // Dismissal is the conversation's ([`Self::dismiss`] flags every
-        // row). Rows dismissed one at a time (by #1838, which flagged the
-        // listed latest row, or by v0.21.0-0.21.2) leave the conversation
-        // dismissed when its latest row, or its latest standing row, was
-        // dismissed, so no dismissal comes back.
-        let mut last = std::collections::BTreeMap::new();
-        let mut standing = std::collections::BTreeMap::new();
+        // Dismissal is the conversation's: [`Self::dismiss`] flags every
+        // row of it, so none is left to list. A row flagged alone (#1838
+        // and v0.21.0-0.21.2 dismissed one row at a time) is passed over,
+        // and the conversation is listed as its latest row the person kept.
+        // The two builds wrote the same file, so a #1838 dismissal of a
+        // resumed conversation cannot be told from a v0.21.x dismissal of
+        // its resume alone; this reading never hides a row they kept.
+        let mut listed = std::collections::BTreeMap::new();
         for (index, e) in self.data.entries.iter().enumerate() {
-            last.insert(e.root(), index);
-            if e.stands_for_conversation() {
-                standing.insert(e.root(), index);
+            if !e.dismissed && e.stands_for_conversation() {
+                listed.insert(e.root(), index);
             }
         }
-        let entries = &self.data.entries;
-        let listed: std::collections::BTreeSet<usize> = standing
-            .iter()
-            .filter(|(root, index)| {
-                !entries[**index].dismissed
-                    && last.get(*root).is_none_or(|l| !entries[*l].dismissed)
-            })
-            .map(|(_, index)| *index)
-            .collect();
+        let mut listed: Vec<usize> = listed.into_values().collect();
+        listed.sort_unstable();
         let held = self.holders(true);
-        Ok(self
-            .data
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| listed.contains(index))
-            .map(|(_, e)| e)
+        Ok(listed
+            .into_iter()
+            .map(|index| &self.data.entries[index])
             .map(|e| {
                 let mut view = e.view.clone();
                 let owned = e.owned_running();
@@ -691,8 +686,7 @@ impl SessionRegistry {
 
     /// Unknown with no process the daemon can watch: its launcher took the
     /// ticket and went quiet before its first report named the tool's
-    /// process, or named only a pid, which another process may reuse, and
-    /// no collection plan names a process the daemon can watch either. So
+    /// process, and no collection plan names one either. So
     /// nothing will end it but the person (owner, 2026-11-02: dismissed by
     /// hand, never on a timer). A launcher still in its setup is safe to
     /// dismiss from: it checks in before it spawns, and a dismissed row's
@@ -701,8 +695,7 @@ impl SessionRegistry {
         e.view.state == SessionState::Unknown
             && e.proof_hash.is_some()
             && e.watched_process().is_none()
-            && super::collection_plan::read(&self.store, e.view.id)
-                .is_none_or(|plan| plan.process.start_time.is_none())
+            && super::collection_plan::read(&self.store, e.view.id).is_none()
     }
 
     /// Fail unredeemed launches whose ticket expired, and lapse redeemed
@@ -851,6 +844,7 @@ impl SessionRegistry {
             keep_saved_model: request.keep_saved_model,
             resume_of: request.resume_of,
             ended_by_daemon: false,
+            collection_by_daemon: false,
             request,
             ticket_hash: Some(digest(&ticket)),
             ticket_expires: now + Duration::seconds(120),
@@ -1156,8 +1150,12 @@ impl SessionRegistry {
             if let Some(collection @ (CollectionState::Collected | CollectionState::Failed)) =
                 report.collection
             {
-                if entry.view.collect_traces && entry.view.collection == CollectionState::Pending {
+                if entry.view.collect_traces
+                    && (entry.view.collection == CollectionState::Pending
+                        || entry.collection_by_daemon)
+                {
                     entry.view.collection = collection;
+                    entry.collection_by_daemon = false;
                     changed = true;
                 }
             }
@@ -1298,16 +1296,15 @@ impl SessionRegistry {
         if entry.view.state != SessionState::Unknown {
             return Ok(());
         }
-        entry.view.state = SessionState::Failed;
-        entry.ended_by_daemon = true;
+        entry.end_by_daemon(false);
         self.commit(next)
     }
 
     /// The quiet rows (unknown: the launcher stopped reporting) whose tool
     /// the daemon can watch, with that tool's process: rows a collection
-    /// plan (`plans`) does not cover, whose launcher named both the pid and
-    /// its start time. A pid alone could be another process reusing it
-    /// ([`Entry::stuck`]: left to the person).
+    /// plan (`plans`) does not cover, whose launcher named the tool's
+    /// process. A pid named without its start time counts as running while
+    /// any process holds it, so a reused pid only delays the end.
     pub fn quiet_tools(
         &self,
         plans: &std::collections::BTreeSet<Uuid>,
@@ -1322,8 +1319,9 @@ impl SessionRegistry {
 
     /// End the quiet rows in `ids` whose tool the daemon saw exit, as
     /// [`Self::tool_exited`] does, in one write. They have no collection
-    /// plan, so nothing will collect them: a collection still pending
-    /// fails, as it does when a restart finds such a row. A row that is no
+    /// plan, so the daemon will not collect them: a collection still
+    /// pending fails, unless the launcher, which may have collected itself,
+    /// still reports otherwise ([`Entry::end_by_daemon`]). A row that is no
     /// longer unknown (its launcher reported again) is left as it is.
     pub fn end_quiet(&mut self, ids: &[Uuid]) -> Result<(), ManagedError> {
         let mut next = self.data.clone();
@@ -1333,11 +1331,7 @@ impl SessionRegistry {
             .iter_mut()
             .filter(|e| ids.contains(&e.view.id) && e.view.state == SessionState::Unknown)
         {
-            entry.view.state = SessionState::Failed;
-            entry.ended_by_daemon = true;
-            if entry.view.collection == CollectionState::Pending {
-                entry.view.collection = CollectionState::Failed;
-            }
+            entry.end_by_daemon(true);
             changed = true;
         }
         if changed { self.commit(next) } else { Ok(()) }
@@ -1425,11 +1419,7 @@ impl SessionRegistry {
         let mut next = self.data.clone();
         for entry in next.entries.iter_mut().filter(|e| e.root() == root) {
             if let Some((_, unplanned)) = stuck.iter().find(|(id, _)| *id == entry.view.id) {
-                entry.view.state = SessionState::Failed;
-                entry.ended_by_daemon = true;
-                if *unplanned && entry.view.collection == CollectionState::Pending {
-                    entry.view.collection = CollectionState::Failed;
-                }
+                entry.end_by_daemon(*unplanned);
             }
             entry.dismissed = true;
         }
@@ -1464,11 +1454,34 @@ impl Entry {
         self.request.resume_of.unwrap_or(self.view.id)
     }
 
-    /// The tool's process as the launcher named it, when it named both the
-    /// pid and its start time.
+    /// The tool's process as the launcher named it: its pid, with its
+    /// start time when the launcher could read it.
     fn watched_process(&self) -> Option<super::collection_plan::ProcessIdentity> {
-        super::collection_plan::ProcessIdentity::parse(self.process_identity.as_deref()?)
-            .filter(|process| process.start_time.is_some())
+        self.process_identity
+            .as_deref()
+            .and_then(super::collection_plan::ProcessIdentity::parse)
+            .or_else(|| {
+                Some(super::collection_plan::ProcessIdentity {
+                    pid: self.process_id?,
+                    start_time: None,
+                })
+            })
+    }
+
+    /// The daemon ends this row: it saw the tool exit, or the person
+    /// dismissed it while nothing watched it. Failed, the state for a
+    /// session that ended without an exit code from its tool; the
+    /// launcher's final report, if one still comes, is taken as how it
+    /// ended. With `unclaimed`, nothing the daemon knows of will collect
+    /// the row, so a pending collection fails too, until the launcher says
+    /// otherwise (`collection_by_daemon`).
+    fn end_by_daemon(&mut self, unclaimed: bool) {
+        self.view.state = SessionState::Failed;
+        self.ended_by_daemon = true;
+        if unclaimed && self.view.collection == CollectionState::Pending {
+            self.view.collection = CollectionState::Failed;
+            self.collection_by_daemon = true;
+        }
     }
 
     /// Whether this row is listed for its conversation when it is the
@@ -2550,15 +2563,16 @@ mod tests {
         assert_eq!(ids, vec![fresh]);
     }
 
-    /// A registry where rows were dismissed one at a time: by #1838 (which
-    /// flagged only the listed latest row, staging builds from
-    /// 2026-11-02) or by v0.21.0-0.21.2 (every row listed). A conversation
-    /// whose latest row was dismissed stays dismissed, whatever its earlier
-    /// rows say, so no #1838 dismissal comes back; that includes a latest
-    /// row whose resume never started. One whose root alone was dismissed,
-    /// which #1838 never wrote, is listed as its latest row.
+    /// A registry where rows were dismissed one at a time, by #1838 (which
+    /// flagged only the listed latest row, staging builds from 2026-11-02)
+    /// or by v0.21.0-0.21.2 (every row listed). Both wrote the same file,
+    /// so the two cannot be told apart, and the reading chosen never hides
+    /// a row the person kept: the conversation is listed as its latest row
+    /// not dismissed, and is gone once every row that ran is dismissed. A
+    /// #1838 dismissal of a resumed conversation therefore shows its
+    /// earlier row again.
     #[test]
-    fn rows_dismissed_one_at_a_time_keep_their_conversation_dismissed() {
+    fn rows_dismissed_one_at_a_time_never_hide_a_row_the_person_kept() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let account = AccountStore::open(&store)
@@ -2581,23 +2595,22 @@ mod tests {
         };
 
         dismissed_on_disk(&store, &[1], true);
-        assert_eq!(listed(), Vec::<Uuid>::new(), "its latest row was dismissed");
+        assert_eq!(listed(), vec![root], "the resume alone was dismissed");
         dismissed_on_disk(&store, &[0], true);
         assert_eq!(listed(), Vec::<Uuid>::new(), "every row was dismissed");
         dismissed_on_disk(&store, &[1], false);
         assert_eq!(listed(), vec![resumed], "the root alone was dismissed");
 
-        // #1838 listed a resume whose ticket expired unredeemed as the
-        // latest row, and dismissing it flagged that row alone.
+        // A resume whose ticket expired unredeemed, dismissed alone: the
+        // row that ran is listed.
         dismissed_on_disk(&store, &[0], false);
         let mut registry = SessionRegistry::open(&store).unwrap();
         let request = registry.resume_request(resumed, Uuid::new_v4()).unwrap();
         registry.prepare(request, &account).unwrap();
         registry.sweep(Utc::now() + Duration::seconds(121)).unwrap();
         drop(registry);
-        assert_eq!(listed(), vec![resumed], "the row that ran");
         dismissed_on_disk(&store, &[2], true);
-        assert_eq!(listed(), Vec::<Uuid>::new(), "dismissed under #1838");
+        assert_eq!(listed(), vec![resumed], "the row that ran");
     }
 
     /// A resume whose tool never started (its ticket expired) does not
@@ -2738,13 +2751,13 @@ mod tests {
     }
 
     /// A quiet row whose launcher named its tool's pid but not its start
-    /// time (`<pid>:<uuid>`, the launcher's fallback) cannot be told from
-    /// another process that reuses the pid, so the daemon never ends it:
-    /// it is left to the person, who can dismiss it. One that named both
-    /// is watched, and cannot be. The quiet rows the daemon watches are
-    /// those, less the ones a collection plan covers.
+    /// time (`<pid>:<uuid>`, the launcher's fallback) is watched like any
+    /// other: a pid alone counts as running while any process holds it, so
+    /// a reused pid only delays its end, never ends a live tool. It is not
+    /// the person's to dismiss while it may run. The quiet rows the daemon
+    /// watches leave out the ones a collection plan covers.
     #[test]
-    fn a_quiet_row_with_a_pid_only_identity_is_left_to_the_person() {
+    fn a_quiet_row_with_a_pid_only_identity_is_watched() {
         let home = tempfile::tempdir().unwrap();
         let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
         let account = AccountStore::open(&store)
@@ -2752,7 +2765,7 @@ mod tests {
             .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
             .unwrap();
         let mut registry = SessionRegistry::open(&store).unwrap();
-        let mut quiet = |identity: String| {
+        let mut quiet = |pid: u32, identity: String| {
             let prepared = registry
                 .prepare(coding(&account, home.path()), &account)
                 .unwrap();
@@ -2766,38 +2779,128 @@ mod tests {
                     session_id: prepared.session_id,
                     proof: context.proof,
                     state: SessionState::Running,
-                    process_id: Some(42),
+                    process_id: Some(pid),
                     process_identity: Some(identity),
                     exit_code: None,
                 })
                 .unwrap();
             prepared.session_id
         };
-        let pid_only = quiet(format!("42:{}", Uuid::new_v4()));
-        let watched = quiet("43:1700000000".to_owned());
-        let planned = quiet("44:1700000000".to_owned());
+        let pid_only = quiet(42, format!("42:{}", Uuid::new_v4()));
+        let watched = quiet(43, "43:1700000000".to_owned());
+        let planned = quiet(44, "44:1700000000".to_owned());
         registry
             .sweep(Utc::now() + LEASE + Duration::seconds(1))
             .unwrap();
         let views = registry.views().unwrap();
-        let can_dismiss = |id: Uuid| views.iter().find(|v| v.id == id).unwrap().can_dismiss;
-        assert!(can_dismiss(pid_only));
-        assert!(!can_dismiss(watched));
+        for id in [pid_only, watched] {
+            assert!(!views.iter().find(|v| v.id == id).unwrap().can_dismiss);
+        }
+        use super::super::collection_plan::ProcessIdentity;
         let plans = std::collections::BTreeSet::from([planned]);
         assert_eq!(
             registry.quiet_tools(&plans),
-            vec![(
-                watched,
-                super::super::collection_plan::ProcessIdentity {
-                    pid: 43,
-                    start_time: Some(1_700_000_000),
-                }
-            )]
+            vec![
+                (
+                    pid_only,
+                    ProcessIdentity {
+                        pid: 42,
+                        start_time: None
+                    }
+                ),
+                (
+                    watched,
+                    ProcessIdentity {
+                        pid: 43,
+                        start_time: Some(1_700_000_000),
+                    }
+                ),
+            ]
         );
-        registry.dismiss(pid_only).unwrap();
+        assert_eq!(registry.dismiss(pid_only), Err(ManagedError::Conflict));
+    }
+
+    /// The daemon fails a quiet row's pending collection when it ends the
+    /// row, but the launcher may have collected after all (it wrote no
+    /// plan and collected itself, or its final report did not get
+    /// through): its late report, or the exit receipt it left, is taken
+    /// over the daemon's guess. A result the launcher or a plan recorded
+    /// is never overwritten that way.
+    #[test]
+    fn a_launchers_late_collection_result_wins_over_the_daemons() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let mut quiet = || {
+            let prepared = registry
+                .prepare(
+                    LaunchRequest {
+                        collect_traces: true,
+                        ..coding(&account, home.path())
+                    },
+                    &account,
+                )
+                .unwrap();
+            let context = registry
+                .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            registry
+                .report(LifecycleReport {
+                    model: None,
+                    collection: None,
+                    session_id: prepared.session_id,
+                    proof: context.proof.clone(),
+                    state: SessionState::Running,
+                    process_id: Some(42),
+                    process_identity: Some("42:1".into()),
+                    exit_code: None,
+                })
+                .unwrap();
+            (prepared.session_id, context.proof)
+        };
+        let (reported, reported_proof) = quiet();
+        let (receipted, receipted_proof) = quiet();
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        registry.end_quiet(&[reported, receipted]).unwrap();
+        let collection = |registry: &SessionRegistry, id: Uuid| {
+            registry.collection_status(id).unwrap().collection
+        };
+        assert_eq!(collection(&registry, reported), CollectionState::Failed);
+        let late = |id: Uuid, proof: String| LifecycleReport {
+            model: None,
+            collection: Some(CollectionState::Collected),
+            session_id: id,
+            proof,
+            state: SessionState::Exited,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code: Some(0),
+        };
+        registry
+            .report(late(reported, reported_proof.clone()))
+            .unwrap();
+        assert_eq!(collection(&registry, reported), CollectionState::Collected);
+        persist_exit(&store, &late(receipted, receipted_proof)).unwrap();
+        registry.views().unwrap();
+        assert_eq!(collection(&registry, receipted), CollectionState::Collected);
         assert_eq!(
-            registry.describe(pid_only).map(|(_, s)| s),
-            Some(SessionState::Failed)
+            registry.report(LifecycleReport {
+                collection: Some(CollectionState::Failed),
+                ..late(reported, reported_proof)
+            }),
+            Ok(()),
+            "a repeat is accepted"
+        );
+        assert_eq!(
+            collection(&registry, reported),
+            CollectionState::Collected,
+            "and changes nothing"
         );
     }
 

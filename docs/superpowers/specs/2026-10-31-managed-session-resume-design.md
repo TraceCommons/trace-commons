@@ -190,32 +190,35 @@ app; changing collection staging rules.
   whose ticket expired unredeemed therefore gives the row that ran back,
   with its Start again and Resume. Dismiss is the conversation's: it marks
   every row of the root, and is refused while any of them holds the
-  conversation (except a stuck row, below). Rows dismissed one at a time
-  (#1838 flagged only the listed latest row; v0.21.0-0.21.2 listed every
-  row) leave the conversation dismissed when its latest row, or its latest
-  standing row, is dismissed, so no #1838 dismissal comes back. A
-  v0.21.x conversation whose root alone was dismissed is listed as its
-  latest row; one whose resume alone was dismissed stays hidden, since the
-  file cannot tell it from a #1838 dismissal.
+  conversation (except a stuck row, below). The list passes over dismissed
+  rows. Rows dismissed one at a time, by #1838 (which flagged only the
+  listed latest row) or by v0.21.0-0.21.2 (every row listed), are read so
+  that no row the person kept is hidden: the conversation is listed as its
+  latest row not dismissed. The two builds wrote the same registry file, so
+  the shapes cannot be told apart, and no load-time rewrite can carry more
+  than the flags already say; a #1838 dismissal of a resumed conversation
+  therefore shows its earlier row again.
 - A quiet row (unknown: its launcher stopped reporting) that has no
-  collection plan ends once the tool process its launcher named (pid and
-  start time) is gone, in its own pass on every lease tick
-  (`end_quiet_rows`, not gated on a collection pass); a collection still
-  pending on it fails, since nothing will collect it. Before, only a
+  collection plan ends once the tool process its launcher named is gone. A
+  pid named without its start time counts as running while any process
+  holds it, so a reused pid only delays the end. This runs in the lease
+  pass (`lease_pass`): every lease tick, detached from the daemon's loop,
+  one sweep and one listing of the plans, whose plan rows then feed a
+  collection pass when none is running, so a long collection holds back no
+  quiet row. A collection still pending on such a row fails, since the
+  daemon will not collect it, but the launcher's own late result (a
+  report, or its exit receipt) is still taken over that. Before, only a
   collecting row with a plan ended this way, and a non-collecting resume
   held its conversation, refusing Resume, for good.
 - A row whose launcher redeemed its ticket and went quiet before its first
-  report names no process, and one that named only a pid (the launcher's
-  `<pid>:<uuid>` fallback, which a reused pid would fool), so nothing
-  above ends it. It is never ended on a
+  report names no process, so nothing above ends it. It is never ended on a
   timer (owner, 2026-11-02): the row says `can_dismiss`, the shell shows
   Dismiss on it, and dismissing ends it (failed, as `tool_exited` does, so
   a late final report is still taken) and dismisses its conversation.
   `can_dismiss` is false while any other row of the conversation holds it.
-  A row whose collection plan names a process with its start time is not
-  stuck (the plan path watches that process). Dismissing a stuck
-  collecting row with no plan fails its collection; with a plan, the plan
-  settles it.
+  A row whose collection plan names a process is not stuck (the plan path
+  watches that process). Dismissing a stuck collecting row fails its
+  collection, unless its launcher still reports a result.
 - A launcher checks in (a `starting` report, no process) right before it
   spawns its tool, after its setup. The daemon takes the row back as
   starting with a fresh lease, so a launcher whose setup outlasted the
