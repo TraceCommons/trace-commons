@@ -1037,7 +1037,7 @@ fn compaction_keeps_pending_remove_intents() {
         );
         let namespace = namespace_of(&a, PRODUCTION_COMPATIBILITY_INDEX_ID);
         let slot = index.existing_namespace(&namespace).unwrap();
-        let mut state = slot.lock().unwrap();
+        let mut state = slot.write().unwrap();
         index.compact(&namespace, &mut state).unwrap();
     }
     assert_eq!(

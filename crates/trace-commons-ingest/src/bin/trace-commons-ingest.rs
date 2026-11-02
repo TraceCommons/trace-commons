@@ -46076,10 +46076,16 @@ const MAX_CONSECUTIVE_SCORE_DRIVER_FAILURES: usize = 3;
 /// downcast still finds it. A miss is treated as permanent, which preserves
 /// the pre-existing behaviour for every error that is not the scorer's HTTP
 /// boundary.
+///
+/// A database pool error is transient too: the pool timing out (it is
+/// bounded, `POOL_WAIT_TIMEOUT`) or failing to open a connection says the
+/// database was busy or unreachable, not that the trace cannot be scored, so
+/// it must not use up one of the submission's attempts.
 fn is_transient_gate_scoring_failure(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<trace_commons_gate_enclave::ScorerFailure>()
         .is_some_and(|err| err.is_transient())
+        || database_pool_error(error).is_some()
 }
 
 /// Typed failures a driver tick raises on its own behalf, rather than
@@ -46577,10 +46583,15 @@ const MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES: usize = 3;
 /// `TraceContributionError` unchanged and `process_one_pii_backstop` lets it
 /// through `?` into `anyhow::Error`, which preserves the concrete type for
 /// this downcast (and keeps preserving it under any later `.context()`).
+///
+/// A database pool error is transient for the same reason it is for gate
+/// scoring (`is_transient_gate_scoring_failure`): a busy or unreachable
+/// database is never the trace's fault.
 fn is_transient_pii_backstop_failure(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<trace_commons_protocol::trace_contribution::TraceContributionError>()
         .is_some_and(|err| err.is_transient())
+        || database_pool_error(error).is_some()
 }
 
 /// Task 6: one pass of the in-process server-side NEAR AI PII-backstop driver.
@@ -61401,14 +61412,11 @@ async fn fail_export_job_with_internal_error<T>(
     operation: &str,
     error: anyhow::Error,
 ) -> ApiResult<T> {
-    let api_error = internal_error(&error);
-    enforce_export_job_mirror_result(
-        state,
-        operation,
-        mirror_export_job_failed_to_db(state, job, &error).await,
-    )
-    .await
-    .map_err(internal_error)?;
+    let mirror_result = mirror_export_job_failed_to_db(state, job, &error).await;
+    let api_error = internal_error(error);
+    enforce_export_job_mirror_result(state, operation, mirror_result)
+        .await
+        .map_err(internal_error)?;
     Err(api_error)
 }
 
@@ -72611,14 +72619,47 @@ fn audit_append_lock(root: &Path, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>
 /// Sets `event`'s chain fields from the file log's latest event. The caller
 /// holds [`audit_append_lock`], so the file's latest event is still the
 /// latest when [`write_chained_audit_event`] appends this one.
+#[cfg(test)]
 fn chain_audit_event(
+    root: &Path,
+    tenant_id: &str,
+    event: TraceCommonsAuditEvent,
+) -> anyhow::Result<TraceCommonsAuditEvent> {
+    ensure_audit_event_tenant(&event, tenant_id)?;
+    let path = audit_events_path(root, tenant_id);
+    let latest = latest_audit_event(&path, tenant_id)?;
+    chain_audit_event_after(latest.as_ref(), event)
+}
+
+/// Stamps `event.created_at` no earlier than the file log's latest event and
+/// chains it from that event, reading the latest event once. The caller
+/// holds [`audit_append_lock`], so the log's time order is its chain order:
+/// readers sort by `created_at`, and an event built before a concurrent one
+/// could otherwise sort ahead of the event it chains from.
+fn stamp_and_chain_audit_event(
     root: &Path,
     tenant_id: &str,
     mut event: TraceCommonsAuditEvent,
 ) -> anyhow::Result<TraceCommonsAuditEvent> {
     ensure_audit_event_tenant(&event, tenant_id)?;
     let path = audit_events_path(root, tenant_id);
-    let previous_event_hash = latest_audit_event_hash(&path, tenant_id)?
+    let latest = latest_audit_event(&path, tenant_id)?;
+    event.created_at = Utc::now().max(
+        latest
+            .as_ref()
+            .map_or(DateTime::<Utc>::MIN_UTC, |latest| latest.created_at),
+    );
+    chain_audit_event_after(latest.as_ref(), event)
+}
+
+/// Sets `event`'s chain fields to follow `latest`, the file log's latest
+/// event (`None`: the log is empty, so it chains from genesis).
+fn chain_audit_event_after(
+    latest: Option<&TraceCommonsAuditEvent>,
+    mut event: TraceCommonsAuditEvent,
+) -> anyhow::Result<TraceCommonsAuditEvent> {
+    let previous_event_hash = latest
+        .and_then(|latest| latest.event_hash.clone())
         .unwrap_or_else(|| TRACE_AUDIT_EVENT_GENESIS_HASH.to_string());
     event.previous_event_hash = Some(previous_event_hash.clone());
     event.event_hash = None;
@@ -73340,8 +73381,7 @@ async fn write_legacy_segment_resume_event(
         &action_counts,
     );
     event.decision_inputs_hash = Some(resume.db_head_event_hash.clone());
-    event.created_at = Utc::now().max(latest_audit_event_created_at(&path, &tenant.tenant_id)?);
-    let event = chain_audit_event(&state.root, &tenant.tenant_id, event)?;
+    let event = stamp_and_chain_audit_event(&state.root, &tenant.tenant_id, event)?;
     let row = legacy_segment_resume_row_mirror(&event)
         .context("the resume event is not in the repair's shape")?;
     let write = audit_event_storage_write(tenant, &event, row)?;
@@ -73928,7 +73968,7 @@ struct AuditRowMirror {
 async fn append_audit_event_mirrored(
     state: &AppState,
     tenant: &TenantAuth,
-    mut event: TraceCommonsAuditEvent,
+    event: TraceCommonsAuditEvent,
     row: AuditRowMirror,
     label: &'static str,
 ) -> anyhow::Result<TraceCommonsAuditEvent> {
@@ -73937,11 +73977,7 @@ async fn append_audit_event_mirrored(
     // Stamped under the lock, so the log's time order is its chain order:
     // readers sort by `created_at`, and an event built before a concurrent
     // one could otherwise sort ahead of the event it chains from.
-    event.created_at = Utc::now().max(latest_audit_event_created_at(
-        &audit_events_path(&state.root, &tenant.tenant_id),
-        &tenant.tenant_id,
-    )?);
-    let event = chain_audit_event(&state.root, &tenant.tenant_id, event)?;
+    let event = stamp_and_chain_audit_event(&state.root, &tenant.tenant_id, event)?;
     if state.require_db_mirror_writes {
         let mirror_result = mirror_audit_event_row_to_db(state, tenant, &event, row).await;
         if let Err(error) = &mirror_result {
@@ -73989,12 +74025,6 @@ fn latest_audit_event_hash(path: &Path, tenant_id: &str) -> anyhow::Result<Optio
     Ok(latest_audit_event(path, tenant_id)?.and_then(|event| event.event_hash))
 }
 
-fn latest_audit_event_created_at(path: &Path, tenant_id: &str) -> anyhow::Result<DateTime<Utc>> {
-    Ok(latest_audit_event(path, tenant_id)?
-        .map(|event| event.created_at)
-        .unwrap_or(DateTime::<Utc>::MIN_UTC))
-}
-
 fn latest_audit_event(
     path: &Path,
     tenant_id: &str,
@@ -74018,26 +74048,37 @@ fn latest_audit_event(
 }
 
 /// The last line of `path` that is not blank, trimmed, read from the end of
-/// the file. Every audit append reads the latest event (for its time, its
-/// chain hash, and the check before writing), under the tenant's append
-/// lock; reading the whole log each time made an append cost the size of
-/// the tenant's history. This reads back from the end in growing chunks
-/// until it holds one complete line, so an append reads about one event.
+/// the file. Every audit append reads the latest event under the tenant's
+/// append lock; reading the whole log each time made an append cost the
+/// size of the tenant's history. This reads back from the end in growing
+/// chunks, so an append reads about one event.
+///
+/// It returns what `body.lines().rev().map(str::trim).find(|l|
+/// !l.is_empty())` returns over the whole file, with "blank" decided by
+/// `str::trim` (Unicode whitespace) on each decoded line. Unlike reading the
+/// whole file, it decodes only the lines it inspects: invalid UTF-8 earlier
+/// in the log no longer refuses an append. The chain verifier, which reads
+/// every event, is what checks the whole log.
 fn read_last_nonempty_line(path: &Path) -> std::io::Result<Option<String>> {
     use std::io::{Read, Seek, SeekFrom};
     const FIRST_CHUNK: u64 = 8 * 1024;
     let mut file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    let mut start = len;
+    let mut start = file.metadata()?.len();
     let mut chunk = FIRST_CHUNK;
-    // Bytes `start..len` of the file, in file order.
+    // Bytes `start..` up to the end of the lines not yet inspected, in file
+    // order. Lines found blank are cut off its end.
     let mut tail: Vec<u8> = Vec::new();
     loop {
-        if start == 0 && !tail.is_empty() {
-            break;
+        // Inspect every complete line in `tail`, last first. The first line
+        // is complete only once the read has reached the start of the file.
+        while let Some(newline) = tail.iter().rposition(|byte| *byte == b'\n') {
+            if let Some(line) = nonblank_line(&tail[newline + 1..])? {
+                return Ok(Some(line));
+            }
+            tail.truncate(newline);
         }
         if start == 0 {
-            return Ok(None);
+            return nonblank_line(&tail);
         }
         let take = chunk.min(start);
         start -= take;
@@ -74047,25 +74088,15 @@ fn read_last_nonempty_line(path: &Path) -> std::io::Result<Option<String>> {
         read.extend_from_slice(&tail);
         tail = read;
         chunk = chunk.saturating_mul(2);
-        // A line is complete once a newline precedes its last non-blank
-        // byte, or the read has reached the start of the file.
-        let Some(end) = tail.iter().rposition(|byte| !byte.is_ascii_whitespace()) else {
-            continue;
-        };
-        if tail[..end].contains(&b'\n') || start == 0 {
-            break;
-        }
     }
-    let Some(end) = tail.iter().rposition(|byte| !byte.is_ascii_whitespace()) else {
-        return Ok(None);
-    };
-    let line_start = tail[..end]
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |newline| newline + 1);
-    let line = std::str::from_utf8(&tail[line_start..=end])
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    Ok(Some(line.trim().to_string()))
+}
+
+/// `line` decoded and trimmed, or `None` when that leaves nothing.
+fn nonblank_line(line: &[u8]) -> std::io::Result<Option<String>> {
+    let line = std::str::from_utf8(line)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+        .trim();
+    Ok((!line.is_empty()).then(|| line.to_string()))
 }
 
 fn compute_audit_event_hash(
@@ -79747,7 +79778,68 @@ fn maintenance_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     internal_error(error)
 }
 
-fn internal_error(error: impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
+/// The label of a `503` refused because no database connection came free
+/// within the pool's wait timeout (`trace_commons_server::db::postgres::
+/// POOL_WAIT_TIMEOUT`), or the pool is closed.
+const DATABASE_BUSY_LABEL: &str = "database_busy";
+
+/// The pool error `error` is, or wraps, if any. Read by downcast along the
+/// error's source chain, for the error shapes that reach the HTTP and driver
+/// error paths: a raw `deadpool_postgres::PoolError`, a
+/// `DatabaseError::PoolRuntime`, or either under `anyhow` context.
+fn database_pool_error(error: &dyn std::any::Any) -> Option<&deadpool_postgres::PoolError> {
+    fn from_cause<'a>(
+        cause: &'a (dyn std::error::Error + 'static),
+    ) -> Option<&'a deadpool_postgres::PoolError> {
+        cause
+            .downcast_ref::<deadpool_postgres::PoolError>()
+            .or_else(|| match cause.downcast_ref::<DatabaseError>() {
+                Some(DatabaseError::PoolRuntime(pool_error)) => Some(pool_error),
+                _ => None,
+            })
+    }
+    fn from_chain<'a>(
+        error: &'a (dyn std::error::Error + 'static),
+    ) -> Option<&'a deadpool_postgres::PoolError> {
+        std::iter::successors(Some(error), |cause| cause.source()).find_map(from_cause)
+    }
+    if let Some(error) = error.downcast_ref::<anyhow::Error>() {
+        return error.chain().find_map(from_cause);
+    }
+    if let Some(error) = error.downcast_ref::<DatabaseError>() {
+        return from_chain(error);
+    }
+    if let Some(error) = error.downcast_ref::<deadpool_postgres::PoolError>() {
+        return from_chain(error);
+    }
+    None
+}
+
+/// Whether `error` is the pool refusing a connection for load or shutdown:
+/// no connection came free (or could be opened) within its timeout, or the
+/// pool is closed. Neither is a fault of the request.
+fn is_database_pool_unavailable(error: &dyn std::any::Any) -> bool {
+    matches!(
+        database_pool_error(error),
+        Some(deadpool_postgres::PoolError::Timeout(_) | deadpool_postgres::PoolError::Closed)
+    )
+}
+
+/// `500` for an internal failure, except a database pool that timed out or
+/// is closed, which is load rather than a fault: `503 database_busy` with a
+/// retry hint, so a client backs off instead of reading a server error.
+fn internal_error<E: std::fmt::Display + 'static>(error: E) -> (StatusCode, Json<ApiError>) {
+    if is_database_pool_unavailable(&error) {
+        tracing::warn!(
+            error_hash = %safe_display_error_hash(&error),
+            "Trace Commons database pool unavailable"
+        );
+        return api_error_with_retry(
+            StatusCode::SERVICE_UNAVAILABLE,
+            DATABASE_BUSY_LABEL,
+            Some(transient_unavailable_retry_after_seconds()),
+        );
+    }
     tracing::error!(
         error_hash = %safe_display_error_hash(&error),
         "Trace Commons ingestion operation failed"

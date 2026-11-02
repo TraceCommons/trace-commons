@@ -103332,3 +103332,104 @@ fn read_last_nonempty_line_matches_a_whole_file_scan() {
         );
     }
 }
+
+#[test]
+fn internal_error_answers_a_pool_timeout_with_503_database_busy() {
+    let timeout = || deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait);
+    let busy: Vec<(&str, (StatusCode, Json<ApiError>))> = vec![
+        ("raw pool error", internal_error(timeout())),
+        (
+            "database error",
+            internal_error(DatabaseError::PoolRuntime(timeout())),
+        ),
+        (
+            "anyhow with context",
+            internal_error(
+                anyhow::Error::new(DatabaseError::PoolRuntime(timeout()))
+                    .context("failed to read the routing row"),
+            ),
+        ),
+        (
+            "create timeout",
+            internal_error(deadpool_postgres::PoolError::Timeout(
+                deadpool_postgres::TimeoutType::Create,
+            )),
+        ),
+        (
+            "closed pool",
+            internal_error(DatabaseError::PoolRuntime(
+                deadpool_postgres::PoolError::Closed,
+            )),
+        ),
+    ];
+    for (case, (status, Json(body))) in busy {
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{case}");
+        assert_eq!(body.error, DATABASE_BUSY_LABEL, "{case}");
+        assert!(
+            body.retry_after_seconds.is_some_and(|seconds| seconds > 0),
+            "{case} carries a retry hint"
+        );
+    }
+
+    let failed: Vec<(&str, (StatusCode, Json<ApiError>))> = vec![
+        (
+            "unconfigured pool",
+            internal_error(DatabaseError::Pool("gate_driver_pool_unconfigured".into())),
+        ),
+        (
+            "query failure",
+            internal_error(DatabaseError::Query("boom".into())),
+        ),
+        ("plain text", internal_error("boom")),
+        ("anyhow", internal_error(anyhow::anyhow!("boom"))),
+    ];
+    for (case, (status, Json(body))) in failed {
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{case}");
+        assert_eq!(body.retry_after_seconds, None, "{case}");
+    }
+}
+
+#[test]
+fn a_database_pool_error_never_uses_up_a_scoring_or_pii_backstop_attempt() {
+    let pool_errors = [
+        anyhow::Error::new(DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait),
+        ))
+        .context("failed to load the gate decision"),
+        anyhow::Error::new(deadpool_postgres::PoolError::Closed),
+        anyhow::Error::new(DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Create),
+        )),
+    ];
+    for error in &pool_errors {
+        assert!(is_transient_gate_scoring_failure(error), "{error:#}");
+        assert!(is_transient_pii_backstop_failure(error), "{error:#}");
+    }
+    let permanent = [
+        anyhow::anyhow!("envelope failed to decode"),
+        anyhow::Error::new(DatabaseError::Query("constraint".into())),
+        anyhow::Error::new(DatabaseError::Pool("pool unconfigured".into())),
+    ];
+    for error in &permanent {
+        assert!(!is_transient_gate_scoring_failure(error), "{error:#}");
+        assert!(!is_transient_pii_backstop_failure(error), "{error:#}");
+    }
+}
+
+#[test]
+fn read_last_nonempty_line_skips_unicode_blank_lines() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("audit.jsonl");
+    for body in [
+        "{\"event\":1}\n\u{a0}\n",
+        "{\"event\":1}\n\u{2028}\n\u{85}\n",
+        "{\"event\":1}\n\u{b}\n",
+    ] {
+        std::fs::write(&path, body).expect("write");
+        assert_eq!(
+            read_last_nonempty_line(&path).expect("read").as_deref(),
+            Some("{\"event\":1}"),
+            "{body:?}"
+        );
+    }
+}

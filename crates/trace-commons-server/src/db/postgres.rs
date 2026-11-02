@@ -385,23 +385,39 @@ const LEADERBOARD_INPUTS_SQL: &str = "SELECT
 pub const POOL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long opening a new connection may take, so an unreachable database
-/// fails a caller instead of holding it for the TCP timeout.
+/// fails a caller instead of holding it for the TCP timeout. A longer
+/// `connect_timeout` in the connection URL raises it for that pool: this is
+/// a floor on what the operator asked for, never a cap below it.
 pub const POOL_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long the health check on a reused connection may take.
 pub const POOL_RECYCLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Builds a pool of at most `max_size` connections whose waits are bounded
-/// by the timeouts above. Every pool this backend opens goes through here.
+/// The create timeout for a pool on `config`: [`POOL_CREATE_TIMEOUT`], or
+/// the URL's `connect_timeout` when that is longer, so the pool never cuts
+/// off a connect the operator allowed more time for.
+fn pool_create_timeout(config: &tokio_postgres::Config) -> std::time::Duration {
+    config
+        .get_connect_timeout()
+        .map_or(POOL_CREATE_TIMEOUT, |connect| {
+            (*connect).max(POOL_CREATE_TIMEOUT)
+        })
+}
+
+/// Builds a pool of at most `max_size` connections on `config` whose waits
+/// are bounded by the timeouts above. Every pool this backend opens goes
+/// through here.
 fn bounded_pool(
-    manager: deadpool_postgres::Manager,
+    config: tokio_postgres::Config,
     max_size: usize,
 ) -> Result<Pool, deadpool_postgres::BuildError> {
+    let create_timeout = pool_create_timeout(&config);
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
     Pool::builder(manager)
         .max_size(max_size)
         .runtime(deadpool_postgres::Runtime::Tokio1)
         .wait_timeout(Some(POOL_WAIT_TIMEOUT))
-        .create_timeout(Some(POOL_CREATE_TIMEOUT))
+        .create_timeout(Some(create_timeout))
         .recycle_timeout(Some(POOL_RECYCLE_TIMEOUT))
         .build()
 }
@@ -412,8 +428,7 @@ impl PgBackend {
             .url()
             .parse::<tokio_postgres::Config>()
             .map_err(|e| DatabaseError::Pool(format!("invalid PostgreSQL URL: {e}")))?;
-        let manager = deadpool_postgres::Manager::new(pg_config, tokio_postgres::NoTls);
-        let pool = bounded_pool(manager, config.pool_size)?;
+        let pool = bounded_pool(pg_config, config.pool_size)?;
 
         // Build a SEPARATE, small resolver pool only when a distinct resolver
         // connection string is configured. This pool runs as the narrow
@@ -428,9 +443,7 @@ impl PgBackend {
                                 "invalid login-resolver PostgreSQL URL: {e}"
                             ))
                         })?;
-                let resolver_manager =
-                    deadpool_postgres::Manager::new(resolver_config, tokio_postgres::NoTls);
-                let resolver_pool = bounded_pool(resolver_manager, 2)?;
+                let resolver_pool = bounded_pool(resolver_config, 2)?;
                 Some(resolver_pool)
             }
             None => None,
@@ -447,9 +460,7 @@ impl PgBackend {
                     .map_err(|e| {
                         DatabaseError::Pool(format!("invalid gate-driver PostgreSQL URL: {e}"))
                     })?;
-                let gate_driver_manager =
-                    deadpool_postgres::Manager::new(gate_driver_config, tokio_postgres::NoTls);
-                let gate_driver_pool = bounded_pool(gate_driver_manager, 2)?;
+                let gate_driver_pool = bounded_pool(gate_driver_config, 2)?;
                 Some(gate_driver_pool)
             }
             None => None,
@@ -469,11 +480,7 @@ impl PgBackend {
                             "invalid pii-backstop-driver PostgreSQL URL: {e}"
                         ))
                     })?;
-                let pii_backstop_driver_manager = deadpool_postgres::Manager::new(
-                    pii_backstop_driver_config,
-                    tokio_postgres::NoTls,
-                );
-                let pii_backstop_driver_pool = bounded_pool(pii_backstop_driver_manager, 2)?;
+                let pii_backstop_driver_pool = bounded_pool(pii_backstop_driver_config, 2)?;
                 Some(pii_backstop_driver_pool)
             }
             None => None,
@@ -490,9 +497,7 @@ impl PgBackend {
                     .map_err(|e| {
                         DatabaseError::Pool(format!("invalid invite-registry PostgreSQL URL: {e}"))
                     })?;
-                let invite_registry_manager =
-                    deadpool_postgres::Manager::new(invite_registry_config, tokio_postgres::NoTls);
-                let invite_registry_pool = bounded_pool(invite_registry_manager, 2)?;
+                let invite_registry_pool = bounded_pool(invite_registry_config, 2)?;
                 Some(invite_registry_pool)
             }
             None => None,
@@ -8996,6 +9001,33 @@ mod tests {
             "PgBackend must not expose its raw pool as a normal public API; use the \
              tenant-context helpers for application paths and an explicit test hook for \
              raw RLS probes"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pool_timeout_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn config(url: &str) -> tokio_postgres::Config {
+        url.parse().expect("valid PostgreSQL URL")
+    }
+
+    #[test]
+    fn create_timeout_never_cuts_below_the_url_connect_timeout() {
+        assert_eq!(
+            pool_create_timeout(&config("postgres://u@127.0.0.1/db")),
+            POOL_CREATE_TIMEOUT
+        );
+        assert_eq!(
+            pool_create_timeout(&config("postgres://u@127.0.0.1/db?connect_timeout=3")),
+            POOL_CREATE_TIMEOUT,
+            "a shorter connect timeout still fails on its own first"
+        );
+        assert_eq!(
+            pool_create_timeout(&config("postgres://u@127.0.0.1/db?connect_timeout=30")),
+            Duration::from_secs(30)
         );
     }
 }
