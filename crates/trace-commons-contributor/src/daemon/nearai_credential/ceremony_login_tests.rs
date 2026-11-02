@@ -52,7 +52,9 @@ async fn a_stored_session_remembers_its_login_and_a_failed_one_does_not() {
     let (sign_in, port) = oauth_leg(&store, login).await;
     let finishing = tokio::spawn(async move {
         sign_in
-            .finish(&api, |_, _, _| async { Err(anyhow!("storage failed")) })
+            .finish(&api, &Progress::new(), |_, _, _| async {
+                Err(anyhow!("storage failed"))
+            })
             .await
     });
     deposit(port).await;
@@ -61,8 +63,11 @@ async fn a_stored_session_remembers_its_login_and_a_failed_one_does_not() {
 
     let api = CloudApi::live().unwrap();
     let (sign_in, port) = oauth_leg(&store, login).await;
-    let finishing =
-        tokio::spawn(async move { sign_in.finish(&api, |_, _, _| async { Ok(()) }).await });
+    let finishing = tokio::spawn(async move {
+        sign_in
+            .finish(&api, &Progress::new(), |_, _, _| async { Ok(()) })
+            .await
+    });
     deposit(port).await;
     finishing.await.unwrap().unwrap();
     assert_eq!(
