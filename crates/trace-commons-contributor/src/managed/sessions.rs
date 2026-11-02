@@ -430,11 +430,24 @@ impl SessionRegistry {
     pub fn views(&mut self) -> Result<Vec<SessionView>, ManagedError> {
         self.reconcile_receipts()?;
         self.sweep(Utc::now())?;
+        // One row per conversation: its latest. A resume is a new row on
+        // the same conversation, and listing the rows it continues beside
+        // it showed the conversation once per resume, each with its own
+        // Resume. Counted over dismissed rows too, so dismissing the
+        // latest does not bring back the one before it.
+        let mut latest = std::collections::BTreeMap::new();
+        for (index, e) in self.data.entries.iter().enumerate() {
+            latest.insert(e.request.resume_of.unwrap_or(e.view.id), index);
+        }
         Ok(self
             .data
             .entries
             .iter()
-            .filter(|e| !e.dismissed)
+            .enumerate()
+            .filter(|(index, e)| {
+                !e.dismissed && latest.get(&e.request.resume_of.unwrap_or(e.view.id)) == Some(index)
+            })
+            .map(|(_, e)| e)
             .map(|e| {
                 let mut view = e.view.clone();
                 let owned = e.owned_running();
@@ -2126,6 +2139,34 @@ mod tests {
         assert_eq!(reopened.resume_root(root), Some(root));
     }
 
+    /// A conversation is one row, its latest: the rows a resume continues
+    /// are not listed beside it, and dismissing the latest does not bring
+    /// one back. A fresh launch in the same folder is its own row.
+    #[test]
+    fn a_resumed_conversation_is_listed_once() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let root = ended(&mut registry, coding(&account, home.path()), &account);
+        let request = registry.resume_request(root, Uuid::new_v4()).unwrap();
+        let first = ended(&mut registry, request, &account);
+        let request = registry.resume_request(first, Uuid::new_v4()).unwrap();
+        let second = ended(&mut registry, request, &account);
+        let fresh = ended(&mut registry, coding(&account, home.path()), &account);
+
+        let ids = |registry: &mut SessionRegistry| -> Vec<Uuid> {
+            registry.views().unwrap().iter().map(|v| v.id).collect()
+        };
+        assert_eq!(ids(&mut registry), vec![second, fresh]);
+
+        registry.dismiss(second).unwrap();
+        assert_eq!(ids(&mut registry), vec![fresh], "no older row comes back");
+    }
+
     /// Start again on a resumed row starts a fresh conversation; only
     /// Resume continues the root's.
     #[test]
@@ -2274,9 +2315,12 @@ mod tests {
         let views = reopened.views().unwrap();
         let find = |id: Uuid| views.iter().find(|v| v.id == id).unwrap();
         assert!(views.iter().all(|v| v.id != root), "the root is dismissed");
-        assert_eq!(find(resumed).resumed_from, Some(root_started));
+        assert!(
+            views.iter().all(|v| v.id != resumed),
+            "the conversation is listed as its latest row"
+        );
         assert_eq!(find(chained).resumed_from, Some(root_started));
-        let json = serde_json::to_value(find(resumed)).unwrap();
+        let json = serde_json::to_value(find(chained)).unwrap();
         assert!(json["resumed_from"].is_string(), "{json}");
     }
 
