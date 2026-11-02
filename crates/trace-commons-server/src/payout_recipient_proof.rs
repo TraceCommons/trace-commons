@@ -87,9 +87,13 @@ impl std::fmt::Debug for VerifiedRecipient {
 pub enum RecipientProofRefusal {
     /// NEAR AI did not answer who the token belongs to.
     LoginUnverified,
-    /// The account is anchored on another NEAR AI subject, or on none (a
-    /// wallet-origin account has no NEAR AI login to match).
+    /// The account is anchored on another NEAR AI subject.
     SubjectMismatch,
+    /// The account has no NEAR AI login anchor (a wallet-origin or
+    /// principal-linked account), so no subject could match. On the wire it
+    /// is `subject_mismatch`, the generic refusal shipped apps already show;
+    /// [`Self::log_reason`] tells the two apart in logs.
+    NoLoginAnchor,
     /// The org is not in the list, not active, or not owned.
     OrgNotOwned,
     /// The rail answered that the org is gone.
@@ -104,11 +108,20 @@ impl RecipientProofRefusal {
     pub fn label(self) -> &'static str {
         match self {
             Self::LoginUnverified => "near_ai_login_unverified",
-            Self::SubjectMismatch => "subject_mismatch",
+            Self::SubjectMismatch | Self::NoLoginAnchor => "subject_mismatch",
             Self::OrgNotOwned => "org_not_owned",
             Self::OrgUnavailable => "near_ai_org_unavailable",
             Self::OrgNotPermitted => "near_ai_org_not_permitted",
             Self::Unavailable => "payout_unavailable",
+        }
+    }
+
+    /// The cause, for log lines only: [`Self::label`] except where two
+    /// causes share a wire label.
+    pub fn log_reason(self) -> &'static str {
+        match self {
+            Self::NoLoginAnchor => "no_near_ai_login",
+            other => other.label(),
         }
     }
 }
@@ -118,7 +131,7 @@ impl RecipientProofRefusal {
 pub trait RecipientProofVerifier: Send + Sync {
     /// `login_anchors` are the account's NEAR AI login anchors
     /// (`trace_near_account_anchors.anchor_hash` with `identity_source =
-    /// 'near_ai_login'`). An empty set is refused as `SubjectMismatch`.
+    /// 'near_ai_login'`). An empty set is refused as `NoLoginAnchor`.
     async fn verify(
         &self,
         proof: RecipientProof,
@@ -225,7 +238,7 @@ impl RecipientProofVerifier for NearAiOrgVerifier {
         // is recorded (owner decision 2026-11-02). Refused before the token
         // is spent.
         if login_anchors.is_empty() {
-            return Err(RecipientProofRefusal::SubjectMismatch);
+            return Err(RecipientProofRefusal::NoLoginAnchor);
         }
         let user = self.users_me(&access_token).await?;
         drop(access_token);
@@ -405,7 +418,7 @@ mod tests {
         .await;
         assert_eq!(
             verifier(&base).verify(proof(), &[]).await.unwrap_err(),
-            RecipientProofRefusal::SubjectMismatch
+            RecipientProofRefusal::NoLoginAnchor
         );
         let mock = mock.lock().unwrap();
         assert_eq!(mock.users_me_calls, 0);
@@ -559,6 +572,10 @@ mod tests {
                 RecipientProofRefusal::SubjectMismatch,
                 Outcome::SubjectMismatch,
             ),
+            (
+                RecipientProofRefusal::NoLoginAnchor,
+                Outcome::SubjectMismatch,
+            ),
             (RecipientProofRefusal::OrgNotOwned, Outcome::OrgNotOwned),
             (
                 RecipientProofRefusal::OrgUnavailable,
@@ -575,6 +592,14 @@ mod tests {
         ] {
             assert_eq!(refusal.label(), outcome.as_str());
         }
+        assert_eq!(
+            RecipientProofRefusal::NoLoginAnchor.log_reason(),
+            "no_near_ai_login"
+        );
+        assert_eq!(
+            RecipientProofRefusal::SubjectMismatch.log_reason(),
+            "subject_mismatch"
+        );
     }
 
     #[test]

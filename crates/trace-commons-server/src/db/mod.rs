@@ -3263,10 +3263,6 @@ pub enum PayoutLinkConfirm {
     ChangePending,
     /// An unlink with no active link.
     NotLinked,
-    /// A link on an account that has no NEAR AI login anchor (any more):
-    /// it links nothing until its login is recorded. Unlinks are not
-    /// refused.
-    NoLoginAnchor,
 }
 
 /// One account's link state on one rail, for the link routes.
@@ -3763,8 +3759,7 @@ pub trait PayoutStore: Send + Sync {
     /// active link, each with its audit rows. Serialized per account and
     /// rail. Refuses (consuming the request) when it expired, a newer
     /// request superseded it, or the account's link version is no longer
-    /// the request's `expected_current_version`; refuses a link (never an
-    /// unlink) when the account has no NEAR AI login anchor.
+    /// the request's `expected_current_version`.
     async fn confirm_payout_link_request(
         &self,
         tenant: &str,

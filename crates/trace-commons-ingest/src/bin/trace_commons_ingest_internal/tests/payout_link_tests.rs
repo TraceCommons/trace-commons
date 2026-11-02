@@ -309,7 +309,9 @@ impl Harness {
             .unwrap();
     }
 
-    /// Removes every NEAR AI login anchor of `account`.
+    /// Removes every NEAR AI login anchor of `account`. Test-only: no
+    /// production path removes an anchor. It stands for an unanchored
+    /// account whose link was made before the start checked anchors.
     async fn drop_login_anchors(&self, account: &Account) {
         self.backend
             .raw_pool_for_tests_and_diagnostics()
@@ -644,40 +646,9 @@ async fn an_account_with_no_near_ai_login_links_nothing() {
     );
 }
 
-/// A login anchor removed between start and confirm: the confirm writes no
-/// link. The request is consumed, as every other confirm refusal does.
-#[tokio::test]
-async fn a_link_confirmed_after_the_login_is_gone_is_refused() {
-    let Some(h) = harness().await else { return };
-    let account = h.account().await;
-    let (status, body) = h
-        .start(&account, link_body(Uuid::new_v4(), org(1), 0))
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let handle = body["handle"].as_str().unwrap().to_owned();
-    h.drop_login_anchors(&account).await;
-    let (status, body) = h.confirm(&account, &handle).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["error"], "subject_mismatch", "{body}");
-    assert!(
-        h.links(
-            &account,
-            &[PayoutLinkState::Waiting, PayoutLinkState::Active]
-        )
-        .await
-        .is_empty()
-    );
-    assert_eq!(h.request_rows(&account).await, 0);
-    assert_eq!(
-        h.audit(&account).await,
-        vec![PayoutAuditAction::LinkRequested]
-    );
-    assert_eq!(h.version(&account).await, 0);
-}
-
-/// A link made before the login went away is left as it is: status still
-/// reports it and the pass still pays it. A change to another org is
-/// refused; stopping payouts is not.
+/// A link an unanchored account made before this check existed is left as
+/// it is: status still reports it and the pass still pays it. A change to
+/// another org is refused; stopping payouts is not.
 #[tokio::test]
 async fn an_existing_link_without_a_login_is_kept_and_can_only_be_unlinked() {
     let Some(h) = harness().await else { return };
