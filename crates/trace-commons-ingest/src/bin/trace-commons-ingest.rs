@@ -20487,6 +20487,45 @@ async fn audit_account_content_read_failure(
     )
 }
 
+/// Failed-read audits of the account content read-back that may run in the
+/// background at once. Each waits on the database pool, so the bound keeps
+/// a burst of busy reads from queueing an unbounded number of them.
+const ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT: usize = 32;
+
+static ACCOUNT_CONTENT_BACKGROUND_AUDITS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT,
+        ))
+    });
+
+/// Audit a content read-back that failed because the database pool was busy,
+/// without making the caller wait for it. The caller answers `503` straight
+/// away; the audit runs on its own task and still waits its turn for a pool
+/// connection, so the failed read is recorded once the pool frees up. It is
+/// best-effort: when [`ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT`] audits are
+/// already waiting, this one is skipped and logged (hash-only), and the
+/// handle is `None`. The read itself is refused either way.
+fn spawn_account_content_read_failure_audit(
+    state: Arc<AppState>,
+    audit_tenant: TenantAuth,
+    submission_id: Uuid,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let Ok(permit) = Arc::clone(&ACCOUNT_CONTENT_BACKGROUND_AUDITS).try_acquire_owned() else {
+        tracing::warn!(
+            submission_id = %submission_id,
+            "Trace Commons account content read-back failure audit skipped: \
+             too many background audits waiting on the database"
+        );
+        return None;
+    };
+    Some(tokio::spawn(async move {
+        let _permit = permit;
+        let _ =
+            audit_account_content_read_failure(state.as_ref(), &audit_tenant, submission_id).await;
+    }))
+}
+
 async fn account_trace_content_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -20553,10 +20592,23 @@ async fn account_trace_content_handler(
                 submission_id = %submission_id,
                 "Trace Commons account content read-back failed; failing closed"
             );
-            let denied =
-                audit_account_content_read_failure(state.as_ref(), &audit_tenant, submission_id)
-                    .await;
-            return Err(database_busy_response(&error).unwrap_or(denied));
+            // A pool that timed out answers 503 now. Awaiting the audit here
+            // would make the caller wait on the pool it just found exhausted,
+            // so the failed read is audited in the background instead.
+            if let Some(busy) = database_busy_response(&error) {
+                let _ = spawn_account_content_read_failure_audit(
+                    Arc::clone(&state),
+                    audit_tenant,
+                    submission_id,
+                );
+                return Err(busy);
+            }
+            return Err(audit_account_content_read_failure(
+                state.as_ref(),
+                &audit_tenant,
+                submission_id,
+            )
+            .await);
         }
     };
 

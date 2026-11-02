@@ -103389,6 +103389,106 @@ fn internal_error_answers_a_pool_timeout_with_503_database_busy() {
     }
 }
 
+/// A content read-back that failed on a busy pool answers 503 without
+/// waiting for its failed-read audit: the audit is only spawned. On this
+/// single-threaded runtime the spawned task cannot run until the test
+/// yields, so finding no audit row right after the call shows the answer
+/// did not wait for it. The audit still lands once the task runs, and is
+/// skipped (with the read still refused) when the background budget is
+/// full.
+#[tokio::test]
+async fn a_busy_pool_content_read_answers_before_its_audit_runs() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let audit_tenant = TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: "account-actor".to_string(),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+    let read_failure_rows = |submission_id: Uuid| {
+        read_all_audit_events(temp.path(), "tenant-a")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|event| {
+                event.kind == "trace_content_read"
+                    && event.submission_id == submission_id
+                    && event
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("surface=account_trace_content"))
+            })
+            .count()
+    };
+    let error = anyhow::Error::new(DatabaseError::PoolRuntime(
+        deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait),
+    ))
+    .context("failed to read the envelope object ref");
+    assert!(
+        database_busy_response(&error).is_some(),
+        "the read-back path answers this error with 503"
+    );
+
+    // The background budget is full: the audit is skipped, nothing waits.
+    let held = Arc::clone(&ACCOUNT_CONTENT_BACKGROUND_AUDITS)
+        .try_acquire_many_owned(ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT as u32)
+        .expect("no other test holds the background audit budget");
+    let skipped = Uuid::new_v4();
+    assert!(
+        spawn_account_content_read_failure_audit(
+            Arc::clone(&state),
+            audit_tenant.clone(),
+            skipped,
+        )
+        .is_none()
+    );
+    drop(held);
+
+    let submission_id = Uuid::new_v4();
+    let audit = spawn_account_content_read_failure_audit(
+        Arc::clone(&state),
+        audit_tenant.clone(),
+        submission_id,
+    )
+    .expect("the budget has room");
+    assert_eq!(
+        read_failure_rows(submission_id),
+        0,
+        "the caller has its answer before the audit runs"
+    );
+    audit.await.expect("audit task");
+    assert_eq!(
+        read_failure_rows(submission_id),
+        1,
+        "the failed read is still audited"
+    );
+    assert_eq!(
+        read_failure_rows(skipped),
+        0,
+        "a skipped audit writes nothing"
+    );
+    assert_eq!(
+        ACCOUNT_CONTENT_BACKGROUND_AUDITS.available_permits(),
+        ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT,
+        "a finished audit gives its slot back"
+    );
+}
+
 #[test]
 fn a_database_pool_error_never_uses_up_a_scoring_or_pii_backstop_attempt() {
     let pool_errors = [

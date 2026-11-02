@@ -27,8 +27,13 @@
 //!   a detached (or retired) handle looks the tenant up again, so a write
 //!   never lands on a handle nothing will save, and a detached handle is
 //!   never saved again. Once `max_open` evicted handles whose flush failed
-//!   wait in `evicting`, a miss first retries their flushes (one caller at
-//!   a time) and then refuses to open another tenant. The cap is checked
+//!   wait in `evicting`, a miss first retries one of their flushes, the
+//!   oldest no other caller is retrying, and refuses to open another tenant
+//!   if that save fails too (or if every one is already being retried). So
+//!   a request pays for at most one retried save on top of its own
+//!   eviction, concurrent misses retry different handles, and the rest of
+//!   the backlog is left to later misses and the periodic flusher. The cap
+//!   is checked
 //!   before a miss's own eviction flush runs, so concurrent misses can each
 //!   add one more failure: the bound is `max_open` plus the number of
 //!   concurrent misses.
@@ -142,6 +147,19 @@ impl OpenIndexes {
     fn failed_evictions(&self) -> usize {
         self.evicting.values().filter(|entry| entry.failed).count()
     }
+
+    /// Claim the oldest failed eviction no other caller is retrying, for
+    /// this caller to retry its flush. `None` when every failed eviction is
+    /// already claimed.
+    fn claim_failed_eviction(&mut self) -> Option<(String, u64, SharedTenantHandle)> {
+        let (key, entry) = self
+            .evicting
+            .iter_mut()
+            .filter(|(_, entry)| entry.failed && !entry.retrying)
+            .min_by_key(|(_, entry)| entry.sequence)?;
+        entry.retrying = true;
+        Some((key.clone(), entry.sequence, Arc::clone(&entry.handle)))
+    }
 }
 
 /// One handle evicted from the LRU.
@@ -154,6 +172,10 @@ struct Evicting {
     /// Its last flush failed. Only these count against the backlog cap; a
     /// flush still running does not.
     failed: bool,
+    /// A miss has claimed this failed entry to retry its flush, so other
+    /// misses retry a different one. It still counts as failed until the
+    /// save lands.
+    retrying: bool,
 }
 
 /// How many times an operation looks a tenant up again after finding its
@@ -167,10 +189,6 @@ const MAX_HANDLE_ATTEMPTS: usize = 8;
 /// owning `UsearchVectorIndex` is gone.
 struct IndexInner {
     open_indexes: Mutex<OpenIndexes>,
-    /// Set while one caller retries the failed eviction flushes, so
-    /// concurrent misses refuse at once instead of each rewriting every
-    /// failed tenant file on a disk that is still failing.
-    draining: AtomicBool,
 }
 
 /// Clears a tenant's `deleting` tombstone when dropped, so an early return
@@ -297,7 +315,6 @@ impl UsearchVectorIndex {
         }
         let cap = NonZeroUsize::new(max_open).expect("max_open > 0 just checked");
         let inner = Arc::new(IndexInner {
-            draining: AtomicBool::new(false),
             open_indexes: Mutex::new(OpenIndexes {
                 lru: LruCache::new(cap),
                 evicting: HashMap::new(),
@@ -373,11 +390,13 @@ impl UsearchVectorIndex {
     /// this caller (so the evaluation fails closed) and the victim stays in
     /// memory, where the next miss takes it back and `flush_all` retries it.
     /// While `max_open` failed evictions are waiting, a miss that would evict
-    /// another tenant first retries their flushes, and is refused if none
-    /// lands, so memory stays bounded. A tenant whose file is being deleted
-    /// is refused.
+    /// another tenant first retries the flush of one of them (the oldest no
+    /// other caller has claimed), and is refused if that save fails or there
+    /// is none left to claim, so memory stays bounded and one request never
+    /// pays for more than one retried save. A tenant whose file is being
+    /// deleted is refused.
     fn handle_for(&self, tenant_storage_ref: &str) -> anyhow::Result<SharedTenantHandle> {
-        let mut drained = false;
+        let mut retried = false;
         loop {
             let (handle, evicted) = {
                 let mut open = self
@@ -399,18 +418,21 @@ impl UsearchVectorIndex {
                         let failed = open.failed_evictions();
                         if open.lru.len() >= cap && failed >= cap {
                             anyhow::ensure!(
-                                !drained,
+                                !retried,
                                 "UsearchVectorIndex has {failed} evicted tenant indexes that \
                                  failed to save; refusing to open another until they are saved"
                             );
+                            let Some((key, sequence, victim)) = open.claim_failed_eviction() else {
+                                anyhow::bail!(
+                                    "UsearchVectorIndex has {failed} evicted tenant indexes that \
+                                     failed to save and other callers are retrying all of them; \
+                                     refusing to open another until they are saved"
+                                );
+                            };
                             drop(open);
-                            anyhow::ensure!(
-                                drain_failed_evictions(&self.inner),
-                                "UsearchVectorIndex has {failed} evicted tenant indexes that \
-                                 failed to save and another caller is retrying them; refusing \
-                                 to open another until they are saved"
-                            );
-                            drained = true;
+                            // Recorded on the entry; the loop re-reads the backlog.
+                            let _ = flush_evicted(&self.inner, &key, sequence, &victim);
+                            retried = true;
                             continue;
                         }
                         Arc::new(Mutex::new(TenantHandle {
@@ -434,6 +456,7 @@ impl UsearchVectorIndex {
                             sequence,
                             handle: Arc::clone(&victim),
                             failed: false,
+                            retrying: false,
                         },
                     );
                     (key, sequence, victim)
@@ -767,42 +790,6 @@ fn flush_handle_arc(handle: &SharedTenantHandle) -> anyhow::Result<()> {
     flush_handle_locked(&mut guard)
 }
 
-/// Retry the flush of every evicted handle whose last flush failed. Errors
-/// are already recorded on the entries; the caller re-reads the backlog.
-/// Returns `false`, without retrying anything, when another caller is
-/// already draining.
-fn drain_failed_evictions(inner: &IndexInner) -> bool {
-    if inner
-        .draining
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return false;
-    }
-    struct Release<'a>(&'a AtomicBool);
-    impl Drop for Release<'_> {
-        fn drop(&mut self) {
-            self.0.store(false, Ordering::Release);
-        }
-    }
-    let _release = Release(&inner.draining);
-    let failed: Vec<(String, u64, SharedTenantHandle)> = {
-        let open = inner
-            .open_indexes
-            .lock()
-            .expect("UsearchVectorIndex lru mutex poisoned");
-        open.evicting
-            .iter()
-            .filter(|(_, entry)| entry.failed)
-            .map(|(key, entry)| (key.clone(), entry.sequence, Arc::clone(&entry.handle)))
-            .collect()
-    };
-    for (key, sequence, handle) in failed {
-        let _ = flush_evicted(inner, &key, sequence, &handle);
-    }
-    true
-}
-
 /// Flush a handle evicted from the LRU as eviction `sequence`, and release
 /// it once the save lands.
 ///
@@ -811,7 +798,8 @@ fn drain_failed_evictions(inner: &IndexInner) -> bool {
 /// `evicting` entry is removed, and the handle marked detached, only when
 /// it is still this eviction's: a miss may have taken the handle back into
 /// the LRU, and then it is live and stays attached. A failed flush marks
-/// this eviction's entry failed, so it counts against the backlog cap.
+/// this eviction's entry failed, so it counts against the backlog cap, and
+/// releases any miss's claim on it so the next miss can retry it.
 fn flush_evicted(
     inner: &IndexInner,
     key: &str,
@@ -836,6 +824,7 @@ fn flush_evicted(
             guard.detached = true;
         } else if let Some(entry) = open.evicting.get_mut(key) {
             entry.failed = true;
+            entry.retrying = false;
         }
     }
     flushed
@@ -1564,6 +1553,7 @@ mod tests {
                     sequence: 0,
                     handle: victim,
                     failed: false,
+                    retrying: false,
                 },
             );
         }
@@ -1691,6 +1681,7 @@ mod tests {
                     sequence: u64::MAX,
                     handle: Arc::clone(&ghost),
                     failed,
+                    retrying: false,
                 },
             );
         };
@@ -1716,21 +1707,37 @@ mod tests {
                 .contains("tenant_a"),
             "a refused miss evicts nothing"
         );
+        assert!(
+            !idx.inner.open_indexes.lock().unwrap().evicting["tenant_ghost"].retrying,
+            "a failed retry releases its claim for the next miss"
+        );
 
-        // The disk recovers. While another caller is draining, a miss
-        // refuses at once instead of retrying the saves itself.
+        // The disk recovers. While another caller is retrying the only
+        // failed save, a miss refuses at once instead of saving it again.
         std::fs::create_dir_all(&missing_dir).unwrap();
-        idx.inner.draining.store(true, Ordering::SeqCst);
+        let claimed = idx
+            .inner
+            .open_indexes
+            .lock()
+            .unwrap()
+            .claim_failed_eviction()
+            .expect("the failed save is unclaimed");
         let Err(err) = idx.handle_for("tenant_c") else {
-            panic!("a miss must not drain while another caller is");
+            panic!("a miss must not retry a save another caller is retrying");
         };
-        assert!(format!("{err:#}").contains("another caller"), "{err:#}");
-        idx.inner.draining.store(false, Ordering::SeqCst);
+        assert!(format!("{err:#}").contains("other callers"), "{err:#}");
+        idx.inner
+            .open_indexes
+            .lock()
+            .unwrap()
+            .evicting
+            .get_mut(&claimed.0)
+            .unwrap()
+            .retrying = false;
 
-        // Then the next miss drains the backlog itself, with no
-        // `flush_all`, and opens.
+        // Then the next miss retries it itself, with no `flush_all`, and
+        // opens.
         idx.handle_for("tenant_c").unwrap();
-        assert!(!idx.inner.draining.load(Ordering::SeqCst));
         assert!(
             !idx.inner
                 .open_indexes
@@ -1740,6 +1747,99 @@ mod tests {
                 .contains_key("tenant_ghost")
         );
         assert!(ghost.lock().unwrap().detached);
+    }
+
+    /// A loaded handle under `dir` whose save fails while `dir` is missing,
+    /// staged as a failed eviction of `key` with `sequence`.
+    fn stage_failed_eviction(
+        idx: &UsearchVectorIndex,
+        dir: &Path,
+        key: &str,
+        sequence: u64,
+    ) -> SharedTenantHandle {
+        let path = dir.join(format!("{key}.usearch"));
+        let handle = Arc::new(Mutex::new(TenantHandle {
+            index: Some(idx.load_index(&path).unwrap()),
+            dirty_writes: 1,
+            file_path: path,
+            retired: false,
+            detached: false,
+        }));
+        idx.inner.open_indexes.lock().unwrap().evicting.insert(
+            key.to_string(),
+            Evicting {
+                sequence,
+                handle: Arc::clone(&handle),
+                failed: true,
+                retrying: false,
+            },
+        );
+        handle
+    }
+
+    /// A miss over a full backlog of failed saves retries one of them, not
+    /// the whole backlog: the request pays for at most one retried save,
+    /// and the rest wait for later misses or the periodic flusher.
+    #[test]
+    fn a_miss_retries_one_failed_save_not_the_whole_backlog() {
+        let tmp = tempdir().unwrap();
+        let idx = UsearchVectorIndex::try_new(
+            tmp.path(),
+            UsearchVectorIndexConfig {
+                max_open: 2,
+                flush_every: 1024,
+                ..test_config(4)
+            },
+        )
+        .unwrap();
+        let v = norm(vec![1.0, 0.0, 0.0, 0.0]);
+        idx.insert(Uuid::new_v4(), "tenant_a", &v).unwrap();
+        idx.insert(Uuid::new_v4(), "tenant_b", &v).unwrap();
+        let dir = tmp.path().join("ghosts");
+        let older = stage_failed_eviction(&idx, &dir, "ghost_old", 100);
+        let newer = stage_failed_eviction(&idx, &dir, "ghost_new", 101);
+        // The disk has recovered: either save would land now.
+        std::fs::create_dir_all(&dir).unwrap();
+
+        idx.handle_for("tenant_c").unwrap();
+
+        assert!(older.lock().unwrap().detached, "the oldest is retried");
+        assert!(
+            !newer.lock().unwrap().detached,
+            "the miss stopped after one retried save"
+        );
+        let open = idx.inner.open_indexes.lock().unwrap();
+        assert!(!open.evicting.contains_key("ghost_old"));
+        let left = &open.evicting["ghost_new"];
+        assert!(left.failed && !left.retrying);
+        assert!(open.lru.contains("tenant_c"));
+    }
+
+    /// Concurrent misses claim different failed saves to retry, oldest
+    /// first, and a miss that finds every one claimed gets nothing to
+    /// retry (and is refused) rather than saving one a second time.
+    #[test]
+    fn concurrent_misses_claim_different_failed_saves() {
+        let tmp = tempdir().unwrap();
+        let idx = UsearchVectorIndex::try_new(
+            tmp.path(),
+            UsearchVectorIndexConfig {
+                max_open: 2,
+                flush_every: 1024,
+                ..test_config(4)
+            },
+        )
+        .unwrap();
+        let dir = tmp.path().join("ghosts");
+        stage_failed_eviction(&idx, &dir, "ghost_new", 7);
+        stage_failed_eviction(&idx, &dir, "ghost_old", 3);
+        let mut open = idx.inner.open_indexes.lock().unwrap();
+        let first = open.claim_failed_eviction().expect("first claim");
+        let second = open.claim_failed_eviction().expect("second claim");
+        assert_eq!(first.0, "ghost_old");
+        assert_eq!(second.0, "ghost_new");
+        assert!(open.claim_failed_eviction().is_none());
+        assert_eq!(open.failed_evictions(), 2, "claimed saves still count");
     }
 
     /// A detached handle is never saved again: a newer handle owns the
