@@ -705,4 +705,18 @@ public class PrivateInferenceTests
                 + "the ABI; a fallback beside a payload read is a paraphrase that renders.");
         }
     }
+
+    /// <summary>
+    /// The managed card's Sign in starts the login chosen on the page
+    /// (owner, 2026-11-01: GitHub, Google or the NEAR wallet), never one
+    /// fixed in the view.
+    /// </summary>
+    [Fact]
+    public void TheManagedCardSignInStartsThePagesChosenLogin()
+    {
+        string view = File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "PrivateInferenceView.xaml.cs.txt"));
+        Assert.Contains("await ViewModel.StartCredentialAsync()));", view);
+        Assert.DoesNotContain("StartCredentialAsync(NearAiCredentialSurface.Provider", view);
+    }
 }

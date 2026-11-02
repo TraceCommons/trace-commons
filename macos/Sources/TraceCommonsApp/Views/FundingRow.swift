@@ -217,20 +217,27 @@ struct FundingRow: View {
                 // 2026-10-24), not Check account: checking cannot help.
                 let signIn = model.nearAiSigningIn || NearAiSignInOffer.billingOffers(
                     state: status?.state, failed: model.nearAiSignInFailed)
-                Button {
+                Group {
                     if signIn {
-                        Task { await model.signInToNearAI() }
+                        // Every login the build offers, as the balance card.
+                        NearAiSignInButton(
+                            title: NearAiSignInOffer.label(copy), choice: NearAiSignInChoice.of(copy),
+                            style: GlassButtonStyle(.primary)
+                        ) { provider in
+                            Task { await model.signInToNearAI(provider: provider) }
+                        }
                     } else {
-                        load(opening: status?.destination)
+                        Button {
+                            load(opening: status?.destination)
+                        } label: {
+                            // The glass style's own 28pt, as every inline card button
+                            // (owner, 2026-10-08); a 44pt label made it the odd one out.
+                            Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass))
                     }
-                } label: {
-                    // The glass style's own 28pt, as every inline card button
-                    // (owner, 2026-10-08); a 44pt label made it the odd one out.
-                    Text(signIn ? NearAiSignInOffer.label(copy)
-                         : status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
-                        .lineLimit(1)
                 }
-                .buttonStyle(GlassButtonStyle(signIn ? .primary : .glass))
+                .lineLimit(1)
                 .fixedSize()
                 .disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn)
                           || (!signIn && request != nil))

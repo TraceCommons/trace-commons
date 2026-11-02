@@ -258,7 +258,7 @@ final class NearAiOnboardingSessionTests: XCTestCase {
         var browserURL: URL?
         await awaitSession(model, state: "obtaining") {
             // Exercise the model action without opening a browser or spending.
-            browserURL = await model.startNearAiCredential()
+            browserURL = await model.startNearAiCredential(provider: nil)
         }
         XCTAssertEqual(browserURL?.absoluteString, "https://cloud.example.invalid/native-login")
         XCTAssertEqual(model.credentialAttempt?.attemptID, "synthetic-attempt")

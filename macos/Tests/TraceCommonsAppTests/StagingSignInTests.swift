@@ -43,20 +43,21 @@ final class StagingSignInTests: XCTestCase {
         }
     }
 
-    /// The first run's near.ai login, and the Monitor's sign-in notice, name
-    /// no provider: the daemon starts the channel's default, so the app
-    /// cannot pick the wallet on a build that has none. The first-run
-    /// screens never choose a provider of their own.
+    /// The first run's near.ai login names no provider: the daemon starts
+    /// the channel's default, so the app cannot pick the wallet on a build
+    /// that has none. The first-run screens never choose a provider of
+    /// their own. The Monitor's sign-in notice offers the core's logins
+    /// (owner, 2026-11-01) and starts the one chosen, never the wallet by
+    /// name.
     func test_theFirstRunSignInNamesNoProvider() throws {
         let model = try Self.source("AppModel.swift")
-        let login = try XCTUnwrap(model.range(of: "func nearAILogin() async -> Bool {"))
-        let end = try XCTUnwrap(model.range(of: "func cancelNearAILogin()", range: login.upperBound..<model.endIndex))
-        let body = model[login.upperBound..<end.lowerBound]
-        XCTAssertTrue(body.contains("client.nearAiCredentialStart()"), "the first run's login names a provider")
-        XCTAssertFalse(body.contains("provider:"))
+        XCTAssertTrue(
+            model.contains("func nearAILogin() async -> Bool { await nearAILogin(fresh: false, provider: nil) }"),
+            "the first run's login names a provider")
 
         let notices = try Self.source("Views/Monitor/MonitorNotices.swift")
-        XCTAssertTrue(notices.contains("await model.startNearAiCredential() else"))
+        XCTAssertTrue(notices.contains("choice: NearAiSignInChoice.of(model.privateInferenceCopy)"))
+        XCTAssertTrue(notices.contains("NearAiSignIn.begin(model, provider: provider, openURL: openURL)"))
         XCTAssertFalse(notices.contains("provider: \"near\""))
 
         let firstRun = GlassSurfaceRulesTests.root.appendingPathComponent("Views/FirstRun")

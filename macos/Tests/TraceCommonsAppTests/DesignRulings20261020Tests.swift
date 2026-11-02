@@ -101,7 +101,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertTrue(home.contains("let snapshot = model.managedSnapshot {"))
         XCTAssertTrue(home.contains("if snapshot.nearAiSignedIn {"))
         XCTAssertTrue(home.contains("line: words.privateAISignIn, button: model.managedText(\"sign_in_near_ai\"),"))
-        XCTAssertTrue(home.contains("NearAiSignIn.begin(model, openURL: openURL)"))
+        XCTAssertTrue(home.contains("NearAiSignIn.begin(model, provider: provider, openURL: openURL)"))
         // The core's managed words, which reach the model with its snapshot.
         let managed = try XCTUnwrap(JSONSerialization.jsonObject(
             with: Data(XCTUnwrap(TCDiscovery.managedCopyJSON()).utf8)) as? [String: String])

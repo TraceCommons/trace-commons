@@ -183,6 +183,13 @@ pub fn render(app: &Rc<App>, balance: &crate::model::NearAiBalance) {
         if !explains.is_empty() {
             style::append_body(&view.action, explains);
         }
+        // The balance row's Sign in shows only while the credential section
+        // offers none, so its login is chosen here (owner, 2026-11-01:
+        // GitHub, Google or the NEAR wallet), on the section's own choice.
+        if action == copy::CredentialAction::Obtain {
+            view.action
+                .append(&super::credential::shared_provider_selector(app));
+        }
         let button = gtk::Button::with_label(label);
         button.set_halign(gtk::Align::Start);
         let app = Rc::clone(app);
@@ -398,6 +405,11 @@ mod tests {
         assert!(
             body.contains("super::credential::act(&app, action)"),
             "the press no longer goes to the one ceremony mechanism"
+        );
+        assert!(
+            body.contains("if action == copy::CredentialAction::Obtain {")
+                && body.contains("super::credential::shared_provider_selector(app)"),
+            "the balance row's Sign in offers no choice of login"
         );
     }
 
