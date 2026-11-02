@@ -306,6 +306,39 @@ fn current_global_log(pick: fn(&Sinks) -> &Arc<DiagnosticsLog>) -> Option<Arc<Di
     }
 }
 
+/// One line of fixed labels for the warn/error log: an event name and
+/// `key=value` pairs, all `&'static str`, so a value cannot be an error's
+/// text, an id or a token. Without the timestamp, which the writer adds.
+pub fn labels_line(event: &'static str, fields: &[(&'static str, &'static str)]) -> String {
+    let mut line = format!("WARN {event}");
+    for (key, value) in fields {
+        line.push(' ');
+        line.push_str(key);
+        line.push('=');
+        line.push_str(value);
+    }
+    line
+}
+
+/// Append [`labels_line`] to `log`, timestamped as every other line.
+pub fn record_labels_to(
+    log: &DiagnosticsLog,
+    event: &'static str,
+    fields: &[(&'static str, &'static str)],
+) {
+    let _ = log.append_line(&format!("{} {}", timestamp(), labels_line(event, fields)));
+}
+
+/// Append [`labels_line`] to the daemon's warn/error log
+/// ([`DIAGNOSTICS_LOG_FILE`]), for a failure whose step the metadata-only
+/// tracing line could not name. Best effort: nothing when no log is
+/// installed.
+pub fn record_labels(event: &'static str, fields: &[(&'static str, &'static str)]) {
+    if let Some(log) = current_global_log(|sinks| &sinks.events) {
+        record_labels_to(&log, event, fields);
+    }
+}
+
 /// The panic hook. Never reads `info.payload()` and never calls `tracing`
 /// (that would re-enter the subscriber below).
 ///
