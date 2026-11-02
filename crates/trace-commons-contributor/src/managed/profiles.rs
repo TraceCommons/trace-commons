@@ -776,6 +776,14 @@ fn check_project_config_in(
                         if near_ai && env.keys().any(|k| names_a_claude_model(k)) {
                             return Err(ManagedError::ProjectChoosesModel);
                         }
+                        // Claude Code applies a settings `env` over the
+                        // launcher's own, so a project could turn
+                        // server-side classifier review back on, which a
+                        // NEAR AI route cannot answer. Refused as an auth
+                        // override is.
+                        if near_ai && env.contains_key("CLAUDE_CODE_AUTO_MODE_SERVER") {
+                            return Err(ManagedError::Conflict);
+                        }
                     }
                 }
                 ToolId::Codex => {
@@ -1088,6 +1096,25 @@ mod tests {
     /// `env` block on a NEAR AI session: it would outrank the launcher's
     /// own model variables and could send work to a less private model
     /// (owner, 2026-11-01). The launch is refused, as an auth override is.
+    #[test]
+    fn a_project_cannot_turn_server_classifier_review_back_on_for_a_near_ai_session() {
+        for file in [".claude/settings.json", ".claude/settings.local.json"] {
+            let dir = project(&[(file, r#"{"env":{"CLAUDE_CODE_AUTO_MODE_SERVER":"1"}}"#)]);
+            for connection in NEAR_AI {
+                assert_eq!(
+                    check_project_config(ToolId::Claude, connection, dir.path()),
+                    Err(ManagedError::Conflict),
+                    "{file} on {connection:?}"
+                );
+            }
+            // Anthropic-native traffic can answer the review: unchanged.
+            assert_eq!(
+                check_project_config(ToolId::Claude, ConnectionKind::Subscription, dir.path()),
+                Ok(())
+            );
+        }
+    }
+
     #[test]
     fn a_project_cannot_set_claude_model_variables_on_a_near_ai_session() {
         for var in [

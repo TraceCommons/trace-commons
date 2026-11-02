@@ -748,9 +748,11 @@ fn near_ai_route(
                 // so. Tell it not to ask: the classifier requests go to the
                 // session's NEAR AI models as they always have.
                 // https://code.claude.com/docs/en/auto-mode-classifier-billing
-                // Claude Code calls this variable temporary. If the notice
-                // comes back on managed sessions, it was probably removed,
-                // and the route itself has to stop Claude Code asking.
+                // The page above says: "CLAUDE_CODE_AUTO_MODE_SERVER is a
+                // temporary setting and may be removed in a later release."
+                // If the "isn't eligible" notice comes back on managed
+                // sessions, look here first: it was probably removed, and
+                // the route itself has to stop Claude Code asking.
                 .env("CLAUDE_CODE_AUTO_MODE_SERVER", "0");
             for (name, value) in super::models::claude_env(in_use, choices.background, models) {
                 match value {
