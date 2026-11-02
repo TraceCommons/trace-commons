@@ -146,7 +146,7 @@ final class AppModel: ObservableObject {
     /// request, in the same task, so a launch dialog that asked for one
     /// opens in it.
     func managedAction(_ method: String, params: [String: Any], openTerminal: Bool = false, newAccountKey: String? = nil,
-                       terminal: String? = nil, inWindowOf: String? = nil) {
+                       terminal: String? = nil) {
         guard let client, !managedBusy else { return }
         managedBusy = true
         managedErrorKey = nil
@@ -188,11 +188,10 @@ final class AppModel: ObservableObject {
                           let ticket = response["ticket"] as? String else {
                         throw DaemonClient.Failure(code: "launch-unknown", message: "managed-launch-unknown")
                     }
-                    // Start again and Resume run in the ended row's own
-                    // tab when Terminal still has it (owner, 2026-11-02).
-                    var launch: [String: Any] = ["session_id": session, "ticket": ticket]
-                    if let inWindowOf { launch["in_window_of"] = inWindowOf }
-                    _ = try client.managedAction("managed_terminal_launch", params: launch)
+                    // Start again and Resume open beside the ended row in
+                    // Terminal when it can (owner, 2026-11-02): the daemon
+                    // knows which row the session came from.
+                    _ = try client.managedAction("managed_terminal_launch", params: ["session_id": session, "ticket": ticket])
                 }
                 return response["revision"] as? UInt64
             }

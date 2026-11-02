@@ -280,6 +280,16 @@ struct Entry {
         deserialize_with = "known_terminal"
     )]
     terminal: Option<TerminalHandle>,
+    /// The id of the Terminal window `terminal`'s tab was in when the
+    /// launch read it back: where Start again and Resume open a new tab.
+    /// A row written without it opens them in a new window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_window: Option<u32>,
+    /// The ended row Start again or Resume prepared this one from. Set by
+    /// the daemon, never by a request: its window is the only one this
+    /// session's launch may open a tab in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    again_of: Option<Uuid>,
     /// A stop was asked for; the launcher is told on its next report.
     #[serde(default)]
     stop_requested: bool,
@@ -473,12 +483,50 @@ impl SessionRegistry {
             .collect())
     }
 
+    /// Hold `id`'s launch for the caller about to open its terminal, after
+    /// its ticket check: a second launch with the same ticket is refused
+    /// from here on, while the terminal opens without the registry held.
+    /// Returns the folder it starts in.
+    pub fn begin_terminal_launch(
+        &mut self,
+        id: Uuid,
+        ticket: &str,
+    ) -> Result<PathBuf, ManagedError> {
+        let cwd = self.launch_cwd(id, ticket)?;
+        let mut next = self.data.clone();
+        let entry = next
+            .entries
+            .iter_mut()
+            .find(|e| e.view.id == id)
+            .ok_or(ManagedError::NotFound)?;
+        entry.launched = true;
+        self.commit(next)?;
+        Ok(cwd)
+    }
+
+    /// The terminal for `id`'s held launch did not open: the launch is
+    /// released as if never begun, so its ticket stands until it lapses.
+    pub fn terminal_launch_failed(&mut self, id: Uuid) -> Result<(), ManagedError> {
+        let mut next = self.data.clone();
+        let Some(entry) = next
+            .entries
+            .iter_mut()
+            .find(|e| e.view.id == id && e.terminal.is_none() && e.proof_hash.is_none())
+        else {
+            return Ok(());
+        };
+        entry.launched = false;
+        self.commit(next)
+    }
+
     /// Record that the daemon opened `id` in a terminal, after its ticket
-    /// check and its own launch, with the window when one was named.
+    /// check and its own launch, with the tab when one was named and the
+    /// window that held it when that could be read.
     pub fn opened_in_terminal(
         &mut self,
         id: Uuid,
         terminal: Option<TerminalHandle>,
+        window: Option<u32>,
     ) -> Result<(), ManagedError> {
         let mut next = self.data.clone();
         let entry = next
@@ -487,6 +535,7 @@ impl SessionRegistry {
             .find(|e| e.view.id == id)
             .ok_or(ManagedError::NotFound)?;
         entry.launched = true;
+        entry.terminal_window = terminal.as_ref().and(window);
         entry.terminal = terminal;
         self.commit(next)
     }
@@ -505,13 +554,22 @@ impl SessionRegistry {
         }
     }
 
-    /// The tab an ended session the daemon opened ran in, for Start again
-    /// and Resume to run in. None while it runs: that tab is in use.
-    pub fn ended_terminal(&self, id: Uuid) -> Option<TerminalHandle> {
-        let entry = self.data.entries.iter().find(|e| e.view.id == id)?;
-        (entry.launched && !entry.view.state.holds_profile())
-            .then(|| entry.terminal.clone())
-            .flatten()
+    /// The Terminal window session `id` opens a new tab in: the one the
+    /// row it was started again or resumed from ran in. Only for a row the
+    /// daemon opened, that started, and that has ended. None otherwise, and
+    /// for any session not prepared by Start again or Resume: that launch
+    /// opens a new window. A window id Terminal has since given another
+    /// window at worst puts the new tab there; nothing is typed into an
+    /// existing tab either way.
+    pub fn again_window(&self, id: Uuid) -> Option<u32> {
+        let entries = &self.data.entries;
+        let source_id = entries.iter().find(|e| e.view.id == id)?.again_of?;
+        let source = entries.iter().find(|e| e.view.id == source_id)?;
+        if !source.launched || source.proof_hash.is_none() || source.view.state.holds_profile() {
+            return None;
+        }
+        source.terminal.as_ref()?;
+        source.terminal_window
     }
 
     /// The window of a running session the daemon opened, or a refusal.
@@ -735,8 +793,21 @@ impl SessionRegistry {
 
     pub fn prepare(
         &mut self,
+        request: LaunchRequest,
+        account: &AccountView,
+    ) -> Result<PreparedLaunch, ManagedError> {
+        self.prepare_again(request, account, None)
+    }
+
+    /// [`Self::prepare`], for Start again and Resume: `again_of` is the
+    /// ended row the request came from, kept on the new row so its launch
+    /// finds that row's window itself ([`Self::again_window`]). A replay
+    /// returns the row first prepared, unchanged.
+    pub fn prepare_again(
+        &mut self,
         mut request: LaunchRequest,
         account: &AccountView,
+        again_of: Option<Uuid>,
     ) -> Result<PreparedLaunch, ManagedError> {
         request.cwd = super::folder::canonical(&request.cwd)?;
         let (cli_options_text, cli_options) = match self.check(&request, account)? {
@@ -797,6 +868,8 @@ impl SessionRegistry {
             dismissed: false,
             launched: false,
             terminal: None,
+            terminal_window: None,
+            again_of,
             stop_requested: false,
             view,
             keep_saved_model: request.keep_saved_model,
@@ -3081,6 +3154,188 @@ mod tests {
             registry.collection_status(id).unwrap().collection,
             CollectionState::Collected,
             "a result is final"
+        );
+    }
+
+    fn tab(n: u8) -> TerminalHandle {
+        TerminalHandle::AppleTerminal {
+            tty: format!("/dev/ttys{n:03}"),
+        }
+    }
+
+    /// Prepare `request` (from row `again_of`, when set), open it in
+    /// `window`'s tab, in Terminal window `wid`, start it and report it in
+    /// `state`. Returns its id.
+    fn ran_in(
+        registry: &mut SessionRegistry,
+        (request, again_of): (LaunchRequest, Option<Uuid>),
+        account: &AccountView,
+        (window, wid): (TerminalHandle, Option<u32>),
+        state: SessionState,
+    ) -> Uuid {
+        let prepared = registry.prepare_again(request, account, again_of).unwrap();
+        registry
+            .opened_in_terminal(prepared.session_id, Some(window), wid)
+            .unwrap();
+        let context = registry
+            .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        registry
+            .report(LifecycleReport {
+                model: None,
+                collection: None,
+                session_id: prepared.session_id,
+                proof: context.proof,
+                state,
+                process_id: Some(42),
+                process_identity: Some("42:1".into()),
+                exit_code: (state == SessionState::Exited).then_some(0),
+            })
+            .unwrap();
+        prepared.session_id
+    }
+
+    /// Prepare Start again on `source`, recording where it came from.
+    fn again(registry: &mut SessionRegistry, source: Uuid, account: &AccountView) -> Uuid {
+        let request = registry
+            .start_again_request(source, Uuid::new_v4())
+            .unwrap();
+        registry
+            .prepare_again(request, account, Some(source))
+            .unwrap()
+            .session_id
+    }
+
+    /// #1839 review, finding 5: a launch that never started (its ticket
+    /// lapsed unredeemed) says nothing about its window, so Start again on
+    /// its row opens a new window.
+    #[test]
+    fn a_launch_that_never_started_offers_no_window() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        registry
+            .opened_in_terminal(prepared.session_id, Some(tab(1)), Some(7))
+            .unwrap();
+        // Its ticket lapses unredeemed: the row reads Failed.
+        registry.sweep(Utc::now() + Duration::seconds(121)).unwrap();
+        assert_eq!(
+            registry.describe(prepared.session_id).unwrap().1,
+            SessionState::Failed
+        );
+        let next = again(&mut registry, prepared.session_id, &account);
+        assert_eq!(registry.again_window(next), None);
+    }
+
+    /// #1839 review, findings 1, 8 and 11, and #1853 review: Start again
+    /// finds its window from the row it was prepared from, recorded by the
+    /// daemon and kept across a restart, and only for a row that ended. A
+    /// row written without a window id (#1839's) offers none. A launch that
+    /// is not a Start again or Resume has none. Another session in the same
+    /// window does not matter: a new tab opens beside it.
+    #[test]
+    fn start_again_offers_the_ended_rows_window_only() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let source = ran_in(
+            &mut registry,
+            (coding(&account, home.path()), None),
+            &account,
+            (tab(1), Some(7)),
+            SessionState::Exited,
+        );
+        let first = again(&mut registry, source, &account);
+        assert_eq!(registry.again_window(first), Some(7));
+        assert_eq!(
+            SessionRegistry::open(&store).unwrap().again_window(first),
+            Some(7),
+            "kept across a restart"
+        );
+        assert_eq!(registry.again_window(source), None, "not a Start again");
+        let fresh = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        assert_eq!(registry.again_window(fresh.session_id), None);
+
+        let unbound = ran_in(
+            &mut registry,
+            (coding(&account, home.path()), None),
+            &account,
+            (tab(2), None),
+            SessionState::Exited,
+        );
+        let from_unbound = again(&mut registry, unbound, &account);
+        assert_eq!(registry.again_window(from_unbound), None, "no window id");
+
+        let running = ran_in(
+            &mut registry,
+            (coding(&account, home.path()), None),
+            &account,
+            (tab(3), Some(9)),
+            SessionState::Running,
+        );
+        let request = registry
+            .start_again_request(source, Uuid::new_v4())
+            .unwrap();
+        ran_in(
+            &mut registry,
+            (request, Some(source)),
+            &account,
+            (tab(4), Some(7)),
+            SessionState::Running,
+        );
+        let second = again(&mut registry, source, &account);
+        assert_eq!(
+            registry.again_window(second),
+            Some(7),
+            "beside a running one"
+        );
+        assert!(registry.describe(running).unwrap().1.holds_profile());
+    }
+
+    /// #1853 review: a launch is held while its terminal opens, so a second
+    /// launch with the same ticket is refused; a launch whose terminal did
+    /// not open is released and its ticket stands.
+    #[test]
+    fn a_held_launch_refuses_a_second_and_a_failed_one_is_released() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        let (id, ticket) = (prepared.session_id, prepared.ticket.unwrap());
+        registry.begin_terminal_launch(id, &ticket).unwrap();
+        assert_eq!(
+            registry.begin_terminal_launch(id, &ticket),
+            Err(ManagedError::Conflict)
+        );
+        registry.terminal_launch_failed(id).unwrap();
+        registry.begin_terminal_launch(id, &ticket).unwrap();
+        registry
+            .opened_in_terminal(id, Some(tab(5)), Some(3))
+            .unwrap();
+        registry.terminal_launch_failed(id).unwrap();
+        assert_eq!(
+            registry.begin_terminal_launch(id, &ticket),
+            Err(ManagedError::Conflict),
+            "an opened launch is not released"
         );
     }
 }
