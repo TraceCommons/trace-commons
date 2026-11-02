@@ -720,11 +720,17 @@ struct MonitorNotices: View {
                 } summary: {
                     Text(model.managedText("sign_in_needed"))
                 } details: { EmptyView() } actions: {
-                    Button(model.managedText("sign_in_near_ai")) { NearAiSignIn.begin(model, openURL: openURL) }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        .lineLimit(1)
-                        .accessibilityLabel(model.managedText("sign_in_near_ai_accessibility"))
-                        .disabled(model.credentialBusy)
+                    // Every login the build offers, as Settings offers them.
+                    NearAiSignInButton(
+                        title: model.managedText("sign_in_near_ai"),
+                        accessibilityName: model.managedText("sign_in_near_ai_accessibility"),
+                        choice: NearAiSignInChoice.of(model.privateInferenceCopy),
+                        style: GlassButtonStyle(.glass)
+                    ) { provider in
+                        NearAiSignIn.begin(model, provider: provider, openURL: openURL)
+                    }
+                    .lineLimit(1)
+                    .disabled(model.credentialBusy)
                 }
             })
         }
@@ -735,18 +741,27 @@ struct MonitorNotices: View {
 /// The NEAR AI sign-in, begun as Settings > Private AI begins it: the
 /// daemon starts the ceremony and the browser finishes it. A browser that
 /// never opened leaves a ceremony nobody can finish, so it is stopped
-/// rather than left to time out. It names no provider, so the daemon starts
-/// this build's default (`channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER`): the
-/// NEAR wallet in production, NEAR AI's Google login in staging.
+/// rather than left to time out. `provider` is the login the person chose
+/// from `NearAiSignInChoice` (owner, 2026-11-01: every NEAR AI login, not
+/// the wallet alone); nil only when the build offers none to choose, and
+/// the daemon then starts its default
+/// (`channel::NEAR_AI_DEFAULT_SIGN_IN_PROVIDER`).
 @MainActor
 enum NearAiSignIn {
-    static func begin(_ model: AppModel, openURL: OpenURLAction, then: (() -> Void)? = nil) {
+    static func begin(
+        _ model: AppModel, provider: String?, openURL: OpenURLAction, then: (() -> Void)? = nil
+    ) {
         Task {
-            guard let url = await model.startNearAiCredential() else { return }
-            let accepted = await openURL.opened(url)
-            if !accepted { model.cancelNearAiCredential() }
+            await run(model, provider: provider, open: { await openURL.opened($0) })
             then?()
         }
+    }
+
+    /// `begin`'s work, with the browser as a seam for tests.
+    static func run(_ model: AppModel, provider: String?, open: (URL) async -> Bool) async {
+        guard let url = await model.startNearAiCredential(provider: provider) else { return }
+        let accepted = await open(url)
+        if !accepted { model.cancelNearAiCredential() }
     }
 }
 

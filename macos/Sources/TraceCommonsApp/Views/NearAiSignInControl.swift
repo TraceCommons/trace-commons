@@ -37,6 +37,67 @@ enum NearAiSignInOffer {
     }
 }
 
+/// How a NEAR AI sign-in is offered (owner, 2026-11-01: "We are going back
+/// to supporting all the near.ai cloud sign in mechanisms. Github, google,
+/// or near wallet."): a menu with one item per login the core offers, in
+/// the core's order and with the core's titles
+/// (`CredentialSection.providerOptions`), or a plain button when the build
+/// offers one (staging's Google login). A new login is a change to
+/// `channel::NEAR_AI_SIGN_IN_PROVIDERS` and its title, not to this.
+///
+/// A menu starts the sign-in on the item chosen, so the wallet's notice
+/// (`credentialWalletNotice`), which Settings draws beside its picker
+/// before the button, has no place to be read first here.
+enum NearAiSignInChoice: Equatable {
+    /// One login, or none known (nil: the daemon's default).
+    case button(provider: String?)
+    /// Several logins, in the core's order.
+    case menu([CredentialSection.ProviderOption])
+
+    static func of(_ options: [CredentialSection.ProviderOption]) -> NearAiSignInChoice {
+        options.count > 1 ? .menu(options) : .button(provider: options.first?.tag)
+    }
+
+    /// The logins this build offers, titled with `copy`; with no copy, the
+    /// daemon's default alone.
+    static func of(_ copy: PrivateInferenceCopy?) -> NearAiSignInChoice {
+        of(copy.map { CredentialSection.providerOptions($0) } ?? [])
+    }
+}
+
+/// A sign-in control for `NearAiSignInChoice`: the caller's label and
+/// style either way, a native menu of the logins when there are several.
+/// `start` gets the chosen login's tag.
+struct NearAiSignInButton: View {
+    let title: String
+    /// VoiceOver's name for the control, when the label alone does not say
+    /// what is signed in to.
+    var accessibilityName: String?
+    let choice: NearAiSignInChoice
+    let style: TCDesign.GlassButtonStyle
+    let start: (String?) -> Void
+
+    var body: some View {
+        switch choice {
+        case .button(let provider):
+            Button(title) { start(provider) }
+                .buttonStyle(style)
+                .accessibilityLabel(accessibilityName ?? title)
+        case .menu(let options):
+            Menu {
+                ForEach(options, id: \.tag) { option in
+                    Button(option.title) { start(option.tag) }
+                }
+            } label: {
+                Text(title)
+            }
+            .menuStyle(.button)
+            .buttonStyle(style)
+            .accessibilityLabel(accessibilityName ?? title)
+        }
+    }
+}
+
 /// The balance card's sign-in: a primary button that runs the one flow
 /// Settings' "Sign in again" runs (`AppModel.signInToNearAI`), with the
 /// core's waiting and failure lines. Draws nothing while the NEAR AI login
@@ -51,10 +112,12 @@ struct NearAiSignInControl: View {
             failed: model.nearAiSignInFailed)
         if offered || model.nearAiSigningIn {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                Button(NearAiSignInOffer.label(copy)) {
-                    Task { await model.signInToNearAI() }
+                NearAiSignInButton(
+                    title: NearAiSignInOffer.label(copy), choice: NearAiSignInChoice.of(copy),
+                    style: GlassButtonStyle(.primary)
+                ) { provider in
+                    Task { await model.signInToNearAI(provider: provider) }
                 }
-                .buttonStyle(GlassButtonStyle(.primary))
                 .disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn))
                 if let line = NearAiSignInOffer.progressLine(
                     copy, signingIn: model.nearAiSigningIn, failed: model.nearAiSignInFailed)

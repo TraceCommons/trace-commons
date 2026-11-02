@@ -76,7 +76,7 @@ final class NearAiSignInButtonTests: XCTestCase {
         try await waitFor("expired NEAR AI balance read") { model.balanceStatus.state == "session_expired" }
         let generation = model.accountSessionGeneration
 
-        let signIn = Task { await model.signInToNearAI() }
+        let signIn = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("browser opened despite valid Commons session") { !opened().isEmpty }
         guard !opened().isEmpty else {
             signIn.cancel()
@@ -106,7 +106,7 @@ final class NearAiSignInButtonTests: XCTestCase {
         let (model, opened) = model(daemon)
         let generation = model.accountSessionGeneration
 
-        let signIn = Task { await model.signInToNearAI() }
+        let signIn = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("browser opened") { !opened().isEmpty }
         XCTAssertEqual(opened().map(\.host), ["cloud.example.invalid"])
         XCTAssertTrue(model.nearAiSigningIn, "progress shows while the browser is open")
@@ -132,7 +132,7 @@ final class NearAiSignInButtonTests: XCTestCase {
         daemon.attemptFails = true
         let (model, opened) = model(daemon)
 
-        await model.signInToNearAI()
+        await model.signInToNearAI(provider: nil)
 
         XCTAssertTrue(model.nearAiSignInFailed)
         XCTAssertFalse(model.nearAiSigningIn)
@@ -140,7 +140,7 @@ final class NearAiSignInButtonTests: XCTestCase {
 
         daemon.attemptFails = false
         daemon.loginRefused = false
-        let retry = Task { await model.signInToNearAI() }
+        let retry = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("retry opens a fresh browser") { opened().count == 2 }
         daemon.finishBrowserSignIn()
         await retry.value
@@ -157,7 +157,7 @@ final class NearAiSignInButtonTests: XCTestCase {
         daemon.signInPath = nil
         let (model, opened) = model(daemon)
 
-        let signIn = Task { await model.signInToNearAI() }
+        let signIn = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("browser opened") { !opened().isEmpty }
         daemon.finishBrowserSignIn()
         await signIn.value
@@ -173,10 +173,10 @@ final class NearAiSignInButtonTests: XCTestCase {
         let daemon = NearAiAccountDaemon()
         daemon.loginRefused = true
         let (model, opened) = model(daemon)
-        let signIn = Task { await model.signInToNearAI() }
+        let signIn = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("first browser opened") { opened().count == 1 }
 
-        await model.signInToNearAI()
+        await model.signInToNearAI(provider: nil)
 
         XCTAssertEqual(opened().count, 2)
         XCTAssertEqual(daemon.cancelledIDs, ["synthetic-attempt-1"])
@@ -194,9 +194,9 @@ final class NearAiSignInButtonTests: XCTestCase {
         daemon.loginRefused = true
         daemon.cancelFails = true
         let (model, opened) = model(daemon)
-        let signIn = Task { await model.signInToNearAI() }
+        let signIn = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("first browser opened") { opened().count == 1 }
-        await model.signInToNearAI()
+        await model.signInToNearAI(provider: nil)
         XCTAssertEqual(daemon.cancelledIDs, ["synthetic-attempt-1"])
         XCTAssertEqual(opened().count, 1)
         XCTAssertTrue(model.nearAiSigningIn)
@@ -212,11 +212,11 @@ final class NearAiSignInButtonTests: XCTestCase {
         daemon.loginRefused = true
         daemon.cancelDelay = 0.2
         let (model, opened) = model(daemon)
-        let signIn = Task { await model.signInToNearAI() }
+        let signIn = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("first browser opened") { opened().count == 1 }
-        let retry = Task { await model.signInToNearAI() }
+        let retry = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("cancel requested") { daemon.count("near_ai_credential_cancel") == 1 }
-        await model.signInToNearAI()
+        await model.signInToNearAI(provider: nil)
         await retry.value
         XCTAssertEqual(opened().count, 2)
         XCTAssertEqual(daemon.count("near_ai_credential_cancel"), 1)
@@ -249,9 +249,9 @@ final class NearAiSignInButtonTests: XCTestCase {
         let daemon = NearAiAccountDaemon()
         daemon.signInPath = nil
         let (model, opened) = model(daemon)
-        let signIn = Task { await model.signInToNearAI() }
+        let signIn = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("first browser opened") { opened().count == 1 }
-        await model.signInToNearAI()
+        await model.signInToNearAI(provider: nil)
         XCTAssertEqual(opened().count, 2)
         XCTAssertEqual(daemon.cancelledIDs, ["synthetic-attempt-1"])
         daemon.finishBrowserSignIn()
@@ -266,10 +266,10 @@ final class NearAiSignInButtonTests: XCTestCase {
         let daemon = NearAiAccountDaemon()
         daemon.loginRefused = true
         let (model, opened) = model(daemon)
-        let signIn = Task { await model.signInToNearAI() }
+        let signIn = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("first browser opened") { opened().count == 1 }
         daemon.startFails = true
-        await model.signInToNearAI()
+        await model.signInToNearAI(provider: nil)
         // Ensure the old implementation can fail without waiting ten minutes.
         if daemon.cancelledIDs.isEmpty { daemon.finishBrowserSignIn() }
         await signIn.value
@@ -277,7 +277,7 @@ final class NearAiSignInButtonTests: XCTestCase {
         XCTAssertTrue(model.nearAiSignInFailed)
         XCTAssertFalse(model.nearAiSigningIn)
         daemon.startFails = false
-        let next = Task { await model.signInToNearAI() }
+        let next = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("another browser opened") { opened().count == 2 }
         daemon.finishBrowserSignIn()
         await next.value
@@ -290,13 +290,13 @@ final class NearAiSignInButtonTests: XCTestCase {
         daemon.loginRefused = true
         daemon.cancelDelay = 0.3
         let (model, opened) = model(daemon)
-        let first = Task { await model.signInToNearAI() }
+        let first = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("first browser opened") { opened().count == 1 }
-        let retry = Task { await model.signInToNearAI() }
+        let retry = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("cancel requested") { daemon.count("near_ai_credential_cancel") == 1 }
         first.cancel()
         await first.value
-        let next = Task { await model.signInToNearAI() }
+        let next = Task { await model.signInToNearAI(provider: nil) }
         try await waitFor("new flow browser opened") { opened().count == 2 }
         await retry.value
         XCTAssertEqual(opened().count, 2, "the old restart cannot open a third browser")
@@ -320,10 +320,10 @@ final class NearAiSignInButtonTests: XCTestCase {
         XCTAssertTrue(account.contains("NearAiSignInControl(copy: copy)"))
         let funding = try source("Views/FundingRow.swift")
         XCTAssertTrue(funding.contains("NearAiSignInOffer.billingOffers"))
-        XCTAssertTrue(funding.contains("model.signInToNearAI()"))
+        XCTAssertTrue(funding.contains("model.signInToNearAI(provider: provider)"))
         let control = try source("Views/NearAiSignInControl.swift")
         XCTAssertTrue(control.contains("copy.credentialObtaining"), "the core's waiting line")
         XCTAssertTrue(control.contains("copy.credentialFailed"), "the core's failure line")
-        XCTAssertTrue(control.contains("signInToNearAI()"))
+        XCTAssertTrue(control.contains("signInToNearAI(provider: provider)"))
     }
 }
