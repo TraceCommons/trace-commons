@@ -2615,7 +2615,8 @@ async fn v145_tracks_dedup_clusters_across_tenants_as_a_non_superuser_owner() {
         drop(holder);
 
         // A write that skips the triggers leaves the count behind until the
-        // cluster's representative is looked up again, which recounts it.
+        // next statement changes the cluster, which recounts it: here a later
+        // member joins and the representative stays.
         seed.batch_execute(&format!(
             "SET session_replication_role = replica; {}; SET session_replication_role = origin;",
             v145_insert(t2, c4, 402, 7)
@@ -2626,17 +2627,27 @@ async fn v145_tracks_dedup_clusters_across_tenants_as_a_non_superuser_owner() {
         let healed = v145_as_tenant(
             &mut owner,
             t1,
-            "DELETE FROM trace_gate_decisions WHERE dedup_simhash = 400",
-            vec![],
+            &format!(
+                "INSERT INTO trace_gate_decisions
+                    (tenant_id, decision_id, submission_id, gate_policy_version,
+                     gate_version_hash, perplexity_micros, tail_fraction_micros,
+                     perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                     novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                     decided_at, dedup_cluster_id, dedup_simhash, dedup_signal_version)
+                 VALUES ('{t1}', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v', 1, 1,
+                         TRUE, 1, 'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                         TIMESTAMPTZ '2026-03-01T00:00:08Z', $1, 403, 'stamp')"
+            ),
+            vec![c4],
         )
         .await;
         let now = v145_cluster_table(&seed).await;
         let truth = v145_cluster_truth(&seed).await;
         let c4_row = now.iter().find(|row| row.0 == c4).copied();
-        if healed.is_err() || now != truth || c4_row != Some((c4, 401, 2)) {
+        if healed.is_err() || now != truth || c4_row != Some((c4, 400, 4)) {
             problems.push(format!(
-                "after a trigger-skipping insert ({drifted:?}) and a representative \
-                 delete: {healed:?}, read {now:?}, a full recompute reads {truth:?}"
+                "after a trigger-skipping insert ({drifted:?}) and a later member \
+                 joining: {healed:?}, read {now:?}, a full recompute reads {truth:?}"
             ));
         }
 
@@ -2765,8 +2776,10 @@ async fn v145_race(
         drop(waiter);
         result.map_err(|e| format!("waiter: {e:?}"))
     });
+    // Poll until the waiter is seen blocked or finishes. A slow runner only
+    // makes this take longer; finishing without ever waiting is the failure.
     let mut waited = false;
-    for _ in 0..100 {
+    for _ in 0..1200 {
         let n: i64 = seed
             .query_one(
                 "SELECT count(*) FROM pg_stat_activity

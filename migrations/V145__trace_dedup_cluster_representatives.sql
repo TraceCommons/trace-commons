@@ -29,10 +29,11 @@
 --
 -- Writes that skip triggers leave the table behind: session_replication_role
 -- = replica, pg_restore --disable-triggers, a logical-replication subscriber,
--- ALTER TABLE ... DISABLE TRIGGER. A cluster with at most 1024 members gets
--- its count back the next time its representative is looked up again (see
--- trace_dedup_cluster_apply). Anything else stays wrong until the rebuild
--- runs, so a restore or bulk load that skips triggers must be followed by one.
+-- ALTER TABLE ... DISABLE TRIGGER. A cluster whose count is at most 1024 is
+-- recounted the next time any statement changes it (see
+-- trace_dedup_cluster_apply). A bigger one, or one nothing touches again,
+-- stays wrong until the rebuild runs, so a restore or bulk load that skips
+-- triggers must be followed by one.
 --
 -- Applied by a non-superuser CREATEROLE migrator, as V101 and V114 are: it
 -- holds the owning guard just long enough to own the functions and run the
@@ -116,6 +117,13 @@ DROP FUNCTION IF EXISTS trace_dedup_cluster_rebuild();
 -- not in the shared lock table, so a statement touching many clusters cannot
 -- run out of lock slots.
 --
+-- The locks are held until the writer's transaction commits. A statement
+-- that touches many clusters, such as a tenant delete (trace_gate_decisions
+-- cascades from trace_tenants), makes any other writer to one of those
+-- clusters, from any tenant, wait for that commit. That is accepted here;
+-- taking the table out of the writer's transaction (an outbox drained by a
+-- worker) would remove the wait.
+--
 -- Isolation. Every call that finds the row writes it. So under REPEATABLE
 -- READ or SERIALIZABLE, where this transaction's snapshot can predate another
 -- writer's commit to the same cluster, the FOR UPDATE (or the insert's
@@ -124,17 +132,19 @@ DROP FUNCTION IF EXISTS trace_dedup_cluster_rebuild();
 -- committed row and is correct.
 --
 -- Cost. The representative only changes when the old one left or an earlier
--- member arrived, so the common case reads and writes one row. Only when the
--- representative left is it looked up again, by one probe of the members
--- index.
+-- member arrived, so the common case reads and writes one row, plus the
+-- recount below when the cluster is small. Only when the representative left
+-- is it looked up again, by one probe of the members index.
 --
--- Self-heal. That re-lookup also recounts the members, reading at most 1025
--- index entries, so a cluster of up to 1024 members that drifted (a write
--- that skipped the triggers) is corrected. A bigger cluster keeps its delta
--- count unless that count is itself 1024 or less, which is then provably
--- wrong and gets a full recount. The cap keeps a recluster that moves a big
--- cluster's members out in representative order from paying a full count on
--- every move.
+-- Self-heal. When the new count is 1024 or less, the members are recounted,
+-- reading at most 1025 index entries, so a small cluster that drifted (a
+-- write that skipped the triggers) is corrected the next time it changes. If
+-- that read finds more than 1024 members, the delta count is provably wrong
+-- and the members are counted in full. A count above 1024 is trusted. So a
+-- statement changing a cluster of M <= 1024 members reads up to M index
+-- entries, and one changing a bigger cluster reads none; a recluster that
+-- drains a cluster one move at a time pays about 1024^2 / 2 entries in all
+-- for its last 1024 moves, whatever the cluster's starting size.
 CREATE FUNCTION trace_dedup_cluster_apply(
     p_cluster     UUID,
     p_delta       BIGINT,
@@ -172,17 +182,6 @@ BEGIN
                      WHERE dedup_cluster_id = p_cluster;
                     RETURN;
                 END IF;
-                SELECT pg_catalog.count(*) INTO v_seen
-                  FROM (SELECT 1 FROM public.trace_gate_decisions g
-                         WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL
-                         LIMIT 1025) m;
-                IF v_seen <= 1024 THEN
-                    v_count := v_seen;
-                ELSIF v_count <= 1024 THEN
-                    SELECT pg_catalog.count(*) INTO v_count
-                      FROM public.trace_gate_decisions g
-                     WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL;
-                END IF;
             ELSIF p_add_id IS NOT NULL
                   AND (p_add_at, p_add_id)
                       < (r.representative_decided_at, r.representative_decision_id) THEN
@@ -191,6 +190,19 @@ BEGIN
             ELSE
                 v_id := r.representative_decision_id; v_at := r.representative_decided_at;
                 v_sh := r.representative_simhash; v_ver := r.representative_signal_version;
+            END IF;
+            IF v_count <= 1024 THEN
+                SELECT pg_catalog.count(*) INTO v_seen
+                  FROM (SELECT 1 FROM public.trace_gate_decisions g
+                         WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL
+                         LIMIT 1025) m;
+                IF v_seen <= 1024 THEN
+                    v_count := v_seen;
+                ELSE
+                    SELECT pg_catalog.count(*) INTO v_count
+                      FROM public.trace_gate_decisions g
+                     WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL;
+                END IF;
             END IF;
             UPDATE public.trace_dedup_cluster_representatives
                SET representative_decision_id    = v_id,
@@ -229,10 +241,10 @@ END $$;
 -- A trigger with transition tables can take neither a column list nor a WHEN
 -- clause, so it fires for every statement, and Postgres captures the changed
 -- rows whether or not this function reads them. What the function can avoid
--- is its own work: a statement with no member rows on either side (a decision
--- insert, which never sets the dedup columns, or an update of a non-member)
--- returns after one scan of the captured rows. An update of members that
--- leaves the dedup columns alone still runs the join below and finds nothing.
+-- is its own work: an insert with no member rows (a decision insert, which
+-- never sets the dedup columns) returns after one scan of the captured rows,
+-- and an update that changes no dedup column (credit, cap, correction value,
+-- status) returns after one anti-join of old rows against new.
 --
 -- jit = off: a query here keeps the transition tables' row counts from its
 -- session's first call, since they are fixed when the query is parsed. After
@@ -283,10 +295,18 @@ BEGIN
                 NULL, NULL, NULL, NULL);
         END LOOP;
     ELSE
-        IF NOT EXISTS (SELECT 1 FROM dedup_old o
-                        WHERE o.dedup_cluster_id IS NOT NULL AND o.dedup_simhash IS NOT NULL)
-           AND NOT EXISTS (SELECT 1 FROM dedup_new n
-                            WHERE n.dedup_cluster_id IS NOT NULL AND n.dedup_simhash IS NOT NULL) THEN
+        -- Nothing to do when every old row has a new row with the same key and
+        -- the same dedup columns. An UPDATE has as many new rows as old, and
+        -- keys are unique, so that pairing covers every row.
+        IF NOT EXISTS (
+            SELECT 1 FROM dedup_old o
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM dedup_new n
+                  WHERE n.tenant_id = o.tenant_id AND n.decision_id = o.decision_id
+                    AND (n.decided_at, n.dedup_cluster_id, n.dedup_simhash, n.dedup_signal_version)
+                        IS NOT DISTINCT FROM
+                        (o.decided_at, o.dedup_cluster_id, o.dedup_simhash, o.dedup_signal_version))
+        ) THEN
             RETURN NULL;
         END IF;
         -- Each changed row's old side leaves (-1) and its new side joins (+1).
