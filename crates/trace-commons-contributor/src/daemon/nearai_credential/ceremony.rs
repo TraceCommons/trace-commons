@@ -635,11 +635,11 @@ const COMMONS_UNAVAILABLE: &str = "near_ai_credential_commons_unavailable";
 /// What a minted login becomes, given what the commons made of it.
 ///
 /// Not bound (a first run, another tenant): stored as it always was.
-/// Verified (signed out, the commons answered for this account): stored,
-/// with no account session.
 /// Unchecked: stored, but never recorded as the account's login.
-/// Accepted: stored, then the account session it earned is stored too;
-/// the only branch that records a login as the one the commons accepted.
+/// Accepted and Verified are the two outcomes where the commons accepted
+/// the login for this account, and the only two that may record it as the
+/// account's login. Accepted: stored, then the account session it earned is
+/// stored too. Verified (signed out): stored, with no account session.
 /// Refused or unasked: nothing is stored, the key just minted is revoked
 /// where NEAR AI allows, and the stored login stays as it was.
 #[allow(clippy::too_many_arguments)]

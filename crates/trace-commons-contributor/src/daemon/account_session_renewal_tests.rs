@@ -1355,8 +1355,57 @@ async fn a_signed_out_device_refuses_another_accounts_login() {
             ),
             "other tenant: {other_tenant}"
         );
+        assert_eq!(
+            fx.ceremonies(),
+            (1, 1),
+            "refused by the commons, not before it"
+        );
         assert!(fx.account_record().is_none());
     }
+}
+
+/// Signed out, and the commons cannot be asked: the login is stored
+/// unchecked, so Private AI does not wait on an account the person left.
+/// (A check past its deadline takes the same arm.)
+#[tokio::test]
+async fn a_signed_out_device_whose_commons_is_unreachable_stores_unchecked() {
+    let fx = Fixture::new(Session::Absent).await;
+    let commons =
+        super::super::native_identity::client("http://127.0.0.1:9", "unauthenticated").unwrap();
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &RenewVia::at(&fx.api, commons), FRESH).await,
+        FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+    ));
+    assert!(fx.account_record().is_none());
+}
+
+/// Signed out, and the commons answers that this device key was revoked:
+/// remembered, and not bound, as on a signed-in device.
+#[tokio::test]
+async fn a_signed_out_device_remembers_a_revoked_key() {
+    let fx = Fixture::new(Session::Absent).await;
+    *fx.stub.state.refuse.lock().unwrap() = true;
+    *fx.stub.state.refuse_label.lock().unwrap() =
+        super::super::nearai_onboarding::DEVICE_KEY_REVOKED_WIRE.into();
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::NotBound
+    ));
+    assert!(super::key_revoked(&fx.shared.store));
+    assert_eq!(fx.ceremonies(), (1, 1));
+}
+
+/// Signed out, and the answer fails a local check: fails closed, as on a
+/// signed-in device (owner, 2026-11-02).
+#[tokio::test]
+async fn a_signed_out_device_fails_closed_on_an_unverifiable_answer() {
+    let fx = Fixture::new(Session::Absent).await;
+    *fx.stub.state.tenant.lock().unwrap() = "tenant-a".into();
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unavailable
+    ));
+    assert_eq!(fx.ceremonies(), (1, 1));
 }
 
 /// A revoked device key is remembered, as `sign_in` and the renewal
@@ -1598,6 +1647,7 @@ mod settle_tests {
         for reason in [
             UNCHECKED_ACCOUNT_RECORD_MALFORMED,
             UNCHECKED_COMMONS_ADDRESS_REFUSED,
+            UNCHECKED_COMMONS_UNREACHABLE,
         ] {
             let fx = Fixture::new(Session::Expired).await;
             let before = (fx.account_record(), fx.renewal_log_text());
