@@ -65,6 +65,18 @@ impl ProcessIdentity {
         self.start_time.map(|start| format!("{}:{start}", self.pid))
     }
 
+    /// The process a launcher's `process_identity` string names: `<pid>`
+    /// and its start time, or the pid alone when the launcher could not
+    /// read the start time (it then wrote some other text there). None
+    /// when no pid can be read from it.
+    pub fn parse(identity: &str) -> Option<Self> {
+        let (pid, start) = identity.split_once(':')?;
+        Some(Self {
+            pid: pid.parse().ok()?,
+            start_time: start.parse().ok(),
+        })
+    }
+
     /// Whether this process still runs. A zombie has exited. Another
     /// process holding the pid with a different start time is not it.
     pub fn is_running(&self) -> bool {
