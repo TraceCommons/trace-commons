@@ -752,7 +752,7 @@ enum NearAiSignIn {
         _ model: AppModel, provider: String?, openURL: OpenURLAction, then: (() -> Void)? = nil
     ) {
         Task {
-            await run(model, provider: provider, open: { await openURL.opened($0) })
+            await run(model, provider: provider, open: { url in await openURL.opened(url) })
             then?()
         }
     }
