@@ -166,16 +166,25 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
     {
         return Err((ERR_UNAVAILABLE, ERR_AUDIT_WRITE_FAILED));
     }
+    // No account after this, so no login goes with one. First, so a write
+    // that fails leaves the device enrolled rather than the old account's
+    // login on disk for a next one. The stored NEAR AI session's login stays
+    // with the session, which unenrolling keeps (until #1843 clears it too).
+    if super::nearai_credential::login_record::forget_commons_login(&shared.store).is_err() {
+        return Err((ERR_UNAVAILABLE, ERR_UNENROLL_FAILED));
+    }
     // Credentials first, then the config and the rest in the same commit
     // section: see the module doc.
     commons_credentials::clear_with(&shared.store, &Kind::ALL, || {
         shared.store.remove_enrollment_files()
     })
     .map_err(|_| (ERR_UNAVAILABLE, ERR_UNENROLL_FAILED))?;
-    // No account any more, so no login goes with one. The stored NEAR AI
-    // session's login stays with the session, which unenrolling keeps
-    // (until #1843 clears the session too).
-    super::nearai_credential::login_record::forget_commons_login(&shared.store);
+    // Once more now the config is gone: an acceptance that landed between
+    // the first clear and the removal is undone, and any later one finds no
+    // enrollment and writes nothing (`login_record::accepted_by_commons`).
+    if super::nearai_credential::login_record::forget_commons_login(&shared.store).is_err() {
+        tracing::warn!(target: "unenroll", "near_ai_login_record_not_cleared");
+    }
     let insights_cleanup = clear_insights_counter(shared);
     for id in &approved {
         queue.revoke_approval(*id, super::preview::REASON_INPUTS_CHANGED);

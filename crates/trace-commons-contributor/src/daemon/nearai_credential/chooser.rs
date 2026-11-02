@@ -191,15 +191,17 @@ impl Chosen {
     }
 }
 
-/// A second choice from this attempt's page, arriving after the listener
-/// moved on to the first one's login: the person went Back to the page and
-/// picked again. The leg cannot switch, so the listener answers with the
-/// page's existing refusal and ends the attempt, and the app can start a
-/// new one at once instead of waiting out the timeout.
+/// This attempt's page coming back after the listener moved on to the first
+/// login: the person went Back. A browser that kept the page in its
+/// back/forward cache posts a second choice; one that did not (the page is
+/// `no-store`) fetches the page's address again. The leg cannot switch, so
+/// the listener answers with the page's existing refusal and ends the
+/// attempt, and the app can start a new one at once instead of waiting out
+/// the timeout.
 ///
-/// Recognized only by the same rules as a first choice -- this attempt's
-/// state, this listener's origin, a login this build offers -- so a page
-/// elsewhere cannot end someone's sign-in.
+/// Recognized only by this attempt's state: the page's exact address, or a
+/// choice by the same rules as a first one (this listener's origin, a login
+/// this build offers). A page elsewhere cannot end someone's sign-in.
 pub(crate) struct StaleChoice {
     state: String,
 }
@@ -215,9 +217,12 @@ impl StaleChoice {
         Self { state }
     }
 
-    /// Whether `head` and `body`, sent to `authority`, are another choice
-    /// from this attempt's page.
+    /// Whether `head` and `body`, sent to `authority`, are this attempt's
+    /// page fetched again or another choice from it.
     pub(super) fn matches(&self, head: &Head, body: &[u8], authority: &str) -> bool {
+        if head.method == "GET" {
+            return body.is_empty() && head.target == format!("{PAGE_PATH}?state={}", self.state);
+        }
         head.method == "POST"
             && head.target == CHOOSE_PATH
             && matches!(

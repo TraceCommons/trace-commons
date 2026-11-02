@@ -216,8 +216,9 @@ fn unix_millis() -> Result<u64, NearWalletError> {
 enum Route {
     Callback,
     Deposit,
-    /// A post to the login page's choice path: judged once its body is read.
-    StaleChoice,
+    /// The login page's address or its choice path: judged by the chooser's
+    /// rules once the body is read.
+    StaleChoice(loopback_http::Head),
     Asset(String),
 }
 
@@ -236,7 +237,12 @@ fn parse_head(bytes: &[u8], authority: &str) -> Result<(Route, usize), NearWalle
     let route = match (head.method.as_str(), head.target.as_str()) {
         ("GET", target) if target == CALLBACK_PATH => Route::Callback,
         ("POST", target) if target == DEPOSIT_PATH => Route::Deposit,
-        ("POST", target) if target == super::chooser::CHOOSE_PATH => Route::StaleChoice,
+        ("POST", target) if target == super::chooser::CHOOSE_PATH => {
+            Route::StaleChoice(head.clone())
+        }
+        ("GET", target) if target.starts_with(super::chooser::PAGE_PATH) => {
+            Route::StaleChoice(head.clone())
+        }
         ("GET", target) => Route::Asset(
             near_wallet_page::asset_path(target)
                 .ok_or(NearWalletError::Invalid)?
@@ -247,7 +253,7 @@ fn parse_head(bytes: &[u8], authority: &str) -> Result<(Route, usize), NearWalle
     let size = head.body_len();
     match &route {
         Route::Callback | Route::Asset(_) if size == 0 => {}
-        Route::StaleChoice => {}
+        Route::StaleChoice(_) => {}
         Route::Deposit
             if head.length.is_some()
                 && (1..=MAX_CALLBACK_BYTES).contains(&size)
@@ -286,9 +292,7 @@ async fn read_request(stream: &mut TcpStream, authority: &str) -> Result<Request
         .await
         .map_err(|_| NearWalletError::Invalid)?;
     match route {
-        Route::StaleChoice => loopback_http::parse_head(&head, authority, MAX_CALLBACK_BYTES)
-            .map(|head| Request::StaleChoice(head, body))
-            .map_err(|_| NearWalletError::Invalid),
+        Route::StaleChoice(head) => Ok(Request::StaleChoice(head, body)),
         Route::Callback => Ok(Request::Callback),
         Route::Asset(path) => Ok(Request::Asset(path)),
         Route::Deposit => String::from_utf8(body)

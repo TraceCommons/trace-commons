@@ -649,3 +649,56 @@ async fn a_second_pick_after_the_first_ends_the_attempt_at_once() {
         assert_eq!(settled_status(&store, &id).await, "failed", "{first}");
     }
 }
+
+/// Back to the login page in a browser that did not keep it (it is
+/// `no-store`): the page's own address is fetched again. That too ends the
+/// attempt at once, with the page's refusal, on both legs; another address
+/// ends nothing.
+#[cfg(not(feature = "near-ai-staging"))]
+#[tokio::test]
+async fn the_page_fetched_again_after_a_pick_ends_the_attempt_at_once() {
+    for first in ["github", "near"] {
+        let (_directory, store) = crate::config::tests_support::temp_store();
+        let (url, _location, port, id) = choose_in_browser(&store, first).await;
+        let address: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+        let authority = format!("127.0.0.1:{port}");
+
+        let other = send(
+            address,
+            get(&authority, &format!("{PAGE_PATH}?state=other")),
+        )
+        .await;
+        assert!(status(&other).starts_with("HTTP/1.1 4"), "{first}: {other}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            crate::daemon::nearai_credential::ceremony::status(store.dir(), Some(&id))
+                .unwrap()
+                .status,
+            "waiting_for_browser",
+            "{first}"
+        );
+
+        let again = send(
+            address,
+            get(
+                &authority,
+                &format!("{}?{}", url.path(), url.query().unwrap()),
+            ),
+        )
+        .await;
+        assert_eq!(status(&again), "HTTP/1.1 400 Bad Request", "{first}");
+        assert!(again.ends_with("Not accepted."), "{first}: {again}");
+        assert_eq!(settled_status(&store, &id).await, "failed", "{first}");
+    }
+}
+
+/// A second pick is the person's own doing, like a cancel: it ends the
+/// attempt and writes no failure line.
+#[test]
+fn a_second_pick_is_not_logged_as_a_failure() {
+    use crate::daemon::nearai_credential::ceremony::failure_fields;
+    use crate::daemon::nearai_credential::near_wallet::NearWalletError;
+    assert!(failure_fields(&anyhow!(STALE_CHOICE), "github").is_none());
+    assert!(failure_fields(&anyhow::Error::from(NearWalletError::StaleChoice), "near").is_none());
+    assert!(failure_fields(&anyhow!("near_ai_credential_unavailable"), "github").is_some());
+}

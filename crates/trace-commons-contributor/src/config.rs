@@ -1489,7 +1489,23 @@ impl ConfigStore {
     /// under the same commit lock -- see `daemon::unenroll` for why that
     /// order is the fail-closed one.
     pub(crate) fn remove_enrollment_files(&self) -> Result<()> {
-        for name in ENROLLMENT_FILES {
+        // Stored envelopes are stamped with this enrollment's identity, so
+        // they go with it -- see `wipe_files` below.
+        self.remove_files_and_temps(&ENROLLMENT_FILES, |file_name| {
+            file_name.starts_with(DAEMON_APPROVED_ENVELOPE_PREFIX)
+                || file_name.starts_with(&format!(".{DAEMON_APPROVED_ENVELOPE_PREFIX}"))
+        })
+    }
+
+    /// Remove `names` from this directory, with the temp files an atomic
+    /// write of any of them left behind (`.{name}.tmp-*`), and every other
+    /// entry `also` names. Missing is not an error.
+    pub(crate) fn remove_files_and_temps(
+        &self,
+        names: &[&str],
+        also: impl Fn(&str) -> bool,
+    ) -> Result<()> {
+        for name in names {
             let path = self.dir.join(name);
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
@@ -1497,10 +1513,7 @@ impl ConfigStore {
                 Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
             }
         }
-        let tmp_prefixes: Vec<String> = ENROLLMENT_FILES
-            .iter()
-            .map(|name| format!(".{name}.tmp-"))
-            .collect();
+        let tmp_prefixes: Vec<String> = names.iter().map(|name| format!(".{name}.tmp-")).collect();
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1512,11 +1525,7 @@ impl ConfigStore {
             let entry = entry.with_context(|| format!("reading dir {}", self.dir.display()))?;
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
-            // Stored envelopes are stamped with this enrollment's identity, so
-            // they go with it -- see `wipe_files` below.
-            let is_approved_envelope = file_name.starts_with(DAEMON_APPROVED_ENVELOPE_PREFIX)
-                || file_name.starts_with(&format!(".{DAEMON_APPROVED_ENVELOPE_PREFIX}"));
-            if is_approved_envelope
+            if also(&file_name)
                 || tmp_prefixes
                     .iter()
                     .any(|prefix| file_name.starts_with(prefix))

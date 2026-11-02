@@ -108,7 +108,7 @@ fn unenrolling_forgets_the_accounts_login_and_keeps_the_sessions() {
     record_stored_login(&store, login(), "key-1");
     accepted_by_commons(&store, Some(login()));
     store.remove_enrollment_files().unwrap();
-    forget_commons_login(&store);
+    forget_commons_login(&store).unwrap();
     assert_eq!(commons_login(&store), None);
     assert_eq!(stored_login(&store, "key-1"), Some(login()));
 }
@@ -144,7 +144,7 @@ fn an_acceptance_after_leaving_the_account_writes_nothing() {
     let (_dir, store) = enrolled();
     accepted_by_commons(&store, Some(login()));
     store.remove_enrollment_files().unwrap();
-    forget_commons_login(&store);
+    forget_commons_login(&store).unwrap();
     accepted_by_commons(&store, Some(login()));
     assert_eq!(commons_login(&store), None);
 }
@@ -173,7 +173,7 @@ fn removal_is_ordered_against_a_write_in_flight() {
 #[test]
 fn an_empty_change_creates_no_file() {
     let (_dir, store) = enrolled();
-    forget_commons_login(&store);
+    forget_commons_login(&store).unwrap();
     clear_stored_login(&store);
     assert!(!store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists());
 }

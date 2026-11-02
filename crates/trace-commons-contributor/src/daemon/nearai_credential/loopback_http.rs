@@ -30,7 +30,7 @@ pub(super) const MAX_HEADER_BYTES: usize = 8192;
 pub(super) struct Invalid;
 
 /// One request head, far enough decoded to route it.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Head {
     pub method: String,
     pub target: String,

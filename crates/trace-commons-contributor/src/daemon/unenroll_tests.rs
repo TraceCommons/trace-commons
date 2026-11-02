@@ -910,3 +910,21 @@ async fn unenroll_forgets_the_accounts_login_and_keeps_the_sessions() {
     assert_eq!(login_record::commons_login(&s.store), None);
     assert_eq!(login_record::stored_login(&s.store, "key-1"), Some(login));
 }
+
+/// A record of the account's login that cannot be cleared fails the
+/// unenroll before anything is removed: the device stays enrolled rather
+/// than leave the old account's login for a next one.
+#[tokio::test]
+async fn unenroll_fails_closed_when_the_accounts_login_cannot_be_cleared() {
+    let s = shared();
+    enroll_fixture(&s);
+    // A directory where the record goes: it can be neither read nor written.
+    let record = s
+        .store
+        .daemon_path(crate::config::DAEMON_NEAR_AI_LOGIN_FILE);
+    std::fs::create_dir_all(record.join("blocked")).unwrap();
+
+    let r = call(&s).await;
+    assert!(r.error.is_some(), "unenroll went ahead");
+    assert!(s.store.load_config().unwrap().is_some(), "still enrolled");
+}

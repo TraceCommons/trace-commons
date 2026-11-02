@@ -91,28 +91,30 @@ fn load(store: &ConfigStore) -> LoginRecord {
 /// Change the record under [`WRITE`]. A change that leaves nothing to keep
 /// never creates the file.
 fn update(store: &ConfigStore, change: impl FnOnce(&mut LoginRecord)) {
-    let Ok(_write) = WRITE.lock() else {
-        return;
-    };
-    write_locked(store, change);
+    if update_checked(store, change).is_err() {
+        tracing::warn!(target: "near_ai_login_record", "near_ai_login_record_unsaved");
+    }
 }
 
-fn write_locked(store: &ConfigStore, change: impl FnOnce(&mut LoginRecord)) {
+/// [`update`] for a caller that must know the write landed.
+fn update_checked(
+    store: &ConfigStore,
+    change: impl FnOnce(&mut LoginRecord),
+) -> anyhow::Result<()> {
+    let _write = WRITE
+        .lock()
+        .map_err(|_| anyhow::anyhow!("near_ai_login_record_unavailable"))?;
+    write_locked(store, change)
+}
+
+fn write_locked(store: &ConfigStore, change: impl FnOnce(&mut LoginRecord)) -> anyhow::Result<()> {
     let mut record = load(store);
     change(&mut record);
     if record == LoginRecord::default() && !store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE).exists() {
-        return;
+        return Ok(());
     }
-    let saved = serde_json::to_vec_pretty(&record)
-        .ok()
-        .is_some_and(|bytes| {
-            store
-                .write_daemon_file(DAEMON_NEAR_AI_LOGIN_FILE, &bytes)
-                .is_ok()
-        });
-    if !saved {
-        tracing::warn!(target: "near_ai_login_record", "near_ai_login_record_unsaved");
-    }
+    let bytes = serde_json::to_vec_pretty(&record)?;
+    store.write_daemon_file(DAEMON_NEAR_AI_LOGIN_FILE, &bytes)
 }
 
 /// Whether this device is enrolled: the account's login is kept only then.
@@ -161,15 +163,19 @@ pub(crate) fn accepted_by_commons(store: &ConfigStore, provider: Option<&str>) {
     let Ok(_write) = WRITE.lock() else {
         return;
     };
-    if enrolled(store) {
-        write_locked(store, |record| record.commons_login = Some(tag.to_owned()));
+    if enrolled(store)
+        && write_locked(store, |record| record.commons_login = Some(tag.to_owned())).is_err()
+    {
+        tracing::warn!(target: "near_ai_login_record", "near_ai_login_record_unsaved");
     }
 }
 
-/// The device left its account (unenroll): no login goes with one any more.
-/// The stored session's login stays with the session.
-pub(crate) fn forget_commons_login(store: &ConfigStore) {
-    update(store, |record| record.commons_login = None);
+/// The device is leaving its account (unenroll): no login goes with one any
+/// more. The stored session's login stays with the session. An error means
+/// the old account's login may still be on disk, so unenroll fails on it
+/// rather than let a next account be shown that login.
+pub(crate) fn forget_commons_login(store: &ConfigStore) -> anyhow::Result<()> {
+    update_checked(store, |record| record.commons_login = None)
 }
 
 /// Remove the whole record (logout), under the record's lock so a write in
@@ -178,25 +184,7 @@ pub(crate) fn remove(store: &ConfigStore) -> anyhow::Result<()> {
     let _write = WRITE
         .lock()
         .map_err(|_| anyhow::anyhow!("near_ai_login_record_unavailable"))?;
-    match std::fs::remove_file(store.daemon_path(DAEMON_NEAR_AI_LOGIN_FILE)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    // And any temp file a crashed atomic write left behind.
-    let prefix = format!(".{DAEMON_NEAR_AI_LOGIN_FILE}.tmp-");
-    let entries = match std::fs::read_dir(store.dir()) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
-            std::fs::remove_file(entry.path())?;
-        }
-    }
-    Ok(())
+    store.remove_files_and_temps(&[DAEMON_NEAR_AI_LOGIN_FILE], |_| false)
 }
 
 /// The login the account last accepted, if known.

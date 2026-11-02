@@ -581,18 +581,25 @@ const FAILURE_EVENT: &str = "near_ai_sign_in_failed";
 
 /// The label line's fields for a failed sign-in -- step, reason, provider
 /// -- or `None` for a cancel, which is not a failure: the wallet's own
-/// cancel, or a cancel or forget that won the race with the persist
-/// (`near_ai_credential_cancelled`). The error's text is checked
+/// cancel, a cancel or forget that won the race with the persist
+/// (`near_ai_credential_cancelled`), or a second pick on the login page
+/// after the first (`chooser::STALE_CHOICE`), which ends the attempt as the
+/// person's own doing. The error's text is checked
 /// ([`failure_reason`]) and never copied otherwise.
 pub(crate) fn failure_fields(
     error: &anyhow::Error,
     provider: &'static str,
 ) -> Option<[(&'static str, String); 3]> {
-    if error.downcast_ref::<NearWalletError>() == Some(&NearWalletError::Cancelled) {
+    // A cancel, and a second pick on the login page after the first, are
+    // the person's own doing, not faults.
+    if matches!(
+        error.downcast_ref::<NearWalletError>(),
+        Some(NearWalletError::Cancelled | NearWalletError::StaleChoice)
+    ) {
         return None;
     }
     let root = error.root_cause().to_string();
-    if root == "near_ai_credential_cancelled" {
+    if root == "near_ai_credential_cancelled" || root == chooser::STALE_CHOICE {
         return None;
     }
     let step = error
@@ -859,6 +866,7 @@ pub(crate) async fn settle(
             return Err(refused(COMMONS_UNAVAILABLE));
         }
     };
+    let accepted_was_some = accepted.is_some();
     progress.set(FailedStep::Persist);
     let persisted = progress.persisting();
     // The session is kept, not dropped. Inference does not need it -- the
@@ -913,37 +921,29 @@ pub(crate) async fn settle(
     .map_err(|_| anyhow!("near_ai_credential_unavailable"))
     .and_then(|persisted| persisted)
     .map_err(at(FailedStep::Persist))?;
-    if verified {
+    // Best effort: the NEAR AI login is stored, so the sign-in has landed
+    // whatever happens here, and Sign in again renews the account session
+    // with it if this write is lost.
+    let committed = match accepted {
+        Some(accepted) => match ConfigStore::open(dir.to_path_buf()) {
+            Ok(store) => commit_fresh_login(&store, *accepted).await.is_ok(),
+            Err(_) => false,
+        },
+        None => false,
+    };
+    if accepted_was_some && !committed {
+        tracing::warn!(target: "near_ai_credential", "near_ai_account_session_not_stored");
+    }
+    // The one place a sign-in records the account's login: the commons
+    // accepted this attempt's login (Accepted, its session stored, or
+    // Verified). The sign-in page lists it first next time. Label only, off
+    // this runtime's one worker.
+    if verified || committed {
         if let Ok(store) = ConfigStore::open(dir.to_path_buf()) {
-            // Label only, off this runtime's one worker.
             let _ = tokio::task::spawn_blocking(move || {
                 super::login_record::accepted_by_commons(&store, login);
             })
             .await;
-        }
-    }
-    if let Some(accepted) = accepted {
-        // Best effort: the NEAR AI login is stored, so the sign-in has
-        // landed whatever happens here, and Sign in again renews the
-        // account session with it if this write is lost.
-        let committed = match ConfigStore::open(dir.to_path_buf()) {
-            Ok(store) => {
-                let committed = commit_fresh_login(&store, *accepted).await.is_ok();
-                if committed {
-                    // The commons accepted this attempt's login: the sign-in
-                    // page lists it first next time. Label only, off this
-                    // runtime's one worker.
-                    let _ = tokio::task::spawn_blocking(move || {
-                        super::login_record::accepted_by_commons(&store, login);
-                    })
-                    .await;
-                }
-                committed
-            }
-            Err(_) => false,
-        };
-        if !committed {
-            tracing::warn!(target: "near_ai_credential", "near_ai_account_session_not_stored");
         }
     }
     Ok(())
