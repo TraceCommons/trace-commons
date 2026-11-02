@@ -187,74 +187,98 @@ pub fn is_device_key_revoked(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REVOKED)
 }
 
-/// Whether a provisioning error is the database failing to answer rather than
-/// a refusal: the pool timed out or is closed, the connection to PostgreSQL
-/// could not be made or was lost (an I/O failure or a closed connection), or
-/// PostgreSQL said it is shutting down or out of resources.
+/// Whether a provisioning error is the database unable to answer rather than
+/// a refusal. Two kinds, both deployment state, the same for every request:
 ///
-/// Narrow on purpose, in three ways:
+/// - **Not answering now**: the pool timed out or is closed, the connection
+///   could not be made or was lost (an I/O failure or a closed connection),
+///   or PostgreSQL said it is shutting down or out of resources.
+/// - **Misconfigured**: a pool that could not be built or run, credentials
+///   PostgreSQL rejects (SQLSTATE class `28`, or a client-side
+///   authentication, TLS or configuration error), a database that does not
+///   exist or was dropped (`3D000`, `57P04`), or a required pool the
+///   deployment did not configure (a `missing-control:` label).
 ///
-/// - Every decided refusal on these paths is carried as
-///   `DatabaseError::Pool(label)` (the refusal labels above and in
-///   `db::postgres_account_onboarding`), and that variant is never transient
-///   here, nor are `Query`, `Constraint` or `Serialization`. Anything not
-///   positively recognised stays a refusal.
-/// - A client-side `tokio_postgres` error (an unexpected row count, a column
-///   or type mismatch, a parameter that will not encode) is deterministic and
-///   follows the data, so it is not transient: only a closed connection and
-///   an I/O cause are.
-/// - Permanent failures are not transient either, so a misconfigured commons
-///   is never told to clients as "try again later": a bad password or a
-///   missing database (a server error with another SQLSTATE), a pool that
-///   could not be built, a dropped database (`57P04`).
+/// What is **not** here, and so stays a refusal:
 ///
-/// Lock contention is deliberately **not** transient: a deadlock (`40P01`),
-/// a serialization failure (`40001`) or a cancelled statement (`57014`)
-/// happens because another transaction holds the rows this request touches,
-/// which on these paths are keyed by the device key and the login's anchor.
-/// Answering those differently would describe that key or login, so they
-/// stay the uniform deny. What remains -- the pool, the connection, the
-/// server's own state -- is the same whichever account, login or key the
-/// request names.
-pub fn is_transient_database_failure(error: &crate::error::DatabaseError) -> bool {
+/// - Every decided refusal: `DatabaseError::Pool(label)` (the refusal labels
+///   above and in `db::postgres_account_onboarding`), `Query`, `Constraint`,
+///   `Serialization`.
+/// - A client-side `tokio_postgres` error that follows the data (an
+///   unexpected row count, a column or type mismatch, a parameter that will
+///   not encode).
+/// - Lock contention: a deadlock (`40P01`), a serialization failure
+///   (`40001`) or a cancelled statement (`57014`) happens because another
+///   transaction holds the rows this request touches, which on these paths
+///   are keyed by the device key and the login's anchor. Answering those
+///   differently would describe that key or login.
+/// - Any other server error (an integrity or permission violation).
+///
+/// Anything not positively recognised stays a refusal.
+pub fn is_database_unavailable(error: &crate::error::DatabaseError) -> bool {
     use crate::error::DatabaseError;
     use deadpool_postgres::PoolError;
     match error {
-        DatabaseError::PoolRuntime(PoolError::Timeout(_) | PoolError::Closed) => true,
-        DatabaseError::PoolRuntime(PoolError::Backend(error)) => postgres_did_not_answer(error),
-        DatabaseError::Postgres(error) => postgres_did_not_answer(error),
+        DatabaseError::PoolBuild(_) => true,
+        DatabaseError::PoolRuntime(PoolError::Backend(error)) => postgres_unavailable(error),
+        DatabaseError::PoolRuntime(_) => true,
+        DatabaseError::Postgres(error) => postgres_unavailable(error),
+        DatabaseError::Pool(label) => label.starts_with("missing-control:"),
         _ => false,
     }
 }
 
-/// Whether a `tokio_postgres` error is PostgreSQL not answering: a closed
-/// connection, an I/O failure (refused, reset, unreachable), or the server
-/// saying it cannot serve now. See [`is_transient_database_failure`].
-fn postgres_did_not_answer(error: &tokio_postgres::Error) -> bool {
+/// Whether a `tokio_postgres` error is PostgreSQL unable to answer: not
+/// answering now, or misconfigured. See [`is_database_unavailable`].
+fn postgres_unavailable(error: &tokio_postgres::Error) -> bool {
     if error.is_closed() {
         return true;
     }
     if let Some(db) = error.as_db_error() {
-        // 08000 / 08001 / 08003 / 08006: connection exception, could not
-        // connect, no connection, connection failure. 53000 / 53100 / 53200 /
-        // 53300: out of resources, disk, memory, connections. 57P01 / 57P02 /
-        // 57P03: admin shutdown, crash shutdown, cannot connect now.
-        return matches!(
-            db.code().code(),
-            "08000"
-                | "08001"
-                | "08003"
-                | "08006"
-                | "53000"
-                | "53100"
-                | "53200"
-                | "53300"
-                | "57P01"
-                | "57P02"
-                | "57P03"
-        );
+        let code = db.code().code();
+        // 28: invalid authorization (bad password, no such role).
+        // 08000 / 08001 / 08003 / 08004 / 08006: connection exception, could
+        // not connect, no connection, connection rejected, connection
+        // failure. 53000 / 53100 / 53200 / 53300: out of resources, disk,
+        // memory, connections. 57P01 / 57P02 / 57P03 / 57P04: admin shutdown,
+        // crash shutdown, cannot connect now, database dropped. 3D000: no
+        // such database.
+        return code.starts_with("28")
+            || matches!(
+                code,
+                "08000"
+                    | "08001"
+                    | "08003"
+                    | "08004"
+                    | "08006"
+                    | "53000"
+                    | "53100"
+                    | "53200"
+                    | "53300"
+                    | "57P01"
+                    | "57P02"
+                    | "57P03"
+                    | "57P04"
+                    | "3D000"
+            );
     }
-    std::error::Error::source(error).is_some_and(|cause| cause.is::<std::io::Error>())
+    if std::error::Error::source(error).is_some_and(|cause| cause.is::<std::io::Error>()) {
+        return true;
+    }
+    // The client-side kinds that mean the deployment cannot reach or log in
+    // to PostgreSQL. `tokio_postgres` does not expose its error kind, so it
+    // is read from `Display`, which prints the kind alone (never the cause).
+    // A kind not listed -- a row count, a column, a type, an encoding --
+    // follows the data and stays a refusal.
+    matches!(
+        error.to_string().as_str(),
+        "authentication error"
+            | "error performing TLS handshake"
+            | "invalid configuration"
+            | "invalid connection string"
+            | "error connecting to server"
+            | "timeout waiting for server"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -523,9 +547,9 @@ mod tests {
 
     /// No decided refusal reads as the database not answering. Each label the
     /// provisioning code refuses with is listed, so a new one has to be
-    /// looked at here; the pool-runtime case is the transient one.
+    /// looked at here; pool and deployment failures are the unavailable ones.
     #[test]
-    fn no_refusal_reads_as_a_transient_database_failure() {
+    fn no_refusal_reads_as_the_database_unavailable() {
         use crate::error::DatabaseError;
         for label in [
             DEVICE_KEY_REGISTERED_ELSEWHERE,
@@ -533,10 +557,9 @@ mod tests {
             "near_provisioning_refused",
             "near_provisioning_wallet_key_registered_elsewhere",
             "near_provisioning_device_bound_to_other_account",
-            "missing-control: login-resolver-pool-unconfigured",
         ] {
             assert!(
-                !is_transient_database_failure(&DatabaseError::Pool(label.into())),
+                !is_database_unavailable(&DatabaseError::Pool(label.into())),
                 "{label}"
             );
         }
@@ -550,18 +573,21 @@ mod tests {
             },
             DatabaseError::UploadPrincipalAuthenticationDenied,
         ] {
-            assert!(!is_transient_database_failure(&refusal), "{refusal:?}");
+            assert!(!is_database_unavailable(&refusal), "{refusal:?}");
         }
-        assert!(is_transient_database_failure(&DatabaseError::PoolRuntime(
+        assert!(is_database_unavailable(&DatabaseError::PoolRuntime(
             deadpool_postgres::PoolError::Closed
         )));
-        assert!(is_transient_database_failure(&DatabaseError::PoolRuntime(
+        assert!(is_database_unavailable(&DatabaseError::PoolRuntime(
             deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait)
         )));
-        // Permanent: a pool that cannot run, or could not be built, is a
-        // misconfiguration, never "try again later".
-        assert!(!is_transient_database_failure(&DatabaseError::PoolRuntime(
+        // Deployment state, the same for every request: a pool that cannot
+        // run, or a required pool the deployment did not configure.
+        assert!(is_database_unavailable(&DatabaseError::PoolRuntime(
             deadpool_postgres::PoolError::NoRuntimeSpecified
+        )));
+        assert!(is_database_unavailable(&DatabaseError::Pool(
+            "missing-control: login-resolver-pool-unconfigured".into()
         )));
     }
 

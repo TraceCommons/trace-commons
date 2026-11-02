@@ -2680,15 +2680,15 @@ async fn each_listed_device_says_what_it_has_contributed() {
     other_task.abort();
 }
 
-/// `is_transient_database_failure` against errors a real PostgreSQL and a
+/// `is_database_unavailable` against errors a real PostgreSQL and a
 /// real pool raise. Only the database not answering is transient: a pool
 /// that cannot connect at all (nothing listening). A missing database, an
 /// unexpected row count (a client-side error that follows the data) and a
 /// cancelled statement (lock contention, which follows the rows a request
 /// touches) are not.
 #[tokio::test]
-async fn only_the_database_not_answering_is_a_transient_failure() {
-    use trace_commons_server::account_onboarding::is_transient_database_failure;
+async fn only_deployment_state_reads_as_the_database_unavailable() {
+    use trace_commons_server::account_onboarding::is_database_unavailable;
     use trace_commons_server::error::DatabaseError;
     let _serial = serial().lock().await;
     let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
@@ -2720,7 +2720,7 @@ async fn only_the_database_not_answering_is_a_transient_failure() {
         .await
         .expect_err("nothing listens");
     assert!(
-        is_transient_database_failure(&DatabaseError::PoolRuntime(unreachable)),
+        is_database_unavailable(&DatabaseError::PoolRuntime(unreachable)),
         "a refused connection is the database not answering"
     );
 
@@ -2732,8 +2732,8 @@ async fn only_the_database_not_answering_is_a_transient_failure() {
         .await
         .expect_err("no such database");
     assert!(
-        !is_transient_database_failure(&DatabaseError::PoolRuntime(missing)),
-        "a missing database is a misconfiguration, not busy"
+        is_database_unavailable(&DatabaseError::PoolRuntime(missing)),
+        "a missing database is deployment state, the same for every request"
     );
 
     let client = pool_for(&url).get().await.expect("connect");
@@ -2743,7 +2743,7 @@ async fn only_the_database_not_answering_is_a_transient_failure() {
         .await
         .expect_err("two rows");
     assert!(row_count.as_db_error().is_none(), "a client-side error");
-    assert!(!is_transient_database_failure(&DatabaseError::Postgres(
+    assert!(!is_database_unavailable(&DatabaseError::Postgres(
         row_count
     )));
 
@@ -2760,7 +2760,7 @@ async fn only_the_database_not_answering_is_a_transient_failure() {
         cancelled.code(),
         Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
     );
-    assert!(!is_transient_database_failure(&DatabaseError::Postgres(
+    assert!(!is_database_unavailable(&DatabaseError::Postgres(
         cancelled
     )));
 }
