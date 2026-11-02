@@ -552,7 +552,7 @@ async fn ceremony(
     identity: &DeviceIdentity,
     referral_code: Option<&str>,
 ) -> Result<Finished> {
-    let started = start_ceremony(commons, identity).await?;
+    let started = start_ceremony(commons, identity, CeremonyFor::Enrolment).await?;
 
     // Spend the refresh token as late as possible, for the reason above. The
     // rotation is persisted inside `exchange` before the JWT is used.
@@ -576,6 +576,7 @@ async fn ceremony(
         started,
         &access_token.access_token,
         referral_code,
+        CeremonyFor::Enrolment,
     )
     .await
 }
@@ -587,10 +588,51 @@ struct StartedCeremony {
     device_signature: String,
 }
 
+/// Which caller's labels a ceremony's commons failures take.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CeremonyFor {
+    /// Enrolment and renewal: the labels their shells word.
+    Enrolment,
+    /// A fresh sign-in's check ([`check_fresh_login`]): a commons that did
+    /// not answer -- no response, a server error, a `429` -- is told apart
+    /// from one that answered, at the start and at the finish.
+    FreshLogin,
+}
+
+/// The fresh-login check's label for a start the commons did not answer.
+pub(super) const FRESH_START_UNANSWERED: &str = "near_ai_enroll_start_failed";
+/// The fresh-login check's label for a start the commons answered with
+/// something unusable: a client error, or a body that does not parse. No
+/// start answer refuses a login -- only the finish can -- and the commons
+/// answers its own rate limit and other transient trouble at the start
+/// with its uniform `400` deny, so the check treats this like a start it
+/// did not answer.
+pub(super) const FRESH_START_REFUSED: &str = "near_ai_enroll_start_refused";
+/// The fresh-login check's label for a finish the commons did not answer,
+/// or answered with something other than a refusal: no response, a server
+/// error, a `429`, a client error that is not its uniform deny (a proxy's
+/// `403` or `408`, say), or a body that does not parse.
+pub(super) const FRESH_FINISH_UNANSWERED: &str = "near_ai_enroll_finish_unanswered";
+
+/// Whether the commons did not answer: no response, a server error, or a
+/// rate limit it said was one. A client error with a body, or a body that
+/// does not parse, is an answer.
+fn commons_unanswered(error: &trace_commons_operator_client::Error) -> bool {
+    use trace_commons_operator_client::Error;
+    match error {
+        Error::Transport { .. } => true,
+        Error::HttpFailure { status, .. } | Error::ServerLabel { status, .. } => {
+            status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        }
+        _ => false,
+    }
+}
+
 /// The ceremony's start and the device proof over its answer.
 async fn start_ceremony(
     commons: &trace_commons_operator_client::Client,
     identity: &DeviceIdentity,
+    caller: CeremonyFor,
 ) -> Result<StartedCeremony> {
     let verifier = random()?;
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -604,7 +646,13 @@ async fn start_ceremony(
             Some(&start_payload(&code_challenge, &identity.public_key_b64)),
         )
         .await
-        .map_err(|_| anyhow!("near_ai_enroll_start_failed"))?;
+        .map_err(|error| match caller {
+            CeremonyFor::Enrolment => anyhow!("near_ai_enroll_start_failed"),
+            CeremonyFor::FreshLogin if commons_unanswered(&error) => {
+                anyhow!(FRESH_START_UNANSWERED)
+            }
+            CeremonyFor::FreshLogin => anyhow!(FRESH_START_REFUSED),
+        })?;
 
     let device_signature = device_proof_for_ceremony(
         identity,
@@ -629,8 +677,16 @@ async fn ceremony_with_access_token(
     identity: &DeviceIdentity,
     access_token: &str,
 ) -> Result<Finished> {
-    let started = start_ceremony(commons, identity).await?;
-    finish_ceremony(commons, identity, started, access_token, None).await
+    let started = start_ceremony(commons, identity, CeremonyFor::FreshLogin).await?;
+    finish_ceremony(
+        commons,
+        identity,
+        started,
+        access_token,
+        None,
+        CeremonyFor::FreshLogin,
+    )
+    .await
 }
 
 async fn finish_ceremony(
@@ -639,7 +695,20 @@ async fn finish_ceremony(
     started: StartedCeremony,
     access_token: &str,
     referral_code: Option<&str>,
+    caller: CeremonyFor,
 ) -> Result<Finished> {
+    // The commons refuses a finish in exactly two ways: its uniform `400`
+    // deny, and the revoked-key `409`. For a fresh sign-in's check, only
+    // those are a refusal; any other answer says nothing about the login.
+    let refusal = |error: trace_commons_operator_client::Error| {
+        let refused =
+            is_uniform_finish_deny(&error) || error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE);
+        if caller == CeremonyFor::FreshLogin && !refused {
+            anyhow!(FRESH_FINISH_UNANSWERED)
+        } else {
+            finish_refusal(&error, "near_ai_enroll_verification_failed")
+        }
+    };
     // The JWT rides in the body, never a header: we are not
     // authenticating to the commons with it, we are handing it over to
     // be introspected.
@@ -661,9 +730,7 @@ async fn finish_ceremony(
             .await
     };
     let Some(code) = referral_code else {
-        return finish(body)
-            .await
-            .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"));
+        return finish(body).await.map_err(refusal);
     };
     // Only when there is one: a finish without a code is the body every
     // shipped commons parses.
@@ -680,12 +747,12 @@ async fn finish_ceremony(
         Err(error) if is_uniform_finish_deny(&error) => finish(body).await,
         other => other,
     }
-    .map_err(|error| finish_refusal(&error, "near_ai_enroll_verification_failed"))
+    .map_err(refusal)
 }
 
 /// The label of the 400 an ingest answers for any refused native finish,
 /// one whose body it could not parse included (`native_generic_deny`).
-const UNIFORM_FINISH_DENY: &str = "native sign-in could not be completed";
+pub(super) const UNIFORM_FINISH_DENY: &str = "native sign-in could not be completed";
 
 /// That uniform deny, and nothing else: not a revoked key, not a 5xx, not
 /// a transport failure.
