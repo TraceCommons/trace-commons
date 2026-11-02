@@ -593,30 +593,31 @@ struct StartedCeremony {
 enum CeremonyFor {
     /// Enrolment and renewal: the labels their shells word.
     Enrolment,
-    /// A fresh sign-in's check ([`check_fresh_login`]): a commons that did
-    /// not answer -- no response, a server error, a `429` -- is told apart
-    /// from one that answered, at the start and at the finish.
+    /// A fresh sign-in's check ([`check_fresh_login`]). No start answer
+    /// refuses a login, and at the finish only the commons's uniform `400`
+    /// deny and the revoked-key `409` do. Every other failure gives no
+    /// verdict, and is labelled by kind for the log and the "needs
+    /// attention" seam: the commons did not answer (no response, a server
+    /// error, a `429`), or it answered with something unusable (any other
+    /// status -- a proxy's or portal's `403`, `404` or `408`, the start's
+    /// uniform `400` -- or a body that does not parse or is too large).
     FreshLogin,
 }
 
 /// The fresh-login check's label for a start the commons did not answer.
 pub(super) const FRESH_START_UNANSWERED: &str = "near_ai_enroll_start_failed";
 /// The fresh-login check's label for a start the commons answered with
-/// something unusable: a client error, or a body that does not parse. No
-/// start answer refuses a login -- only the finish can -- and the commons
-/// answers its own rate limit and other transient trouble at the start
-/// with its uniform `400` deny, so the check treats this like a start it
-/// did not answer.
-pub(super) const FRESH_START_REFUSED: &str = "near_ai_enroll_start_refused";
-/// The fresh-login check's label for a finish the commons did not answer,
-/// or answered with something other than a refusal: no response, a server
-/// error, a `429`, a client error that is not its uniform deny (a proxy's
-/// `403` or `408`, say), or a body that does not parse.
+/// something unusable.
+pub(super) const FRESH_START_UNUSABLE: &str = "near_ai_enroll_start_unusable";
+/// The fresh-login check's label for a finish the commons did not answer.
 pub(super) const FRESH_FINISH_UNANSWERED: &str = "near_ai_enroll_finish_unanswered";
+/// The fresh-login check's label for a finish the commons answered with
+/// something that is neither a refusal nor usable.
+pub(super) const FRESH_FINISH_UNUSABLE: &str = "near_ai_enroll_finish_unusable";
 
 /// Whether the commons did not answer: no response, a server error, or a
 /// rate limit it said was one. A client error with a body, or a body that
-/// does not parse, is an answer.
+/// does not parse or is too large, is an answer -- an unusable one.
 fn commons_unanswered(error: &trace_commons_operator_client::Error) -> bool {
     use trace_commons_operator_client::Error;
     match error {
@@ -651,7 +652,7 @@ async fn start_ceremony(
             CeremonyFor::FreshLogin if commons_unanswered(&error) => {
                 anyhow!(FRESH_START_UNANSWERED)
             }
-            CeremonyFor::FreshLogin => anyhow!(FRESH_START_REFUSED),
+            CeremonyFor::FreshLogin => anyhow!(FRESH_START_UNUSABLE),
         })?;
 
     let device_signature = device_proof_for_ceremony(
@@ -704,7 +705,11 @@ async fn finish_ceremony(
         let refused =
             is_uniform_finish_deny(&error) || error.server_label() == Some(DEVICE_KEY_REVOKED_WIRE);
         if caller == CeremonyFor::FreshLogin && !refused {
-            anyhow!(FRESH_FINISH_UNANSWERED)
+            if commons_unanswered(&error) {
+                anyhow!(FRESH_FINISH_UNANSWERED)
+            } else {
+                anyhow!(FRESH_FINISH_UNUSABLE)
+            }
         } else {
             finish_refusal(&error, "near_ai_enroll_verification_failed")
         }

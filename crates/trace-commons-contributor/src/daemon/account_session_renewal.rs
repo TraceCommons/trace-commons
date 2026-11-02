@@ -547,16 +547,18 @@ pub(crate) enum FreshLogin {
     /// answer, or answered with something other than a refusal, is
     /// [`FreshLogin::Unchecked`] instead.)
     Unavailable,
-    /// The account is bound, but its check did not run: the account record
-    /// is malformed, the allowlist refuses the enrolled address, or (signed
-    /// out only) the commons could not be asked.
+    /// The account is bound, but its check gave no verdict: the account
+    /// record is malformed, the allowlist refuses the enrolled address, or
+    /// (signed out only) the commons did not answer, or answered with
+    /// something unusable.
     /// The login is stored, so NEAR AI sign-in is not blocked for good, but
     /// it is not the account's verified login: nothing records it as the
     /// login the commons accepted. The reason is one of
     /// [`UNCHECKED_ACCOUNT_RECORD_MALFORMED`],
-    /// [`UNCHECKED_COMMONS_ADDRESS_REFUSED`] and
-    /// [`UNCHECKED_COMMONS_UNREACHABLE`], the seam a "needs attention" state
-    /// keys on (#1836); no shell shows one yet.
+    /// [`UNCHECKED_COMMONS_ADDRESS_REFUSED`],
+    /// [`UNCHECKED_COMMONS_UNREACHABLE`] and
+    /// [`UNCHECKED_COMMONS_ANSWER_UNUSABLE`], the seam a "needs attention"
+    /// state keys on (#1836); no shell shows one yet.
     Unchecked(&'static str),
 }
 
@@ -566,11 +568,16 @@ pub(crate) const UNCHECKED_ACCOUNT_RECORD_MALFORMED: &str = "account_record_malf
 /// commons address.
 pub(crate) const UNCHECKED_COMMONS_ADDRESS_REFUSED: &str = "commons_address_refused";
 /// [`FreshLogin::Unchecked`]: a signed-out device's commons did not answer
-/// the start or the finish, or answered with something other than a
-/// refusal (no response, a server error, a `429`, any start answer, a
-/// finish answer that is not its uniform deny or the revoked key, or the
-/// check's deadline).
+/// the start or the finish: no response, a server error, a `429`, or the
+/// check's deadline.
 pub(crate) const UNCHECKED_COMMONS_UNREACHABLE: &str = "commons_unreachable";
+/// [`FreshLogin::Unchecked`]: a signed-out device's commons answered the
+/// start or the finish, but with something that is neither a verdict nor a
+/// refusal: any other status (a proxy's or captive portal's `403`, `404` or
+/// `408`; the start's uniform `400`), or a body that does not parse or is
+/// too large. Often a misrouted or intercepted commons address rather than
+/// an outage.
+pub(crate) const UNCHECKED_COMMONS_ANSWER_UNUSABLE: &str = "commons_answer_unusable";
 
 /// A login the commons accepted, and the account session it earned, held
 /// until the NEAR AI credentials are stored. No renewal turn is held with
@@ -621,13 +628,19 @@ pub(crate) async fn check_fresh_login_live(
 /// start answer (the commons answers its own rate limit and other
 /// transient trouble at the start with its uniform `400` too), a finish
 /// answer that is neither refusal (a proxy's `403`, a body that does not
-/// parse) -- does not block a signed-out device: its login is stored
-/// [`FreshLogin::Unchecked`] (`commons_unreachable`). A signed-in device
-/// fails closed on those. A commons that answers its own transient trouble
-/// at the finish with the uniform `400` cannot be told from a refusal here,
-/// and reads as [`FreshLogin::Refused`]; telling them apart needs the
-/// commons to answer those with a `429` or `5xx`. A check that issues no
-/// session needs a commons endpoint that does not exist yet.
+/// parse or is too large) -- does not block a signed-out device: its login
+/// is stored [`FreshLogin::Unchecked`], `commons_unreachable` when the
+/// commons did not answer and `commons_answer_unusable` when it answered
+/// with something unusable. A signed-in device fails closed on those.
+///
+/// A commons that answers its own trouble at the finish with the uniform
+/// `400` cannot be told from a refusal here, and reads as
+/// [`FreshLogin::Refused`]. #1850 answers the transient cases with a `429` or
+/// `503`, but a commons that is not ready, cannot reach its account
+/// database, has no account identity configured, or meets a non-transient
+/// database error at the finish still answers the uniform `400`. That is a
+/// server-side gap; this client cannot tell it apart. A check that issues
+/// no session needs a commons endpoint that does not exist yet.
 ///
 /// Unchecked, and stored but not recorded as the account's login: a
 /// malformed record or an enrolled address the allowlist refuses, where no
@@ -672,13 +685,16 @@ pub(super) async fn check_fresh_login(
         Err(AccountRecordError::Storage) => return FreshLogin::Unavailable,
     };
     let signed_out = previous.is_none();
-    // A commons that cannot be asked fails a signed-in device closed. A
-    // signed-out device stores the login unchecked instead: the person left
-    // the account, and Private AI does not wait on it.
-    let unasked = if signed_out {
-        FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
-    } else {
-        FreshLogin::Unavailable
+    // A commons that gives no verdict fails a signed-in device closed. A
+    // signed-out device stores the login unchecked instead, with the kind
+    // of failure: the person left the account, and Private AI does not wait
+    // on it.
+    let no_verdict = |reason: &'static str| {
+        if signed_out {
+            FreshLogin::Unchecked(reason)
+        } else {
+            FreshLogin::Unavailable
+        }
     };
     let Ok(commons) = via.commons(&cfg) else {
         return FreshLogin::Unchecked(UNCHECKED_COMMONS_ADDRESS_REFUSED);
@@ -703,7 +719,7 @@ pub(super) async fn check_fresh_login(
         Ok(Ok(_)) if signed_out => return FreshLogin::Verified,
         Ok(Ok(checked)) => return FreshLogin::Accepted(Box::new(AcceptedLogin { checked })),
         Ok(Err(error)) => error,
-        Err(_) => return unasked,
+        Err(_) => return no_verdict(UNCHECKED_COMMONS_UNREACHABLE),
     };
     let class = classify(&error);
     match class {
@@ -720,10 +736,14 @@ pub(super) async fn check_fresh_login(
             FreshLogin::NotBound
         }
         "commons_address_refused" => FreshLogin::Unchecked(UNCHECKED_COMMONS_ADDRESS_REFUSED),
-        // The commons did not answer the start or the finish, or answered
-        // with something other than a refusal. No start answer refuses a
-        // login, and only the finish's uniform deny or revoked key does.
-        "commons_start_failed" | "commons_start_refused" | "commons_finish_unanswered" => unasked,
+        // No start answer refuses a login, and only the finish's uniform
+        // deny or revoked key does: anything else gives no verdict.
+        "commons_start_failed" | "commons_finish_unanswered" => {
+            no_verdict(UNCHECKED_COMMONS_UNREACHABLE)
+        }
+        "commons_start_unusable" | "commons_finish_unusable" => {
+            no_verdict(UNCHECKED_COMMONS_ANSWER_UNUSABLE)
+        }
         // Everything else fails closed, signed in or out: a successful
         // answer this device could not verify as its account (owner,
         // 2026-11-02), or a local failure.
@@ -790,7 +810,8 @@ pub(crate) fn classify(error: &anyhow::Error) -> &'static str {
         // Only a fresh sign-in's check tells these apart
         // (`nearai_onboarding::CeremonyFor::FreshLogin`).
         super::nearai_onboarding::FRESH_FINISH_UNANSWERED => "commons_finish_unanswered",
-        super::nearai_onboarding::FRESH_START_REFUSED => "commons_start_refused",
+        super::nearai_onboarding::FRESH_START_UNUSABLE => "commons_start_unusable",
+        super::nearai_onboarding::FRESH_FINISH_UNUSABLE => "commons_finish_unusable",
         "near_ai_enroll_verification_failed" | "device_session_renewal_refused" => {
             "commons_refused"
         }

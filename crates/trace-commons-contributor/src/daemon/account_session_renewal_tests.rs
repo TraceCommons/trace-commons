@@ -48,6 +48,8 @@ struct Commons {
     start_status: Mutex<u16>,
     /// The finish answers 200 with a body that does not parse.
     finish_garbage: Mutex<bool>,
+    /// The finish answers this status, content type and raw body instead.
+    finish_raw: Mutex<Option<(u16, &'static str, String)>>,
     starts: Mutex<u32>,
     finishes: Mutex<u32>,
     refreshes: Mutex<u32>,
@@ -87,6 +89,7 @@ async fn spawn(device_public_key: String) -> Stub {
         refuse_status: Mutex::new(400),
         start_status: Mutex::new(200),
         finish_garbage: Mutex::new(false),
+        finish_raw: Mutex::new(None),
         starts: Mutex::new(0),
         finishes: Mutex::new(0),
         refreshes: Mutex::new(0),
@@ -180,8 +183,19 @@ async fn spawn(device_public_key: String) -> Stub {
                         .verify(&preimage, &signature)
                         .unwrap();
                     assert!(body["access_token"].as_str().unwrap().starts_with("near-access-"));
+                    use axum::response::IntoResponse as _;
+                    if let Some((status, content_type, body)) =
+                        state.finish_raw.lock().unwrap().clone()
+                    {
+                        return (
+                            StatusCode::from_u16(status).unwrap(),
+                            [(axum::http::header::CONTENT_TYPE, content_type)],
+                            body,
+                        )
+                            .into_response();
+                    }
                     if *state.finish_garbage.lock().unwrap() {
-                        return (StatusCode::OK, Json(json!({"not": "a finish"})));
+                        return (StatusCode::OK, Json(json!({"not": "a finish"}))).into_response();
                     }
                     if *state.refuse.lock().unwrap() {
                         let label = state.refuse_label.lock().unwrap().clone();
@@ -189,7 +203,8 @@ async fn spawn(device_public_key: String) -> Stub {
                         return (
                             StatusCode::from_u16(status).unwrap(),
                             Json(json!({"error": label})),
-                        );
+                        )
+                            .into_response();
                     }
                     let device_key_id =
                         trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
@@ -207,6 +222,7 @@ async fn spawn(device_public_key: String) -> Stub {
                             "anchor_hash": format!("sha256:{}", "cd".repeat(32)),
                         })),
                     )
+                        .into_response()
                 }
             }),
         )
@@ -1437,10 +1453,15 @@ async fn a_start_answer_never_refuses_a_login() {
     for status in [400u16, 503] {
         let fx = Fixture::new(Session::Absent).await;
         *fx.stub.state.start_status.lock().unwrap() = status;
+        let reason = if status == 400 {
+            UNCHECKED_COMMONS_ANSWER_UNUSABLE
+        } else {
+            UNCHECKED_COMMONS_UNREACHABLE
+        };
         assert!(
             matches!(
                 check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
-                FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+                FreshLogin::Unchecked(found) if found == reason
             ),
             "signed out, start {status}"
         );
@@ -1478,7 +1499,10 @@ async fn an_unusable_finish_answer_is_not_another_account() {
             let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
             if signed_out {
                 assert!(
-                    matches!(check, FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)),
+                    matches!(
+                        check,
+                        FreshLogin::Unchecked(UNCHECKED_COMMONS_ANSWER_UNUSABLE)
+                    ),
                     "signed out, finish {status}"
                 );
             } else {
@@ -1502,10 +1526,52 @@ async fn an_unusable_finish_answer_is_not_another_account() {
         if signed_out {
             assert!(matches!(
                 check,
-                FreshLogin::Unchecked(UNCHECKED_COMMONS_UNREACHABLE)
+                FreshLogin::Unchecked(UNCHECKED_COMMONS_ANSWER_UNUSABLE)
             ));
         } else {
             assert!(matches!(check, FreshLogin::Unavailable));
+        }
+    }
+    // A proxy's or portal's own page, not the commons's JSON: an HTML or
+    // plain-text 404, and a body past the client's size limit.
+    for (status, content_type, body) in [
+        (
+            404u16,
+            "text/html",
+            "<html><body>Not Found</body></html>".to_string(),
+        ),
+        (404, "text/plain", "Not Found".to_string()),
+        (
+            200,
+            "application/json",
+            format!("\"{}\"", "x".repeat(300 * 1024)),
+        ),
+    ] {
+        for signed_out in [true, false] {
+            let fx = Fixture::new(if signed_out {
+                Session::Absent
+            } else {
+                Session::Expired
+            })
+            .await;
+            *fx.stub.state.finish_raw.lock().unwrap() = Some((status, content_type, body.clone()));
+            let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
+            if signed_out {
+                assert!(
+                    matches!(
+                        check,
+                        FreshLogin::Unchecked(UNCHECKED_COMMONS_ANSWER_UNUSABLE)
+                    ),
+                    "signed out, {status} {content_type} ({} bytes)",
+                    body.len()
+                );
+            } else {
+                assert!(
+                    matches!(check, FreshLogin::Unavailable),
+                    "signed in, {status} {content_type} ({} bytes)",
+                    body.len()
+                );
+            }
         }
     }
 }
@@ -1858,6 +1924,7 @@ mod settle_tests {
             UNCHECKED_ACCOUNT_RECORD_MALFORMED,
             UNCHECKED_COMMONS_ADDRESS_REFUSED,
             UNCHECKED_COMMONS_UNREACHABLE,
+            UNCHECKED_COMMONS_ANSWER_UNUSABLE,
         ] {
             let fx = Fixture::new(Session::Expired).await;
             let before = (fx.account_record(), fx.renewal_log_text());
