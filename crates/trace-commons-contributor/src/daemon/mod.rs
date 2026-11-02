@@ -51,6 +51,7 @@ pub(crate) mod setup_completion;
 pub(crate) mod credential_store {
     pub(crate) use trace_commons_contributor_platform::credential_store::*;
 }
+pub mod economizer;
 pub mod eligibility;
 pub mod enroll;
 pub mod grant_terms;

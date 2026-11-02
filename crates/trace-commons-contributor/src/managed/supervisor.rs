@@ -867,13 +867,8 @@ fn economizer_launch(
     resumed: bool,
 ) -> crate::economizer::launch::Launch<'_> {
     let row = &context.session;
-    let harness = match row.tool {
-        super::ToolId::Claude => crate::economizer::Harness::Claude,
-        super::ToolId::Codex => crate::economizer::Harness::Codex,
-        super::ToolId::Opencode => crate::economizer::Harness::Opencode,
-    };
     crate::economizer::launch::Launch {
-        harness,
+        harness: row.tool.into(),
         version,
         resumed: resumed || context.resume_of.is_some(),
         collecting: row.collect_traces,

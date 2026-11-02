@@ -34,9 +34,8 @@ extension DaemonClient {
     // Calls may reconnect to a restarted/replaced daemon. Re-check capabilities
     // until the transport exposes a connection generation for safe caching.
     private func requireIdentityMethods(_ required: [String]) throws {
-        struct Hello: Decodable { let methods: [String] }
-        let hello = try call("hello", as: Hello.self)
-        guard required.allSatisfy(hello.methods.contains) else {
+        let hello = try call("hello", as: DaemonHello.self)
+        guard required.allSatisfy(hello.serves) else {
             throw Failure(code: "unknown_method", message: "native-identity-unsupported")
         }
     }

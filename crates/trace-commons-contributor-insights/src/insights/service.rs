@@ -1946,6 +1946,13 @@ mod tests {
             // what Claude Code and Codex record on this Mac.
             "analytics_start_step_use_detail",
             "analytics_start_step_fill_detail",
+            // The Economizer tab (2026-11-01): a managed coding session,
+            // which is what the economizer learns from.
+            "analytics_econ_switch_detail",
+            "analytics_econ_empty",
+            "analytics_econ_sessions",
+            "analytics_econ_sessions_one",
+            "analytics_econ_left_out_detail",
         ];
         assert_eq!(copy["analytics_subscriptions_session"], "Session");
         for (key, words) in ANALYTICS_COPY {

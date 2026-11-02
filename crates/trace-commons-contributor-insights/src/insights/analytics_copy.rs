@@ -976,4 +976,48 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_sample_banner_detail",
         "This is what Insights shows once your traces come in.",
     ),
+    // 27. DRAFT, NEEDS APPROVAL (2026-11-01): the Economizer tab, what
+    // `near-ai economizer` learned in each folder a managed coding session
+    // ran in (`economizer_status`). "Session" here names a managed coding
+    // session, not a trace. No advice and no estimate of what was saved.
+    ("analytics_tab_economizer", "Economizer"),
+    ("analytics_econ_switch", "Economizer"),
+    (
+        "analytics_econ_switch_detail",
+        "Learns from earlier coding sessions in each folder: it leaves out built-in tools they never used, and tells the agent commands that work there. Applies to new Claude, Codex and OpenCode sessions started from Trace Commons.",
+    ),
+    ("analytics_econ_empty_title", "Nothing learned yet"),
+    (
+        "analytics_econ_empty",
+        "What the economizer learns in a folder appears here after a coding session there ends.",
+    ),
+    (
+        "analytics_econ_unavailable",
+        "Economizer details are unavailable.",
+    ),
+    // Under the switch when the read after a change failed; the page
+    // below is from before it.
+    ("analytics_econ_stale", "These details may be out of date."),
+    ("analytics_econ_folder_tool", "{folder} · {harness}"),
+    ("analytics_econ_sessions", "Learned from {n} sessions"),
+    ("analytics_econ_sessions_one", "Learned from {n} session"),
+    ("analytics_econ_left_out", "Left out"),
+    (
+        "analytics_econ_left_out_detail",
+        "Built-in tools these sessions never used. Their definitions are no longer sent with each request.",
+    ),
+    ("analytics_econ_none", "None yet"),
+    ("analytics_econ_give_back", "Give back"),
+    (
+        "analytics_econ_give_back_detail",
+        "Tools you give back are never left out in this folder again.",
+    ),
+    ("analytics_econ_given_back", "Given back"),
+    ("analytics_econ_told", "Commands it tells the agent"),
+    ("analytics_econ_told_line", "{first} runs as {second}"),
+    ("analytics_econ_forming", "{n} more being confirmed"),
+    ("analytics_econ_truncated", "{n} more folders not shown"),
+    ("analytics_econ_harness_claude", "Claude"),
+    ("analytics_econ_harness_codex", "Codex"),
+    ("analytics_econ_harness_opencode", "OpenCode"),
 ];

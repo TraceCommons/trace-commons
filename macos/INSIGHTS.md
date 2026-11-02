@@ -8,6 +8,7 @@ apply. Returning to Insights does not stop services already activated.
 The window has three tabs (product owner, 2026-10-29): **Overview** (the
 default) shows one local week, **Breakdown** (`patterns`) shows where that
 week's tokens went, and **Benchmarks** compares models on your own traces.
+A fourth, **Economizer**, follows them (below).
 The Sessions and Analyze tabs are gone: the app no longer analyzes, saves,
 assesses or groups trace files itself. Snapshots saved to the local store
 (for example with the CLI) still feed the saved week below.
@@ -68,6 +69,16 @@ infers. The app no longer sets task or outcome labels (the Sessions tab's
 menus are gone); labels stored before are still read. No shipped screen
 shows a Kept share by outcome label: Overview no longer draws the Models
 card, and the daemon's `insights_model_answers` is not read by the app.
+
+**Economizer** (2026-11-01, words DRAFT pending approval) reads the
+daemon's `economizer_status`: the `near-ai economizer` switch, then one card
+per folder and coding tool a managed session ran in, with how many sessions
+it learned from, the built-in tools it leaves out (Give back returns them
+for good, and the card says so), the commands it tells the agent, and how
+many more it is still confirming. A folder with nothing learned has no card.
+The tab is hidden without a daemon to ask, shows no sample, and draws no
+estimate of what was saved. The switch draws only what the daemon's reply
+confirms.
 
 Insights is the main window's fourth tab (Cmd-4; 2026-10-15, before that
 a Home page, and Home's Insights card now switches to the tab). It draws in

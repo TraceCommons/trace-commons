@@ -1401,3 +1401,368 @@ fn codex_patches_count_as_edits() {
     turn.record(&native);
     assert_eq!(turn.edits.len(), 2);
 }
+
+// ---- summary ----
+
+#[test]
+fn the_summary_lists_each_known_folder_once_with_what_it_learned() {
+    use super::summary::{ToldCommand, restore, summarize};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    let busy = dir.path().join("work").join("busy-project");
+    let quiet = dir.path().join("work").join("quiet");
+    let unknown = dir.path().join("work").join("never-ran");
+    for folder in [&busy, &quiet, &unknown] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+
+    // Busy: six sessions, so unused tools are left out, and a command
+    // confirmed in three of them is told.
+    let busy_key = repo_key(&busy, Harness::Claude);
+    let mut state = RepoState::default();
+    for n in 0..6 {
+        state
+            .tools
+            .fold_session(Harness::Claude, 5, &used(&["Bash", "Agent"]));
+        if n < 3 {
+            state
+                .facts
+                .fold_session(&format!("s{n}"), &repair_session());
+        }
+        state.sessions += 1;
+    }
+    store.save_repo(&busy_key, &state).unwrap();
+    // Quiet: one Codex session, nothing decided yet.
+    let mut quiet_state = RepoState::default();
+    quiet_state
+        .tools
+        .fold_session(Harness::Codex, 2, &used(&["shell"]));
+    quiet_state.sessions = 1;
+    store
+        .save_repo(&repo_key(&quiet, Harness::Codex), &quiet_state)
+        .unwrap();
+
+    let summary = summarize(
+        &store,
+        [
+            (Harness::Codex, quiet.clone()),
+            (Harness::Claude, busy.clone()),
+            (Harness::Claude, busy.clone()),
+            (Harness::Claude, unknown.clone()),
+        ],
+    );
+    assert!(!summary.enabled);
+    assert_eq!(summary.folders_truncated, 0);
+    assert_eq!(summary.folders.len(), 2, "{summary:?}");
+    let first = &summary.folders[0];
+    assert_eq!(first.folder, "busy-project");
+    assert_eq!(first.harness, Harness::Claude);
+    assert_eq!(first.key, busy_key);
+    assert_eq!(first.sessions, 6);
+    assert!(first.left_out.contains(&"TodoWrite".to_owned()));
+    assert!(!first.left_out.contains(&"Agent".to_owned()), "used here");
+    assert_eq!(
+        first.told,
+        [ToldCommand {
+            program: "pytest".into(),
+            prefix: "python -m".into()
+        }]
+    );
+    assert_eq!(first.forming, 0);
+    assert!(first.given_back.is_empty());
+    let second = &summary.folders[1];
+    assert_eq!(
+        (second.folder.as_str(), second.harness),
+        ("quiet", Harness::Codex)
+    );
+    assert!(second.left_out.is_empty());
+
+    // Nothing crosses but the label and the digest.
+    let wire = serde_json::to_string(&summary).unwrap();
+    assert!(!wire.contains(&dir.path().to_string_lossy().into_owned()));
+
+    // Giving back clears the left-out list and keeps the tools out of it.
+    let given = restore(&store, Harness::Claude, &busy_key).unwrap();
+    assert_eq!(given, first.left_out);
+    let after = summarize(&store, [(Harness::Claude, busy.clone())]);
+    assert!(after.folders[0].left_out.is_empty());
+    assert_eq!(after.folders[0].given_back, given);
+    assert!(
+        restore(&store, Harness::Claude, &busy_key)
+            .unwrap()
+            .is_empty()
+    );
+    // A name that cannot be a store key is refused; a well-formed one
+    // that names no folder gives back nothing.
+    assert!(restore(&store, Harness::Claude, "../escape").is_err());
+    assert!(
+        restore(&store, Harness::Claude, "repo-unknown")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn update_repo_writes_only_when_asked_and_serializes_writers() {
+    const LONG: std::time::Duration = std::time::Duration::from_secs(30);
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    let key = repo_key(Path::new("/home/a/project"), Harness::Claude);
+    let read = store
+        .try_update_repo(&key, LONG, |state| (false, state.sessions))
+        .unwrap();
+    assert_eq!(read, 0);
+    assert_eq!(store.repo(&key), RepoState::default());
+    assert!(
+        store
+            .try_update_repo("../escape", LONG, |_| (true, ()))
+            .is_err()
+    );
+
+    // Writers in parallel each add one session; none is lost.
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                store
+                    .try_update_repo(&key, LONG, |state| {
+                        state.sessions += 1;
+                        (true, ())
+                    })
+                    .unwrap();
+            });
+        }
+    });
+    assert_eq!(store.repo(&key).sessions, 8);
+}
+
+#[test]
+fn folders_with_the_same_name_are_told_apart_by_their_parent() {
+    use super::summary::summarize;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    let work = dir.path().join("work").join("api");
+    let oss = dir.path().join("oss").join("api");
+    for folder in [&work, &oss] {
+        std::fs::create_dir_all(folder).unwrap();
+        let state = RepoState {
+            sessions: 2,
+            ..RepoState::default()
+        };
+        store
+            .save_repo(&repo_key(folder, Harness::Claude), &state)
+            .unwrap();
+    }
+    let labels = |summary: super::summary::Summary| -> Vec<String> {
+        summary.folders.into_iter().map(|row| row.folder).collect()
+    };
+    let first = labels(summarize(
+        &store,
+        [
+            (Harness::Claude, work.clone()),
+            (Harness::Claude, oss.clone()),
+        ],
+    ));
+    assert_eq!(first, ["oss/api", "work/api"]);
+    // The same order whatever order the folders were named in.
+    let again = labels(summarize(
+        &store,
+        [
+            (Harness::Claude, oss.clone()),
+            (Harness::Claude, work.clone()),
+        ],
+    ));
+    assert_eq!(again, first);
+    // A lone folder keeps its own name.
+    assert_eq!(
+        labels(summarize(&store, [(Harness::Claude, work)])),
+        ["api"]
+    );
+}
+
+#[test]
+fn labels_grow_until_they_differ_and_never_name_the_home_folder() {
+    use super::summary::summarize_in;
+    let dir = tempfile::tempdir().unwrap();
+    // Resolved first: on macOS the temp folder sits under `/var`, itself a
+    // symlink to `/private/var`.
+    let root = dir.path().canonicalize().unwrap();
+    let store = Store::new(&root);
+    let home = root.join("someone");
+    let deep_a = home.join("a").join("x").join("api");
+    let deep_b = home.join("b").join("x").join("api");
+    let at_home = home.join("api");
+    let elsewhere = root.join("srv").join("api");
+    for folder in [&deep_a, &deep_b, &at_home, &elsewhere] {
+        std::fs::create_dir_all(folder).unwrap();
+        let state = RepoState {
+            sessions: 1,
+            ..RepoState::default()
+        };
+        store
+            .save_repo(&repo_key(folder, Harness::Claude), &state)
+            .unwrap();
+    }
+    let labels = |folders: Vec<&std::path::PathBuf>| -> Vec<String> {
+        let mut out: Vec<String> = summarize_in(
+            &store,
+            folders
+                .into_iter()
+                .map(|path| (Harness::Claude, path.clone())),
+            Some(&home),
+        )
+        .folders
+        .into_iter()
+        .map(|row| row.folder)
+        .collect();
+        out.sort();
+        out
+    };
+    // One parent is not enough for these two; two are.
+    assert_eq!(labels(vec![&deep_a, &deep_b]), ["a/x/api", "b/x/api"]);
+    // A folder right under home shows `~`, never the account name.
+    assert_eq!(labels(vec![&at_home, &elsewhere]), ["srv/api", "~/api"]);
+    let all = labels(vec![&deep_a, &deep_b, &at_home, &elsewhere]);
+    assert!(
+        all.iter().all(|label| !label.contains("someone")),
+        "{all:?}"
+    );
+    let unique: std::collections::BTreeSet<_> = all.iter().collect();
+    assert_eq!(unique.len(), 4, "{all:?}");
+
+    // Home given through a symlink still matches folders recorded under
+    // its resolved path.
+    #[cfg(unix)]
+    {
+        let link = root.join("home-link");
+        std::os::unix::fs::symlink(&home, &link).unwrap();
+        let mut through_link: Vec<String> = summarize_in(
+            &store,
+            [
+                (Harness::Claude, at_home.clone()),
+                (Harness::Claude, elsewhere.clone()),
+            ],
+            Some(&link),
+        )
+        .folders
+        .into_iter()
+        .map(|row| row.folder)
+        .collect();
+        through_link.sort();
+        assert_eq!(through_link, ["srv/api", "~/api"]);
+
+        // And the other way: home resolved, the folder recorded through
+        // the symlink.
+        let mut recorded_through_link: Vec<String> = summarize_in(
+            &store,
+            [
+                (Harness::Claude, link.join("api")),
+                (Harness::Claude, elsewhere.clone()),
+            ],
+            Some(&home),
+        )
+        .folders
+        .into_iter()
+        .map(|row| row.folder)
+        .collect();
+        recorded_through_link.sort();
+        assert_eq!(recorded_through_link, ["srv/api", "~/api"]);
+
+        // A project inside home that links out of it keeps its `~`.
+        let outside = root.join("volume").join("someone").join("work");
+        std::fs::create_dir_all(outside.join("api")).unwrap();
+        let linked_work = home.join("work");
+        std::os::unix::fs::symlink(&outside, &linked_work).unwrap();
+        let linked_api = linked_work.join("api");
+        let state = RepoState {
+            sessions: 1,
+            ..RepoState::default()
+        };
+        store
+            .save_repo(&repo_key(&linked_api, Harness::Claude), &state)
+            .unwrap();
+        let other_work = root.join("x").join("work").join("api");
+        std::fs::create_dir_all(&other_work).unwrap();
+        store
+            .save_repo(&repo_key(&other_work, Harness::Claude), &state)
+            .unwrap();
+        let mut linked_out: Vec<String> = summarize_in(
+            &store,
+            [
+                (Harness::Claude, linked_api.clone()),
+                (Harness::Claude, other_work.clone()),
+            ],
+            Some(&home),
+        )
+        .folders
+        .into_iter()
+        .map(|row| row.folder)
+        .collect();
+        linked_out.sort();
+        assert_eq!(linked_out, ["x/work/api", "~/work/api"]);
+
+        // Named both through the link and directly, a folder keeps the
+        // spelling under home, whatever the order.
+        let direct = outside.join("api");
+        for order in [
+            [linked_api.clone(), direct.clone()],
+            [direct.clone(), linked_api.clone()],
+        ] {
+            let mut labels: Vec<String> = summarize_in(
+                &store,
+                order
+                    .into_iter()
+                    .chain([other_work.clone()])
+                    .map(|path| (Harness::Claude, path)),
+                Some(&home),
+            )
+            .folders
+            .into_iter()
+            .map(|row| row.folder)
+            .collect();
+            labels.sort();
+            assert_eq!(labels, ["x/work/api", "~/work/api"]);
+        }
+    }
+}
+
+#[test]
+fn giving_back_in_an_unknown_folder_leaves_no_lock_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    let key = repo_key(dir.path(), Harness::Claude);
+    let given = super::summary::restore(&store, Harness::Claude, &key).unwrap();
+    assert!(given.is_empty());
+    assert!(!store.root().join("repos").exists());
+}
+
+#[test]
+fn the_hook_gives_up_on_a_held_lock_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    let key = repo_key(dir.path(), Harness::Claude);
+    store.save_repo(&key, &RepoState::default()).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(store.root().join("repos").join(format!("{key}.lock")))
+        .unwrap();
+    held.lock().unwrap();
+    let started = std::time::Instant::now();
+    let tried = store.try_update_repo(&key, std::time::Duration::from_millis(100), |state| {
+        state.sessions += 1;
+        (true, ())
+    });
+    assert!(tried.is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(store.repo(&key).sessions, 0);
+    drop(held);
+    store
+        .try_update_repo(&key, std::time::Duration::from_millis(100), |state| {
+            state.sessions += 1;
+            (true, ())
+        })
+        .unwrap();
+    assert_eq!(store.repo(&key).sessions, 1);
+}

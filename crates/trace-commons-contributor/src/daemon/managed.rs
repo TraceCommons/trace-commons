@@ -834,6 +834,19 @@ fn with_service<T>(
     Ok(result?)
 }
 
+/// Every (tool, folder) a managed session row names, dismissed rows
+/// included, for the economizer's status. Read only: it neither reconciles
+/// nor sweeps the registry, so nothing is written and no event is sent. A
+/// registry that cannot be read names none.
+pub(crate) fn session_folders(shared: &DaemonShared) -> Vec<(ToolId, std::path::PathBuf)> {
+    let Ok(held) = shared.managed.lock() else {
+        return Vec::new();
+    };
+    held.as_ref()
+        .map(|service| service.sessions.coding_folders())
+        .unwrap_or_default()
+}
+
 fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
     match result {
         Ok(value) => Response::ok(request.id, value),
