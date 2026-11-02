@@ -1223,6 +1223,25 @@ pub const CREDENTIAL_PROVIDER_NEAR: &str = "NEAR wallet";
 pub const CREDENTIAL_WALLET_NOTICE: &str =
     "Your wallet only signs a login message. Nothing is staked or moved.";
 
+/// Heading (and tab title) of the browser page the daemon serves when a
+/// sign-in starts without a login named, listing this build's logins
+/// (owner wording, 2026-11-02).
+pub const NEAR_AI_SIGN_IN_PAGE_HEADING: &str = "Sign in to NEAR AI";
+
+/// The button title for one of `channel::NEAR_AI_SIGN_IN_PROVIDERS`, or
+/// `None` for a tag with no title yet. A new login (near.com, say) is a
+/// channel entry, a title here, and a ceremony arm; the browser page and
+/// every shell pick it up without further changes.
+#[must_use]
+pub fn credential_provider_title(tag: &str) -> Option<&'static str> {
+    match tag {
+        "near" => Some(CREDENTIAL_PROVIDER_NEAR),
+        "github" => Some(CREDENTIAL_PROVIDER_GITHUB),
+        "google" => Some(CREDENTIAL_PROVIDER_GOOGLE),
+        _ => None,
+    }
+}
+
 pub(crate) fn wallet_browser_copy() -> serde_json::Value {
     serde_json::json!({
         "title": "Sign in with NEAR",

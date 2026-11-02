@@ -18,6 +18,7 @@
 //!   a device key as a side effect of buying inference.
 
 use super::api::CloudApi;
+use super::chooser;
 use super::loopback;
 use crate::config::ConfigStore;
 use crate::daemon::nearai_credential::near_wallet::NearWalletError;
@@ -218,10 +219,35 @@ enum BrowserSignIn {
         state: String,
     },
     Near(NearWalletListener),
+    /// No login named: the browser is sent to the chooser page on this
+    /// listener, and the login picked there continues on it (see
+    /// [`chooser`]). `state` binds the page, the choice and, for an OAuth
+    /// login, the deposit.
+    Choose {
+        listener: std::net::TcpListener,
+        state: String,
+    },
 }
 
 impl BrowserSignIn {
-    async fn prepare(api: &CloudApi, provider: &str) -> Result<(String, Self)> {
+    async fn prepare(api: &CloudApi, provider: Option<&str>) -> Result<(String, Self)> {
+        let provider = match (provider, crate::channel::NEAR_AI_SIGN_IN_PROVIDERS) {
+            (Some(provider), _) => provider,
+            // One login (staging): nothing to choose, so no page.
+            (None, &[only]) => only,
+            (None, _) => {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                let state = loopback::random_state()?;
+                let url = chooser::page_url(listener.local_addr()?.port(), &state);
+                return Ok((
+                    url,
+                    Self::Choose {
+                        listener: listener.into_std()?,
+                        state,
+                    },
+                ));
+            }
+        };
         // Only what this build offers (`channel::NEAR_AI_SIGN_IN_PROVIDERS`):
         // a staging build has no NEAR wallet ceremony to begin.
         if !crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&provider) {
@@ -242,6 +268,48 @@ impl BrowserSignIn {
         ))
     }
 
+    /// Serve the chooser until a login is picked, then send the browser to
+    /// that login on the same listener. Any other sign-in is returned as is.
+    async fn chosen(self, api: &CloudApi) -> Result<Self> {
+        let (listener, state) = match self {
+            Self::Choose { listener, state } => (listener, state),
+            other => return Ok(other),
+        };
+        let listener = tokio::net::TcpListener::from_std(listener)?;
+        let choice =
+            chooser::receive_choice(&listener, &state, crate::channel::NEAR_AI_SIGN_IN_PROVIDERS)
+                .await?;
+        let next = listener
+            .into_std()
+            .map_err(anyhow::Error::from)
+            .and_then(|listener| Self::continue_on(api, choice.provider, listener, state));
+        match next {
+            Ok((location, sign_in)) => {
+                choice.redirect(&location).await;
+                Ok(sign_in)
+            }
+            Err(error) => {
+                choice.refuse().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// The picked login, on the listener the chooser was served from.
+    fn continue_on(
+        api: &CloudApi,
+        provider: &str,
+        listener: std::net::TcpListener,
+        state: String,
+    ) -> Result<(String, Self)> {
+        if provider == "near" {
+            let (url, listener) = near_wallet_loopback::adopt(listener)?;
+            return Ok((url, Self::Near(listener)));
+        }
+        let url = api.authorize_url(provider, listener.local_addr()?.port())?;
+        Ok((url, Self::OAuth { listener, state }))
+    }
+
     /// The third argument is the agent that *created* the session, which the
     /// service matches on every later refresh. The two arms differ on it and
     /// that difference is the point: the OAuth redirect is completed by the
@@ -252,7 +320,7 @@ impl BrowserSignIn {
         F: FnOnce(loopback::SessionTokens, Option<DateTime<Utc>>, String) -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
-        match self {
+        match self.chosen(api).await? {
             Self::OAuth { listener, state } => {
                 let listener = tokio::net::TcpListener::from_std(listener)?;
                 loopback::receive_session(listener, &state, |session| {
@@ -269,6 +337,7 @@ impl BrowserSignIn {
                 )
                 .await
             }
+            Self::Choose { .. } => bail!("near_ai_credential_unavailable"),
         }
     }
 }
@@ -280,6 +349,17 @@ impl BrowserSignIn {
 /// binding afterwards would leave a window in which another process could take
 /// the port and receive the session.
 pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Value> {
+    begin_with(store, Some(provider)).await
+}
+
+/// Begin a ceremony that names no login: the browser opens the chooser page
+/// listing this build's logins (`channel::NEAR_AI_SIGN_IN_PROVIDERS`), or goes
+/// straight to the only one when the build offers one.
+pub async fn begin_in_browser(store: &ConfigStore) -> Result<serde_json::Value> {
+    begin_with(store, None).await
+}
+
+async fn begin_with(store: &ConfigStore, provider: Option<&str>) -> Result<serde_json::Value> {
     // Before anything that reaches the network or a browser: a ceremony this
     // process could not store is a wasted sign-in at the service. The probe
     // is an OS read that can wait on a prompt or a locked store, so it runs

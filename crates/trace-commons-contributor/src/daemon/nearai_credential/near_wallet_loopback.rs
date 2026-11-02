@@ -35,19 +35,31 @@ pub(crate) struct NearWalletListener {
 pub(crate) async fn bind() -> Result<(String, NearWalletListener), NearWalletError> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
-        .map_err(|_| NearWalletError::Unavailable)?;
-    let port = listener
-        .local_addr()
         .map_err(|_| NearWalletError::Unavailable)?
-        .port();
+        .into_std()
+        .map_err(|_| NearWalletError::Unavailable)?;
+    adopt(listener)
+}
+
+/// Serve the wallet sign-in on a loopback listener this process already
+/// holds: the one the in-browser login chooser was served from. Same port,
+/// so the chooser's redirect stays same-origin and a forwarded port (the
+/// CLI's remote sign-in) still reaches the wallet page.
+pub(crate) fn adopt(
+    listener: std::net::TcpListener,
+) -> Result<(String, NearWalletListener), NearWalletError> {
+    let address = listener
+        .local_addr()
+        .map_err(|_| NearWalletError::Unavailable)?;
+    if address.ip() != Ipv4Addr::LOCALHOST {
+        return Err(NearWalletError::Unavailable);
+    }
+    let port = address.port();
     let now = unix_millis()?;
     let started = Instant::now();
     let challenge = NearWalletChallenge::new(port, now)?;
     let deadline = started + Duration::from_millis(challenge.expires_at_ms() - now);
     let browser_url = challenge.browser_url()?;
-    let listener = listener
-        .into_std()
-        .map_err(|_| NearWalletError::Unavailable)?;
     Ok((
         browser_url,
         NearWalletListener {
