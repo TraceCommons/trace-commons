@@ -48,7 +48,9 @@
 //!   has no `resume`; otherwise an item in the row's menu. `dismiss` is that
 //!   row's menu item too, unless neither `resume` nor `start_again` is
 //!   offered; then it is a link, even when the menu holds
-//!   `copy_resume_command`.
+//!   `copy_resume_command`. A row stuck unknown (its launcher gone before
+//!   its first report) that says `can_dismiss` offers `dismiss` alone, as
+//!   the link (owner, 2026-11-02).
 //!
 //! Resuming a session (design agreed 2026-10-31,
 //! `docs/superpowers/specs/2026-10-31-managed-session-resume-design.md`):

@@ -28,8 +28,13 @@ near-ai launch codex --account Work --cwd /path/to/another-project
 near-ai sessions list
 ```
 
-CLI launches use the current terminal or multiplexer pane. All managed launches,
-including those initiated from the CLI, appear in the app's managed-session list.
+CLI launches use the current terminal or multiplexer pane. Managed launches,
+including those initiated from the CLI, appear in the app's managed-session list,
+one row per conversation: a resumed session continues its conversation's row
+rather than adding one beside it. The row shown is the conversation's latest
+session that is still starting or running, or whose launcher took up its launch;
+a resume whose launch expired unused does not replace the row that ran. Dismissing a row dismisses the
+whole conversation, so no earlier row comes back in its place.
 A session the app opened in Terminal can be shown (its tab brought to the
 front) and stopped from its row; a CLI launch cannot, because the app neither
 opened its window nor started its launcher. An ended session can be started
