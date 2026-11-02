@@ -737,7 +737,18 @@ fn near_ai_route(
         super::ToolId::Claude => {
             command
                 .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))
-                .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session");
+                .env("ANTHROPIC_AUTH_TOKEN", "managed-local-session")
+                // Auto mode's server-side classifier review rides on the
+                // Anthropic API: an `anthropic-beta` value and a `safeguards`
+                // request field, answered by `safeguard_results` in the
+                // reply. This route translates to NEAR AI's Chat Completions,
+                // where neither survives, so Claude Code would ask, get no
+                // review, fall back to its own classifier requests anyway,
+                // and hold the first checked action behind a notice saying
+                // so. Tell it not to ask: the classifier requests go to the
+                // session's NEAR AI models as they always have.
+                // https://code.claude.com/docs/en/auto-mode-classifier-billing
+                .env("CLAUDE_CODE_AUTO_MODE_SERVER", "0");
             for (name, value) in super::models::claude_env(in_use, choices.background, models) {
                 match value {
                     Some(value) => command.env(name, value),
@@ -1125,6 +1136,9 @@ mod tests {
             env("ANTHROPIC_SMALL_FAST_MODEL"),
             Some(Some("deepseek-ai/DeepSeek-V3.1".into()))
         );
+        // NEAR AI cannot run auto mode's server-side classifier review,
+        // so Claude Code is told not to ask for it.
+        assert_eq!(env("CLAUDE_CODE_AUTO_MODE_SERVER"), Some(Some("0".into())));
         // Removed, not left to the person's shell.
         assert_eq!(env("CLAUDE_CODE_SUBAGENT_MODEL"), Some(None));
         assert_eq!(env("ANTHROPIC_CUSTOM_MODEL_OPTION"), Some(None));
