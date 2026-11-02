@@ -205,12 +205,12 @@ pub fn is_transient_database_failure(error: &crate::error::DatabaseError) -> boo
     use crate::error::DatabaseError;
     match error {
         DatabaseError::PoolRuntime(_) | DatabaseError::PoolBuild(_) => true,
-        DatabaseError::Postgres(error) => match error.code() {
-            // No SQLSTATE: the server never answered the statement (I/O
+        DatabaseError::Postgres(error) => match error.as_db_error() {
+            // No server error: PostgreSQL never answered the statement (I/O
             // failure, closed connection, connect timeout).
-            None => error.as_db_error().is_none(),
-            Some(code) => {
-                let code = code.code();
+            None => true,
+            Some(db) => {
+                let code = db.code().code();
                 // 08: connection exception. 53: insufficient resources.
                 // 57P: operator intervention (shutdown, cannot connect now).
                 // 57014: statement cancelled (statement_timeout).
