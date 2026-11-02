@@ -1924,6 +1924,30 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The dedup clusters whose representative simhash is within
+    /// `max_hamming` bits of `simhash`, cross-tenant, each with its
+    /// representative's stamp and its member count. What the inline gate path
+    /// assigns a new decision against.
+    ///
+    /// Postgres answers from `trace_dedup_cluster_representatives` (V145), one
+    /// row per cluster kept in step by trigger. Default: the pre-V145 fold over
+    /// a full [`Database::list_dedup_signals`] enumeration, which is also the
+    /// reference the table is tested against.
+    async fn list_dedup_cluster_candidates(
+        &self,
+        simhash: i64,
+        max_hamming: u32,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupClusterCandidateRow>, DatabaseError> {
+        let signals = self.list_dedup_signals(i64::MAX).await?;
+        Ok(
+            crate::trace_corpus_storage::dedup_cluster_candidates_from_signals(
+                &signals,
+                simhash,
+                max_hamming,
+            ),
+        )
+    }
+
     /// Enumerate every decision row for the dedup re-derivation pass,
     /// cross-tenant, ordered `decided_at ASC, decision_id ASC`, capped at
     /// `limit`. Not filtered by stamp: the pass reuses rows already on its

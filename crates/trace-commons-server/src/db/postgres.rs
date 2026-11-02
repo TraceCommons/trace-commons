@@ -1934,6 +1934,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "remove_passkeys",
         include_str!("../../../../migrations/V144__remove_passkeys.sql"),
     ),
+    // V145 keeps one row per dedup cluster (representative simhash, stamp,
+    // member count) in step with trace_gate_decisions by trigger, so the
+    // inline gate path stops enumerating every decision on each submission
+    // (`list_dedup_cluster_candidates`).
+    (
+        145,
+        "trace_dedup_cluster_representatives",
+        include_str!("../../../../migrations/V145__trace_dedup_cluster_representatives.sql"),
+    ),
 ];
 
 /// Shared by verified claim issuance and the explicit historical repair.
@@ -5758,6 +5767,44 @@ impl Database for PgBackend {
                 dedup_simhash: row.get("dedup_simhash"),
                 dedup_signal_version: row.get("dedup_signal_version"),
             })
+            .collect())
+    }
+
+    async fn list_dedup_cluster_candidates(
+        &self,
+        simhash: i64,
+        max_hamming: u32,
+    ) -> Result<Vec<crate::trace_corpus_storage::DedupClusterCandidateRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        let max_hamming = i64::from(max_hamming);
+        // One row per cluster (V145), filtered to the Hamming radius in the
+        // database, so only the clusters a new decision could join cross the
+        // wire. No tenant GUC: the trace_gate_driver role's permissive SELECT
+        // policy on the table authorizes it, as on trace_gate_decisions.
+        let rows = client
+            .query(
+                "SELECT dedup_cluster_id, representative_simhash,
+                        representative_signal_version, member_count
+                 FROM trace_dedup_cluster_representatives
+                 WHERE bit_count((representative_simhash # $1)::bit(64)) <= $2",
+                &[&simhash, &max_hamming],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |row| crate::trace_corpus_storage::DedupClusterCandidateRow {
+                    dedup_cluster_id: row.get("dedup_cluster_id"),
+                    representative_simhash: row.get("representative_simhash"),
+                    representative_signal_version: row.get("representative_signal_version"),
+                    member_count: row.get("member_count"),
+                },
+            )
             .collect())
     }
 
