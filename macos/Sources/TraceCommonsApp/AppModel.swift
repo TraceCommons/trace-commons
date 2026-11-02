@@ -350,11 +350,24 @@ final class AppModel: ObservableObject {
                     .flatMap(legacyMigrationWording)
                     .flatMap(LegacyMigrationNotice.decode(fromJSON:))
             }
+            if status.accountAttention != oldValue.accountAttention {
+                accountAttention = status.accountAttention.wireJSON
+                    .flatMap(accountAttentionWording)
+                    .flatMap(AccountAttention.decode(fromJSON:))
+            }
         }
     }
     /// The notice after a legacy invite identity moved to a NEAR AI account,
     /// in the Rust's words, or nil when there is none or it cannot be read.
     @Published private(set) var legacyMigrationNotice: LegacyMigrationNotice?
+    /// The account section's status while this app's account needs
+    /// attention (#1836 F1), in the Rust's words, or nil.
+    @Published private(set) var accountAttention: AccountAttention?
+    /// Words the account-attention status keys. The ABI in the app; replaced
+    /// only by tests.
+    var accountAttentionWording: (String) -> String? = TCConsentCopy.accountAttentionJSON(forStatus:)
+    /// "Set up again" is running.
+    @Published private(set) var settingUpAgain = false
     /// Words `status.legacy_invite_migration.notice`. The ABI in the app;
     /// replaced only by tests.
     var legacyMigrationWording: (String) -> String? = TCConsentCopy.legacyMigrationNoticeJSON(
@@ -4626,6 +4639,18 @@ extension AppModel: FirstRunDaemon {
             publishIfChanged(\.status, fresh)
         }
         return true
+    }
+
+    /// "Set up again" (#1836 F1): the daemon drops this Mac's enrollment,
+    /// then the first run opens, which starts with a NEAR AI sign-in. The
+    /// daemon never does this on its own; only the button asks.
+    func setUpAgain() async {
+        guard !settingUpAgain else { return }
+        settingUpAgain = true
+        defer { settingUpAgain = false }
+        if await unenroll() {
+            OpenMonitor.request()
+        }
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.

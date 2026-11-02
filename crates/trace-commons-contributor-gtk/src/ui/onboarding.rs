@@ -236,6 +236,15 @@ pub fn set_pending_invite(invite: String) {
     PENDING_INVITE.with(|p| *p.borrow_mut() = Some(invite));
 }
 
+/// Open the first run after the account section's "Set up again"
+/// unenrolled this device (#1836 F1). Takes the once-per-launch latch, so
+/// the `status` read that follows does not open a second window; a run
+/// already shown this launch would otherwise keep it from opening at all.
+pub fn present_after_unenroll(app: &Rc<App>) {
+    PRESENTED.with(|p| p.set(true));
+    present(app);
+}
+
 /// Build and show the onboarding window.
 pub fn present(app: &Rc<App>) {
     present_at(app, None);

@@ -70,6 +70,10 @@ pub struct SettingsView {
     /// §5.4 draws it as a status pill, and §7.3 requires colour AND glyph
     /// AND words, which is what `style::tag` is.
     connection_chip: gtk::Box,
+    /// This app's account needs to be set up again (#1836 F1): the core's
+    /// status block and its "Set up again" button, empty otherwise. A
+    /// status in this section, never a banner or notification.
+    account_attention: gtk::Box,
     /// The three check rows of §5.4's Connection section. Filled from
     /// `get_settings`, never from a guess.
     connection_checks: gtk::Box,
@@ -263,6 +267,9 @@ impl SettingsView {
         let connection_chip = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
         connection_chip.set_halign(gtk::Align::Start);
         state_card.append(&connection_chip);
+        let account_attention = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+        account_attention.set_visible(false);
+        state_card.append(&account_attention);
         let connection = gtk::Label::builder().xalign(0.0).wrap(true).build();
         connection.add_css_class("tc-body");
         state_card.append(&connection);
@@ -683,6 +690,7 @@ impl SettingsView {
             root,
             connection,
             connection_chip,
+            account_attention,
             connection_checks,
             pause_button,
             projects,
@@ -1033,7 +1041,49 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
         style::tag(copy::NOT_CONNECTED, Tone::Attention)
     });
 
+    render_account_attention(app, status);
     render_routing_status(app, status);
+}
+
+/// The account's status while it needs to be set up again (#1836 F1), in
+/// the core's words. "Set up again" unenrolls this device, then opens the
+/// first run, which starts with a NEAR AI sign-in. The daemon never
+/// unenrolls on its own; only this button asks it to.
+fn render_account_attention(app: &Rc<App>, status: &Status) {
+    let view = &app.settings.account_attention;
+    while let Some(child) = view.first_child() {
+        view.remove(&child);
+    }
+    let Some(copy) = status.account_attention() else {
+        view.set_visible(false);
+        return;
+    };
+    let title = gtk::Label::builder().xalign(0.0).wrap(true).build();
+    title.set_text(copy.title);
+    title.add_css_class("tc-card-title");
+    view.append(&title);
+    if let Some(body) = copy.body {
+        style::append_body(view, body);
+    }
+    if let Some(private_ai) = copy.private_ai {
+        style::append_body(view, private_ai);
+    }
+    let set_up_again = gtk::Button::with_label(copy.action);
+    set_up_again.set_halign(gtk::Align::Start);
+    let a = Rc::clone(app);
+    set_up_again.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        let button = button.clone();
+        a.call("unenroll", serde_json::json!({}), move |app, result| {
+            button.set_sensitive(true);
+            if result.is_ok() {
+                super::onboarding::present_after_unenroll(app);
+            }
+            app.refresh();
+        });
+    });
+    view.append(&set_up_again);
+    view.set_visible(true);
 }
 
 /// The two session-source rows: the sentence, and whether the tone is the

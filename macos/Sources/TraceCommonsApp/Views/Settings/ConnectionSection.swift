@@ -1,12 +1,16 @@
 import SwiftUI
 import TCBridge
 import TCDesign
+import TCShellCore
 
 struct ConnectionSection: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            // Where the account's state is said: a status here, never a
+            // banner or notification (#1836 F1).
+            AccountAttentionCard()
             connection
             ContributionAccountCard()
             // The devices linked to this account, and Link a server.
@@ -154,6 +158,50 @@ struct ContributionAccountCard: View {
                 }
             }
             .disabled(model.contributionBusy)
+        }
+    }
+}
+
+/// This app's account needs attention (#1836 F1): its record cannot be read,
+/// or the address it was set up with is refused. Every word is the Rust's
+/// (`AppModel.accountAttention`). The button unenrolls, then the first run
+/// opens. Nothing here marks the NEAR AI login as the account's.
+struct AccountAttentionCard: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        if let attention = model.accountAttention {
+            AccountAttentionBlock(attention: attention, busy: model.settingUpAgain) {
+                Task { await model.setUpAgain() }
+            }
+        }
+    }
+}
+
+/// The block itself, separate from the model so a test can lay it out.
+struct AccountAttentionBlock: View {
+    let attention: AccountAttention
+    let busy: Bool
+    let setUpAgain: () -> Void
+
+    /// The lines under the title, in order: the reason, then Private AI.
+    static func lines(_ attention: AccountAttention) -> [String] {
+        [attention.body, attention.privateAI].compactMap { $0 }
+    }
+
+    var body: some View {
+        GlassEyebrowCard(attention.title, title: attention.title) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                ForEach(Self.lines(attention), id: \.self) { line in
+                    Text(line)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Button(attention.action, action: setUpAgain)
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .disabled(busy)
+            }
         }
     }
 }

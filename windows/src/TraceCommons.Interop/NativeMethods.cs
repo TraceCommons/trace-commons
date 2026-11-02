@@ -308,6 +308,18 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? noticeJson);
 
     /// <summary>
+    /// The account section's status while this app's account needs
+    /// attention, from the <c>status</c> object passed through as the daemon
+    /// sent it, as an owned JSON object (title, body, private_ai, action;
+    /// body and private_ai may be null). The sentence is chosen on the Rust
+    /// side. NULL while there is nothing to show, for an argument that is not
+    /// a JSON object, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_account_attention_copy_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? statusJson);
+
+    /// <summary>
     /// The offer to move a legacy invite identity to a NEAR AI account, as an
     /// owned JSON object of the offer's sentences. Free it the way
     /// <see cref="TakeOwnedString"/> does. NULL only on a caught panic.

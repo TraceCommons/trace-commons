@@ -72,6 +72,22 @@ public sealed partial class SettingsView : UserControl
         OpenPrivateInferenceRequested?.Invoke(this, EventArgs.Empty);
     }
 
+    /// <summary>
+    /// Asks the window to start the first run once "Set up again" unenrolled
+    /// this device. Raised as an event for the reason
+    /// <see cref="OpenPrivateInferenceRequested"/> is: this control knows
+    /// nothing about the onboarding window.
+    /// </summary>
+    public event EventHandler? SetUpAgainRequested;
+
+    private async void OnSetUpAgain(object sender, RoutedEventArgs e)
+    {
+        if (await Settings.SetUpAgainAsync())
+        {
+            SetUpAgainRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
     private async void OnDisableInferenceEvidence(object sender, RoutedEventArgs e)
     {
         await Settings.SetInferenceEvidenceAsync(false);

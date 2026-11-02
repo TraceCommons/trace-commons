@@ -937,6 +937,97 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public bool HasConnectionDetail => !Connected;
 
+    private AccountAttention? _accountAttention;
+
+    /// <summary>
+    /// The account section's status while this app's account needs attention
+    /// (#1836 F1), in the Rust's words, or null when there is nothing to
+    /// show. Re-read with every status read, so it goes once the account is
+    /// set up again.
+    /// </summary>
+    public AccountAttention? AccountAttention
+    {
+        get => _accountAttention;
+        private set
+        {
+            if (Equals(_accountAttention, value))
+            {
+                return;
+            }
+
+            _accountAttention = value;
+            Raise(nameof(AccountAttention));
+            Raise(nameof(HasAccountAttention));
+            Raise(nameof(AccountAttentionTitle));
+            Raise(nameof(AccountAttentionBody));
+            Raise(nameof(HasAccountAttentionBody));
+            Raise(nameof(AccountAttentionPrivateAi));
+            Raise(nameof(HasAccountAttentionPrivateAi));
+            Raise(nameof(AccountAttentionAction));
+        }
+    }
+
+    public bool HasAccountAttention => AccountAttention is not null;
+
+    public string AccountAttentionTitle => AccountAttention?.Title ?? string.Empty;
+
+    public string AccountAttentionBody => AccountAttention?.Body ?? string.Empty;
+
+    public bool HasAccountAttentionBody => !string.IsNullOrEmpty(AccountAttention?.Body);
+
+    public string AccountAttentionPrivateAi => AccountAttention?.PrivateAi ?? string.Empty;
+
+    public bool HasAccountAttentionPrivateAi => !string.IsNullOrEmpty(AccountAttention?.PrivateAi);
+
+    public string AccountAttentionAction => AccountAttention?.Action ?? string.Empty;
+
+    /// <summary>
+    /// Words the attention block from a status reply. An error frame leaves
+    /// the block as it was: a daemon that could not answer has not said the
+    /// account is fine.
+    /// </summary>
+    private void FillAccountAttention(DaemonResponse statusResponse)
+    {
+        if (statusResponse.IsError || statusResponse.Result is not { } result)
+        {
+            return;
+        }
+
+        AccountAttention = AccountAttentions.For(result.GetRawText());
+    }
+
+    /// <summary>
+    /// The attention block's button: the daemon drops this device's enrollment
+    /// (<c>unenroll</c>). True only once it confirmed; the caller then
+    /// starts the first run, which begins with a fresh NEAR AI sign-in. The
+    /// daemon never does this on its own.
+    /// </summary>
+    public async Task<bool> SetUpAgainAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            DaemonResponse response = await _host
+                .CallAsync(DaemonProtocol.Methods.Unenroll, "{}")
+                .ConfigureAwait(true);
+            if (response.IsError)
+            {
+                return false;
+            }
+
+            DaemonResponse status = await _host
+                .CallAsync(DaemonProtocol.Methods.Status)
+                .ConfigureAwait(true);
+            Connected = status.ResultAs<DaemonStatus>()?.LoggedIn ?? false;
+            FillAccountAttention(status);
+            return true;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
     public string Notice
     {
         get => _notice;
@@ -1002,6 +1093,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             DaemonStatus? status = statusResponse.ResultAs<DaemonStatus>();
             Connected = status?.LoggedIn ?? false;
+            FillAccountAttention(statusResponse);
 
             DaemonResponse settingsResponse = await _host
                 .CallAsync(DaemonProtocol.Methods.GetSettings)
@@ -1821,6 +1913,10 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             .CallAsync(DaemonProtocol.Methods.Status)
             .ConfigureAwait(true);
 
+        // The attention block follows every status event too: a record that
+        // breaks or is set up again elsewhere must not leave this section
+        // saying the old thing.
+        FillAccountAttention(statusResponse);
         DaemonSettingsSnapshot? snapshot = settingsResponse.ResultAs<DaemonSettingsSnapshot>();
         FillRouting(
             snapshot,

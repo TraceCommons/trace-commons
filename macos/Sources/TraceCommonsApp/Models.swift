@@ -284,6 +284,9 @@ struct DaemonStatus: Decodable, Equatable {
     /// The notice after a legacy invite identity moved to a NEAR AI account.
     /// A daemon that predates the field has nothing to show.
     let legacyInviteMigration: LegacyMigrationWire
+    /// Whether this app's account needs attention (#1836 F1). A daemon that
+    /// predates the keys has nothing to show.
+    let accountAttention: AccountAttentionWire
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -303,6 +306,9 @@ struct DaemonStatus: Decodable, Equatable {
         case armingRewordings = "arming_rewordings"
         case gateHeld = "automatic_contribution_held"
         case legacyInviteMigration = "legacy_invite_migration"
+        case accountState = "account_state"
+        case accountStateReason = "account_state_reason"
+        case nearAILoginUnconfirmed = "near_ai_login_unconfirmed"
     }
 
     init(
@@ -322,7 +328,8 @@ struct DaemonStatus: Decodable, Equatable {
         witnessCapacity: WitnessCapacity = .none,
         armingRewordings: [ArmingRewordingWire] = [],
         gateHeld: GateHeld = .none,
-        legacyInviteMigration: LegacyMigrationWire = .none
+        legacyInviteMigration: LegacyMigrationWire = .none,
+        accountAttention: AccountAttentionWire = .none
     ) {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
@@ -341,6 +348,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.armingRewordings = armingRewordings
         self.gateHeld = gateHeld
         self.legacyInviteMigration = legacyInviteMigration
+        self.accountAttention = accountAttention
     }
 
     init(from decoder: Decoder) throws {
@@ -369,6 +377,13 @@ struct DaemonStatus: Decodable, Equatable {
         legacyInviteMigration =
             (try? c.decodeIfPresent(LegacyMigrationWire.self, forKey: .legacyInviteMigration))
             .flatMap { $0 } ?? .none
+        // Each key alone, and a wrong type reads as absent: an older daemon,
+        // or one this build cannot read, has nothing to show.
+        accountAttention = AccountAttentionWire(
+            state: (try? c.decodeIfPresent(String.self, forKey: .accountState)).flatMap { $0 },
+            reason: (try? c.decodeIfPresent(String.self, forKey: .accountStateReason)).flatMap { $0 },
+            nearAILoginUnconfirmed:
+                (try? c.decodeIfPresent(Bool.self, forKey: .nearAILoginUnconfirmed)).flatMap { $0 } ?? false)
     }
 
     static let unknown = DaemonStatus(
