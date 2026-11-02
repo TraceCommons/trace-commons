@@ -1001,6 +1001,7 @@ mod tests {
     /// open and idle, and opens a new window otherwise; the command is in
     /// the script once for each, and a tty that is not one is never put in
     /// a script.
+    #[cfg(unix)]
     #[test]
     fn start_again_runs_in_the_ended_sessions_tab() {
         let command = hostile_command();
