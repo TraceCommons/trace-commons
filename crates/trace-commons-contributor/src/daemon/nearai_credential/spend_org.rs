@@ -50,6 +50,51 @@ mod tests;
 /// The daemon file holding the explicit choice and pending revocations.
 pub const SPEND_ORG_FILE: &str = "near-ai-spend-org.json";
 
+/// The per-install salt [`identity_digest`] hashes with. Local only.
+pub const IDENTITY_SALT_FILE: &str = "near-ai-identity-salt";
+
+/// A digest of a NEAR AI user id, salted per install: `sha256:` and hex.
+/// Local only -- never logged, never sent -- so the record can tell one
+/// identity's revocations from another's without holding the id.
+pub(crate) fn identity_digest(store: &ConfigStore, user_id: &str) -> Result<String> {
+    use sha2::Digest as _;
+    let salt = match store
+        .read_daemon_file(IDENTITY_SALT_FILE)
+        .map_err(|_| anyhow!(LABEL_SPEND_ORG_UNAVAILABLE))?
+    {
+        Some(salt) if salt.len() == 32 => salt,
+        _ => {
+            let mut salt = vec![0u8; 32];
+            ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut salt)
+                .map_err(|_| anyhow!(LABEL_SPEND_ORG_UNAVAILABLE))?;
+            store
+                .write_daemon_file(IDENTITY_SALT_FILE, &salt)
+                .map_err(|_| anyhow!(LABEL_SPEND_ORG_UNAVAILABLE))?;
+            salt
+        }
+    };
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(&salt);
+    hasher.update(user_id.as_bytes());
+    let digest: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(format!("sha256:{digest}"))
+}
+
+/// The digest of the identity `tokens` belong to, or `None` when it cannot
+/// be read.
+async fn current_identity(
+    store: &ConfigStore,
+    api: &CloudApi,
+    tokens: &SessionTokens,
+) -> Option<String> {
+    let user_id = api.current_user_id(tokens).await.ok()?;
+    identity_digest(store, &user_id).ok()
+}
+
 /// More pending revocations than this and a switch is refused: something is
 /// persistently refusing revokes, and minting further keys would only add to
 /// what has to be cleaned up.
@@ -92,6 +137,13 @@ pub(crate) struct PendingRevocation {
     pub(crate) workspace_id: String,
     pub(crate) key_id: String,
     pub(crate) recorded_at: DateTime<Utc>,
+    /// The NEAR AI identity that recorded it, as [`identity_digest`]: only
+    /// that identity's session can revoke the key, so the sweep runs it with
+    /// no other (spec 2026-11-02 B8). `None` for an entry recorded before
+    /// tags, or when the identity could not be read; the sweep tries those
+    /// with the current session and drops one answered `403`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<String>,
 }
 
 impl PendingRevocation {
@@ -100,6 +152,22 @@ impl PendingRevocation {
             workspace_id: workspace_id.to_owned(),
             key_id: key_id.to_owned(),
             recorded_at: Utc::now(),
+            identity: None,
+        }
+    }
+
+    fn tagged(mut self, identity: Option<&str>) -> Self {
+        self.identity = identity.map(str::to_owned);
+        self
+    }
+
+    /// Whether the sweep may run this entry with a session of `identity`:
+    /// an untagged entry, or one tagged with that identity.
+    fn belongs_to(&self, identity: Option<&str>) -> bool {
+        match (&self.identity, identity) {
+            (None, _) => true,
+            (Some(tag), Some(current)) => tag == current,
+            (Some(_), None) => false,
         }
     }
 
@@ -421,6 +489,7 @@ async fn sweep(shared: &DaemonShared, api: &CloudApi, tokens: SessionTokens) -> 
     // revoked. A daemon whose memory and disk disagree answers an error
     // here, and nothing is touched.
     let active = current_key(shared)?.map(|key| PendingRevocation::of(&key));
+    let identity = current_identity(&shared.store, api, &tokens).await;
     let mut settled = Vec::new();
     let mut remaining = false;
     for entry in pending {
@@ -429,6 +498,13 @@ async fn sweep(shared: &DaemonShared, api: &CloudApi, tokens: SessionTokens) -> 
             .is_some_and(|active| active.same_key(&entry))
         {
             settled.push(entry);
+            continue;
+        }
+        // Another identity's key stays parked: this session cannot revoke
+        // it, and it is not this identity's to report. With the identity
+        // unread, a tagged entry waits for a sweep that can read it.
+        if !entry.belongs_to(identity.as_deref()) {
+            remaining |= identity.is_none();
             continue;
         }
         match api
@@ -552,7 +628,16 @@ async fn switch_step(
         remember_choice(&shared.store, target)?;
         return Ok(false);
     }
-    if load(&shared.store)?.pending_revocations.len() >= MAX_PENDING {
+    // Tagged with the identity that mints, so the sweep never runs these
+    // with another's session. Only this identity's entries (and untagged
+    // ones) count toward the limit: another's parked entries cannot jam it.
+    let identity = current_identity(&shared.store, api, &tokens).await;
+    let actionable = load(&shared.store)?
+        .pending_revocations
+        .iter()
+        .filter(|entry| entry.belongs_to(identity.as_deref()))
+        .count();
+    if actionable >= MAX_PENDING {
         bail!(LABEL_SPEND_ORG_BUSY)
     }
     let key_name = super::ceremony::key_name(&super::loopback::random_state()?);
@@ -573,10 +658,12 @@ async fn switch_step(
             });
         }
     };
-    let fresh = PendingRevocation::new(&minted.workspace_id, &minted.key_id);
+    let fresh =
+        PendingRevocation::new(&minted.workspace_id, &minted.key_id).tagged(identity.as_deref());
     // Recorded before the new key is relied on. Whichever of the two is not
     // active when a sweep runs is revoked; the active one never is.
-    if record_pending(&shared.store, &[PendingRevocation::of(&old), fresh.clone()]).is_err() {
+    let old_entry = PendingRevocation::of(&old).tagged(identity.as_deref());
+    if record_pending(&shared.store, &[old_entry, fresh.clone()]).is_err() {
         // Nothing recorded means nothing would ever revoke the new key, so
         // it is revoked now, and the switch fails having changed nothing.
         let _ = api
