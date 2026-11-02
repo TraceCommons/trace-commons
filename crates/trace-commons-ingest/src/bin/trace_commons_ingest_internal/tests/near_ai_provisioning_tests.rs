@@ -2045,3 +2045,153 @@ async fn pg_every_near_ai_finish_refusal_is_the_identical_uniform_deny() {
     reset_account_rate_limiter_for_db_test().await;
     drop_tenants(&admin, &[&enrolled_tenant]).await;
 }
+
+/// An account registry on the test server, with or without the login
+/// resolver pool, or pointed at a database that does not exist.
+async fn registry(database: Option<&str>, with_resolver: bool) -> Arc<PgBackend> {
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("the harness found a database");
+    let url = match database {
+        Some(name) => {
+            let mut parsed = reqwest::Url::parse(&url).expect("url");
+            parsed.set_path(&format!("/{name}"));
+            parsed.to_string()
+        }
+        None => url,
+    };
+    Arc::new(
+        PgBackend::new(&DatabaseConfig {
+            url: SecretString::from(url),
+            pool_size: 2,
+            ssl_mode: trace_commons_server::config::SslMode::Prefer,
+            login_resolver_url: if with_resolver {
+                trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env()
+            } else {
+                None
+            },
+            gate_driver_url: None,
+            pii_backstop_driver_url: None,
+            invite_registry_url: None,
+        })
+        .await
+        .expect("the pool is built lazily"),
+    )
+}
+
+/// A commons not ready to offer the ceremony -- the path off, no account
+/// registry, no identity material -- answers `503` at start and at finish,
+/// not the uniform deny a signed-out device reads as "another account".
+/// Readiness is the same for every request, so this says nothing about who
+/// the request names.
+#[tokio::test]
+async fn pg_a_near_ai_commons_that_is_not_ready_answers_503() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let device = Device::new();
+    let (_, challenge) = pkce();
+    let start_body = serde_json::json!({
+        "device_public_key": device.public_b64(),
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    });
+    let unready: [(&str, fn(&mut AppState)); 3] = [
+        ("provisioning off", |s| s.near_provisioning_enabled = false),
+        ("no account registry", |s| s.db_mirror = None),
+        ("no identity material", |s| s.near_account_identity = None),
+    ];
+    for (cause, make_unready) in unready {
+        let mut state = h.state.clone();
+        make_unready(Arc::make_mut(&mut state));
+        let started = post(&state, PROVISION_START, &start_body).await;
+        assert_unavailable(&started, &format!("start, {cause}"));
+        let finished = post(
+            &state,
+            PROVISION_FINISH,
+            &well_formed_unknown_finish(&device),
+        )
+        .await;
+        assert_unavailable(&finished, &format!("finish, {cause}"));
+    }
+    reset_account_rate_limiter_for_db_test().await;
+}
+
+/// A misconfigured account registry -- a database that does not exist --
+/// answers `503` at start and at finish: PostgreSQL refuses every
+/// connection the same way, whoever the request names.
+#[tokio::test]
+async fn pg_a_near_ai_sign_in_whose_database_is_misconfigured_answers_503() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let missing = registry(
+        Some(&format!("no_such_db_{}", Uuid::new_v4().simple())),
+        true,
+    )
+    .await;
+    let mut state = h.state.clone();
+    Arc::make_mut(&mut state).db_mirror = Some(missing as Arc<dyn Database>);
+    let device = Device::new();
+    let (_, challenge) = pkce();
+    let started = post(
+        &state,
+        PROVISION_START,
+        &serde_json::json!({
+            "device_public_key": device.public_b64(),
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }),
+    )
+    .await;
+    assert_unavailable(&started, "start, database does not exist");
+    let finished = post(
+        &state,
+        PROVISION_FINISH,
+        &well_formed_unknown_finish(&device),
+    )
+    .await;
+    assert_unavailable(&finished, "finish, database does not exist");
+    reset_account_rate_limiter_for_db_test().await;
+}
+
+/// The one deployment failure that surfaces inside provisioning rather than
+/// before it: no login-resolver pool. Every provisioning resolves the anchor
+/// through it first, so it fails the same way for every login; the finish
+/// answers `503` and registers nothing.
+#[tokio::test]
+async fn pg_a_near_ai_finish_without_the_resolver_pool_answers_503() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let admin = h.admin().await;
+    let mut state = h.state.clone();
+    Arc::make_mut(&mut state).db_mirror = Some(registry(None, false).await as Arc<dyn Database>);
+    let device = Device::new();
+    let started = start(&state, PROVISION_START, None, &device).await;
+    let signature = device.sign(&started.signing_bytes);
+    let finished = finish(
+        &state,
+        PROVISION_FINISH,
+        None,
+        &started,
+        &device,
+        &signature,
+    )
+    .await;
+    assert_unavailable(&finished, "finish, no resolver pool");
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*)::bigint FROM device_keys WHERE public_key = $1",
+            &[&device.public_b64()],
+        )
+        .await,
+        0,
+        "an unanswered finish registered the device"
+    );
+    reset_account_rate_limiter_for_db_test().await;
+}
