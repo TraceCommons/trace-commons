@@ -44,6 +44,17 @@ final class TracesFolderOrderTests: XCTestCase {
             ["b", "a", "hidden"])
     }
 
+    /// As the tabs: a dragged folder trades places once past the middle
+    /// of the folder above or below, and not before.
+    func testADraggedFolderTradesPlacesPastItsNeighboursMiddle() {
+        let above = (id: "a", midY: CGFloat(20)), below = (id: "c", midY: CGFloat(100))
+        XCTAssertNil(TracesTreeView.folderSwap(center: 60, above: above, below: below))
+        XCTAssertEqual(TracesTreeView.folderSwap(center: 19, above: above, below: below), "a")
+        XCTAssertEqual(TracesTreeView.folderSwap(center: 101, above: above, below: below), "c")
+        XCTAssertNil(TracesTreeView.folderSwap(center: -50, above: nil, below: below), "nothing above the first")
+        XCTAssertNil(TracesTreeView.folderSwap(center: 500, above: above, below: nil), "nothing below the last")
+    }
+
     @MainActor
     func testTheArrangementIsReadBackOnThisMac() throws {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: "TracesFolderOrderTests"))
