@@ -513,8 +513,8 @@ extension DaemonData {
         /// `account_record_unreadable` or `account_address_refused` while
         /// `accountState` is `needs_attention`. A label, never shown as text.
         public let accountStateReason: String?
-        /// A NEAR AI login is stored while the account needs attention: it
-        /// is not presented as the account's.
+        /// A NEAR AI login is stored while the account needs attention, so
+        /// no Commons check ran for it. The core's words read it.
         public let nearAILoginUnconfirmed: Bool?
         /// K2 (#1173): `true` while a debug daemon runs a developer dry
         /// run. A release daemon never sends it. The app's notice reads it

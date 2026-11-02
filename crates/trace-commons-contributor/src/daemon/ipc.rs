@@ -2878,7 +2878,7 @@ impl DaemonShared {
             // `account_record_unreadable` or `account_address_refused`, and
             // `null` otherwise. `near_ai_login_unconfirmed` is true while
             // that holds and a NEAR AI login is stored: no Commons check
-            // could run for it, so no shell presents it as the account's.
+            // could run for it. It picks the core's Private AI line.
             // All three always present, so a shell can tell "nothing to
             // say" from a daemon too old to say. Words:
             // `consent_copy::account_attention_for_wire`.
