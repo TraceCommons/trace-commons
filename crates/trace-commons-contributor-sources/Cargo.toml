@@ -2,7 +2,7 @@
 name = "trace-commons-contributor-sources"
 # Released in lockstep with trace-commons-contributor, which re-exports this
 # crate's modules at their old `source` and `routing` paths.
-version = "0.21.1"
+version = "0.21.2"
 edition.workspace = true
 rust-version.workspace = true
 # MIT OR Apache-2.0, like the contributor that embeds it. This crate must
