@@ -442,10 +442,17 @@ impl ManagedService {
                 struct Params {
                     session_id: Uuid,
                     ticket: String,
+                    /// Start again and Resume: the ended row whose tab the
+                    /// launch runs in, when Terminal still has it idle.
+                    #[serde(default)]
+                    in_window_of: Option<Uuid>,
                 }
                 let p: Params = parse(request)?;
                 let cwd = self.sessions.launch_cwd(p.session_id, &p.ticket)?;
                 let installed = self.installed_terminals(choice.app());
+                let tab = p
+                    .in_window_of
+                    .and_then(|id| self.sessions.ended_terminal(id));
                 let window = terminal::launch(
                     choice,
                     &installed,
@@ -453,6 +460,7 @@ impl ManagedService {
                     &cwd,
                     p.session_id,
                     &p.ticket,
+                    tab.as_ref(),
                 )?;
                 self.sessions.opened_in_terminal(p.session_id, window)?;
                 Ok(json!({"opened":true,"destination":terminal::destination(choice)}))

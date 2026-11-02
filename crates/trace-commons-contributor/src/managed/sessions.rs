@@ -493,6 +493,15 @@ impl SessionRegistry {
     }
 
     /// The window of a running session the daemon opened, or a refusal.
+    /// The tab an ended session the daemon opened ran in, for Start again
+    /// and Resume to run in. None while it runs: that tab is in use.
+    pub fn ended_terminal(&self, id: Uuid) -> Option<TerminalHandle> {
+        let entry = self.data.entries.iter().find(|e| e.view.id == id)?;
+        (entry.launched && !entry.view.state.holds_profile())
+            .then(|| entry.terminal.clone())
+            .flatten()
+    }
+
     pub fn terminal_for(&self, id: Uuid) -> Result<TerminalHandle, ManagedError> {
         self.owned(id)?
             .terminal
