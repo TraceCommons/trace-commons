@@ -198,5 +198,11 @@ app; changing collection staging rules.
   on the daemon's lease tick (`collect_abandoned`); before, only a
   collecting row ended this way, and a non-collecting resume held its
   conversation, refusing Resume, for good.
+- A row whose launcher redeemed its ticket and went quiet before its first
+  report names no process, so nothing above ends it. It is never ended on a
+  timer (owner, 2026-11-02): the row says `can_dismiss`, the shell shows
+  Dismiss on it, and dismissing ends it (failed, as `tool_exited` does, so
+  a late final report is still taken) and dismisses its conversation.
+  `can_dismiss` is false while any other row of the conversation holds it.
 - New OpenCode sessions on NEAR AI are titled "NEAR AI private session"
   (shown as `OC | NEAR AI private session`); others keep "Managed session".

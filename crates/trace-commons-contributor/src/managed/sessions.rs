@@ -152,6 +152,13 @@ pub struct SessionView {
     /// conversation id is known. Set by the daemon's snapshot.
     #[serde(default)]
     pub can_resume: bool,
+    /// The row can be dismissed (with its conversation): no row of the
+    /// conversation holds its profile, or the only ones that do are stuck
+    /// unknown, their launcher gone before its first report, with no
+    /// process to watch (owner, 2026-11-02). Computed on every read.
+    /// Additive: absent from an older daemon.
+    #[serde(default)]
+    pub can_dismiss: bool,
     /// For a resumed row: when its conversation's root row started, so a
     /// shell can say "Continues 2:14 PM". Recorded when the row is
     /// prepared, so it survives the root being dismissed. Absent for a
@@ -445,6 +452,7 @@ impl SessionRegistry {
                 latest.insert(e.root(), index);
             }
         }
+        let held = self.held_conversations();
         Ok(self
             .data
             .entries
@@ -459,6 +467,7 @@ impl SessionRegistry {
                 view.can_stop = owned && !e.stop_requested;
                 view.can_start_again = false;
                 view.can_resume = false;
+                view.can_dismiss = !held.contains(&e.root());
                 view
             })
             .collect())
@@ -773,6 +782,7 @@ impl SessionRegistry {
             can_stop: false,
             can_start_again: false,
             can_resume: false,
+            can_dismiss: false,
             resumed_from: request.resume_of.and_then(|root| {
                 self.data
                     .entries
@@ -1286,7 +1296,10 @@ impl SessionRegistry {
 
     /// Dismiss the conversation of row `id`: every row of it, so no
     /// earlier row comes back in its place. Refused while a row of it
-    /// still holds its profile.
+    /// holds its profile, unless that row is stuck ([`Entry::stuck`]): the
+    /// person may let it go (owner, 2026-11-02), and it is ended as
+    /// [`Self::tool_exited`] ends a row, so a launcher that does report
+    /// later is still taken as how it ended.
     pub fn dismiss(&mut self, id: Uuid) -> Result<(), ManagedError> {
         let root = self
             .data
@@ -1295,14 +1308,29 @@ impl SessionRegistry {
             .find(|e| e.view.id == id)
             .ok_or(ManagedError::NotFound)?
             .root();
-        if self.conversation_in_use(root) {
+        if self.held_conversations().contains(&root) {
             return Err(ManagedError::Conflict);
         }
         let mut next = self.data.clone();
         for entry in next.entries.iter_mut().filter(|e| e.root() == root) {
+            if entry.stuck() {
+                entry.view.state = SessionState::Failed;
+                entry.ended_by_daemon = true;
+            }
             entry.dismissed = true;
         }
         self.commit(next)
+    }
+
+    /// The conversations a row holds that the person cannot dismiss: one
+    /// holding its profile that is not stuck.
+    fn held_conversations(&self) -> std::collections::BTreeSet<Uuid> {
+        self.data
+            .entries
+            .iter()
+            .filter(|e| e.view.state.holds_profile() && !e.stuck())
+            .map(Entry::root)
+            .collect()
     }
 
     pub fn changed(&mut self) -> Result<(), ManagedError> {
@@ -1331,6 +1359,16 @@ impl Entry {
     /// run by one session at a time.
     fn root(&self) -> Uuid {
         self.request.resume_of.unwrap_or(self.view.id)
+    }
+
+    /// Unknown with no process to watch: its launcher took the ticket and
+    /// went quiet before its first report named the tool's process, so
+    /// nothing will end it but the person (owner, 2026-11-02: dismissed by
+    /// hand, never on a timer).
+    fn stuck(&self) -> bool {
+        self.view.state == SessionState::Unknown
+            && self.proof_hash.is_some()
+            && self.process_id.is_none()
     }
 
     /// Whether this row is listed for its conversation when it is the
@@ -2480,6 +2518,108 @@ mod tests {
 
         registry.dismiss(resumed).unwrap();
         assert_eq!(ids(&mut registry), Vec::<Uuid>::new());
+    }
+
+    /// A resume whose launcher took its ticket and died before its first
+    /// report is unknown with no process to watch, so nothing ends it. The
+    /// person can dismiss it (owner, 2026-11-02): the row says
+    /// `can_dismiss`, and dismissing ends it and dismisses its
+    /// conversation, freeing the account. A quiet row whose launcher named
+    /// its tool's process, or one still starting, cannot be dismissed; an
+    /// ended row can. A launcher that does report later is still heard.
+    #[test]
+    fn a_row_stuck_before_its_first_report_can_be_dismissed() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let root = ended(&mut registry, coding(&account, home.path()), &account);
+        let can_dismiss = |registry: &mut SessionRegistry, id: Uuid| {
+            registry
+                .views()
+                .unwrap()
+                .iter()
+                .find(|v| v.id == id)
+                .map(|v| v.can_dismiss)
+        };
+        assert_eq!(can_dismiss(&mut registry, root), Some(true), "ended");
+
+        let request = registry.resume_request(root, Uuid::new_v4()).unwrap();
+        let stuck = registry.prepare(request, &account).unwrap();
+        assert_eq!(
+            can_dismiss(&mut registry, stuck.session_id),
+            Some(false),
+            "starting"
+        );
+        let context = registry
+            .redeem(stuck.session_id, stuck.ticket.as_deref().unwrap())
+            .unwrap();
+        let fresh = registry
+            .prepare(coding(&account, home.path()), &account)
+            .unwrap();
+        let fresh_context = registry
+            .redeem(fresh.session_id, fresh.ticket.as_deref().unwrap())
+            .unwrap();
+        registry
+            .report(LifecycleReport {
+                model: None,
+                collection: None,
+                session_id: fresh.session_id,
+                proof: fresh_context.proof,
+                state: SessionState::Running,
+                process_id: Some(42),
+                process_identity: Some("42:1".into()),
+                exit_code: None,
+            })
+            .unwrap();
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        for id in [stuck.session_id, fresh.session_id] {
+            assert_eq!(
+                registry.describe(id).map(|(_, s)| s),
+                Some(SessionState::Unknown)
+            );
+        }
+        assert_eq!(can_dismiss(&mut registry, stuck.session_id), Some(true));
+        assert_eq!(
+            can_dismiss(&mut registry, fresh.session_id),
+            Some(false),
+            "its tool's process is watched"
+        );
+        assert_eq!(
+            registry.dismiss(fresh.session_id),
+            Err(ManagedError::Conflict)
+        );
+
+        registry.dismiss(stuck.session_id).unwrap();
+        let listed: Vec<Uuid> = registry.views().unwrap().iter().map(|v| v.id).collect();
+        assert_eq!(listed, vec![fresh.session_id], "the conversation is gone");
+        assert_eq!(
+            registry.describe(stuck.session_id).map(|(_, s)| s),
+            Some(SessionState::Failed)
+        );
+        assert!(registry.resume_root(root).is_some(), "no longer in use");
+        registry
+            .report(LifecycleReport {
+                model: None,
+                collection: None,
+                session_id: stuck.session_id,
+                proof: context.proof,
+                state: SessionState::Exited,
+                process_id: None,
+                process_identity: None,
+                exit_code: Some(0),
+            })
+            .unwrap();
+        assert_eq!(
+            registry.describe(stuck.session_id).map(|(_, s)| s),
+            Some(SessionState::Exited),
+            "a late final report is taken"
+        );
     }
 
     /// The list and the one-session-per-conversation lock group rows by the
