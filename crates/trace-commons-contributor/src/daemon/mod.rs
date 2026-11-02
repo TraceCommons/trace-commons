@@ -652,6 +652,7 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
             _ = token_cleanup_tasks.join_next(), if !token_cleanup_tasks.is_empty() => {}
             _ = managed_lease_tick.tick() => {
                 managed::sweep(shared, Utc::now()).await;
+                managed::end_quiet_rows(shared, Utc::now()).await;
                 // Detached: a collection is recorded when it finishes.
                 if collection_pass.as_ref().is_none_or(|pass| pass.is_finished()) {
                     let shared = Arc::clone(shared);

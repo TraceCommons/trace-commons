@@ -190,16 +190,24 @@ app; changing collection staging rules.
   whose ticket expired unredeemed therefore gives the row that ran back,
   with its Start again and Resume. Dismiss is the conversation's: it marks
   every row of the root, and is refused while any of them holds the
-  conversation. The list passes over dismissed rows, so a v0.21.0-0.21.2
-  registry, where rows were dismissed one at a time, shows the latest row
-  the person kept.
+  conversation (except a stuck row, below). Rows dismissed one at a time
+  (#1838 flagged only the listed latest row; v0.21.0-0.21.2 listed every
+  row) leave the conversation dismissed when its latest row, or its latest
+  standing row, is dismissed, so no #1838 dismissal comes back. A
+  v0.21.x conversation whose root alone was dismissed is listed as its
+  latest row; one whose resume alone was dismissed stays hidden, since the
+  file cannot tell it from a #1838 dismissal.
 - A quiet row (unknown: its launcher stopped reporting) that has no
-  collection plan ends once the tool process its launcher named is gone,
-  on the daemon's lease tick (`collect_abandoned`); before, only a
-  collecting row ended this way, and a non-collecting resume held its
-  conversation, refusing Resume, for good.
+  collection plan ends once the tool process its launcher named (pid and
+  start time) is gone, in its own pass on every lease tick
+  (`end_quiet_rows`, not gated on a collection pass); a collection still
+  pending on it fails, since nothing will collect it. Before, only a
+  collecting row with a plan ended this way, and a non-collecting resume
+  held its conversation, refusing Resume, for good.
 - A row whose launcher redeemed its ticket and went quiet before its first
-  report names no process, so nothing above ends it. It is never ended on a
+  report names no process, and one that named only a pid (the launcher's
+  `<pid>:<uuid>` fallback, which a reused pid would fool), so nothing
+  above ends it. It is never ended on a
   timer (owner, 2026-11-02): the row says `can_dismiss`, the shell shows
   Dismiss on it, and dismissing ends it (failed, as `tool_exited` does, so
   a late final report is still taken) and dismisses its conversation.
