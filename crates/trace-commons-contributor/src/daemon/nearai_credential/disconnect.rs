@@ -88,9 +88,19 @@ impl Revocation {
             || disk.near_ai_inference.is_some();
         let active = metadata_ids.or(plaintext_ids);
         let mut pending = Vec::new();
-        // An unreadable record names nothing this can act on.
+        // An unreadable record names nothing this can act on. Only entries
+        // the stored login's session may revoke: those tagged with its
+        // recorded identity, or untagged (spec 2026-11-02 B8, #1842). Another
+        // identity's keys are never sent with this session.
         if let Ok(record) = super::spend_org::load(store) {
-            for entry in record.pending_revocations {
+            let identity = active
+                .as_ref()
+                .and_then(|(_, key_id)| super::spend_org::recorded_identity(&record, key_id));
+            for entry in record
+                .pending_revocations
+                .into_iter()
+                .filter(|entry| entry.belongs_to(identity.as_deref()))
+            {
                 let pair = (entry.workspace_id, entry.key_id);
                 if active.as_ref() != Some(&pair) && !pending.contains(&pair) {
                     pending.push(pair);

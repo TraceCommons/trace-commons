@@ -680,6 +680,8 @@ public class NearAiCredentialTests
             // session state's empty default when an older daemon omits it.
             "state", "session_state", "attempt_id", "attempt_status", "browser_url", "{}", "",
             "github", "google", "near",
+            // The forget answer's two fields, read by ForgetLeftKeyAtService.
+            "removed", "revoked",
         };
 
         foreach (Match match in Regex.Matches(uncommented, "\"([^\"\\\\]|\\\\.)*\""))

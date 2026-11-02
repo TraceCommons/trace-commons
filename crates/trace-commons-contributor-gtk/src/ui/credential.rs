@@ -632,11 +632,13 @@ mod tests {
             .split("fn forget(app: &Rc<App>)")
             .nth(1)
             .expect("forget is in this file");
-        assert!(forget
-            .split("\n}\n")
-            .next()
-            .unwrap()
-            .contains(".set(result.as_ref().is_ok_and(forget_left_key_at_service))"));
+        assert!(
+            forget
+                .split("\n}\n")
+                .next()
+                .unwrap()
+                .contains(".set(result.as_ref().is_ok_and(forget_left_key_at_service))")
+        );
         let render = production
             .split("pub fn render(")
             .nth(1)
@@ -648,11 +650,12 @@ mod tests {
             .split("pub(super) fn act_with_provider(")
             .nth(1)
             .expect("act_with_provider is in this file");
-        assert!(act
-            .split("match action")
-            .next()
-            .unwrap()
-            .contains("view.not_revoked.set(false);"));
+        assert!(
+            act.split("match action")
+                .next()
+                .unwrap()
+                .contains("view.not_revoked.set(false);")
+        );
     }
 
     /// The selector offers the core's logins, in its order, with the core's

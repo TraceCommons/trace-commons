@@ -514,3 +514,28 @@ fn account_logout_reads_the_daemons_answer_strictly() {
         crate::commands::DaemonSignOut::DryRun
     ));
 }
+
+/// A pending key tagged with another NEAR AI identity is never sent with
+/// this session; an untagged one is (#1842's rule, spec B8).
+#[tokio::test]
+async fn another_identitys_pending_key_is_not_sent() {
+    let (_dir, store) = temp_store();
+    seed(&store);
+    super::super::spend_org::record_identity(&store, "key-1", "sha256:mine");
+    let mut theirs = super::super::spend_org::PendingRevocation::new("ws-9", "key-theirs");
+    theirs.identity = Some("sha256:theirs".into());
+    super::super::spend_org::record_pending(&store, &[theirs]).unwrap();
+    let (origin, seen) = stub(StatusCode::OK, StatusCode::NO_CONTENT).await;
+    let revocation = clear_store(&store).unwrap().revocation.unwrap();
+    let api = CloudApi::for_test(&origin).unwrap();
+    assert_eq!(revocation.run(Some(&api)).await, Some(true));
+    assert_revoked_with_old_session(&seen);
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("key-theirs")),
+        "{seen:?}"
+    );
+}

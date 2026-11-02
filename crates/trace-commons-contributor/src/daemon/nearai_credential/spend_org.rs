@@ -130,7 +130,7 @@ pub(crate) struct SessionIdentity {
 }
 
 /// The recorded identity of the login whose key is `key_id`, if any.
-fn recorded_identity(record: &SpendOrgRecord, key_id: &str) -> Option<String> {
+pub(super) fn recorded_identity(record: &SpendOrgRecord, key_id: &str) -> Option<String> {
     record
         .session_identity
         .as_ref()
@@ -259,7 +259,7 @@ impl PendingRevocation {
 
     /// Whether the sweep may run this entry with a session of `identity`:
     /// an untagged entry, or one tagged with that identity.
-    fn belongs_to(&self, identity: Option<&str>) -> bool {
+    pub(super) fn belongs_to(&self, identity: Option<&str>) -> bool {
         match (&self.identity, identity) {
             (None, _) => true,
             (Some(tag), Some(current)) => tag == current,
