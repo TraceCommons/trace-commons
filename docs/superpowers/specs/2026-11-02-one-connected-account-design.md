@@ -157,8 +157,20 @@ onto this function unchanged in behaviour.
 
 ### 3.2a The "needs attention" state (B12)
 
-Owner-approved on 2026-11-02 as a surface; its wording is DRAFT (section
-5).
+The surface and its wording are owner-APPROVED (2026-11-02), with the
+button "Set up again":
+
+| Key | APPROVED text |
+| --- | --- |
+| `account.attention.title` | This app's account needs attention |
+| `account.attention.record_unreadable` | This app can't read its account details on this Mac. Set it up again to keep sending traces. |
+| `account.attention.address_refused` | This app can no longer reach the service it was set up with. Update the app, or set it up again. |
+| `account.attention.private_ai` | Private AI still works with your NEAR AI account. |
+| `account.attention.set_up_again` | Set up again |
+
+`account.attention.private_ai` is shown only when a NEAR AI login is
+stored. The block is a status in the account section, not a banner or
+notification. "Set up again" runs unenroll and then first run (below).
 
 - **Daemon.** When the account record fails to parse, or the enrolled
   Commons address is refused by the allowlist, status carries
@@ -174,9 +186,12 @@ Owner-approved on 2026-11-02 as a surface; its wording is DRAFT (section
   login stored without the check is marked `near_ai_login_unconfirmed:
   true`, so the shells do not present it as the account's login (no
   "Connected with {provider}" line, no chooser mark).
-- **The way out.** `account_record_unreadable`: sign out and set up again
-  (unenroll, then first run, which provisions from the stored NEAR AI
-  login; consistent by construction, B11). `account_address_refused`: the
+- **The way out.** `account_record_unreadable`: "Set up again"
+  (unenroll, then first run). Under owner decision 1 (section 6),
+  unenroll clears the whole connected set, the NEAR AI login included, so
+  first run starts with a fresh NEAR AI sign-in and provisions from it;
+  consistent by construction (B11). Until F9 makes unenroll clear the
+  NEAR AI login, first run provisions from the login still stored. `account_address_refused`: the
   same, or update the app if the address was dropped from this build by
   mistake. The daemon offers the action; it never unenrolls on its own.
 - **Every shell.** The state and reason cross IPC and the C ABI as two
@@ -244,21 +259,7 @@ its DRAFT wording is approved. Two DRAFT strings, if the owner wants them:
 | `account.disconnect.button` | Sign out |
 | `account.disconnect.body` | Signs out of NEAR AI on this Mac. Private AI and uploads stop until you sign in again. |
 
-The "needs attention" surface (section 3.2a). The owner approved the
-surface on 2026-11-02; every string below is DRAFT and needs approval of
-its wording. No string names Trace Commons.
-
-| Key | DRAFT text |
-| --- | --- |
-| `account.attention.title` | This app's account needs attention |
-| `account.attention.record_unreadable` | This app can't read its account details on this Mac. Sign out and set it up again to keep sending traces. |
-| `account.attention.address_refused` | This app can no longer reach the service it was set up with. Update the app, or sign out and set it up again. |
-| `account.attention.private_ai` | Private AI still works with your NEAR AI account. |
-| `account.attention.sign_out` | Sign out |
-
-`account.attention.private_ai` is shown only when a NEAR AI login is
-stored. The attention block is a status in the account section, not a
-banner or notification.
+The "needs attention" strings are APPROVED and listed in section 3.2a.
 
 The two sign-out strings are not notices. A notice that the app found mismatched credentials
 would need approval (copy guide rule 9); this design does not propose one.
