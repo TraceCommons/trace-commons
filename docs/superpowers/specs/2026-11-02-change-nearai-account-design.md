@@ -150,8 +150,8 @@ minted.
 | # | Threat | What must hold |
 | --- | --- | --- |
 | T1 | Someone holding only a NEAR AI identity (new or stolen) captures an existing account. | A NEAR AI login alone never moves an account. Today it cannot: an unknown anchor makes a new tenant. A rebind must keep that. |
-| T2 | Someone holding a live native session or the device key (a stolen laptop, malware on it) rebinds the account to their own identity and retires the owner's, locking the owner out and then relinking payouts. | The rebind requires proof of the current identity, not only the device. This is the main reason for option (a). |
-| T3 | The old NEAR AI login is stolen or expired. | Expired: the daemon refreshes it before the ceremony; if refresh fails the user signs in to the old identity again first. Stolen: the thief holds T2's half and not the device, and gets nothing from the old identity alone (T1). |
+| T2 | Someone holding a live native session or the device key (a stolen laptop, malware on it) rebinds the account to their own identity and retires the owner's, locking the owner out and then relinking payouts. | The rebind requires a fresh, interactive sign-in to the current identity, not only the device. The device's stored NEAR AI refresh token does not count: it lives in the same keychain as the device key, so a thief with the device holds it too, and a silent refresh would reduce (a) to (b). This is the main reason for option (a) and for its step 1 (section 3.7). |
+| T3 | The old NEAR AI login is stolen or expired. | Expired: no effect, since step 1 is a new sign-in anyway. Stolen (the NEAR AI login alone): the thief has no device or native session, and gets nothing from the old identity alone (T1). Stolen together with the device: the thief can pass step 1 and move the account. A cooldown with a revert window (Q6) is the remaining defence. |
 | T4 | The owner lost the old identity (lost wallet, closed GitHub). | No self-service path in the first slice; see option (d). Anything weaker than option (a) is a takeover path for T2, so it needs delay and wide revocation, not just a different check. |
 | T5 | Sybil laundering: rebind to free an identity, then sign that identity up again as a fresh account to reclaim per-identity sign-up grants or admission. | A retired anchor keeps its row, so `UNIQUE (anchor_hash)` keeps it from claiming a new account. |
 | T6 | Two accounts merged by the back door: rebind account A onto an identity that already has account B. | Refused. The new anchor must be unclaimed. Merging across tenants is out of scope. |
@@ -167,15 +167,19 @@ is never needed for that pair.
 
 ### (a) Prove both identities in one ceremony, then rebind (recommended)
 
-The signed-in device starts a ceremony; the daemon presents a fresh token
-for the current identity and one for the new identity; the server checks
+The signed-in device starts a ceremony; the person signs in again,
+interactively, with the current identity, and the daemon presents that
+token and one for the new identity; the server checks
 the first resolves to this account's live anchor and the second to no
 anchor, then adds the new anchor and retires the old one in one
 transaction. Tenant and account id do not change, so traces, credit,
 referrals, payouts and devices stay where they are, and the client's
-mismatch check (`nearai_onboarding.rs:898`) passes unchanged.
+mismatch check (`nearai_onboarding.rs:898`) passes unchanged: it compares
+tenant and account only, and `validate_finished` (`:760-778`) checks the
+answer's `anchor_hash` for shape, never against a stored value.
 
-- Pros: defeats T1 and T2; no data moves; reuses the provisioning
+- Pros: defeats T1, and T2 short of a thief who can also complete a NEAR
+  AI sign-in as the owner; no data moves; reuses the provisioning
   ceremony's shape (single-use row, device signature, server-side
   introspection); the schema already allows two anchors.
 - Cons: needs the old identity to be reachable now (T4 is not served); two
@@ -226,37 +230,52 @@ route) is the alternative. It adds an admin credential scope and a drill.
 
 | | T1 | T2 | T4 served | Data moves | Server size |
 | --- | --- | --- | --- | --- | --- |
-| (a) both identities | yes | yes | no | no | one route pair, one migration |
+| (a) both identities | yes | yes, with a fresh sign-in to the current login | no | no | one route pair, one migration |
 | (b) device + new | yes | **no** | yes | no | same as (a) |
 | (c) multi-link | yes | yes, if link needs (a) | partly | no | (a) plus unlink |
 | (d) delayed recovery | yes | delayed, cancellable | yes | no | (a) plus pending state, scheduler |
 
 ### 3.5 Server changes for (a)
 
-**Migration** (next free number; V145 is claimed by open PR #1826 and V139
-is reused by open PR #1654, so this is V146 at the earliest; check the
-`PgBackend` migration list at implementation time):
+**Migration** (next free number; V145 is claimed by open PR #1826, so this
+is V146 at the earliest; check the `PgBackend` migration list at
+implementation time):
 
 ```sql
 ALTER TABLE trace_near_account_anchors
     ADD COLUMN retired_at TIMESTAMPTZ;
 GRANT UPDATE (retired_at) ON trace_near_account_anchors TO trace_ingest_runtime;
 -- The login resolver's cross-tenant read must see the column it filters on.
-GRANT SELECT (retired_at) ON trace_near_account_anchors TO <login resolver role>;
+-- How the resolver currently reads this table (grant or definer function)
+-- decides the exact form; see docs/operator/login-resolver-role.md.
+GRANT SELECT (retired_at) ON trace_near_account_anchors TO trace_login_resolver;
+-- Re-keying provisioned devices onto the new anchor (below).
+GRANT UPDATE (anchor_hash) ON trace_near_provisioned_devices TO trace_ingest_runtime;
 ```
 
-- The old anchor row is never deleted. `trace_near_provisioned_devices` has
-  a foreign key to `(tenant_id, account_id, anchor_hash)` (V58:55), so
-  devices provisioned under the old identity stay attached and keep their
-  sessions. A device that signs in afterwards with the new identity gets a
-  new provisioned-device row under the new anchor; the
-  `ON CONFLICT (tenant_id, principal_ref) DO NOTHING` at
-  `postgres_account_onboarding.rs:228` means the existing row, under the
-  old anchor, is kept. The readiness join (`:713`) then reads a retired
-  anchor for that device and must still accept it (the device is live; only
-  the login is retired). That is a test to write, not a schema change.
-- Column-scoped grant, V100's pattern: a compromised runtime can retire or
-  revive an anchor of its own tenant but cannot re-key it.
+- The old anchor row is never deleted: a retired row is what keeps the old
+  identity from claiming a fresh account (T5).
+- **Provisioned devices are re-keyed to the new anchor in the rebind
+  transaction**, as V82 does for merges. Without it they would point at the
+  retired anchor forever: `attach_near_ai_login_device` inserts its row
+  with `ON CONFLICT (tenant_id, principal_ref) DO NOTHING`
+  (`postgres_account_onboarding.rs:228`), so a later sign-in never updates
+  it. And `near_provisioned_row_for_principal` (`:713`) is what admission
+  reads as the account's anchor (`admission::anchor`,
+  `trace_commons_ingest_internal/admission.rs:246`). Admission reservations
+  and per-anchor limits are keyed by that anchor (`AdmissionReservation`,
+  `admission.rs:638-646`). Left alone, existing devices would count
+  against the retired identity and new devices against the new one: two
+  admission windows for one account, and a retired identity still
+  granting admission. Re-keying gives one window. The cost is that the
+  window restarts once per move; a cooldown between moves (Q6) bounds
+  that. The foreign key to `(tenant_id, account_id, anchor_hash)`
+  (V58:55) is satisfied because the new anchor row is inserted first. The
+  rebind refuses while an admission reservation for the old anchor is
+  in progress (`AdmissionDecision::Busy`), so no lease straddles the move.
+- Column-scoped grants, V100's pattern: a compromised runtime can retire or
+  revive an anchor of its own tenant and point its own devices at its own
+  anchors (the foreign key holds), but cannot re-key an anchor.
 - Forced RLS is unchanged. Every write runs in the account's own tenant.
 
 **Readers to update** (each must treat a retired anchor as not an identity
@@ -298,7 +317,8 @@ provisioning pair):
      roll back and answer `near_ai_login_in_use` (409). If the new anchor
      exists as a retired anchor of this same account, clear its
      `retired_at` instead (switching back). Then set the old anchor's
-     `retired_at`, write the audit row, commit.
+     `retired_at`, re-key the account's `trace_near_provisioned_devices`
+     rows from the old anchor to the new one, write the audit row, commit.
   5. Answer `{account_id, tenant_id, anchor_hash, auth_provider}` (the new
      anchor's). The current session stays valid; no new session is minted.
 - Neither token is stored, logged or put into an error; both are dropped
@@ -358,8 +378,16 @@ top of this spec, extended with a slot the change flow can use.
 
 **Change flow (one IPC verb).** `near_ai_account_change { confirm: true }`:
 
-1. Refresh the current `near_ai_session` to a fresh access token. A
-   refusal ends the flow with `current_login_required`.
+1. Ask the person to sign in with the current login: the chooser page
+   opens with only the remembered provider offered. That sign-in's access
+   token is held in memory for this ceremony only and never stored. Its
+   subject digest must match the remembered one, or the flow ends with
+   `current_login_required`. This is the owner's "sign in again with that
+   account", and it is what makes (a) stronger than (b): silently
+   refreshing the stored `near_ai_session` would prove only that the
+   device's keychain was readable (T2). The silent refresh is the weaker
+   variant, and the owner can choose it (Q1) if the extra sign-in is too
+   much friction, accepting T2 short of a revert window.
 2. Take `near_ai_session_pending`'s access token. Absent: `new_login_required`.
 3. Run rebind start and finish.
 4. On success, in order: revoke the inference keys minted in the old NEAR AI
@@ -393,8 +421,9 @@ while the old one retires.
    sign-in answer; the audit row. PostgreSQL tests for: rebind success,
    `in_use` with a concurrent sign-up of the new identity, old identity
    refused after rebind, switching back, a retired anchor rejected by the
-   payout proof, the strong-authenticator count, a device provisioned under
-   the old anchor still passing readiness, and RLS (a session in tenant A
+   payout proof, the strong-authenticator count, devices re-keyed to the
+   new anchor (and admission reading it), refusal while an admission
+   reservation is in progress, and RLS (a session in tenant A
    cannot rebind B).
 2. Daemon: remember provider and subject digest; `login_matches_commons`;
    the pending slot; the change and cancel verbs; FFI.
@@ -475,7 +504,10 @@ approves both the notice and its wording.
 ## 6. Open questions for the owner
 
 1. **Option (a) as the only self-service path?** It needs the old login to
-   still work. Someone who lost it (lost wallet) cannot move. Build
+   still work, and the recommendation asks for a fresh interactive
+   sign-in with it during the move (not a silent refresh of the stored
+   login, which a device thief also holds). Is that friction acceptable?
+   Someone who lost the old login (lost wallet) cannot move. Build
    recovery (d) with a delay, offer operator-assisted recovery, or neither
    for now?
 2. **Multi-link (c)?** Should an account ever accept more than one NEAR AI
@@ -490,8 +522,11 @@ approves both the notice and its wording.
 5. **Payout links.** Recommendation: keep an active link through a rebind
    (it pays an org the owner proved). The alternative is to close it and
    ask for a relink under the new login.
-6. **Switching back.** Allowed in slice 1 (the retired anchor is revived).
-   Should there be a cooldown between moves?
+6. **Switching back and cooldown.** Allowed in slice 1 (the retired
+   anchor is revived). Should there be a cooldown between moves, and a
+   revert window in which the retired login can undo a move? Each move
+   restarts the account's admission window once, so a cooldown also bounds
+   that.
 7. **What "remember" shows.** Provider only ("Signed in with GitHub"), or
    also a hint such as a masked email, read locally from NEAR AI and kept
    only on the device? Two GitHub logins look the same with provider only.
