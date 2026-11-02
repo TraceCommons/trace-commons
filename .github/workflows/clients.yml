@@ -42,6 +42,7 @@ on:
       - "crates/trace-commons-protocol/**"
       - ".github/workflows/clients.yml"
       - ".github/actions/**"
+      - "scripts/ci/run-with-deadline.sh"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -122,9 +123,23 @@ jobs:
       # generated file's layout and a generator change nobody re-ran.
       - name: Glass tokens are generated from their source
         run: python3 scripts/design-tokens/generate.py --check
+      # A green run takes 5.5 to 7 minutes, build included, and the steps
+      # above use 20 to 23 of the job's 45. A hung test used to run into the
+      # job timeout, which cancels the step and keeps no log, so nothing said
+      # which test hung. The deadline fails the step instead, names the test
+      # that never finished and samples the xctest process; the artifact
+      # below keeps the whole output and the sample.
       - name: swift test
         working-directory: macos
-        run: swift test -Xswiftc -warnings-as-errors
+        run: ../scripts/ci/run-with-deadline.sh 900 "$RUNNER_TEMP/swift-test" -- swift test -Xswiftc -warnings-as-errors
+      - name: Keep the swift test output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-swift-test-output
+          path: ${{ runner.temp }}/swift-test
+          if-no-files-found: ignore
+          retention-days: 14
       # `swift test` builds Debug only, so a DEBUG-only symbol (sample
       # clients, monitor windows behind `#if DEBUG`) reachable from a Release
       # path compiled here and failed first in the release workflow. This
