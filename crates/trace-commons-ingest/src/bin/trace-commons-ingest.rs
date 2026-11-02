@@ -20553,12 +20553,10 @@ async fn account_trace_content_handler(
                 submission_id = %submission_id,
                 "Trace Commons account content read-back failed; failing closed"
             );
-            return Err(audit_account_content_read_failure(
-                state.as_ref(),
-                &audit_tenant,
-                submission_id,
-            )
-            .await);
+            let denied =
+                audit_account_content_read_failure(state.as_ref(), &audit_tenant, submission_id)
+                    .await;
+            return Err(database_busy_response(&error).unwrap_or(denied));
         }
     };
 
@@ -21285,7 +21283,7 @@ async fn owned_account_trace_submission(
 }
 
 /// The label-only `500` every account withdrawal failure returns, logged
-/// hash-only.
+/// hash-only (`503 database_busy` when the database pool was unavailable).
 fn account_trace_withdrawal_failed(
     submission_id: Uuid,
     error: &anyhow::Error,
@@ -21295,7 +21293,8 @@ fn account_trace_withdrawal_failed(
         %submission_id,
         "Trace Commons trace withdrawal failed; failing closed"
     );
-    api_error(StatusCode::INTERNAL_SERVER_ERROR, "trace withdrawal failed")
+    database_busy_response(error)
+        .unwrap_or_else(|| api_error(StatusCode::INTERNAL_SERVER_ERROR, "trace withdrawal failed"))
 }
 
 /// The account's credit events and the ids of the events a finalized batch
@@ -58501,14 +58500,17 @@ async fn pii_backstop_clear_stale_prior_risk_handler(
         .list_quarantined_with_only_residual_survivor(&tenant.tenant_id, limit)
         .await
         .map_err(|error| {
+            let busy = database_busy_response(&error);
             tracing::warn!(
                 error_hash = %safe_display_error_hash(&anyhow::Error::new(error)),
                 "Trace Commons stale-prior-risk enumeration failed"
             );
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "stale prior risk enumeration failed",
-            )
+            busy.unwrap_or_else(|| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "stale prior risk enumeration failed",
+                )
+            })
         })?;
 
     let mut cleared = 0u64;
@@ -72616,9 +72618,9 @@ fn audit_append_lock(root: &Path, tenant_id: &str) -> Arc<tokio::sync::Mutex<()>
         .clone()
 }
 
-/// Sets `event`'s chain fields from the file log's latest event. The caller
-/// holds [`audit_append_lock`], so the file's latest event is still the
-/// latest when [`write_chained_audit_event`] appends this one.
+/// Test-only: sets `event`'s chain fields from the file log's latest event,
+/// without stamping `created_at`. Production appends use
+/// [`stamp_and_chain_audit_event`] under [`audit_append_lock`].
 #[cfg(test)]
 fn chain_audit_event(
     root: &Path,
@@ -79825,20 +79827,30 @@ fn is_database_pool_unavailable(error: &dyn std::any::Any) -> bool {
     )
 }
 
+/// `503 database_busy` with a retry hint when `error` is a database pool that
+/// timed out or is closed ([`is_database_pool_unavailable`]), else `None`.
+/// For handlers that answer their own failure label instead of calling
+/// [`internal_error`], so they back off the same way.
+fn database_busy_response(error: &dyn std::any::Any) -> Option<(StatusCode, Json<ApiError>)> {
+    is_database_pool_unavailable(error).then(|| {
+        api_error_with_retry(
+            StatusCode::SERVICE_UNAVAILABLE,
+            DATABASE_BUSY_LABEL,
+            Some(transient_unavailable_retry_after_seconds()),
+        )
+    })
+}
+
 /// `500` for an internal failure, except a database pool that timed out or
 /// is closed, which is load rather than a fault: `503 database_busy` with a
 /// retry hint, so a client backs off instead of reading a server error.
 fn internal_error<E: std::fmt::Display + 'static>(error: E) -> (StatusCode, Json<ApiError>) {
-    if is_database_pool_unavailable(&error) {
+    if let Some(busy) = database_busy_response(&error) {
         tracing::warn!(
             error_hash = %safe_display_error_hash(&error),
             "Trace Commons database pool unavailable"
         );
-        return api_error_with_retry(
-            StatusCode::SERVICE_UNAVAILABLE,
-            DATABASE_BUSY_LABEL,
-            Some(transient_unavailable_retry_after_seconds()),
-        );
+        return busy;
     }
     tracing::error!(
         error_hash = %safe_display_error_hash(&error),

@@ -22,7 +22,13 @@
 //!   never holds up another tenant's lookup. An evicted handle stays
 //!   reachable (`OpenIndexes::evicting`) until its flush lands, and a miss
 //!   for that tenant takes the same handle back rather than reading a file
-//!   the flush has not finished writing.
+//!   the flush has not finished writing. Once the flush lands the handle is
+//!   marked detached while its lock is still held, and a caller that finds
+//!   a detached (or retired) handle looks the tenant up again, so a write
+//!   never lands on a handle nothing will save. At most `max_open` handles
+//!   wait in `evicting`; past that, opening another tenant is refused.
+//! - Lock order is tenant lock, then cache lock. Nothing takes a tenant lock
+//!   while holding the cache lock.
 //! - Cosine metric over **L2-normalized** vectors. Callers are responsible for
 //!   normalizing on the way in (A3's `FastEmbedTextEmbedder` does this; the
 //!   `MockEmbedder` already emits unit-norm vectors). The orchestrator's
@@ -89,6 +95,10 @@ struct TenantHandle {
     /// saved again, so an eviction flush still in flight cannot write the
     /// deleted contents back.
     retired: bool,
+    /// Set once an eviction flush has landed and the handle has left the
+    /// cache. Nothing will save it again, so a caller that finds it set
+    /// must look the tenant up again instead of writing to it.
+    detached: bool,
 }
 
 impl TenantHandle {
@@ -119,18 +129,11 @@ struct OpenIndexes {
     next_eviction: u64,
 }
 
-impl OpenIndexes {
-    fn get_cloned(&self, tenant_storage_ref: &str) -> Option<SharedTenantHandle> {
-        self.lru
-            .peek(tenant_storage_ref)
-            .or_else(|| {
-                self.evicting
-                    .get(tenant_storage_ref)
-                    .map(|(_, handle)| handle)
-            })
-            .map(Arc::clone)
-    }
-}
+/// How many times an operation looks a tenant up again after finding its
+/// handle detached or retired. Each retry follows another caller's eviction
+/// or delete of the same tenant, so running out means sustained churn, and
+/// the operation fails closed rather than spinning.
+const MAX_HANDLE_ATTEMPTS: usize = 8;
 
 /// Shared state the background flusher needs. Held behind an `Arc` so the
 /// flusher thread can keep a `Weak` reference and exit on its own once the
@@ -307,16 +310,18 @@ impl UsearchVectorIndex {
         }
     }
 
-    /// Return the tenant's handle, loaded, populating the LRU cache.
+    /// Return the tenant's handle, populating the LRU cache. The handle may
+    /// not be loaded yet; [`Self::with_tenant`] loads it under its own lock.
     ///
-    /// The cache lock is held only to find or insert the handle. Loading the
-    /// tenant's file happens under the handle's own lock, and flushing an
-    /// evicted tenant happens after the cache lock is released, so neither
-    /// holds up other tenants. An evicted handle stays in
+    /// The cache lock is held only to find or insert the handle. Flushing an
+    /// evicted tenant happens after the cache lock is released, so it does
+    /// not hold up other tenants. An evicted handle stays in
     /// `OpenIndexes::evicting` until its flush lands; a miss for it takes the
     /// same handle back. When the eviction flush fails, the error surfaces to
     /// this caller (so the evaluation fails closed) and the victim stays in
     /// memory, where the next miss takes it back and `flush_all` retries it.
+    /// While `max_open` failed evictions are waiting, a miss that would evict
+    /// another tenant is refused, so memory stays bounded.
     fn handle_for(&self, tenant_storage_ref: &str) -> anyhow::Result<SharedTenantHandle> {
         let (handle, evicted) = {
             let mut open = self
@@ -329,12 +334,22 @@ impl UsearchVectorIndex {
             } else {
                 let handle = match open.evicting.remove(tenant_storage_ref) {
                     Some((_, taken_back)) => taken_back,
-                    None => Arc::new(Mutex::new(TenantHandle {
-                        index: None,
-                        dirty_writes: 0,
-                        file_path: self.tenant_file_path(tenant_storage_ref),
-                        retired: false,
-                    })),
+                    None => {
+                        let would_evict = open.lru.len() >= open.lru.cap().get();
+                        anyhow::ensure!(
+                            !would_evict || open.evicting.len() < open.lru.cap().get(),
+                            "UsearchVectorIndex has {} evicted tenant indexes waiting to be \
+                             saved; refusing to open another until they are",
+                            open.evicting.len()
+                        );
+                        Arc::new(Mutex::new(TenantHandle {
+                            index: None,
+                            dirty_writes: 0,
+                            file_path: self.tenant_file_path(tenant_storage_ref),
+                            retired: false,
+                            detached: false,
+                        }))
+                    }
                 };
                 let evicted = open
                     .lru
@@ -351,35 +366,39 @@ impl UsearchVectorIndex {
         };
 
         if let Some((key, sequence, victim)) = evicted {
-            let flushed = flush_handle_arc(&victim);
-            if flushed.is_ok() {
-                let mut open = self
-                    .inner
-                    .open_indexes
-                    .lock()
-                    .expect("UsearchVectorIndex lru mutex poisoned");
-                // Only this eviction's entry: a miss may have taken the
-                // handle back, and a later eviction may own the slot now.
-                if open
-                    .evicting
-                    .get(&key)
-                    .is_some_and(|(current, _)| *current == sequence)
-                {
-                    open.evicting.remove(&key);
-                }
-            }
-            flushed.context("UsearchVectorIndex eviction flush failed; victim kept in memory")?;
+            flush_evicted(&self.inner, &key, sequence, &victim)
+                .context("UsearchVectorIndex eviction flush failed; victim kept in memory")?;
         }
+        Ok(handle)
+    }
 
-        {
+    /// Run `op` on the tenant's loaded index under the tenant's lock.
+    ///
+    /// A handle found detached (its eviction flush landed after this caller
+    /// looked it up) or retired (its file was deleted) is not written to:
+    /// the tenant is looked up again, at most [`MAX_HANDLE_ATTEMPTS`] times.
+    fn with_tenant<T>(
+        &self,
+        tenant_storage_ref: &str,
+        mut op: impl FnMut(&mut TenantHandle) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        for _ in 0..MAX_HANDLE_ATTEMPTS {
+            let handle = self.handle_for(tenant_storage_ref)?;
             let mut guard = handle
                 .lock()
                 .expect("UsearchVectorIndex tenant mutex poisoned");
+            if guard.detached || guard.retired {
+                continue;
+            }
             if guard.index.is_none() {
                 guard.index = Some(self.load_index(&guard.file_path)?);
             }
+            return op(&mut guard);
         }
-        Ok(handle)
+        Err(anyhow!(
+            "UsearchVectorIndex tenant handle was evicted or deleted {MAX_HANDLE_ATTEMPTS} \
+             times in a row; refusing the operation"
+        ))
     }
 
     /// Construct the tenant's index and load its file when one exists.
@@ -431,24 +450,24 @@ impl UsearchVectorIndex {
                 .open_indexes
                 .lock()
                 .expect("UsearchVectorIndex lru mutex poisoned");
-            let cached = open.lru.pop(tenant_storage_ref);
-            let evicting = open
-                .evicting
-                .remove(tenant_storage_ref)
-                .map(|(_, handle)| handle);
-            cached.into_iter().chain(evicting).collect::<Vec<_>>()
+            // A tenant is in at most one of the two maps.
+            open.lru.pop(tenant_storage_ref).or_else(|| {
+                open.evicting
+                    .remove(tenant_storage_ref)
+                    .map(|(_, handle)| handle)
+            })
         };
-        // Retire them so an eviction flush still running cannot save their
-        // contents back after the file is gone. Holding each lock across the
-        // removal orders the removal after any save already in progress.
-        let mut retired_guards = Vec::with_capacity(dropped.len());
-        for handle in &dropped {
+        // Retire it so an eviction flush still running cannot save its
+        // contents back after the file is gone, and a caller holding it
+        // looks the tenant up again. Holding the lock across the removal
+        // orders the removal after any save already in progress.
+        let _retired_guard = dropped.as_ref().map(|handle| {
             let mut guard = handle
                 .lock()
                 .expect("UsearchVectorIndex tenant mutex poisoned");
             guard.retired = true;
-            retired_guards.push(guard);
-        }
+            guard
+        });
         let path = self.tenant_file_path(tenant_storage_ref);
         let file_hash = {
             let name = path
@@ -483,11 +502,7 @@ impl UsearchVectorIndex {
     /// Return the live entry count for `tenant_storage_ref`. Opens (or
     /// reloads) the per-tenant handle and reports `Index::size()`.
     pub fn tenant_entry_count(&self, tenant_storage_ref: &str) -> anyhow::Result<usize> {
-        let handle = self.handle_for(tenant_storage_ref)?;
-        let guard = handle
-            .lock()
-            .expect("UsearchVectorIndex tenant mutex poisoned");
-        Ok(guard.loaded()?.size())
+        self.with_tenant(tenant_storage_ref, |handle| Ok(handle.loaded()?.size()))
     }
 
     /// Return true if the tenant index already contains an entry for
@@ -498,12 +513,10 @@ impl UsearchVectorIndex {
         tenant_storage_ref: &str,
         vector_entry_id: Uuid,
     ) -> anyhow::Result<bool> {
-        let handle = self.handle_for(tenant_storage_ref)?;
-        let guard = handle
-            .lock()
-            .expect("UsearchVectorIndex tenant mutex poisoned");
         let key = Self::uuid_to_key(vector_entry_id);
-        Ok(guard.loaded()?.contains(key))
+        self.with_tenant(tenant_storage_ref, |handle| {
+            Ok(handle.loaded()?.contains(key))
+        })
     }
 
     /// Flush every still-cached tenant. Best-effort; returns the first error
@@ -517,16 +530,26 @@ impl UsearchVectorIndex {
     /// and nothing is written. The LRU lock is released before the shard
     /// is saved, so other tenants are not held up by this save.
     pub fn flush_tenant(&self, tenant_storage_ref: &str) -> anyhow::Result<()> {
-        let handle = {
+        let (cached, evicting) = {
             let open = self
                 .inner
                 .open_indexes
                 .lock()
                 .expect("UsearchVectorIndex lru mutex poisoned");
-            open.get_cloned(tenant_storage_ref)
+            (
+                open.lru.peek(tenant_storage_ref).map(Arc::clone),
+                open.evicting
+                    .get(tenant_storage_ref)
+                    .map(|(sequence, handle)| (*sequence, Arc::clone(handle))),
+            )
         };
-        match handle {
-            Some(handle) => flush_handle_arc(&handle),
+        if let Some(handle) = cached {
+            return flush_handle_arc(&handle);
+        }
+        match evicting {
+            Some((sequence, handle)) => {
+                flush_evicted(&self.inner, tenant_storage_ref, sequence, &handle)
+            }
             None => Ok(()),
         }
     }
@@ -536,24 +559,36 @@ impl UsearchVectorIndex {
 /// [`UsearchVectorIndex::flush_all`] and the background flusher thread, which
 /// only holds the inner state.
 fn flush_inner(inner: &IndexInner) -> anyhow::Result<()> {
-    // Snapshot the cache so we don't hold the LRU mutex across per-tenant
-    // mutex acquisitions (which could deadlock if anyone is trying to
-    // acquire the LRU lock with a tenant lock already held — they're not
-    // today, but the snapshot keeps it future-proof).
-    let snapshot: Vec<SharedTenantHandle> = {
+    // Snapshot the cache: tenant locks are taken after the cache lock is
+    // released, never under it (the lock order is tenant, then cache).
+    let (cached, evicting): (
+        Vec<SharedTenantHandle>,
+        Vec<(String, u64, SharedTenantHandle)>,
+    ) = {
         let open = inner
             .open_indexes
             .lock()
             .expect("UsearchVectorIndex lru mutex poisoned");
-        open.lru
-            .iter()
-            .map(|(_, v)| Arc::clone(v))
-            .chain(open.evicting.values().map(|(_, v)| Arc::clone(v)))
-            .collect()
+        (
+            open.lru.iter().map(|(_, v)| Arc::clone(v)).collect(),
+            open.evicting
+                .iter()
+                .map(|(key, (sequence, v))| (key.clone(), *sequence, Arc::clone(v)))
+                .collect(),
+        )
     };
+    let results = cached
+        .iter()
+        .map(flush_handle_arc)
+        .chain(
+            evicting
+                .iter()
+                .map(|(key, sequence, handle)| flush_evicted(inner, key, *sequence, handle)),
+        )
+        .collect::<Vec<_>>();
     let mut first_err: Option<anyhow::Error> = None;
-    for handle in snapshot {
-        if let Err(e) = flush_handle_arc(&handle) {
+    for result in results {
+        if let Err(e) = result {
             tracing::warn!(
                 error_class = "UsearchFlushFailed",
                 error_hash = %short_error_hash(&e.to_string()),
@@ -645,6 +680,39 @@ fn flush_handle_arc(handle: &SharedTenantHandle) -> anyhow::Result<()> {
     flush_handle_locked(&mut guard)
 }
 
+/// Flush a handle evicted from the LRU as eviction `sequence`, and release
+/// it once the save lands.
+///
+/// The cache lock is taken while the handle's lock is still held, so no
+/// caller can lock the handle between the save and the release. The
+/// `evicting` entry is removed, and the handle marked detached, only when
+/// it is still this eviction's: a miss may have taken the handle back into
+/// the LRU, and then it is live and stays attached.
+fn flush_evicted(
+    inner: &IndexInner,
+    key: &str,
+    sequence: u64,
+    victim: &SharedTenantHandle,
+) -> anyhow::Result<()> {
+    let mut guard = victim
+        .lock()
+        .expect("UsearchVectorIndex tenant mutex poisoned");
+    flush_handle_locked(&mut guard)?;
+    let mut open = inner
+        .open_indexes
+        .lock()
+        .expect("UsearchVectorIndex lru mutex poisoned");
+    if open
+        .evicting
+        .get(key)
+        .is_some_and(|(current, _)| *current == sequence)
+    {
+        open.evicting.remove(key);
+        guard.detached = true;
+    }
+    Ok(())
+}
+
 fn flush_handle_locked(handle: &mut TenantHandle) -> anyhow::Result<()> {
     // Never loaded: nothing in memory to save. Retired: the file was
     // deleted on purpose and must stay deleted.
@@ -680,30 +748,29 @@ impl VectorIndex for UsearchVectorIndex {
             embedding.len(),
             self.dim
         );
-        let handle = self.handle_for(tenant_storage_ref)?;
-        let mut guard = handle
-            .lock()
-            .expect("UsearchVectorIndex tenant mutex poisoned");
-        // usearch needs reservation up front; grow when the live size hits
-        // capacity. We grow geometrically to amortize reservation cost.
-        let index = guard.loaded_mut()?;
-        let size = index.size();
-        let cap = index.capacity();
-        if size + 1 > cap {
-            let next = (cap.saturating_mul(2)).max(64);
-            index
-                .reserve(next)
-                .map_err(|e| anyhow!("usearch reserve({next}) failed: {e}"))?;
-        }
         let key = Self::uuid_to_key(entry_id);
-        index
-            .add(key, embedding)
-            .map_err(|e| anyhow!("usearch add failed: {e}"))?;
-        guard.dirty_writes += 1;
-        if guard.dirty_writes >= self.flush_every {
-            flush_handle_locked(&mut guard)?;
-        }
-        Ok(())
+        self.with_tenant(tenant_storage_ref, |handle| {
+            // usearch needs reservation up front; grow when the live size
+            // hits capacity. We grow geometrically to amortize reservation
+            // cost.
+            let index = handle.loaded_mut()?;
+            let size = index.size();
+            let cap = index.capacity();
+            if size + 1 > cap {
+                let next = (cap.saturating_mul(2)).max(64);
+                index
+                    .reserve(next)
+                    .map_err(|e| anyhow!("usearch reserve({next}) failed: {e}"))?;
+            }
+            index
+                .add(key, embedding)
+                .map_err(|e| anyhow!("usearch add failed: {e}"))?;
+            handle.dirty_writes += 1;
+            if handle.dirty_writes >= self.flush_every {
+                flush_handle_locked(handle)?;
+            }
+            Ok(())
+        })
     }
 
     fn nearest(
@@ -721,18 +788,19 @@ impl VectorIndex for UsearchVectorIndex {
         if k == 0 {
             return Ok(Vec::new());
         }
-        let handle = self.handle_for(tenant_storage_ref)?;
-        let guard = handle
-            .lock()
-            .expect("UsearchVectorIndex tenant mutex poisoned");
-        let index = guard.loaded()?;
-        if index.size() == 0 {
+        let Some(matches) = self.with_tenant(tenant_storage_ref, |handle| {
+            let index = handle.loaded()?;
+            if index.size() == 0 {
+                return Ok(None);
+            }
+            index
+                .search(embedding, k)
+                .map(Some)
+                .map_err(|e| anyhow!("usearch search failed: {e}"))
+        })?
+        else {
             return Ok(Vec::new());
-        }
-        let matches = index
-            .search(embedding, k)
-            .map_err(|e| anyhow!("usearch search failed: {e}"))?;
-        drop(guard);
+        };
 
         // usearch Cos metric returns a **distance** in [0, 2] where 0 = perfect
         // match. Convert back to cosine similarity for the trait contract.
@@ -763,23 +831,21 @@ impl VectorIndex for UsearchVectorIndex {
     }
 
     fn delete(&self, tenant_storage_ref: &str, entry_id: Uuid) -> anyhow::Result<bool> {
-        let handle = self.handle_for(tenant_storage_ref)?;
-        let mut guard = handle
-            .lock()
-            .expect("UsearchVectorIndex tenant mutex poisoned");
         let key = Self::uuid_to_key(entry_id);
-        let removed = guard
-            .loaded_mut()?
-            .remove(key)
-            .map_err(|e| anyhow!("usearch remove failed: {e}"))?;
-        let hit = removed > 0;
-        if hit {
-            guard.dirty_writes += 1;
-            if guard.dirty_writes >= self.flush_every {
-                flush_handle_locked(&mut guard)?;
+        self.with_tenant(tenant_storage_ref, |handle| {
+            let removed = handle
+                .loaded_mut()?
+                .remove(key)
+                .map_err(|e| anyhow!("usearch remove failed: {e}"))?;
+            let hit = removed > 0;
+            if hit {
+                handle.dirty_writes += 1;
+                if handle.dirty_writes >= self.flush_every {
+                    flush_handle_locked(handle)?;
+                }
             }
-        }
-        Ok(hit)
+            Ok(hit)
+        })
     }
 
     fn flush(&self) -> anyhow::Result<()> {
@@ -797,13 +863,11 @@ impl VectorIndex for UsearchVectorIndex {
         // evaluation: the scoring call immediately after this one will fail
         // closed on the same error, and instrumentation must not become a new
         // way for a trace to be rejected.
-        let handle = self.handle_for(tenant_storage_ref).ok()?;
-        let cardinality = {
-            let guard = handle
-                .lock()
-                .expect("UsearchVectorIndex tenant mutex poisoned");
-            guard.loaded().ok()?.size() as u64
-        };
+        let cardinality = self
+            .with_tenant(tenant_storage_ref, |handle| {
+                Ok(handle.loaded()?.size() as u64)
+            })
+            .ok()?;
         Some(VectorIndexSnapshot {
             snapshot_id: self.shard_snapshot_id(tenant_storage_ref),
             cardinality,
@@ -1389,6 +1453,130 @@ mod tests {
             !idx.tenant_file_path("tenant").exists(),
             "a retired handle must not save the deleted tenant back"
         );
+    }
+
+    fn unloaded_handle(idx: &UsearchVectorIndex, tenant: &str) -> SharedTenantHandle {
+        Arc::new(Mutex::new(TenantHandle {
+            index: None,
+            dirty_writes: 0,
+            file_path: idx.tenant_file_path(tenant),
+            retired: false,
+            detached: false,
+        }))
+    }
+
+    /// A caller that looked a tenant up just before its eviction flush
+    /// landed holds a handle nothing will save again. The evictor marks it
+    /// detached, and a write through the index goes to a fresh handle that
+    /// reloads the flushed file, so neither the flushed nor the new entry
+    /// is lost.
+    #[test]
+    fn a_handle_whose_eviction_flush_landed_is_detached() {
+        let tmp = tempdir().unwrap();
+        let config = UsearchVectorIndexConfig {
+            max_open: 1,
+            flush_every: 1024,
+            ..test_config(4)
+        };
+        let id_first = Uuid::new_v4();
+        let id_second = Uuid::new_v4();
+        {
+            let idx = UsearchVectorIndex::try_new(tmp.path(), config.clone()).unwrap();
+            idx.insert(id_first, "tenant_a", &norm(vec![1.0, 0.0, 0.0, 0.0]))
+                .unwrap();
+            let stale = idx.handle_for("tenant_a").unwrap();
+            idx.insert(Uuid::new_v4(), "tenant_b", &norm(vec![0.0, 1.0, 0.0, 0.0]))
+                .unwrap();
+            assert!(
+                stale.lock().unwrap().detached,
+                "a landed eviction flush detaches the victim"
+            );
+            assert!(idx.inner.open_indexes.lock().unwrap().evicting.is_empty());
+
+            idx.insert(id_second, "tenant_a", &norm(vec![0.0, 0.0, 1.0, 0.0]))
+                .unwrap();
+            let current = idx.handle_for("tenant_a").unwrap();
+            assert!(!Arc::ptr_eq(&stale, &current));
+            idx.flush_all().unwrap();
+        }
+        let idx = UsearchVectorIndex::try_new(tmp.path(), config).unwrap();
+        assert!(idx.contains_entry("tenant_a", id_first).unwrap());
+        assert!(idx.contains_entry("tenant_a", id_second).unwrap());
+    }
+
+    /// A write never lands on a retired handle. Retrying is bounded: a
+    /// handle that stays retired makes the operation fail rather than
+    /// succeed against contents that will never be saved.
+    #[test]
+    fn a_retired_handle_is_never_written_and_retries_are_bounded() {
+        let tmp = tempdir().unwrap();
+        let idx = build_index(tmp.path(), 4);
+        let v = norm(vec![1.0, 0.0, 0.0, 0.0]);
+        idx.insert(Uuid::new_v4(), "tenant", &v).unwrap();
+        let handle = idx.handle_for("tenant").unwrap();
+        // Retire the handle but leave it cached, as no real path does, so
+        // every lookup returns it.
+        handle.lock().unwrap().retired = true;
+
+        let err = idx
+            .insert(Uuid::new_v4(), "tenant", &v)
+            .expect_err("a retired handle must not take the write");
+        assert!(
+            format!("{err:#}").contains("refusing the operation"),
+            "{err:#}"
+        );
+        assert_eq!(handle.lock().unwrap().loaded().unwrap().size(), 1);
+        assert!(idx.snapshot("tenant").is_none());
+    }
+
+    /// Evicted handles waiting to be saved are bounded by `max_open`. Past
+    /// that, a miss that would evict another tenant is refused, and
+    /// `flush_all` releases the ones it manages to save.
+    #[test]
+    fn evicted_handles_waiting_to_be_saved_are_bounded() {
+        let tmp = tempdir().unwrap();
+        let idx = UsearchVectorIndex::try_new(
+            tmp.path(),
+            UsearchVectorIndexConfig {
+                max_open: 1,
+                flush_every: 1024,
+                ..test_config(4)
+            },
+        )
+        .unwrap();
+        idx.insert(Uuid::new_v4(), "tenant_a", &norm(vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        // Stage one eviction whose flush has not landed, as a failed one
+        // leaves it.
+        let ghost = unloaded_handle(&idx, "tenant_ghost");
+        idx.inner
+            .open_indexes
+            .lock()
+            .unwrap()
+            .evicting
+            .insert("tenant_ghost".to_string(), (u64::MAX, Arc::clone(&ghost)));
+
+        let Err(err) = idx.handle_for("tenant_c") else {
+            panic!("a full eviction backlog refuses another eviction");
+        };
+        assert!(
+            format!("{err:#}").contains("waiting to be saved"),
+            "{err:#}"
+        );
+        assert!(
+            idx.inner
+                .open_indexes
+                .lock()
+                .unwrap()
+                .lru
+                .contains("tenant_a"),
+            "a refused miss evicts nothing"
+        );
+
+        idx.flush_all().unwrap();
+        assert!(idx.inner.open_indexes.lock().unwrap().evicting.is_empty());
+        assert!(ghost.lock().unwrap().detached);
+        idx.handle_for("tenant_c").unwrap();
     }
 
     /// Phase A audit fix: when an LRU eviction is triggered AND the victim

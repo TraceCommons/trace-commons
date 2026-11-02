@@ -385,23 +385,24 @@ const LEADERBOARD_INPUTS_SQL: &str = "SELECT
 pub const POOL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long opening a new connection may take, so an unreachable database
-/// fails a caller instead of holding it for the TCP timeout. A longer
-/// `connect_timeout` in the connection URL raises it for that pool: this is
-/// a floor on what the operator asked for, never a cap below it.
+/// fails a caller instead of holding it for the TCP timeout. Used only when
+/// the connection URL sets no `connect_timeout` of its own
+/// ([`pool_create_timeout`]).
 pub const POOL_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long the health check on a reused connection may take.
 pub const POOL_RECYCLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The create timeout for a pool on `config`: [`POOL_CREATE_TIMEOUT`], or
-/// the URL's `connect_timeout` when that is longer, so the pool never cuts
-/// off a connect the operator allowed more time for.
-fn pool_create_timeout(config: &tokio_postgres::Config) -> std::time::Duration {
-    config
-        .get_connect_timeout()
-        .map_or(POOL_CREATE_TIMEOUT, |connect| {
-            (*connect).max(POOL_CREATE_TIMEOUT)
-        })
+/// none when the URL sets `connect_timeout`. `tokio_postgres` applies that
+/// timeout to each host and resolved address in turn, so any single pool
+/// bound could cut off failover to a second host the operator configured;
+/// with it set, the connect is already bounded per attempt.
+fn pool_create_timeout(config: &tokio_postgres::Config) -> Option<std::time::Duration> {
+    match config.get_connect_timeout() {
+        Some(_) => None,
+        None => Some(POOL_CREATE_TIMEOUT),
+    }
 }
 
 /// Builds a pool of at most `max_size` connections on `config` whose waits
@@ -417,7 +418,7 @@ fn bounded_pool(
         .max_size(max_size)
         .runtime(deadpool_postgres::Runtime::Tokio1)
         .wait_timeout(Some(POOL_WAIT_TIMEOUT))
-        .create_timeout(Some(create_timeout))
+        .create_timeout(create_timeout)
         .recycle_timeout(Some(POOL_RECYCLE_TIMEOUT))
         .build()
 }
@@ -9008,26 +9009,28 @@ mod tests {
 #[cfg(test)]
 mod pool_timeout_tests {
     use super::*;
-    use std::time::Duration;
 
     fn config(url: &str) -> tokio_postgres::Config {
         url.parse().expect("valid PostgreSQL URL")
     }
 
     #[test]
-    fn create_timeout_never_cuts_below_the_url_connect_timeout() {
+    fn create_timeout_defers_to_the_url_connect_timeout() {
         assert_eq!(
             pool_create_timeout(&config("postgres://u@127.0.0.1/db")),
-            POOL_CREATE_TIMEOUT
+            Some(POOL_CREATE_TIMEOUT)
+        );
+        // `connect_timeout` bounds each host and address, so a pool-wide
+        // bound would cut off failover to the second host.
+        assert_eq!(
+            pool_create_timeout(&config(
+                "postgres://u@primary,standby/db?connect_timeout=10"
+            )),
+            None
         );
         assert_eq!(
             pool_create_timeout(&config("postgres://u@127.0.0.1/db?connect_timeout=3")),
-            POOL_CREATE_TIMEOUT,
-            "a shorter connect timeout still fails on its own first"
-        );
-        assert_eq!(
-            pool_create_timeout(&config("postgres://u@127.0.0.1/db?connect_timeout=30")),
-            Duration::from_secs(30)
+            None
         );
     }
 }
