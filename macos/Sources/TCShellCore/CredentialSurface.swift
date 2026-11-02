@@ -168,6 +168,19 @@ public enum CredentialSurface {
     public static let startMethod = "near_ai_credential_start"
     public static let cancelMethod = "near_ai_credential_cancel"
     public static let forgetMethod = "near_ai_credential_forget"
+
+    /// Whether a forget's answer says the key was removed here but not
+    /// revoked at NEAR AI, the one answer `credentialForgetNotRevoked` is
+    /// drawn for. `revoked` is `null` when no key was stored or the outcome
+    /// is not known, and neither draws it; nor does anything unreadable.
+    public static func forgetLeftKeyAtService(resultJSON: String) -> Bool {
+        guard let data = resultJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["removed"] as? Bool == true,
+              let revoked = object["revoked"] as? Bool
+        else { return false }
+        return !revoked
+    }
     public static let migrateMethod = "near_ai_credential_migrate"
 
     // MARK: - The state
@@ -220,9 +233,8 @@ public enum CredentialSurface {
     ///
     /// Returned FROM THE ACTION rather than left to a view's own `if`, so the
     /// pairing cannot be broken by a layout change. `.obtain` carries the
-    /// three consequences of pressing it; `.forget` carries the fact that
-    /// forgetting is local and the key stays valid until the contributor
-    /// removes it in their own account. `.cancel` stops a ceremony this app
+    /// three consequences of pressing it; `.forget` says the key is removed
+    /// here and revoked at NEAR AI. `.cancel` stops a ceremony this app
     /// started and costs nothing, and `.none` has no button to qualify.
     public static func actionExplains(
         _ action: CredentialAction, copy: PrivateInferenceCopy

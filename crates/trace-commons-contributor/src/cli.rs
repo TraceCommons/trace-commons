@@ -809,7 +809,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Update { stage_only } => commands::update(&store, stage_only, cli.json).await,
-        Command::Logout { yes } => commands::logout(&store, yes),
+        Command::Logout { yes } => commands::logout(&store, yes).await,
         Command::Unenroll { yes } => commands::unenroll(&store, yes, cli.json),
         Command::Devices { action } => {
             let mut call = |method: &str, params: serde_json::Value| {

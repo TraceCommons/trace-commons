@@ -137,6 +137,13 @@ async fn sign_out(shared: &DaemonShared) -> Result<Value> {
             .flatten()
     });
     let _ = commons_credentials::cleanup(&shared.store);
+    // The NEAR AI half goes with it: Private AI does not outlive the account
+    // (owner decision 2026-11-02). The key is revoked at NEAR AI, best effort.
+    // An OS entry left to delete is journaled and retried, as the Commons
+    // cleanup above is.
+    let near_ai = super::nearai_credential::disconnect(shared)
+        .await
+        .map_err(|_| anyhow!("account-unavailable"))?;
     let origin = config
         .as_ref()
         .map(|c| c.ingest_url.clone())
@@ -175,7 +182,10 @@ async fn sign_out(shared: &DaemonShared) -> Result<Value> {
             }
         }
     }
-    Ok(json!({"signed_out":true}))
+    // `near_ai_revoked`: whether the NEAR AI key is gone at NEAR AI, `null`
+    // when none was stored. `false` is when a shell says
+    // `credential_forget_not_revoked`.
+    Ok(json!({"signed_out":true,"near_ai_revoked":near_ai.revoked}))
 }
 async fn handle_inner(shared: &DaemonShared, req: &Request) -> Result<Value> {
     match req.method.as_str() {

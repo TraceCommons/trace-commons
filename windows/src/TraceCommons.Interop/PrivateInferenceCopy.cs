@@ -377,13 +377,20 @@ public sealed record PrivateInferenceCopy
     public string CredentialForget { get; init; } = string.Empty;
 
     /// <summary>
-    /// That forgetting is local: the key stays valid at the service until the
-    /// contributor removes it in their own account there. Drawn wherever the
+    /// What forgetting does: the key leaves this computer and is revoked at
+    /// NEAR AI. Drawn wherever the
     /// forget action is, for the same reason the cost sentence is drawn
     /// wherever the obtain action is.
     /// </summary>
     [JsonPropertyName("credential_forget_explains")]
     public string CredentialForgetExplains { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Drawn only after a forget that answered <c>removed: true, revoked:
+    /// false</c>: the revoke at NEAR AI did not happen.
+    /// </summary>
+    [JsonPropertyName("credential_forget_not_revoked")]
+    public string CredentialForgetNotRevoked { get; init; } = string.Empty;
 
     /// <summary>
     /// The button behind <c>migration_available</c>, and the sentence drawn
@@ -829,6 +836,7 @@ public sealed record PrivateInferenceCopy
             CredentialCancel,
             CredentialForget,
             CredentialForgetExplains,
+            CredentialForgetNotRevoked,
             CredentialMigrate,
             CredentialMigrateExplains,
             CredentialAbsent,

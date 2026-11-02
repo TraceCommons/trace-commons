@@ -14914,11 +14914,9 @@ mod tests {
         let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
         let body = r.result.unwrap();
         assert_eq!(body["removed"], true);
-        // Local only: forget never calls the service, though the retained
-        // session would let it. `credential_forget_explains` says so, and
-        // `forget_answers_not_revoked_because_the_forget_sentence_says_so`
-        // ties the two together.
-        assert_eq!(body["revoked"], false);
+        // The sync handler revokes in the background and claims nothing
+        // either way; see `the_sync_forget_claims_no_revocation_either_way`.
+        assert!(body["revoked"].is_null(), "{body}");
         assert!(
             DaemonSettings::load(&s.store)
                 .unwrap()

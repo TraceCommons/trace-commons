@@ -15,6 +15,11 @@
 //! enrolled or not (owner decision D4, open). The in-process Insights store
 //! of files the contributor analyzed is not the daemon's and stays.
 //!
+//! The NEAR AI sign-in goes too, in the socket handler after the blocking
+//! body: the inference key, its session and the spending-organization
+//! record, with the key revoked at NEAR AI, best effort (owner decision
+//! 2026-11-02, `nearai_credential::disconnect`).
+//!
 //! What stays: receipts, history and the audit log (the local record of what
 //! this device did -- the audit log also records this call), settings, folder
 //! rules, the queue, and the NEAR AI notice marker, which are not an
@@ -281,9 +286,22 @@ fn turn_off_insights_readers(shared: &DaemonShared) -> Result<(), (&'static str,
 /// The socket entry point. Async-only: it waits on the pass lock, which a
 /// full scan holds for seconds, and the credential store cleanup can block
 /// on the OS keychain.
+///
+/// The NEAR AI sign-in goes after the enrollment, on every call, enrolled or
+/// not: Private AI does not outlive the account (owner decision 2026-11-02),
+/// and a device that holds only a NEAR AI sign-in is still cleared. Its key
+/// is revoked at NEAR AI, best effort. A failure to clear it is
+/// `unenroll-failed`, and calling again finishes it.
 pub(super) async fn handle_unenroll(shared: &DaemonShared, req: &Request) -> Response {
     match super::run_blocking(|| unenroll(shared)) {
         Ok(done) => {
+            let near_ai = match super::nearai_credential::disconnect(shared).await {
+                Ok(near_ai) => near_ai,
+                Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_UNENROLL_FAILED),
+            };
+            if near_ai.removed && !done.removed {
+                shared.publish(EVENT_STATUS_CHANGED, json!({}));
+            }
             if done.removed {
                 // The OS entries the references pointed at. Journaled by the
                 // clear above, so a locked keychain only defers this to the
@@ -298,6 +316,10 @@ pub(super) async fn handle_unenroll(shared: &DaemonShared, req: &Request) -> Res
                     "unenrolled": true,
                     "removed": done.removed,
                     "approvals_returned": done.approvals_returned,
+                    // Whether the NEAR AI key is gone at NEAR AI; `null`
+                    // when none was stored. `false` is when a shell says
+                    // `credential_forget_not_revoked`.
+                    "near_ai_revoked": near_ai.revoked,
                 }),
             )
         }

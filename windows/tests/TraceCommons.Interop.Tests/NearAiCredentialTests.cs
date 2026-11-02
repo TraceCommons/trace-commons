@@ -339,10 +339,11 @@ public class NearAiCredentialTests
             Assert.Contains(consequence, copy.CredentialCost, StringComparison.Ordinal);
         }
 
-        // And forgetting says what it does not do: the key keeps working
-        // until the contributor removes it in their own account.
+        // And forgetting says what it does: removed here, revoked at NEAR AI;
+        // a failed revoke sends the contributor to their own account.
         Assert.Contains("from this computer", copy.CredentialForgetExplains, StringComparison.Ordinal);
-        Assert.Contains("account", copy.CredentialForgetExplains, StringComparison.Ordinal);
+        Assert.Contains("revokes it at NEAR AI", copy.CredentialForgetExplains, StringComparison.Ordinal);
+        Assert.Contains("account", copy.CredentialForgetNotRevoked, StringComparison.Ordinal);
     }
 
     /// <summary>

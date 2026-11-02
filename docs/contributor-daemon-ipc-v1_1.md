@@ -6371,7 +6371,8 @@ state, the harness rows and the credential row:
   `harness_plan_no_config_path`;
 - `credential_title`, `credential_what`, `credential_cost`;
 - `credential_obtain`, `credential_cancel`, `credential_forget`,
-  `credential_forget_explains`, `credential_migrate`,
+  `credential_forget_explains`, `credential_forget_not_revoked`,
+  `credential_migrate`,
   `credential_migrate_explains`;
 - `credential_absent`, `credential_obtaining`, `credential_failed`,
   `credential_cancelled`, `credential_present`, `credential_unknown`,
@@ -6908,10 +6909,16 @@ never re-served.
 action, and it is the counterpart of `offer_exposure`: getting a key opens a
 browser, signs the contributor in to a company that is not this app, and
 mints a key this app then keeps. `credential_forget_explains` is its
-counterpart at the other end -- forgetting is LOCAL, the key stays valid at
-the service until the contributor removes it there, and this app cannot do it
-for them, which is why `near_ai_credential_forget` answers `revoked: false`
-rather than leaving "removed" to be read as "revoked".
+counterpart at the other end: forgetting removes the key and saved sign-in
+from this computer and revokes the key at NEAR AI with the sign-in being
+removed, best effort (owner decision 2026-11-02). `near_ai_credential_forget`
+answers `revoked: true` when the key is gone at NEAR AI, `false` when the
+revoke did not happen, and `null` when no key was stored (the sync handler,
+which revokes in the background, also answers `null`). A shell draws
+`credential_forget_not_revoked` only on `removed: true, revoked: false`.
+
+Unenroll and `account_sign_out` clear the same NEAR AI sign-in and revoke the
+same way; each answers `near_ai_revoked` with the same three values.
 
 No sentence on this surface renders a key, a key prefix, an id or an account
 name, and none of them carries a hole a shell could fill with one.

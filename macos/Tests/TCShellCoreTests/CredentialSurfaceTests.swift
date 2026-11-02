@@ -27,6 +27,7 @@ final class CredentialSurfaceTests: XCTestCase {
         "credential_provider_label", "credential_provider_github", "credential_provider_google",
         "credential_provider_near", "credential_wallet_notice",
         "credential_cancel", "credential_forget", "credential_forget_explains",
+        "credential_forget_not_revoked",
         "credential_migrate", "credential_migrate_explains",
         "credential_absent", "credential_obtaining", "credential_failed",
         "credential_cancelled", "credential_present", "credential_unknown",
@@ -201,13 +202,32 @@ final class CredentialSurfaceTests: XCTestCase {
         XCTAssertEqual(CredentialSurface.actionExplains(.obtain, copy: copy()), copy().credentialCost)
     }
 
-    /// Forgetting is local, and the button says only "forget". Without this
-    /// sentence a contributor reads it as a revocation, which is exactly what
-    /// `handle_forget`'s `revoked: false` says it is not.
-    func testForgetCannotBeOfferedWithoutSayingItIsLocal() {
+    /// The button says only "forget"; the sentence beside it says the key
+    /// is removed here and revoked at NEAR AI.
+    func testForgetCannotBeOfferedWithoutSayingWhatItDoes() {
         XCTAssertEqual(
             CredentialSurface.actionExplains(.forget, copy: copy()),
             copy().credentialForgetExplains)
+        XCTAssertEqual(copy().credentialForgetNotRevoked, "C-FORGET-NOT-REVOKED")
+    }
+
+    /// The failure sentence is for `removed: true, revoked: false` only: not
+    /// for a revoke that happened, nothing stored, an outcome not known
+    /// (`null`), or an answer that cannot be read.
+    func testOnlyAFailedRevokeLeavesTheKeyAtTheService() {
+        XCTAssertTrue(CredentialSurface.forgetLeftKeyAtService(
+            resultJSON: #"{"removed":true,"revoked":false}"#))
+        for answer in [
+            #"{"removed":true,"revoked":true}"#,
+            #"{"removed":true,"revoked":null}"#,
+            #"{"removed":false,"revoked":null}"#,
+            #"{"removed":false,"revoked":false}"#,
+            #"{"removed":true}"#,
+            "not json",
+        ] {
+            XCTAssertFalse(
+                CredentialSurface.forgetLeftKeyAtService(resultJSON: answer), answer)
+        }
     }
 
     /// Cancel stops a ceremony this app started and costs nothing; `.none`

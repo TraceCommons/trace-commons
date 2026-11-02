@@ -1122,8 +1122,14 @@ final class AppModel: ObservableObject {
     }
 
     /// Removes the stored key from this machine.
+    ///
+    /// The daemon also revokes the key at NEAR AI. When that did not happen,
+    /// the one sentence for it is shown where an action's failure is.
     func forgetNearAiCredential() {
-        submitNearAiCredential { try $0.nearAiCredentialForget() }
+        submitNearAiCredentialReporting { client in
+            try CredentialSurface.forgetLeftKeyAtService(
+                resultJSON: client.nearAiCredentialForget())
+        }
     }
 
     func migrateNearAiCredential() {
@@ -1141,6 +1147,17 @@ final class AppModel: ObservableObject {
     /// continuation on success only, which would leave a failed cancel with
     /// the button disabled and no way back.
     private func submitNearAiCredential(_ work: @escaping @Sendable (DaemonClient) throws -> Void) {
+        submitNearAiCredentialReporting { client in
+            try work(client)
+            return false
+        }
+    }
+
+    /// The same, for a forget: `true` from `work` is a key removed here but
+    /// not revoked at NEAR AI, and `credentialForgetNotRevoked` is shown.
+    private func submitNearAiCredentialReporting(
+        _ work: @escaping @Sendable (DaemonClient) throws -> Bool
+    ) {
         guard !credentialBusy else { return }
         guard let client else {
             lastActionError = privateInferenceCopy?.writeUnconfirmed
@@ -1151,8 +1168,13 @@ final class AppModel: ObservableObject {
             let outcome = Result { try work(client) }
             await MainActor.run {
                 self.credentialBusy = false
-                if case .failure = outcome {
+                switch outcome {
+                case .failure:
                     self.lastActionError = self.privateInferenceCopy?.writeUnconfirmed
+                case .success(true):
+                    self.lastActionError = self.privateInferenceCopy?.credentialForgetNotRevoked
+                case .success(false):
+                    break
                 }
                 self.refreshNearAiCredential()
                 self.refreshSettings()

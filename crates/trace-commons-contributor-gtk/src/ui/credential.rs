@@ -33,8 +33,7 @@
 //! appear without the sentence saying a browser will open, that the sign-in
 //! is with a company that is not this app, and that a key is minted and kept
 //! here; `Forget` cannot appear without the sentence saying that forgetting
-//! is local and the key stays valid until the contributor removes it in their
-//! own account.
+//! removes the key here and revokes it at NEAR AI.
 //!
 //! # Never a value
 //!
@@ -511,10 +510,9 @@ fn cancel(app: &Rc<App>) {
 
 /// Remove the stored key from this machine.
 ///
-/// `revoked` comes back false and is not drawn: the key stays valid at the
-/// service until the contributor removes it there, which this cannot do for
-/// them. That is what `CREDENTIAL_FORGET_EXPLAINS` says, and it was on screen
-/// beside the control that got pressed.
+/// The daemon also revokes the key at NEAR AI. `revoked: false` (a revoke
+/// that did not happen) is not drawn here yet; the native macOS shell draws
+/// `credential_forget_not_revoked` for it.
 ///
 /// The tool list is read again afterwards because the same fact gates it: on
 /// a daemon that reports `destination_credentialed`, forgetting the key takes

@@ -618,13 +618,71 @@ fn print_account_status(value: serde_json::Value, json: bool) -> Result<()> {
 
 /// Revoke the account session server-side and forget it locally. Leaves the
 /// device enrollment alone -- that is what `logout` is for.
+///
+/// The NEAR AI sign-in goes too, and its key is revoked at NEAR AI, best
+/// effort (owner decision 2026-11-02: Private AI does not outlive the
+/// account). When a daemon holds this state directory the daemon signs out,
+/// so its in-memory copy and running proxy let go of the key with the file;
+/// clearing the file under it would leave the daemon using a key it no
+/// longer has on disk.
 pub async fn account_logout(store: &ConfigStore) -> Result<()> {
     let cfg = store
         .load_config()?
         .context("not enrolled: run `login` first")?;
-    crate::account_auth::sign_out(store, &cfg).await?;
+    let owned = store.clone();
+    let answered = tokio::task::spawn_blocking(move || {
+        crate::daemon::client::try_call(&owned, "account_sign_out", &serde_json::json!({}))
+    })
+    .await
+    .context("reaching the daemon")??;
+    let revoked = match answered {
+        Some(response) => {
+            if let Some(error) = response.error {
+                anyhow::bail!("{}", error.message);
+            }
+            response
+                .result
+                .and_then(|result| result.get("near_ai_revoked").and_then(|v| v.as_bool()))
+        }
+        None => {
+            let api = crate::daemon::nearai_credential::disconnect::api(store);
+            account_logout_local(store, &cfg, api.as_ref()).await?
+        }
+    };
+    if revoked == Some(false) {
+        println!(
+            "{}",
+            crate::private_inference_copy::CREDENTIAL_FORGET_NOT_REVOKED
+        );
+    }
     println!("signed out of your account");
     Ok(())
+}
+
+/// `account logout` with no daemon running: the account session, then the
+/// NEAR AI half through its cleanup journal and a revoke with the session
+/// just cleared. The NEAR AI half goes even when the account sign-out could
+/// not reach the server. Answers whether the NEAR AI key was revoked, `None`
+/// when none was stored.
+pub(crate) async fn account_logout_local(
+    store: &ConfigStore,
+    cfg: &crate::config::ContributorConfig,
+    near_ai: Option<&crate::daemon::nearai_credential::api::CloudApi>,
+) -> Result<Option<bool>> {
+    let signed_out = crate::account_auth::sign_out(store, cfg).await;
+    let owned = store.clone();
+    let (revocation, cleaned) = tokio::task::spawn_blocking(move || {
+        crate::daemon::nearai_credential::disconnect::clear_store(&owned)
+    })
+    .await
+    .context("reaching the credential store")??;
+    let revoked = match revocation {
+        Some(revocation) => revocation.run(near_ai).await,
+        None => None,
+    };
+    signed_out?;
+    cleaned?;
+    Ok(revoked)
 }
 
 /// What `logout` is about to delete, for the confirmation. Counts only:
@@ -749,19 +807,33 @@ pub(crate) fn logout_summary_lines(inv: &LogoutInventory) -> Vec<String> {
 
 /// Delete all local contributor state (config, device key, receipts,
 /// history, audit log). Requires a terminal confirmation or explicit `yes`.
-pub fn logout(store: &ConfigStore, yes: bool) -> Result<()> {
+///
+/// The NEAR AI sign-in goes too, and its inference key is revoked at NEAR AI,
+/// best effort (owner decision 2026-11-02: Private AI does not outlive the
+/// account). See `daemon::nearai_credential::disconnect`.
+pub async fn logout(store: &ConfigStore, yes: bool) -> Result<()> {
     if !yes && !std::io::stdin().is_terminal() {
         anyhow::bail!("logout requires confirmation; use --yes in non-interactive mode");
     }
-    logout_with(store, yes, &mut std::io::stdin(), &mut std::io::stdout())
+    let api = crate::daemon::nearai_credential::disconnect::api(store);
+    logout_with(
+        store,
+        yes,
+        &mut std::io::stdin(),
+        &mut std::io::stdout(),
+        api.as_ref(),
+    )
+    .await
 }
 
-/// `logout` over explicit streams, so the confirmation is testable.
-pub(crate) fn logout_with(
+/// `logout` over explicit streams and an explicit NEAR AI client, so the
+/// confirmation and the revoke are testable.
+pub(crate) async fn logout_with(
     store: &ConfigStore,
     yes: bool,
     reader: &mut impl std::io::Read,
     writer: &mut impl std::io::Write,
+    near_ai: Option<&crate::daemon::nearai_credential::api::CloudApi>,
 ) -> Result<()> {
     if !yes {
         for line in logout_summary_lines(&logout_inventory(store)) {
@@ -810,7 +882,21 @@ pub(crate) fn logout_with(
             );
         }
     }
-    crate::daemon::nearai_credential::ceremony::forget(store)?;
+    // The NEAR AI half first, through its cleanup journal, so the keychain
+    // bundle is never orphaned by the wipe below. Then the revoke, with the
+    // session just cleared; it never stops the logout.
+    let (revocation, cleaned) = crate::daemon::nearai_credential::disconnect::clear_store(store)?;
+    if let Some(revocation) = revocation {
+        if revocation.run(near_ai).await == Some(false) {
+            writeln!(
+                writer,
+                "{}",
+                crate::private_inference_copy::CREDENTIAL_FORGET_NOT_REVOKED
+            )
+            .context("writing logout outcome")?;
+        }
+    }
+    cleaned?;
     store.wipe().context("wiping contributor state")?;
     let _ = store.remove_daemon_file(crate::config::DAEMON_SOCK_FILE);
     let _ = store.remove_daemon_file(crate::config::DAEMON_LOCK_FILE);
@@ -5634,12 +5720,16 @@ mod logout_tests {
         assert!(text.contains("account session"), "got: {text}");
     }
 
-    #[test]
-    fn a_closed_stdin_or_no_leaves_everything_in_place() {
+    #[tokio::test]
+    async fn a_closed_stdin_or_no_leaves_everything_in_place() {
         for answer in ["", "\n", "n\n", "no\n"] {
             let (_d, store) = a_populated_store();
             let mut out = Vec::new();
-            assert!(logout_with(&store, false, &mut answer.as_bytes(), &mut out).is_err());
+            assert!(
+                logout_with(&store, false, &mut answer.as_bytes(), &mut out, None)
+                    .await
+                    .is_err()
+            );
             let text = String::from_utf8(out).unwrap();
             assert!(text.contains("[y/N]"), "answer {answer:?}: {text}");
             assert!(
@@ -5651,22 +5741,26 @@ mod logout_tests {
         }
     }
 
-    #[test]
-    fn yes_on_stdin_wipes() {
+    #[tokio::test]
+    async fn yes_on_stdin_wipes() {
         let (_d, store) = a_populated_store();
         let mut out = Vec::new();
-        logout_with(&store, false, &mut "y\n".as_bytes(), &mut out).unwrap();
+        logout_with(&store, false, &mut "y\n".as_bytes(), &mut out, None)
+            .await
+            .unwrap();
         assert!(!store.device_key_path().exists());
         assert_eq!(store.load_receipts().unwrap().len(), 0);
         assert!(String::from_utf8(out).unwrap().contains("logged out"));
     }
 
-    #[test]
-    fn the_yes_flag_skips_the_prompt() {
+    #[tokio::test]
+    async fn the_yes_flag_skips_the_prompt() {
         let (_d, store) = a_populated_store();
         let mut out = Vec::new();
         // A closed stdin, so any attempt to prompt would read as "no".
-        logout_with(&store, true, &mut "".as_bytes(), &mut out).unwrap();
+        logout_with(&store, true, &mut "".as_bytes(), &mut out, None)
+            .await
+            .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(!text.contains("[y/N]"), "got: {text}");
         assert!(!store.device_key_path().exists());
