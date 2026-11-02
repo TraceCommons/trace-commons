@@ -220,11 +220,11 @@ Each fits in one PR.
 | --- | --- | --- | --- | --- |
 | F0 | Gate the sign-in persist on Commons acceptance | B1 | -- | **#1837** (open); prerequisite, not counted |
 | F1 | The "needs attention" state for a locally broken Commons account: daemon status fields, C ABI, and the surface in all four shells | B12 | Small daemon change, one surface per shell | Owner-approved 2026-11-02; follows #1837, whose "not bound" cases it reports |
-| F2 | CLI logout and unenroll stop orphaning the NEAR AI keychain bundle: journal its reference before the wipe; add `near-ai-spend-org.json` and `near-ai-login.json` to the wipe list | B4, part of B5 | Small, client | None |
-| F3 | Check a sign-in on a signed-out but enrolled device against the config's tenant (the provisioning ceremony with the existing device key is the check); refuse to store on refusal | B2, B7's follow-on | Small, client; extends #1837's table | #1837 marks it "not checked" |
+| F2 | CLI logout and unenroll stop orphaning the NEAR AI keychain bundle: journal its reference before the wipe; add `near-ai-spend-org.json` and `near-ai-login.json` to the wipe list | B4, part of B5 | Small, client | **In progress** (separate PR) |
+| F3 | Check a sign-in on a signed-out but enrolled device against the config's tenant (the provisioning ceremony with the existing device key is the check); refuse to store on refusal | B2, B7's follow-on | Small, client; extends #1837's table | **In progress** (separate PR); #1837 marks it "not checked" |
 | F4 | Server route for a device that joined by code to ask "does this NEAR AI login belong to my account?" (native session plus token; answers yes or no, names nothing), and the client gate using it | B3 | Medium, server and client | None |
-| F5 | Tag pending revocations with the identity's digest; the sweep skips other identities' entries | B8 | Small, client | #1833 kept them; #1837 drops 403s |
-| F6 | Payout link: refuse a link for an account with no `near_ai_login` anchor, or record the proving subject and require it to match the sign-in identity | B9 | Small, server | None. Needs an owner call (Q3) |
+| F5 | Tag pending revocations with the identity's digest; the sweep skips other identities' entries | B8 | Small, client | **In progress** (separate PR); #1833 kept them, #1837 drops 403s |
+| F6 | Payout link: refuse a link for an account with no `near_ai_login` anchor, or record the proving subject and require it to match the sign-in identity | B9 | Small, server | **In progress** (separate PR); refuse, per decision 3 |
 | F7 | The connected-account record and the `needs_sign_in` status check | Invariant detection | Medium, client and IPC | #1835's `commons_login` folds into it |
 | F8 | `commit_connected`, with #1837's ceremony moved onto it | Single commit point | Medium, client | #1837 is its first caller |
 | F9 | `account_disconnect` replacing forget, native sign-out and CLI logout's partial clears, with NEAR AI key revocation | B4, B6, B7 | Medium, client and every shell's sign-out | None |
@@ -263,17 +263,15 @@ banner or notification.
 The two sign-out strings are not notices. A notice that the app found mismatched credentials
 would need approval (copy guide rule 9); this design does not propose one.
 
-## 6. Open questions for the owner
+## 6. Owner decisions (2026-11-02)
 
-1. **Can Private AI outlive the Commons account?** Today unenroll and
-   native sign-out keep the NEAR AI login, so Private AI keeps working.
-   Under "change together", sign-out clears both. Keep a NEAR AI-only
-   forget, and let unenroll keep Private AI?
-2. **Devices that joined by code (B3).** Should such a device be allowed
-   any NEAR AI login, or only the account's? Requiring the account's needs
-   F4.
-3. **Payout links on accounts with no NEAR AI login anchor (B9).** Refuse,
-   or allow any organization the person owns?
-4. **Revoking at NEAR AI on sign-out.** Revoke the inference key when the
-   person signs out (it cannot be used again anyway), or leave it in their
-   NEAR AI account for them to manage?
+The four questions this section asked were answered by the owner on
+2026-11-02:
+
+1. **Private AI does not outlive the account.** Sign-out, unenroll and
+   logout clear the whole connected set, the NEAR AI login included.
+2. **A device that joined by code may use only the account's own NEAR AI
+   login.** F4 enforces it later.
+3. **Payout links on accounts with no NEAR AI login anchor are refused**
+   until the account has its login recorded.
+4. **The inference key is revoked at NEAR AI on sign-out**, best effort.
