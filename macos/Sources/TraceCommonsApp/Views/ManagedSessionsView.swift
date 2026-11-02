@@ -900,7 +900,7 @@ struct ManagedSessionActions: View {
         model.managedAction(
             "managed_session_resume",
             params: ManagedSurface.resumeParams(sessionID: session.id, requestID: UUID().uuidString),
-            openTerminal: true)
+            openTerminal: true, inWindowOf: session.id)
     }
 
     private func copyResumeCommand() {
@@ -927,7 +927,7 @@ struct ManagedSessionActions: View {
         model.managedAction(
             "managed_session_start_again",
             params: ManagedSurface.startAgainParams(sessionID: session.id, requestID: UUID().uuidString),
-            openTerminal: true)
+            openTerminal: true, inWindowOf: session.id)
     }
 }
 
@@ -948,6 +948,8 @@ struct ManagedSessionRowActions<Content: View>: View {
         } else {
             content
                 .contentShape(Rectangle())
+                // A click on the row shows its terminal, never moves the window.
+                .holdsWindowStill()
                 .onTapGesture { if ManagedSurface.clickShows(session) { model.showManagedSession(session.id) } }
                 .accessibilityElement(children: .contain)
                 .accessibilityActions {
