@@ -2651,6 +2651,79 @@ async fn v145_tracks_dedup_clusters_across_tenants_as_a_non_superuser_owner() {
             ));
         }
 
+        // Trigger-skipping deletes take a cluster's representative and all but
+        // one member; a triggered delete of the last member must then drop the
+        // cluster's row, not write a zero count.
+        let c5 = uuid::Uuid::new_v4();
+        let mut seeded = Ok(0);
+        for (simhash, secs) in [(600, 10), (601, 11), (602, 12)] {
+            seeded = seeded.and(
+                v145_as_tenant(&mut owner, t1, &v145_insert(t1, c5, simhash, secs), vec![]).await,
+            );
+        }
+        seed.batch_execute(
+            "SET session_replication_role = replica;
+             DELETE FROM trace_gate_decisions WHERE dedup_simhash IN (600, 601);
+             SET session_replication_role = origin;",
+        )
+        .await
+        .expect("delete members with the triggers skipped");
+        let emptied = v145_as_tenant(
+            &mut owner,
+            t1,
+            "DELETE FROM trace_gate_decisions WHERE dedup_simhash = 602",
+            vec![],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if seeded.is_err() || emptied.is_err() || now != truth || now.iter().any(|r| r.0 == c5) {
+            problems.push(format!(
+                "after trigger-skipping deletes left one member and it was deleted: \
+                 {seeded:?} {emptied:?}, read {now:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
+        // Trigger-skipping writes remove a small cluster's representative and
+        // add 1100 members. The next triggered change finds its delta count
+        // (3) wrong, counts past the cap in full, and finds the new earliest.
+        let c6 = uuid::Uuid::new_v4();
+        let mut seeded = Ok(0);
+        for (simhash, secs) in [(700, 20), (701, 21)] {
+            seeded = seeded.and(
+                v145_as_tenant(&mut owner, t2, &v145_insert(t2, c6, simhash, secs), vec![]).await,
+            );
+        }
+        seed.batch_execute(&format!(
+            "SET session_replication_role = replica;
+             DELETE FROM trace_gate_decisions WHERE dedup_simhash = 700;
+             INSERT INTO trace_gate_decisions
+                (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+                 perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+                 nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+                 attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+                 dedup_signal_version)
+             SELECT '{t2}', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v', 1, 1, TRUE, 1,
+                    'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                    TIMESTAMPTZ '2026-03-01T00:00:00Z' + make_interval(secs => 100 + i),
+                    '{c6}', 800, 'stamp'
+               FROM generate_series(1, 1100) i;
+             SET session_replication_role = origin;"
+        ))
+        .await
+        .expect("change a cluster with the triggers skipped");
+        let recounted = v145_as_tenant(&mut owner, t2, &v145_insert(t2, c6, 702, 30), vec![]).await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c6_row = now.iter().find(|row| row.0 == c6).copied();
+        if seeded.is_err() || recounted.is_err() || now != truth || c6_row != Some((c6, 701, 1102))
+        {
+            problems.push(format!(
+                "after trigger-skipping writes past the recount cap: {seeded:?} {recounted:?}, \
+                 read {c6_row:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
         // Nobody but the guard and the gate driver sees the table, and the
         // migrator gave the guard back.
         let visible: i64 = owner

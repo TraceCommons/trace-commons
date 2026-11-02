@@ -30,8 +30,8 @@
 -- Writes that skip triggers leave the table behind: session_replication_role
 -- = replica, pg_restore --disable-triggers, a logical-replication subscriber,
 -- ALTER TABLE ... DISABLE TRIGGER. A cluster whose count is at most 1024 is
--- recounted the next time any statement changes it (see
--- trace_dedup_cluster_apply). A bigger one, or one nothing touches again,
+-- recounted, and its representative looked up again if the count was wrong,
+-- the next time any statement changes it (see trace_dedup_cluster_apply). A bigger one, or one nothing touches again,
 -- stays wrong until the rebuild runs, so a restore or bulk load that skips
 -- triggers must be followed by one.
 --
@@ -137,14 +137,20 @@ DROP FUNCTION IF EXISTS trace_dedup_cluster_rebuild();
 -- is it looked up again, by one probe of the members index.
 --
 -- Self-heal. When the new count is 1024 or less, the members are recounted,
--- reading at most 1025 index entries, so a small cluster that drifted (a
--- write that skipped the triggers) is corrected the next time it changes. If
--- that read finds more than 1024 members, the delta count is provably wrong
--- and the members are counted in full. A count above 1024 is trusted. So a
--- statement changing a cluster of M <= 1024 members reads up to M index
--- entries, and one changing a bigger cluster reads none; a recluster that
--- drains a cluster one move at a time pays about 1024^2 / 2 entries in all
--- for its last 1024 moves, whatever the cluster's starting size.
+-- reading at most 1025 index entries; if that finds more than 1024, the
+-- delta count is provably wrong and the members are counted in full. When
+-- the recount differs from the delta count, a write skipped the triggers, so
+-- the representative is looked up again as well, and a cluster found empty
+-- loses its row. So a small cluster that drifted, in its count or its
+-- representative, is corrected the next time any statement changes it. A
+-- count above 1024 is trusted.
+--
+-- The recount runs under the cluster's row lock, so other writers to the
+-- same cluster wait for it. A statement changing a cluster of M <= 1024
+-- members reads up to M index entries, and one changing a bigger cluster
+-- reads none; a recluster that drains a cluster one move at a time pays about
+-- 1024^2 / 2 entries in all for its last 1024 moves, whatever the cluster's
+-- starting size.
 CREATE FUNCTION trace_dedup_cluster_apply(
     p_cluster     UUID,
     p_delta       BIGINT,
@@ -196,12 +202,26 @@ BEGIN
                   FROM (SELECT 1 FROM public.trace_gate_decisions g
                          WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL
                          LIMIT 1025) m;
-                IF v_seen <= 1024 THEN
-                    v_count := v_seen;
-                ELSE
-                    SELECT pg_catalog.count(*) INTO v_count
+                IF v_seen > 1024 THEN
+                    SELECT pg_catalog.count(*) INTO v_seen
                       FROM public.trace_gate_decisions g
                      WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL;
+                END IF;
+                IF v_seen <> v_count THEN
+                    -- The triggers missed a write, so the representative may
+                    -- be stale too: look it up again.
+                    SELECT g.decision_id, g.decided_at, g.dedup_simhash, g.dedup_signal_version
+                      INTO v_id, v_at, v_sh, v_ver
+                      FROM public.trace_gate_decisions g
+                     WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL
+                     ORDER BY g.decided_at, g.decision_id
+                     LIMIT 1;
+                    IF NOT FOUND THEN
+                        DELETE FROM public.trace_dedup_cluster_representatives
+                         WHERE dedup_cluster_id = p_cluster;
+                        RETURN;
+                    END IF;
+                    v_count := v_seen;
                 END IF;
             END IF;
             UPDATE public.trace_dedup_cluster_representatives
@@ -242,9 +262,11 @@ END $$;
 -- clause, so it fires for every statement, and Postgres captures the changed
 -- rows whether or not this function reads them. What the function can avoid
 -- is its own work: an insert with no member rows (a decision insert, which
--- never sets the dedup columns) returns after one scan of the captured rows,
--- and an update that changes no dedup column (credit, cap, correction value,
--- status) returns after one anti-join of old rows against new.
+-- never sets the dedup columns) returns after one scan of the captured rows.
+-- An update that changes no dedup column (credit, cap, correction value,
+-- status) runs the FULL JOIN below, which drops every unchanged pair, so it
+-- applies nothing. A FULL JOIN is only ever a hash or merge join, so that
+-- check stays linear on a bulk update whatever row counts the plan assumed.
 --
 -- jit = off: a query here keeps the transition tables' row counts from its
 -- session's first call, since they are fixed when the query is parsed. After
@@ -295,20 +317,6 @@ BEGIN
                 NULL, NULL, NULL, NULL);
         END LOOP;
     ELSE
-        -- Nothing to do when every old row has a new row with the same key and
-        -- the same dedup columns. An UPDATE has as many new rows as old, and
-        -- keys are unique, so that pairing covers every row.
-        IF NOT EXISTS (
-            SELECT 1 FROM dedup_old o
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM dedup_new n
-                  WHERE n.tenant_id = o.tenant_id AND n.decision_id = o.decision_id
-                    AND (n.decided_at, n.dedup_cluster_id, n.dedup_simhash, n.dedup_signal_version)
-                        IS NOT DISTINCT FROM
-                        (o.decided_at, o.dedup_cluster_id, o.dedup_simhash, o.dedup_signal_version))
-        ) THEN
-            RETURN NULL;
-        END IF;
         -- Each changed row's old side leaves (-1) and its new side joins (+1).
         -- The FULL JOIN also covers an update that changes the key itself.
         FOR c IN
