@@ -1298,7 +1298,7 @@ impl PayoutStore for PgBackend {
             None,
             None,
             None,
-            None,
+            request.proof_label,
         )
         .await?;
         tx.commit().await?;
@@ -1418,42 +1418,32 @@ impl PayoutStore for PgBackend {
         })
     }
 
-    async fn payout_account_login_anchors(
+    async fn payout_account_anchors(
         &self,
         tenant: &str,
         account: Uuid,
-    ) -> Result<Vec<String>, DatabaseError> {
+    ) -> Result<crate::payout_recipient_proof::AccountAnchors, DatabaseError> {
         let mut client = self.payout_tenant_client().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
         let rows = tx
             .query(
-                "SELECT anchor_hash FROM trace_near_account_anchors
+                "SELECT identity_source, anchor_hash FROM trace_near_account_anchors
                   WHERE tenant_id = $1 AND account_id = $2
-                    AND identity_source = 'near_ai_login'",
+                    AND identity_source IN ('near_ai_login', 'wallet')",
                 &[&tenant, &account],
             )
             .await?;
         tx.commit().await?;
-        Ok(rows.iter().map(|row| row.get(0)).collect())
-    }
-
-    async fn payout_account_wallet_anchors(
-        &self,
-        tenant: &str,
-        account: Uuid,
-    ) -> Result<Vec<String>, DatabaseError> {
-        let mut client = self.payout_tenant_client().await?;
-        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
-        let rows = tx
-            .query(
-                "SELECT anchor_hash FROM trace_near_account_anchors
-                  WHERE tenant_id = $1 AND account_id = $2
-                    AND identity_source = 'wallet'",
-                &[&tenant, &account],
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(rows.iter().map(|row| row.get(0)).collect())
+        let mut anchors = crate::payout_recipient_proof::AccountAnchors::default();
+        for row in rows {
+            let source: &str = row.get(0);
+            let hash: String = row.get(1);
+            match source {
+                "near_ai_login" => anchors.login.push(hash),
+                _ => anchors.wallet.push(hash),
+            }
+        }
+        Ok(anchors)
     }
 
     async fn confirm_payout_link_request(

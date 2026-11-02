@@ -55,8 +55,8 @@ use trace_commons_server::db::{
 use trace_commons_server::payout_pass::{stream_status_hold_label, stream_waiting};
 use trace_commons_server::payout_rate::PayoutMode;
 use trace_commons_server::payout_recipient_proof::{
-    AccountAnchors, NEAR_AI_USERS_ME_TIMEOUT, NearAiOrgVerifier, RecipientProof,
-    RecipientProofRefusal, RecipientProofVerifier,
+    NEAR_AI_USERS_ME_TIMEOUT, NearAiOrgVerifier, ProofKind, RecipientProof, RecipientProofRefusal,
+    RecipientProofVerifier,
 };
 use trace_commons_server::payout_recipient_seal::{payout_link_handle, seal_payout_recipient};
 use trace_commons_server::payout_worker::PayoutRailEntry;
@@ -279,8 +279,8 @@ pub(super) async fn start_handler(
     let expected_version = body.expected_version();
     let idempotency_key = body.idempotency_key;
     let wire_action = body.action;
-    let (action, recipient, recipient_ref) = match body.proof {
-        None => (PayoutLinkAction::Unlink, None, None),
+    let (action, recipient, recipient_ref, proof_kind) = match body.proof {
+        None => (PayoutLinkAction::Unlink, None, None, None),
         Some(proof) => {
             let organization_id = match &proof {
                 PayoutLinkProof::NearAi {
@@ -288,22 +288,11 @@ pub(super) async fn start_handler(
                 } => *organization_id,
             };
             // What the proving login must match: a NEAR AI login anchor, or
-            // for a NEAR AI wallet sign-in the account's wallet anchor, keyed
-            // under this deployment's NEAR network.
-            let anchors = AccountAnchors {
-                login: store
-                    .payout_account_login_anchors(tenant, account)
-                    .await
-                    .map_err(store_failed)?,
-                wallet: store
-                    .payout_account_wallet_anchors(tenant, account)
-                    .await
-                    .map_err(store_failed)?,
-                network: state
-                    .account_near_config
-                    .as_ref()
-                    .map(|config| config.network.clone()),
-            };
+            // for a NEAR AI wallet sign-in the account's wallet anchor.
+            let anchors = store
+                .payout_account_anchors(tenant, account)
+                .await
+                .map_err(store_failed)?;
             // The token becomes a secret here and is dropped inside verify.
             let proof = RecipientProof::from(proof);
             let verifier = NearAiOrgVerifier::new(
@@ -311,6 +300,15 @@ pub(super) async fn start_handler(
                 rail.clone(),
                 identity.clone(),
                 NEAR_AI_USERS_ME_TIMEOUT,
+            )
+            // Wallet anchors are keyed under this deployment's NEAR network;
+            // the verifier matches them only when that is the network NEAR
+            // AI verifies wallet sign-ins on.
+            .with_wallet_network(
+                state
+                    .account_near_config
+                    .as_ref()
+                    .map(|config| config.network.as_str()),
             );
             let verified = match verifier.verify(proof, &anchors).await {
                 Ok(verified) => verified,
@@ -342,6 +340,7 @@ pub(super) async fn start_handler(
                 PayoutLinkAction::Link,
                 Some((rail.descriptor().recipient_kind.clone(), sealed)),
                 Some(recipient_ref),
+                Some(verified.proof),
             )
         }
     };
@@ -360,6 +359,7 @@ pub(super) async fn start_handler(
                 recipient,
                 expires_at,
                 actor_ref_hash: account_actor_hash(&ctx),
+                proof_label: proof_kind.map(ProofKind::label),
             },
         )
         .await
@@ -374,6 +374,7 @@ pub(super) async fn start_handler(
         rail = %rail_id,
         action = action.as_str(),
         replayed = inserted == PayoutLinkRequestInsert::Replayed,
+        proof = proof_kind.map(ProofKind::label).unwrap_or("none"),
         "payout link requested"
     );
     Ok((
