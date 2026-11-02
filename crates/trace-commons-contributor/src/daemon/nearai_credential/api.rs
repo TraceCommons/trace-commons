@@ -121,6 +121,15 @@ pub enum RevokeOutcome {
     /// The session may not act on that workspace (`403`): the key is in
     /// another NEAR AI account, recorded before a sign-in to a different
     /// one. No retry with this session can revoke it.
+    ///
+    /// cloud-api answers `403` here for one reason only: its revoke checks
+    /// that the user is a member of the workspace's organization, and any
+    /// member may revoke, whatever the role (`nearai/cloud-api`,
+    /// `services/src/workspace/mod.rs` `check_workspace_permission`, and
+    /// `api/src/routes/workspaces.rs` mapping `Unauthorized` to `403`, as of
+    /// 2026-09-24). So a `403` is never the same account short of a role: it
+    /// is an organization this user does not belong to -- another account,
+    /// or one this user has left, where it could not revoke either.
     NotThisAccount,
 }
 
