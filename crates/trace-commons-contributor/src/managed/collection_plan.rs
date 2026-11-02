@@ -81,37 +81,38 @@ impl ProcessIdentity {
     /// `named_at`. A pid named without its start time is otherwise taken to
     /// run while any process holds it; one that started after `named_at`
     /// is another process reusing the pid, not this one.
+    ///
+    /// Two narrow cases this misjudges, both accepted: a system clock that
+    /// steps back between the tool's start and its last report can make a
+    /// live short-lived tool look newer than `named_at` (so gone), and a pid
+    /// reused within the two seconds of slack (fast on Windows) still counts
+    /// as the tool until that process exits.
     pub fn is_running_named_at(&self, named_at: chrono::DateTime<chrono::Utc>) -> bool {
         if self.start_time.is_some() {
             return self.is_running();
         }
-        let mut system = sysinfo::System::new();
-        let key = sysinfo::Pid::from_u32(self.pid);
-        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[key]), true);
-        let Some(process) = system.process(key) else {
-            return false;
-        };
         // Start times are whole seconds: a little slack keeps a process
         // that started in the same second as the report as this one.
-        process.status() != sysinfo::ProcessStatus::Zombie
-            && i64::try_from(process.start_time())
-                .is_ok_and(|start| start <= named_at.timestamp() + 2)
+        self.live_start_time()
+            .and_then(|start| i64::try_from(start).ok())
+            .is_some_and(|start| start <= named_at.timestamp() + 2)
     }
 
     /// Whether this process still runs. A zombie has exited. Another
     /// process holding the pid with a different start time is not it.
     pub fn is_running(&self) -> bool {
+        self.live_start_time()
+            .is_some_and(|start| self.start_time.is_none_or(|own| own == start))
+    }
+
+    /// The start time of the live process holding this pid, or None when
+    /// none does (a zombie has exited).
+    fn live_start_time(&self) -> Option<u64> {
         let mut system = sysinfo::System::new();
         let key = sysinfo::Pid::from_u32(self.pid);
         system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[key]), true);
-        let Some(process) = system.process(key) else {
-            return false;
-        };
-        if process.status() == sysinfo::ProcessStatus::Zombie {
-            return false;
-        }
-        self.start_time
-            .is_none_or(|start| process.start_time() == start)
+        let process = system.process(key)?;
+        (process.status() != sysinfo::ProcessStatus::Zombie).then(|| process.start_time())
     }
 }
 
