@@ -77,6 +77,27 @@ impl ProcessIdentity {
         })
     }
 
+    /// [`Self::is_running`], for a process a launcher last named at
+    /// `named_at`. A pid named without its start time is otherwise taken to
+    /// run while any process holds it; one that started after `named_at`
+    /// is another process reusing the pid, not this one.
+    pub fn is_running_named_at(&self, named_at: chrono::DateTime<chrono::Utc>) -> bool {
+        if self.start_time.is_some() {
+            return self.is_running();
+        }
+        let mut system = sysinfo::System::new();
+        let key = sysinfo::Pid::from_u32(self.pid);
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[key]), true);
+        let Some(process) = system.process(key) else {
+            return false;
+        };
+        // Start times are whole seconds: a little slack keeps a process
+        // that started in the same second as the report as this one.
+        process.status() != sysinfo::ProcessStatus::Zombie
+            && i64::try_from(process.start_time())
+                .is_ok_and(|start| start <= named_at.timestamp() + 2)
+    }
+
     /// Whether this process still runs. A zombie has exited. Another
     /// process holding the pid with a different start time is not it.
     pub fn is_running(&self) -> bool {
@@ -421,6 +442,21 @@ pub fn next(
 
 #[cfg(test)]
 mod tests {
+    /// A pid named without its start time is this tool's only while the
+    /// process holding it could be: one that started after the launcher
+    /// last named the pid (`named_at`) is another process reusing it.
+    #[test]
+    fn a_pid_alone_is_not_a_process_that_started_after_it_was_named() {
+        let me = ProcessIdentity {
+            pid: std::process::id(),
+            start_time: None,
+        };
+        assert!(me.is_running_named_at(chrono::Utc::now()));
+        assert!(!me.is_running_named_at(chrono::Utc::now() - chrono::Duration::days(30)));
+        let exact = ProcessIdentity::current();
+        assert!(exact.is_running_named_at(chrono::Utc::now() - chrono::Duration::days(30)));
+    }
+
     use super::*;
 
     const ACCOUNT: AccountId = AccountId(Uuid::from_u128(7));

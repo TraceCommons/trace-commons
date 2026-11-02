@@ -200,14 +200,16 @@ app; changing collection staging rules.
   therefore shows its earlier row again.
 - A quiet row (unknown: its launcher stopped reporting) that has no
   collection plan ends once the tool process its launcher named is gone. A
-  pid named without its start time counts as running while any process
-  holds it, so a reused pid only delays the end. This runs in the lease
+  pid named without its start time counts as running while a process
+  holds it that started before the launcher's last report named it; one
+  that started later is another process reusing the pid. This runs in the lease
   pass (`lease_pass`): every lease tick, detached from the daemon's loop,
   one sweep and one listing of the plans, whose plan rows then feed a
   collection pass when none is running, so a long collection holds back no
   quiet row. A collection still pending on such a row fails, since the
   daemon will not collect it, but the launcher's own late result (a
-  report, or its exit receipt) is still taken over that. Before, only a
+  report, or its exit receipt) is still taken over that; so is the failed
+  collection a restart sets on an ended row with no plan. Before, only a
   collecting row with a plan ended this way, and a non-collecting resume
   held its conversation, refusing Resume, for good.
 - A row whose launcher redeemed its ticket and went quiet before its first

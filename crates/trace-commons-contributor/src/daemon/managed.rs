@@ -1343,7 +1343,7 @@ pub type PlanRow = (Uuid, Option<crate::managed::collection_plan::RowStatus>);
 /// together, each quiet row has one owner per tick.
 struct LeaseScan {
     plans: Vec<PlanRow>,
-    quiet: Vec<(Uuid, crate::managed::collection_plan::ProcessIdentity)>,
+    quiet: Vec<crate::managed::sessions::QuietTool>,
 }
 
 /// The daemon's lease tick, whose first tick is at startup: lapse rows
@@ -1424,14 +1424,11 @@ fn scan(
 }
 
 /// End, in one write, the quiet rows whose tool is gone.
-fn end_gone(
-    shared: &DaemonShared,
-    quiet: Vec<(Uuid, crate::managed::collection_plan::ProcessIdentity)>,
-) {
+fn end_gone(shared: &DaemonShared, quiet: Vec<crate::managed::sessions::QuietTool>) {
     let gone: Vec<Uuid> = quiet
         .into_iter()
-        .filter(|(_, process)| !process.is_running())
-        .map(|(id, _)| id)
+        .filter(|tool| tool.gone())
+        .map(|tool| tool.id)
         .collect();
     if !gone.is_empty() {
         let _ = with_service(shared, |service| service.sessions.end_quiet(&gone));

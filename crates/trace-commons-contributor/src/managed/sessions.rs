@@ -261,6 +261,22 @@ where
     Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
+/// A quiet row whose tool the daemon watches ([`SessionRegistry::quiet_tools`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuietTool {
+    pub id: Uuid,
+    pub process: super::collection_plan::ProcessIdentity,
+    /// The launcher's last report, which named this process while it ran.
+    pub named_at: DateTime<Utc>,
+}
+
+impl QuietTool {
+    /// Whether the tool is gone.
+    pub fn gone(&self) -> bool {
+        !self.process.is_running_named_at(self.named_at)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     #[serde(default)]
@@ -366,7 +382,10 @@ impl SessionRegistry {
                 && entry.view.collection == CollectionState::Pending
                 && super::collection_plan::read(store, entry.view.id).is_none()
             {
+                // The daemon's guess: a receipt the launcher left, replayed
+                // below, still replaces it.
                 entry.view.collection = CollectionState::Failed;
+                entry.collection_by_daemon = true;
             }
             entry.ticket_hash = None;
             entry.request.keep_saved_model = entry.keep_saved_model;
@@ -1317,16 +1336,21 @@ impl SessionRegistry {
     /// the daemon can watch, with that tool's process: rows a collection
     /// plan (`plans`) does not cover, whose launcher named the tool's
     /// process. A pid named without its start time counts as running while
-    /// any process holds it, so a reused pid only delays the end.
-    pub fn quiet_tools(
-        &self,
-        plans: &std::collections::BTreeSet<Uuid>,
-    ) -> Vec<(Uuid, super::collection_plan::ProcessIdentity)> {
+    /// any process holds it that started before the launcher last named it
+    /// (`named_at`), so a reused pid only delays the end, and only while
+    /// that is so.
+    pub fn quiet_tools(&self, plans: &std::collections::BTreeSet<Uuid>) -> Vec<QuietTool> {
         self.data
             .entries
             .iter()
             .filter(|e| e.view.state == SessionState::Unknown && !plans.contains(&e.view.id))
-            .filter_map(|e| Some((e.view.id, e.watched_process()?)))
+            .filter_map(|e| {
+                Some(QuietTool {
+                    id: e.view.id,
+                    process: e.watched_process()?,
+                    named_at: e.last_seen,
+                })
+            })
             .collect()
     }
 
@@ -2806,7 +2830,11 @@ mod tests {
         use super::super::collection_plan::ProcessIdentity;
         let plans = std::collections::BTreeSet::from([planned]);
         assert_eq!(
-            registry.quiet_tools(&plans),
+            registry
+                .quiet_tools(&plans)
+                .into_iter()
+                .map(|tool| (tool.id, tool.process))
+                .collect::<Vec<_>>(),
             vec![
                 (
                     pid_only,
@@ -3063,6 +3091,65 @@ mod tests {
             Some(SessionState::Exited)
         );
         assert!(!registry.stop_requested(id));
+    }
+
+    /// A restart fails a pending collection on an ended row with no plan,
+    /// as its guess; the launcher's exit receipt, replayed in the same
+    /// start, still replaces it.
+    #[test]
+    fn a_restart_keeps_a_late_receipts_collection_result() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let prepared = registry
+            .prepare(
+                LaunchRequest {
+                    collect_traces: true,
+                    ..coding(&account, home.path())
+                },
+                &account,
+            )
+            .unwrap();
+        let id = prepared.session_id;
+        let context = registry
+            .redeem(id, prepared.ticket.as_deref().unwrap())
+            .unwrap();
+        let report = |state, collection, exit_code| LifecycleReport {
+            model: None,
+            collection,
+            session_id: id,
+            proof: context.proof.clone(),
+            state,
+            process_id: Some(42),
+            process_identity: Some("42:1".into()),
+            exit_code,
+        };
+        registry
+            .report(report(SessionState::Running, None, None))
+            .unwrap();
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        registry.tool_exited(id).unwrap();
+        persist_exit(
+            &store,
+            &report(
+                SessionState::Exited,
+                Some(CollectionState::Collected),
+                Some(0),
+            ),
+        )
+        .unwrap();
+        drop(registry);
+        let reopened = SessionRegistry::open(&store).unwrap();
+        assert_eq!(
+            reopened.collection_status(id).unwrap().collection,
+            CollectionState::Collected
+        );
     }
 
     /// The list and the one-session-per-conversation lock group rows by the
