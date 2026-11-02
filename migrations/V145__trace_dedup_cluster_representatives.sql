@@ -29,11 +29,11 @@
 --
 -- Writes that skip triggers leave the table behind: session_replication_role
 -- = replica, pg_restore --disable-triggers, a logical-replication subscriber,
--- ALTER TABLE ... DISABLE TRIGGER. A cluster whose count is at most 1024 is
--- recounted, and its representative looked up again if the count was wrong,
--- the next time any statement changes it (see trace_dedup_cluster_apply). A bigger one, or one nothing touches again,
--- stays wrong until the rebuild runs, so a restore or bulk load that skips
--- triggers must be followed by one.
+-- ALTER TABLE ... DISABLE TRIGGER. A cluster whose count is at most 1024 has
+-- its count and representative read again the next time any statement
+-- changes it (see trace_dedup_cluster_apply). A bigger one, or one nothing
+-- touches again, stays wrong until the rebuild runs, so a restore or bulk
+-- load that skips triggers must be followed by one.
 --
 -- Applied by a non-superuser CREATEROLE migrator, as V101 and V114 are: it
 -- holds the owning guard just long enough to own the functions and run the
@@ -131,22 +131,28 @@ DROP FUNCTION IF EXISTS trace_dedup_cluster_rebuild();
 -- stale count or a stale representative. Under READ COMMITTED it sees the
 -- committed row and is correct.
 --
--- Cost. The representative only changes when the old one left or an earlier
--- member arrived, so the common case reads and writes one row, plus the
--- recount below when the cluster is small. Only when the representative left
--- is it looked up again, by one probe of the members index.
+-- Cost. For a cluster whose new count is above 1024, the count moves by the
+-- delta and the representative only changes when the old one left (one
+-- probe of the members index) or an earlier member arrived, so the call
+-- reads and writes one row.
 --
--- Self-heal. When the new count is 1024 or less, the members are recounted,
--- reading at most 1025 index entries; if that finds more than 1024, the
--- delta count is provably wrong and the members are counted in full. When
--- the recount differs from the delta count, a write skipped the triggers, so
--- the representative is looked up again as well, and a cluster found empty
--- loses its row. So a small cluster that drifted, in its count or its
--- representative, is corrected the next time any statement changes it. A
--- count above 1024 is trusted.
+-- Self-heal. For a cluster whose new count is 1024 or less, both are read
+-- again from trace_gate_decisions instead: the representative by one probe,
+-- and the members counted, reading at most 1025 index entries. If that finds
+-- more than 1024, the delta count was provably wrong and the members are
+-- counted in full; if it finds none, the row is deleted. So a small cluster
+-- whose count or representative drifted is corrected the next time any
+-- statement changes it. A count above 1024 is trusted.
 --
--- The recount runs under the cluster's row lock, so other writers to the
--- same cluster wait for it. A statement changing a cluster of M <= 1024
+-- Drift mostly comes from writes that skip the triggers. One query that
+-- writes trace_gate_decisions twice (a writable CTE doing DELETE and INSERT)
+-- can cause it too: both statement triggers fire after the whole query, so
+-- the first one already sees the second write, and the second then adds its
+-- delta on top. The next change to the cluster repairs that, unless the
+-- doubled count crossed 1024.
+--
+-- These reads run under the cluster's row lock, so other writers to the
+-- same cluster wait for them. A statement changing a cluster of M <= 1024
 -- members reads up to M index entries, and one changing a bigger cluster
 -- reads none; a recluster that drains a cluster one move at a time pays about
 -- 1024^2 / 2 entries in all for its last 1024 moves, whatever the cluster's
@@ -164,7 +170,6 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
     r     public.trace_dedup_cluster_representatives%ROWTYPE;
     v_count BIGINT;
-    v_seen  BIGINT;
     v_id  UUID;
     v_at  TIMESTAMPTZ;
     v_sh  BIGINT;
@@ -176,7 +181,7 @@ BEGIN
          FOR UPDATE;
         IF FOUND THEN
             v_count := r.member_count + p_delta;
-            IF r.representative_decision_id = ANY (p_removed) OR v_count <= 0 THEN
+            IF v_count <= 1024 OR r.representative_decision_id = ANY (p_removed) THEN
                 SELECT g.decision_id, g.decided_at, g.dedup_simhash, g.dedup_signal_version
                   INTO v_id, v_at, v_sh, v_ver
                   FROM public.trace_gate_decisions g
@@ -198,30 +203,15 @@ BEGIN
                 v_sh := r.representative_simhash; v_ver := r.representative_signal_version;
             END IF;
             IF v_count <= 1024 THEN
-                SELECT pg_catalog.count(*) INTO v_seen
+                -- The probe above found a member, so this is at least 1.
+                SELECT pg_catalog.count(*) INTO v_count
                   FROM (SELECT 1 FROM public.trace_gate_decisions g
                          WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL
                          LIMIT 1025) m;
-                IF v_seen > 1024 THEN
-                    SELECT pg_catalog.count(*) INTO v_seen
+                IF v_count > 1024 THEN
+                    SELECT pg_catalog.count(*) INTO v_count
                       FROM public.trace_gate_decisions g
                      WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL;
-                END IF;
-                IF v_seen <> v_count THEN
-                    -- The triggers missed a write, so the representative may
-                    -- be stale too: look it up again.
-                    SELECT g.decision_id, g.decided_at, g.dedup_simhash, g.dedup_signal_version
-                      INTO v_id, v_at, v_sh, v_ver
-                      FROM public.trace_gate_decisions g
-                     WHERE g.dedup_cluster_id = p_cluster AND g.dedup_simhash IS NOT NULL
-                     ORDER BY g.decided_at, g.decision_id
-                     LIMIT 1;
-                    IF NOT FOUND THEN
-                        DELETE FROM public.trace_dedup_cluster_representatives
-                         WHERE dedup_cluster_id = p_cluster;
-                        RETURN;
-                    END IF;
-                    v_count := v_seen;
                 END IF;
             END IF;
             UPDATE public.trace_dedup_cluster_representatives

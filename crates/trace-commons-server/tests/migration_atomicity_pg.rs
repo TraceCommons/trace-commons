@@ -2724,6 +2724,36 @@ async fn v145_tracks_dedup_clusters_across_tenants_as_a_non_superuser_owner() {
             ));
         }
 
+        // A trigger-skipping update moves the representative behind another
+        // member without changing the count. The next triggered change to the
+        // small cluster must still find the new earliest member.
+        let c7 = uuid::Uuid::new_v4();
+        let mut seeded = Ok(0);
+        for (simhash, secs) in [(900, 40), (901, 41)] {
+            seeded = seeded.and(
+                v145_as_tenant(&mut owner, t1, &v145_insert(t1, c7, simhash, secs), vec![]).await,
+            );
+        }
+        seed.batch_execute(
+            "SET session_replication_role = replica;
+             UPDATE trace_gate_decisions
+                SET decided_at = TIMESTAMPTZ '2026-03-01T00:00:50Z'
+              WHERE dedup_simhash = 900;
+             SET session_replication_role = origin;",
+        )
+        .await
+        .expect("move the representative with the triggers skipped");
+        let reprobed = v145_as_tenant(&mut owner, t1, &v145_insert(t1, c7, 902, 60), vec![]).await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        let c7_row = now.iter().find(|row| row.0 == c7).copied();
+        if seeded.is_err() || reprobed.is_err() || now != truth || c7_row != Some((c7, 901, 3)) {
+            problems.push(format!(
+                "after a trigger-skipping update moved the representative: {seeded:?} \
+                 {reprobed:?}, read {c7_row:?}, a full recompute reads {truth:?}"
+            ));
+        }
+
         // Nobody but the guard and the gate driver sees the table, and the
         // migrator gave the guard back.
         let visible: i64 = owner
