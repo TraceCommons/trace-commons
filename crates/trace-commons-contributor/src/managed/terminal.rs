@@ -1050,6 +1050,12 @@ pub fn launch_tool_setup(
 /// The handle names the window it opened in, when the terminal can say
 /// (Terminal's tab, by tty); a launch that cannot is still a launch, with no
 /// handle.
+///
+/// `in_tab` is the tab an ended session ran in, for Start again and Resume,
+/// already checked by the caller to be that same tab. Terminal runs the
+/// session there when the tab is still open and idle, and names it as the
+/// handle; otherwise, and in every other app or platform, the launch opens
+/// a new window as it would without it.
 pub fn launch(
     choice: TerminalSetting,
     installed: &[TerminalApp],

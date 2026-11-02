@@ -9450,6 +9450,32 @@ focusable or stoppable.
   folder, `managed-not-found` for a removed account, and
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.
 
+`managed_terminal_launch {session_id, ticket}` for a session that
+`managed_session_start_again` or `managed_session_resume` prepared runs it, in
+Terminal on macOS, in the tab the ended row ran in (owner, 2026-11-02), when
+all of these hold; otherwise it opens a new window, as any launch does:
+
+- The daemon recorded, when it prepared the session, which row it came from.
+  The shell names nothing: the macOS app built from #1839 sent an
+  `in_window_of` field, which is still accepted so that app keeps launching,
+  and ignored.
+- The daemon opened that row itself, its tool started (it was redeemed), and
+  it has ended. No other session that still holds its account has the same
+  tab.
+- That tab is still the one the row ran in. A tty alone does not say so:
+  macOS hands a closed tab's tty to the next tab opened. When it opens a
+  Terminal tab the daemon records the pid and start time of the one process
+  on that tty whose parent is not on it (the tab's `login`), and before
+  typing into the tab it reads them again and requires the same.
+- Terminal still has that tab, idle (not `busy`), when it is found again by
+  its window's id just before the command is typed.
+
+Terminal cannot say whether an idle tab's prompt holds half-typed input. The
+launch is typed after it, so such input, and whatever that shell has set
+since (its `PATH`, an activated environment), reach the launch. A launch
+swallowed that way never starts: its ticket lapses, the row reads Failed, and
+Start again on that row opens a new window, since its tool never started.
+
 When `managed_launch_prepare` or `managed_session_start_again` passes the
 checks that come before preparing, other than the tool's version, and would
 prepare a new session on `near_ai_signin`, the daemon first reads the

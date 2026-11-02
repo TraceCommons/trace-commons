@@ -895,12 +895,14 @@ struct ManagedSessionActions: View {
             }
     }
 
-    /// The conversation continues; the terminal opens as for any launch.
+    /// The conversation continues. In Terminal it runs in this row's tab
+    /// while that tab is still open and idle, otherwise in a new window,
+    /// as for any launch; the daemon decides.
     private func resume() {
         model.managedAction(
             "managed_session_resume",
             params: ManagedSurface.resumeParams(sessionID: session.id, requestID: UUID().uuidString),
-            openTerminal: true, inWindowOf: session.id)
+            openTerminal: true)
     }
 
     private func copyResumeCommand() {
@@ -921,13 +923,14 @@ struct ManagedSessionActions: View {
             userInfo: [.announcement: model.managedText("copied"), .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
 
-    /// Same tool, account and folder, with no folder chooser; the terminal
-    /// opens as for any launch.
+    /// Same tool, account and folder, with no folder chooser. In Terminal
+    /// it runs in this row's tab while that tab is still open and idle,
+    /// otherwise in a new window, as for any launch; the daemon decides.
     private func startAgain() {
         model.managedAction(
             "managed_session_start_again",
             params: ManagedSurface.startAgainParams(sessionID: session.id, requestID: UUID().uuidString),
-            openTerminal: true, inWindowOf: session.id)
+            openTerminal: true)
     }
 }
 
@@ -948,21 +951,51 @@ struct ManagedSessionRowActions<Content: View>: View {
         } else {
             content
                 .contentShape(Rectangle())
-                // A click on the row shows its terminal, never moves the window.
-                .holdsWindowStill()
-                .onTapGesture { if ManagedSurface.clickShows(session) { model.showManagedSession(session.id) } }
+                .holdsWindowStill(when: ManagedRowClick.holdsWindow(session))
+                // Off while another request runs, as the row's buttons are.
+                .gesture(
+                    TapGesture().onEnded { model.showManagedSession(session.id) },
+                    including: ManagedRowClick.acts(session, busy: model.managedBusy) ? .all : .subviews)
                 .accessibilityElement(children: .contain)
                 .accessibilityActions {
                     if menu.contains(.show) {
                         Button(model.managedText("show")) { model.showManagedSession(session.id) }
+                            .disabled(model.managedBusy)
                     }
                     if menu.contains(.stop) {
                         Button(model.managedText("stop")) { onStop() }
+                            .disabled(model.managedBusy)
                     }
                 }
         }
     }
 
+}
+
+/// What a click on a session row does.
+enum ManagedRowClick {
+    /// A click on the row shows its terminal, never moves the window, so
+    /// the row holds the window still, but only where that click shows
+    /// something: a session in another terminal app has nothing to show,
+    /// and its row stays a place the window can be dragged by (#1839
+    /// review, finding 10).
+    static func holdsWindow(_ session: ManagedSession) -> Bool {
+        ManagedSurface.clickShows(session)
+    }
+
+    /// The click shows the terminal, and is off while another request
+    /// runs, as the row's buttons are, rather than dropped unseen.
+    static func acts(_ session: ManagedSession, busy: Bool) -> Bool {
+        ManagedSurface.clickShows(session) && !busy
+    }
+}
+
+private extension View {
+    /// `holdsWindowStill()` only `when` true. A row that turns clickable
+    /// gets its hold then, which checks where the pointer already is.
+    @ViewBuilder func holdsWindowStill(when: Bool) -> some View {
+        if when { holdsWindowStill() } else { self }
+    }
 }
 
 extension AppModel {

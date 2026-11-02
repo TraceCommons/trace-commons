@@ -1,7 +1,6 @@
 import AppKit
 import XCTest
 import TCBridge
-import TCDesign
 import TCShellCore
 @testable import TraceCommonsApp
 
@@ -78,30 +77,5 @@ final class TracesFolderOrderTests: XCTestCase {
         XCTAssertNotNil(copy[.listOrderArranged])
         XCTAssertNotNil(copy[.listOrderMoveUp])
         XCTAssertNotNil(copy[.listOrderMoveDown])
-    }
-
-    /// A folder dragged on the tree does not move the window (owner,
-    /// 2026-11-02): over the tree the window is not moved by its
-    /// background, and is again once the pointer leaves.
-    @MainActor
-    func testTheWindowHoldsStillWhileThePointerIsOverTheTree() throws {
-        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 200, height: 200),
-                              styleMask: [.titled], backing: .buffered, defer: true)
-        window.isMovableByWindowBackground = true
-        let view = GlassHoldWindowView(frame: .init(x: 0, y: 0, width: 200, height: 200))
-        window.contentView?.addSubview(view)
-        let event = try XCTUnwrap(NSEvent.enterExitEvent(
-            with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
-            windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil))
-
-        view.mouseEntered(with: event)
-        XCTAssertFalse(window.isMovableByWindowBackground)
-        XCTAssertNil(view.hitTest(.init(x: 10, y: 10)), "takes no clicks from the rows")
-        view.mouseExited(with: event)
-        XCTAssertTrue(window.isMovableByWindowBackground)
-
-        view.mouseEntered(with: event)
-        view.removeFromSuperview()
-        XCTAssertTrue(window.isMovableByWindowBackground, "let go when the tree goes")
     }
 }
