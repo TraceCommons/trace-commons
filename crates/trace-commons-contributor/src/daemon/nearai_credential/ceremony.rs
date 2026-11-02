@@ -1428,7 +1428,9 @@ mod tests {
     /// Every step after the browser was sent out is tagged in `begin`.
     #[test]
     fn begin_tags_every_step() {
-        let source = include_str!("ceremony.rs");
+        // A Windows checkout has CRLF line endings; every match below is
+        // written with `\n`.
+        let source = include_str!("ceremony.rs").replace("\r\n", "\n");
         let body = source
             .split("pub async fn begin(")
             .nth(1)
@@ -1447,7 +1449,14 @@ mod tests {
         ] {
             assert!(body.contains(tag), "begin lost {tag}");
         }
-        assert!(source.contains(".map_err(at(FailedStep::Exchange))?;"));
+        // Scoped to the wallet leg's impl, so the match cannot be this
+        // test's own line.
+        let browser_sign_in = source
+            .split("impl BrowserSignIn {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .unwrap();
+        assert!(browser_sign_in.contains(".map_err(at(FailedStep::Exchange))?;"));
     }
 
     /// The label line lands in the warn/error log with a timestamp, and
