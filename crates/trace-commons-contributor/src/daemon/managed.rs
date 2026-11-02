@@ -2343,6 +2343,15 @@ mod tests {
         )
     }
 
+    fn listed(service: &mut ManagedService, id: Uuid) -> bool {
+        let snapshot = call(service, "managed_snapshot", json!({}), false).unwrap();
+        snapshot["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == json!(id))
+    }
+
     fn row(service: &mut ManagedService, id: Uuid, sign_in: bool) -> Value {
         let snapshot = call(service, "managed_snapshot", json!({}), sign_in).unwrap();
         snapshot["sessions"]
@@ -3004,7 +3013,7 @@ mod tests {
     }
 
     /// While a resume of a conversation runs, no row on that conversation
-    /// offers Resume.
+    /// offers Resume, and the conversation is listed once, as the resume.
     #[test]
     fn resume_is_withheld_while_the_conversation_runs_elsewhere() {
         let (home, _store, mut service) = service();
@@ -3023,8 +3032,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(row(&mut service, root, false)["can_resume"], false);
-        assert_eq!(row(&mut service, root, false)["can_start_again"], true);
+        assert!(!listed(&mut service, root), "listed as its latest row");
+        assert_eq!(
+            row(&mut service, prepared.session_id, false)["can_resume"],
+            false
+        );
         assert_eq!(
             call(
                 &mut service,
@@ -3046,7 +3058,7 @@ mod tests {
             Some(0),
         )
         .unwrap();
-        assert_eq!(row(&mut service, root, false)["can_resume"], true);
+        assert!(!listed(&mut service, root));
         assert_eq!(
             row(&mut service, prepared.session_id, false)["can_resume"],
             true
@@ -3078,7 +3090,8 @@ mod tests {
             "no turn yet"
         );
         claude_transcript(&mut service, id);
-        assert_eq!(row(&mut service, id, false)["can_resume"], true);
+        let old = row(&mut service, id, false);
+        assert_eq!(old["can_resume"], true);
 
         let prepared: PreparedLaunch = serde_json::from_value(
             call(
@@ -3093,7 +3106,6 @@ mod tests {
         assert_ne!(prepared.session_id, id, "a resumed launch is a new row");
         assert!(prepared.ticket.is_some());
         let fresh = row(&mut service, prepared.session_id, false);
-        let old = row(&mut service, id, false);
         for field in ["tool", "connection", "account_id", "cwd", "purpose"] {
             assert_eq!(fresh[field], old[field], "{field}");
         }
