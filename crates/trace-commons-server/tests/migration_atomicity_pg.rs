@@ -2469,6 +2469,65 @@ async fn v145_tracks_dedup_clusters_across_tenants_as_a_non_superuser_owner() {
             ));
         }
 
+        // Tenant 2 deletes C1's representative: the next earliest member
+        // (tenant 2's simhash 6) takes over.
+        let rep_deleted = v145_as_tenant(
+            &mut owner,
+            t2,
+            "DELETE FROM trace_gate_decisions WHERE dedup_simhash = 99",
+            vec![],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let expected = vec![(c1, 6, 1)];
+        if rep_deleted.is_err() || now != expected {
+            problems.push(format!(
+                "after C1's representative was deleted: {rep_deleted:?}, read {now:?}, \
+                 not {expected:?}"
+            ));
+        }
+
+        // One statement touching several clusters, as a recluster sweep or a
+        // bulk import would: five new members across three clusters, then
+        // one UPDATE that moves two of them and changes nothing about a third.
+        let c3 = uuid::Uuid::new_v4();
+        let bulk = v145_as_tenant(
+            &mut owner,
+            t2,
+            "INSERT INTO trace_gate_decisions
+                (tenant_id, decision_id, submission_id, gate_policy_version, gate_version_hash,
+                 perplexity_micros, tail_fraction_micros, perplexity_passed, novelty_score_micros,
+                 nearest_neighbor_hash, novelty_passed, embedding_evidence_hash,
+                 attestation_chain_hash, decided_at, dedup_cluster_id, dedup_simhash,
+                 dedup_signal_version)
+             SELECT 'v145-tenant-2', gen_random_uuid(), gen_random_uuid(), 'v', 'sha256:v',
+                    1, 1, TRUE, 1, 'sha256:n', TRUE, 'sha256:e', 'sha256:a',
+                    TIMESTAMPTZ '2026-02-01T00:00:00Z' + make_interval(secs => i),
+                    (ARRAY[$1::uuid, $2::uuid, $3::uuid])[1 + i % 3], 200 + i, 'stamp'
+               FROM generate_series(0, 4) i",
+            vec![c1, c2, c3],
+        )
+        .await;
+        let moved = v145_as_tenant(
+            &mut owner,
+            t2,
+            "UPDATE trace_gate_decisions
+                SET dedup_cluster_id = CASE WHEN dedup_simhash IN (201, 202) THEN $1::uuid
+                                            ELSE dedup_cluster_id END,
+                    dedup_cluster_size = 1
+              WHERE dedup_simhash IN (200, 201, 202)",
+            vec![c3],
+        )
+        .await;
+        let now = v145_cluster_table(&seed).await;
+        let truth = v145_cluster_truth(&seed).await;
+        if bulk.is_err() || moved.is_err() || now != truth {
+            problems.push(format!(
+                "after multi-cluster statements: {bulk:?} {moved:?}, read {now:?}, \
+                 a full recompute reads {truth:?}"
+            ));
+        }
+
         // Nobody but the guard and the gate driver sees the table, and the
         // migrator gave the guard back.
         let visible: i64 = owner
@@ -2497,6 +2556,19 @@ async fn v145_tracks_dedup_clusters_across_tenants_as_a_non_superuser_owner() {
             .get(0);
         if still_member {
             problems.push("the migrator can still act as the guard role".into());
+        }
+
+        // TRUNCATE skips row and statement DML triggers; its own trigger
+        // must empty the table.
+        let truncated = owner
+            .batch_execute("TRUNCATE trace_gate_decisions CASCADE")
+            .await
+            .map_err(|e| format!("{e:?}"));
+        let now = v145_cluster_table(&seed).await;
+        if truncated.is_err() || !now.is_empty() {
+            problems.push(format!(
+                "after TRUNCATE: {truncated:?}, read {now:?}, not an empty table"
+            ));
         }
     }
 
@@ -2540,6 +2612,29 @@ async fn v145_as_tenant(
     let result = tx.execute(statement, &params).await;
     tx.commit().await.expect("commit tenant transaction");
     result.map_err(|e| format!("{e:?}"))
+}
+
+/// What a full recompute of trace_gate_decisions gives, in the same shape.
+async fn v145_cluster_truth(seed: &tokio_postgres::Client) -> Vec<(uuid::Uuid, i64, i64)> {
+    seed.query(
+        "SELECT DISTINCT ON (dedup_cluster_id) dedup_cluster_id, dedup_simhash,
+                count(*) OVER (PARTITION BY dedup_cluster_id)
+           FROM trace_gate_decisions
+          WHERE dedup_cluster_id IS NOT NULL AND dedup_simhash IS NOT NULL
+          ORDER BY dedup_cluster_id, decided_at, decision_id",
+        &[],
+    )
+    .await
+    .expect("recompute the cluster table")
+    .iter()
+    .map(|r| {
+        (
+            r.get::<_, uuid::Uuid>(0),
+            r.get::<_, i64>(1),
+            r.get::<_, i64>(2),
+        )
+    })
+    .collect()
 }
 
 /// (cluster, representative simhash, member count), read as the superuser.
