@@ -353,22 +353,31 @@ it already lives.
 
 ### 3.7 Client changes for (a)
 
-**Remember the login (daemon).** On every successful Commons sign-in or
-renewal, store beside the Commons record:
+**Remember the login (daemon).** PR #1835 (branch
+`claude/nearai-browser-login-chooser`) already records the provider: field
+`commons_login` (`near` | `github` | `google`) in the daemon file
+`near-ai-login.json`
+(`crates/trace-commons-contributor/src/daemon/nearai_credential/login_record.rs`),
+written whenever the Commons accepts a NEAR AI login (first enrollment,
+renewal, and the in-ceremony accept). The chooser page's mark reads it.
+This spec reuses that record and adds one field to it:
 
-- `near_ai_provider`: the `auth_provider` the server answered (`near`,
-  `github`, `google`, `unknown`).
-- `near_ai_subject_digest`: a keyed digest of the NEAR AI subject id, read
-  by the daemon from `GET /v1/users/me` with the token it already holds,
-  keyed by a per-install secret kept with the Commons record. Local only,
-  never sent, never logged. It answers "is this login the same NEAR AI
-  account?" before anything is replaced or sent to the Commons. The digest
-  is a convenience; the Commons is still the authority.
+- `subject_digest`: a keyed digest of the NEAR AI subject id, read by the
+  daemon from `GET /v1/users/me` with the token it already holds, keyed by
+  a per-install secret kept with the Commons record. Local only, never
+  sent, never logged. It answers "is this the same NEAR AI account?" where
+  the provider tag cannot (two GitHub accounts share a tag), before
+  anything is replaced or sent to the Commons. The Commons is still the
+  authority.
 
-Exposed over IPC as part of the account status: `commons_login: {provider}`
-and, after a browser sign-in, `login_matches_commons: true | false |
-unknown`. The chooser page marks the remembered provider; this spec does
-not change how the chooser renders that mark.
+Once the server answers `auth_provider` (section 3.5), the daemon writes
+`commons_login` from the server's answer instead of the provider the
+person picked. On a completed move it rewrites both fields.
+
+Exposed over IPC as part of the account status: `commons_login`, and after
+a browser sign-in, `login_matches_commons: true | false | unknown`. The
+chooser page has a named seam for this flow, `chooser::change_account_path()`
+(returns `None` in #1835); the change flow supplies it.
 
 **Hold a non-matching login aside.** When a browser sign-in completes and
 `login_matches_commons` is false, the daemon keeps the new NEAR AI session
