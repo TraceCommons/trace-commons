@@ -1178,3 +1178,45 @@ async fn a_revoked_key_runs_no_further_ceremony_and_a_new_key_is_not_held_back()
     );
     assert!(!super::key_revoked(&fx.shared.store));
 }
+
+/// A renewal the Commons accepted remembers the stored NEAR AI login as the
+/// account's; one it refused, or answered for another account, does not.
+#[tokio::test]
+async fn only_an_accepted_renewal_remembers_the_accounts_login() {
+    use crate::daemon::nearai_credential::login_record;
+    let login = *crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.last().unwrap();
+
+    let fx = Fixture::new(Session::Expired).await;
+    login_record::record_stored_login(&fx.shared.store, login);
+    assert_eq!(refusal(&fx.payout_status().await), None);
+    assert_eq!(login_record::commons_login(&fx.shared.store), Some(login));
+
+    let fx = Fixture::new(Session::Expired).await;
+    login_record::record_stored_login(&fx.shared.store, login);
+    *fx.stub.state.refuse.lock().unwrap() = true;
+    assert_eq!(
+        refusal(&fx.payout_status().await),
+        Some("account-session-required")
+    );
+    assert_eq!(login_record::commons_login(&fx.shared.store), None);
+
+    let fx = Fixture::new(Session::Expired).await;
+    login_record::record_stored_login(&fx.shared.store, login);
+    *fx.stub.state.account.lock().unwrap() = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        refusal(&fx.payout_status().await),
+        Some("account-session-required")
+    );
+    assert_eq!(login_record::commons_login(&fx.shared.store), None);
+}
+
+/// Sign in again records the account's login on acceptance too.
+#[tokio::test]
+async fn sign_in_again_remembers_the_accounts_login_when_accepted() {
+    use crate::daemon::nearai_credential::login_record;
+    let login = *crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.last().unwrap();
+    let fx = Fixture::new(Session::Expired).await;
+    login_record::record_stored_login(&fx.shared.store, login);
+    assert_eq!(refusal(&sign_in_again(&fx).await), None);
+    assert_eq!(login_record::commons_login(&fx.shared.store), Some(login));
+}

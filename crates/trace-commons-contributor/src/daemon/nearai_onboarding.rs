@@ -362,6 +362,8 @@ async fn enroll_prepared(
     prepared: Prepared,
     expected: super::commons_credentials::Snapshot,
 ) -> Result<Enrolled> {
+    // Which login the NEAR AI session came from, read before it is spent.
+    let signed_in_with = super::nearai_credential::login_record::stored_login(&shared.store);
     let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
     let provisioned = provision(shared, api, prepared, &identity).await?;
     let referral = provisioned.finished.referral;
@@ -385,7 +387,11 @@ async fn enroll_prepared(
     })
     .await
     .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
-    .map(|value| Enrolled { value, referral })
+    .map(|value| {
+        // The Commons accepted this NEAR AI login: it is the account's login.
+        super::nearai_credential::login_record::accepted_by_commons(&shared.store, signed_in_with);
+        Enrolled { value, referral }
+    })
 }
 
 /// Everything checked before a device key is chosen or the refresh token is
@@ -832,6 +838,9 @@ pub(super) async fn renew_account_session(
     if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
         bail!("near_ai_enroll_invalid")
     }
+    // Which login the session came from, read before it is spent, so an
+    // accepted renewal remembers the login the Commons accepted.
+    let signed_in_with = super::nearai_credential::login_record::stored_login(&shared.store);
     let (session, login) = {
         let settings = shared
             .settings
@@ -858,7 +867,9 @@ pub(super) async fn renew_account_session(
     store_renewed_session(
         shared, cfg, identity, previous, account_id, finished, expected,
     )
-    .await
+    .await?;
+    super::nearai_credential::login_record::accepted_by_commons(&shared.store, signed_in_with);
+    Ok(())
 }
 
 /// The stored record's account id, which a renewal's answer must name.
@@ -1906,7 +1917,23 @@ mod route_tests {
         commons: Commons,
         referral: SignupReferral,
     ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
+        enroll_against_signed_in_with(commons, referral, None).await
+    }
+
+    /// [`enroll_against_with`], with the NEAR AI session recorded as coming
+    /// from `login`.
+    async fn enroll_against_signed_in_with(
+        commons: Commons,
+        referral: SignupReferral,
+        login: Option<&str>,
+    ) -> (Stub, DaemonShared, Result<Value>, tempfile::TempDir) {
         let (dir, shared) = shared_with_session();
+        if let Some(login) = login {
+            crate::daemon::nearai_credential::login_record::record_stored_login(
+                &shared.store,
+                login,
+            );
+        }
         let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
         let stub = stub(commons, identity).await;
         let expected = super::super::commons_credentials::snapshot(
@@ -1972,6 +1999,37 @@ mod route_tests {
                 crate::config::WitnessOrigin::PublishedAtJoin
             ))
         );
+    }
+
+    /// An enrollment the Commons accepted remembers the login it came from
+    /// as the account's; one it refused remembers nothing.
+    #[cfg(not(feature = "near-ai-staging"))]
+    #[tokio::test]
+    async fn an_accepted_enrollment_remembers_the_accounts_login_and_a_refused_one_does_not() {
+        use crate::daemon::nearai_credential::login_record;
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::Production,
+            SignupReferral::None,
+            Some("github"),
+        )
+        .await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), Some("github"));
+
+        let (_stub, shared, result, _dir) = enroll_against_signed_in_with(
+            Commons::ProductionFinishDenied,
+            SignupReferral::None,
+            Some("github"),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(login_record::commons_login(&shared.store), None);
+        assert_eq!(login_record::stored_login(&shared.store), Some("github"));
+
+        // A session whose login is not known leaves the record as it was.
+        let (_stub, shared, result, _dir) = enroll_against(Commons::Production).await;
+        result.expect("enrolled");
+        assert_eq!(login_record::commons_login(&shared.store), None);
     }
 
     /// A referral code typed at sign-up rides in the finish, canonical, and

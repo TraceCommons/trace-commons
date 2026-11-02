@@ -82,39 +82,80 @@ fn escape(text: &str) -> String {
 /// The page: one button per offered login, in the build's order, with the
 /// wallet notice under the NEAR wallet button.
 ///
+/// With `account_login` -- the login the device's Trace Commons account was
+/// last accepted with (`login_record::commons_login`) -- that login comes
+/// first, marked as the account's, and the others follow under their own
+/// line. A remembered login this build does not offer is ignored and the
+/// page is drawn as if none were remembered.
+///
 /// Fails closed on a login with no title: a button with no name, or with the
 /// raw tag, is not something to show a person.
-pub(super) fn render(offered: &[&str], state: &str, nonce: &str) -> Result<String> {
+pub(super) fn render(
+    offered: &[&str],
+    account_login: Option<&str>,
+    state: &str,
+    nonce: &str,
+) -> Result<String> {
+    use crate::private_inference_copy as copy;
     if !token_shaped(state) || !token_shaped(nonce) || offered.is_empty() {
         bail!("near_ai_credential_unavailable")
     }
+    let marked = account_login.filter(|tag| offered.contains(tag));
     let mut options = String::new();
-    for tag in offered {
-        if tag.is_empty() || !tag.bytes().all(|b| b.is_ascii_lowercase()) {
-            bail!("near_ai_credential_provider_unknown")
+    if let Some(tag) = marked {
+        options.push_str(&button(tag)?);
+        options.push_str(&note(copy::NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN));
+        if let Some(path) = change_account_path() {
+            options.push_str(&path);
         }
-        let title = crate::private_inference_copy::credential_provider_title(tag)
-            .ok_or_else(|| anyhow!("near_ai_credential_provider_unknown"))?;
-        options.push_str(&format!(
-            "<button type=\"submit\" name=\"provider\" value=\"{tag}\">{}</button>\n",
-            escape(title)
-        ));
-        if *tag == "near" {
+        if offered.len() > 1 {
             options.push_str(&format!(
-                "<p class=\"note\">{}</p>\n",
-                escape(crate::private_inference_copy::CREDENTIAL_WALLET_NOTICE)
+                "<p class=\"others\">{}</p>\n",
+                escape(copy::NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS)
             ));
         }
     }
+    for tag in offered.iter().filter(|tag| Some(**tag) != marked) {
+        options.push_str(&button(tag)?);
+    }
     Ok(include_str!("choose.html")
-        .replace(
-            "__HEADING__",
-            &escape(crate::private_inference_copy::NEAR_AI_SIGN_IN_PAGE_HEADING),
-        )
+        .replace("__HEADING__", &escape(copy::NEAR_AI_SIGN_IN_PAGE_HEADING))
         .replace("__CHOOSE_PATH__", CHOOSE_PATH)
         .replace("__STATE__", state)
         .replace("__NONCE__", nonce)
         .replace("__OPTIONS__\n", &options))
+}
+
+/// One login's button, and the wallet notice under the wallet's.
+fn button(tag: &str) -> Result<String> {
+    if tag.is_empty() || !tag.bytes().all(|b| b.is_ascii_lowercase()) {
+        bail!("near_ai_credential_provider_unknown")
+    }
+    let title = crate::private_inference_copy::credential_provider_title(tag)
+        .ok_or_else(|| anyhow!("near_ai_credential_provider_unknown"))?;
+    let mut html = format!(
+        "<button type=\"submit\" name=\"provider\" value=\"{tag}\">{}</button>\n",
+        escape(title)
+    );
+    if tag == "near" {
+        html.push_str(&note(
+            crate::private_inference_copy::CREDENTIAL_WALLET_NOTICE,
+        ));
+    }
+    Ok(html)
+}
+
+fn note(text: &str) -> String {
+    format!("<p class=\"note\">{}</p>\n", escape(text))
+}
+
+/// Seam for changing which NEAR AI account the Trace Commons account uses.
+/// That flow has its own spec (`change-nearai-account-design`); when it
+/// exists, its way in from this page -- markup placed under the marked
+/// login -- comes from here. Until then there is none, and the page offers
+/// the other logins without promising they reach the same account.
+fn change_account_path() -> Option<String> {
+    None
 }
 
 /// A choice that passed every check, with the connection that made it still
@@ -162,10 +203,16 @@ pub(super) async fn receive_choice(
     listener: &TcpListener,
     state: &str,
     offered: &[&'static str],
+    account_login: Option<&str>,
 ) -> Result<Chosen> {
     let port = listener.local_addr()?.port();
     let authority = format!("127.0.0.1:{port}");
-    let page = render(offered, state, &super::loopback::random_state()?)?;
+    let page = render(
+        offered,
+        account_login,
+        state,
+        &super::loopback::random_state()?,
+    )?;
     loop {
         let (mut stream, _) = listener.accept().await?;
         let Ok(Ok(request)) =

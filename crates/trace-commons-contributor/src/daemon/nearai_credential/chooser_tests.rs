@@ -1,7 +1,8 @@
 use super::*;
 use crate::private_inference_copy::{
     CREDENTIAL_PROVIDER_GITHUB, CREDENTIAL_PROVIDER_GOOGLE, CREDENTIAL_PROVIDER_NEAR,
-    CREDENTIAL_WALLET_NOTICE, NEAR_AI_SIGN_IN_PAGE_HEADING,
+    CREDENTIAL_WALLET_NOTICE, NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN, NEAR_AI_SIGN_IN_PAGE_HEADING,
+    NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS,
 };
 
 const STATE: &str = "s7aTe_-0123456789abcdefghijklmnopqrstuvwxyzA";
@@ -17,7 +18,7 @@ fn buttons(page: &str) -> Vec<&str> {
 
 #[test]
 fn the_page_lists_exactly_the_offered_logins_in_order() {
-    let page = render(&["near", "github", "google"], STATE, NONCE).unwrap();
+    let page = render(&["near", "github", "google"], None, STATE, NONCE).unwrap();
     assert_eq!(buttons(&page), ["near", "github", "google"]);
     for title in [
         CREDENTIAL_PROVIDER_NEAR,
@@ -40,13 +41,58 @@ fn the_page_lists_exactly_the_offered_logins_in_order() {
     assert!(page.contains(&format!("name=\"state\" value=\"{STATE}\"")));
 
     // Order is the build's, not the page's.
-    let page = render(&["google", "near"], STATE, NONCE).unwrap();
+    let page = render(&["google", "near"], None, STATE, NONCE).unwrap();
     assert_eq!(buttons(&page), ["google", "near"]);
 }
 
 #[test]
+fn with_nothing_remembered_the_page_marks_no_login() {
+    let page = render(&["near", "github", "google"], None, STATE, NONCE).unwrap();
+    assert!(!page.contains(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN));
+    assert!(!page.contains(NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS));
+    // Identical to a remembered login this build does not offer.
+    assert_eq!(
+        page,
+        render(
+            &["near", "github", "google"],
+            Some("bitbucket"),
+            STATE,
+            NONCE
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn the_accounts_login_comes_first_and_is_marked() {
+    let page = render(&["near", "github", "google"], Some("github"), STATE, NONCE).unwrap();
+    assert_eq!(buttons(&page), ["github", "near", "google"]);
+    let github = page.find(">GitHub</button>").unwrap();
+    let mark = page.find(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN).unwrap();
+    let others = page.find(NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS).unwrap();
+    let wallet = page.find(">NEAR wallet</button>").unwrap();
+    assert!(github < mark && mark < others && others < wallet, "{page}");
+    assert_eq!(page.matches(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN).count(), 1);
+    // The wallet keeps its notice wherever it is listed.
+    assert!(page.find(CREDENTIAL_WALLET_NOTICE).unwrap() > wallet);
+
+    // The wallet as the account's login: its notice, then the mark.
+    let page = render(&["near", "github", "google"], Some("near"), STATE, NONCE).unwrap();
+    assert_eq!(buttons(&page), ["near", "github", "google"]);
+    let notice = page.find(CREDENTIAL_WALLET_NOTICE).unwrap();
+    let mark = page.find(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN).unwrap();
+    let github = page.find(">GitHub</button>").unwrap();
+    assert!(notice < mark && mark < github, "{page}");
+
+    // Alone, it is marked with no "other logins" line beneath it.
+    let page = render(&["google"], Some("google"), STATE, NONCE).unwrap();
+    assert!(page.contains(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN));
+    assert!(!page.contains(NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS));
+}
+
+#[test]
 fn a_build_without_the_wallet_shows_no_wallet_button_or_notice() {
-    let page = render(&["google"], STATE, NONCE).unwrap();
+    let page = render(&["google"], None, STATE, NONCE).unwrap();
     assert_eq!(buttons(&page), ["google"]);
     assert!(!page.contains(CREDENTIAL_WALLET_NOTICE));
     assert!(!page.contains(CREDENTIAL_PROVIDER_NEAR));
@@ -54,7 +100,13 @@ fn a_build_without_the_wallet_shows_no_wallet_button_or_notice() {
 
 #[test]
 fn the_page_is_the_builds_list() {
-    let page = render(crate::channel::NEAR_AI_SIGN_IN_PROVIDERS, STATE, NONCE).unwrap();
+    let page = render(
+        crate::channel::NEAR_AI_SIGN_IN_PROVIDERS,
+        None,
+        STATE,
+        NONCE,
+    )
+    .unwrap();
     assert_eq!(buttons(&page), crate::channel::NEAR_AI_SIGN_IN_PROVIDERS);
 }
 
@@ -70,18 +122,24 @@ fn every_offered_login_has_a_title() {
 
 #[test]
 fn the_page_fetches_nothing_and_quotes_nothing_it_was_given() {
-    let page = render(&["near", "github", "google"], STATE, NONCE).unwrap();
+    let page = render(&["near", "github", "google"], None, STATE, NONCE).unwrap();
     assert!(!page.contains("http://"), "{page}");
     assert!(!page.contains("https://"), "{page}");
     assert!(!page.contains("__"), "an unfilled placeholder: {page}");
     for hostile in ["\"><script>", "a'b", "a b", "", &"a".repeat(65)] {
-        assert!(render(&["google"], hostile, NONCE).is_err(), "{hostile}");
-        assert!(render(&["google"], STATE, hostile).is_err(), "{hostile}");
+        assert!(
+            render(&["google"], None, hostile, NONCE).is_err(),
+            "{hostile}"
+        );
+        assert!(
+            render(&["google"], None, STATE, hostile).is_err(),
+            "{hostile}"
+        );
     }
     // A login with no title, or no logins at all, is not drawn.
-    assert!(render(&["google", "bitbucket"], STATE, NONCE).is_err());
-    assert!(render(&["Google"], STATE, NONCE).is_err());
-    assert!(render(&[], STATE, NONCE).is_err());
+    assert!(render(&["google", "bitbucket"], None, STATE, NONCE).is_err());
+    assert!(render(&["Google"], None, STATE, NONCE).is_err());
+    assert!(render(&[], None, STATE, NONCE).is_err());
 }
 
 /// Send one raw request and return the whole response.
@@ -123,7 +181,7 @@ async fn only_this_attempts_same_origin_choice_of_an_offered_login_is_taken() {
     let server = tokio::spawn({
         let state = state.clone();
         async move {
-            receive_choice(&listener, &state, &["google", "github"])
+            receive_choice(&listener, &state, &["google", "github"], None)
                 .await
                 .map(|chosen| chosen.provider)
         }
@@ -367,6 +425,72 @@ async fn a_single_login_build_skips_the_page() {
     let url = reqwest::Url::parse(started["browser_url"].as_str().unwrap()).unwrap();
     assert_ne!(url.path(), PAGE_PATH);
     assert_eq!(url.path(), "/v1/auth/google");
+    let id = started["attempt_id"].as_str().unwrap();
+    crate::daemon::nearai_credential::ceremony::cancel(store.dir(), Some(id)).unwrap();
+}
+
+/// A sign-in on a device whose Trace Commons account is known to use a
+/// login opens a page that lists that login first and marks it.
+#[cfg(not(feature = "near-ai-staging"))]
+#[tokio::test]
+async fn the_page_marks_the_login_the_commons_last_accepted() {
+    let (_directory, store) = crate::config::tests_support::temp_store();
+    crate::daemon::nearai_credential::login_record::accepted_by_commons(&store, Some("google"));
+    let started = crate::daemon::nearai_credential::ceremony::begin_in_browser(&store)
+        .await
+        .unwrap();
+    let url = reqwest::Url::parse(started["browser_url"].as_str().unwrap()).unwrap();
+    let port = url.port().unwrap();
+    let authority = format!("127.0.0.1:{port}");
+    let page = send(
+        ([127, 0, 0, 1], port).into(),
+        get(
+            &authority,
+            &format!("{}?{}", url.path(), url.query().unwrap()),
+        ),
+    )
+    .await;
+    assert_eq!(buttons(&page), ["google", "near", "github"]);
+    assert!(page.contains(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN));
+    let id = started["attempt_id"].as_str().unwrap();
+    crate::daemon::nearai_credential::ceremony::cancel(store.dir(), Some(id)).unwrap();
+}
+
+/// Once picked, the attempt knows which login it is using, for the
+/// Commons check to remember.
+#[cfg(not(feature = "near-ai-staging"))]
+#[tokio::test]
+async fn a_pick_tells_the_attempt_which_login_it_uses() {
+    let (_directory, store) = crate::config::tests_support::temp_store();
+    let (_url, _location, _port, id) = choose_in_browser(&store, "github").await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while crate::daemon::nearai_credential::ceremony::attempt_provider(store.dir()).is_none()
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        crate::daemon::nearai_credential::ceremony::attempt_provider(store.dir()),
+        Some("github")
+    );
+    crate::daemon::nearai_credential::ceremony::cancel(store.dir(), Some(&id)).unwrap();
+}
+
+/// A sign-in that names its login tells the attempt at once.
+#[tokio::test]
+async fn a_named_login_tells_the_attempt_which_login_it_uses() {
+    let (_directory, store) = crate::config::tests_support::temp_store();
+    let login = *crate::channel::NEAR_AI_SIGN_IN_PROVIDERS
+        .iter()
+        .find(|tag| **tag != "near")
+        .unwrap();
+    let started = crate::daemon::nearai_credential::ceremony::begin(&store, login)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::daemon::nearai_credential::ceremony::attempt_provider(store.dir()),
+        Some(login)
+    );
     let id = started["attempt_id"].as_str().unwrap();
     crate::daemon::nearai_credential::ceremony::cancel(store.dir(), Some(id)).unwrap();
 }

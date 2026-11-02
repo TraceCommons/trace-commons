@@ -1228,6 +1228,15 @@ pub const CREDENTIAL_WALLET_NOTICE: &str =
 /// (owner wording, 2026-11-02).
 pub const NEAR_AI_SIGN_IN_PAGE_HEADING: &str = "Sign in to NEAR AI";
 
+/// DRAFT, not owner-approved. Under the login the device's Trace Commons
+/// account was last accepted with, which the page lists first.
+pub const NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN: &str =
+    concat!("Your ", crate::commons_name!(), " account uses this login.");
+
+/// DRAFT, not owner-approved. Above the other logins, when one is marked as
+/// the account's.
+pub const NEAR_AI_SIGN_IN_PAGE_OTHER_LOGINS: &str = "Or use another login";
+
 /// The button title for one of `channel::NEAR_AI_SIGN_IN_PROVIDERS`, or
 /// `None` for a tag with no title yet. A new login (near.com, say) is a
 /// channel entry, a title here, and a ceremony arm; the browser page and

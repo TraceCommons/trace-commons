@@ -103,6 +103,7 @@ impl Fixture {
                     status: "waiting_for_browser",
                 },
                 abort: None,
+                provider: None,
             },
         );
     }

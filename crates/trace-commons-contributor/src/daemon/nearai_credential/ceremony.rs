@@ -52,6 +52,10 @@ const MAX_ATTEMPTS: usize = 128;
 #[path = "ceremony_regression_tests.rs"]
 mod regression_tests;
 
+#[cfg(test)]
+#[path = "ceremony_login_tests.rs"]
+mod login_tests;
+
 /// One ceremony's public state. Never carries the key, the session, or the
 /// browser URL -- the URL is returned once, by `begin`, and is not re-served
 /// by a status poll that any local caller can make.
@@ -64,6 +68,8 @@ pub struct Status {
 struct Attempt {
     state: Status,
     abort: Option<tokio::task::AbortHandle>,
+    /// The login this attempt signs in with, once known. Label only.
+    provider: Option<&'static str>,
 }
 
 static ATTEMPTS: OnceLock<Mutex<HashMap<PathBuf, Attempt>>> = OnceLock::new();
@@ -213,24 +219,69 @@ pub(super) fn key_name(attempt_id: &str) -> String {
     format!("trace-commons-{suffix}")
 }
 
-enum BrowserSignIn {
+/// One sign-in's browser leg, and which attempt and directory it belongs to,
+/// so the login it ends up using can be told to the attempt
+/// ([`attempt_provider`]) and remembered once its session is stored
+/// (`login_record::record_stored_login`).
+struct BrowserSignIn {
+    dir: PathBuf,
+    attempt_id: String,
+    leg: Leg,
+}
+
+enum Leg {
     OAuth {
         listener: std::net::TcpListener,
         state: String,
+        provider: &'static str,
     },
     Near(NearWalletListener),
     /// No login named: the browser is sent to the chooser page on this
     /// listener, and the login picked there continues on it (see
     /// [`chooser`]). `state` binds the page, the choice and, for an OAuth
-    /// login, the deposit.
+    /// login, the deposit. `account_login` is the login the device's Trace
+    /// Commons account was last accepted with, which the page lists first.
     Choose {
         listener: std::net::TcpListener,
         state: String,
+        account_login: Option<&'static str>,
     },
 }
 
+impl Leg {
+    /// The login this leg signs in with; `None` while it is still a choice.
+    fn provider(&self) -> Option<&'static str> {
+        match self {
+            Self::OAuth { provider, .. } => Some(provider),
+            Self::Near(_) => Some("near"),
+            Self::Choose { .. } => None,
+        }
+    }
+}
+
 impl BrowserSignIn {
-    async fn prepare(api: &CloudApi, provider: Option<&str>) -> Result<(String, Self)> {
+    async fn prepare(
+        api: &CloudApi,
+        store: &ConfigStore,
+        attempt_id: &str,
+        provider: Option<&str>,
+    ) -> Result<(String, Self)> {
+        let (url, leg) = Self::prepare_leg(api, store, provider).await?;
+        Ok((
+            url,
+            Self {
+                dir: store.dir().to_path_buf(),
+                attempt_id: attempt_id.to_owned(),
+                leg,
+            },
+        ))
+    }
+
+    async fn prepare_leg(
+        api: &CloudApi,
+        store: &ConfigStore,
+        provider: Option<&str>,
+    ) -> Result<(String, Leg)> {
         let provider = match (provider, crate::channel::NEAR_AI_SIGN_IN_PROVIDERS) {
             (Some(provider), _) => provider,
             // One login (staging): nothing to choose, so no page.
@@ -241,52 +292,66 @@ impl BrowserSignIn {
                 let url = chooser::page_url(listener.local_addr()?.port(), &state);
                 return Ok((
                     url,
-                    Self::Choose {
+                    Leg::Choose {
                         listener: listener.into_std()?,
                         state,
+                        account_login: super::login_record::commons_login(store),
                     },
                 ));
             }
         };
         // Only what this build offers (`channel::NEAR_AI_SIGN_IN_PROVIDERS`):
         // a staging build has no NEAR wallet ceremony to begin.
-        if !crate::channel::NEAR_AI_SIGN_IN_PROVIDERS.contains(&provider) {
+        let Some(provider) = crate::channel::NEAR_AI_SIGN_IN_PROVIDERS
+            .iter()
+            .copied()
+            .find(|offered| *offered == provider)
+        else {
             bail!("near_ai_credential_provider_unknown")
-        }
+        };
         if provider == "near" {
             let (url, listener) = near_wallet_loopback::bind().await?;
-            return Ok((url, Self::Near(listener)));
+            return Ok((url, Leg::Near(listener)));
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let url = api.authorize_url(provider, listener.local_addr()?.port())?;
         Ok((
             url,
-            Self::OAuth {
+            Leg::OAuth {
                 listener: listener.into_std()?,
                 state: loopback::random_state()?,
+                provider,
             },
         ))
     }
 
     /// Serve the chooser until a login is picked, then send the browser to
-    /// that login on the same listener. Any other sign-in is returned as is.
-    async fn chosen(self, api: &CloudApi) -> Result<Self> {
-        let (listener, state) = match self {
-            Self::Choose { listener, state } => (listener, state),
+    /// that login on the same listener. Any other leg is returned as is.
+    async fn chosen(leg: Leg, api: &CloudApi) -> Result<Leg> {
+        let (listener, state, account_login) = match leg {
+            Leg::Choose {
+                listener,
+                state,
+                account_login,
+            } => (listener, state, account_login),
             other => return Ok(other),
         };
         let listener = tokio::net::TcpListener::from_std(listener)?;
-        let choice =
-            chooser::receive_choice(&listener, &state, crate::channel::NEAR_AI_SIGN_IN_PROVIDERS)
-                .await?;
+        let choice = chooser::receive_choice(
+            &listener,
+            &state,
+            crate::channel::NEAR_AI_SIGN_IN_PROVIDERS,
+            account_login,
+        )
+        .await?;
         let next = listener
             .into_std()
             .map_err(anyhow::Error::from)
             .and_then(|listener| Self::continue_on(api, choice.provider, listener, state));
         match next {
-            Ok((location, sign_in)) => {
+            Ok((location, leg)) => {
                 choice.redirect(&location).await;
-                Ok(sign_in)
+                Ok(leg)
             }
             Err(error) => {
                 choice.refuse().await;
@@ -298,16 +363,23 @@ impl BrowserSignIn {
     /// The picked login, on the listener the chooser was served from.
     fn continue_on(
         api: &CloudApi,
-        provider: &str,
+        provider: &'static str,
         listener: std::net::TcpListener,
         state: String,
-    ) -> Result<(String, Self)> {
+    ) -> Result<(String, Leg)> {
         if provider == "near" {
             let (url, listener) = near_wallet_loopback::adopt(listener)?;
-            return Ok((url, Self::Near(listener)));
+            return Ok((url, Leg::Near(listener)));
         }
         let url = api.authorize_url(provider, listener.local_addr()?.port())?;
-        Ok((url, Self::OAuth { listener, state }))
+        Ok((
+            url,
+            Leg::OAuth {
+                listener,
+                state,
+                provider,
+            },
+        ))
     }
 
     /// The third argument is the agent that *created* the session, which the
@@ -315,20 +387,33 @@ impl BrowserSignIn {
     /// that difference is the point: the OAuth redirect is completed by the
     /// browser, so the browser's agent is what cloud-api recorded, while the
     /// NEAR wallet sign-in is a request this client makes itself.
+    ///
+    /// Once `finish` has stored the session, the login it came from is
+    /// remembered (`login_record`), label only.
     async fn finish<F, Fut>(self, api: &CloudApi, finish: F) -> Result<()>
     where
         F: FnOnce(loopback::SessionTokens, Option<DateTime<Utc>>, String) -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
-        match self.chosen(api).await? {
-            Self::OAuth { listener, state } => {
+        let Self {
+            dir,
+            attempt_id,
+            leg,
+        } = self;
+        let leg = Self::chosen(leg, api).await?;
+        let provider = leg.provider();
+        set_attempt_provider(&dir, &attempt_id, provider);
+        let outcome = match leg {
+            Leg::OAuth {
+                listener, state, ..
+            } => {
                 let listener = tokio::net::TcpListener::from_std(listener)?;
                 loopback::receive_session(listener, &state, |session| {
                     finish(session.tokens, None, session.user_agent)
                 })
                 .await
             }
-            Self::Near(listener) => {
+            Leg::Near(listener) => {
                 let authenticated = api.sign_in_near(listener.wait().await?).await?;
                 finish(
                     authenticated.session,
@@ -337,9 +422,49 @@ impl BrowserSignIn {
                 )
                 .await
             }
-            Self::Choose { .. } => bail!("near_ai_credential_unavailable"),
+            Leg::Choose { .. } => bail!("near_ai_credential_unavailable"),
+        };
+        if let (Ok(()), Some(provider)) = (&outcome, provider) {
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(store) = ConfigStore::open(dir) {
+                    super::login_record::record_stored_login(&store, provider);
+                }
+            })
+            .await;
         }
+        outcome
     }
+}
+
+/// Tell the attempt which login it is using, once that is known.
+fn set_attempt_provider(dir: &std::path::Path, attempt_id: &str, provider: Option<&'static str>) {
+    if let Some(attempt) = attempts()
+        .lock()
+        .expect("ceremony state lock")
+        .get_mut(dir)
+        .filter(|a| a.state.attempt_id == attempt_id)
+    {
+        attempt.provider = provider;
+    }
+}
+
+/// The login the current attempt for `dir` signs in with: named when it
+/// began, or picked on the browser's login page. `None` before a pick, or
+/// with no attempt. For the Commons acceptance point to remember
+/// (`login_record::accepted_by_commons`).
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the hook for the Commons check inside the ceremony (claude/nearai-signin-keep-bound-account)"
+    )
+)]
+pub(crate) fn attempt_provider(dir: &std::path::Path) -> Option<&'static str> {
+    attempts()
+        .lock()
+        .expect("ceremony state lock")
+        .get(dir)
+        .and_then(|attempt| attempt.provider)
 }
 
 /// Begin a ceremony: bind the listener, hand back where to send the browser.
@@ -373,7 +498,8 @@ async fn begin_with(store: &ConfigStore, provider: Option<&str>) -> Result<serde
     let api = CloudApi::live()?;
     let attempt_id = loopback::random_state()?;
     let dir = store.dir().to_path_buf();
-    let (browser_url, sign_in) = BrowserSignIn::prepare(&api, provider).await?;
+    let (browser_url, sign_in) = BrowserSignIn::prepare(&api, store, &attempt_id, provider).await?;
+    let known_provider = sign_in.leg.provider();
     #[cfg(test)]
     record_browser_url_served(&dir);
 
@@ -396,6 +522,7 @@ async fn begin_with(store: &ConfigStore, provider: Option<&str>) -> Result<serde
                     status: "waiting_for_browser",
                 },
                 abort: None,
+                provider: known_provider,
             },
         );
     }
