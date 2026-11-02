@@ -11,17 +11,17 @@
 use std::net::Ipv4Addr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, timeout_at};
 
+use crate::daemon::nearai_credential::loopback_http;
 use crate::daemon::nearai_credential::near_wallet::{
     CALLBACK_PATH, DEPOSIT_PATH, MAX_CALLBACK_BYTES, NearWalletChallenge, NearWalletError,
     VerifiedNearWalletSignIn,
 };
 use crate::daemon::nearai_credential::near_wallet_page::{self, ASSET_TIMEOUT, Assets};
 
-const MAX_HEADER_BYTES: usize = 8192;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Owns the socket and challenge; neither can outlive cancellation of wait().
@@ -197,78 +197,31 @@ enum Request {
 }
 
 fn parse_head(bytes: &[u8], authority: &str) -> Result<(Route, usize), NearWalletError> {
-    if bytes.len() > MAX_HEADER_BYTES {
-        return Err(NearWalletError::Invalid);
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| NearWalletError::Invalid)?;
-    let text = text
-        .strip_suffix("\r\n\r\n")
-        .ok_or(NearWalletError::Invalid)?;
-    let mut lines = text.split("\r\n");
-    let route = match lines.next() {
-        Some(line) if line == format!("GET {CALLBACK_PATH} HTTP/1.1") => Route::Callback,
-        Some(line) if line == format!("POST {DEPOSIT_PATH} HTTP/1.1") => Route::Deposit,
-        Some(line) => {
-            let path = line
-                .strip_prefix("GET ")
-                .and_then(|line| line.strip_suffix(" HTTP/1.1"))
-                .and_then(near_wallet_page::asset_path)
-                .ok_or(NearWalletError::Invalid)?;
-            Route::Asset(path.to_owned())
-        }
+    // Framing, `Host` and header hygiene are the shared reader's; the routes
+    // and what each requires are this listener's.
+    let head = loopback_http::parse_head(bytes, authority, MAX_CALLBACK_BYTES)
+        .map_err(|_| NearWalletError::Invalid)?;
+    let route = match (head.method.as_str(), head.target.as_str()) {
+        ("GET", target) if target == CALLBACK_PATH => Route::Callback,
+        ("POST", target) if target == DEPOSIT_PATH => Route::Deposit,
+        ("GET", target) => Route::Asset(
+            near_wallet_page::asset_path(target)
+                .ok_or(NearWalletError::Invalid)?
+                .to_owned(),
+        ),
         _ => return Err(NearWalletError::Invalid),
     };
-    let (mut host, mut origin, mut length, mut content_type) = (None, None, None, None);
-    for line in lines {
-        let (name, value) = line.split_once(':').ok_or(NearWalletError::Invalid)?;
-        if name.is_empty() || !name.bytes().all(header_token) {
-            return Err(NearWalletError::Invalid);
-        }
-        let value = value.trim_matches([' ', '\t']);
-        if value
-            .chars()
-            .any(|character| character.is_control() && character != '\t')
-        {
-            return Err(NearWalletError::Invalid);
-        }
-        let slot = match name.to_ascii_lowercase().as_str() {
-            "host" => &mut host,
-            "origin" => &mut origin,
-            "content-length" => &mut length,
-            "content-type" => &mut content_type,
-            "transfer-encoding" | "expect" | "trailer" => return Err(NearWalletError::Invalid),
-            _ => continue,
-        };
-        if slot.replace(value).is_some() {
-            return Err(NearWalletError::Invalid);
-        }
-    }
-    if host != Some(authority) {
-        return Err(NearWalletError::Invalid);
-    }
-    let size = match length {
-        Some(value) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
-            value
-                .parse::<usize>()
-                .map_err(|_| NearWalletError::Invalid)?
-        }
-        Some(_) => return Err(NearWalletError::Invalid),
-        None => 0,
-    };
+    let size = head.body_len();
     match &route {
         Route::Callback | Route::Asset(_) if size == 0 => {}
         Route::Deposit
-            if length.is_some()
+            if head.length.is_some()
                 && (1..=MAX_CALLBACK_BYTES).contains(&size)
-                && origin == Some(format!("http://{authority}").as_str())
-                && content_type.is_some_and(form_content_type) => {}
+                && head.origin.as_deref() == Some(format!("http://{authority}").as_str())
+                && head.content_type.as_deref().is_some_and(form_content_type) => {}
         _ => return Err(NearWalletError::Invalid),
     }
     Ok((route, size))
-}
-
-fn header_token(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 fn form_content_type(value: &str) -> bool {
@@ -291,43 +244,13 @@ fn form_content_type(value: &str) -> bool {
 }
 
 async fn read_request(stream: &mut TcpStream, authority: &str) -> Result<Request, NearWalletError> {
-    let mut bytes = Vec::with_capacity(MAX_HEADER_BYTES);
-    let mut chunk = [0; 1024];
-    let end = loop {
-        if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-            break position + 4;
-        }
-        let available = (MAX_HEADER_BYTES - bytes.len()).min(chunk.len());
-        if available == 0 {
-            return Err(NearWalletError::Invalid);
-        }
-        let count = stream
-            .read(&mut chunk[..available])
-            .await
-            .map_err(|_| NearWalletError::Invalid)?;
-        if count == 0 {
-            return Err(NearWalletError::Invalid);
-        }
-        bytes.extend_from_slice(&chunk[..count]);
-    };
-    let (route, length) = parse_head(&bytes[..end], authority)?;
-    let mut body = bytes[end..].to_vec();
-    while body.len() < length {
-        // Read one extra byte when available so an overrun is refused instead
-        // of silently truncating bytes coalesced with the declared body.
-        let available = (length - body.len() + 1).min(chunk.len());
-        let count = stream
-            .read(&mut chunk[..available])
-            .await
-            .map_err(|_| NearWalletError::Invalid)?;
-        if count == 0 {
-            return Err(NearWalletError::Invalid);
-        }
-        body.extend_from_slice(&chunk[..count]);
-    }
-    if body.len() != length {
-        return Err(NearWalletError::Invalid);
-    }
+    let (head, rest) = loopback_http::read_head(stream)
+        .await
+        .map_err(|_| NearWalletError::Invalid)?;
+    let (route, length) = parse_head(&head, authority)?;
+    let body = loopback_http::read_body(stream, rest, length)
+        .await
+        .map_err(|_| NearWalletError::Invalid)?;
     match route {
         Route::Callback => Ok(Request::Callback),
         Route::Asset(path) => Ok(Request::Asset(path)),
@@ -369,6 +292,7 @@ mod tests {
     use url::Url;
 
     use crate::daemon::nearai_credential::near_wallet_loopback::*;
+    use tokio::io::AsyncReadExt;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(8);
     const AUTHORITY: &str = "127.0.0.1:54321";
@@ -532,7 +456,7 @@ mod tests {
         let mut utf8 = valid.into_bytes();
         utf8[0] = 0xff;
         assert!(parse_head(&utf8, AUTHORITY).is_err());
-        assert!(parse_head(&vec![b'a'; MAX_HEADER_BYTES + 1], AUTHORITY).is_err());
+        assert!(parse_head(&vec![b'a'; loopback_http::MAX_HEADER_BYTES + 1], AUTHORITY).is_err());
     }
 
     #[test]

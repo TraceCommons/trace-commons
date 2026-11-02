@@ -31,7 +31,7 @@
 use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 /// Where the service is told to send the browser. Bare -- no query, no
 /// fragment -- because `validate_frontend_callback` refuses either.
@@ -43,8 +43,6 @@ const MAX_USER_AGENT_BYTES: usize = 512;
 /// the service never sees it, so it may carry a body.
 pub const DEPOSIT_PATH: &str = "/trace-commons/near-ai/deposit";
 
-/// Header bytes accepted from one connection before it is abandoned.
-const MAX_HEADER_BYTES: usize = 8192;
 /// Body bytes accepted from one deposit. A JWT plus an `rt_` token is a few
 /// hundred; this is generous and still bounded.
 const MAX_BODY_BYTES: usize = 8192;
@@ -74,6 +72,18 @@ impl std::fmt::Debug for SessionTokens {
     }
 }
 
+/// Whether `value` has the shape of [`random_state`]'s output: non-empty, at
+/// most 64 characters, base64url only. A value a page quotes inside a script
+/// or an attribute is refused unless it has this shape, rather than escaped.
+/// The one definition every loopback page checks against.
+pub(super) fn state_shaped(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// A URL-safe random string, used as the ceremony's local state value.
 pub fn random_state() -> Result<String> {
     let mut bytes = [0; 32];
@@ -93,12 +103,7 @@ pub fn random_state() -> Result<String> {
 /// module's own base64url output, so it cannot contain a quote or a backslash,
 /// and [`bounce_page`] refuses anything else rather than trusting that.
 fn bounce_page(state: &str) -> Result<String> {
-    if state.is_empty()
-        || state.len() > 64
-        || !state
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
+    if !state_shaped(state) {
         bail!("near_ai_credential_callback_invalid")
     }
     Ok(include_str!("sign_in.html")
@@ -187,69 +192,11 @@ fn parse_deposit(body: &str, state: &str) -> Result<BrowserSession> {
     })
 }
 
-/// One HTTP request, far enough decoded to route it.
+/// One request, as the routes below need it.
 struct Incoming {
     method: String,
     path: String,
     body: String,
-}
-
-/// Read one request off a connection, tolerating a client that writes its
-/// headers in more than one packet -- which a browser routinely does, and
-/// which a single `read` would silently truncate.
-async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<Incoming> {
-    let mut bytes = vec![0; MAX_HEADER_BYTES];
-    let mut filled = 0;
-    let header_end = loop {
-        if filled == bytes.len() {
-            bail!("near_ai_credential_callback_invalid")
-        }
-        let count = stream.read(&mut bytes[filled..]).await?;
-        if count == 0 {
-            bail!("near_ai_credential_callback_invalid")
-        }
-        filled += count;
-        // Search from far enough back that a delimiter split across two reads
-        // is still found.
-        if let Some(at) = bytes[..filled]
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-        {
-            break at + 4;
-        }
-    };
-    let head = String::from_utf8_lossy(&bytes[..header_end]).into_owned();
-    let mut lines = head.lines();
-    let parts: Vec<_> = lines.next().unwrap_or("").split_whitespace().collect();
-    if parts.len() != 3 {
-        bail!("near_ai_credential_callback_invalid")
-    }
-    let length: usize = lines
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
-        })
-        .unwrap_or(0);
-    if length > MAX_BODY_BYTES {
-        bail!("near_ai_credential_callback_invalid")
-    }
-    let mut body = bytes[header_end..filled].to_vec();
-    body.truncate(length);
-    while body.len() < length {
-        let mut chunk = vec![0; length - body.len()];
-        let count = stream.read(&mut chunk).await?;
-        if count == 0 {
-            bail!("near_ai_credential_callback_invalid")
-        }
-        body.extend_from_slice(&chunk[..count]);
-    }
-    Ok(Incoming {
-        method: parts[0].to_string(),
-        path: parts[1].to_string(),
-        body: String::from_utf8_lossy(&body).into_owned(),
-    })
 }
 
 async fn respond(stream: &mut tokio::net::TcpStream, status: &str, kind: &str, body: &str) {
@@ -277,12 +224,31 @@ where
     Fut: std::future::Future<Output = Result<T>>,
 {
     let page = bounce_page(state)?;
+    let authority = format!("127.0.0.1:{}", listener.local_addr()?.port());
     loop {
         let (mut stream, _) = listener.accept().await?;
-        let Ok(Ok(request)) =
-            tokio::time::timeout(CONNECTION_TIMEOUT, read_request(&mut stream)).await
-        else {
-            continue;
+        let request = match tokio::time::timeout(
+            CONNECTION_TIMEOUT,
+            super::loopback_http::read_request(&mut stream, &authority, MAX_BODY_BYTES),
+        )
+        .await
+        {
+            Ok(Ok((head, body))) => Incoming {
+                method: head.method,
+                path: head.target,
+                body: String::from_utf8_lossy(&body).into_owned(),
+            },
+            Ok(Err(_)) => {
+                respond(
+                    &mut stream,
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    "This callback was not accepted.",
+                )
+                .await;
+                continue;
+            }
+            Err(_) => continue,
         };
         // The service appends the fragment to the callback URL; a browser
         // strips it before the request, so the path is exact.
@@ -346,6 +312,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
 
     /// Post one deposit and read the status line back.
     async fn deposit(address: std::net::SocketAddr, body: &str) -> String {
@@ -353,7 +320,7 @@ mod tests {
         stream
             .write_all(
                 format!(
-                    "POST {DEPOSIT_PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                    "POST {DEPOSIT_PATH} HTTP/1.1\r\nHost: {address}\r\nContent-Length: {}\r\n\r\n{body}",
                     body.len()
                 )
                 .as_bytes(),
@@ -481,7 +448,7 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         stream
             .write_all(
-                format!("GET {CALLBACK_PATH} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+                format!("GET {CALLBACK_PATH} HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes(),
             )
             .await
             .unwrap();
@@ -574,12 +541,19 @@ mod tests {
         let body = "state=state&ua=Mozilla/5.0%20Test&token=jwt&refresh_token=rt_x";
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         stream
-            .write_all(format!("POST {DEPOSIT_PATH} HTTP/1.1\r\nHost: local").as_bytes())
+            .write_all(format!("POST {DEPOSIT_PATH} HTTP/1.1\r\nHost: 127.0").as_bytes())
             .await
             .unwrap();
         tokio::task::yield_now().await;
         stream
-            .write_all(format!("host\r\nContent-Length: {}\r\n\r\n", body.len()).as_bytes())
+            .write_all(
+                format!(
+                    ".0.1:{}\r\nContent-Length: {}\r\n\r\n",
+                    address.port(),
+                    body.len()
+                )
+                .as_bytes(),
+            )
             .await
             .unwrap();
         tokio::task::yield_now().await;

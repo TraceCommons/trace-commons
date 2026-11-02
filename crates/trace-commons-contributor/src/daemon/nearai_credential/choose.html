@@ -48,6 +48,8 @@ __OPTIONS__
 <script nonce="__NONCE__">
 // One choice per sign-in: a second click would race the first redirect.
 var sent = false;
+// A page restored from the back/forward cache starts a fresh choice.
+window.addEventListener("pageshow", function () { sent = false; });
 document.querySelector("form").addEventListener("submit", function (event) {
   if (sent) { event.preventDefault(); }
   sent = true;

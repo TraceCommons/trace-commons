@@ -39,6 +39,7 @@ pub(crate) mod chooser;
 pub mod funding;
 pub(crate) mod login_record;
 pub mod loopback;
+pub(crate) mod loopback_http;
 pub(crate) mod near_wallet;
 pub(crate) mod near_wallet_loopback;
 pub(crate) mod near_wallet_page;

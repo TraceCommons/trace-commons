@@ -1228,10 +1228,12 @@ pub const CREDENTIAL_WALLET_NOTICE: &str =
 /// (owner wording, 2026-11-02).
 pub const NEAR_AI_SIGN_IN_PAGE_HEADING: &str = "Sign in to NEAR AI";
 
-/// DRAFT, not owner-approved. Beside the login this device's account was
-/// last accepted with, which the page lists first. Names the app, never the
-/// Commons, which people signing in do not know by name (owner, 2026-11-02).
-pub const NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN: &str = "Connected to this app";
+/// Beside the login this device's account was last accepted with, which the
+/// page lists first. Owner-approved 2026-11-02 (replaced "Connected to this
+/// app", which read as a live connection on a page shown when the sign-in
+/// is missing). True whatever happened since, and never names the Commons,
+/// which people signing in do not know by name.
+pub const NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN: &str = "You used this login last time";
 
 /// The button title for one of `channel::NEAR_AI_SIGN_IN_PROVIDERS`, or
 /// `None` for a tag with no title yet. A new login (near.com, say) is a

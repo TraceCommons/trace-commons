@@ -3,6 +3,7 @@ use crate::private_inference_copy::{
     CREDENTIAL_PROVIDER_GITHUB, CREDENTIAL_PROVIDER_GOOGLE, CREDENTIAL_PROVIDER_NEAR,
     CREDENTIAL_WALLET_NOTICE, NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN, NEAR_AI_SIGN_IN_PAGE_HEADING,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const STATE: &str = "s7aTe_-0123456789abcdefghijklmnopqrstuvwxyzA";
 const NONCE: &str = "n0nce";
@@ -63,6 +64,11 @@ fn with_nothing_remembered_the_page_marks_no_login() {
 
 #[test]
 fn the_accounts_login_comes_first_and_is_marked() {
+    // Owner-approved wording, 2026-11-02.
+    assert_eq!(
+        NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN,
+        "You used this login last time"
+    );
     let page = render(&["near", "github", "google"], Some("github"), STATE, NONCE).unwrap();
     assert_eq!(buttons(&page), ["github", "near", "google"]);
     let github = page.find(">GitHub</button>").unwrap();
@@ -87,6 +93,29 @@ fn the_accounts_login_comes_first_and_is_marked() {
     // Alone, it is still marked.
     let page = render(&["google"], Some("google"), STATE, NONCE).unwrap();
     assert!(page.contains(NEAR_AI_SIGN_IN_PAGE_ACCOUNT_LOGIN));
+}
+
+/// Git on Windows checks the template out with CRLF line endings. The page
+/// must fill exactly as from an LF checkout: every button drawn, no
+/// placeholder left.
+#[test]
+fn a_crlf_template_fills_like_an_lf_one() {
+    let lf = include_str!("choose.html");
+    let crlf = lf.replace("\r\n", "\n").replace('\n', "\r\n");
+    let offered = ["near", "github", "google"];
+    let from_lf = fill(lf, &offered, Some("github"), STATE, NONCE).unwrap();
+    let from_crlf = fill(&crlf, &offered, Some("github"), STATE, NONCE).unwrap();
+    assert!(!from_crlf.contains("__"), "{from_crlf}");
+    assert_eq!(buttons(&from_crlf), buttons(&from_lf));
+    assert_eq!(buttons(&from_crlf), ["github", "near", "google"]);
+}
+
+/// A page restored from the back/forward cache must not keep refusing
+/// submits it never sent.
+#[test]
+fn a_restored_page_can_choose_again() {
+    let page = render(&["google"], None, STATE, NONCE).unwrap();
+    assert!(page.contains("window.addEventListener(\"pageshow\", function () { sent = false; });"));
 }
 
 #[test]
@@ -241,12 +270,25 @@ async fn only_this_attempts_same_origin_choice_of_an_offered_login_is_taken() {
             "",
             &format!("state={state}&provider=github&provider=google"),
         ),
-        // Anything else in the body, including a place to go next.
+        // Anything else in the body, including a place to go next, and
+        // including one hidden behind a `#`.
         post(
             &authority,
             Some(&own),
             "",
             &format!("state={state}&provider=github&next=https://evil.example"),
+        ),
+        post(
+            &authority,
+            Some(&own),
+            "",
+            &format!("state={state}&provider=github#next=https://evil.example"),
+        ),
+        post(
+            &authority,
+            Some(&own),
+            "",
+            &format!("state={state}#&provider=github"),
         ),
         // Another site's form, a sandboxed one, or none at all.
         post(
@@ -455,41 +497,74 @@ async fn the_page_marks_the_login_the_commons_last_accepted() {
     crate::daemon::nearai_credential::ceremony::cancel(store.dir(), Some(id)).unwrap();
 }
 
-/// Once picked, the attempt knows which login it is using, for the
-/// Commons check to remember.
+/// The OAuth leg's deposit secret is its own: the chooser's state is in the
+/// page's address (browser history, the opener's argv, the CLI's output), so
+/// a deposit bound to it is refused.
 #[cfg(not(feature = "near-ai-staging"))]
 #[tokio::test]
-async fn a_pick_tells_the_attempt_which_login_it_uses() {
+async fn the_oauth_deposit_is_bound_to_a_secret_no_url_carries() {
+    use crate::daemon::nearai_credential::loopback::{CALLBACK_PATH, DEPOSIT_PATH};
     let (_directory, store) = crate::config::tests_support::temp_store();
-    let (_url, _location, _port, id) = choose_in_browser(&store, "github").await;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while crate::daemon::nearai_credential::ceremony::attempt_provider(store.dir()).is_none()
-        && std::time::Instant::now() < deadline
-    {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert_eq!(
-        crate::daemon::nearai_credential::ceremony::attempt_provider(store.dir()),
-        Some("github")
-    );
+    let (url, _location, port, id) = choose_in_browser(&store, "github").await;
+    let chooser_state = url
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let address: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+    let authority = format!("127.0.0.1:{port}");
+    let bounce = send(address, get(&authority, CALLBACK_PATH)).await;
+    assert_eq!(status(&bounce), "HTTP/1.1 200 OK", "{bounce}");
+    let deposit_state = bounce
+        .split("body: \"state=")
+        .nth(1)
+        .and_then(|rest| rest.split('&').next())
+        .unwrap()
+        .to_owned();
+    assert!(crate::daemon::nearai_credential::loopback::state_shaped(
+        &deposit_state
+    ));
+    assert_ne!(deposit_state, chooser_state);
+    assert!(!bounce.contains(&chooser_state));
+    let body = format!("state={chooser_state}&ua=Mozilla%2F5.0&token=jwt&refresh_token=rt_x");
+    let refused = send(
+        address,
+        format!(
+            "POST {DEPOSIT_PATH} HTTP/1.1\r\nHost: {authority}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+    .await;
+    assert_eq!(status(&refused), "HTTP/1.1 400 Bad Request", "{refused}");
     crate::daemon::nearai_credential::ceremony::cancel(store.dir(), Some(&id)).unwrap();
 }
 
-/// A sign-in that names its login tells the attempt at once.
+/// A redirect that could not be written reports it, so the attempt fails
+/// at once instead of waiting out its timeout with nothing to retry.
 #[tokio::test]
-async fn a_named_login_tells_the_attempt_which_login_it_uses() {
-    let (_directory, store) = crate::config::tests_support::temp_store();
-    let login = *crate::channel::NEAR_AI_SIGN_IN_PROVIDERS
-        .iter()
-        .find(|tag| **tag != "near")
-        .unwrap();
-    let started = crate::daemon::nearai_credential::ceremony::begin(&store, login)
-        .await
-        .unwrap();
-    assert_eq!(
-        crate::daemon::nearai_credential::ceremony::attempt_provider(store.dir()),
-        Some(login)
+async fn a_redirect_that_was_not_written_says_so() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = TcpStream::connect(address).await.unwrap();
+    let (mut accepted, _) = listener.accept().await.unwrap();
+    drop(client);
+    // Our own write side closed: the write cannot happen.
+    accepted.shutdown().await.unwrap();
+    assert!(
+        !Chosen::for_test("github", accepted)
+            .redirect("http://127.0.0.1/x")
+            .await
     );
-    let id = started["attempt_id"].as_str().unwrap();
-    crate::daemon::nearai_credential::ceremony::cancel(store.dir(), Some(id)).unwrap();
+
+    let mut client = TcpStream::connect(address).await.unwrap();
+    let (accepted, _) = listener.accept().await.unwrap();
+    assert!(
+        Chosen::for_test("github", accepted)
+            .redirect("http://127.0.0.1/x")
+            .await
+    );
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 303 See Other"));
 }

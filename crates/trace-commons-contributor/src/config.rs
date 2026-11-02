@@ -109,6 +109,13 @@ pub const JOINED_BY_CODE_FILE: &str = "joined-by-device-code";
 /// new key) starts clean; sign-out keeps the key, and so keeps the marker.
 pub const DEVICE_KEY_REVOKED_FILE: &str = "device-key-revoked";
 
+/// Which NEAR AI login this device's account was last accepted with, and
+/// which one the stored session came from
+/// (`daemon::nearai_credential::login_record`). Tags only. It goes with the
+/// enrollment, so unenrolling and logging out both remove it: a next account
+/// on this machine is never shown the last one's login.
+pub const DAEMON_NEAR_AI_LOGIN_FILE: &str = "near-ai-login.json";
+
 /// The plain files that belong to one enrollment, apart from the credential
 /// references `commons_credentials` owns (device key, account session,
 /// staged device key). `unenroll` removes exactly these, with the stored
@@ -118,7 +125,7 @@ pub const DEVICE_KEY_REVOKED_FILE: &str = "device-key-revoked";
 /// record of what this device did, and the audit log records the unenroll
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), and the NEAR AI notice marker.
-pub(crate) const ENROLLMENT_FILES: [&str; 11] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 12] = [
     CONFIG_FILE,
     DAEMON_SETUP_COMPLETION_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
@@ -130,6 +137,7 @@ pub(crate) const ENROLLMENT_FILES: [&str; 11] = [
     LEGACY_INVITE_REFUSAL_FILE,
     JOINED_BY_CODE_FILE,
     DEVICE_KEY_REVOKED_FILE,
+    DAEMON_NEAR_AI_LOGIN_FILE,
 ];
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
@@ -2367,6 +2375,7 @@ mod tests {
             DAEMON_PAYOUT_ORG_NAMES_FILE,
             JOINED_BY_CODE_FILE,
             DEVICE_KEY_REVOKED_FILE,
+            DAEMON_NEAR_AI_LOGIN_FILE,
         ];
         for name in names {
             store.write_daemon_file(name, b"{}").unwrap();
