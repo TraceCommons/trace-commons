@@ -1893,6 +1893,92 @@ mod tests {
         (dir, DaemonShared::load(store).unwrap())
     }
 
+    /// The map's managed routes read the same list as the Sessions tab: a
+    /// resumed conversation is one route row, its latest row that ran; a
+    /// resume whose tool never started does not replace that row; and a
+    /// dismissed conversation leaves the map, as any dismissed row does.
+    #[test]
+    fn a_resumed_conversation_is_one_managed_route_row() {
+        use crate::managed::{
+            ConnectionKind, Generation, ToolId,
+            accounts::AccountStore,
+            sessions::{LaunchPurpose, LaunchRequest, LifecycleReport, SessionState},
+        };
+        let (dir, store) = crate::config::tests_support::temp_store();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let s = DaemonShared::load(store).unwrap();
+        let with = |f: &mut dyn FnMut(&mut crate::managed::sessions::SessionRegistry)| {
+            let mut held = s.managed.lock().unwrap();
+            f(&mut held.as_mut().unwrap().sessions);
+        };
+        let request = LaunchRequest {
+            cli_options: None,
+            model: None,
+            collect_traces: false,
+            purpose: LaunchPurpose::Coding,
+            request_id: uuid::Uuid::new_v4(),
+            tool: ToolId::Claude,
+            connection: ConnectionKind::Subscription,
+            account_id: account.id,
+            cwd: dir.path().to_path_buf(),
+            expected_generation: Generation(0),
+            save_default: false,
+            keep_saved_model: false,
+            resume_of: None,
+            background_model: None,
+        };
+        let run = |sessions: &mut crate::managed::sessions::SessionRegistry,
+                   request: LaunchRequest| {
+            let prepared = sessions.prepare(request, &account).unwrap();
+            let context = sessions
+                .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            sessions
+                .report(LifecycleReport {
+                    model: None,
+                    collection: None,
+                    session_id: prepared.session_id,
+                    proof: context.proof,
+                    state: SessionState::Exited,
+                    process_id: None,
+                    process_identity: None,
+                    exit_code: Some(0),
+                })
+                .unwrap();
+            prepared.session_id
+        };
+        let mut resumed = uuid::Uuid::nil();
+        with(&mut |sessions| {
+            let root = run(sessions, request.clone());
+            let again = sessions.resume_request(root, uuid::Uuid::new_v4()).unwrap();
+            resumed = run(sessions, again);
+            // A second resume whose ticket expires before its tool starts.
+            let again = sessions
+                .resume_request(resumed, uuid::Uuid::new_v4())
+                .unwrap();
+            sessions.prepare(again, &account).unwrap();
+            sessions
+                .sweep(Utc::now() + chrono::Duration::seconds(121))
+                .unwrap();
+        });
+        let routes = |s: &DaemonShared| {
+            super::super::ipc::handle_request(s, &call("tool_destinations", serde_json::json!({})))
+                .result
+                .expect("destinations")["managed_sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(routes(&s), vec![serde_json::json!(resumed)]);
+        with(&mut |sessions| sessions.dismiss(resumed).unwrap());
+        assert_eq!(routes(&s), Vec::<serde_json::Value>::new());
+    }
+
     fn call(method: &str, params: serde_json::Value) -> Request {
         Request {
             id: 1,

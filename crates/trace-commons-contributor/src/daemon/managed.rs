@@ -280,21 +280,16 @@ impl ManagedService {
     /// Whether an ended row's conversation can be continued in a new
     /// session: it can be started again, its conversation's root started
     /// and is not in use (`roots`, from `SessionRegistry::resume_roots`),
-    /// and the tool's id for that conversation is known. `known` keeps
-    /// that last answer for the snapshot, since every row of a chain asks
-    /// it of the same conversation.
+    /// and the tool's id for that conversation is known.
     fn can_resume(
         &self,
         view: &SessionView,
         roots: &std::collections::BTreeMap<Uuid, Uuid>,
-        known: &mut std::collections::BTreeMap<(ToolId, Uuid, Uuid), bool>,
     ) -> bool {
         view.can_start_again
-            && roots.get(&view.id).is_some_and(|root| {
-                *known
-                    .entry((view.tool, view.account_id.0, *root))
-                    .or_insert_with(|| self.knows_conversation(view.tool, view.account_id, *root))
-            })
+            && roots
+                .get(&view.id)
+                .is_some_and(|root| self.knows_conversation(view.tool, view.account_id, *root))
     }
 
     /// Redeem a ticket. A session on the NEAR AI sign-in is refused without
@@ -362,10 +357,9 @@ impl ManagedService {
             "managed_snapshot" => {
                 let mut sessions = self.sessions.views()?;
                 let roots = self.sessions.resume_roots();
-                let mut known = std::collections::BTreeMap::new();
                 for view in &mut sessions {
                     view.can_start_again = self.can_start_again(view, sign_in);
-                    view.can_resume = self.can_resume(view, &roots, &mut known);
+                    view.can_resume = self.can_resume(view, &roots);
                 }
                 let saved = [
                     self.accounts.selection(ToolId::Claude),
@@ -442,10 +436,17 @@ impl ManagedService {
                 struct Params {
                     session_id: Uuid,
                     ticket: String,
+                    /// Start again and Resume: the ended row whose tab the
+                    /// launch runs in, when Terminal still has it idle.
+                    #[serde(default)]
+                    in_window_of: Option<Uuid>,
                 }
                 let p: Params = parse(request)?;
                 let cwd = self.sessions.launch_cwd(p.session_id, &p.ticket)?;
                 let installed = self.installed_terminals(choice.app());
+                let tab = p
+                    .in_window_of
+                    .and_then(|id| self.sessions.ended_terminal(id));
                 let window = terminal::launch(
                     choice,
                     &installed,
@@ -453,6 +454,7 @@ impl ManagedService {
                     &cwd,
                     p.session_id,
                     &p.ticket,
+                    tab.as_ref(),
                 )?;
                 self.sessions.opened_in_terminal(p.session_id, window)?;
                 Ok(json!({"opened":true,"destination":terminal::destination(choice)}))
@@ -1338,7 +1340,10 @@ pub async fn sweep(shared: &DaemonShared, now: chrono::DateTime<chrono::Utc>) {
 /// The daemon's loop runs this on its lease tick, whose first tick is at
 /// startup, so rows a restart found unknown or failed are picked up too.
 /// A row whose tool the daemon saw exit has ended, so its conversation can
-/// be resumed (`SessionRegistry::tool_exited`).
+/// be resumed (`SessionRegistry::tool_exited`). That includes a quiet row
+/// with no plan (it does not collect), whose tool's process the launcher
+/// named: without it, such a row stayed unknown, holding its conversation,
+/// for good.
 ///
 /// Never while the launcher still reports, never while the tool's process
 /// runs (its pid and start time), never for a row that does not collect,
@@ -1363,20 +1368,33 @@ fn collect_abandoned_now(shared: &DaemonShared, now: chrono::DateTime<chrono::Ut
     use crate::managed::collection_plan::{self, Next, ProcessIdentity};
     let store = &shared.store;
     let ids = collection_plan::list(store);
-    if ids.is_empty() {
-        return 0;
-    }
     // Rows lapse lazily (a shell's snapshot, or a sweep while the daemon
     // hosts a route); lapse them here so a quiet launcher is seen.
-    let Ok(rows) = with_service(shared, |service| {
+    let Ok((rows, quiet)) = with_service(shared, |service| {
         service.sessions.sweep(now)?;
-        Ok(ids
-            .iter()
-            .map(|id| service.sessions.collection_status(*id))
-            .collect::<Vec<_>>())
+        Ok((
+            ids.iter()
+                .map(|id| service.sessions.collection_status(*id))
+                .collect::<Vec<_>>(),
+            service.sessions.quiet_tools(),
+        ))
     }) else {
         return 0;
     };
+    // A quiet row with no plan is never collected, so nothing below ends
+    // it: once its tool is gone it has ended, and frees its conversation.
+    // A row with a plan is ended below, when its plan is decided.
+    for (id, identity) in quiet {
+        if ids.contains(&id) {
+            continue;
+        }
+        if ProcessIdentity::parse(&identity).is_some_and(|process| !process.is_running()) {
+            let _ = with_service(shared, |service| service.sessions.tool_exited(id));
+        }
+    }
+    if ids.is_empty() {
+        return 0;
+    }
     let record = |id, collection, tool_exited: bool| {
         let _ = with_service(shared, |service| {
             service.sessions.record_collection(id, collection)?;
@@ -2343,6 +2361,15 @@ mod tests {
         )
     }
 
+    fn listed(service: &mut ManagedService, id: Uuid) -> bool {
+        let snapshot = call(service, "managed_snapshot", json!({}), false).unwrap();
+        snapshot["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == json!(id))
+    }
+
     fn row(service: &mut ManagedService, id: Uuid, sign_in: bool) -> Value {
         let snapshot = call(service, "managed_snapshot", json!({}), sign_in).unwrap();
         snapshot["sessions"]
@@ -3004,7 +3031,7 @@ mod tests {
     }
 
     /// While a resume of a conversation runs, no row on that conversation
-    /// offers Resume.
+    /// offers Resume, and the conversation is listed once, as the resume.
     #[test]
     fn resume_is_withheld_while_the_conversation_runs_elsewhere() {
         let (home, _store, mut service) = service();
@@ -3023,8 +3050,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(row(&mut service, root, false)["can_resume"], false);
-        assert_eq!(row(&mut service, root, false)["can_start_again"], true);
+        assert!(!listed(&mut service, root), "listed as its latest row");
+        assert_eq!(
+            row(&mut service, prepared.session_id, false)["can_resume"],
+            false
+        );
         assert_eq!(
             call(
                 &mut service,
@@ -3046,11 +3076,41 @@ mod tests {
             Some(0),
         )
         .unwrap();
-        assert_eq!(row(&mut service, root, false)["can_resume"], true);
+        assert!(!listed(&mut service, root));
         assert_eq!(
             row(&mut service, prepared.session_id, false)["can_resume"],
             true
         );
+    }
+
+    /// A resume whose tool never starts holds the conversation only until
+    /// its launch ticket expires: then the row that ran is listed again,
+    /// with Start again and Resume, and the failed resume is not.
+    #[test]
+    fn a_resume_that_never_starts_gives_the_conversation_back() {
+        let (home, _store, mut service) = service();
+        let folder = home.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        let root = ended_on(&mut service, ToolId::Claude, &folder);
+        claude_transcript(&mut service, root);
+        let prepared: PreparedLaunch = serde_json::from_value(
+            call(
+                &mut service,
+                "managed_session_resume",
+                json!({"session_id":root,"request_id":Uuid::new_v4()}),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(!listed(&mut service, root), "the resume holds it");
+        service
+            .sessions
+            .sweep(chrono::Utc::now() + chrono::Duration::seconds(121))
+            .unwrap();
+        assert!(!listed(&mut service, prepared.session_id));
+        assert_eq!(row(&mut service, root, false)["can_start_again"], true);
+        assert_eq!(row(&mut service, root, false)["can_resume"], true);
     }
 
     #[test]
@@ -3078,7 +3138,8 @@ mod tests {
             "no turn yet"
         );
         claude_transcript(&mut service, id);
-        assert_eq!(row(&mut service, id, false)["can_resume"], true);
+        let old = row(&mut service, id, false);
+        assert_eq!(old["can_resume"], true);
 
         let prepared: PreparedLaunch = serde_json::from_value(
             call(
@@ -3093,7 +3154,6 @@ mod tests {
         assert_ne!(prepared.session_id, id, "a resumed launch is a new row");
         assert!(prepared.ticket.is_some());
         let fresh = row(&mut service, prepared.session_id, false);
-        let old = row(&mut service, id, false);
         for field in ["tool", "connection", "account_id", "cwd", "purpose"] {
             assert_eq!(fresh[field], old[field], "{field}");
         }
@@ -3451,6 +3511,34 @@ mod tests {
                 !collection_plan::exists(&f.store, id),
                 "the stray plan is dropped"
             );
+        }
+
+        /// A row with no collection plan whose launcher went quiet ends once
+        /// its tool is gone, so it no longer holds its conversation; while
+        /// the tool runs it stays unknown.
+        #[tokio::test]
+        async fn a_quiet_row_without_a_plan_ends_once_its_tool_is_gone() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let gone = sessions_of(&shared, |s| running(&f, s, exited(), false));
+            collection_plan::finish(&f.store, gone);
+            let mut tool = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let live = sessions_of(&shared, |s| {
+                running(&f, s, ProcessIdentity::of(tool.id()), false)
+            });
+            collection_plan::finish(&f.store, live);
+            assert_eq!(collect_abandoned(&shared, chrono::Utc::now()).await, 0);
+            assert_eq!(status(&shared, gone).state, SessionState::Running);
+            collect_abandoned(&shared, lapsed()).await;
+            assert_eq!(status(&shared, gone).state, SessionState::Failed);
+            assert_eq!(status(&shared, live).state, SessionState::Unknown);
+            tool.kill().unwrap();
+            tool.wait().unwrap();
+            collect_abandoned(&shared, lapsed()).await;
+            assert_eq!(status(&shared, live).state, SessionState::Failed);
         }
 
         #[tokio::test]
