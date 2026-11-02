@@ -359,11 +359,17 @@ it already lives.
 `near-ai-login.json`
 (`crates/trace-commons-contributor/src/daemon/nearai_credential/login_record.rs`),
 written on first enrollment and on renewals that use the stored NEAR AI
-login, and removed by unenroll. It also records `stored_login`, the
-provider of the NEAR AI session the daemon currently holds; a
-`stored_login` that differs from `commons_login` is a provider-level
-mismatch the daemon can see without any network call. The chooser page's
-mark reads `commons_login`.
+login. The accepted login is read from the sign-in attempt's own progress
+object, not looked up by directory. `near-ai-login.json` is one of the
+enrollment files, so logout and unenroll remove it. The record also holds
+`stored_login`, the provider of the NEAR AI session the daemon currently
+holds, read with that session's key (`stored_login(store, key_id)`): a tag
+left by another sign-in reads as unknown, never as the wrong provider, and
+a spend-organization switch (a new key) makes it unknown until the next
+sign-in. A known `stored_login` that differs from `commons_login` is a
+provider-level mismatch the daemon can see without any network call;
+unknown proves nothing either way. The chooser page's mark reads
+`commons_login`.
 This spec reuses that record and adds one field to it:
 
 - `subject_digest`: a keyed digest of the NEAR AI subject id, read by the
@@ -379,9 +385,11 @@ Once the server answers `auth_provider` (section 3.5), the daemon writes
 person picked. On a completed move it rewrites both fields.
 
 Exposed over IPC as part of the account status: `commons_login`, and after
-a browser sign-in, `login_matches_commons: true | false | unknown`. The
-chooser page has a named seam for this flow, `chooser::change_account_path()`
-(returns `None` in #1835); the change flow supplies it.
+a browser sign-in, `login_matches_commons: true | false | unknown`.
+#1835 no longer has a seam for this flow (`chooser::change_account_path()`
+was removed), so the change flow adds its own entry point on the chooser
+page: a "Use a different account" link that opens the change sheet
+(section 5.3) instead of starting an ordinary sign-in.
 
 **Hold a non-matching login aside.** When a browser sign-in completes and
 `login_matches_commons` is false, the daemon keeps the new NEAR AI session
@@ -459,8 +467,9 @@ Commons is, so no sign-in or change-account string names it. The frame is
 account, or use a different one. The strings match the drafts in the
 sign-in chooser work (#1835) and the refusal wording elsewhere:
 "This app is connected to a different NEAR AI account. Sign in with that
-account again.", the action "Use a different account", and the page
-marker "Connected to this app".
+account again." and the action "Use a different account". The page
+marker's wording is being re-picked by the owner (candidates "You used
+this login last time" and "Last used with this app"), so it is PENDING.
 
 ### 5.1 Signing in again with the connected account
 
@@ -471,7 +480,7 @@ remembered provider (`commons_login`) and the chooser page marks it.
 | --- | --- |
 | `account.login.connected` | Connected with {provider} |
 | `account.sign_in.button` | Sign in |
-| `chooser.mark.connected` | Connected to this app |
+| `chooser.mark.connected` | PENDING owner choice: "You used this login last time" or "Last used with this app" (replaces "Connected to this app") |
 
 `{provider}` is NEAR wallet, GitHub or Google. An `unknown` provider shows
 no provider line.
