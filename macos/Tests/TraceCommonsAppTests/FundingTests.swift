@@ -453,9 +453,18 @@ final class FundingTests: XCTestCase {
 
     /// Signed out, the billing card's button is the balance card's Sign in
     /// (owner, 2026-10-24): pressing it runs the sign-in flow, not another
-    /// funding read ("Check account" cannot help without a login).
+    /// funding read ("Check account" cannot help without a login). A build
+    /// that offers several logins (owner, 2026-11-01) draws it as a menu of
+    /// them, so the press opens the menu and nothing starts until a login is
+    /// chosen; `NearAiSignInChoiceTests` holds the choice to its start.
     @MainActor
     func testHostedSignedOutBillingButtonRunsTheSignInFlow() async throws {
+        let offersSeveral: Bool
+        if case .menu = NearAiSignInChoice.of(AppModel().privateInferenceCopy) {
+            offersSeveral = true
+        } else {
+            offersSeveral = false
+        }
         let view = try HostedFunding()
         defer { view.close() }
         let entered = expectation(description: "Visible row reads its account")
@@ -469,6 +478,14 @@ final class FundingTests: XCTestCase {
 
         try await view.press()
         try await view.draw()
+        if offersSeveral {
+            try await Task.sleep(nanoseconds: 300_000_000)
+            let methods = view.daemon.calls.map(\.method)
+            XCTAssertEqual(methods.filter { $0 == "near_ai_funding" }.count, fundingReads,
+                           "Check account must not run when signed out: \(methods)")
+            XCTAssertFalse(methods.contains("near_ai_credential_start"), "no login starts before one is chosen")
+            return
+        }
         let deadline = Date().addingTimeInterval(3)
         while !view.daemon.calls.contains(where: { $0.method == "near_ai_credential_start" }),
               Date() < deadline {
@@ -523,7 +540,7 @@ final class FundingTests: XCTestCase {
             } else {
                 // This real model method publishes both busy values. The fake
                 // refuses the start, so no wallet or credential is created.
-                let browser = await view.model.startNearAiCredential()
+                let browser = await view.model.startNearAiCredential(provider: nil)
                 XCTAssertNil(browser)
                 XCTAssertFalse(view.model.credentialBusy)
             }
@@ -571,7 +588,7 @@ final class FundingTests: XCTestCase {
         try await prime(view)
         let entered = expectation(description: "The row reads again after the busy cycle")
         _ = view.daemon.enqueue(try response(ready()), entered: entered)
-        let browser = await view.model.startNearAiCredential()
+        let browser = await view.model.startNearAiCredential(provider: nil)
         XCTAssertNil(browser)
         await fulfillment(of: [entered], timeout: 2)
         try await view.draw()

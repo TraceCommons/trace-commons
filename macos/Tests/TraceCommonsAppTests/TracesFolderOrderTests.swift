@@ -1,0 +1,107 @@
+import AppKit
+import XCTest
+import TCBridge
+import TCDesign
+import TCShellCore
+@testable import TraceCommonsApp
+
+/// The person's folder order on the Traces tab (owner, 2026-11-02): folders
+/// dragged into place, beside Suggested first and Oldest first.
+final class TracesFolderOrderTests: XCTestCase {
+    private func folders(_ ids: String...) -> [TracesTree.FolderNode] {
+        ids.map { TracesTree.FolderNode(id: $0, label: $0, mode: .ask, sessions: []) }
+    }
+
+    func testFoldersFollowTheArrangementAndNewOnesComeAfter() {
+        let drawn = TracesTree.arranged(folders("a", "b", "c", "new"), by: ["c", "a", "b"])
+        XCTAssertEqual(drawn.map(\.id), ["c", "a", "b", "new"])
+    }
+
+    func testAnArrangementNamingGoneFoldersStillDrawsTheRest() {
+        let drawn = TracesTree.arranged(folders("a", "b"), by: ["gone", "b", "a"])
+        XCTAssertEqual(drawn.map(\.id), ["b", "a"])
+    }
+
+    func testDroppedOnAFolderBelowItGoesAfterIt() {
+        XCTAssertEqual(
+            TracesTree.moving("a", onto: "c", shown: ["a", "b", "c", "d"], order: []),
+            ["b", "c", "a", "d"])
+    }
+
+    func testDroppedOnAFolderAboveItGoesBeforeIt() {
+        XCTAssertEqual(
+            TracesTree.moving("d", onto: "b", shown: ["a", "b", "c", "d"], order: []),
+            ["a", "d", "b", "c"])
+    }
+
+    func testDroppedOnItselfOrSomethingUnknownChangesNothing() {
+        let shown = ["a", "b", "c"]
+        XCTAssertEqual(TracesTree.moving("b", onto: "b", shown: shown, order: []), shown)
+        XCTAssertEqual(TracesTree.moving("x", onto: "b", shown: shown, order: []), shown)
+    }
+
+    func testFoldersNotDrawnKeepTheirPlaceInTheArrangement() {
+        XCTAssertEqual(
+            TracesTree.moving("b", onto: "a", shown: ["a", "b"], order: ["a", "b", "hidden"]),
+            ["b", "a", "hidden"])
+    }
+
+    /// As the tabs: a dragged folder trades places once past the middle
+    /// of the folder above or below, and not before.
+    func testADraggedFolderTradesPlacesPastItsNeighboursMiddle() {
+        let above = (id: "a", midY: CGFloat(20)), below = (id: "c", midY: CGFloat(100))
+        XCTAssertNil(TracesTreeView.folderSwap(center: 60, above: above, below: below))
+        XCTAssertEqual(TracesTreeView.folderSwap(center: 19, above: above, below: below), "a")
+        XCTAssertEqual(TracesTreeView.folderSwap(center: 101, above: above, below: below), "c")
+        XCTAssertNil(TracesTreeView.folderSwap(center: -50, above: nil, below: below), "nothing above the first")
+        XCTAssertNil(TracesTreeView.folderSwap(center: 500, above: above, below: nil), "nothing below the last")
+    }
+
+    @MainActor
+    func testTheArrangementIsReadBackOnThisMac() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "TracesFolderOrderTests"))
+        defer { defaults.removePersistentDomain(forName: "TracesFolderOrderTests") }
+        defaults.set(["b", "a"], forKey: TracesStore.folderOrderKey)
+        defaults.set(true, forKey: TracesStore.arrangedKey)
+        let store = TracesStore(client: nil, orderDefaults: defaults)
+        XCTAssertEqual(store.folderOrder, ["b", "a"])
+        XCTAssertTrue(store.arranged)
+        XCTAssertEqual(TracesListControls.orderChoice(store), .arranged)
+
+        let fresh = TracesStore(client: nil, orderDefaults: nil)
+        XCTAssertFalse(fresh.arranged)
+        XCTAssertEqual(TracesListControls.orderChoice(fresh), .pending(.suggested))
+    }
+
+    func testTheCoreHasTheWordsForYourOrderAndTheMoves() throws {
+        let copy = try XCTUnwrap(NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON()))
+        XCTAssertNotNil(copy[.listOrderArranged])
+        XCTAssertNotNil(copy[.listOrderMoveUp])
+        XCTAssertNotNil(copy[.listOrderMoveDown])
+    }
+
+    /// A folder dragged on the tree does not move the window (owner,
+    /// 2026-11-02): over the tree the window is not moved by its
+    /// background, and is again once the pointer leaves.
+    @MainActor
+    func testTheWindowHoldsStillWhileThePointerIsOverTheTree() throws {
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 200, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: true)
+        window.isMovableByWindowBackground = true
+        let view = GlassHoldWindowView(frame: .init(x: 0, y: 0, width: 200, height: 200))
+        window.contentView?.addSubview(view)
+        let event = try XCTUnwrap(NSEvent.enterExitEvent(
+            with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil))
+
+        view.mouseEntered(with: event)
+        XCTAssertFalse(window.isMovableByWindowBackground)
+        XCTAssertNil(view.hitTest(.init(x: 10, y: 10)), "takes no clicks from the rows")
+        view.mouseExited(with: event)
+        XCTAssertTrue(window.isMovableByWindowBackground)
+
+        view.mouseEntered(with: event)
+        view.removeFromSuperview()
+        XCTAssertTrue(window.isMovableByWindowBackground, "let go when the tree goes")
+    }
+}

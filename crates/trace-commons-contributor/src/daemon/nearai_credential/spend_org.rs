@@ -162,6 +162,47 @@ pub(crate) fn chosen_organization(store: &ConfigStore) -> Option<String> {
         .and_then(|record| record.chosen_organization_id)
 }
 
+/// Whether a sign-in landed in another NEAR AI account (owner, 2026-11-02:
+/// signing in to a different account with a different NEAR AI organization
+/// switches to its organization if it has one, or asks).
+///
+/// The signal is the organization listing the sign-in's mint reads anyway
+/// ([`super::api::CloudApi::mint_inference_key_listing`]): a choice is
+/// remembered and the account does not list that organization at all --
+/// most often a GitHub or Google login beside a wallet one. An organization
+/// the account still lists but that is inactive for now is the same
+/// account, and the choice stands. No identity is read; ids are compared in
+/// memory and never logged.
+pub(crate) fn account_changed(remembered: Option<&str>, remembered_listed: bool) -> bool {
+    remembered.is_some() && !remembered_listed
+}
+
+/// After a sign-in to another account stored its key: forget the choice
+/// made in the old one, so the new account's organization stands. With one
+/// organization nothing is asked; with several,
+/// [`OrganizationsReport::prompt`] asks again, since no choice is recorded
+/// for this account.
+///
+/// Pending revocations are kept: a missing organization is not proof of
+/// another account (it may have been deleted or left in the same one), and
+/// those keys may still be revocable. The sweep drops an entry the service
+/// answers `403` for ([`RevokeOutcome::NotThisAccount`]), so an old
+/// account's keys cannot hold `revoke_pending` or the [`MAX_PENDING`] limit
+/// for good. Best effort: a record that cannot be written keeps the old
+/// preference, which the mint already falls back from.
+pub(crate) fn forget_other_account(
+    store: &ConfigStore,
+    remembered: Option<&str>,
+    remembered_listed: bool,
+) {
+    if !account_changed(remembered, remembered_listed) {
+        return;
+    }
+    if update(store, |record| record.chosen_organization_id = None).is_err() {
+        tracing::warn!(target: "near_ai_spend_org", "near_ai_spend_org_choice_not_cleared");
+    }
+}
+
 /// Forget the record. The caller holds the credential commit lock: this is
 /// the forget path's, which removes the session every revoke needs, and the
 /// forget sentence already says keys are not revoked at NEAR AI. Best
@@ -395,6 +436,17 @@ async fn sweep(shared: &DaemonShared, api: &CloudApi, tokens: SessionTokens) -> 
             .await
         {
             Ok(RevokeOutcome::Revoked | RevokeOutcome::AlreadyGone) => settled.push(entry),
+            // Another account's key: this session can never revoke it, and
+            // keeping it would hold `revoke_pending` and the limit forever.
+            // The key stays at NEAR AI in that account, as after a forget.
+            Ok(RevokeOutcome::NotThisAccount) => {
+                crate::daemon::diagnostics_log::record_labels(
+                    tracing::Level::WARN,
+                    "near_ai_spend_org_revocation_dropped",
+                    &[("reason", "not_this_account")],
+                );
+                settled.push(entry);
+            }
             Err(_) => {
                 tracing::warn!(target: "near_ai_spend_org", "near_ai_key_revoke_deferred");
                 remaining = true;

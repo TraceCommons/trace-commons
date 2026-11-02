@@ -103,20 +103,24 @@ struct TracesListControls: View {
             {
                 // An icon on the round glass control whose menu checks the
                 // chosen order (owner, 2026-10-11), never a purple
-                // segmented pill (owner, 2026-10-10).
+                // segmented pill (owner, 2026-10-10). "Your order" is the
+                // folders as the person dragged them (owner, 2026-11-02).
                 GlassIconMenu(
                     label,
                     systemImage: Self.orderIcon,
                     selection: Binding(
-                        get: { store.order },
+                        get: { Self.orderChoice(store) },
                         set: { chosen in
-                            guard let chosen, chosen != store.order else { return }
-                            Task { await store.setOrder(chosen) }
+                            guard let chosen, chosen != Self.orderChoice(store) else { return }
+                            switch chosen {
+                            case .arranged: store.showArranged()
+                            case .pending(let order): Task { await store.setOrder(order) }
+                            }
                         }),
                     options: [
-                        GlassPickerOption(suggested, value: DaemonData.PendingOrder.suggested),
-                        GlassPickerOption(queue, value: DaemonData.PendingOrder.queue),
-                    ]
+                        GlassPickerOption(suggested, value: OrderChoice.pending(.suggested)),
+                        GlassPickerOption(queue, value: OrderChoice.pending(.queue)),
+                    ] + (copy?[.listOrderArranged].map { [GlassPickerOption($0, value: OrderChoice.arranged)] } ?? [])
                 ) {
                     // The toolbar's View menu's one item, moved here (owner,
                     // 2026-10-19): it filters this list.
@@ -149,6 +153,17 @@ struct TracesListControls: View {
     private func closeSearch() {
         store.searchText = ""
         withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { searching = false }
+    }
+
+    /// What the order control checks: the person's order while it is
+    /// drawn, else the core's.
+    enum OrderChoice: Hashable {
+        case pending(DaemonData.PendingOrder)
+        case arranged
+    }
+
+    static func orderChoice(_ store: TracesStore) -> OrderChoice? {
+        store.arranged ? .arranged : store.order.map(OrderChoice.pending)
     }
 
     /// The order control's accessible name, the core's; nil without it,

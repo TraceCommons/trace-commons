@@ -70,22 +70,19 @@ impl ProviderSelector {
         let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
         let root = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         style::append_body(&root, copy.credential_provider_label);
-        let selector = gtk::DropDown::from_strings(&[
-            copy.credential_provider_near,
-            copy.credential_provider_github,
-            copy.credential_provider_google,
-        ]);
+        let titles: Vec<&str> = provider_options().iter().map(|(_, title)| *title).collect();
+        let selector = gtk::DropDown::from_strings(&titles);
         selector.set_selected(selected);
         selector.set_size_request(-1, 44);
         let notice = gtk::Label::builder()
             .label(copy.credential_wallet_notice)
             .wrap(true)
             .xalign(0.0)
-            .visible(selected == 0)
+            .visible(shows_wallet_notice(selected))
             .build();
         selector.connect_selected_notify({
             let notice = notice.clone();
-            move |selector| notice.set_visible(selector.selected() == 0)
+            move |selector| notice.set_visible(shows_wallet_notice(selector.selected()))
         });
         root.append(&selector);
         root.append(&notice);
@@ -97,8 +94,36 @@ impl ProviderSelector {
     }
 }
 
+/// The sign-in providers this build offers, in the core's order
+/// (`channel::NEAR_AI_SIGN_IN_PROVIDERS`), each with the core's title. A
+/// provider the copy has no title for is not offered. The list is the
+/// core's, never this shell's: a staging build offers Google alone, and a
+/// new login is added there and in the copy, not here.
+fn provider_options() -> Vec<(&'static str, &'static str)> {
+    let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
+    trace_commons_contributor::channel::NEAR_AI_SIGN_IN_PROVIDERS
+        .iter()
+        .filter_map(|tag| {
+            let title = match *tag {
+                "near" => copy.credential_provider_near,
+                "github" => copy.credential_provider_github,
+                "google" => copy.credential_provider_google,
+                _ => return None,
+            };
+            Some((*tag, title))
+        })
+        .collect()
+}
+
 fn provider_id(selected: u32) -> Option<&'static str> {
-    ["near", "github", "google"].get(selected as usize).copied()
+    provider_options()
+        .get(selected as usize)
+        .map(|(tag, _)| *tag)
+}
+
+/// The wallet's key-custody notice accompanies the NEAR wallet alone.
+fn shows_wallet_notice(selected: u32) -> bool {
+    provider_id(selected) == Some("near")
 }
 
 /// The section's widgets. Built once and refilled, like every other screen in
@@ -287,20 +312,7 @@ pub fn render(app: &Rc<App>, state: &str) {
             style::append_body(&view.action, explains);
         }
         if action == CredentialAction::Obtain {
-            let providers = ProviderSelector::new(view.provider.get());
-            providers.root.set_sensitive(!view.pending.get());
-            providers.selector.connect_selected_notify({
-                let app = Rc::clone(app);
-                move |selector| {
-                    let view = &app.private_inference.credential;
-                    if view.pending.get() {
-                        selector.set_selected(view.provider.get());
-                    } else {
-                        view.provider.set(selector.selected());
-                    }
-                }
-            });
-            view.action.append(&providers.root);
+            view.action.append(&shared_provider_selector(app));
         }
         let button = gtk::Button::with_label(label);
         button.set_halign(gtk::Align::Start);
@@ -334,6 +346,28 @@ pub fn render(app: &Rc<App>, state: &str) {
 /// a sign-in, so the balance's button comes here rather than opening a
 /// second ceremony path with a second in-flight guard. One press at a time,
 /// wherever it was pressed.
+/// The provider selector bound to this section's choice, which every Sign in
+/// on the Private AI screen starts ([`act`]). Drawn beside whichever Sign in
+/// is on screen: this section's, or the balance row's, which shows only
+/// while this section offers no sign-in of its own.
+pub(super) fn shared_provider_selector(app: &Rc<App>) -> gtk::Box {
+    let view = &app.private_inference.credential;
+    let providers = ProviderSelector::new(view.provider.get());
+    providers.root.set_sensitive(!view.pending.get());
+    providers.selector.connect_selected_notify({
+        let app = Rc::clone(app);
+        move |selector| {
+            let view = &app.private_inference.credential;
+            if view.pending.get() {
+                selector.set_selected(view.provider.get());
+            } else {
+                view.provider.set(selector.selected());
+            }
+        }
+    });
+    providers.root
+}
+
 pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
     act_with_provider(
         app,
@@ -542,6 +576,41 @@ mod tests {
     };
 
     const SOURCE: &str = include_str!("credential.rs");
+
+    /// The selector offers the core's logins, in its order, with the core's
+    /// titles (owner, 2026-11-01: GitHub, Google or the NEAR wallet), and
+    /// keeps no list of its own.
+    #[test]
+    fn the_provider_selector_offers_the_cores_logins_in_its_order() {
+        let copy = private_inference_copy();
+        let offered = trace_commons_contributor::channel::NEAR_AI_SIGN_IN_PROVIDERS;
+        let options = provider_options();
+        assert_eq!(
+            options.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+            offered.to_vec()
+        );
+        for (index, (tag, title)) in options.iter().enumerate() {
+            let expected = match *tag {
+                "near" => copy.credential_provider_near,
+                "github" => copy.credential_provider_github,
+                "google" => copy.credential_provider_google,
+                other => panic!("no title for {other}"),
+            };
+            assert_eq!(*title, expected);
+            assert_eq!(provider_id(index as u32), Some(*tag));
+            assert_eq!(shows_wallet_notice(index as u32), *tag == "near");
+        }
+        assert_eq!(provider_id(options.len() as u32), None);
+        let selector = SOURCE
+            .split("impl ProviderSelector {")
+            .nth(1)
+            .and_then(|rest| rest.split("fn provider_options()").next())
+            .unwrap();
+        assert!(
+            !selector.contains("[\"near\", \"github\", \"google\"]"),
+            "the selector keeps its own provider list"
+        );
+    }
 
     /// Every state a daemon can report, plus the two ways of reporting none.
     fn every_label() -> Vec<&'static str> {

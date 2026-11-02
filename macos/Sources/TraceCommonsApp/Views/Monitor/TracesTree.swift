@@ -237,6 +237,39 @@ struct TracesTree: Equatable {
         return listed + ordered(folders.filter { rank[$0.id] == nil })
     }
 
+    /// The tree with its folders in `order`, the person's arrangement by
+    /// folder id (owner, 2026-11-02); folders it does not name follow, in
+    /// the order they came.
+    func arranged(by order: [String]) -> TracesTree {
+        var tree = self
+        tree.folders = Self.arranged(folders, by: order)
+        return tree
+    }
+
+    static func arranged(_ folders: [FolderNode], by order: [String]) -> [FolderNode] {
+        var rank: [String: Int] = [:]
+        for (index, id) in order.enumerated() where rank[id] == nil {
+            rank[id] = index
+        }
+        let placed = folders.filter { rank[$0.id] != nil }.sorted { rank[$0.id]! < rank[$1.id]! }
+        return placed + folders.filter { rank[$0.id] == nil }
+    }
+
+    /// The arrangement after `moved` is dropped on `target`: in its place,
+    /// after it when moving down the list and before it when moving up.
+    /// `shown` is the folders as drawn, so a folder the arrangement did not
+    /// name yet takes the place it was drawn in; folders `order` names that
+    /// are not drawn keep their ids, after the drawn ones.
+    static func moving(_ moved: String, onto target: String, shown: [String], order: [String]) -> [String] {
+        var ids = shown + order.filter { !shown.contains($0) }
+        guard moved != target, let from = ids.firstIndex(of: moved), let to = ids.firstIndex(of: target) else {
+            return ids
+        }
+        ids.remove(at: from)
+        ids.insert(moved, at: to)
+        return ids
+    }
+
     /// Newest waiting session first; folders with nothing waiting after
     /// them; ties by name, then by id so the order never depends on how
     /// the core happened to list them.

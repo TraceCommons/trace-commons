@@ -114,7 +114,7 @@ final class NearAiSignInPollTests: XCTestCase {
         let daemon = SignInDaemon()
         let model = makeModel(daemon)
         let (waiting, waitingSubscription) = published(model, "waiting") { $0.sessionState == "obtaining" }
-        _ = await model.startNearAiCredential()
+        _ = await model.startNearAiCredential(provider: nil)
         await fulfillment(of: [waiting], timeout: 3)
         waitingSubscription.cancel()
         XCTAssertEqual(model.credentialAttempt?.attemptID, "synthetic-attempt")
@@ -182,7 +182,7 @@ final class NearAiSignInPollTests: XCTestCase {
     func testCancelStopsThePollWithoutReReadingTheKeyDependents() async throws {
         let daemon = SignInDaemon()
         let model = makeModel(daemon)
-        _ = await model.startNearAiCredential()
+        _ = await model.startNearAiCredential(provider: nil)
         let poll = try XCTUnwrap(model.credentialPoll)
         model.cancelNearAiCredential()
         await poll.value
@@ -200,7 +200,7 @@ final class NearAiSignInPollTests: XCTestCase {
     func testTimedOutOrFailedSignInStopsThePoll() async throws {
         let daemon = SignInDaemon()
         let model = makeModel(daemon)
-        _ = await model.startNearAiCredential()
+        _ = await model.startNearAiCredential(provider: nil)
         let poll = try XCTUnwrap(model.credentialPoll)
         // The daemon gives up on the ceremony: no key, nothing pending.
         daemon.set(.absent)
@@ -217,7 +217,7 @@ final class NearAiSignInPollTests: XCTestCase {
     func testAFailedFreshAttemptWithARetainedKeyDoesNotPublishSignIn() async throws {
         let daemon = SignInDaemon()
         let model = makeModel(daemon)
-        _ = await model.startNearAiCredential()
+        _ = await model.startNearAiCredential(provider: nil)
         let poll = try XCTUnwrap(model.credentialPoll)
         daemon.set(.failedWithRetainedKey)
         await poll.value
@@ -230,7 +230,7 @@ final class NearAiSignInPollTests: XCTestCase {
     func testACancelledFreshAttemptWithARetainedSessionDoesNotPublishSignIn() async throws {
         let daemon = SignInDaemon()
         let model = makeModel(daemon)
-        _ = await model.startNearAiCredential()
+        _ = await model.startNearAiCredential(provider: nil)
         let poll = try XCTUnwrap(model.credentialPoll)
         daemon.set(.cancelledWithRetainedSession)
         await poll.value
@@ -245,7 +245,7 @@ final class NearAiSignInPollTests: XCTestCase {
         model.credentialPollInterval = .seconds(60)
         defer { daemon.releaseStatus.signal(); model.shutdown() }
         let (waiting, waitingSubscription) = published(model, "initial browser wait") { $0.sessionState == "obtaining" }
-        _ = await model.startNearAiCredential()
+        _ = await model.startNearAiCredential(provider: nil)
         await fulfillment(of: [waiting], timeout: 3)
         waitingSubscription.cancel()
 
@@ -291,7 +291,7 @@ final class NearAiSignInPollTests: XCTestCase {
         let model = makeModel(daemon)
         var browserOpened = false
         model.openBrowser = { _ in browserOpened = true }
-        let signIn = Task { await model.signInToNearAI() }
+        let signIn = Task { await model.signInToNearAI(provider: nil) }
         let deadline = Date().addingTimeInterval(3)
         while !browserOpened, Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
         XCTAssertTrue(browserOpened)
@@ -311,9 +311,9 @@ final class NearAiSignInPollTests: XCTestCase {
     func testASecondStartDoesNotCreateASecondLoop() async throws {
         let daemon = SignInDaemon()
         let model = makeModel(daemon)
-        _ = await model.startNearAiCredential()
+        _ = await model.startNearAiCredential(provider: nil)
         let first = try XCTUnwrap(model.credentialPoll)
-        _ = await model.startNearAiCredential()
+        _ = await model.startNearAiCredential(provider: nil)
         XCTAssertEqual(model.credentialPoll, first, "One sign-in is one loop")
         daemon.set(.absent)
         await first.value
@@ -334,7 +334,7 @@ final class NearAiSignInPollTests: XCTestCase {
         let daemon = SignInDaemon()
         let model = makeModel(daemon)
         XCTAssertFalse(model.refreshCredentialOnActivation(), "Nothing is waiting, so nothing is read")
-        _ = await model.startNearAiCredential()
+        _ = await model.startNearAiCredential(provider: nil)
         model.credentialPollInterval = .seconds(60)
         let before = daemon.count("near_ai_credential_status")
         XCTAssertTrue(model.refreshCredentialOnActivation())

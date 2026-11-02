@@ -263,9 +263,9 @@ final class InferenceParityTests: XCTestCase {
         let funding = try Self.text("Views/FundingRow.swift")
         for needle in ["?? status?.view.message ?? copy.fundingUnavailable",
                        "NearAiSignInOffer.billingOffers(",
-                       "state: status?.state, failed: model.nearAiSignInFailed)", "model.signInToNearAI()", "info: copy.fundingWhat,",
+                       "state: status?.state, failed: model.nearAiSignInFailed)", "model.signInToNearAI(provider: provider)", "info: copy.fundingWhat,",
                        "GlassIconCard(\n            systemImage: \"creditcard\", title: copy.fundingTitle,",
-                       ": status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
+                       "Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
                        ".disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn)",
                        ".onReceive(model.$credentialBusy.removeDuplicates().dropFirst())",
                        ".onReceive(model.$credentialStatus.map(\\.sessionState).removeDuplicates().dropFirst())"] {

@@ -440,8 +440,10 @@ private struct HomeOverview: View {
                 } else {
                     HomePrivateAISignInCard(
                         line: words.privateAISignIn, button: model.managedText("sign_in_near_ai"),
-                        buttonName: model.managedText("sign_in_near_ai_accessibility"), busy: model.credentialBusy) {
-                        NearAiSignIn.begin(model, openURL: openURL)
+                        buttonName: model.managedText("sign_in_near_ai_accessibility"),
+                        choice: NearAiSignInChoice.of(model.privateInferenceCopy), busy: model.credentialBusy
+                    ) { provider in
+                        NearAiSignIn.begin(model, provider: provider, openURL: openURL)
                     }
                 }
             }
@@ -580,8 +582,10 @@ private struct HomePrivateAISignInCard: View {
     /// The button's name for VoiceOver: "Sign in" alone does not say to
     /// what.
     let buttonName: String
+    /// Every login the build offers (`NearAiSignInChoice`).
+    let choice: NearAiSignInChoice
     let busy: Bool
-    let action: () -> Void
+    let action: (String?) -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s3) {
@@ -590,10 +594,10 @@ private struct HomePrivateAISignInCard: View {
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: GlassTokens.Space.s4)
-            Button(button, action: action)
-                .buttonStyle(GlassButtonStyle(.primary, small: true))
+            NearAiSignInButton(
+                title: button, accessibilityName: buttonName, choice: choice,
+                style: GlassButtonStyle(.primary, small: true), start: action)
                 .fixedSize()
-                .accessibilityLabel(buttonName)
                 .disabled(busy)
         }
         .padding(.vertical, 10)
