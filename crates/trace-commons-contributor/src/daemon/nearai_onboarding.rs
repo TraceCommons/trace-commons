@@ -1009,8 +1009,9 @@ pub(super) async fn check_fresh_login(
     expected: super::commons_credentials::Snapshot,
     access_token: &str,
 ) -> Result<CheckedRenewal> {
+    // The tenant is the caller's check (`account_session_renewal::check_fresh_login`).
     let account_id = previous_account_id(previous.as_ref())?;
-    if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
+    if identity.device_key_id != cfg.device_key_id {
         bail!("near_ai_enroll_invalid")
     }
     let finished = ceremony_with_access_token(commons, identity, access_token).await?;

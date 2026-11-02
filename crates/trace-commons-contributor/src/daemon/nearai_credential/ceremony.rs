@@ -517,6 +517,8 @@ pub(super) async fn complete(
         .mint_inference_key_listing(&session, &key_name(attempt_id), choice)
         .await
         .map_err(at(FailedStep::Mint))?;
+    // From here on, every way out that does not store the key revokes it.
+    let unstored = UnstoredKey::new(api, &session, &minted);
     // A device whose Trace Commons account signs in through NEAR AI asks the
     // commons about this login before it replaces the stored one (owner,
     // 2026-11-02).
@@ -529,7 +531,6 @@ pub(super) async fn complete(
     )
     .await;
     settle(
-        api,
         dir,
         attempt_id,
         minted,
@@ -540,8 +541,83 @@ pub(super) async fn complete(
         preferred_listed,
         check,
         progress,
+        unstored,
     )
     .await
+}
+
+/// A key minted for a sign-in and not yet stored. Dropped while armed --
+/// the commons refused the login, the sign-in was cancelled or ran out of
+/// time, or the persist failed -- it revokes the key, so no way out leaves
+/// an unused key in the NEAR AI account. Disarmed once the key is stored.
+pub(crate) struct UnstoredKey {
+    revoke: Option<UnstoredRevoke>,
+}
+
+struct UnstoredRevoke {
+    api: CloudApi,
+    access_token: String,
+    workspace_id: String,
+    key_id: String,
+    runtime: tokio::runtime::Handle,
+}
+
+impl UnstoredRevoke {
+    async fn run(self) {
+        let session = loopback::SessionTokens {
+            access_token: self.access_token,
+            refresh_token: String::new(),
+        };
+        if self
+            .api
+            .revoke_inference_key(&session, &self.workspace_id, &self.key_id)
+            .await
+            .is_err()
+        {
+            tracing::warn!(target: "near_ai_credential", "near_ai_unbound_key_not_revoked");
+        }
+    }
+}
+
+impl UnstoredKey {
+    pub(crate) fn new(
+        api: &CloudApi,
+        session: &loopback::SessionTokens,
+        minted: &super::api::MintedKey,
+    ) -> Self {
+        Self {
+            revoke: tokio::runtime::Handle::try_current()
+                .ok()
+                .map(|runtime| UnstoredRevoke {
+                    api: api.clone(),
+                    access_token: session.access_token.clone(),
+                    workspace_id: minted.workspace_id.clone(),
+                    key_id: minted.key_id.clone(),
+                    runtime,
+                }),
+        }
+    }
+
+    /// The key is stored: nothing to revoke.
+    fn stored(mut self) {
+        self.revoke = None;
+    }
+
+    /// Revoke now, and wait for the answer.
+    async fn revoke_now(mut self) {
+        if let Some(revoke) = self.revoke.take() {
+            revoke.run().await;
+        }
+    }
+}
+
+impl Drop for UnstoredKey {
+    fn drop(&mut self) {
+        if let Some(revoke) = self.revoke.take() {
+            let runtime = revoke.runtime.clone();
+            runtime.spawn(revoke.run());
+        }
+    }
 }
 
 /// The attempt word for a login the enrolled commons refused, most often a
@@ -564,7 +640,6 @@ const COMMONS_UNAVAILABLE: &str = "near_ai_credential_commons_unavailable";
 /// where NEAR AI allows, and the stored login stays as it was.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn settle(
-    api: &CloudApi,
     dir: &std::path::Path,
     attempt_id: &str,
     minted: super::api::MintedKey,
@@ -575,27 +650,23 @@ pub(crate) async fn settle(
     preferred_listed: bool,
     check: crate::daemon::account_session_renewal::FreshLogin,
     progress: &Progress,
+    unstored: UnstoredKey,
 ) -> Result<()> {
     use crate::daemon::account_session_renewal::{FreshLogin, commit_fresh_login};
+    // Refused or unasked: the new key is revoked, never recorded for a
+    // later sweep -- that runs with the stored login's session, which is
+    // another account's.
+    let refused = |label: &'static str| at(FailedStep::Commons)(anyhow!(label));
     let accepted = match check {
         FreshLogin::NotBound => None,
         FreshLogin::Accepted(accepted) => Some(accepted),
-        FreshLogin::Refused | FreshLogin::Unavailable => {
-            let label = if matches!(check, FreshLogin::Refused) {
-                DIFFERENT_ACCOUNT
-            } else {
-                COMMONS_UNAVAILABLE
-            };
-            // Not recorded for a later sweep: that runs with the stored
-            // login's session, which is another account's.
-            if api
-                .revoke_inference_key(&session, &minted.workspace_id, &minted.key_id)
-                .await
-                .is_err()
-            {
-                tracing::warn!(target: "near_ai_credential", "near_ai_unbound_key_not_revoked");
-            }
-            return Err(at(FailedStep::Commons)(anyhow!(label)));
+        FreshLogin::Refused => {
+            unstored.revoke_now().await;
+            return Err(refused(DIFFERENT_ACCOUNT));
+        }
+        FreshLogin::Unavailable => {
+            unstored.revoke_now().await;
+            return Err(refused(COMMONS_UNAVAILABLE));
         }
     };
     progress.set(FailedStep::Persist);
@@ -616,6 +687,7 @@ pub(crate) async fn settle(
             expires_at,
             user_agent,
         )?;
+        unstored.stored();
         // A sign-in to another account forgets what belonged to the old one,
         // once its key is stored.
         if let Ok(store) = ConfigStore::open(persist_dir) {
@@ -638,10 +710,14 @@ pub(crate) async fn settle(
     .and_then(|persisted| persisted)
     .map_err(at(FailedStep::Persist))?;
     if let Some(accepted) = accepted {
-        // Best effort: the NEAR AI login is stored, and Sign in again
-        // renews the account session with it if this write lost a race.
-        let store = ConfigStore::open(dir.to_path_buf()).map_err(at(FailedStep::Persist))?;
-        if commit_fresh_login(&store, *accepted).await.is_err() {
+        // Best effort: the NEAR AI login is stored, so the sign-in has
+        // landed whatever happens here, and Sign in again renews the
+        // account session with it if this write is lost.
+        let committed = match ConfigStore::open(dir.to_path_buf()) {
+            Ok(store) => commit_fresh_login(&store, *accepted).await.is_ok(),
+            Err(_) => false,
+        };
+        if !committed {
             tracing::warn!(target: "near_ai_credential", "near_ai_account_session_not_stored");
         }
     }
@@ -1944,10 +2020,14 @@ mod tests {
             "pub(crate) async fn settle(",
             "\n/// The control name a settled",
         );
-        let refused = settle
-            .find("FreshLogin::Refused | FreshLogin::Unavailable")
-            .unwrap();
-        assert!(refused < settle.find("persist_attempt(").unwrap());
+        let persist = settle.find("persist_attempt(").unwrap();
+        for arm in ["FreshLogin::Refused => {", "FreshLogin::Unavailable => {"] {
+            assert!(settle.find(arm).unwrap() < persist, "{arm}");
+        }
+        // The minted key is guarded from the mint on, and disarmed only once
+        // the persist stored it.
+        assert!(complete.find("UnstoredKey::new(").unwrap() < asked);
+        assert!(settle.find("unstored.stored();").unwrap() > persist);
         let wallet = section("impl BrowserSignIn {", "\n}\n");
         assert!(wallet.contains("progress.set(FailedStep::Exchange);"));
         assert!(wallet.contains(".map_err(at(FailedStep::Exchange))?;"));

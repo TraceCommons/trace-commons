@@ -40,6 +40,8 @@ struct Commons {
     account: Mutex<String>,
     /// Refuses every finish.
     refuse: Mutex<bool>,
+    /// The label a refused finish carries.
+    refuse_label: Mutex<String>,
     starts: Mutex<u32>,
     finishes: Mutex<u32>,
     refreshes: Mutex<u32>,
@@ -74,6 +76,7 @@ async fn spawn(device_public_key: String) -> Stub {
         tenant: Mutex::new(tenant()),
         account: Mutex::new(ACCOUNT.to_string()),
         refuse: Mutex::new(false),
+        refuse_label: Mutex::new("refused".into()),
         starts: Mutex::new(0),
         finishes: Mutex::new(0),
         refreshes: Mutex::new(0),
@@ -158,7 +161,8 @@ async fn spawn(device_public_key: String) -> Stub {
                         .unwrap();
                     assert!(body["access_token"].as_str().unwrap().starts_with("near-access-"));
                     if *state.refuse.lock().unwrap() {
-                        return (StatusCode::BAD_REQUEST, Json(json!({"error": "refused"})));
+                        let label = state.refuse_label.lock().unwrap().clone();
+                        return (StatusCode::BAD_REQUEST, Json(json!({"error": label})));
                     }
                     let device_key_id =
                         trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
@@ -1296,6 +1300,102 @@ async fn an_unreachable_commons_fails_closed() {
     assert_eq!(fx.account_record(), before);
 }
 
+/// A read of the configuration that fails is not "not enrolled": the
+/// check fails closed and the commons is not asked.
+#[tokio::test]
+async fn a_failed_read_of_the_configuration_fails_closed() {
+    let fx = Fixture::new(Session::Expired).await;
+    std::fs::write(
+        fx.shared.store.daemon_path("contributor.json"),
+        b"{not json",
+    )
+    .unwrap();
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unavailable
+    ));
+    assert_eq!(fx.ceremonies(), (0, 0));
+}
+
+/// Signed out of the account (no record): a NEAR AI sign-in for Private AI
+/// does not sign the person back in. The commons is not asked, and no
+/// account session is written when the login is stored.
+#[tokio::test]
+async fn a_signed_out_account_is_not_signed_back_in_by_a_near_ai_sign_in() {
+    let fx = Fixture::new(Session::Absent).await;
+    assert!(fx.account_record().is_none());
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::NotBound
+    ));
+    assert_eq!(fx.ceremonies(), (0, 0));
+    assert!(fx.account_record().is_none());
+}
+
+/// A revoked device key is remembered, as `sign_in` and the renewal
+/// remember it, and the login is stored as on any unbound device. The next
+/// sign-in runs no ceremony for that key.
+#[tokio::test]
+async fn a_revoked_device_key_is_remembered() {
+    let fx = Fixture::new(Session::Expired).await;
+    *fx.stub.state.refuse.lock().unwrap() = true;
+    *fx.stub.state.refuse_label.lock().unwrap() =
+        super::super::nearai_onboarding::DEVICE_KEY_REVOKED_WIRE.into();
+    assert!(!super::key_revoked(&fx.shared.store));
+
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::NotBound
+    ));
+    assert!(super::key_revoked(&fx.shared.store));
+    assert_eq!(fx.ceremonies(), (1, 1));
+
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::NotBound
+    ));
+    assert_eq!(fx.ceremonies(), (1, 1), "no further ceremony for that key");
+}
+
+/// A device that joined by one-time code renews by its device key and
+/// never took the NEAR AI ceremony: its NEAR AI sign-in is not gated on
+/// one.
+#[tokio::test]
+async fn a_device_joined_by_code_is_not_gated() {
+    let fx = Fixture::new(Session::Expired).await;
+    fx.shared
+        .store
+        .write_daemon_file(super::super::device_codes::JOINED_BY_CODE_FILE, b"1\n")
+        .unwrap();
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::NotBound
+    ));
+    assert_eq!(fx.ceremonies(), (0, 0));
+}
+
+/// Failures no retry fixes do not block NEAR AI sign-in for good: a
+/// malformed account record, and an enrolled address the signup allowlist
+/// refuses (this stub is on loopback, which it refuses).
+#[tokio::test]
+async fn a_permanent_local_failure_does_not_block_sign_in() {
+    let fx = Fixture::new(Session::Expired).await;
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &RenewVia::live(&fx.api), FRESH).await,
+        FreshLogin::NotBound
+    ));
+    assert_eq!(fx.ceremonies(), (0, 0));
+
+    let fx = Fixture::new(Session::Expired).await;
+    let expected = commons_credentials::snapshot(&fx.shared.store, Kind::Account).unwrap();
+    commons_credentials::replace(&fx.shared.store, &expected, b"not json", None).unwrap();
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::NotBound
+    ));
+    assert_eq!(fx.ceremonies(), (0, 0));
+}
+
 mod settle_tests {
     //! The sign-in ceremony's last step, given what the commons made of the
     //! login: the stored NEAR AI login is replaced only when the commons
@@ -1338,8 +1438,12 @@ mod settle_tests {
 
     async fn run(fx: &Fixture, check: FreshLogin) -> anyhow::Result<()> {
         mark_waiting_for_test(fx.shared.store.dir(), "attempt-fresh");
-        settle(
+        let unstored = crate::daemon::nearai_credential::ceremony::UnstoredKey::new(
             &fx.api,
+            &fresh_session(),
+            &minted(),
+        );
+        settle(
             fx.shared.store.dir(),
             "attempt-fresh",
             minted(),
@@ -1350,6 +1454,7 @@ mod settle_tests {
             false,
             check,
             &crate::daemon::nearai_credential::ceremony::Progress::new(),
+            unstored,
         )
         .await
     }
@@ -1370,6 +1475,8 @@ mod settle_tests {
             .unwrap()
             .unwrap();
         assert_eq!(loaded.session.access_token, renewed_token());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(revokes(&fx), 0, "a stored key is not revoked");
     }
 
     /// Refused: nothing stored changes -- not the key, not the login, not
@@ -1390,6 +1497,56 @@ mod settle_tests {
         assert_eq!(fields[0].1, "commons");
         assert_eq!(fields[1].1, different_account_label());
         assert_eq!((stored(&fx), fx.account_record(), fx.config()), before);
+        assert_eq!(revokes(&fx), 1, "the key minted for it is revoked");
+    }
+
+    /// The revokes of the minted key the stub saw.
+    fn revokes(fx: &Fixture) -> usize {
+        fx.feature_bearers("/v1/workspaces/ws-fresh/api-keys/key-fresh")
+            .len()
+    }
+
+    /// A persist refused after the check -- a cancel that landed meanwhile --
+    /// leaves the minted key unstored, and it is revoked.
+    #[tokio::test]
+    async fn a_key_the_persist_did_not_store_is_revoked() {
+        let fx = Fixture::new(Session::Expired).await;
+        let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
+        assert!(matches!(check, FreshLogin::Accepted(_)));
+        mark_waiting_for_test(fx.shared.store.dir(), "attempt-fresh");
+        crate::daemon::nearai_credential::ceremony::cancel(
+            fx.shared.store.dir(),
+            Some("attempt-fresh"),
+        );
+        let unstored = crate::daemon::nearai_credential::ceremony::UnstoredKey::new(
+            &fx.api,
+            &fresh_session(),
+            &minted(),
+        );
+        let error = settle(
+            fx.shared.store.dir(),
+            "attempt-fresh",
+            minted(),
+            fresh_session(),
+            None,
+            "Mozilla/5.0 Test".into(),
+            None,
+            false,
+            check,
+            &crate::daemon::nearai_credential::ceremony::Progress::new(),
+            unstored,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.root_cause().to_string(),
+            "near_ai_credential_cancelled"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while revokes(&fx) == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(revokes(&fx), 1);
     }
 
     /// Not bound (a first run): stored as it always was.

@@ -322,7 +322,8 @@ impl std::fmt::Debug for MintedKey {
     }
 }
 
-/// A client pinned to one origin.
+/// A client pinned to one origin. Cloning shares the connection pool.
+#[derive(Clone)]
 pub struct CloudApi {
     base: reqwest::Url,
     http: reqwest::Client,

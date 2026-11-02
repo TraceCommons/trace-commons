@@ -171,6 +171,41 @@ fn remember_if_revoked(store: &crate::config::ConfigStore, class: &str, device_k
     }
 }
 
+/// The stored account record, as `sign_in`, `renew` and
+/// [`check_fresh_login`] read it.
+struct AccountRecord {
+    raw: Vec<u8>,
+    previous: serde_json::Value,
+    expected: commons_credentials::Snapshot,
+}
+
+/// Why the account record could not be read.
+enum AccountRecordError {
+    /// Credential storage did not answer (locked, a prompt): may pass.
+    Storage,
+    /// The record is stored but is not JSON: no retry fixes it.
+    Malformed,
+}
+
+/// Read the account record. `Ok(None)` when there is none (signed out).
+/// Blocking: credential storage can wait on a prompt.
+fn load_account_record(
+    store: &crate::config::ConfigStore,
+) -> Result<Option<AccountRecord>, AccountRecordError> {
+    let Some((raw, expected)) = commons_credentials::load_with_snapshot(store, Kind::Account)
+        .map_err(|_| AccountRecordError::Storage)?
+    else {
+        return Ok(None);
+    };
+    let previous = serde_json::from_slice::<serde_json::Value>(&raw)
+        .map_err(|_| AccountRecordError::Malformed)?;
+    Ok(Some(AccountRecord {
+        raw,
+        previous,
+        expected,
+    }))
+}
+
 /// Per state directory: one renewal at a time, so the reads that arrive
 /// together renew once.
 static RENEWING: Mutex<Option<HashMap<PathBuf, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
@@ -413,19 +448,11 @@ pub(super) async fn sign_in(
         // Nothing to present: the shell signs in to NEAR AI first.
         return Err(FAILURE_NEAR_AI_SIGN_IN_REQUIRED);
     }
-    let Ok(loaded) =
-        super::run_blocking(|| commons_credentials::load_with_snapshot(store, Kind::Account))
-    else {
-        return Err("commons_credential_storage_unavailable");
-    };
-    let (raw, previous, expected) = match loaded {
-        Some((raw, expected)) => {
-            let Ok(previous) = serde_json::from_slice::<serde_json::Value>(&raw) else {
-                return Err("near_ai_sign_in_unavailable");
-            };
-            (raw, Some(previous), expected)
-        }
-        None => {
+    let (raw, previous, expected) = match super::run_blocking(|| load_account_record(store)) {
+        Err(AccountRecordError::Storage) => return Err("commons_credential_storage_unavailable"),
+        Err(AccountRecordError::Malformed) => return Err("near_ai_sign_in_unavailable"),
+        Ok(Some(record)) => (record.raw, Some(record.previous), record.expected),
+        Ok(None) => {
             let Ok(expected) = commons_credentials::snapshot(store, Kind::Account) else {
                 return Err("commons_credential_storage_unavailable");
             };
@@ -499,11 +526,12 @@ pub(crate) enum FreshLogin {
 }
 
 /// A login the commons accepted, and the account session it earned, held
-/// until the NEAR AI credentials are stored. The renewal turn is held with
-/// it, so no renewal runs on the old login in between.
+/// until the NEAR AI credentials are stored. No renewal turn is held with
+/// it: the persist can wait on credential storage, and the commit is
+/// checked against the record it was read with, so a renewal or sign-out
+/// that lands in between wins.
 pub(crate) struct AcceptedLogin {
     checked: super::nearai_onboarding::CheckedRenewal,
-    _turn: tokio::sync::OwnedMutexGuard<()>,
 }
 
 /// [`check_fresh_login`] against the enrolled commons (a test's stub under
@@ -524,66 +552,79 @@ pub(crate) async fn check_fresh_login_live(
 }
 
 /// Ask the enrolled commons whether `access_token`, a fresh NEAR AI login
-/// not yet stored, signs in this device's account. Nothing is written.
+/// not yet stored, signs in this device's account. Nothing is written,
+/// except the revoked-key marker [`sign_in`] and `renew` write too.
+///
+/// Not bound, and stored as before: not enrolled, another tenant, a
+/// revoked device key, a device that joined by one-time code (it renews by
+/// device key and never took this ceremony), and a signed-out account (no
+/// record: a NEAR AI sign-in for Private AI does not sign the person back
+/// in). Also not bound: a failure no retry can fix -- a malformed record,
+/// an enrolled address the allowlist refuses, an answer that fails a local
+/// check -- since failing closed on those would block NEAR AI sign-in for
+/// good. Unavailable, and failing closed: anything that may pass, a read
+/// of configuration or credential storage included.
 pub(super) async fn check_fresh_login(
     store: &crate::config::ConfigStore,
     via: &RenewVia<'_>,
     access_token: &str,
 ) -> FreshLogin {
-    let Ok(Some(cfg)) = store.load_config() else {
-        return FreshLogin::NotBound;
+    let cfg = match store.load_config() {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => return FreshLogin::NotBound,
+        Err(_) => return FreshLogin::Unavailable,
     };
-    if !super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id) || key_revoked(store) {
+    if !super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id)
+        || key_revoked(store)
+        || super::device_codes::joined_by_code(store)
+    {
         return FreshLogin::NotBound;
     }
-    let Ok(Some(identity)) = DeviceIdentity::load(store) else {
-        return FreshLogin::NotBound;
+    let identity = match DeviceIdentity::load(store) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => return FreshLogin::NotBound,
+        Err(_) => return FreshLogin::Unavailable,
     };
-    let turn = renewing(store.dir()).lock_owned().await;
-    let Ok(loaded) =
-        super::run_blocking(|| commons_credentials::load_with_snapshot(store, Kind::Account))
-    else {
-        return FreshLogin::Unavailable;
-    };
-    let (previous, expected) = match loaded {
-        Some((raw, expected)) => match serde_json::from_slice::<serde_json::Value>(&raw) {
-            Ok(previous) => (Some(previous), expected),
-            Err(_) => return FreshLogin::Unavailable,
-        },
-        None => match commons_credentials::snapshot(store, Kind::Account) {
-            Ok(expected) => (None, expected),
-            Err(_) => return FreshLogin::Unavailable,
-        },
+    let account = match super::run_blocking(|| load_account_record(store)) {
+        Ok(Some(account)) => account,
+        Ok(None) | Err(AccountRecordError::Malformed) => return FreshLogin::NotBound,
+        Err(AccountRecordError::Storage) => return FreshLogin::Unavailable,
     };
     let Ok(commons) = via.commons(&cfg) else {
-        return FreshLogin::Unavailable;
+        return FreshLogin::NotBound;
     };
-    let checked = tokio::time::timeout(
-        FRESH_LOGIN_TIMEOUT,
+    // The turn wait is inside the deadline: the browser's tab waits on all
+    // of it.
+    let checked = tokio::time::timeout(FRESH_LOGIN_TIMEOUT, async {
+        let _turn = renewing(store.dir()).lock_owned().await;
         super::nearai_onboarding::check_fresh_login(
             &commons,
             &cfg,
             &identity,
-            previous,
-            expected,
+            Some(account.previous),
+            account.expected,
             access_token,
-        ),
-    )
+        )
+        .await
+    })
     .await;
-    match checked {
-        Ok(Ok(checked)) => FreshLogin::Accepted(Box::new(AcceptedLogin {
-            checked,
-            _turn: turn,
-        })),
-        Ok(Err(error)) => match classify(&error) {
-            "commons_refused" | "commons_answer_mismatch" => {
-                record(store, Trigger::SignIn, Some(classify(&error)));
-                FreshLogin::Refused
-            }
-            FAILURE_DEVICE_KEY_REVOKED => FreshLogin::NotBound,
-            _ => FreshLogin::Unavailable,
-        },
-        Err(_) => FreshLogin::Unavailable,
+    let error = match checked {
+        Ok(Ok(checked)) => return FreshLogin::Accepted(Box::new(AcceptedLogin { checked })),
+        Ok(Err(error)) => error,
+        Err(_) => return FreshLogin::Unavailable,
+    };
+    let class = classify(&error);
+    match class {
+        "commons_refused" | "commons_answer_mismatch" => {
+            record(store, Trigger::SignIn, Some(class));
+            FreshLogin::Refused
+        }
+        FAILURE_DEVICE_KEY_REVOKED => {
+            remember_if_revoked(store, class, &identity.device_key_id);
+            FreshLogin::NotBound
+        }
+        "local_check_failed" | "commons_address_refused" => FreshLogin::NotBound,
+        _ => FreshLogin::Unavailable,
     }
 }
 
@@ -594,7 +635,7 @@ pub(crate) async fn commit_fresh_login(
     store: &crate::config::ConfigStore,
     accepted: AcceptedLogin,
 ) -> anyhow::Result<()> {
-    let AcceptedLogin { checked, _turn } = accepted;
+    let AcceptedLogin { checked } = accepted;
     match super::nearai_onboarding::write_renewed_session(store, checked).await {
         Ok(()) => {
             record(store, Trigger::SignIn, None);
@@ -806,10 +847,13 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
     if !super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id) {
         return false;
     }
-    let Ok(Some((raw, expected))) =
-        super::run_blocking(|| commons_credentials::load_with_snapshot(store, Kind::Account))
+    // Absent: signed out, never renewed.
+    let Ok(Some(AccountRecord {
+        raw,
+        previous,
+        expected,
+    })) = super::run_blocking(|| load_account_record(store))
     else {
-        // Absent: signed out, never renewed.
         return false;
     };
     // The stored session and the NEAR AI login, by digest: a renewal
@@ -817,9 +861,6 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
     if recently_failed(store.dir(), &attempt_key(shared, &raw)) {
         return false;
     }
-    let Ok(previous) = serde_json::from_slice::<serde_json::Value>(&raw) else {
-        return false;
-    };
     let Ok(Some(identity)) = DeviceIdentity::load(store) else {
         return false;
     };
