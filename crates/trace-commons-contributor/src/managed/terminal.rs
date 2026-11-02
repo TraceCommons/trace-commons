@@ -207,7 +207,7 @@ impl TerminalApp {
     /// still open and idle, and that tab's window comes to the front;
     /// otherwise in a new window, as [`Self::script`]. The tab's tty is
     /// printed either way. Terminal only: no other app here can name a tab.
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", all(test, unix)))]
     fn script_in(self, command: &str, tty: &str) -> Vec<String> {
         let literal = applescript_literal(command);
         let (TerminalApp::Terminal, Some(id), true) = (self, self.bundle_id(), valid_tty(tty))
@@ -1001,6 +1001,7 @@ mod tests {
     /// open and idle, and opens a new window otherwise; the command is in
     /// the script once for each, and a tty that is not one is never put in
     /// a script.
+    #[cfg(unix)]
     #[test]
     fn start_again_runs_in_the_ended_sessions_tab() {
         let command = hostile_command();
