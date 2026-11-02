@@ -361,6 +361,13 @@ pub const NUDGE_MISSION_FIT_CLAUSE_ONE: &str = "1 of them fits a mission.";
 pub const LIST_ORDER_SUGGESTED: &str = "Suggested first";
 /// The Traces sort control, queue order. DRAFT, NEEDS APPROVAL.
 pub const LIST_ORDER_QUEUE: &str = "Oldest first";
+/// The Traces sort control, the folders in the order the person dragged
+/// them into (owner, 2026-11-02). DRAFT, NEEDS APPROVAL.
+pub const LIST_ORDER_ARRANGED: &str = "Your order";
+/// A folder row's actions that move it one place in that order, for
+/// VoiceOver and anyone not dragging. DRAFT, NEEDS APPROVAL.
+pub const LIST_ORDER_MOVE_UP: &str = "Move up";
+pub const LIST_ORDER_MOVE_DOWN: &str = "Move down";
 /// The Traces sort control's own accessible name, so it is not read with
 /// the tree's. DRAFT, NEEDS APPROVAL.
 pub const LIST_ORDER_LABEL: &str = "Order of waiting traces";
@@ -676,6 +683,9 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_MISSION_FIT_CLAUSE_ONE", NUDGE_MISSION_FIT_CLAUSE_ONE),
     ("LIST_ORDER_SUGGESTED", LIST_ORDER_SUGGESTED),
     ("LIST_ORDER_QUEUE", LIST_ORDER_QUEUE),
+    ("LIST_ORDER_ARRANGED", LIST_ORDER_ARRANGED),
+    ("LIST_ORDER_MOVE_UP", LIST_ORDER_MOVE_UP),
+    ("LIST_ORDER_MOVE_DOWN", LIST_ORDER_MOVE_DOWN),
     ("LIST_ORDER_LABEL", LIST_ORDER_LABEL),
     ("ENTRY_MISSION_FIT", ENTRY_MISSION_FIT),
     ("LIST_FILTER_IDLE", LIST_FILTER_IDLE),

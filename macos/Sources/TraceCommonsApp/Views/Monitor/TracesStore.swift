@@ -62,7 +62,63 @@ final class TracesStore {
 
     private func narrow() {
         narrowings += 1
-        shownTree = tree.matching(appliedSearch)
+        shownTree = (arranged ? tree.arranged(by: folderOrder) : tree).matching(appliedSearch)
+    }
+
+    // MARK: The person's folder order
+
+    /// The folders in the order the person dragged them into (owner,
+    /// 2026-11-02), by folder id, kept on this Mac. Drawn while `arranged`;
+    /// folders it does not name follow, in the order the core's answers.
+    private(set) var folderOrder: [String] = []
+    /// Whether the folders are drawn in `folderOrder`: from a drag or a
+    /// move, or "Your order" in the order control, until another order is
+    /// chosen there. The core's order still decides the sessions in a
+    /// folder.
+    private(set) var arranged = false
+    /// Where both are kept; nil keeps them for this window only.
+    @ObservationIgnored private let orderDefaults: UserDefaults?
+    static let folderOrderKey = "traces.folderOrder"
+    static let arrangedKey = "traces.folderOrderArranged"
+
+    /// Moves `moved` onto `target`, and draws the folders in the person's
+    /// order from now on. Against every folder, not only those a search
+    /// leaves drawn, so a move made while searching keeps the others in
+    /// place.
+    func moveFolder(_ moved: String, onto target: String) {
+        let shown = (arranged ? tree.arranged(by: folderOrder) : tree).folders.map(\.id)
+        guard moved != target, shown.contains(moved), shown.contains(target) else { return }
+        folderOrder = TracesTree.moving(moved, onto: target, shown: shown, order: folderOrder)
+        arrange(true)
+    }
+
+    /// Moves a folder one place up (`by: -1`) or down (`by: 1`) in the
+    /// folders as drawn: the row's Move up and Move down.
+    func moveFolder(_ id: String, by step: Int) {
+        let shown = shownTree.folders.map(\.id)
+        guard let index = shown.firstIndex(of: id), shown.indices.contains(index + step) else { return }
+        moveFolder(id, onto: shown[index + step])
+    }
+
+    /// Whether `id` can move one place `step` in the folders as drawn.
+    func canMoveFolder(_ id: String, by step: Int) -> Bool {
+        let shown = shownTree.folders.map(\.id)
+        guard let index = shown.firstIndex(of: id) else { return false }
+        return shown.indices.contains(index + step)
+    }
+
+    /// "Your order" in the order control: the arrangement last made, or,
+    /// with none yet, the folders as drawn now.
+    func showArranged() {
+        if folderOrder.isEmpty { folderOrder = shownTree.folders.map(\.id) }
+        arrange(true)
+    }
+
+    private func arrange(_ on: Bool) {
+        arranged = on
+        orderDefaults?.set(folderOrder, forKey: Self.folderOrderKey)
+        orderDefaults?.set(on, forKey: Self.arrangedKey)
+        narrow()
     }
 
     private func scheduleSearch() {
@@ -193,6 +249,9 @@ final class TracesStore {
 
     /// Asks the core for the list in `order`.
     func setOrder(_ order: DaemonData.PendingOrder) async {
+        let wasArranged = arranged
+        if arranged { arrange(false) }
+        guard order != self.order || !wasArranged else { return }
         self.order = order
         await load()
     }
@@ -364,10 +423,16 @@ final class TracesStore {
     private(set) var sample: String?
     private(set) var sampleUnknown: Bool
 
-    init(client: (any DaemonDataClient)?, sample: String? = nil, sampleUnknown: Bool = false) {
+    init(
+        client: (any DaemonDataClient)?, sample: String? = nil, sampleUnknown: Bool = false,
+        orderDefaults: UserDefaults? = .standard
+    ) {
         self.client = client
         self.sample = sample
         self.sampleUnknown = sampleUnknown
+        self.orderDefaults = orderDefaults
+        folderOrder = orderDefaults?.stringArray(forKey: Self.folderOrderKey) ?? []
+        arranged = orderDefaults?.bool(forKey: Self.arrangedKey) ?? false
     }
 
     /// Follows a new client (or none). Nothing the old one reported is

@@ -58,6 +58,8 @@ struct TracesTreeView: View, Equatable {
     /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
     /// session in it is selected from elsewhere (#1146 `reveal`).
     @State private var expanded: Set<String> = []
+    /// The folder a dragged folder is over, marked by a line on its top.
+    @State private var dropTarget: String?
     /// The folders the search opened that were not open already: they
     /// close again when the search is cleared. A folder the person opens or
     /// closes by hand leaves this set and stays as they left it.
@@ -697,6 +699,23 @@ struct TracesTreeView: View, Equatable {
         )
         .equatable()
         .id(Self.rowID(.folder(projectID: folder.id)))
+        // Dragged onto another folder, it takes that folder's place (owner,
+        // 2026-11-02): the list is then in the person's order.
+        .draggable(folder.id)
+        .dropDestination(for: String.self) { ids, _ in
+            dropTarget = nil
+            guard let moved = ids.first else { return false }
+            store.moveFolder(moved, onto: folder.id)
+            return true
+        } isTargeted: { over in
+            if over { dropTarget = folder.id } else if dropTarget == folder.id { dropTarget = nil }
+        }
+        .overlay(alignment: .top) {
+            if dropTarget == folder.id {
+                Capsule().fill(GlassColor.accentText).frame(height: 2).allowsHitTesting(false)
+            }
+        }
+        .modifier(FolderMoveActions(store: store, id: folder.id))
     }
 
     /// A session row's values, worked out here and handed to its own view.
@@ -1483,5 +1502,20 @@ struct TracesColumnTitles: View {
         .padding(.trailing, 6)
         .padding(.bottom, GlassTokens.Space.s2)
         .accessibilityHidden(true)
+    }
+}
+
+/// A folder row's Move up and Move down, in the core's words: the drag's
+/// order without dragging, for VoiceOver and the keyboard. Nothing without
+/// the words, and none past either end.
+private struct FolderMoveActions: ViewModifier {
+    let store: TracesStore
+    let id: String
+
+    func body(content: Content) -> some View {
+        let copy = store.nudgeCopy
+        content
+            .accessibilityAction(named: Text(copy?[.listOrderMoveUp] ?? "")) { store.moveFolder(id, by: -1) }
+            .accessibilityAction(named: Text(copy?[.listOrderMoveDown] ?? "")) { store.moveFolder(id, by: 1) }
     }
 }
