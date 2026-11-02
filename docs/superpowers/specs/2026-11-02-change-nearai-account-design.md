@@ -450,69 +450,87 @@ an account.
 ## 5. UX flow and strings
 
 Every string below is **DRAFT** and needs owner approval of wording. Copy
-follows `docs/ui-copy-guide.md`: one- or two-word buttons, consequences
-beside the action, separate title and button keys.
+follows `docs/ui-copy-guide.md`: short buttons, consequences beside the
+action, separate title and button keys.
 
-### 5.1 Signing in again with the remembered login
+**Owner wording direction (2026-11-02):** people do not know what Trace
+Commons is, so no sign-in or change-account string names it. The frame is
+"this app is connected to a NEAR AI account": sign in again with that
+account, or use a different one. The strings match the drafts in the
+sign-in chooser work (#1835) and the refusal wording elsewhere:
+"This app is connected to a different NEAR AI account. Sign in with that
+account again.", the action "Use a different account", and the page
+marker "Connected to this app".
 
-When the Commons asks for a sign-in, the account section's Sign in uses the
-remembered provider and the chooser page marks it.
+### 5.1 Signing in again with the connected account
+
+When a sign-in is needed, the account section's Sign in uses the
+remembered provider (`commons_login`) and the chooser page marks it.
 
 | Key | DRAFT text |
 | --- | --- |
-| `account.login.used_by` | Signed in with {provider} |
+| `account.login.connected` | Connected with {provider} |
 | `account.sign_in.button` | Sign in |
-| `chooser.mark.commons_login` | Your Trace Commons account uses this login |
+| `chooser.mark.connected` | Connected to this app |
 
 `{provider}` is NEAR wallet, GitHub or Google. An `unknown` provider shows
 no provider line.
 
 ### 5.2 After signing in with a different NEAR AI account
 
-The browser sign-in finished, but the login is not the account's. Nothing
-was replaced. Shown in the account section where the sign-in was started.
+The browser sign-in finished, but it was a different NEAR AI account from
+the one this app is connected to. Nothing was replaced. Shown in the
+account section where the sign-in was started.
 
 | Key | DRAFT text |
 | --- | --- |
-| `account.login.mismatch.title` | This is a different NEAR AI account |
-| `account.login.mismatch.body` | Your Trace Commons account uses {provider}. Sign in with {provider} to keep using it, or move your account to the login you just used. |
+| `account.login.mismatch.body` | This app is connected to a different NEAR AI account. Sign in with that account again. |
+| `account.login.mismatch.provider` | Connected with {provider} |
 | `account.login.mismatch.sign_in` | Sign in |
-| `account.login.mismatch.change` | Move account |
-| `account.login.mismatch.cancel` | Cancel |
+| `account.login.mismatch.change` | Use a different account |
 
-### 5.3 The change sheet
+`account.login.mismatch.provider` shares its text with
+`account.login.connected` but keeps its own key (copy guide rule 4/8: same
+words, different place). The sign-in button opens the chooser with the
+connected provider marked.
+
+### 5.3 Using a different account
+
+Opened from `account.login.mismatch.change`, or from the account section's
+`account.login.change` beside `account.login.connected`.
 
 | Key | DRAFT text |
 | --- | --- |
-| `account.change.title` | Move to another NEAR AI login |
-| `account.change.body` | Your traces, credit, referrals and payout settings stay with your account. After the move, sign in with {new_provider}. {old_provider} will no longer sign in to this account. |
-| `account.change.private_ai` | Private AI will use {new_provider}'s NEAR AI account. Keys made in the old account are removed. |
-| `account.change.confirm` | Move |
+| `account.login.change` | Use a different account |
+| `account.change.title` | Use a different NEAR AI account |
+| `account.change.body` | Your traces, credit and payout settings stay. After you switch, sign in with {new_provider}. Your {old_provider} account will no longer connect to this app. |
+| `account.change.private_ai` | Private AI will use your {new_provider} account. Keys made in the old account are removed. |
+| `account.change.confirm` | Switch |
 | `account.change.cancel` | Cancel |
-| `account.change.done` | Your account now uses {new_provider} |
-| `account.change.error.in_use` | That NEAR AI login already has its own Trace Commons account. |
-| `account.change.error.retired` | That NEAR AI login was moved off its Trace Commons account. |
-| `account.change.error.current_login` | Sign in with {old_provider} first, to confirm it's you. |
-| `account.change.error.unavailable` | Couldn't move your account. Try again. |
+| `account.change.error.current_login` | Sign in with {old_provider} first to confirm it's you. |
+| `account.change.error.in_use` | That NEAR AI account is already in use. Choose a different account. |
+| `account.change.error.retired` | This app no longer uses that NEAR AI account. Sign in with {provider}. |
+| `account.change.error.unavailable` | Couldn't switch accounts. Try again. |
 
-Entry points: the mismatch block (5.2), and a "Change" control beside
-`account.login.used_by` in account settings (`account.login.change`:
-"Change"), which opens the chooser and then the sheet.
+`account.change.error.retired` is shown on a sign-in with a login that a
+switch retired (`near_ai_login_retired`), not inside the sheet. After a
+switch, the account section shows `account.login.connected` with the new
+provider; there is no separate confirmation.
 
 ### 5.4 Notices this design implies (need explicit approval)
 
 Rule 9 of the copy guide applies. None of these is built until the owner
 approves both the notice and its wording.
 
-1. **The mismatch block (5.2).** It appears unprompted after a sign-in. The
-   owner's "encourage users to sign in again with that account" asks for
-   something like it; that is direction, not approval of this block or its
-   words.
-2. **`account.change.done`** as a confirmation after the sheet closes. It
-   could instead be the updated `account.login.used_by` line, which is not
-   a notice.
-3. **Recovery (d) only:** telling the account's other devices that a rebind
-   is pending. Not part of slice 1.
+1. **The mismatch block (5.2).** It appears unprompted after a sign-in.
+   The owner's direction asks for it ("encourage users to sign in again
+   with that account") and the wording now follows the owner's frame, but
+   approval of the block itself and its words is still needed.
+2. **Recovery (d) only:** telling the account's other devices that a
+   switch is pending. Not part of slice 1.
+
+The earlier draft's "done" confirmation is dropped: the updated
+`account.login.connected` line says the same thing and is not a notice.
 
 ## 6. Open questions for the owner
 
@@ -543,7 +561,7 @@ approves both the notice and its wording.
 7. **What "remember" shows.** Provider only ("Signed in with GitHub"), or
    also a hint such as a masked email, read locally from NEAR AI and kept
    only on the device? Two GitHub logins look the same with provider only.
-8. **The notices in 5.4**, and every DRAFT string in section 5.
+8. **The notice in 5.4**, and every DRAFT string in section 5.
 9. **The field case.** Before this is built, the owner's
    `account-session-renewal.jsonl` (state directory) shows the failure class
    of the GitHub sign-in. It says whether the GitHub identity already
