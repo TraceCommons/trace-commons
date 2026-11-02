@@ -1543,7 +1543,9 @@ mod tests {
     /// Every step after the browser was sent out is tagged in `begin`.
     #[test]
     fn begin_tags_every_step() {
-        let source = include_str!("ceremony.rs");
+        // A Windows checkout has CRLF line endings; every match below is
+        // written with `\n`.
+        let source = include_str!("ceremony.rs").replace("\r\n", "\n");
         let section = |from: &str, to: &str| {
             source
                 .split(from)
@@ -1583,7 +1585,10 @@ mod tests {
             .find("FreshLogin::Refused | FreshLogin::Unavailable")
             .unwrap();
         assert!(refused < settle.find("persist_attempt(").unwrap());
-        assert!(source.contains(".map_err(at(FailedStep::Exchange))?;"));
+        // Scoped to the wallet leg's impl, so the match cannot be this
+        // test's own line.
+        let browser_sign_in = section("impl BrowserSignIn {", "\n}\n");
+        assert!(browser_sign_in.contains(".map_err(at(FailedStep::Exchange))?;"));
     }
 
     /// The label line lands in the warn/error log with a timestamp, and
