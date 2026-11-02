@@ -223,7 +223,8 @@ app; changing collection staging rules.
   collection, unless its launcher still reports a result.
   Dismissing a stuck row also asks for a stop: if the daemon restarted
   between the tool's spawn and its first report, the launcher's next
-  heartbeat is answered with `stop: true` (which every launcher obeys)
+  heartbeat is answered with `stop: true` (which every launcher since
+  `stop` obeys; an older one ignores it, as it ignored the refusal)
   rather than refused, and the row stays ended and dismissed.
 - A launcher checks in (a `starting` report, no process) right before it
   spawns its tool, after its setup. The daemon takes the row back as

@@ -708,7 +708,8 @@ impl SessionRegistry {
 
     /// Unknown with no process the daemon can watch: its launcher took the
     /// ticket and went quiet before its first report named the tool's
-    /// process, and no collection plan names one either. So
+    /// process, and no collection plan file is there either (one this build
+    /// cannot read still blocks it until the collection pass removes it). So
     /// nothing will end it but the person (owner, 2026-11-02: dismissed by
     /// hand, never on a timer). A launcher still in its setup is safe to
     /// dismiss from: it checks in before it spawns, and a dismissed row's
@@ -1431,14 +1432,14 @@ impl SessionRegistry {
             .find(|e| e.view.id == id)
             .ok_or(ManagedError::NotFound)?
             .root();
-        // The conversation's rows that hold it, each checked once: any that
-        // is not stuck refuses the dismissal.
+        // Refused by the same rule as `can_dismiss` ([`Self::holds`]); the
+        // rows that still hold the conversation past it are stuck.
         let mut stuck = Vec::new();
         for e in self.data.entries.iter().filter(|e| e.root() == root) {
+            if self.holds(e, true) {
+                return Err(ManagedError::Conflict);
+            }
             if e.view.state.holds_profile() {
-                if !self.stuck(e) {
-                    return Err(ManagedError::Conflict);
-                }
                 stuck.push(e.view.id);
             }
         }
@@ -3030,8 +3031,9 @@ mod tests {
     /// A row can look stuck while its tool runs: the launcher checked in
     /// and spawned, and the daemon restarted before it took a `running`
     /// report. Dismissing it asks for a stop too, so the launcher's next
-    /// heartbeat is answered with a stop (which every launcher obeys)
-    /// rather than refused and ignored; the row stays ended and dismissed,
+    /// heartbeat is answered with a stop (which every launcher since `stop`
+    /// obeys) rather than refused and ignored; the row stays ended and
+    /// dismissed,
     /// and its final report is still taken. A check-in from a dismissed
     /// row is still refused, so a launcher still in its setup never spawns.
     #[test]
