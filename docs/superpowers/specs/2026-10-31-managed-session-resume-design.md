@@ -212,5 +212,17 @@ app; changing collection staging rules.
   Dismiss on it, and dismissing ends it (failed, as `tool_exited` does, so
   a late final report is still taken) and dismisses its conversation.
   `can_dismiss` is false while any other row of the conversation holds it.
+  A row whose collection plan names a process with its start time is not
+  stuck (the plan path watches that process). Dismissing a stuck
+  collecting row with no plan fails its collection; with a plan, the plan
+  settles it.
+- A launcher checks in (a `starting` report, no process) right before it
+  spawns its tool, after its setup. The daemon takes the row back as
+  starting with a fresh lease, so a launcher whose setup outlasted the
+  lease cannot be dismissed from under it; a dismissed row's check-in is
+  refused (`managed-conflict`) and the launcher exits without spawning.
+  Any other answer (an older daemon's `managed-invalid-request`, no
+  daemon) spawns as before. A launcher older than the check-in can still
+  spawn after its row was dismissed.
 - New OpenCode sessions on NEAR AI are titled "NEAR AI private session"
   (shown as `OC | NEAR AI private session`); others keep "Managed session".

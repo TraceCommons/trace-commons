@@ -466,7 +466,7 @@ impl SessionRegistry {
             })
             .map(|(_, index)| *index)
             .collect();
-        let held = self.held_conversations();
+        let held = self.holders(true);
         Ok(self
             .data
             .entries
@@ -640,13 +640,7 @@ impl SessionRegistry {
     /// snapshot: each row whose conversation can be continued now, with
     /// that conversation's root.
     pub fn resume_roots(&self) -> std::collections::BTreeMap<Uuid, Uuid> {
-        let in_use: std::collections::BTreeSet<Uuid> = self
-            .data
-            .entries
-            .iter()
-            .filter(|e| e.view.state.holds_profile())
-            .map(Entry::root)
-            .collect();
+        let in_use = self.holders(false);
         let started: std::collections::BTreeSet<Uuid> = self
             .data
             .entries
@@ -668,12 +662,47 @@ impl SessionRegistry {
     }
 
     /// Whether a row on the conversation `root` started (the root itself,
-    /// or a resume of it) still holds its profile.
+    /// or a resume of it) still holds its profile. A stuck row does: its
+    /// launcher may still be alive, so no other session may resume it.
     fn conversation_in_use(&self, root: Uuid) -> bool {
         self.data
             .entries
             .iter()
-            .any(|e| e.root() == root && e.view.state.holds_profile())
+            .any(|e| e.root() == root && self.holds(e, false))
+    }
+
+    /// Whether row `e` holds its conversation: it holds its profile. When
+    /// `dismissing`, a stuck row ([`Self::stuck`]) does not: the person may
+    /// let it go. The one rule behind Resume's lock, Dismiss and
+    /// `can_dismiss`.
+    fn holds(&self, e: &Entry, dismissing: bool) -> bool {
+        e.view.state.holds_profile() && !(dismissing && self.stuck(e))
+    }
+
+    /// The roots of the conversations a row holds ([`Self::holds`]).
+    fn holders(&self, dismissing: bool) -> std::collections::BTreeSet<Uuid> {
+        self.data
+            .entries
+            .iter()
+            .filter(|e| self.holds(e, dismissing))
+            .map(Entry::root)
+            .collect()
+    }
+
+    /// Unknown with no process the daemon can watch: its launcher took the
+    /// ticket and went quiet before its first report named the tool's
+    /// process, or named only a pid, which another process may reuse, and
+    /// no collection plan names a process the daemon can watch either. So
+    /// nothing will end it but the person (owner, 2026-11-02: dismissed by
+    /// hand, never on a timer). A launcher still in its setup is safe to
+    /// dismiss from: it checks in before it spawns, and a dismissed row's
+    /// check-in is refused ([`Self::report`]).
+    fn stuck(&self, e: &Entry) -> bool {
+        e.view.state == SessionState::Unknown
+            && e.proof_hash.is_some()
+            && e.watched_process().is_none()
+            && super::collection_plan::read(&self.store, e.view.id)
+                .is_none_or(|plan| plan.process.start_time.is_none())
     }
 
     /// Fail unredeemed launches whose ticket expired, and lapse redeemed
@@ -1135,7 +1164,22 @@ impl SessionRegistry {
             return if changed { self.commit(next) } else { Ok(()) };
         }
         if report.state == SessionState::Starting {
-            return Err(ManagedError::InvalidRequest);
+            // A launcher's check-in right before it spawns its tool: it is
+            // still in its setup, so the row is starting again, with a
+            // fresh lease. A dismissed row was refused above, so its
+            // launcher never spawns.
+            if entry.process_id.is_some()
+                || report.process_id.is_some()
+                || report.process_identity.is_some()
+                || report.exit_code.is_some()
+                || report.collection.is_some()
+                || report.model.is_some()
+            {
+                return Err(ManagedError::InvalidRequest);
+            }
+            entry.view.state = SessionState::Starting;
+            entry.last_seen = Utc::now();
+            return self.commit(next);
         }
         if report.state == SessionState::Running
             && (report.process_id.is_none()
@@ -1344,7 +1388,7 @@ impl SessionRegistry {
 
     /// Dismiss the conversation of row `id`: every row of it, so no
     /// earlier row comes back in its place. Refused while a row of it
-    /// holds its profile, unless that row is stuck ([`Entry::stuck`]): the
+    /// holds its profile, unless that row is stuck ([`Self::stuck`]): the
     /// person may let it go (owner, 2026-11-02), and it is ended as
     /// [`Self::tool_exited`] ends a row, so a launcher that does report
     /// later is still taken as how it ended.
@@ -1356,29 +1400,40 @@ impl SessionRegistry {
             .find(|e| e.view.id == id)
             .ok_or(ManagedError::NotFound)?
             .root();
-        if self.held_conversations().contains(&root) {
+        if self
+            .data
+            .entries
+            .iter()
+            .any(|e| e.root() == root && self.holds(e, true))
+        {
             return Err(ManagedError::Conflict);
         }
+        // A stuck collecting row with no plan will never be collected; with
+        // one, the plan settles it.
+        let stuck: Vec<(Uuid, bool)> = self
+            .data
+            .entries
+            .iter()
+            .filter(|e| e.root() == root && self.stuck(e))
+            .map(|e| {
+                (
+                    e.view.id,
+                    !super::collection_plan::exists(&self.store, e.view.id),
+                )
+            })
+            .collect();
         let mut next = self.data.clone();
         for entry in next.entries.iter_mut().filter(|e| e.root() == root) {
-            if entry.stuck() {
+            if let Some((_, unplanned)) = stuck.iter().find(|(id, _)| *id == entry.view.id) {
                 entry.view.state = SessionState::Failed;
                 entry.ended_by_daemon = true;
+                if *unplanned && entry.view.collection == CollectionState::Pending {
+                    entry.view.collection = CollectionState::Failed;
+                }
             }
             entry.dismissed = true;
         }
         self.commit(next)
-    }
-
-    /// The conversations a row holds that the person cannot dismiss: one
-    /// holding its profile that is not stuck.
-    fn held_conversations(&self) -> std::collections::BTreeSet<Uuid> {
-        self.data
-            .entries
-            .iter()
-            .filter(|e| e.view.state.holds_profile() && !e.stuck())
-            .map(Entry::root)
-            .collect()
     }
 
     pub fn changed(&mut self) -> Result<(), ManagedError> {
@@ -1407,17 +1462,6 @@ impl Entry {
     /// run by one session at a time.
     fn root(&self) -> Uuid {
         self.request.resume_of.unwrap_or(self.view.id)
-    }
-
-    /// Unknown with no process the daemon can watch: its launcher took
-    /// the ticket and went quiet before its first report named the tool's
-    /// process, or named only a pid, which another process may reuse. So
-    /// nothing will end it but the person (owner, 2026-11-02: dismissed by
-    /// hand, never on a timer).
-    fn stuck(&self) -> bool {
-        self.view.state == SessionState::Unknown
-            && self.proof_hash.is_some()
-            && self.watched_process().is_none()
     }
 
     /// The tool's process as the launcher named it, when it named both the
@@ -2754,6 +2798,94 @@ mod tests {
         assert_eq!(
             registry.describe(pid_only).map(|(_, s)| s),
             Some(SessionState::Failed)
+        );
+    }
+
+    /// A launcher checks in (a `starting` report) right before it spawns
+    /// its tool. One that went quiet in a long setup is taken back as
+    /// starting, with a fresh lease, so the person cannot dismiss it from
+    /// under it; once dismissed, its check-in is refused, so it never
+    /// spawns. A check-in from a row that already named its tool's process,
+    /// or that names one, is refused as before.
+    #[test]
+    fn a_launcher_checks_in_before_it_spawns() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(home.path().to_path_buf()).unwrap();
+        let account = AccountStore::open(&store)
+            .unwrap()
+            .add(ToolId::Claude, ConnectionKind::Subscription, "Personal")
+            .unwrap();
+        let mut registry = SessionRegistry::open(&store).unwrap();
+        let mut redeemed = || {
+            let prepared = registry
+                .prepare(coding(&account, home.path()), &account)
+                .unwrap();
+            let context = registry
+                .redeem(prepared.session_id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            (prepared.session_id, context.proof)
+        };
+        let (slow, slow_proof) = redeemed();
+        let (gone, gone_proof) = redeemed();
+        let check_in = |id: Uuid, proof: &str| LifecycleReport {
+            model: None,
+            collection: None,
+            session_id: id,
+            proof: proof.to_owned(),
+            state: SessionState::Starting,
+            process_id: None,
+            process_identity: None,
+            exit_code: None,
+        };
+        let can_dismiss = |registry: &mut SessionRegistry, id: Uuid| {
+            registry
+                .views()
+                .unwrap()
+                .iter()
+                .find(|v| v.id == id)
+                .unwrap()
+                .can_dismiss
+        };
+        registry.report(check_in(slow, &slow_proof)).unwrap();
+        registry
+            .sweep(Utc::now() + LEASE + Duration::seconds(1))
+            .unwrap();
+        assert!(can_dismiss(&mut registry, slow), "quiet in its setup");
+        registry.report(check_in(slow, &slow_proof)).unwrap();
+        assert_eq!(
+            registry.describe(slow).map(|(_, s)| s),
+            Some(SessionState::Starting)
+        );
+        assert!(!can_dismiss(&mut registry, slow), "it checked in");
+        assert_eq!(registry.dismiss(slow), Err(ManagedError::Conflict));
+
+        assert!(can_dismiss(&mut registry, gone));
+        registry.dismiss(gone).unwrap();
+        assert_eq!(
+            registry.report(check_in(gone, &gone_proof)),
+            Err(ManagedError::Conflict),
+            "dismissed: it must not spawn"
+        );
+
+        registry
+            .report(LifecycleReport {
+                state: SessionState::Running,
+                process_id: Some(42),
+                process_identity: Some("42:1".into()),
+                ..check_in(slow, &slow_proof)
+            })
+            .unwrap();
+        assert_eq!(
+            registry.report(check_in(slow, &slow_proof)),
+            Err(ManagedError::InvalidRequest),
+            "its tool runs"
+        );
+        assert_eq!(
+            registry.report(LifecycleReport {
+                process_id: Some(42),
+                ..check_in(slow, &slow_proof)
+            }),
+            Err(ManagedError::InvalidRequest)
         );
     }
 

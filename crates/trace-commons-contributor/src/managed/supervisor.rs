@@ -349,6 +349,26 @@ async fn run_native(
     } else {
         None
     };
+    // Setup (the snapshot above) can outlast the lease, and the person may
+    // have dismissed the row meanwhile: check in first, so a dismissed row
+    // never gets a tool running untracked.
+    let check_in: anyhow::Result<Value> = call(
+        store,
+        "managed_session_report",
+        json!(LifecycleReport {
+            model: None,
+            collection: None,
+            session_id: row.id,
+            proof: context.proof.clone(),
+            state: SessionState::Starting,
+            process_id: None,
+            process_identity: None,
+            exit_code: None,
+        }),
+    );
+    if check_in_refused(&check_in) {
+        return Err(ManagedError::LaunchUnknown.into());
+    }
     clear_parent_session(&mut command);
     #[cfg(unix)]
     let command = with_open_files_floor(command);
@@ -823,6 +843,15 @@ fn status_line(command: &mut std::process::Command, tool: super::ToolId, home: &
 
 /// Whether the daemon's answer to a running report asks for a stop. Only
 /// an explicit `true` does; anything else leaves the tool running.
+/// Whether the daemon refused this launcher's check-in before spawn: the
+/// row was ended (the person dismissed it) or is not this launcher's. Any
+/// other answer spawns, as before the check-in existed: an older daemon
+/// refuses a `starting` report as invalid, an unreachable one answers
+/// nothing.
+fn check_in_refused(answer: &anyhow::Result<Value>) -> bool {
+    matches!(answer, Err(error) if error.to_string() == "managed-conflict")
+}
+
 fn stop_asked(answer: &anyhow::Result<Value>) -> bool {
     matches!(answer, Ok(value) if value.get("stop") == Some(&Value::Bool(true)))
 }
@@ -1020,6 +1049,25 @@ impl TerminalSignals {
 
 #[cfg(test)]
 mod tests {
+    /// Only a refusal of the check-in stops the spawn: the row was ended
+    /// (dismissed) or is not this launcher's. An older daemon refuses a
+    /// `starting` report as invalid, and an unreachable daemon answers
+    /// nothing; both spawn, as before the check-in existed.
+    #[test]
+    fn only_a_refused_check_in_stops_the_spawn() {
+        use serde_json::json;
+        assert!(!super::check_in_refused(&Ok(json!({"accepted":true}))));
+        assert!(super::check_in_refused(&Err(anyhow::anyhow!(
+            "managed-conflict"
+        ))));
+        assert!(!super::check_in_refused(&Err(anyhow::anyhow!(
+            "managed-invalid-request"
+        ))));
+        assert!(!super::check_in_refused(&Err(
+            super::ManagedError::DaemonUnavailable.into()
+        )));
+    }
+
     /// The workflows notice is the owner's approved line, from the shared
     /// copy table.
     #[test]

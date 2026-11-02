@@ -3585,6 +3585,146 @@ mod tests {
             assert_eq!(row.collection, CollectionState::Failed);
         }
 
+        /// A collecting row whose launcher redeemed it and went quiet
+        /// without reporting, after writing a collection plan naming
+        /// `process` when one is given. Returns its id, lapsed to unknown.
+        fn quiet_unreported(
+            f: &Fixture,
+            sessions: &mut SessionRegistry,
+            process: Option<ProcessIdentity>,
+        ) -> Uuid {
+            let prepared = sessions
+                .prepare(
+                    LaunchRequest {
+                        cli_options: None,
+                        model: None,
+                        collect_traces: true,
+                        purpose: LaunchPurpose::Coding,
+                        request_id: Uuid::new_v4(),
+                        tool: ToolId::Claude,
+                        connection: ConnectionKind::Subscription,
+                        account_id: f.account.id,
+                        cwd: f.store.dir().to_path_buf(),
+                        expected_generation: Generation(0),
+                        save_default: false,
+                        keep_saved_model: false,
+                        resume_of: None,
+                        background_model: None,
+                    },
+                    &f.account,
+                )
+                .unwrap();
+            let id = prepared.session_id;
+            sessions
+                .redeem(id, prepared.ticket.as_deref().unwrap())
+                .unwrap();
+            if let Some(process) = process {
+                let collection =
+                    NativeCollection::snapshot(&f.store, ToolId::Claude, f.account.id, id, None)
+                        .unwrap();
+                collection_plan::write(
+                    &f.store,
+                    &CollectionPlan {
+                        schema_version: 1,
+                        session_id: id,
+                        tool: ToolId::Claude,
+                        account_id: f.account.id,
+                        resume_root: None,
+                        cwd: f.store.dir().to_path_buf(),
+                        collect_traces: true,
+                        created_at: chrono::Utc::now(),
+                        native: Some(collection.plan()),
+                        opencode: None,
+                        process,
+                    },
+                )
+                .unwrap();
+            }
+            sessions.sweep(lapsed()).unwrap();
+            assert_eq!(
+                sessions.describe(id).map(|(_, s)| s),
+                Some(SessionState::Unknown)
+            );
+            id
+        }
+
+        fn can_dismiss(shared: &DaemonShared, id: Uuid) -> bool {
+            sessions_of(shared, |s| {
+                s.views()
+                    .unwrap()
+                    .iter()
+                    .find(|v| v.id == id)
+                    .unwrap()
+                    .can_dismiss
+            })
+        }
+
+        /// A launcher that spawned its tool and wrote a plan naming it, then
+        /// died before reporting, is not stuck: the daemon watches that
+        /// process, and the plan ends the row once it is gone. A plan that
+        /// names a pid alone is not watchable, so that row is the person's.
+        #[tokio::test]
+        async fn a_plan_naming_the_tool_keeps_an_unreported_row_watched() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let mut tool = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap();
+            let watched = sessions_of(&shared, |s| {
+                quiet_unreported(&f, s, Some(ProcessIdentity::of(tool.id())))
+            });
+            let pid_only = sessions_of(&shared, |s| {
+                quiet_unreported(
+                    &f,
+                    s,
+                    Some(ProcessIdentity {
+                        pid: tool.id(),
+                        start_time: None,
+                    }),
+                )
+            });
+            assert!(!can_dismiss(&shared, watched));
+            assert!(can_dismiss(&shared, pid_only));
+            tool.kill().unwrap();
+            tool.wait().unwrap();
+            collect_abandoned(&shared, lapsed()).await;
+            assert_eq!(status(&shared, watched).state, SessionState::Failed);
+        }
+
+        /// Dismissing a stuck collecting row fails its collection when no
+        /// plan exists, since nothing will collect it; with a plan, the plan
+        /// settles it.
+        #[tokio::test]
+        async fn dismissing_a_stuck_collecting_row_settles_its_collection() {
+            let f = fixture();
+            let shared = Arc::new(DaemonShared::load(f.store.clone()).unwrap());
+            let unplanned = sessions_of(&shared, |s| quiet_unreported(&f, s, None));
+            let planned = sessions_of(&shared, |s| {
+                quiet_unreported(
+                    &f,
+                    s,
+                    Some(ProcessIdentity {
+                        pid: std::process::id(),
+                        start_time: None,
+                    }),
+                )
+            });
+            for id in [unplanned, planned] {
+                sessions_of(&shared, |s| s.dismiss(id)).unwrap();
+                assert_eq!(status(&shared, id).state, SessionState::Failed);
+            }
+            assert_eq!(
+                status(&shared, unplanned).collection,
+                CollectionState::Failed
+            );
+            assert_eq!(
+                status(&shared, planned).collection,
+                CollectionState::Pending,
+                "its plan settles it"
+            );
+        }
+
         #[tokio::test]
         async fn rows_a_restart_found_unknown_are_collected_at_startup() {
             let f = fixture();
