@@ -225,6 +225,9 @@ fn pkce() -> (String, String) {
 struct Reply {
     status: StatusCode,
     bytes: Vec<u8>,
+    /// The headers a client acts on: whether to cache, and when to retry.
+    cache_control: Option<String>,
+    retry_after: Option<String>,
 }
 
 impl Reply {
@@ -255,12 +258,25 @@ async fn send(
         .oneshot(builder.body(body).expect("request"))
         .await
         .expect("router is infallible");
+    let header = |name: axum::http::HeaderName| {
+        response
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().expect("ascii").to_string())
+    };
+    let cache_control = header(axum::http::header::CACHE_CONTROL);
+    let retry_after = header(axum::http::header::RETRY_AFTER);
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .expect("body")
         .to_vec();
-    Reply { status, bytes }
+    Reply {
+        status,
+        bytes,
+        cache_control,
+        retry_after,
+    }
 }
 
 /// A started ceremony as the client sees it.
@@ -1428,12 +1444,25 @@ async fn send_account(
         .oneshot(builder.body(body).expect("request"))
         .await
         .expect("router is infallible");
+    let header = |name: axum::http::HeaderName| {
+        response
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().expect("ascii").to_string())
+    };
+    let cache_control = header(axum::http::header::CACHE_CONTROL);
+    let retry_after = header(axum::http::header::RETRY_AFTER);
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .expect("body")
         .to_vec();
-    Reply { status, bytes }
+    Reply {
+        status,
+        bytes,
+        cache_control,
+        retry_after,
+    }
 }
 
 /// A session on `account` that no NEAR AI sign-in minted, inserted as a
@@ -1716,65 +1745,9 @@ fn well_formed_unknown_finish(device: &Device) -> serde_json::Value {
     })
 }
 
-/// The answer a client sees, with the headers that matter to it.
-struct Answer {
-    status: StatusCode,
-    bytes: Vec<u8>,
-    cache_control: Option<String>,
-    retry_after: Option<String>,
-}
-
-async fn post_answer(state: &Arc<AppState>, uri: &str, body: &serde_json::Value) -> Answer {
-    let request = axum::http::Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(body).expect("json")))
-        .expect("request");
-    let response = app(state.clone())
-        .oneshot(request)
-        .await
-        .expect("router is infallible");
-    let header = |name: axum::http::HeaderName| {
-        response
-            .headers()
-            .get(name)
-            .map(|value| value.to_str().expect("ascii").to_string())
-    };
-    let cache_control = header(axum::http::header::CACHE_CONTROL);
-    let retry_after = header(axum::http::header::RETRY_AFTER);
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("body")
-        .to_vec();
-    Answer {
-        status,
-        bytes,
-        cache_control,
-        retry_after,
-    }
-}
-
-/// A finish of `started` by `device`, as [`post_answer`] sees it.
-async fn finish_answer(
-    state: &Arc<AppState>,
-    started: &Started,
-    device: &Device,
-    signature: &str,
-) -> Answer {
-    post_answer(
-        state,
-        PROVISION_FINISH,
-        &serde_json::json!({
-            "ceremony_id": started.ceremony_id,
-            "code_verifier": started.verifier,
-            "device_public_key": device.public_b64(),
-            "device_signature": signature,
-            "access_token": "near-ai-access-token-fixture",
-        }),
-    )
-    .await
+/// A `POST` of `body` to `uri`, unauthenticated.
+async fn post(state: &Arc<AppState>, uri: &str, body: &serde_json::Value) -> Reply {
+    send(state, "POST", uri, Some(body), None).await
 }
 
 /// The uniform deny, byte for byte, as the router answers it.
@@ -1785,14 +1758,14 @@ fn uniform_deny_bytes() -> Vec<u8> {
     .expect("json")
 }
 
-fn assert_uniform_deny(answer: &Answer, cause: &str) {
+fn assert_uniform_deny(answer: &Reply, cause: &str) {
     assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{cause}");
     assert_eq!(answer.bytes, uniform_deny_bytes(), "{cause}");
     assert_eq!(answer.cache_control.as_deref(), Some("no-store"), "{cause}");
     assert_eq!(answer.retry_after, None, "{cause}");
 }
 
-fn assert_unavailable(answer: &Answer, cause: &str) {
+fn assert_unavailable(answer: &Reply, cause: &str) {
     assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE, "{cause}");
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&answer.bytes).expect("json"),
@@ -1818,10 +1791,10 @@ async fn pg_a_rate_limited_near_ai_sign_in_answers_429_not_the_refusal() {
         // An empty body is refused after the limit is counted, so each one
         // spends a slot and answers the uniform deny until the limit is hit.
         for attempt in 0..30 {
-            let answer = post_answer(&h.state, uri, &serde_json::json!({})).await;
+            let answer = post(&h.state, uri, &serde_json::json!({})).await;
             assert_uniform_deny(&answer, &format!("{uri} attempt {attempt}"));
         }
-        let limited = post_answer(&h.state, uri, &serde_json::json!({})).await;
+        let limited = post(&h.state, uri, &serde_json::json!({})).await;
         assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS, "{uri}");
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&limited.bytes).expect("json"),
@@ -1866,7 +1839,7 @@ async fn pg_a_near_ai_sign_in_whose_database_does_not_answer_answers_503() {
     let device = Device::new();
     let (_, challenge) = pkce();
 
-    let started = post_answer(
+    let started = post(
         &state,
         PROVISION_START,
         &serde_json::json!({
@@ -1878,7 +1851,7 @@ async fn pg_a_near_ai_sign_in_whose_database_does_not_answer_answers_503() {
     .await;
     assert_unavailable(&started, "start, database down");
 
-    let finished = post_answer(
+    let finished = post(
         &state,
         PROVISION_FINISH,
         &well_formed_unknown_finish(&device),
@@ -1919,14 +1892,15 @@ async fn pg_a_near_ai_finish_whose_near_ai_does_not_answer_answers_503() {
         .await;
         let started = start(&state, PROVISION_START, None, &device).await;
         let signature = device.sign(&started.signing_bytes);
-        let body = serde_json::json!({
-            "ceremony_id": started.ceremony_id,
-            "code_verifier": started.verifier,
-            "device_public_key": device.public_b64(),
-            "device_signature": signature,
-            "access_token": "near-ai-access-token-fixture",
-        });
-        let answer = post_answer(&state, PROVISION_FINISH, &body).await;
+        let answer = finish(
+            &state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await;
         assert_unavailable(&answer, cause);
         assert_eq!(
             count(
@@ -1939,7 +1913,15 @@ async fn pg_a_near_ai_finish_whose_near_ai_does_not_answer_answers_503() {
             "{cause}: an unanswered finish registered the device"
         );
         // Consumed: the same finish again is a replay, and a replay is refused.
-        let replay = post_answer(&state, PROVISION_FINISH, &body).await;
+        let replay = finish(
+            &state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await;
         assert_uniform_deny(&replay, &format!("{cause}, replayed"));
     }
     reset_account_rate_limiter_for_db_test().await;
@@ -1956,19 +1938,19 @@ async fn pg_every_near_ai_finish_refusal_is_the_identical_uniform_deny() {
     };
     reset_account_rate_limiter_for_db_test().await;
     let admin = h.admin().await;
-    let mut answers: Vec<(&str, Answer)> = Vec::new();
+    let mut answers: Vec<(&str, Reply)> = Vec::new();
 
     // Not a finish body at all.
     answers.push((
         "malformed body",
-        post_answer(&h.state, PROVISION_FINISH, &serde_json::json!({})).await,
+        post(&h.state, PROVISION_FINISH, &serde_json::json!({})).await,
     ));
 
     // A ceremony nobody started.
     let stranger = Device::new();
     answers.push((
         "unknown ceremony",
-        post_answer(
+        post(
             &h.state,
             PROVISION_FINISH,
             &well_formed_unknown_finish(&stranger),
@@ -1982,7 +1964,7 @@ async fn pg_every_near_ai_finish_refusal_is_the_identical_uniform_deny() {
     let wrong = device.sign(b"some other ceremony");
     answers.push((
         "wrong device signature",
-        finish_answer(&h.state, &started, &device, &wrong).await,
+        finish(&h.state, PROVISION_FINISH, None, &started, &device, &wrong).await,
     ));
 
     // NEAR AI answered, and named no one: its 401.
@@ -1995,7 +1977,15 @@ async fn pg_every_near_ai_finish_refusal_is_the_identical_uniform_deny() {
     let signature = device.sign(&started.signing_bytes);
     answers.push((
         "near ai 401",
-        finish_answer(&refusing, &started, &device, &signature).await,
+        finish(
+            &refusing,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &device,
+            &signature,
+        )
+        .await,
     ));
 
     // A replayed finish: the first one succeeded and consumed the ceremony.
@@ -2018,7 +2008,15 @@ async fn pg_every_near_ai_finish_refusal_is_the_identical_uniform_deny() {
         .to_string();
     answers.push((
         "replayed ceremony",
-        finish_answer(&h.state, &started, &enrolled, &signature).await,
+        finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &enrolled,
+            &signature,
+        )
+        .await,
     ));
 
     // The enrolled device, now signed in to near.ai as someone else: its key
@@ -2029,7 +2027,15 @@ async fn pg_every_near_ai_finish_refusal_is_the_identical_uniform_deny() {
     let signature = enrolled.sign(&started.signing_bytes);
     answers.push((
         "device key held by another login's account",
-        finish_answer(&h.state, &started, &enrolled, &signature).await,
+        finish(
+            &h.state,
+            PROVISION_FINISH,
+            None,
+            &started,
+            &enrolled,
+            &signature,
+        )
+        .await,
     ));
 
     for (cause, answer) in &answers {

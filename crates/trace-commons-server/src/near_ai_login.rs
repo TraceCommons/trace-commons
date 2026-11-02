@@ -150,11 +150,22 @@ fn normalise_auth_provider(raw: Option<&str>) -> String {
     }
 }
 
-/// What a non-success answer from NEAR AI means. A `5xx` or a `429` is NEAR
-/// AI not answering the question, the same for every token at that moment;
-/// any other status is its answer about this token.
+/// What a non-success answer from NEAR AI means. A `5xx`, a `429`, or a
+/// status that says the request was not handled (`408` Request Timeout,
+/// `421` Misdirected Request, `425` Too Early, as a fronting proxy or CDN
+/// answers) is NEAR AI not answering the question, the same for every token
+/// at that moment; any other status is its answer about this token.
 fn failure_for_status(status: reqwest::StatusCode) -> LoginIntrospectionFailure {
-    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+    use reqwest::StatusCode;
+    if status.is_server_error()
+        || matches!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS
+                | StatusCode::REQUEST_TIMEOUT
+                | StatusCode::MISDIRECTED_REQUEST
+                | StatusCode::TOO_EARLY
+        )
+    {
         LoginIntrospectionFailure::Unavailable
     } else {
         LoginIntrospectionFailure::Refused
@@ -175,10 +186,13 @@ pub async fn introspect_login(
     timeout: Duration,
 ) -> Result<VerifiedNearAiLogin, LoginIntrospectionFailure> {
     let url = introspection_url(base_url);
+    // A client that cannot be built (the TLS backend or root store) fails
+    // the same way on every request: a misconfiguration, not NEAR AI being
+    // down, so it is not `Unavailable` and is never "try again later".
     let http = reqwest::Client::builder()
         .timeout(timeout)
         .build()
-        .map_err(|_| LoginIntrospectionFailure::Unavailable)?;
+        .map_err(|_| LoginIntrospectionFailure::Refused)?;
     // The one place the token appears. `bearer_auth` rather than a formatted
     // string so it is never a `String` this function owns and could log.
     let response = http
@@ -191,10 +205,21 @@ pub async fn introspect_login(
     if !status.is_success() {
         return Err(failure_for_status(status));
     }
-    let user: IntrospectedUser = response
-        .json()
+    // Read, then parse, as two steps: a body that stops arriving (the
+    // timeout running out, a reset after the headers) is NEAR AI not
+    // answering; a body that arrived and does not parse is its answer.
+    //
+    // Every error from `bytes()` is the first kind. reqwest reports any body
+    // read failure from it as `is_decode()` (it maps the collect error with
+    // `error::decode`), so that flag cannot tell the two apart; with no
+    // content decompression enabled in this crate, a `bytes()` error is
+    // always the body not arriving. The parse below is the only refusal.
+    let body = response
+        .bytes()
         .await
-        .map_err(|_| LoginIntrospectionFailure::Refused)?;
+        .map_err(|_| LoginIntrospectionFailure::Unavailable)?;
+    let user: IntrospectedUser =
+        serde_json::from_slice(&body).map_err(|_| LoginIntrospectionFailure::Refused)?;
     // A subject that is empty, or long enough to be something other than an
     // identifier, is not one we will anchor. Bounded before it reaches the
     // HMAC so a hostile response cannot make us hash something unbounded.
@@ -326,7 +351,7 @@ mod tests {
         assert_eq!(format!("{unavailable:?}"), "Unavailable");
     }
 
-    /// Only NEAR AI not answering is `Unavailable`. Every answer it gives
+    /// Only NEAR AI not handling the request is `Unavailable`. Every answer it gives
     /// about the token, whatever the status, stays the one refusal.
     #[test]
     fn only_a_server_error_or_a_rate_limit_reads_as_unavailable() {
@@ -337,6 +362,9 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
             StatusCode::GATEWAY_TIMEOUT,
             StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::MISDIRECTED_REQUEST,
+            StatusCode::TOO_EARLY,
         ] {
             assert_eq!(
                 failure_for_status(status),
@@ -400,5 +428,65 @@ mod tests {
                 "{status}"
             );
         }
+    }
+
+    /// A `200` whose body stops arriving is NEAR AI not answering, not a
+    /// refusal: the connection drops partway through the body, or the body
+    /// stalls past the timeout. A complete body that does not parse is the
+    /// refusal.
+    #[tokio::test]
+    async fn a_body_that_stops_arriving_is_unavailable_and_a_bad_one_is_refused() {
+        use tokio::io::AsyncWriteExt as _;
+        /// A one-shot server that writes `head` and then either closes or
+        /// holds the connection open.
+        async fn raw(head: &'static str, hold: bool) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request).await;
+                socket.write_all(head.as_bytes()).await.unwrap();
+                if hold {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            });
+            base
+        }
+        let token = SecretString::from("fixture-token".to_string());
+        let short = Duration::from_millis(500);
+
+        let truncated = raw(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"id\"",
+            false,
+        )
+        .await;
+        assert_eq!(
+            introspect_login(&truncated, &token, short).await,
+            Err(LoginIntrospectionFailure::Unavailable),
+            "a body cut off after the headers"
+        );
+
+        let stalled = raw(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"id\"",
+            true,
+        )
+        .await;
+        assert_eq!(
+            introspect_login(&stalled, &token, short).await,
+            Err(LoginIntrospectionFailure::Unavailable),
+            "a body that stalls past the timeout"
+        );
+
+        let garbled = raw(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 9\r\nconnection: close\r\n\r\nnot json!",
+            false,
+        )
+        .await;
+        assert_eq!(
+            introspect_login(&garbled, &token, short).await,
+            Err(LoginIntrospectionFailure::Refused),
+            "a complete body that does not parse"
+        );
     }
 }

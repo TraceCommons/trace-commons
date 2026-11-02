@@ -188,43 +188,73 @@ pub fn is_device_key_revoked(error: &crate::error::DatabaseError) -> bool {
 }
 
 /// Whether a provisioning error is the database failing to answer rather than
-/// a refusal: no connection from the pool, a connection lost or timed out, or
-/// PostgreSQL itself out of resources, shutting down, cancelling the
-/// statement, or aborting it on a serialization failure or deadlock.
+/// a refusal: the pool timed out or is closed, the connection to PostgreSQL
+/// could not be made or was lost (an I/O failure or a closed connection), or
+/// PostgreSQL said it is shutting down or out of resources.
 ///
-/// Narrow on purpose. Every decided refusal on these paths is carried as
-/// `DatabaseError::Pool(label)` (the refusal labels above and in
-/// `db::postgres_account_onboarding`), and that variant is never transient
-/// here, nor are `Query`, `Constraint`, `Serialization`, or a PostgreSQL
-/// error with any other SQLSTATE (an integrity or permission violation). So
-/// a refusal cannot read as "unavailable": anything not positively
-/// recognised as the database not answering stays a refusal. None of the
-/// recognised causes depends on whose account, login or key the request
-/// names.
+/// Narrow on purpose, in three ways:
+///
+/// - Every decided refusal on these paths is carried as
+///   `DatabaseError::Pool(label)` (the refusal labels above and in
+///   `db::postgres_account_onboarding`), and that variant is never transient
+///   here, nor are `Query`, `Constraint` or `Serialization`. Anything not
+///   positively recognised stays a refusal.
+/// - A client-side `tokio_postgres` error (an unexpected row count, a column
+///   or type mismatch, a parameter that will not encode) is deterministic and
+///   follows the data, so it is not transient: only a closed connection and
+///   an I/O cause are.
+/// - Permanent failures are not transient either, so a misconfigured commons
+///   is never told to clients as "try again later": a bad password or a
+///   missing database (a server error with another SQLSTATE), a pool that
+///   could not be built, a dropped database (`57P04`).
+///
+/// Lock contention is deliberately **not** transient: a deadlock (`40P01`),
+/// a serialization failure (`40001`) or a cancelled statement (`57014`)
+/// happens because another transaction holds the rows this request touches,
+/// which on these paths are keyed by the device key and the login's anchor.
+/// Answering those differently would describe that key or login, so they
+/// stay the uniform deny. What remains -- the pool, the connection, the
+/// server's own state -- is the same whichever account, login or key the
+/// request names.
 pub fn is_transient_database_failure(error: &crate::error::DatabaseError) -> bool {
     use crate::error::DatabaseError;
+    use deadpool_postgres::PoolError;
     match error {
-        DatabaseError::PoolRuntime(_) | DatabaseError::PoolBuild(_) => true,
-        DatabaseError::Postgres(error) => match error.as_db_error() {
-            // No server error: PostgreSQL never answered the statement (I/O
-            // failure, closed connection, connect timeout).
-            None => true,
-            Some(db) => {
-                let code = db.code().code();
-                // 08: connection exception. 53: insufficient resources.
-                // 57P: operator intervention (shutdown, cannot connect now).
-                // 57014: statement cancelled (statement_timeout).
-                // 40001 / 40P01: serialization failure, deadlock detected.
-                code.starts_with("08")
-                    || code.starts_with("53")
-                    || code.starts_with("57P")
-                    || code == "57014"
-                    || code == "40001"
-                    || code == "40P01"
-            }
-        },
+        DatabaseError::PoolRuntime(PoolError::Timeout(_) | PoolError::Closed) => true,
+        DatabaseError::PoolRuntime(PoolError::Backend(error)) => postgres_did_not_answer(error),
+        DatabaseError::Postgres(error) => postgres_did_not_answer(error),
         _ => false,
     }
+}
+
+/// Whether a `tokio_postgres` error is PostgreSQL not answering: a closed
+/// connection, an I/O failure (refused, reset, unreachable), or the server
+/// saying it cannot serve now. See [`is_transient_database_failure`].
+fn postgres_did_not_answer(error: &tokio_postgres::Error) -> bool {
+    if error.is_closed() {
+        return true;
+    }
+    if let Some(db) = error.as_db_error() {
+        // 08000 / 08001 / 08003 / 08006: connection exception, could not
+        // connect, no connection, connection failure. 53000 / 53100 / 53200 /
+        // 53300: out of resources, disk, memory, connections. 57P01 / 57P02 /
+        // 57P03: admin shutdown, crash shutdown, cannot connect now.
+        return matches!(
+            db.code().code(),
+            "08000"
+                | "08001"
+                | "08003"
+                | "08006"
+                | "53000"
+                | "53100"
+                | "53200"
+                | "53300"
+                | "57P01"
+                | "57P02"
+                | "57P03"
+        );
+    }
+    std::error::Error::source(error).is_some_and(|cause| cause.is::<std::io::Error>())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -524,6 +554,14 @@ mod tests {
         }
         assert!(is_transient_database_failure(&DatabaseError::PoolRuntime(
             deadpool_postgres::PoolError::Closed
+        )));
+        assert!(is_transient_database_failure(&DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait)
+        )));
+        // Permanent: a pool that cannot run, or could not be built, is a
+        // misconfiguration, never "try again later".
+        assert!(!is_transient_database_failure(&DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::NoRuntimeSpecified
         )));
     }
 

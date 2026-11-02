@@ -2679,3 +2679,88 @@ async fn each_listed_device_says_what_it_has_contributed() {
     task.abort();
     other_task.abort();
 }
+
+/// `is_transient_database_failure` against errors a real PostgreSQL and a
+/// real pool raise. Only the database not answering is transient: a pool
+/// that cannot connect at all (nothing listening). A missing database, an
+/// unexpected row count (a client-side error that follows the data) and a
+/// cancelled statement (lock contention, which follows the rows a request
+/// touches) are not.
+#[tokio::test]
+async fn only_the_database_not_answering_is_a_transient_failure() {
+    use trace_commons_server::account_onboarding::is_transient_database_failure;
+    use trace_commons_server::error::DatabaseError;
+    let _serial = serial().lock().await;
+    let Ok(url) = std::env::var("TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL") else {
+        eprintln!("SKIPPED: isolated TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL required");
+        return;
+    };
+    assert!(
+        url.contains("127.0.0.1"),
+        "test requires explicitly isolated loopback DB"
+    );
+    let pool_for = |url: &str| {
+        let config: tokio_postgres::Config = url.parse().expect("url");
+        deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
+            config,
+            tokio_postgres::NoTls,
+        ))
+        .max_size(1)
+        .build()
+        .expect("pool")
+    };
+
+    // Nothing listening: the database did not answer.
+    let closed_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let unreachable = pool_for(&format!("postgres://nobody@127.0.0.1:{closed_port}/x"))
+        .get()
+        .await
+        .expect_err("nothing listens");
+    assert!(
+        is_transient_database_failure(&DatabaseError::PoolRuntime(unreachable)),
+        "a refused connection is the database not answering"
+    );
+
+    // The server answered, permanently: this database does not exist (3D000).
+    let mut missing = reqwest::Url::parse(&url).unwrap();
+    missing.set_path(&format!("/no_such_db_{}", uuid::Uuid::new_v4().simple()));
+    let missing = pool_for(missing.as_str())
+        .get()
+        .await
+        .expect_err("no such database");
+    assert!(
+        !is_transient_database_failure(&DatabaseError::PoolRuntime(missing)),
+        "a missing database is a misconfiguration, not busy"
+    );
+
+    let client = pool_for(&url).get().await.expect("connect");
+    // Client-side and data-dependent: more than one row for `query_opt`.
+    let row_count = client
+        .query_opt("SELECT 1 UNION ALL SELECT 2", &[])
+        .await
+        .expect_err("two rows");
+    assert!(row_count.as_db_error().is_none(), "a client-side error");
+    assert!(!is_transient_database_failure(&DatabaseError::Postgres(
+        row_count
+    )));
+
+    // Contention-shaped: a statement cancelled by statement_timeout (57014).
+    client
+        .batch_execute("SET statement_timeout = '50ms'")
+        .await
+        .unwrap();
+    let cancelled = client
+        .batch_execute("SELECT pg_sleep(1)")
+        .await
+        .expect_err("cancelled");
+    assert_eq!(
+        cancelled.code(),
+        Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+    );
+    assert!(!is_transient_database_failure(&DatabaseError::Postgres(
+        cancelled
+    )));
+}
