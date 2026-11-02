@@ -21,6 +21,38 @@ namespace TraceCommons.Interop.Tests;
 public class NearAiCredentialTests
 {
     [Theory]
+    [InlineData("{\"removed\":true,\"revoked\":false}", true)]
+    [InlineData("{\"removed\":true,\"revoked\":true}", false)]
+    [InlineData("{\"removed\":true,\"revoked\":null}", false)]
+    [InlineData("{\"removed\":false,\"revoked\":null}", false)]
+    [InlineData("{\"removed\":false,\"revoked\":false}", false)]
+    [InlineData("{\"removed\":true}", false)]
+    [InlineData("[]", false)]
+    public void OnlyAFailedRevokeLeavesTheKeyAtTheService(string result, bool left)
+    {
+        using JsonDocument document = JsonDocument.Parse(result);
+        Assert.Equal(left, NearAiCredentialSurface.ForgetLeftKeyAtService(document.RootElement.Clone()));
+        Assert.False(NearAiCredentialSurface.ForgetLeftKeyAtService(null));
+    }
+
+    [Fact]
+    public void AFailedRevokeIsStatusTextInTheOwnersWords()
+    {
+        PrivateInferenceCopy copy = Copy();
+        DaemonResponse failed = DaemonResponse.Parse(
+            "{\"id\":1,\"result\":{\"removed\":true,\"revoked\":false}}");
+        Assert.Equal(
+            "Couldn't revoke the key. Delete it in your NEAR AI account.",
+            NearAiCredentialSurface.ForgetNotice(failed, copy));
+        DaemonResponse revoked = DaemonResponse.Parse(
+            "{\"id\":1,\"result\":{\"removed\":true,\"revoked\":true}}");
+        Assert.Equal(string.Empty, NearAiCredentialSurface.ForgetNotice(revoked, copy));
+        DaemonResponse refused = DaemonResponse.Parse(
+            "{\"id\":1,\"error\":{\"code\":\"unavailable\",\"message\":\"near_ai_credential_unavailable\"}}");
+        Assert.Equal(string.Empty, NearAiCredentialSurface.ForgetNotice(refused, copy));
+    }
+
+    [Theory]
     [InlineData("github")]
     [InlineData("google")]
     [InlineData("near")]
@@ -132,7 +164,9 @@ public class NearAiCredentialTests
             .Where(name => name.StartsWith("credential_", StringComparison.Ordinal))
             .ToList();
 
-        Assert.Equal(21, credentialFields.Count);
+        // 22 since `credential_forget_not_revoked`: copy, and none of its
+        // words is a carrier, so the per-word check below still holds it.
+        Assert.Equal(22, credentialFields.Count);
         var carriers = new HashSet<string>(StringComparer.Ordinal)
         {
             "key", "keys", "secret", "token", "prefix", "account", "email", "org", "workspace",

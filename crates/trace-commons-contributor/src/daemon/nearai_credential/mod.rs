@@ -347,10 +347,9 @@ pub fn handle_cancel(shared: &DaemonShared, req: &Request) -> Response {
 
 /// Forget the stored credential, and the session stored beside it.
 ///
-/// `revoked` says whether the stored key is gone at NEAR AI. The sync handler
-/// answers `null` and revokes in the background, when a runtime is there to
-/// run it; the async handler, which is what the socket dispatches, waits for
-/// the revoke and answers what happened (`null` when no key was stored). A revoke that could not happen is
+/// `revoked` says whether the stored key is gone at NEAR AI: [`disconnect`]
+/// waits for the revoke and answers what happened (`null` when no key was
+/// stored). Only the async dispatcher answers this method. A revoke that could not happen is
 /// best effort by owner decision (2026-11-02) and never undoes the clear.
 ///
 /// The running daemon's own copy is cleared too, not just the file. The
@@ -404,17 +403,15 @@ fn clear_local(shared: &DaemonShared) -> anyhow::Result<(bool, Option<disconnect
     Ok((removed, revocation))
 }
 
-pub fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
-    let Ok((removed, revocation)) = clear_local(shared) else {
+/// The local clear, synchronously and without the revoke or the proxy
+/// reconcile, for tests that race a clear against a read in flight. The
+/// socket answers `near_ai_credential_forget` with [`handle_forget_async`]
+/// only; the sync dispatcher refuses it.
+#[cfg(test)]
+pub(crate) fn handle_forget(shared: &DaemonShared, req: &Request) -> Response {
+    let Ok((removed, _revocation)) = clear_local(shared) else {
         return Response::err(req.id, ERR_UNAVAILABLE, "near_ai_credential_unavailable");
     };
-    if let (Some(revocation), Ok(runtime)) = (revocation, tokio::runtime::Handle::try_current()) {
-        let api = disconnect::api(&shared.store);
-        runtime.spawn(async move {
-            revocation.run(api.as_ref()).await;
-        });
-    }
-    // Contributor-initiated, so a legacy-store prompt here is explicable.
     crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(&shared.store);
     if crate::daemon::cloud_credential_lifecycle::cleanup_native(&shared.store).is_err() {
         return Response::err(
@@ -993,43 +990,6 @@ mod tests {
         // reading the wrong field.
         assert_eq!(ATTEMPT_STATUS_FIELD, "attempt_status");
         assert_eq!(ceremony::STATUS_COMPLETE, "complete");
-    }
-
-    /// The sync `handle_forget` revokes in the background, so it cannot know
-    /// the outcome and answers `revoked: null`. A shell draws
-    /// `credential_forget_not_revoked` only on `removed: true, revoked:
-    /// false`, which only the async handler (the socket's) answers, after the
-    /// revoke really failed. A `false` here would draw that sentence over a
-    /// revoke still in flight.
-    #[tokio::test]
-    async fn the_sync_forget_claims_no_revocation_either_way() {
-        let (_directory, store) = crate::config::tests_support::temp_store();
-        let shared = DaemonShared::load(store).unwrap();
-        shared.settings.lock().unwrap().near_ai_inference =
-            Some(crate::daemon::settings::NearAiInferenceCredential {
-                key: "sk-forget-pin".into(),
-                key_id: "key-1".into(),
-                key_prefix: "sk-for".into(),
-                organization_id: "org-1".into(),
-                workspace_id: "ws-1".into(),
-                minted_at: chrono::Utc::now(),
-            });
-        shared
-            .settings
-            .lock()
-            .unwrap()
-            .save_for_test(&shared.store)
-            .unwrap();
-        let request = Request {
-            id: 29,
-            method: "near_ai_credential_forget".into(),
-            params: serde_json::json!({}),
-        };
-        let body = handle_forget(&shared, &request)
-            .result
-            .expect("forgetting a stored key is answered");
-        assert_eq!(body["removed"], true, "{body}");
-        assert!(body["revoked"].is_null(), "{body}");
     }
 
     /// An unnamed cancel answers only for a sign-in that is running.

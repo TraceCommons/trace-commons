@@ -151,6 +151,10 @@ pub struct CredentialView {
     /// for a second ceremony.
     pending: Cell<bool>,
     provider: Cell<u32>,
+    /// Set by a forget that removed the key here but did not revoke it at
+    /// NEAR AI, and drawn under the state line as status text until the next
+    /// action is pressed.
+    not_revoked: Cell<bool>,
 }
 
 impl Default for CredentialView {
@@ -187,6 +191,7 @@ impl CredentialView {
             polling: Cell::new(false),
             pending: Cell::new(false),
             provider: Cell::new(0),
+            not_revoked: Cell::new(false),
         }
     }
 }
@@ -287,6 +292,9 @@ pub fn render(app: &Rc<App>, state: &str) {
         copy::credential_state_line(state),
         private_inference::indicator_tone(copy::credential_state_tone(state)),
     ));
+    if view.not_revoked.get() {
+        style::append_body(&view.status, copy::CREDENTIAL_FORGET_NOT_REVOKED);
+    }
 
     let action = copy::credential_action(state);
     app.private_inference
@@ -384,6 +392,8 @@ pub(super) fn act_with_provider(app: &Rc<App>, action: CredentialAction, provide
     if view.pending.replace(true) {
         return;
     }
+    // What the last forget left is about that forget, not this action.
+    view.not_revoked.set(false);
     match action {
         CredentialAction::None => {
             view.pending.set(false);
@@ -510,9 +520,9 @@ fn cancel(app: &Rc<App>) {
 
 /// Remove the stored key from this machine.
 ///
-/// The daemon also revokes the key at NEAR AI. `revoked: false` (a revoke
-/// that did not happen) is not drawn here yet; the native macOS shell draws
-/// `credential_forget_not_revoked` for it.
+/// The daemon also revokes the key at NEAR AI. A revoke that did not happen
+/// (`revoked: false`) is drawn as status text under the state line,
+/// `CREDENTIAL_FORGET_NOT_REVOKED`, until the next action.
 ///
 /// The tool list is read again afterwards because the same fact gates it: on
 /// a daemon that reports `destination_credentialed`, forgetting the key takes
@@ -522,12 +532,25 @@ fn forget(app: &Rc<App>) {
     app.call(
         "near_ai_credential_forget",
         serde_json::json!({}),
-        |app, _result| {
-            app.private_inference.credential.pending.set(false);
+        |app, result| {
+            let credential = &app.private_inference.credential;
+            credential
+                .not_revoked
+                .set(result.as_ref().is_ok_and(forget_left_key_at_service));
+            credential.pending.set(false);
             refresh(app);
             private_inference::render_harnesses(app);
         },
     );
+}
+
+/// Whether a forget's answer says the key was removed here but not revoked
+/// at NEAR AI: `removed: true, revoked: false`, the one answer
+/// `CREDENTIAL_FORGET_NOT_REVOKED` is drawn for. `revoked: null` (no key was
+/// stored), a revoke that happened, or anything unreadable draws nothing.
+fn forget_left_key_at_service(result: &serde_json::Value) -> bool {
+    result.get("removed") == Some(&serde_json::Value::Bool(true))
+        && result.get("revoked") == Some(&serde_json::Value::Bool(false))
 }
 
 /// Move a sign-in an earlier build kept in the legacy keychain. Only macOS
@@ -574,6 +597,63 @@ mod tests {
     };
 
     const SOURCE: &str = include_str!("credential.rs");
+
+    /// The failed-revoke sentence is for `removed: true, revoked: false`
+    /// only: not a revoke that happened, nothing stored (`null`), or an
+    /// answer this cannot read.
+    #[test]
+    fn only_a_failed_revoke_leaves_the_key_at_the_service() {
+        use serde_json::json;
+        assert!(forget_left_key_at_service(
+            &json!({"removed": true, "revoked": false})
+        ));
+        for answer in [
+            json!({"removed": true, "revoked": true}),
+            json!({"removed": true, "revoked": null}),
+            json!({"removed": false, "revoked": null}),
+            json!({"removed": false, "revoked": false}),
+            json!({"removed": true}),
+            json!([]),
+        ] {
+            assert!(!forget_left_key_at_service(&answer), "{answer}");
+        }
+        assert_eq!(
+            copy::CREDENTIAL_FORGET_NOT_REVOKED,
+            "Couldn't revoke the key. Delete it in your NEAR AI account."
+        );
+    }
+
+    /// The forget's answer sets the flag, the state line draws the sentence
+    /// under it as status text, and the next action clears it.
+    #[test]
+    fn a_failed_revoke_is_status_text_until_the_next_action() {
+        let production = SOURCE.split("\n#[cfg(test)]").next().unwrap();
+        let forget = production
+            .split("fn forget(app: &Rc<App>)")
+            .nth(1)
+            .expect("forget is in this file");
+        assert!(forget
+            .split("\n}\n")
+            .next()
+            .unwrap()
+            .contains(".set(result.as_ref().is_ok_and(forget_left_key_at_service))"));
+        let render = production
+            .split("pub fn render(")
+            .nth(1)
+            .expect("render is in this file");
+        assert!(render.contains(
+            "if view.not_revoked.get() {\n        style::append_body(&view.status, copy::CREDENTIAL_FORGET_NOT_REVOKED);"
+        ));
+        let act = production
+            .split("pub(super) fn act_with_provider(")
+            .nth(1)
+            .expect("act_with_provider is in this file");
+        assert!(act
+            .split("match action")
+            .next()
+            .unwrap()
+            .contains("view.not_revoked.set(false);"));
+    }
 
     /// The selector offers the core's logins, in its order, with the core's
     /// titles (owner, 2026-11-01: GitHub, Google or the NEAR wallet), and

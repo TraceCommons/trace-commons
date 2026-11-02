@@ -214,6 +214,12 @@ final class CredentialSurfaceTests: XCTestCase {
     /// The failure sentence is for `removed: true, revoked: false` only: not
     /// for a revoke that happened, nothing stored, an outcome not known
     /// (`null`), or an answer that cannot be read.
+    func testOnlyASignOutsFailedRevokeLeavesTheKeyAtTheService() {
+        XCTAssertTrue(CredentialSurface.signOutLeftKeyAtService(nearAiRevoked: false))
+        XCTAssertFalse(CredentialSurface.signOutLeftKeyAtService(nearAiRevoked: true))
+        XCTAssertFalse(CredentialSurface.signOutLeftKeyAtService(nearAiRevoked: nil))
+    }
+
     func testOnlyAFailedRevokeLeavesTheKeyAtTheService() {
         XCTAssertTrue(CredentialSurface.forgetLeftKeyAtService(
             resultJSON: #"{"removed":true,"revoked":false}"#))

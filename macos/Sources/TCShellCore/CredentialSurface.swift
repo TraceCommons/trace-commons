@@ -168,11 +168,19 @@ public enum CredentialSurface {
     public static let startMethod = "near_ai_credential_start"
     public static let cancelMethod = "near_ai_credential_cancel"
     public static let forgetMethod = "near_ai_credential_forget"
+    public static let migrateMethod = "near_ai_credential_migrate"
+
+    /// The same question about an `unenroll` or `account_sign_out` answer,
+    /// whose `near_ai_revoked` carries it: only `false` is a stored key left
+    /// at NEAR AI. `nil` is no key stored, or a daemon that does not say.
+    public static func signOutLeftKeyAtService(nearAiRevoked: Bool?) -> Bool {
+        nearAiRevoked == false
+    }
 
     /// Whether a forget's answer says the key was removed here but not
     /// revoked at NEAR AI, the one answer `credentialForgetNotRevoked` is
-    /// drawn for. `revoked` is `null` when no key was stored or the outcome
-    /// is not known, and neither draws it; nor does anything unreadable.
+    /// drawn for. `revoked` is `null` when no key was stored, which draws
+    /// nothing; nor does anything unreadable.
     public static func forgetLeftKeyAtService(resultJSON: String) -> Bool {
         guard let data = resultJSON.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -181,7 +189,6 @@ public enum CredentialSurface {
         else { return false }
         return !revoked
     }
-    public static let migrateMethod = "near_ai_credential_migrate"
 
     // MARK: - The state
 

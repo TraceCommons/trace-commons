@@ -635,54 +635,118 @@ pub async fn account_logout(store: &ConfigStore) -> Result<()> {
     })
     .await
     .context("reaching the daemon")??;
-    let revoked = match answered {
-        Some(response) => {
-            if let Some(error) = response.error {
-                anyhow::bail!("{}", error.message);
-            }
-            response
-                .result
-                .and_then(|result| result.get("near_ai_revoked").and_then(|v| v.as_bool()))
-        }
-        None => {
-            let api = crate::daemon::nearai_credential::disconnect::api(store);
-            account_logout_local(store, &cfg, api.as_ref()).await?
-        }
+    let api = crate::daemon::nearai_credential::disconnect::api(store);
+    let outcome = match answered {
+        Some(response) => match daemon_sign_out_outcome(response) {
+            DaemonSignOut::Answered(outcome) => outcome,
+            // A developer dry-run daemon serves only its local allowlist and
+            // refuses this; sign out here, as before there was a daemon path.
+            DaemonSignOut::DryRun => account_logout_local(store, &cfg, api.as_ref()).await,
+        },
+        None => account_logout_local(store, &cfg, api.as_ref()).await,
     };
-    if revoked == Some(false) {
+    if outcome.near_ai_revoked == Some(false) {
         println!(
             "{}",
             crate::private_inference_copy::CREDENTIAL_FORGET_NOT_REVOKED
         );
     }
+    outcome.result?;
     println!("signed out of your account");
     Ok(())
 }
 
-/// `account logout` with no daemon running: the account session, then the
-/// NEAR AI half through its cleanup journal and a revoke with the session
-/// just cleared. The NEAR AI half goes even when the account sign-out could
-/// not reach the server. Answers whether the NEAR AI key was revoked, `None`
-/// when none was stored.
+/// What `account logout` did: whether the NEAR AI key was revoked (`None`
+/// when none was stored), and the error to fail with, if any. The two are
+/// apart so a failed revoke is said even when the command fails for another
+/// reason.
+#[derive(Debug)]
+pub(crate) struct AccountLogoutOutcome {
+    pub near_ai_revoked: Option<bool>,
+    pub result: Result<()>,
+}
+
+pub(crate) enum DaemonSignOut {
+    Answered(AccountLogoutOutcome),
+    DryRun,
+}
+
+/// Read a daemon's `account_sign_out` answer the way `account logout`
+/// reports it. It fails, as the local path does, when the server did not
+/// accept the account session's revoke or the NEAR AI sign-in could not be
+/// cleared. An answer with no `near_ai_revoked` is from a daemon that
+/// predates clearing the NEAR AI sign-in on sign-out, so that sign-in is
+/// still there: said, never read as cleared.
+pub(crate) fn daemon_sign_out_outcome(response: Response) -> DaemonSignOut {
+    let fail = |message: String| AccountLogoutOutcome {
+        near_ai_revoked: None,
+        result: Err(anyhow::anyhow!(message)),
+    };
+    if let Some(error) = response.error {
+        if error.message == crate::daemon::ipc::ERR_DEV_DRY_RUN {
+            return DaemonSignOut::DryRun;
+        }
+        return DaemonSignOut::Answered(fail(error.message));
+    }
+    let result = response.result.unwrap_or_default();
+    let Some(revoked) = result.get("near_ai_revoked") else {
+        return DaemonSignOut::Answered(fail(
+            "signed out of the account, but the running daemon is too old to \
+             clear the NEAR AI sign-in: restart it and run `account logout` again"
+                .to_string(),
+        ));
+    };
+    let near_ai_revoked = revoked.as_bool();
+    let result = if result.get("near_ai_cleared") == Some(&serde_json::Value::Bool(false)) {
+        Err(anyhow::anyhow!(
+            "signed out of the account, but the NEAR AI sign-in could not be \
+             cleared: run `account logout` again"
+        ))
+    } else if result.get("server_revoked") == Some(&serde_json::Value::Bool(false)) {
+        Err(anyhow::anyhow!("revoking the account session"))
+    } else {
+        Ok(())
+    };
+    DaemonSignOut::Answered(AccountLogoutOutcome {
+        near_ai_revoked,
+        result,
+    })
+}
+
+/// `account logout` with no daemon running: the account session is revoked
+/// at the server while the NEAR AI half is cleared through its cleanup
+/// journal and revoked with the session just cleared. The NEAR AI half goes
+/// even when the account sign-out could not reach the server.
 pub(crate) async fn account_logout_local(
     store: &ConfigStore,
     cfg: &crate::config::ContributorConfig,
     near_ai: Option<&crate::daemon::nearai_credential::api::CloudApi>,
-) -> Result<Option<bool>> {
-    let signed_out = crate::account_auth::sign_out(store, cfg).await;
+) -> AccountLogoutOutcome {
     let owned = store.clone();
-    let (revocation, cleaned) = tokio::task::spawn_blocking(move || {
-        crate::daemon::nearai_credential::disconnect::clear_store(&owned)
-    })
-    .await
-    .context("reaching the credential store")??;
-    let revoked = match revocation {
-        Some(revocation) => revocation.run(near_ai).await,
-        None => None,
+    let near_ai_half = async {
+        let cleared = tokio::task::spawn_blocking(move || {
+            crate::daemon::nearai_credential::disconnect::clear_store(&owned)
+        })
+        .await
+        .context("reaching the credential store")??;
+        let revoked = match cleared.revocation {
+            Some(revocation) => revocation.run(near_ai).await,
+            None => None,
+        };
+        Ok::<_, anyhow::Error>((revoked, cleared.cleaned))
     };
-    signed_out?;
-    cleaned?;
-    Ok(revoked)
+    let (signed_out, near_ai_half) =
+        tokio::join!(crate::account_auth::sign_out(store, cfg), near_ai_half);
+    match near_ai_half {
+        Ok((near_ai_revoked, cleaned)) => AccountLogoutOutcome {
+            near_ai_revoked,
+            result: signed_out.and(cleaned),
+        },
+        Err(error) => AccountLogoutOutcome {
+            near_ai_revoked: None,
+            result: signed_out.and(Err(error)),
+        },
+    }
 }
 
 /// What `logout` is about to delete, for the confirmation. Counts only:
@@ -885,8 +949,8 @@ pub(crate) async fn logout_with(
     // The NEAR AI half first, through its cleanup journal, so the keychain
     // bundle is never orphaned by the wipe below. Then the revoke, with the
     // session just cleared; it never stops the logout.
-    let (revocation, cleaned) = crate::daemon::nearai_credential::disconnect::clear_store(store)?;
-    if let Some(revocation) = revocation {
+    let cleared = crate::daemon::nearai_credential::disconnect::clear_store(store)?;
+    if let Some(revocation) = cleared.revocation {
         if revocation.run(near_ai).await == Some(false) {
             writeln!(
                 writer,
@@ -896,7 +960,7 @@ pub(crate) async fn logout_with(
             .context("writing logout outcome")?;
         }
     }
-    cleaned?;
+    cleared.cleaned?;
     store.wipe().context("wiping contributor state")?;
     let _ = store.remove_daemon_file(crate::config::DAEMON_SOCK_FILE);
     let _ = store.remove_daemon_file(crate::config::DAEMON_LOCK_FILE);

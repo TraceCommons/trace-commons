@@ -9,21 +9,34 @@ extension DaemonClient {
         try identityCall("account_sign_in")
     }
 
-    func accountSignOut() throws {
-        struct Reply: Decodable { let signedOut: Bool
-            enum CodingKeys: String, CodingKey { case signedOut = "signed_out" }
+    /// Answers whether the NEAR AI key was left at NEAR AI: stored, cleared
+    /// here, and not revoked there (`CredentialSurface.signOutLeftKeyAtService`).
+    @discardableResult
+    func accountSignOut() throws -> Bool {
+        struct Reply: Decodable { let signedOut: Bool; let nearAiRevoked: Bool?
+            enum CodingKeys: String, CodingKey {
+                case signedOut = "signed_out", nearAiRevoked = "near_ai_revoked"
+            }
         }
         let reply: Reply = try identityCall("account_sign_out")
         guard reply.signedOut else { throw Failure(code: "refused", message: "account-sign-out-failed") }
+        return CredentialSurface.signOutLeftKeyAtService(nearAiRevoked: reply.nearAiRevoked)
     }
 
-    /// `unenroll`: the daemon drops this Mac's enrollment, locally only.
-    /// Checked against `hello` first, so a daemon without the call refuses
-    /// (`native-identity-unsupported`) and the caller stays as it was.
-    func unenroll() throws {
-        struct Reply: Decodable { let unenrolled: Bool }
+    /// `unenroll`: the daemon drops this Mac's enrollment, locally only, and
+    /// the NEAR AI sign-in with it. Checked against `hello` first, so a daemon
+    /// without the call refuses (`native-identity-unsupported`) and the
+    /// caller stays as it was. Answers whether the NEAR AI key was left at
+    /// NEAR AI, as `accountSignOut` does.
+    func unenroll() throws -> Bool {
+        struct Reply: Decodable { let unenrolled: Bool; let nearAiRevoked: Bool?
+            enum CodingKeys: String, CodingKey {
+                case unenrolled, nearAiRevoked = "near_ai_revoked"
+            }
+        }
         let reply: Reply = try identityCall("unenroll")
         guard reply.unenrolled else { throw Failure(code: "refused", message: "unenroll-failed") }
+        return CredentialSurface.signOutLeftKeyAtService(nearAiRevoked: reply.nearAiRevoked)
     }
 
     private func identityCall<T: Decodable>(_ method: String, params: [String: Any] = [:]) throws -> T {

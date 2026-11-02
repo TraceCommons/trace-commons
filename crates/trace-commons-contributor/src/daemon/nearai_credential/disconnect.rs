@@ -6,7 +6,8 @@
 //! and the inference key is revoked at NEAR AI on the way out, best effort.
 //!
 //! The order is clear, then revoke. Clearing never waits on NEAR AI: what the
-//! revoke needs is copied under the commit lock, the local clear runs through
+//! revoke needs is copied under the commit lock (the key's ids from the
+//! non-secret metadata, the session from the secret when it can be read), the local clear runs through
 //! the cleanup journal ([`super::ceremony::forget_locked`]), and only then is
 //! the copied session exchanged for an access token and the keys deleted. A
 //! failed or impossible revoke is one label line and nothing else: the clear
@@ -17,6 +18,7 @@
 //! with the same session, since the record goes with the clear and nothing
 //! would be left to retry them.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -36,97 +38,148 @@ pub(crate) const LABEL_NOT_REVOKED: &str = "near_ai_sign_out_key_not_revoked";
 /// What a revoke needs, copied before the clear. Never logged: `Debug`
 /// names nothing.
 pub(crate) struct Revocation {
+    /// The daemon directory, for its refresh lock.
+    dir: PathBuf,
+    /// Whether disk named a stored key. Read from disk, not from the secret,
+    /// so a key whose secret could not be read still counts as stored.
+    stored: bool,
+    /// The stored key's `(workspace_id, key_id)`, from the non-secret
+    /// metadata. `None` with `stored` only for a record that names none.
+    active: Option<(String, String)>,
+    /// The refresh token and the agent it is bound to. `None` when the
+    /// secret could not be read, or no session was stored.
     session: Option<(String, String)>,
-    /// `(workspace_id, key_id)`, the stored key first.
-    keys: Vec<(String, String)>,
-    has_active: bool,
+    /// Older keys the spending-organization record still meant to revoke.
+    pending: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for Revocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Revocation")
-            .field("keys", &self.keys.len())
+            .field("stored", &self.stored)
+            .field("pending", &self.pending.len())
             .finish_non_exhaustive()
     }
 }
 
 impl Revocation {
-    /// `None` when there is no key to revoke.
-    fn capture(current: Option<&DaemonSettings>, store: &ConfigStore) -> Option<Self> {
-        let mut keys = Vec::new();
-        let mut has_active = false;
-        if let Some(key) = current.and_then(|c| c.near_ai_inference.as_ref()) {
-            keys.push((key.workspace_id.clone(), key.key_id.clone()));
-            has_active = true;
-        }
+    /// `None` when there is nothing to revoke: no stored key and no pending
+    /// one.
+    ///
+    /// `disk` is the settings file as it is now; `current` the resolved
+    /// secrets the caller could read, already checked against `disk`.
+    fn capture(
+        store: &ConfigStore,
+        disk: &DaemonSettings,
+        current: Option<&DaemonSettings>,
+    ) -> Option<Self> {
+        let metadata_ids = disk
+            .cloud_credentials
+            .as_ref()
+            .and_then(|metadata| metadata.inference_ids());
+        let plaintext_ids = disk
+            .near_ai_inference
+            .as_ref()
+            .map(|key| (key.workspace_id.clone(), key.key_id.clone()));
+        let stored = disk
+            .cloud_credentials
+            .as_ref()
+            .is_some_and(|metadata| metadata.has_inference())
+            || disk.near_ai_inference.is_some();
+        let active = metadata_ids.or(plaintext_ids);
+        let mut pending = Vec::new();
         // An unreadable record names nothing this can act on.
         if let Ok(record) = super::spend_org::load(store) {
             for entry in record.pending_revocations {
                 let pair = (entry.workspace_id, entry.key_id);
-                if !keys.contains(&pair) {
-                    keys.push(pair);
+                if active.as_ref() != Some(&pair) && !pending.contains(&pair) {
+                    pending.push(pair);
                 }
             }
         }
-        if keys.is_empty() {
+        if !stored && pending.is_empty() {
             return None;
         }
+        // A legacy plaintext document carries its own session.
         let session = current
-            .and_then(|c| c.near_ai_session.as_ref())
+            .and_then(|current| current.near_ai_session.as_ref())
+            .or(disk.near_ai_session.as_ref())
             .map(|s| (s.refresh_token.clone(), s.user_agent.clone()));
         Some(Self {
+            dir: store.dir().to_path_buf(),
+            stored,
+            active,
             session,
-            keys,
-            has_active,
+            pending,
         })
     }
 
     /// Revoke, best effort. Answers whether the stored key is gone at NEAR
     /// AI, or `None` when no key was stored (only older pending keys were
-    /// tidied). Never fails: anything short of a revoke is one label line.
+    /// tidied). A stored key that could not be revoked -- including one whose
+    /// secret could not be read -- is `Some(false)`, never `None`. Never
+    /// fails: a stored key not revoked is one label line.
     pub(crate) async fn run(self, api: Option<&CloudApi>) -> Option<bool> {
-        let has_active = self.has_active;
+        let stored = self.stored;
         let reason = match tokio::time::timeout(REVOKE_BUDGET, self.attempt(api)).await {
-            Ok(Ok(())) => return has_active.then_some(true),
+            Ok(Ok(())) => return stored.then_some(true),
             Ok(Err(reason)) => reason,
             Err(_) => "timed_out",
         };
-        tracing::warn!(target: "near_ai_credential", "near_ai_sign_out_key_not_revoked");
-        crate::daemon::diagnostics_log::record_labels(
-            tracing::Level::WARN,
-            LABEL_NOT_REVOKED,
-            &[("reason", reason)],
-        );
-        has_active.then_some(false)
+        if stored {
+            tracing::warn!(target: "near_ai_credential", "near_ai_sign_out_key_not_revoked");
+            crate::daemon::diagnostics_log::record_labels(
+                tracing::Level::WARN,
+                LABEL_NOT_REVOKED,
+                &[("reason", reason)],
+            );
+        }
+        stored.then_some(false)
     }
 
     async fn attempt(self, api: Option<&CloudApi>) -> Result<(), &'static str> {
         let api = api.ok_or("unavailable")?;
         let (refresh_token, user_agent) = self.session.ok_or("no_session")?;
-        let access_token = api
-            .refresh_session(&refresh_token, &user_agent)
-            .await
-            .map_err(|_| "session")?
-            .session
-            .access_token;
+        // NEAR AI rotates the refresh token on use, so this exchange takes the
+        // same per-directory lock as every other one. An exchange that copied
+        // the session before the clear and is still in flight finishes first;
+        // its rotation then cannot be stored (the session it expected is
+        // gone), and this one presents a token NEAR AI no longer accepts and
+        // answers `session`. Never two uses of one token at once.
+        let access_token = {
+            let locks = super::session::coordination(&self.dir).map_err(|_| "unavailable")?;
+            let _refresh = locks.refresh_lock().await;
+            api.refresh_session(&refresh_token, &user_agent)
+                .await
+                .map_err(|_| "session")?
+                .session
+                .access_token
+        };
         let tokens = SessionTokens {
             access_token,
             refresh_token: String::new(),
         };
-        let mut outcome = Ok(());
-        for (index, (workspace_id, key_id)) in self.keys.iter().enumerate() {
-            let active = self.has_active && index == 0;
+        let mut outcome = if self.stored && self.active.is_none() {
+            Err("no_key_ids")
+        } else {
+            Ok(())
+        };
+        if let Some((workspace_id, key_id)) = &self.active {
             match api
                 .revoke_inference_key(&tokens, workspace_id, key_id)
                 .await
             {
                 Ok(RevokeOutcome::Revoked | RevokeOutcome::AlreadyGone) => {}
-                // A pending key from another account: this session never can.
-                Ok(RevokeOutcome::NotThisAccount) if !active => {}
                 Ok(RevokeOutcome::NotThisAccount) => outcome = Err("not_this_account"),
-                Err(_) if active => outcome = Err("refused"),
-                Err(_) => {}
+                Err(_) => outcome = Err("refused"),
             }
+        }
+        // Older keys: tidied where this session can, never a reason the
+        // stored key's answer changes. Another account's (`403`) never can.
+        for (workspace_id, key_id) in &self.pending {
+            let _ = api
+                .revoke_inference_key(&tokens, workspace_id, key_id)
+                .await;
         }
         outcome
     }
@@ -135,8 +188,10 @@ impl Revocation {
 /// Clear the NEAR AI credential, its session and the spending-organization
 /// record, and answer what a revoke needs. The caller holds the commit lock.
 ///
-/// `current` is the resolved credential as the caller holds it. It is used
-/// only when it is still what disk names: a stale copy revokes nothing.
+/// `current` is the resolved credential as the caller holds it. Its session
+/// is used only when it is still what disk names. Whether a key was stored,
+/// and its ids, come from disk, so a secret that could not be read still
+/// answers "stored, not revoked".
 pub(crate) fn clear_locked(
     store: &ConfigStore,
     current: Option<&DaemonSettings>,
@@ -145,37 +200,60 @@ pub(crate) fn clear_locked(
     let current = current.filter(|current| {
         crate::daemon::cloud_credential_lifecycle::ensure_current(&disk, current).is_ok()
     });
-    let revocation = Revocation::capture(current, store);
+    let revocation = Revocation::capture(store, &disk, current);
     let removed = super::ceremony::forget_locked(store)?;
     Ok((removed, revocation))
 }
 
-/// [`clear_locked`] for a caller with no running daemon: CLI `logout`, which
-/// stops the daemon first. The same steps as `ceremony::forget`, which it
-/// replaces there, plus the copy a revoke needs.
+/// What [`clear_store`] did.
+#[derive(Debug)]
+pub(crate) struct StoreCleared {
+    /// A credential or session was stored and is gone. Read by the tests'
+    /// `ceremony::forget`; no shipping caller needs it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub removed: bool,
+    /// What a revoke needs, when there is anything to revoke.
+    pub revocation: Option<Revocation>,
+    /// The OS cleanup. An entry that cannot be deleted is an error here: the
+    /// reference stays journaled, and logout stops before wiping the journal
+    /// that names it. The local clear has happened either way.
+    pub cleaned: Result<()>,
+}
+
+/// [`clear_locked`] for a caller with no running daemon (CLI `logout`, which
+/// stops the daemon first, and `account logout` when none answers).
 ///
-/// The inner result is the OS cleanup. An entry that cannot be deleted is an
-/// error there, as in `ceremony::forget`: the reference stays journaled, and
-/// logout stops before wiping the journal that names it. The revocation is
-/// answered either way, since the local clear has happened.
-pub(crate) fn clear_store(store: &ConfigStore) -> Result<(Option<Revocation>, Result<()>)> {
-    // Read before the commit lock: an OS read may prompt, and the commit
-    // lock covers local publication only.
+/// The secret is read before the commit lock: an OS read may prompt, and the
+/// commit lock covers local publication only. A read that fails or is
+/// declined still clears, and the revoke then answers "stored, not revoked".
+///
+/// The legacy sweep runs before `cleanup_native`, and the order matters.
+/// `clear_locked` has already cleared `cloud_credentials`, so every journal
+/// reference is an orphan now, but `cleanup_native` drains the journal as it
+/// deletes -- run after it, the sweep finds nothing left to do. This is a
+/// contributor-initiated moment, the only kind that may spend an
+/// authorization prompt on the legacy store.
+pub(crate) fn clear_store(store: &ConfigStore) -> Result<StoreCleared> {
     let current = resolve_stored(store);
     let locks = super::session::coordination(store.dir())?;
     let commit = locks
         .commit
         .lock()
         .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
-    let (_, revocation) = clear_locked(store, current.as_ref())?;
+    let (removed, revocation) = clear_locked(store, current.as_ref())?;
     drop(commit);
     crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(store);
     let cleaned = crate::daemon::cloud_credential_lifecycle::cleanup_native(store);
-    Ok((revocation, cleaned))
+    Ok(StoreCleared {
+        removed,
+        revocation,
+        cleaned,
+    })
 }
 
 /// The stored credential with its secrets, for a caller with no running
 /// daemon to ask. May read the OS credential store; never migrates or writes.
+/// `None` when the bundle cannot be read.
 pub(crate) fn resolve_stored(store: &ConfigStore) -> Option<DaemonSettings> {
     let settings = DaemonSettings::load(store).ok()?;
     if settings.cloud_credentials.is_none() {

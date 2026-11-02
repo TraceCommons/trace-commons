@@ -290,18 +290,14 @@ fn turn_off_insights_readers(shared: &DaemonShared) -> Result<(), (&'static str,
 /// The NEAR AI sign-in goes after the enrollment, on every call, enrolled or
 /// not: Private AI does not outlive the account (owner decision 2026-11-02),
 /// and a device that holds only a NEAR AI sign-in is still cleared. Its key
-/// is revoked at NEAR AI, best effort. A failure to clear it is
-/// `unenroll-failed`, and calling again finishes it.
+/// is revoked at NEAR AI, best effort. The enrollment's own cleanup and
+/// events come first, so a slow NEAR AI never holds them up, and a NEAR AI
+/// half that could not be cleared is reported in `near_ai_cleared` rather
+/// than as a failed unenroll: the enrollment is gone either way, and calling
+/// again clears what is left.
 pub(super) async fn handle_unenroll(shared: &DaemonShared, req: &Request) -> Response {
     match super::run_blocking(|| unenroll(shared)) {
         Ok(done) => {
-            let near_ai = match super::nearai_credential::disconnect(shared).await {
-                Ok(near_ai) => near_ai,
-                Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, ERR_UNENROLL_FAILED),
-            };
-            if near_ai.removed && !done.removed {
-                shared.publish(EVENT_STATUS_CHANGED, json!({}));
-            }
             if done.removed {
                 // The OS entries the references pointed at. Journaled by the
                 // clear above, so a locked keychain only defers this to the
@@ -310,16 +306,28 @@ pub(super) async fn handle_unenroll(shared: &DaemonShared, req: &Request) -> Res
                 shared.publish(EVENT_QUEUE_CHANGED, json!({}));
                 shared.publish(EVENT_STATUS_CHANGED, json!({}));
             }
+            let (near_ai_cleared, near_ai_revoked) =
+                match super::nearai_credential::disconnect(shared).await {
+                    Ok(near_ai) => {
+                        if near_ai.removed {
+                            shared.publish(EVENT_STATUS_CHANGED, json!({}));
+                        }
+                        (true, near_ai.revoked)
+                    }
+                    Err(_) => (false, None),
+                };
             Response::ok(
                 req.id,
                 json!({
                     "unenrolled": true,
                     "removed": done.removed,
                     "approvals_returned": done.approvals_returned,
+                    // Whether the NEAR AI sign-in could be cleared here.
+                    "near_ai_cleared": near_ai_cleared,
                     // Whether the NEAR AI key is gone at NEAR AI; `null`
                     // when none was stored. `false` is when a shell says
                     // `credential_forget_not_revoked`.
-                    "near_ai_revoked": near_ai.revoked,
+                    "near_ai_revoked": near_ai_revoked,
                 }),
             )
         }

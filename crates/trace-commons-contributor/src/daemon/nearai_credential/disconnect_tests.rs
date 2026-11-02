@@ -4,6 +4,7 @@ use super::test_support::{
 use super::*;
 use crate::config::tests_support::temp_store;
 use axum::http::StatusCode;
+use std::time::Duration;
 
 /// The store-level clear (CLI `logout`'s) leaves nothing behind, and the
 /// revoke it answers goes out with the session it cleared.
@@ -13,8 +14,9 @@ async fn the_store_clear_removes_everything_and_revokes_with_the_old_session() {
     let reference = seed(&store);
     let (origin, seen) = stub(StatusCode::OK, StatusCode::NO_CONTENT).await;
 
-    let (revocation, cleaned) = clear_store(&store).unwrap();
-    cleaned.unwrap();
+    let cleared = clear_store(&store).unwrap();
+    cleared.cleaned.unwrap();
+    let revocation = cleared.revocation;
     // Cleared before anything was sent.
     assert_cleared(&store, &reference);
     assert!(seen.lock().unwrap().is_empty());
@@ -40,8 +42,9 @@ async fn a_failed_revoke_still_clears() {
         let (_dir, store) = temp_store();
         let reference = seed(&store);
         let (origin, _seen) = stub(refresh, revoke).await;
-        let (revocation, cleaned) = clear_store(&store).unwrap();
-        cleaned.unwrap();
+        let cleared = clear_store(&store).unwrap();
+        cleared.cleaned.unwrap();
+        let revocation = cleared.revocation;
         let api = CloudApi::for_test(&origin).unwrap();
         assert_eq!(
             revocation.unwrap().run(Some(&api)).await,
@@ -57,14 +60,15 @@ async fn a_failed_revoke_still_clears() {
 async fn an_impossible_revoke_still_clears() {
     let (_dir, store) = temp_store();
     let reference = seed(&store);
-    let (revocation, cleaned) = clear_store(&store).unwrap();
-    cleaned.unwrap();
+    let cleared = clear_store(&store).unwrap();
+    cleared.cleaned.unwrap();
+    let revocation = cleared.revocation;
     assert_eq!(revocation.unwrap().run(None).await, Some(false));
     assert_cleared(&store, &reference);
 
     let (_dir, store) = temp_store();
     let reference = seed(&store);
-    let (revocation, _) = clear_store(&store).unwrap();
+    let revocation = clear_store(&store).unwrap().revocation;
     // Nothing listens here.
     let unreachable = {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -79,8 +83,9 @@ async fn an_impossible_revoke_still_clears() {
 #[tokio::test]
 async fn nothing_stored_revokes_nothing() {
     let (_dir, store) = temp_store();
-    let (revocation, cleaned) = clear_store(&store).unwrap();
-    cleaned.unwrap();
+    let cleared = clear_store(&store).unwrap();
+    cleared.cleaned.unwrap();
+    let revocation = cleared.revocation;
     assert!(revocation.is_none());
 }
 
@@ -145,7 +150,7 @@ fn a_failed_revoke_logs_a_label_and_no_secret() {
                             let reference = seed(&store);
                             let (origin, seen): (String, Seen) =
                                 stub(StatusCode::OK, StatusCode::INTERNAL_SERVER_ERROR).await;
-                            let (revocation, _) = clear_store(&store).unwrap();
+                            let revocation = clear_store(&store).unwrap().revocation;
                             let api = CloudApi::for_test(&origin).unwrap();
                             assert_eq!(revocation.unwrap().run(Some(&api)).await, Some(false));
                             assert!(!seen.lock().unwrap().is_empty());
@@ -351,10 +356,9 @@ async fn cli_account_logout_without_a_daemon_clears_and_revokes() {
     store.save_config(&cfg).unwrap();
     let (origin, seen) = stub(StatusCode::OK, StatusCode::NO_CONTENT).await;
     let api = CloudApi::for_test(&origin).unwrap();
-    let revoked = crate::commands::account_logout_local(&store, &cfg, Some(&api))
-        .await
-        .unwrap();
-    assert_eq!(revoked, Some(true));
+    let outcome = crate::commands::account_logout_local(&store, &cfg, Some(&api)).await;
+    outcome.result.unwrap();
+    assert_eq!(outcome.near_ai_revoked, Some(true));
     assert_cleared(&store, &reference);
     assert_revoked_with_old_session(&seen);
 }
@@ -375,4 +379,138 @@ async fn cli_logout_names_a_failed_revoke() {
             .unwrap()
             .contains("Couldn't revoke the key. Delete it in your NEAR AI account."),
     );
+}
+
+/// A stored key whose secret cannot be read (a locked or declined keychain)
+/// is cleared, and answers "not revoked", never "nothing was stored".
+#[tokio::test]
+async fn a_stored_key_whose_secret_cannot_be_read_answers_not_revoked() {
+    let (_dir, store) = temp_store();
+    let reference = seed(&store);
+    crate::daemon::cloud_credential_test_support::backend(store.dir())
+        .unwrap()
+        .delete(&reference)
+        .unwrap();
+    let (origin, seen) = stub(StatusCode::OK, StatusCode::NO_CONTENT).await;
+    let cleared = clear_store(&store).unwrap();
+    let api = CloudApi::for_test(&origin).unwrap();
+    assert_eq!(
+        cleared
+            .revocation
+            .expect("a stored key")
+            .run(Some(&api))
+            .await,
+        Some(false)
+    );
+    // No session could be read, so nothing was sent.
+    assert!(seen.lock().unwrap().is_empty());
+    assert_cleared(&store, &reference);
+}
+
+/// The same in the daemon: a running daemon that cannot vouch for its copy
+/// still clears, and forget answers `revoked: false`.
+#[tokio::test]
+async fn forget_with_an_unreadable_copy_answers_not_revoked() {
+    let (_dir, shared, reference, seen) = connected_daemon(StatusCode::NO_CONTENT).await;
+    shared.settings.lock().unwrap().cloud_storage_unavailable = true;
+    let response =
+        crate::daemon::ipc::handle_request_async(&shared, &request("near_ai_credential_forget"))
+            .await;
+    let body = response.result.expect("forget answers");
+    assert_eq!(body["removed"], true);
+    assert_eq!(body["revoked"], false);
+    assert_cleared(&shared.store, &reference);
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// The revoke's exchange waits for an exchange already in flight: NEAR AI
+/// rotates the refresh token on use, and two uses at once would present a
+/// rotated token.
+#[tokio::test]
+async fn the_revoke_exchange_takes_the_refresh_lock() {
+    let (_dir, store) = temp_store();
+    seed(&store);
+    let (origin, seen) = stub(StatusCode::OK, StatusCode::NO_CONTENT).await;
+    let revocation = clear_store(&store).unwrap().revocation.unwrap();
+    let locks = super::super::session::coordination(store.dir()).unwrap();
+    let held = locks.refresh_lock().await;
+    let api = CloudApi::for_test(&origin).unwrap();
+    let task = tokio::spawn(async move { revocation.run(Some(&api)).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "exchanged while another exchange held the lock"
+    );
+    drop(held);
+    assert_eq!(task.await.unwrap(), Some(true));
+    assert_revoked_with_old_session(&seen);
+}
+
+/// Native sign-out whose NEAR AI half cannot be cleared still signs out of
+/// the account, and says the NEAR AI half on its own.
+#[tokio::test]
+async fn native_sign_out_reports_a_near_ai_clear_failure_separately() {
+    let (_dir, shared, _reference, _seen) = connected_daemon(StatusCode::NO_CONTENT).await;
+    shared
+        .store
+        .write_daemon_file(crate::config::DAEMON_SETTINGS_FILE, b"not json")
+        .unwrap();
+    let response =
+        crate::daemon::ipc::handle_request_async(&shared, &request("account_sign_out")).await;
+    let body = response.result.expect("sign-out answers");
+    assert_eq!(body["signed_out"], true);
+    assert_eq!(body["near_ai_cleared"], false);
+    assert!(body["near_ai_revoked"].is_null(), "{body}");
+    // No account session was stored, so there was nothing to revoke there.
+    assert!(body["server_revoked"].is_null(), "{body}");
+}
+
+fn outcome(response: crate::daemon::ipc::Response) -> crate::commands::AccountLogoutOutcome {
+    match crate::commands::daemon_sign_out_outcome(response) {
+        crate::commands::DaemonSignOut::Answered(outcome) => outcome,
+        crate::commands::DaemonSignOut::DryRun => panic!("read as a dry run"),
+    }
+}
+
+/// `account logout` through a daemon fails as the local path does, and never
+/// reads an old daemon's silence as a cleared NEAR AI sign-in.
+#[test]
+fn account_logout_reads_the_daemons_answer_strictly() {
+    use crate::daemon::ipc::Response;
+    use serde_json::json;
+    let ok = outcome(Response::ok(
+        1,
+        json!({"signed_out": true, "server_revoked": true, "near_ai_cleared": true, "near_ai_revoked": false}),
+    ));
+    assert!(ok.result.is_ok());
+    assert_eq!(ok.near_ai_revoked, Some(false));
+
+    let server = outcome(Response::ok(
+        1,
+        json!({"signed_out": true, "server_revoked": false, "near_ai_cleared": true, "near_ai_revoked": true}),
+    ));
+    assert_eq!(
+        server.result.unwrap_err().to_string(),
+        "revoking the account session"
+    );
+    assert_eq!(server.near_ai_revoked, Some(true));
+
+    let not_cleared = outcome(Response::ok(
+        1,
+        json!({"signed_out": true, "server_revoked": null, "near_ai_cleared": false, "near_ai_revoked": null}),
+    ));
+    assert!(not_cleared.result.is_err());
+
+    // An older daemon: no NEAR AI fields at all.
+    let old = outcome(Response::ok(1, json!({"signed_out": true})));
+    assert!(old.result.is_err());
+
+    assert!(matches!(
+        crate::commands::daemon_sign_out_outcome(Response::err(
+            1,
+            crate::daemon::ipc::ERR_BAD_PARAMS,
+            crate::daemon::ipc::ERR_DEV_DRY_RUN,
+        )),
+        crate::commands::DaemonSignOut::DryRun
+    ));
 }

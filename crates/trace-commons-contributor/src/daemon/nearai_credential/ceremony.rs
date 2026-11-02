@@ -1080,41 +1080,14 @@ fn cancel_locked(dir: &std::path::Path, attempt_id: Option<&str>) -> Option<Stat
     Some(entry.state.clone())
 }
 
-/// Forget a stored credential **and the session stored beside it**.
-///
-/// Both, always, and never one without the other. A contributor who forgets a
-/// credential believes they have taken this machine's access to their NEAR AI
-/// account away; a refresh token left behind would keep exactly the wider half
-/// of that access -- the half that can mint further keys and read the account
-/// -- while the screen said the credential was gone. That is the worst outcome
-/// this pair of records can produce, so it is one `take` beside the other with
-/// no condition between them.
-///
-/// Local only, and it says so: the key remains valid at the service until the
-/// contributor revokes it there, and this does not revoke it for them. It now
-/// *could* -- revoking needs a session and a session is retained -- but a
-/// forget that also called the service would be a network operation on a path
-/// a contributor expects to be instant and offline, and one that fails
-/// halfway leaves them unsure which of the two happened. `key_id` is kept
-/// precisely so a contributor can find the right key in their own list and
-/// revoke it there deliberately.
-pub fn forget(store: &ConfigStore) -> Result<bool> {
-    let locks = crate::daemon::nearai_credential::session::coordination(store.dir())?;
-    let _commit = locks
-        .commit
-        .lock()
-        .map_err(|_| anyhow::anyhow!("near_ai_credential_unavailable"))?;
-    let removed = forget_locked(store)?;
-    drop(_commit);
-    // A contributor-initiated moment, which is the only kind that may spend an
-    // authorization prompt on the legacy store. See the sweep's own doc. This
-    // must run before `cleanup_native`: `forget_locked` has already cleared
-    // `cloud_credentials`, so every journal reference is genuinely an orphan
-    // now, but `cleanup_native` drains the journal as it deletes -- run after
-    // it, the sweep finds nothing left to do.
-    crate::daemon::cloud_credential_lifecycle::sweep_legacy_cloud_entries(store);
-    crate::daemon::cloud_credential_lifecycle::cleanup_native(store)?;
-    Ok(removed)
+/// The local clear without the revoke, for tests that only need the clear.
+/// Production clears through `disconnect::clear_store` or the daemon's
+/// `disconnect`, which also revoke.
+#[cfg(test)]
+pub(crate) fn forget(store: &ConfigStore) -> Result<bool> {
+    let cleared = super::disconnect::clear_store(store)?;
+    cleared.cleaned?;
+    Ok(cleared.removed)
 }
 
 pub(super) fn forget_locked(store: &ConfigStore) -> Result<bool> {

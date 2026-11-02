@@ -6912,13 +6912,18 @@ mints a key this app then keeps. `credential_forget_explains` is its
 counterpart at the other end: forgetting removes the key and saved sign-in
 from this computer and revokes the key at NEAR AI with the sign-in being
 removed, best effort (owner decision 2026-11-02). `near_ai_credential_forget`
-answers `revoked: true` when the key is gone at NEAR AI, `false` when the
-revoke did not happen, and `null` when no key was stored (the sync handler,
-which revokes in the background, also answers `null`). A shell draws
-`credential_forget_not_revoked` only on `removed: true, revoked: false`.
+answers `revoked: true` when the key is gone at NEAR AI, `false` when a key
+was stored and the revoke did not happen (including when its secret could not
+be read), and `null` when no key was stored. It is async-only: the sync
+dispatcher refuses it with `near-ai-credential-forget-requires-async`. A shell
+draws `credential_forget_not_revoked` only on `removed: true, revoked: false`.
 
 Unenroll and `account_sign_out` clear the same NEAR AI sign-in and revoke the
-same way; each answers `near_ai_revoked` with the same three values.
+same way. Each answers `near_ai_revoked` with the same three values, and
+`near_ai_cleared: false` when the NEAR AI sign-in could not be cleared here
+(the rest of the call has happened; calling again clears what is left).
+`account_sign_out` also answers `server_revoked`: whether the server accepted
+the account session's revoke, `null` when there was no session.
 
 No sentence on this surface renders a key, a key prefix, an id or an account
 name, and none of them carries a hole a shell could fill with one.

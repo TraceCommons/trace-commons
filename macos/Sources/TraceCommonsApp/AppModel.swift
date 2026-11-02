@@ -4642,8 +4642,16 @@ extension AppModel: FirstRunDaemon {
 
     /// The daemon drops this Mac's enrollment (`unenroll`). Status is read
     /// again, so `status.loggedIn` is false before watch only is marked.
+    ///
+    /// The NEAR AI sign-in goes too. When its key could not be revoked at
+    /// NEAR AI, the failed-revoke sentence is shown where an action's failure
+    /// is.
     func unenroll() async -> Bool {
-        guard case .success = await firstRunCall({ try $0.unenroll() }) else { return false }
+        guard case .success(let leftAtService) = await firstRunCall({ try $0.unenroll() })
+        else { return false }
+        if leftAtService {
+            lastActionError = privateInferenceCopy?.credentialForgetNotRevoked
+        }
         if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
             publishIfChanged(\.status, fresh)
         }

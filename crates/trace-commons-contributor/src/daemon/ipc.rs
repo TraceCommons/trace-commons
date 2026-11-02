@@ -3666,6 +3666,12 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    // It waits for the revoke at NEAR AI and takes the key out of the
+    // running proxy; neither can happen on this dispatcher.
+    (
+        "near_ai_credential_forget",
+        "near-ai-credential-forget-requires-async",
+    ),
     (
         "managed_model_catalogue",
         "managed-model-catalogue-requires-async",
@@ -4039,7 +4045,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "near_account_cancel" => super::account_onboarding::handle_cancel(shared, req),
         "near_ai_credential_status" => super::nearai_credential::handle_status(shared, req),
         "near_ai_credential_cancel" => super::nearai_credential::handle_cancel(shared, req),
-        "near_ai_credential_forget" => super::nearai_credential::handle_forget(shared, req),
 
         // Unlike the probe, discovery opens no connection: it reads one
         // small file the proxy left on disk. So it answers here, on the
@@ -14863,9 +14868,9 @@ mod tests {
     }
 
     /// The ceremony is reachable over the socket, and forgetting says what it
-    /// actually did rather than implying a revocation it cannot perform.
-    #[test]
-    fn the_credential_ceremony_is_dispatched_and_forgetting_claims_nothing_extra() {
+    /// actually did rather than implying a revocation it did not perform.
+    #[tokio::test]
+    async fn the_credential_ceremony_is_dispatched_and_forgetting_claims_nothing_extra() {
         let s = shared();
         // A machine with nothing on it says so, in one word, to a caller
         // that names no attempt. It refused this once; a shell left to infer
@@ -14911,12 +14916,13 @@ mod tests {
             !serde_json::to_string(&body).unwrap().contains("sk-super"),
             "{body}"
         );
-        let r = handle_request(&s, &req("near_ai_credential_forget", serde_json::json!({})));
+        let r = handle_request_async(&s, &req("near_ai_credential_forget", serde_json::json!({})))
+            .await;
         let body = r.result.unwrap();
         assert_eq!(body["removed"], true);
-        // The sync handler revokes in the background and claims nothing
-        // either way; see `the_sync_forget_claims_no_revocation_either_way`.
-        assert!(body["revoked"].is_null(), "{body}");
+        // No NEAR AI client in a test build, so the revoke cannot happen,
+        // and the answer says so rather than claiming it.
+        assert_eq!(body["revoked"], false, "{body}");
         assert!(
             DaemonSettings::load(&s.store)
                 .unwrap()
@@ -18837,7 +18843,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 74);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 75);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -19320,7 +19326,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 108, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 107, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 81, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
