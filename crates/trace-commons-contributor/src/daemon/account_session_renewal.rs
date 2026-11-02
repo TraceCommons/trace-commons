@@ -520,10 +520,26 @@ pub(crate) enum FreshLogin {
     /// most often a different NEAR AI account from the one this device
     /// joined with. The stored login is kept.
     Refused,
-    /// The commons could not be asked. Fail closed: the stored login is
-    /// kept.
+    /// The commons could not be asked, or answered something this device
+    /// could not verify as its account (a local check failed: a clock to
+    /// correct, say). Fail closed: the stored login is kept.
     Unavailable,
+    /// The account is bound, but its check can never run here: the account
+    /// record is malformed, or the allowlist refuses the enrolled address.
+    /// The login is stored, so NEAR AI sign-in is not blocked for good, but
+    /// it is not the account's verified login: nothing records it as the
+    /// login the commons accepted. The reason is one of
+    /// [`UNCHECKED_ACCOUNT_RECORD_MALFORMED`] and
+    /// [`UNCHECKED_COMMONS_ADDRESS_REFUSED`], the seam a "needs attention"
+    /// state keys on (#1836); no shell shows one yet.
+    Unchecked(&'static str),
 }
+
+/// [`FreshLogin::Unchecked`]: the stored account record is not JSON.
+pub(crate) const UNCHECKED_ACCOUNT_RECORD_MALFORMED: &str = "account_record_malformed";
+/// [`FreshLogin::Unchecked`]: the signup allowlist refuses the enrolled
+/// commons address.
+pub(crate) const UNCHECKED_COMMONS_ADDRESS_REFUSED: &str = "commons_address_refused";
 
 /// A login the commons accepted, and the account session it earned, held
 /// until the NEAR AI credentials are stored. No renewal turn is held with
@@ -559,11 +575,13 @@ pub(crate) async fn check_fresh_login_live(
 /// revoked device key, a device that joined by one-time code (it renews by
 /// device key and never took this ceremony), and a signed-out account (no
 /// record: a NEAR AI sign-in for Private AI does not sign the person back
-/// in). Also not bound: a failure no retry can fix -- a malformed record,
-/// an enrolled address the allowlist refuses, an answer that fails a local
-/// check -- since failing closed on those would block NEAR AI sign-in for
-/// good. Unavailable, and failing closed: anything that may pass, a read
-/// of configuration or credential storage included.
+/// in). Unchecked, and stored but not recorded as the account's login: a
+/// malformed record or an enrolled address the allowlist refuses, where no
+/// retry can run the check and failing closed would block NEAR AI sign-in
+/// for good. Unavailable, and failing closed: anything that may pass -- a
+/// read of configuration or credential storage, the commons unreachable --
+/// and an answer that fails a local check, where the commons spoke and
+/// this device could not verify it as its account.
 pub(super) async fn check_fresh_login(
     store: &crate::config::ConfigStore,
     via: &RenewVia<'_>,
@@ -587,11 +605,14 @@ pub(super) async fn check_fresh_login(
     };
     let account = match super::run_blocking(|| load_account_record(store)) {
         Ok(Some(account)) => account,
-        Ok(None) | Err(AccountRecordError::Malformed) => return FreshLogin::NotBound,
+        Ok(None) => return FreshLogin::NotBound,
+        Err(AccountRecordError::Malformed) => {
+            return FreshLogin::Unchecked(UNCHECKED_ACCOUNT_RECORD_MALFORMED);
+        }
         Err(AccountRecordError::Storage) => return FreshLogin::Unavailable,
     };
     let Ok(commons) = via.commons(&cfg) else {
-        return FreshLogin::NotBound;
+        return FreshLogin::Unchecked(UNCHECKED_COMMONS_ADDRESS_REFUSED);
     };
     // The turn wait is inside the deadline: the browser's tab waits on all
     // of it.
@@ -623,7 +644,8 @@ pub(super) async fn check_fresh_login(
             remember_if_revoked(store, class, &identity.device_key_id);
             FreshLogin::NotBound
         }
-        "local_check_failed" | "commons_address_refused" => FreshLogin::NotBound,
+        "commons_address_refused" => FreshLogin::Unchecked(UNCHECKED_COMMONS_ADDRESS_REFUSED),
+        // `local_check_failed` among them: the answer could not be verified.
         _ => FreshLogin::Unavailable,
     }
 }

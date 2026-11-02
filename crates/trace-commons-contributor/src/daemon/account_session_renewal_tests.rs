@@ -1374,15 +1374,16 @@ async fn a_device_joined_by_code_is_not_gated() {
     assert_eq!(fx.ceremonies(), (0, 0));
 }
 
-/// Failures no retry fixes do not block NEAR AI sign-in for good: a
-/// malformed account record, and an enrolled address the signup allowlist
-/// refuses (this stub is on loopback, which it refuses).
+/// The two failures no retry fixes -- a malformed account record, and an
+/// enrolled address the signup allowlist refuses (this stub is on
+/// loopback, which it refuses) -- do not block NEAR AI sign-in for good:
+/// unchecked, so the login is stored, but the commons is not asked.
 #[tokio::test]
-async fn a_permanent_local_failure_does_not_block_sign_in() {
+async fn a_malformed_record_or_refused_address_is_unchecked() {
     let fx = Fixture::new(Session::Expired).await;
     assert!(matches!(
         check_fresh_login(&fx.shared.store, &RenewVia::live(&fx.api), FRESH).await,
-        FreshLogin::NotBound
+        FreshLogin::Unchecked(UNCHECKED_COMMONS_ADDRESS_REFUSED)
     ));
     assert_eq!(fx.ceremonies(), (0, 0));
 
@@ -1391,9 +1392,23 @@ async fn a_permanent_local_failure_does_not_block_sign_in() {
     commons_credentials::replace(&fx.shared.store, &expected, b"not json", None).unwrap();
     assert!(matches!(
         check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
-        FreshLogin::NotBound
+        FreshLogin::Unchecked(UNCHECKED_ACCOUNT_RECORD_MALFORMED)
     ));
     assert_eq!(fx.ceremonies(), (0, 0));
+}
+
+/// The commons answered, but the answer fails a local check (here, a
+/// tenant that is not a NEAR AI one): this device cannot verify it as its
+/// account, so the check fails closed.
+#[tokio::test]
+async fn an_answer_failing_a_local_check_fails_closed() {
+    let fx = Fixture::new(Session::Expired).await;
+    *fx.stub.state.tenant.lock().unwrap() = "tenant-a".into();
+    assert!(matches!(
+        check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await,
+        FreshLogin::Unavailable
+    ));
+    assert_eq!(fx.ceremonies(), (1, 1));
 }
 
 mod settle_tests {
@@ -1547,6 +1562,45 @@ mod settle_tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(revokes(&fx), 1);
+    }
+
+    /// Unchecked: the login is stored, and nothing records it as the
+    /// account's -- no account session is written.
+    #[tokio::test]
+    async fn an_unchecked_login_is_stored_but_not_recorded_as_the_accounts() {
+        for reason in [
+            UNCHECKED_ACCOUNT_RECORD_MALFORMED,
+            UNCHECKED_COMMONS_ADDRESS_REFUSED,
+        ] {
+            let fx = Fixture::new(Session::Expired).await;
+            let before = (fx.account_record(), fx.renewal_log_text());
+            run(&fx, FreshLogin::Unchecked(reason)).await.unwrap();
+            assert_eq!(
+                stored(&fx),
+                (Some("key-fresh".into()), Some("rt-synthetic-fresh".into())),
+                "{reason}"
+            );
+            assert_eq!(
+                (fx.account_record(), fx.renewal_log_text()),
+                before,
+                "{reason}"
+            );
+            assert_eq!(fx.ceremonies(), (0, 0));
+        }
+    }
+
+    /// An answer failing a local check stores nothing.
+    #[tokio::test]
+    async fn a_login_failing_a_local_check_stores_nothing() {
+        let fx = Fixture::new(Session::Expired).await;
+        *fx.stub.state.tenant.lock().unwrap() = "tenant-a".into();
+        let before = (stored(&fx), fx.account_record(), fx.config());
+        let check = check_fresh_login(&fx.shared.store, &fx.via(), FRESH).await;
+        let error = run(&fx, check).await.unwrap_err();
+        let fields =
+            crate::daemon::nearai_credential::ceremony::failure_fields(&error, "github").unwrap();
+        assert_eq!(fields[1].1, "near_ai_credential_commons_unavailable");
+        assert_eq!((stored(&fx), fx.account_record(), fx.config()), before);
     }
 
     /// Not bound (a first run): stored as it always was.
