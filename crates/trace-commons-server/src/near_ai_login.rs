@@ -32,7 +32,8 @@
 //!   body, a subject that is missing or malformed. This is the fact about the
 //!   token, and it stays one label for every cause.
 //! - [`LoginIntrospectionFailure::Unavailable`] -- NEAR AI did not answer:
-//!   unreachable, slow, a `5xx`, or its own `429`. This is a fact about NEAR AI
+//!   unreachable, slow, a body that stops arriving, a `5xx`, a `429`, `408`,
+//!   `421` or `425`, or no client could be built to ask it. This is a fact about NEAR AI
 //!   and the path to it, the same for every token at that moment, so telling
 //!   it apart says nothing about whose token this is. A caller uses it to say
 //!   "try again later" rather than "refused".
@@ -187,12 +188,13 @@ pub async fn introspect_login(
 ) -> Result<VerifiedNearAiLogin, LoginIntrospectionFailure> {
     let url = introspection_url(base_url);
     // A client that cannot be built (the TLS backend or root store) fails
-    // the same way on every request: a misconfiguration, not NEAR AI being
-    // down, so it is not `Unavailable` and is never "try again later".
+    // the same way on every request: deployment state, never an answer about
+    // this token, so it is `Unavailable` like the commons' other
+    // misconfigurations.
     let http = reqwest::Client::builder()
         .timeout(timeout)
         .build()
-        .map_err(|_| LoginIntrospectionFailure::Refused)?;
+        .map_err(|_| LoginIntrospectionFailure::Unavailable)?;
     // The one place the token appears. `bearer_auth` rather than a formatted
     // string so it is never a `String` this function owns and could log.
     let response = http
