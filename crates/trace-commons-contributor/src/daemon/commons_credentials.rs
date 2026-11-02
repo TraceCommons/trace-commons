@@ -277,23 +277,36 @@ pub(crate) fn load_with_snapshot(
     store: &ConfigStore,
     kind: Kind,
 ) -> Result<Option<(Vec<u8>, Snapshot)>> {
+    Ok(match load_or_snapshot(store, kind)? {
+        (Some(payload), expected) => Some((payload, expected)),
+        (None, _) => None,
+    })
+}
+
+/// [`load_with_snapshot`], answering the snapshot when nothing is stored
+/// too, so a caller that writes against an absent record needs no second
+/// read of credential storage.
+pub(crate) fn load_or_snapshot(
+    store: &ConfigStore,
+    kind: Kind,
+) -> Result<(Option<Vec<u8>>, Snapshot)> {
     if needs_native_thread() {
         return std::thread::scope(|scope| {
             scope
-                .spawn(|| load_with_snapshot(store, kind))
+                .spawn(|| load_or_snapshot(store, kind))
                 .join()
                 .map_err(|_| unavailable())?
         });
     }
     let expected = snapshot(store, kind)?;
     let Some(bytes) = &expected.previous else {
-        return Ok(None);
+        return Ok((None, expected));
     };
     let Some(record) = record(bytes)? else {
         // Migration keeps the original file intact until an immutable OS entry
         // has passed readback. The same filename then becomes a rollback guard.
         replace(store, &expected, bytes, None)?;
-        return load_with_snapshot(store, kind);
+        return load_or_snapshot(store, kind);
     };
     if record.kind != kind
         || (kind == Kind::Account && record.authority != current_authority(store)?)
@@ -312,7 +325,7 @@ pub(crate) fn load_with_snapshot(
     let locks = coordination(store.dir())?;
     let _commit = locks.commit.lock()?;
     ensure_current(store, &expected)?;
-    Ok(Some((payload, expected)))
+    Ok((Some(payload), expected))
 }
 
 /// Publish a secret, optionally publishing its first enrollment config in the
