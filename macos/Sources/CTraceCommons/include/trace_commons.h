@@ -1788,12 +1788,15 @@ char*       tc_legacy_migration_notice(const char* notice_json);
  * an object holding its account_state, account_state_reason and
  * near_ai_login_unconfirmed keys). Returns an owned JSON object with title,
  * body (null for a reason this build does not know), private_ai (null
- * unless a NEAR AI login is stored) and action; free it with tc_string_free.
+ * unless a NEAR AI login is stored), action, confirm_title, confirm_body,
+ * confirm_action, confirm_cancel and failed; free it with tc_string_free.
  *
  * THE BRANCH CROSSES, NOT ONLY THE WORDS. Do not read account_state_reason
  * to choose words natively. Draw it in the account section, never as a
- * banner or notification. The action calls unenroll, then starts the first
- * run. While it is shown, do not mark the NEAR AI login as the account's.
+ * banner or notification. The action first asks confirm_title and
+ * confirm_body with confirm_action and confirm_cancel; only confirm_action
+ * calls unenroll, then opens the first run. Show failed if unenroll is
+ * refused.
  *
  * NULL while there is nothing to show (account_state ok, absent or anything
  * else), for a NULL, non-UTF-8 or unparseable argument, anything that is not

@@ -1,12 +1,15 @@
 //! `status.account_state` (#1836 F1): the two cases #1837 lets a NEAR AI
-//! sign-in through unchecked, reported on every status build.
+//! sign-in through unchecked, reported on every status build without a
+//! credential-store read.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use serde_json::{Value, json};
 
 use super::commons_credentials::{self, Kind};
+use super::credential_store::{CredentialError, CredentialReference, SecretBackend};
 use super::ipc::DaemonShared;
 use super::settings::NearAiInferenceCredential;
 use crate::config::ACCOUNT_SESSION_FILE;
@@ -20,16 +23,67 @@ fn near_ai_tenant() -> String {
     format!("nearai-{}", "ab".repeat(32))
 }
 
+/// An OS store that counts reads, can lose every entry, and can stop
+/// answering, as a locked keychain does.
+#[derive(Default)]
+struct Store {
+    entries: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    reads: AtomicUsize,
+    locked: AtomicBool,
+}
+
+impl SecretBackend for Store {
+    fn read(&self, reference: &CredentialReference) -> Result<Vec<u8>, CredentialError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if self.locked.load(Ordering::SeqCst) {
+            return Err(CredentialError::Unavailable);
+        }
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&reference.storage_key()?)
+            .cloned()
+            .ok_or(CredentialError::NoEntry)
+    }
+    fn write(&self, reference: &CredentialReference, bytes: &[u8]) -> Result<(), CredentialError> {
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(reference.storage_key()?, bytes.to_vec());
+        Ok(())
+    }
+    fn delete(&self, reference: &CredentialReference) -> Result<(), CredentialError> {
+        self.entries
+            .lock()
+            .unwrap()
+            .remove(&reference.storage_key()?);
+        Ok(())
+    }
+}
+
 struct Fixture {
     shared: Arc<DaemonShared>,
+    os: Arc<Store>,
     _dir: tempfile::TempDir,
+}
+
+fn session(ingest_url: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "access_token": "tcn1_bmVhcmFp.session",
+        "expires_at": Utc::now() + chrono::Duration::hours(1),
+        "account_id": "6f1d2c3b-4a59-4e6f-8a7b-9c0d1e2f3a4b",
+        "ingest_origin": ingest_url,
+    }))
+    .unwrap()
 }
 
 impl Fixture {
     /// Enrolled in `tenant_id` against `ingest_url`, with an account record
-    /// stored when `record` holds.
+    /// stored in the OS store when `record` holds.
     fn new(tenant_id: &str, ingest_url: &str, record: bool) -> Self {
         let (dir, store) = crate::config::tests_support::temp_store();
+        let os = Arc::new(Store::default());
+        commons_credentials::install_test_backend(&store, os.clone());
         let shared = Arc::new(DaemonShared::load(store).unwrap());
         let mut cfg = crate::commands::unenrolled_preview_config();
         cfg.ingest_url = ingest_url.to_string();
@@ -37,19 +91,15 @@ impl Fixture {
         cfg.device_key_id = "device-key-attention".into();
         cfg.user_subject = "device-key-attention".into();
         shared.store.save_config(&cfg).unwrap();
+        let fx = Self {
+            shared,
+            os,
+            _dir: dir,
+        };
         if record {
-            let session = json!({
-                "access_token": "tcn1_bmVhcmFp.session",
-                "expires_at": Utc::now() + chrono::Duration::hours(1),
-                "account_id": "6f1d2c3b-4a59-4e6f-8a7b-9c0d1e2f3a4b",
-                "ingest_origin": ingest_url,
-            });
-            shared
-                .store
-                .write_daemon_file(ACCOUNT_SESSION_FILE, &serde_json::to_vec(&session).unwrap())
-                .unwrap();
+            fx.write_record(&session(ingest_url));
         }
-        Self { shared, _dir: dir }
+        fx
     }
 
     /// A NEAR AI tenant against an accepted address, with a record.
@@ -57,10 +107,14 @@ impl Fixture {
         Self::new(&near_ai_tenant(), ACCEPTED, true)
     }
 
-    /// Replace the stored record with bytes that are not JSON.
-    fn break_record(&self) {
+    fn write_record(&self, bytes: &[u8]) {
         let expected = commons_credentials::snapshot(&self.shared.store, Kind::Account).unwrap();
-        commons_credentials::replace(&self.shared.store, &expected, b"not json", None).unwrap();
+        commons_credentials::replace(&self.shared.store, &expected, bytes, None).unwrap();
+    }
+
+    /// What every account feature does: read the record.
+    fn read_record(&self) -> Result<(), commons_credentials::AccountLoadFailure> {
+        commons_credentials::load_account(&self.shared.store).map(|_| ())
     }
 
     /// Hold a NEAR AI inference key, as a stored NEAR AI login leaves.
@@ -85,25 +139,93 @@ impl Fixture {
     }
 }
 
+fn unreadable() -> (Value, Value, Value) {
+    (
+        json!("needs_attention"),
+        json!("account_record_unreadable"),
+        json!(false),
+    )
+}
+
 #[test]
 fn a_healthy_account_shows_no_state() {
     let fx = Fixture::healthy();
     fx.hold_near_ai_key();
+    fx.read_record().unwrap();
     assert_eq!(fx.state(), (json!("ok"), Value::Null, json!(false)));
 }
 
+/// A payload that is not JSON, once anything has read it.
 #[test]
 fn an_unreadable_record_needs_attention() {
     let fx = Fixture::healthy();
-    fx.break_record();
+    fx.write_record(b"not json");
     assert_eq!(
-        fx.state(),
-        (
-            json!("needs_attention"),
-            json!("account_record_unreadable"),
-            json!(false)
-        )
+        fx.read_record(),
+        Err(commons_credentials::AccountLoadFailure::Unreadable)
     );
+    assert_eq!(fx.state(), unreadable());
+}
+
+/// An OS entry that is gone is as unreadable as a malformed one: no retry
+/// reads it, and the account cannot renew.
+#[test]
+fn a_missing_os_entry_needs_attention() {
+    let fx = Fixture::healthy();
+    fx.os.entries.lock().unwrap().clear();
+    assert_eq!(
+        fx.read_record(),
+        Err(commons_credentials::AccountLoadFailure::Unreadable)
+    );
+    assert_eq!(fx.state(), unreadable());
+}
+
+/// Storage that does not answer (locked, a prompt) may pass: not attention.
+#[test]
+fn locked_storage_is_not_attention() {
+    let fx = Fixture::healthy();
+    fx.os.locked.store(true, Ordering::SeqCst);
+    assert_eq!(
+        fx.read_record(),
+        Err(commons_credentials::AccountLoadFailure::Storage)
+    );
+    assert_eq!(fx.state().0, json!("ok"));
+}
+
+/// A status build never reads the credential store, however many times it
+/// runs, and so can never wait on or raise a prompt.
+#[test]
+fn status_reads_no_credential_store() {
+    let fx = Fixture::healthy();
+    fx.write_record(b"not json");
+    let before = fx.os.reads.load(Ordering::SeqCst);
+    for _ in 0..5 {
+        let _ = fx.shared.status_value();
+    }
+    assert_eq!(fx.os.reads.load(Ordering::SeqCst), before);
+    // Nothing has read the record yet, so nothing is known about it.
+    assert_eq!(fx.state().0, json!("ok"));
+}
+
+/// Nor does it write: a legacy, pre-record account file stays as it is,
+/// where a read would move it into the OS store.
+#[test]
+fn status_migrates_nothing() {
+    let fx = Fixture::new(&near_ai_tenant(), ACCEPTED, false);
+    fx.shared
+        .store
+        .write_daemon_file(ACCOUNT_SESSION_FILE, &session(ACCEPTED))
+        .unwrap();
+    let entries = fx.os.entries.lock().unwrap().len();
+    let _ = fx.shared.status_value();
+    let file = fx
+        .shared
+        .store
+        .read_daemon_file(ACCOUNT_SESSION_FILE)
+        .unwrap()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&file).contains("commons_credential_version"));
+    assert_eq!(fx.os.entries.lock().unwrap().len(), entries);
 }
 
 #[test]
@@ -129,7 +251,8 @@ fn a_near_ai_login_held_in_that_state_is_unconfirmed() {
 
     let fx = Fixture::healthy();
     fx.hold_near_ai_key();
-    fx.break_record();
+    fx.write_record(b"not json");
+    let _ = fx.read_record();
     assert_eq!(fx.state().0, json!("needs_attention"));
     assert_eq!(fx.state().2, json!(true));
 }
@@ -161,28 +284,17 @@ fn not_bound_devices_show_no_state() {
     assert_eq!(status["near_ai_login_unconfirmed"], false);
 }
 
-/// The answer is remembered per stored record, not forever: a record that
-/// changes is read again.
+/// What a read found holds only for the record it read: a record that
+/// changes is not attention until it is read again.
 #[test]
-fn a_changed_record_is_read_again() {
+fn a_changed_record_is_judged_afresh() {
     let fx = Fixture::healthy();
-    assert_eq!(fx.state().0, json!("ok"));
-    fx.break_record();
+    fx.write_record(b"not json");
+    let _ = fx.read_record();
     assert_eq!(fx.state().0, json!("needs_attention"));
-    let expected = commons_credentials::snapshot(&fx.shared.store, Kind::Account).unwrap();
-    let good = json!({
-        "access_token": "tcn1_bmVhcmFp.session",
-        "expires_at": Utc::now() + chrono::Duration::hours(1),
-        "account_id": "6f1d2c3b-4a59-4e6f-8a7b-9c0d1e2f3a4b",
-        "ingest_origin": ACCEPTED,
-    });
-    commons_credentials::replace(
-        &fx.shared.store,
-        &expected,
-        &serde_json::to_vec(&good).unwrap(),
-        None,
-    )
-    .unwrap();
+    fx.write_record(&session(ACCEPTED));
+    assert_eq!(fx.state().0, json!("ok"));
+    fx.read_record().unwrap();
     assert_eq!(fx.state().0, json!("ok"));
 }
 
@@ -192,7 +304,8 @@ fn a_changed_record_is_read_again() {
 #[test]
 fn unenrolling_clears_the_state_and_reading_it_unenrolls_nothing() {
     let fx = Fixture::healthy();
-    fx.break_record();
+    fx.write_record(b"not json");
+    let _ = fx.read_record();
     assert_eq!(fx.state().0, json!("needs_attention"));
     assert_eq!(fx.state().0, json!("needs_attention"));
     assert!(fx.shared.store.load_config().unwrap().is_some());
@@ -200,4 +313,17 @@ fn unenrolling_clears_the_state_and_reading_it_unenrolls_nothing() {
     let unenrolled = super::unenroll::unenroll(&fx.shared).unwrap_or_else(|_| panic!("unenroll"));
     assert!(unenrolled.removed);
     assert_eq!(fx.state(), (json!("ok"), Value::Null, json!(false)));
+}
+
+/// #1837's sign-in check and the status share one record classification:
+/// an OS entry that is gone is unreadable there too, not "storage may
+/// pass" forever.
+#[test]
+fn the_sign_in_check_reads_a_missing_entry_as_unreadable() {
+    let fx = Fixture::healthy();
+    fx.os.entries.lock().unwrap().clear();
+    assert!(matches!(
+        super::account_session_renewal::load_account_record(&fx.shared.store),
+        Err(super::account_session_renewal::AccountRecordError::Malformed)
+    ));
 }

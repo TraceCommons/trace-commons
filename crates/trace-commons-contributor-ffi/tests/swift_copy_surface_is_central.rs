@@ -666,6 +666,8 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             consent::ACCOUNT_ATTENTION_ADDRESS_REFUSED_BODY,
             consent::ACCOUNT_ATTENTION_PRIVATE_AI,
             consent::ACCOUNT_ATTENTION_ACTION,
+            consent::ACCOUNT_ATTENTION_CONFIRM_TITLE,
+            consent::ACCOUNT_ATTENTION_CONFIRM_BODY,
         ]
         .map(str::to_owned)
         .to_vec(),

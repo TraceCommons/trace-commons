@@ -142,10 +142,18 @@ pub const FAILURE_DEVICE_KEY_REVOKED: &str = "device_key_revoked";
 /// spend the provisioning rate limit for an answer that cannot change.
 /// Unenroll removes the marker with the enrollment; sign-out does not.
 pub(crate) fn key_revoked(store: &crate::config::ConfigStore) -> bool {
-    let Ok(Some(marker)) = store.read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE) else {
+    let Ok(Some(cfg)) = store.load_config() else {
         return false;
     };
-    let Ok(Some(cfg)) = store.load_config() else {
+    key_revoked_for(store, &cfg)
+}
+
+/// [`key_revoked`] for a configuration already read.
+pub(crate) fn key_revoked_for(
+    store: &crate::config::ConfigStore,
+    cfg: &crate::config::ContributorConfig,
+) -> bool {
+    let Ok(Some(marker)) = store.read_daemon_file(crate::config::DEVICE_KEY_REVOKED_FILE) else {
         return false;
     };
     marker.trim_ascii() == revoked_key_digest(&cfg.device_key_id).as_bytes()
@@ -183,7 +191,8 @@ pub(super) struct AccountRecord {
 pub(super) enum AccountRecordError {
     /// Credential storage did not answer (locked, a prompt): may pass.
     Storage,
-    /// The record is stored but is not JSON: no retry fixes it.
+    /// The record is stored but cannot be read: not JSON, or a reference or
+    /// OS entry no retry reads ([`commons_credentials::AccountLoadFailure`]).
     Malformed,
 }
 
@@ -192,8 +201,11 @@ pub(super) enum AccountRecordError {
 pub(super) fn load_account_record(
     store: &crate::config::ConfigStore,
 ) -> Result<Option<AccountRecord>, AccountRecordError> {
-    let Some((raw, expected)) = commons_credentials::load_with_snapshot(store, Kind::Account)
-        .map_err(|_| AccountRecordError::Storage)?
+    let Some((raw, expected)) =
+        commons_credentials::load_account(store).map_err(|failure| match failure {
+            commons_credentials::AccountLoadFailure::Storage => AccountRecordError::Storage,
+            commons_credentials::AccountLoadFailure::Unreadable => AccountRecordError::Malformed,
+        })?
     else {
         return Ok(None);
     };
@@ -204,6 +216,37 @@ pub(super) fn load_account_record(
         previous,
         expected,
     }))
+}
+
+/// Whether `cfg` is an account whose NEAR AI login the commons checks: a
+/// `nearai-` tenant, a device key the account has not revoked, and a device
+/// that did not join by one-time code. [`check_fresh_login`] and the
+/// "needs attention" status (`super::account_attention`) both gate on it.
+pub(super) fn checks_near_ai_login(
+    store: &crate::config::ConfigStore,
+    cfg: &crate::config::ContributorConfig,
+) -> bool {
+    super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id)
+        && !key_revoked_for(store, cfg)
+        && !super::device_codes::joined_by_code(store)
+}
+
+/// The enrolled commons under the signup allowlist every NEAR AI ceremony
+/// uses. `Err` when this build refuses the address
+/// ([`UNCHECKED_COMMONS_ADDRESS_REFUSED`]).
+pub(super) fn commons_client(
+    cfg: &crate::config::ContributorConfig,
+) -> anyhow::Result<trace_commons_operator_client::Client> {
+    let allowed = super::account_onboarding::signup_allowlist(&cfg.ingest_url, &[])?;
+    super::account_onboarding::client(&cfg.ingest_url, &allowed)
+}
+
+/// Whether this build refuses the enrolled address, as [`commons_client`]
+/// would, without building a client.
+pub(super) fn commons_address_refused(cfg: &crate::config::ContributorConfig) -> bool {
+    super::account_onboarding::signup_allowlist(&cfg.ingest_url, &[])
+        .and_then(|allowed| super::account_onboarding::check_address(&cfg.ingest_url, &allowed))
+        .is_err()
 }
 
 /// Per state directory: one renewal at a time, so the reads that arrive
@@ -262,8 +305,7 @@ impl<'a> RenewVia<'a> {
         if let Some(commons) = &self.commons {
             return Ok(commons.clone());
         }
-        let allowed = super::account_onboarding::signup_allowlist(&cfg.ingest_url, &[])?;
-        super::account_onboarding::client(&cfg.ingest_url, &allowed)
+        commons_client(cfg)
     }
 }
 
@@ -592,10 +634,7 @@ pub(super) async fn check_fresh_login(
         Ok(None) => return FreshLogin::NotBound,
         Err(_) => return FreshLogin::Unavailable,
     };
-    if !super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id)
-        || key_revoked(store)
-        || super::device_codes::joined_by_code(store)
-    {
+    if !checks_near_ai_login(store, &cfg) {
         return FreshLogin::NotBound;
     }
     let identity = match DeviceIdentity::load(store) {

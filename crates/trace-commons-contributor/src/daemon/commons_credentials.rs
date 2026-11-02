@@ -301,41 +301,153 @@ pub(crate) fn load_with_snapshot(
     store: &ConfigStore,
     kind: Kind,
 ) -> Result<Option<(Vec<u8>, Snapshot)>> {
+    load_observed(store, kind).map_err(LoadFailure::into_error)
+}
+
+/// Why the account record could not be read ([`load_account`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccountLoadFailure {
+    /// Storage did not answer, or the files moved under the read: may pass.
+    Storage,
+    /// The record is stored but cannot be read, and no retry reads it: the
+    /// reference is malformed, its OS entry is gone or does not match it, or
+    /// the payload is not JSON.
+    Unreadable,
+}
+
+/// The account record and the snapshot it was read under, telling a record
+/// no retry reads from storage that may answer later. Every account-record
+/// read goes through here or [`load_with_snapshot`], and each leaves what
+/// it found for [`observed_account_read`].
+pub(crate) fn load_account(
+    store: &ConfigStore,
+) -> std::result::Result<Option<(Vec<u8>, Snapshot)>, AccountLoadFailure> {
+    match load_observed(store, Kind::Account) {
+        Ok(Some((payload, _))) if !payload_is_json(&payload) => Err(AccountLoadFailure::Unreadable),
+        Ok(loaded) => Ok(loaded),
+        Err(LoadFailure::Permanent(..)) => Err(AccountLoadFailure::Unreadable),
+        Err(LoadFailure::Transient(_)) => Err(AccountLoadFailure::Storage),
+    }
+}
+
+/// What the last read of the account record found under `snapshot`, or
+/// `None` when nothing has read it since the files last changed. Reads no
+/// OS store and writes nothing, so `status` can ask on every build.
+pub(crate) fn observed_account_read(
+    store: &ConfigStore,
+    snapshot: &Snapshot,
+) -> Option<AccountLoadFailure> {
+    let (digest, unreadable) = *ACCOUNT_READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()?
+        .get(store.dir())?;
+    (digest == snapshot.digest() && unreadable).then_some(AccountLoadFailure::Unreadable)
+}
+
+/// Per state directory: the snapshot digest of the last account-record read
+/// that reached an answer, and whether that answer was "unreadable".
+#[allow(clippy::type_complexity)]
+static ACCOUNT_READS: std::sync::Mutex<
+    Option<std::collections::HashMap<std::path::PathBuf, ([u8; 32], bool)>>,
+> = std::sync::Mutex::new(None);
+
+fn observe_account(store: &ConfigStore, digest: [u8; 32], unreadable: bool) {
+    ACCOUNT_READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(Default::default)
+        .insert(store.dir().to_path_buf(), (digest, unreadable));
+}
+
+fn payload_is_json(payload: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(payload).is_ok()
+}
+
+/// A failed load: [`LoadFailure::Permanent`] when no retry reads this
+/// snapshot's record, with the digest it was read under.
+enum LoadFailure {
+    Transient(anyhow::Error),
+    Permanent(anyhow::Error, [u8; 32]),
+}
+impl LoadFailure {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Transient(error) | Self::Permanent(error, _) => error,
+        }
+    }
+}
+
+/// [`load_inner`], leaving an account read's answer for
+/// [`observed_account_read`].
+fn load_observed(
+    store: &ConfigStore,
+    kind: Kind,
+) -> std::result::Result<Option<(Vec<u8>, Snapshot)>, LoadFailure> {
+    let loaded = load_inner(store, kind);
+    if kind == Kind::Account {
+        match &loaded {
+            Ok(Some((payload, snapshot))) => {
+                observe_account(store, snapshot.digest(), !payload_is_json(payload));
+            }
+            Err(LoadFailure::Permanent(_, digest)) => observe_account(store, *digest, true),
+            Ok(None) | Err(LoadFailure::Transient(_)) => {}
+        }
+    }
+    loaded
+}
+
+fn load_inner(
+    store: &ConfigStore,
+    kind: Kind,
+) -> std::result::Result<Option<(Vec<u8>, Snapshot)>, LoadFailure> {
     if needs_native_thread() {
         return std::thread::scope(|scope| {
             scope
-                .spawn(|| load_with_snapshot(store, kind))
+                .spawn(|| load_inner(store, kind))
                 .join()
-                .map_err(|_| unavailable())?
+                .map_err(|_| LoadFailure::Transient(unavailable()))?
         });
     }
-    let expected = snapshot(store, kind)?;
+    let transient = LoadFailure::Transient;
+    let expected = snapshot(store, kind).map_err(transient)?;
+    let digest = expected.digest();
+    let permanent = |error: anyhow::Error| LoadFailure::Permanent(error, digest);
     let Some(bytes) = &expected.previous else {
         return Ok(None);
     };
-    let Some(record) = record(bytes)? else {
+    let Some(record) = record(bytes).map_err(permanent)? else {
         // Migration keeps the original file intact until an immutable OS entry
         // has passed readback. The same filename then becomes a rollback guard.
-        replace(store, &expected, bytes, None)?;
-        return load_with_snapshot(store, kind);
+        replace(store, &expected, bytes, None).map_err(transient)?;
+        return load_inner(store, kind);
     };
-    if record.kind != kind
-        || (kind == Kind::Account && record.authority != current_authority(store)?)
-    {
-        return Err(changed());
+    if record.kind != kind {
+        return Err(permanent(changed()));
     }
-    let credentials = native(store)?;
-    let stored = credentials
-        .load_bytes(&record.reference)
-        .map_err(|_| unavailable())?;
-    let bundle: Bundle = serde_json::from_slice(&stored).map_err(|_| unavailable())?;
-    if bundle.version != 1 || bundle.binding != binding(store, &record)? {
-        return Err(unavailable());
+    if kind == Kind::Account && record.authority != current_authority(store).map_err(transient)? {
+        return Err(permanent(changed()));
     }
-    let payload = STANDARD.decode(bundle.payload).map_err(|_| unavailable())?;
-    let locks = coordination(store.dir())?;
-    let _commit = locks.commit.lock()?;
-    ensure_current(store, &expected)?;
+    let credentials = native(store).map_err(transient)?;
+    let stored = credentials.load_bytes(&record.reference).map_err(|error| {
+        use super::credential_store::CredentialError;
+        match error {
+            CredentialError::NoEntry
+            | CredentialError::InvalidReference
+            | CredentialError::TooLarge => permanent(unavailable()),
+            _ => LoadFailure::Transient(unavailable()),
+        }
+    })?;
+    let bundle: Bundle = serde_json::from_slice(&stored).map_err(|_| permanent(unavailable()))?;
+    if bundle.version != 1 || bundle.binding != binding(store, &record).map_err(transient)? {
+        return Err(permanent(unavailable()));
+    }
+    let payload = STANDARD
+        .decode(bundle.payload)
+        .map_err(|_| permanent(unavailable()))?;
+    let locks = coordination(store.dir()).map_err(transient)?;
+    let _commit = locks.commit.lock().map_err(transient)?;
+    ensure_current(store, &expected).map_err(transient)?;
     Ok(Some((payload, expected)))
 }
 

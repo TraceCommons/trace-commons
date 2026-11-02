@@ -3711,9 +3711,10 @@ pub unsafe extern "C" fn tc_legacy_migration_notice(notice_json: *const c_char) 
 /// Returns an owned JSON object whose keys are `AccountAttentionCopy`'s
 /// fields -- `title`, `body` (the reason's sentence, or null for a reason
 /// this build does not know), `private_ai` (null unless a NEAR AI login is
-/// stored) and `action`, the "Set up again" button -- free it with
-/// [`tc_string_free`]. The button unenrolls (`unenroll`), then the first
-/// run starts.
+/// stored), `action` (the "Set up again" button), the confirmation it opens
+/// (`confirm_title`, `confirm_body`, `confirm_action`, `confirm_cancel`) and
+/// `failed` -- free it with [`tc_string_free`]. Only `confirm_action`
+/// unenrolls (`unenroll`); then the first run starts.
 ///
 /// THE BRANCH CROSSES, NOT ONLY THE WORDS: a shell does not read
 /// `account_state_reason` to choose a sentence. Returns NULL while there is

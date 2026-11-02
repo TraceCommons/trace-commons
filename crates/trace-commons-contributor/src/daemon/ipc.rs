@@ -2623,10 +2623,25 @@ impl DaemonShared {
         let routing = self.routing_value();
         // Taken before the locks below for the same reason as `routing`:
         // one lock order everywhere.
-        let account_scope = super::commons_credentials::account_scope(&self.store).ok();
-        // Before the locks below too: it takes the commit lock, as
-        // `account_scope` does, and `holds_near_ai_key` the settings lock.
-        let account_attention = super::account_attention::account_attention(&self.store);
+        // One account snapshot (the commit lock, then three files) for both
+        // the scope and the account's state, and one config read for every
+        // field below.
+        let account_snapshot = super::commons_credentials::snapshot(
+            &self.store,
+            super::commons_credentials::Kind::Account,
+        )
+        .ok();
+        let account_scope = account_snapshot
+            .as_ref()
+            .and_then(|snapshot| super::commons_credentials::scope_for_snapshot(snapshot).ok());
+        let cfg = self.store.load_config().ok().flatten();
+        // No credential-store read and no write (`account_attention`'s doc).
+        // `holds_near_ai_key` takes the settings lock, before the locks below.
+        let account_attention = super::account_attention::account_attention(
+            &self.store,
+            cfg.as_ref(),
+            account_snapshot.as_ref(),
+        );
         let near_ai_login_unconfirmed =
             account_attention.is_some() && self.holds_near_ai_key() == Some(true);
         let private_inference = self.private_inference_value();
@@ -2752,7 +2767,6 @@ impl DaemonShared {
             policy.contribution_mode_partial(queue.all().iter().map(|e| e.project_key.as_str()));
         drop(policy);
         let health = self.health.lock().expect("health lock");
-        let cfg = self.store.load_config().ok().flatten();
         let consent_hold = crate::config::consent_hold(cfg.as_ref());
         // One set of inputs for the lead and the mark (nudge A3), so the
         // two can never read different gates, counts or news.
