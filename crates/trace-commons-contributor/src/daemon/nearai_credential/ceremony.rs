@@ -281,6 +281,7 @@ impl BrowserSignIn {
 /// fixed label for the daemon's error log. Attached to the error as context,
 /// so the ceremony's own handling of the error is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub(super) enum FailedStep {
     /// The ceremony's own client could not be built.
     Setup,
@@ -316,37 +317,52 @@ impl std::fmt::Display for FailedStep {
     }
 }
 
-/// The step a ceremony is in, so a timeout names the step it interrupted:
-/// a mint or a persist that ran past the deadline is not a sign-in that
-/// never arrived. Starts at [`FailedStep::Callback`], the browser wait.
+/// Where a ceremony is, so a timeout names the step it interrupted -- a
+/// mint that ran past the deadline is not a sign-in that never arrived --
+/// and so a persist the deadline cannot stop is waited for rather than
+/// reported as failed. Starts at [`FailedStep::Callback`], the browser wait.
 #[derive(Clone)]
-pub(super) struct Progress(std::sync::Arc<std::sync::atomic::AtomicU8>);
+pub(super) struct Progress {
+    step: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// The persist's outcome once it is running: `None` until it ends, then
+    /// its root-cause label on failure. A blocking persist outlives the
+    /// future that started it.
+    persist: std::sync::Arc<std::sync::Mutex<Option<PersistWatch>>>,
+}
+
+type PersistWatch = tokio::sync::watch::Receiver<Option<Result<(), String>>>;
 
 impl Progress {
-    const STEPS: [FailedStep; 6] = [
-        FailedStep::Setup,
-        FailedStep::Callback,
-        FailedStep::Exchange,
-        FailedStep::Mint,
-        FailedStep::Persist,
-        FailedStep::Timeout,
-    ];
-
     pub(super) fn new() -> Self {
-        let progress = Self(Default::default());
+        let progress = Self {
+            step: Default::default(),
+            persist: Default::default(),
+        };
         progress.set(FailedStep::Callback);
         progress
     }
 
     pub(super) fn set(&self, step: FailedStep) {
-        let index = Self::STEPS.iter().position(|s| *s == step).unwrap_or(1);
-        self.0
-            .store(index as u8, std::sync::atomic::Ordering::SeqCst);
+        self.step
+            .store(step as u8, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn get(&self) -> FailedStep {
-        Self::STEPS[usize::from(self.0.load(std::sync::atomic::Ordering::SeqCst))
-            .min(Self::STEPS.len() - 1)]
+        match self.step.load(std::sync::atomic::Ordering::SeqCst) {
+            x if x == FailedStep::Setup as u8 => FailedStep::Setup,
+            x if x == FailedStep::Exchange as u8 => FailedStep::Exchange,
+            x if x == FailedStep::Mint as u8 => FailedStep::Mint,
+            x if x == FailedStep::Persist as u8 => FailedStep::Persist,
+            x if x == FailedStep::Timeout as u8 => FailedStep::Timeout,
+            _ => FailedStep::Callback,
+        }
+    }
+
+    /// Hand the running persist's outcome to [`Self::after_deadline`].
+    fn persisting(&self) -> tokio::sync::watch::Sender<Option<Result<(), String>>> {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        *self.persist.lock().unwrap_or_else(|e| e.into_inner()) = Some(receiver);
+        sender
     }
 
     /// The error a timeout ends the ceremony with: [`FailedStep::Timeout`]
@@ -358,6 +374,30 @@ impl Progress {
         };
         at(step)(anyhow!("near_ai_credential_expired"))
     }
+
+    /// What the deadline leaves: a persist that was already running is
+    /// waited for, so a sign-in that stored its key reads as complete and
+    /// one that did not reads as the persist's own failure; anything else
+    /// is [`Self::timed_out`].
+    pub(super) async fn after_deadline(&self) -> Result<()> {
+        let running = self
+            .persist
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let Some(mut running) = running else {
+            return Err(self.timed_out());
+        };
+        let ended = running.wait_for(Option::is_some).await.map(|v| v.clone());
+        match ended {
+            Ok(Some(Ok(()))) => Ok(()),
+            Ok(Some(Err(label))) => Err(at(FailedStep::Persist)(anyhow!(label))),
+            // The persist ended without a word: its worker was lost.
+            _ => Err(at(FailedStep::Persist)(anyhow!(
+                "near_ai_credential_unavailable"
+            ))),
+        }
+    }
 }
 
 /// Tag an error with the step it came from.
@@ -366,16 +406,20 @@ fn at(step: FailedStep) -> impl FnOnce(anyhow::Error) -> anyhow::Error {
 }
 
 /// The reason a failed step logs: the error's control name when it is
-/// one -- every label this crate fails with is `near_ai_` and lowercase
-/// letters and `_` -- else `other`. Checked by shape rather than against a
-/// copied list, so a label added later is logged as itself; remote text is
-/// never shaped like one, and the error log checks every value again.
+/// one -- `near_ai_` and label-shaped by the error log's own rule
+/// ([`crate::daemon::diagnostics_log::label_value`]), one definition for
+/// both -- else `other`. Checked by shape rather than against a copied
+/// list, so a label added later is logged as itself; remote text is never
+/// shaped like one.
 fn failure_reason(root: &str) -> &str {
-    let shaped = root.len() <= 64
-        && root.strip_prefix("near_ai_").is_some_and(|rest| {
-            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
-        });
-    if shaped { root } else { "other" }
+    let named = root
+        .strip_prefix("near_ai_")
+        .is_some_and(|rest| !rest.is_empty());
+    if named && crate::daemon::diagnostics_log::label_value(root) == root {
+        root
+    } else {
+        "other"
+    }
 }
 
 /// The event a failed sign-in logs.
@@ -470,6 +514,7 @@ pub(super) async fn complete(
         .await
         .map_err(at(FailedStep::Mint))?;
     progress.set(FailedStep::Persist);
+    let persisted = progress.persisting();
     // The session is kept, not dropped. Inference does not need it -- the
     // key is non-expiring and self-sufficient -- but the balance does:
     // every management route on cloud-api is session-only. What is retained
@@ -477,7 +522,7 @@ pub(super) async fn complete(
     // authority over.
     let persist_dir = dir.to_path_buf();
     let persist_id = attempt_id.to_string();
-    tokio::task::spawn_blocking(move || {
+    let persist = move || -> Result<()> {
         persist_attempt(
             &persist_dir,
             &persist_id,
@@ -492,6 +537,16 @@ pub(super) async fn complete(
             super::spend_org::forget_other_account(&store, preferred.as_deref(), preferred_listed);
         }
         Ok(())
+    };
+    tokio::task::spawn_blocking(move || {
+        let outcome = persist();
+        let _ = persisted.send(Some(
+            outcome
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| error.root_cause().to_string()),
+        ));
+        outcome
     })
     .await
     .map_err(|_| anyhow!("near_ai_credential_unavailable"))
@@ -580,7 +635,7 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
             let finished_dir = &finished_dir;
             let progress = Progress::new();
             let progress_ref = &progress;
-            tokio::time::timeout(
+            let finished = tokio::time::timeout(
                 BROWSER_TIMEOUT,
                 sign_in.finish(&api, &progress, |session, expires_at, user_agent| {
                     complete(
@@ -594,8 +649,12 @@ pub async fn begin(store: &ConfigStore, provider: &str) -> Result<serde_json::Va
                     )
                 }),
             )
-            .await
-            .map_err(|_| progress.timed_out())?
+            .await;
+            match finished {
+                Ok(finished) => finished,
+                // A persist already running is waited for, not abandoned.
+                Err(_) => progress.after_deadline().await,
+            }
         }
         .await;
         if let Err(error) = &outcome {
@@ -1484,6 +1543,7 @@ mod tests {
             "near_ai_credential_storage_binding_mismatch",
             "near_ai_credential_migration_unsupported",
             "near_ai_wallet_already_used",
+            "near_ai_key_1234",
         ] {
             assert_eq!(failure_reason(label), label);
         }
@@ -1491,7 +1551,6 @@ mod tests {
             SECRET,
             "near_ai_Credential",
             "near_ai_credential-x",
-            "near_ai_key_1234",
             "near_ai_",
             "storage_unavailable",
             &format!("near_ai_{}", "a".repeat(64)),
@@ -1555,6 +1614,48 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// A deadline that fires while the persist runs waits for it: a persist
+    /// that stored the key reads as complete, one that failed reads as its
+    /// own failure, and a deadline with no persist running is the step it
+    /// interrupted.
+    #[tokio::test]
+    async fn a_deadline_waits_for_a_running_persist() {
+        let progress = Progress::new();
+        assert_eq!(
+            line(&progress.after_deadline().await.unwrap_err(), "near").unwrap(),
+            "WARN near_ai_sign_in_failed step=timeout reason=near_ai_credential_expired provider=near"
+        );
+
+        let progress = Progress::new();
+        progress.set(FailedStep::Persist);
+        let persisted = progress.persisting();
+        let waiting = tokio::spawn({
+            let progress = progress.clone();
+            async move { progress.after_deadline().await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "the deadline waits for the persist");
+        persisted.send(Some(Ok(()))).unwrap();
+        waiting
+            .await
+            .unwrap()
+            .expect("a stored sign-in is complete");
+
+        let progress = Progress::new();
+        progress.set(FailedStep::Persist);
+        progress
+            .persisting()
+            .send(Some(Err(
+                "near_ai_credential_storage_verification_failed".into()
+            )))
+            .unwrap();
+        assert_eq!(
+            line(&progress.after_deadline().await.unwrap_err(), "github").unwrap(),
+            "WARN near_ai_sign_in_failed step=persist \
+             reason=near_ai_credential_storage_verification_failed provider=github"
+        );
     }
 
     /// A NEAR AI stub for the mint: the organizations listed, and how long
@@ -1725,7 +1826,7 @@ mod tests {
         let begin = section("pub async fn begin(", "\nfn persist_attempt(");
         for tag in [
             "CloudApi::live().map_err(at(FailedStep::Setup))?",
-            ".map_err(|_| progress.timed_out())?",
+            "Err(_) => progress.after_deadline().await,",
             "record_failure(error, provider);",
             "complete(",
         ] {

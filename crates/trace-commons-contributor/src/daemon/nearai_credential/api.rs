@@ -118,6 +118,10 @@ pub enum RevokeOutcome {
     Revoked,
     /// The service has no such key: already revoked, which is what was asked.
     AlreadyGone,
+    /// The session may not act on that workspace (`403`): the key is in
+    /// another NEAR AI account, recorded before a sign-in to a different
+    /// one. No retry with this session can revoke it.
+    NotThisAccount,
 }
 
 /// Whether a service id may become one path segment.
@@ -585,13 +589,27 @@ impl CloudApi {
             bail!("near_ai_credential_invalid")
         }
         let organizations: Organizations = self
-            .call(reqwest::Method::GET, "/v1/organizations", session, None)
+            .call(
+                reqwest::Method::GET,
+                &format!("/v1/organizations?limit={ORGANIZATION_PAGE}"),
+                session,
+                None,
+            )
             .await?;
+        // A page that did not carry every organization cannot show that one
+        // is absent: it counts as listed, so a long account is never taken
+        // for another one.
+        let short_page = organizations.total.is_some_and(|total| {
+            total < 0 || total as u64 > organizations.organizations.len() as u64
+        });
         let preferred_listed = match choice {
-            OrganizationChoice::Prefer(preferred) => organizations
-                .organizations
-                .iter()
-                .any(|organization| organization.id == preferred),
+            OrganizationChoice::Prefer(preferred) => {
+                short_page
+                    || organizations
+                        .organizations
+                        .iter()
+                        .any(|organization| organization.id == preferred)
+            }
             _ => false,
         };
         let mut active = organizations
@@ -788,6 +806,7 @@ impl CloudApi {
         match response.status() {
             status if status.is_success() => Ok(RevokeOutcome::Revoked),
             reqwest::StatusCode::NOT_FOUND => Ok(RevokeOutcome::AlreadyGone),
+            reqwest::StatusCode::FORBIDDEN => Ok(RevokeOutcome::NotThisAccount),
             reqwest::StatusCode::UNAUTHORIZED => bail!("near_ai_credential_session_expired"),
             // The body is never read: label-only, as everywhere in this file.
             _ => bail!("near_ai_credential_refused"),
