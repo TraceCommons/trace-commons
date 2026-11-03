@@ -140,6 +140,9 @@ async fn fixture() -> Option<Fixture> {
              THEN CREATE ROLE tc_legacy_carry_payout LOGIN NOSUPERUSER NOBYPASSRLS; END IF; END $$;
              GRANT trace_ingest_runtime TO tc_legacy_carry_payout;
              GRANT SELECT ON trace_accounts, trace_near_account_anchors, trace_credit_holds, trace_account_principals TO trace_ingest_runtime;
+             GRANT INSERT ON trace_accounts, trace_account_principals TO trace_ingest_runtime;
+             GRANT UPDATE (closed_at) ON trace_accounts TO trace_ingest_runtime;
+             GRANT SELECT, INSERT, UPDATE ON trace_tenants TO trace_ingest_runtime;
              GRANT INSERT ON trace_account_audit TO trace_ingest_runtime;
              GRANT USAGE ON SEQUENCE trace_account_audit_audit_sequence_seq TO trace_ingest_runtime;
              DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tc_legacy_carry_operator')
@@ -420,12 +423,95 @@ impl Fixture {
             .collect()
     }
 
-    async fn add_account(&self, tenant: &str, closed: bool) -> Uuid {
+    /// An account in `tenant` with no principal: opened by nobody the tenant
+    /// link proved.
+    async fn add_unproven_account(&self, tenant: &str, closed: bool) -> Uuid {
         let account = Uuid::new_v4();
         self.exec(
             "INSERT INTO trace_accounts (tenant_id, account_id, closed_at)
              VALUES ($1, $2, CASE WHEN $3 THEN now() END)",
             &[&tenant, &account, &closed],
+        )
+        .await;
+        account
+    }
+
+    /// A principal a claim recorded for the tenant's linking device under
+    /// its live tenant link, held by no account yet: what an attested
+    /// second device's claim leaves behind, so an account holding it is
+    /// proven (V148 proves only by the claims' records).
+    async fn proven_principal(&self, tenant: &str) -> String {
+        let row = self
+            .admin
+            .query_one(
+                "SELECT link_id, device_key_id FROM trace_legacy_invite_links
+                  WHERE legacy_tenant_id = $1 AND revoked_at IS NULL",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        let link: Uuid = row.get(0);
+        let device: String = row.get(1);
+        let principal = format!(
+            "principal_sha256:{}",
+            &hash(&format!("recorded:{}", Uuid::new_v4()))[7..]
+        );
+        self.exec(
+            "INSERT INTO trace_legacy_link_claimed_principals
+                 (tenant_id, legacy_link_hash, device_key_id, principal_ref)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &tenant,
+                &trace_commons_server::db::payout_legacy_link_hash(link),
+                &device,
+                &principal,
+            ],
+        )
+        .await;
+        principal
+    }
+
+    /// A principal of the tenant's linking device under a fresh enrollment
+    /// subject enrolled at `enrolled_at` (an SQL expression).
+    async fn enrolled_principal(&self, tenant: &str, enrolled_at: &str) -> String {
+        let device: String = self
+            .admin
+            .query_one(
+                "SELECT device_key_id FROM trace_legacy_invite_links
+                  WHERE legacy_tenant_id = $1 AND revoked_at IS NULL",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        let subject = hash(&format!("enrolled-user:{}", Uuid::new_v4()));
+        self.exec(
+            &format!(
+                "INSERT INTO trace_instance_enrollments
+                     (instance_subject_hash, user_subject_hash, tenant_id, created_at)
+                 VALUES ($1, $2, $3, {enrolled_at})"
+            ),
+            &[&hash(&format!("instance:{subject}")), &subject, &tenant],
+        )
+        .await;
+        device_upload_principal_refs(
+            tenant,
+            &device,
+            &device_claim_actor(tenant, &device, Some(&subject)),
+        )
+        .unwrap()[0]
+            .clone()
+    }
+
+    /// An account in a linked tenant holding a principal of the linking
+    /// device, so the carry treats it as proven (owner, 2026-11-03).
+    async fn add_account(&self, tenant: &str, closed: bool) -> Uuid {
+        let account = self.add_unproven_account(tenant, closed).await;
+        let principal = self.proven_principal(tenant).await;
+        self.exec(
+            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+             VALUES ($1, $2, $3)",
+            &[&tenant, &account, &principal],
         )
         .await;
         account
@@ -756,8 +842,11 @@ async fn pooled_closed_and_own_link_accounts_are_not_carried() {
         &[&legacy, &claimed],
     )
     .await;
+    // Since V148 the close itself released the carry (#1872); the next
+    // carry has nothing left to release and still skips the own link.
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
     let report = fx.carry(&near, account).await;
-    assert_eq!(report.released, 1);
+    assert_eq!(report.released, 0);
     assert_eq!(report.skipped, 1);
     assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
 
@@ -772,7 +861,8 @@ async fn pooled_closed_and_own_link_accounts_are_not_carried() {
         &[&legacy],
     )
     .await;
-    assert_eq!(fx.carry(&near, account).await.released, 1);
+    // Released by the mark itself (V148), and never carried again.
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
     assert_eq!(fx.carry(&near, account).await, LegacyCarryReport::default());
     assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
 }
@@ -1060,10 +1150,12 @@ async fn a_revocation_after_a_change_and_before_activation_stops_both_carries() 
     assert_eq!(fx.live_carries(&legacy, claimed).await, 0);
 }
 
-/// Review of #1865, finding 4: the account standing checked before every
-/// send holds a live carry whose tenant was marked pooled, whose tenant link
-/// row is gone, whose source account closed or was put on a credit hold, or
-/// whose source link was unlinked, without waiting for another carry run.
+/// Review of #1865, finding 4, and #1872. A pooled mark, a deleted tenant
+/// link and a closed source account release the carry in their own
+/// transaction (V148), so nothing is left to hold. A credit hold on the
+/// source account, which is temporary, and a source link unlinked outside
+/// a confirm leave the carry live, and the account standing checked before
+/// every send holds it.
 #[tokio::test]
 async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
     let Some(fx) = fixture().await else { return };
@@ -1080,15 +1172,12 @@ async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
         &[&legacy],
     )
     .await;
-    assert!(fx.carry_invalid(&legacy, claimed).await);
     assert_eq!(
-        fx.payout_runtime
-            .payout_account_standing(&legacy, claimed)
-            .await
-            .unwrap()
-            .hold_label(),
-        Some(trace_commons_server::db::PAYOUT_LEGACY_CARRY_INVALID)
+        fx.live_carries(&legacy, claimed).await,
+        0,
+        "released by the mark"
     );
+    assert!(!fx.carry_invalid(&legacy, claimed).await);
 
     // The tenant link row deleted rather than revoked.
     let (near, account, legacy, claimed) = fx.linked_pair().await;
@@ -1099,7 +1188,11 @@ async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
         &[&legacy],
     )
     .await;
-    assert!(fx.carry_invalid(&legacy, claimed).await);
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        0,
+        "released by the delete"
+    );
 
     // The NEAR AI account closed, then (another pair) put on a credit hold.
     let (near, account, legacy, claimed) = fx.linked_pair().await;
@@ -1110,7 +1203,11 @@ async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
         &[&near, &account],
     )
     .await;
-    assert!(fx.carry_invalid(&legacy, claimed).await);
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        0,
+        "released by the close"
+    );
     let (near, account, legacy, claimed) = fx.linked_pair().await;
     fx.confirm(&near, account, PayoutLinkAction::Link, "org-4d")
         .await;
@@ -1127,6 +1224,14 @@ async fn the_send_time_standing_holds_a_carry_that_no_longer_stands() {
     )
     .await;
     assert!(fx.carry_invalid(&legacy, claimed).await);
+    assert_eq!(
+        fx.payout_runtime
+            .payout_account_standing(&legacy, claimed)
+            .await
+            .unwrap()
+            .hold_label(),
+        Some(trace_commons_server::db::PAYOUT_LEGACY_CARRY_INVALID)
+    );
 
     // The source link unlinked without a carry run.
     let (near, account, legacy, claimed) = fx.linked_pair().await;
@@ -1279,6 +1384,255 @@ async fn the_sql_hash_helpers_match_the_rust_hashes() {
             trace_commons_server::db::payout_legacy_link_hash(id)
         );
     }
+}
+
+impl Fixture {
+    /// A pair with the source and the carry both active, and a second legacy
+    /// account whose carry is still waiting.
+    async fn carried_pair(&self, seed: &str) -> (String, Uuid, String, Uuid, Uuid) {
+        let (near, account, legacy, claimed) = self.linked_pair().await;
+        let waiting = self.add_account(&legacy, false).await;
+        self.confirm(&near, account, PayoutLinkAction::Link, seed)
+            .await;
+        self.activate(&near, account).await;
+        self.activate(&legacy, claimed).await;
+        (near, account, legacy, claimed, waiting)
+    }
+
+    /// Both carries released in the event's own transaction: the active one
+    /// unlinked, the waiting one closed at zero, each audited with `label`.
+    async fn assert_released(&self, legacy: &str, active: Uuid, waiting: Uuid, label: &str) {
+        let row = self
+            .admin
+            .query_one(
+                "SELECT (SELECT bool_and(l.unlink_requested_at IS NOT NULL)
+                           FROM trace_payout_links l
+                          WHERE l.tenant_id = $1 AND l.account_id = $2 AND l.state = 'active'),
+                        (SELECT count(*) FROM trace_payout_links l
+                          WHERE l.tenant_id = $1 AND l.account_id = $3 AND l.state = 'waiting'),
+                        (SELECT count(*) FROM trace_legacy_payout_carries c
+                          WHERE c.tenant_id = $1 AND c.released_at IS NULL),
+                        (SELECT count(*) FROM trace_payout_audit a
+                          WHERE a.tenant_id = $1 AND a.label = $4)",
+                &[&legacy, &active, &waiting, &label],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<_, Option<bool>>(0),
+            Some(true),
+            "active carry unlinked"
+        );
+        assert_eq!(row.get::<_, i64>(1), 0, "waiting carry closed");
+        assert_eq!(row.get::<_, i64>(2), 0, "no live carry left");
+        assert_eq!(row.get::<_, i64>(3), 2, "both releases audited as {label}");
+    }
+}
+
+/// #1872: marking a linked tenant pooled releases its carries at once, so
+/// nothing stays held until the next carry.
+#[tokio::test]
+async fn marking_a_tenant_pooled_releases_its_carries() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, active, waiting) = fx.carried_pair("org-p1").await;
+    fx.exec(
+        "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
+         VALUES ($1, 'shared event invite')",
+        &[&legacy],
+    )
+    .await;
+    fx.assert_released(&legacy, active, waiting, "legacy_tenant_pooled")
+        .await;
+    assert!(
+        !fx.carry_invalid(&legacy, active).await,
+        "released, so not held"
+    );
+}
+
+/// #1872: closing the NEAR AI account releases its carries in every
+/// tenant it linked.
+#[tokio::test]
+async fn closing_the_source_account_releases_its_carries() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, active, waiting) = fx.carried_pair("org-c1").await;
+    fx.exec(
+        "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",
+        &[&near, &account],
+    )
+    .await;
+    fx.assert_released(&legacy, active, waiting, "legacy_source_account_closed")
+        .await;
+}
+
+/// #1872: closing a legacy account releases its own carry, and only its own.
+#[tokio::test]
+async fn closing_a_legacy_account_releases_its_own_carry() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, active, waiting) = fx.carried_pair("org-c2").await;
+    fx.exec(
+        "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",
+        &[&legacy, &active],
+    )
+    .await;
+    assert_eq!(fx.live_carries(&legacy, active).await, 0);
+    assert_eq!(
+        fx.live_carries(&legacy, waiting).await,
+        1,
+        "the other account keeps its carry"
+    );
+}
+
+/// #1872: deleting the tenant link row (rather than revoking it) releases
+/// its carries, as a revocation does.
+#[tokio::test]
+async fn deleting_the_tenant_link_releases_its_carries() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, active, waiting) = fx.carried_pair("org-d1").await;
+    fx.exec(
+        "DELETE FROM trace_legacy_invite_links WHERE legacy_tenant_id = $1",
+        &[&legacy],
+    )
+    .await;
+    fx.assert_released(&legacy, active, waiting, "legacy_tenant_link_deleted")
+        .await;
+}
+
+/// Review of #1879: deleting a linked legacy tenant (an erasure) still
+/// succeeds while it has live carries. The tenant link's delete trigger
+/// fires inside the cascade and must not write into a tenant being removed.
+#[tokio::test]
+async fn deleting_a_linked_legacy_tenant_with_live_carries_succeeds() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, active, _) = fx.carried_pair("org-e1").await;
+    assert_eq!(fx.live_carries(&legacy, active).await, 1);
+    fx.exec("DELETE FROM trace_tenants WHERE tenant_id = $1", &[&legacy])
+        .await;
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_payout_audit WHERE tenant_id = $1",
+            &[&legacy],
+        )
+        .await,
+        0
+    );
+}
+
+/// Review of #1879: the send-time check is still the backstop for each
+/// event V148 releases from. Each event runs with its trigger disabled
+/// inside one transaction that is rolled back, so no other test ever sees
+/// the trigger off; the check, asked in that transaction, holds the carry.
+#[tokio::test]
+async fn the_send_time_check_backs_up_each_release_event() {
+    let Some(fx) = fixture().await else { return };
+    for (trigger, table) in [
+        (
+            "trace_legacy_pooled_tenant_releases_carries",
+            "trace_legacy_invite_pooled_tenants",
+        ),
+        (
+            "trace_legacy_account_close_releases_carries",
+            "trace_accounts",
+        ),
+        (
+            "trace_legacy_invite_link_delete_releases_carries",
+            "trace_legacy_invite_links",
+        ),
+    ] {
+        let (near, account, legacy, active, _) = fx.carried_pair("org-b1").await;
+        let mut client = fx
+            .owner
+            .raw_pool_for_tests_and_diagnostics()
+            .get()
+            .await
+            .unwrap();
+        let tx = client.transaction().await.unwrap();
+        tx.batch_execute(&format!("ALTER TABLE {table} DISABLE TRIGGER {trigger}"))
+            .await
+            .unwrap();
+        match table {
+            "trace_legacy_invite_pooled_tenants" => tx
+                .execute(
+                    "INSERT INTO trace_legacy_invite_pooled_tenants (tenant_id, reason_label)
+                     VALUES ($1, 'shared event invite')",
+                    &[&legacy],
+                )
+                .await
+                .unwrap(),
+            "trace_accounts" => tx
+                .execute(
+                    "UPDATE trace_accounts SET closed_at = now()
+                      WHERE tenant_id = $1 AND account_id = $2",
+                    &[&near, &account],
+                )
+                .await
+                .unwrap(),
+            _ => tx
+                .execute(
+                    "DELETE FROM trace_legacy_invite_links WHERE legacy_tenant_id = $1",
+                    &[&legacy],
+                )
+                .await
+                .unwrap(),
+        };
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&legacy],
+        )
+        .await
+        .unwrap();
+        let row = tx
+            .query_one(
+                "SELECT (SELECT count(*) FROM trace_legacy_payout_carries
+                          WHERE tenant_id = $1 AND account_id = $2 AND released_at IS NULL),
+                        trace_legacy_payout_carry_invalid($1, $2)",
+                &[&legacy, &active],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<_, i64>(0),
+            1,
+            "{trigger} disabled: the carry stays live"
+        );
+        assert!(row.get::<_, bool>(1), "{trigger}: the backstop holds");
+        tx.rollback().await.unwrap();
+        // Rolled back: the trigger is on again for everyone.
+        assert_eq!(fx.live_carries(&legacy, active).await, 1);
+    }
+}
+
+/// Review of #1879: a carry that changes nothing writes no audit row, so the
+/// pass carrying on every run does not grow the audit table with an
+/// account that keeps its own link (decision 6) skipped each time.
+#[tokio::test]
+async fn a_carry_that_changes_nothing_writes_no_audit_row() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, _) = fx.linked_pair().await;
+    let own = fx.add_account(&legacy, false).await;
+    fx.exec(
+        "INSERT INTO trace_payout_links (tenant_id, account_id, rail_id, link_id, recipient_kind,
+             state, sealed_recipient, recipient_index, recipient_key_ref, index_pepper_ref,
+             subject_index, program)
+         VALUES ($1, $2, $3, $4, 'near_ai_org', 'waiting', '{}', $5, 'k', 'p', $5, 'tc1-own2')",
+        &[&legacy, &own, &RAIL, &Uuid::new_v4(), &hash("own2")],
+    )
+    .await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-a1")
+        .await;
+    let audits = || async {
+        fx.count(
+            "SELECT count(*) FROM trace_account_audit
+              WHERE tenant_id = $1 AND action = 'legacy_payout_carried'",
+            &[&near],
+        )
+        .await
+    };
+    let before = audits().await;
+    for _ in 0..3 {
+        let report = fx.carry(&near, account).await;
+        assert_eq!((report.carried, report.released, report.skipped), (0, 0, 1));
+    }
+    assert_eq!(audits().await, before);
 }
 
 const HASH_HELPERS: [&str; 3] = [
@@ -1435,4 +1789,450 @@ async fn a_database_that_ran_an_earlier_v146_is_refused() {
         assert!(refused.to_string().contains("V146"), "{refused}");
         tx.rollback().await.unwrap();
     }
+}
+
+impl Fixture {
+    /// Opens (or reuses) the account for `principal` in `tenant` the way the
+    /// login-link mint does since V148: carrying in the same transaction.
+    async fn open_account(&self, tenant: &str, principal: &str) -> Uuid {
+        self.payout_runtime
+            .create_or_reuse_account_carrying(tenant, principal, &[(rail(), programs())], ACTOR)
+            .await
+            .unwrap()
+    }
+}
+
+/// #1873, owner decision 2026-11-03: opening an account in a linked legacy
+/// tenant (the login-link path) carries the NEAR AI account's link to it in
+/// the same transaction, whether or not the tenant had a carry before; a
+/// repeat reuses the account and carries nothing twice.
+#[tokio::test]
+async fn opening_an_account_in_a_linked_tenant_carries_to_it() {
+    let Some(fx) = fixture().await else { return };
+    // A tenant already carried.
+    let (_, _, legacy, _, _) = fx.carried_pair("org-o1").await;
+    let later = fx.proven_principal(&legacy).await;
+    let opened = fx.open_account(&legacy, &later).await;
+    assert_eq!(fx.live_carries(&legacy, opened).await, 1);
+    assert_eq!(fx.open_account(&legacy, &later).await, opened);
+    assert_eq!(
+        fx.live_carries(&legacy, opened).await,
+        1,
+        "nothing carried twice"
+    );
+
+    // A tenant linked before it had any account: no carry yet, so no live
+    // link of its own. Its first account is carried at opening.
+    let device = new_device();
+    let (fresh, invite) = fx.legacy_invite_tenant(&device).await;
+    let (near, account) = fx.near_ai_account().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-o2")
+        .await;
+    fx.link(&near, account, &fresh, &invite, &device)
+        .await
+        .unwrap();
+    let principal = fx.proven_principal(&fresh).await;
+    let first = fx.open_account(&fresh, &principal).await;
+    assert_eq!(fx.live_carries(&fresh, first).await, 1);
+}
+
+/// Review of #1879: a closed NEAR AI account carries nothing, at any event.
+#[tokio::test]
+async fn opening_an_account_carries_nothing_from_a_closed_source() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, _, _) = fx.carried_pair("org-o3").await;
+    fx.exec(
+        "UPDATE trace_accounts SET closed_at = now() WHERE tenant_id = $1 AND account_id = $2",
+        &[&near, &account],
+    )
+    .await;
+    let principal = fx.proven_principal(&legacy).await;
+    let opened = fx.open_account(&legacy, &principal).await;
+    assert_eq!(fx.live_carries(&legacy, opened).await, 0);
+    assert!(!fx.carry_invalid(&legacy, opened).await);
+}
+
+/// An account opened in a legacy tenant with no tenant link is just an
+/// account: nothing is carried, and nothing is written outside the tenant.
+#[tokio::test]
+async fn opening_an_account_in_an_unlinked_tenant_carries_nothing() {
+    let Some(fx) = fixture().await else { return };
+    let device = new_device();
+    let (legacy, _) = fx.legacy_invite_tenant(&device).await;
+    let opened = fx.open_account(&legacy, "principal_sha256:unlinked").await;
+    assert_eq!(fx.live_carries(&legacy, opened).await, 0);
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_payout_links WHERE tenant_id = $1",
+            &[&legacy],
+        )
+        .await,
+        0
+    );
+}
+
+/// Owner decision, 2026-11-03 (#1879): at every carry event, carry only to
+/// accounts whose principals a signed device proved (the linking device or a
+/// V91-attested one). An account opened by an unproven device, such as one
+/// the instance key enrolled later, waits: not at its own opening, and not
+/// at the NEAR AI account's next confirm.
+#[tokio::test]
+async fn an_account_no_signed_device_proved_is_not_carried() {
+    let Some(fx) = fixture().await else { return };
+    let (near, account, legacy, claimed, proven) = fx.carried_pair("org-u1").await;
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 1);
+    assert_eq!(fx.live_carries(&legacy, proven).await, 1);
+    // Opened through the login-link path by a principal no proven device
+    // derives.
+    let opened = fx
+        .open_account(&legacy, "principal_sha256:unproven-device")
+        .await;
+    assert_eq!(
+        fx.live_carries(&legacy, opened).await,
+        0,
+        "not at its opening"
+    );
+    // Nor at the next confirm.
+    let bare = fx.add_unproven_account(&legacy, false).await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-u2")
+        .await;
+    assert_eq!(
+        fx.live_carries(&legacy, opened).await,
+        0,
+        "not at a confirm"
+    );
+    assert_eq!(fx.live_carries(&legacy, bare).await, 0);
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        1,
+        "the proven ones move to the new link"
+    );
+}
+
+/// Review of #1879: a carry failure at account opening never fails the
+/// sign-in. The carry runs in a savepoint; here the rail's program for the
+/// carried link breaks the link's CHECK, so the carry fails, nothing is
+/// carried, and the account is still opened.
+#[tokio::test]
+async fn a_failed_carry_never_fails_the_account_opening() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, _, _) = fx.carried_pair("org-f1").await;
+    let principal = fx.proven_principal(&legacy).await;
+    let broken = CarryPrograms(Arc::new(|_| "not a valid program!".to_owned()));
+    let opened = fx
+        .payout_runtime
+        .create_or_reuse_account_carrying(&legacy, &principal, &[(rail(), broken)], ACTOR)
+        .await
+        .expect("the account opens even though its carry failed");
+    assert_eq!(fx.live_carries(&legacy, opened).await, 0);
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_account_principals
+              WHERE tenant_id = $1 AND account_id = $2",
+            &[&legacy, &opened],
+        )
+        .await,
+        1,
+        "the account and its principal committed"
+    );
+}
+
+/// Review of #1879: opening an account carries that account alone. Another
+/// proven account in the tenant that is not yet carried stays as it is until
+/// its own event, and reusing an existing account is not an event.
+#[tokio::test]
+async fn opening_an_account_carries_only_that_account() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, _, _) = fx.carried_pair("org-s1").await;
+    let waiting_its_turn = fx.add_account(&legacy, false).await;
+    let principal = fx.proven_principal(&legacy).await;
+    let opened = fx.open_account(&legacy, &principal).await;
+    assert_eq!(fx.live_carries(&legacy, opened).await, 1);
+    assert_eq!(fx.live_carries(&legacy, waiting_its_turn).await, 0);
+}
+
+/// Review of #1879: proof is checked at send time too. A carried, active
+/// account whose proving principal is unlinked, or whose proving device is
+/// revoked, is held by the standing at once, and the next carry event
+/// releases it (its active link gets an unlink request). This is also what
+/// the first event after deploy does to any V146-era carry on an account no
+/// signed device proved.
+#[tokio::test]
+async fn a_carried_account_that_stops_being_proven_is_held_then_released() {
+    let Some(fx) = fixture().await else { return };
+    // Its principal unlinked.
+    let (near, account, legacy, _, proven) = fx.carried_pair("org-r1").await;
+    fx.activate(&legacy, proven).await;
+    assert!(!fx.carry_invalid(&legacy, proven).await);
+    fx.exec(
+        "UPDATE trace_account_principals SET unlinked_at = now()
+          WHERE tenant_id = $1 AND account_id = $2",
+        &[&legacy, &proven],
+    )
+    .await;
+    assert!(fx.carry_invalid(&legacy, proven).await, "held at send time");
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-r2")
+        .await;
+    assert_eq!(
+        fx.live_carries(&legacy, proven).await,
+        0,
+        "released at the next event"
+    );
+    let unlinked: bool = fx
+        .admin
+        .query_one(
+            "SELECT bool_and(unlink_requested_at IS NOT NULL) FROM trace_payout_links
+              WHERE tenant_id = $1 AND account_id = $2 AND state = 'active'",
+            &[&legacy, &proven],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(unlinked, "the active carried link is unlinked");
+
+    // The proving device revoked: every account it proved stops qualifying.
+    let (_, _, legacy, claimed, proven) = fx.carried_pair("org-r3").await;
+    fx.exec(
+        "UPDATE device_keys SET revoked_at = now() WHERE tenant_id = $1",
+        &[&legacy],
+    )
+    .await;
+    assert!(fx.carry_invalid(&legacy, claimed).await);
+    assert!(fx.carry_invalid(&legacy, proven).await);
+}
+
+/// Review of #1879: the decision-5 derivation lives in one SQL function,
+/// called by the claim; the proof set reads what the claim recorded, so the
+/// two cannot drift. No other function in the database spells the
+/// signed-claim formula.
+#[tokio::test]
+async fn only_one_function_derives_signed_upload_principals() {
+    let Some(fx) = fixture().await else { return };
+    let spellers: Vec<String> = fx
+        .admin
+        .query(
+            "SELECT p.proname::TEXT FROM pg_proc p
+               JOIN pg_namespace n ON n.oid = p.pronamespace
+              WHERE n.nspname = 'public' AND p.prosrc LIKE '%12:signed_claim:%'
+              ORDER BY 1",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(
+        spellers,
+        vec!["trace_legacy_device_upload_principals".to_owned()]
+    );
+    for caller in ["trace_legacy_link_claim_device_principals"] {
+        let calls: bool = fx
+            .admin
+            .query_one(
+                "SELECT bool_or(prosrc LIKE '%trace_legacy_device_upload_principals(%')
+                   FROM pg_proc WHERE proname = $1",
+                &[&caller],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(calls, "{caller} calls the shared derivation");
+    }
+}
+
+/// Owner decision, 2026-11-03 (V148:253): an instance-enrollment subject
+/// proves only if it was enrolled no later than the tenant link (or than the
+/// V91 attestation, for an attested device). An account under a subject the
+/// instance key enrolled after the link is not proven: not carried at its
+/// opening, and a carry it held is held at send time.
+#[tokio::test]
+async fn a_subject_enrolled_after_the_link_proves_nothing() {
+    let Some(fx) = fixture().await else { return };
+    let (_, _, legacy, _, _) = fx.carried_pair("org-l1").await;
+    let late = fx
+        .enrolled_principal(&legacy, "now() + interval '1 minute'")
+        .await;
+    let opened = fx.open_account(&legacy, &late).await;
+    assert_eq!(
+        fx.live_carries(&legacy, opened).await,
+        0,
+        "not carried at its opening"
+    );
+    let proven: i64 = fx
+        .count(
+            "SELECT count(*) FROM (SELECT set_config('trace_commons.trace_tenant_id', $1, true)) c,
+                    trace_legacy_payout_proven_accounts($1) AS p(account_id)
+              WHERE p.account_id = $2",
+            &[&legacy, &opened],
+        )
+        .await;
+    assert_eq!(proven, 0, "not in the proof set");
+}
+
+/// Review of #1879: the claim snapshots what it linked. Repeating the link
+/// (an `already_linked` re-POST) after a new instance enrollment derives
+/// nothing new: the late subject's principals are neither recorded, nor
+/// linked to the claimed account, nor proving.
+#[tokio::test]
+async fn repeating_the_link_after_a_late_enrollment_claims_nothing_new() {
+    let Some(fx) = fixture().await else { return };
+    let device = new_device();
+    let (legacy, invite) = fx.legacy_invite_tenant(&device).await;
+    let (near, account) = fx.near_ai_account().await;
+    fx.link(&near, account, &legacy, &invite, &device)
+        .await
+        .unwrap();
+    let recorded = || async {
+        fx.count(
+            "SELECT count(*) FROM trace_legacy_link_claimed_principals WHERE tenant_id = $1",
+            &[&legacy],
+        )
+        .await
+    };
+    let before = recorded().await;
+    assert_eq!(before, 4, "bare and app subject, both forms");
+    let late = fx
+        .enrolled_principal(&legacy, "now() + interval '1 minute'")
+        .await;
+    fx.link(&near, account, &legacy, &invite, &device)
+        .await
+        .unwrap();
+    assert_eq!(recorded().await, before, "the re-POST recorded nothing new");
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_account_principals WHERE tenant_id = $1 AND principal_ref = $2",
+            &[&legacy, &late],
+        )
+        .await,
+        0,
+        "and linked nothing new"
+    );
+}
+
+/// Review of #1879: when the principal insert loses a concurrent race, the
+/// account this call inserted is closed, not left open and not deleted (the
+/// runtime may only INSERT and UPDATE (closed_at) on trace_accounts). Run as
+/// the non-superuser runtime login against a real held race.
+#[tokio::test]
+async fn a_lost_principal_race_closes_the_orphan_account() {
+    let Some(fx) = fixture().await else { return };
+    let device = new_device();
+    let (legacy, _) = fx.legacy_invite_tenant(&device).await;
+    let principal = format!("principal_sha256:{}", &hash(&format!("race:{legacy}"))[7..]);
+    let winner = Uuid::new_v4();
+    let mut client = fx
+        .owner
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.execute(
+        "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+        &[&legacy, &winner],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES ($1, $2, $3)",
+        &[&legacy, &winner, &principal],
+    )
+    .await
+    .unwrap();
+    let runtime = fx.payout_runtime.clone();
+    let (tenant, principal_ref) = (legacy.clone(), principal.clone());
+    let loser = tokio::spawn(async move {
+        runtime
+            .create_or_reuse_account_carrying(&tenant, &principal_ref, &[], ACTOR)
+            .await
+    });
+    // The loser blocks on the principal's unique index until this commits.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tx.commit().await.unwrap();
+    assert_eq!(loser.await.unwrap().unwrap(), winner);
+    assert_eq!(
+        fx.count(
+            "SELECT count(*) FROM trace_accounts a
+              WHERE a.tenant_id = $1 AND a.closed_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM trace_account_principals p
+                                 WHERE p.tenant_id = a.tenant_id AND p.account_id = a.account_id)",
+            &[&legacy],
+        )
+        .await,
+        0,
+        "no open account without a principal"
+    );
+}
+
+/// Review of #1879: the repair path. A tenant link whose best-effort carry
+/// never landed (here, the store-level link runs no carry) has no carry on
+/// the rail; the next account opening there carries the whole tenant, the
+/// claimed account included, not only the account it opened.
+#[tokio::test]
+async fn an_opening_in_an_uncarried_tenant_carries_the_whole_tenant() {
+    let Some(fx) = fixture().await else { return };
+    let device = new_device();
+    let (legacy, invite) = fx.legacy_invite_tenant(&device).await;
+    let (near, account) = fx.near_ai_account().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-x1")
+        .await;
+    fx.link(&near, account, &legacy, &invite, &device)
+        .await
+        .unwrap();
+    let claimed = fx.accounts(&legacy).await[0];
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        0,
+        "nothing carried yet"
+    );
+    let principal = fx.proven_principal(&legacy).await;
+    let opened = fx.open_account(&legacy, &principal).await;
+    assert_eq!(fx.live_carries(&legacy, opened).await, 1);
+    assert_eq!(fx.live_carries(&legacy, claimed).await, 1, "repaired");
+}
+
+/// Review of #1879: a returning user's sign-in repairs a tenant whose carry
+/// never landed. The mint reuses their account (no account opens), but the
+/// tenant has a live source link and no carry on the rail, so the whole
+/// tenant is carried.
+#[tokio::test]
+async fn a_returning_sign_in_repairs_an_uncarried_tenant() {
+    let Some(fx) = fixture().await else { return };
+    let device = new_device();
+    let (legacy, invite) = fx.legacy_invite_tenant(&device).await;
+    let (near, account) = fx.near_ai_account().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-y1")
+        .await;
+    fx.link(&near, account, &legacy, &invite, &device)
+        .await
+        .unwrap();
+    let claimed = fx.accounts(&legacy).await[0];
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        0,
+        "the link's carry never ran"
+    );
+    // The returning user's principal: one the claim linked to `claimed`.
+    let principal: String = fx
+        .admin
+        .query_one(
+            "SELECT principal_ref FROM trace_account_principals
+              WHERE tenant_id = $1 AND account_id = $2 LIMIT 1",
+            &[&legacy, &claimed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        fx.open_account(&legacy, &principal).await,
+        claimed,
+        "reused"
+    );
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        1,
+        "repaired at sign-in"
+    );
 }

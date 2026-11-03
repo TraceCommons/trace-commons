@@ -3858,6 +3858,35 @@ pub trait PayoutStore: Send + Sync {
         actor_ref_hash: &str,
     ) -> Result<LegacyCarryReport, DatabaseError>;
 
+    /// Create or reuse the account for `principal_ref` in `tenant`, as
+    /// [`Database::create_or_reuse_account`] does, and, in the same
+    /// transaction, carry the linked NEAR AI account's live link on each of
+    /// `rails` to it when `tenant` is a legacy tenant linked through V81
+    /// (#1873; owner, 2026-11-03: carry only at events, and opening an
+    /// account in a linked tenant is one). Nothing is carried for a tenant
+    /// outside a live tenant link, or from a closed source account. A
+    /// failure rolls the whole transaction back, the account included.
+    /// Owner decision, 2026-11-03 (V148:444): release every live carry on
+    /// `rail` in legacy tenant `tenant` whose account is no longer proven, at
+    /// send time, audited with `actor_ref_hash` (the pass's actor). A live
+    /// pass calls this before it reads the tenant's links; a dry run does
+    /// not. It only ends carries. Nothing for a `near-` / `nearai-` tenant.
+    /// Returns how many carries it released.
+    async fn release_unproven_legacy_carries(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        actor_ref_hash: &str,
+    ) -> Result<u32, DatabaseError>;
+
+    async fn create_or_reuse_account_carrying(
+        &self,
+        tenant: &str,
+        principal_ref: &str,
+        rails: &[(RailId, CarryPrograms)],
+        actor_ref_hash: &str,
+    ) -> Result<Uuid, DatabaseError>;
+
     /// The audit actions on `rail` in this tenant, oldest first.
     async fn payout_audit_actions(
         &self,

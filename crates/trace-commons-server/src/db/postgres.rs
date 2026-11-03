@@ -2056,7 +2056,112 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "revoke_payout_links_without_near_ai_login",
         include_str!("../../../../migrations/V147__revoke_payout_links_without_near_ai_login.sql"),
     ),
+    // V148: legacy payout carries follow their events. A pooled mark, an
+    // account closing and a tenant link deleted each release the carries
+    // they invalidate, in their own transaction (#1872); opening an account
+    // in a linked legacy tenant carries to it (#1873); and every carry
+    // reaches only accounts a signed device proved (owner, 2026-11-03).
+    (
+        148,
+        "legacy_payout_carry_events",
+        include_str!("../../../../migrations/V148__legacy_payout_carry_events.sql"),
+    ),
 ];
+
+/// The body of `create_or_reuse_account`, inside a transaction already under
+/// the tenant's context, so a caller can do more in the same transaction
+/// (V148: carrying a payout link to an account opened in a linked legacy
+/// tenant).
+pub(super) async fn create_or_reuse_account_in_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    principal_ref: &str,
+) -> Result<Uuid, DatabaseError> {
+    Ok(create_or_reuse_account_in_tx_opened(tx, principal_ref)
+        .await?
+        .0)
+}
+
+/// [`create_or_reuse_account_in_tx`], also saying whether this call opened
+/// the account (`true`) or found the principal's existing one.
+pub(super) async fn create_or_reuse_account_in_tx_opened(
+    tx: &deadpool_postgres::Transaction<'_>,
+    principal_ref: &str,
+) -> Result<(Uuid, bool), DatabaseError> {
+    // Fast path: an active link for this principal already maps to an account.
+    if let Some(row) = tx
+        .query_opt(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = trace_current_tenant_id()
+                AND principal_ref = $1
+                AND unlinked_at IS NULL",
+            &[&principal_ref],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?
+    {
+        return Ok((row.get("account_id"), false));
+    }
+
+    // No active link: mint a fresh account and link the principal. The link
+    // insert is ON CONFLICT DO NOTHING against the UNIQUE (tenant_id,
+    // principal_ref) constraint so a concurrent mint that won the race does
+    // not error us out; we re-select the authoritative account below.
+    let new_account_id = Uuid::new_v4();
+    tx.execute(
+        "INSERT INTO trace_accounts (tenant_id, account_id)
+         VALUES (trace_current_tenant_id(), $1)",
+        &[&new_account_id],
+    )
+    .await
+    .map_err(DatabaseError::Postgres)?;
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES (trace_current_tenant_id(), $1, $2)
+         ON CONFLICT (tenant_id, principal_ref) DO NOTHING",
+        &[&new_account_id, &principal_ref],
+    )
+    .await
+    .map_err(|error| {
+        if error.as_db_error().is_some_and(|db_error| {
+            db_error.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
+                && db_error.message() == "device_upload_principal_namespace_conflict"
+        }) {
+            DatabaseError::UploadPrincipalAuthenticationDenied
+        } else {
+            DatabaseError::Postgres(error)
+        }
+    })?;
+
+    // Re-select the authoritative account for this principal. If a
+    // concurrent mint inserted the link first, this returns ITS account_id,
+    // and the row this call inserted is closed: an open account with no
+    // principal would otherwise be one more open account in the tenant
+    // (review of #1879). Closed, not deleted: the runtime's documented writes
+    // to trace_accounts are INSERT and UPDATE (closed_at) (V90), never
+    // DELETE. If we won, it returns new_account_id.
+    let row = tx
+        .query_one(
+            "SELECT account_id FROM trace_account_principals
+              WHERE tenant_id = trace_current_tenant_id()
+                AND principal_ref = $1
+                AND unlinked_at IS NULL",
+            &[&principal_ref],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+    let account_id: Uuid = row.get("account_id");
+    if account_id != new_account_id {
+        tx.execute(
+            "UPDATE trace_accounts SET closed_at = now()
+              WHERE tenant_id = trace_current_tenant_id() AND account_id = $1",
+            &[&new_account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+        return Ok((account_id, false));
+    }
+    Ok((account_id, true))
+}
 
 /// Shared by verified claim issuance and the explicit historical repair.
 async fn bind_device_upload_principal_tx(
@@ -3958,69 +4063,7 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-
-        // Fast path: an active link for this principal already maps to an account.
-        if let Some(row) = tx
-            .query_opt(
-                "SELECT account_id FROM trace_account_principals
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND principal_ref = $1
-                    AND unlinked_at IS NULL",
-                &[&principal_ref],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?
-        {
-            let account_id: Uuid = row.get("account_id");
-            tx.commit().await.map_err(DatabaseError::Postgres)?;
-            return Ok(account_id);
-        }
-
-        // No active link: mint a fresh account and link the principal. The link
-        // insert is ON CONFLICT DO NOTHING against the UNIQUE (tenant_id,
-        // principal_ref) constraint so a concurrent mint that won the race does
-        // not error us out; we re-select the authoritative account below.
-        let new_account_id = Uuid::new_v4();
-        tx.execute(
-            "INSERT INTO trace_accounts (tenant_id, account_id)
-             VALUES (trace_current_tenant_id(), $1)",
-            &[&new_account_id],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
-        tx.execute(
-            "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
-             VALUES (trace_current_tenant_id(), $1, $2)
-             ON CONFLICT (tenant_id, principal_ref) DO NOTHING",
-            &[&new_account_id, &principal_ref],
-        )
-        .await
-        .map_err(|error| {
-            if error.as_db_error().is_some_and(|db_error| {
-                db_error.code() == &tokio_postgres::error::SqlState::CHECK_VIOLATION
-                    && db_error.message() == "device_upload_principal_namespace_conflict"
-            }) {
-                DatabaseError::UploadPrincipalAuthenticationDenied
-            } else {
-                DatabaseError::Postgres(error)
-            }
-        })?;
-
-        // Re-select the authoritative account for this principal. If a
-        // concurrent mint inserted the link first, this returns ITS account_id
-        // and our freshly-inserted (now orphaned) trace_accounts row is harmless
-        // (no principal links to it). If we won, it returns new_account_id.
-        let row = tx
-            .query_one(
-                "SELECT account_id FROM trace_account_principals
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND principal_ref = $1
-                    AND unlinked_at IS NULL",
-                &[&principal_ref],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
-        let account_id: Uuid = row.get("account_id");
+        let account_id = create_or_reuse_account_in_tx(&tx, principal_ref).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
         Ok(account_id)
     }
@@ -5321,6 +5364,20 @@ impl Database for PgBackend {
         )
         .await
         .map_err(DatabaseError::Postgres)?;
+        // A legacy tenant's tenant-link lock (V81, V148), also before any
+        // account row lock: a link or attestation holds it while its claim
+        // writes principals referencing an account, and closing the absorbed
+        // account below takes it in the release trigger. Taken here first,
+        // the order is always tenant link, then account row (review of
+        // #1879).
+        if !trace_commons_protocol::admission::is_anchored_tenant(tenant_id) {
+            tx.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
+                &[&tenant_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        }
 
         // Load + consume the proposal atomically. The conditional UPDATE
         // re-validates OWNERSHIP (surviving_account_id = A, the auth-derived
@@ -5357,6 +5414,35 @@ impl Database for PgBackend {
             return Ok(None);
         };
         let absorbed_account_id: Uuid = consumed.get("absorbed_account_id");
+
+        // A NEAR AI tenant's absorbed account B may hold V81 tenant links.
+        // Closing B below fires the close trigger, which takes each linked
+        // legacy tenant's tenant-link lock, while this transaction holds B's
+        // row; an attestation under such a link holds that lock and needs a
+        // key-share on B. So take those locks here, sorted, before any row
+        // lock: tenant links first, then rows, on every path (review of
+        // #1879).
+        if trace_commons_protocol::admission::is_anchored_tenant(tenant_id) {
+            let legacy_tenants = tx
+                .query(
+                    "SELECT DISTINCT legacy_tenant_id FROM trace_legacy_invite_links
+                      WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
+                        AND revoked_at IS NULL
+                      ORDER BY legacy_tenant_id",
+                    &[&absorbed_account_id],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            for row in legacy_tenants {
+                let legacy: String = row.get(0);
+                tx.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
+                    &[&legacy],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            }
+        }
 
         // B's NEAR anchors and provisioned devices follow the identity, so a
         // device provisioned to B is a live device of A and a returning NEAR

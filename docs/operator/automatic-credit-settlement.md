@@ -34,9 +34,9 @@ have landed (owner, 2026-11-03):
     tenant link it rides on. Roll it out before going live.
   - **Pooled Devfolio tenants** (`trace_legacy_invite_pooled_tenants`) are
     excluded from payouts by design; they need no migration.
-- **Run the two legacy rollout checks and have the owner review them**
-  (owner, 2026-11-03; spec section 13, "Production-payout gates"). Both
-  are read-only and return counts only. RLS is forced, so run them as the
+- **Run the four legacy rollout checks and have the owner review them**
+  (owner, 2026-11-03; spec section 13, "Production-payout gates"). All
+  four are read-only and return counts only. RLS is forced, so run them as the
   migration owner or once per tenant.
   - **Source provenance.** Live payout links that may have been proved by
     a wallet anchor before #1862, split by whether the account holds a
@@ -65,6 +65,29 @@ have landed (owner, 2026-11-03):
     cannot tell how those were proved. Run it on the pilot first; if it
     finds any such rows, stop and ask the owner before going live (owner,
     2026-11-03).
+  - **Legacy own links.** Re-run Q4 from the same spec (live payout links
+    in legacy tenants). Expected 0 (the pilot had 0 on 2026-11-02). Report
+    it to the owner together with the provenance count. If it is not 0,
+    stop and ask the owner before going live: each such link is revoked by
+    V147 and its account is paid again only through a carry.
+  - **Carries on unproven accounts.** Count live carries whose account no
+    signed device proves; the first carry event after deploy releases each
+    (a waiting one closes at zero, an active one is unlinked and stops
+    being paid). It needs V148's functions, so run it right after V148 is
+    applied and before any carry event can happen: with every payout rail
+    `disabled` (a `shadow` or `dry_run` rail still carries), or before
+    ingest restarts on the new build. Run per legacy tenant, under its
+    tenant context:
+
+    ```sql
+    SELECT count(*) FROM trace_legacy_payout_carries c
+     WHERE c.tenant_id = current_setting('trace_commons.trace_tenant_id')
+       AND c.released_at IS NULL
+       AND c.account_id NOT IN (SELECT * FROM trace_legacy_payout_proven_accounts(c.tenant_id));
+    ```
+
+    Expected 0 (the pilot had no payout links, so no carries). If it is
+    not 0, stop and ask the owner before going live.
   - **Q5.** Run Q5 from the
     [legacy payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
     section 8 (unowned accruals in non-pooled legacy tenants), and give the
@@ -125,8 +148,9 @@ SELECT tenant_id, prior_state, count(*) FROM trace_payout_audit
 A legacy account whose own link V147 revoked is paid again only through a
 carry, and only at a carry event (owner, 2026-11-03, on #1879): its
 holder's next payout-link confirm, a tenant link, or a new account opening
-in a linked legacy tenant, and only to an account a signed device claimed.
-A carry never runs on a pass, so nothing replaces the revoked link until
+in a linked legacy tenant, and only to an account proven by a signed device
+(a signed-upload principal of the linking device, or V91-attested). A
+carry never runs on a pass, so nothing replaces the revoked link until
 such an event. A revoked own link (unlink-marked or closing) no longer
 blocks the carry, which then lands as its waiting successor. The pass
 closes the revoked link before activating the carry, so the account is

@@ -276,12 +276,31 @@ A tenant link also decides who is paid the legacy tenant's credit
   account's links' locks in tenant order; revoking several links in one
   transaction can deadlock with it, and PostgreSQL then aborts one side
   (retry it).
+- **Other events release carries too (V148).** Marking a tenant pooled,
+  closing an account (a legacy account's own carry, or every carry of a
+  NEAR AI account), and deleting a tenant link rather than revoking it
+  each release the carries they invalidate, in the same transaction. A
+  legacy account opened later (a new login link) is carried when it is
+  opened, in the same transaction. The payout pass never carries.
+- **Only proven accounts are carried** (owner, 2026-11-03). At every carry
+  event (a confirm, a tenant link, an account opening) the carry reaches
+  only accounts holding a signed-upload principal of a device the tenant
+  link proved: the linking device or a V91-attested one, still live in the
+  tenant, under an instance-enrollment subject enrolled no later than the
+  link or attestation. An account opened by any other device or subject,
+  such as one enrolled later with the instance key, waits. A legacy
+  account whose own payout link V147 revoked is carried at the next event,
+  if proven. A carry whose account stops being proven (its device revoked,
+  its principal unlinked) is released by the next payout pass, audited as
+  `legacy_carry_unproven` (owner, 2026-11-03).
 - **Every send re-checks the carry.** The account standing the pass reads
   before each send holds a live carry (`payout_legacy_carry_invalid`) when
   its tenant was marked pooled, its tenant link is revoked or deleted, or
   the NEAR AI account is closed, on an account credit hold, or no longer
-  has the source link live. Marking a tenant pooled therefore stops its
-  carried payouts at once; revoking its link as well releases them.
+  has the source link live. It is the backstop now that the events above
+  release carries themselves; it still holds while the NEAR AI account is
+  on a credit hold, which pauses payment and releases nothing (owner,
+  2026-11-03).
 - **Instance-enrolled tenants link too** (no `onboarding_invites` row):
   the link records no invite grant and changes no trust
   (`legacy_instance_linked`). Only the tenant's earliest live device can

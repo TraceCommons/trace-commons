@@ -710,20 +710,91 @@ Where the implementation differs from, or adds to, sections 3 to 5:
 - **Runbook:** revoke one tenant link per transaction (a multi-row revoke
   can deadlock with a concurrent carry; PostgreSQL aborts one side).
 
+### Owner decisions on #1879 (2026-11-03)
+
+1. **A credit hold on the NEAR AI account pauses its carried payouts and
+   does not release the carry.** The send-time standing check holds
+   payment while the hold lasts, and payment resumes when the hold lifts.
+   A close, a pooled mark, a revocation and a tenant-link delete still
+   release.
+2. **Carry only at events, never on every pass, and only to proven
+   accounts.** The events are the NEAR AI account's confirm, the tenant
+   link, and an account opening in a linked legacy tenant (the login-link
+   path), each in its own transaction. The payout pass does not carry. At
+   every event the carry reaches only accounts whose principals a signed
+   device proved: the linking device or a V91-attested one
+   (`trace_legacy_payout_proven_accounts`, V148, a join over what the
+   claims recorded; see decision 3). Only devices still live
+   in the tenant prove (unrevoked, `invite` origin, not NEAR-provisioned).
+   An account opened by an unproven device waits. A live carry on an
+   account that stops qualifying is released at send time (decision 6);
+   so is any V146-era carry on an unproven account, at the first pass or
+   carry event after deploy, which the pre-deploy checks count.
+3. **Instance-enrollment subjects prove only if enrolled by the link**
+   (owner, 2026-11-03, review of #1879 at V148:253). A subject counts
+   toward the proof set only if it was enrolled no later than the tenant
+   link (for the linking device) or the V91 attestation (for an attested
+   device). The claim records the principals it links, once per device
+   under the tenant link (`trace_legacy_link_claimed_principals`, V148),
+   and reuses that record on any repeat; the proof set is a join over those
+   records, so the claim and the proof cannot differ and no two clocks are
+   compared (review of #1879). An account under a subject the instance key
+   enrolls after the link is not proven and is not carried. Links made
+   before V148 are recorded once by V148, bounded by the stored link and
+   attestation times.
+4. **A legacy account whose own payout link V147 (#1868) revoked** gets its
+   carry at the next of those events, if it is proven, as the waiting
+   successor of the revoked link. The pilot had 0 links on 2026-11-02;
+   the pre-deploy count below confirms it.
+5. **Carry failures never fail a sign-in** (review of #1879). The
+   account-opening carry runs in a savepoint of the login-link mint, for
+   the opened account only and only when the call opened it; a failure is
+   logged by class and carries nothing.
+6. **A carry whose account stops being proven is released at send time**
+   (owner, 2026-11-03, review of #1879 at V148:444). Before reading a
+   legacy tenant's links, a live payout pass (never a dry run) calls
+   `trace_legacy_payout_release_unproven_carries` for its own rail only.
+   Candidates are found without a lock; only when there are any does it
+   take the tenant-link lock and read them again. Every live carry on that
+   rail held by an account no longer proven (its proving principal
+   unlinked, its device revoked, the account closed) is released, an
+   active one with an unlink request and a waiting one closed at zero,
+   audited hash-only as `legacy_carry_unproven` with the pass's actor; the
+   holder's tenant gets a hash-only `legacy_payout_carry_released` account
+   audit row. The account's standing then no longer holds it, so its other
+   streams resume. The pass only ends carries; it never creates one.
+   `trace_legacy_payout_carry_unproven` stays in the standing as the
+   backstop if the release fails. A carry that races an account close lands
+   on a closed account, which is never proven, so the next live pass ends
+   it; that is why a close takes the tenant-link lock only when the account
+   holds a live carry (review of #1879).
+
 ### Known limits, not fixed here
 
 - **Accounts created after a carry by a later login link** are carried
   only at the NEAR AI account's next confirm or tenant link. Their credit
   accrues but is not paid until then. (A claim at a V91 attestation goes
-  through the tenant-link route, which carries after it.) Tracked in
-  #1873.
+  through the tenant-link route, which carries after it.) **Fixed by V148
+  (#1873):** opening an account in a legacy tenant linked through V81 (the
+  login-link path, `PayoutStore::create_or_reuse_account_carrying`)
+  carries the NEAR AI account's live link to it in the same transaction,
+  through the guard-owned `trace_legacy_payout_source_account`. The
+  payout pass never carries. A closed source account carries nothing.
 - **An invalid carry is held, not released.** A pooled mark, a closed or
   held NEAR AI account, or a deleted tenant link holds the legacy
   account's sends at once (fail closed), but the carried link is released
   only at the next carry or a revocation. The hold is per account, so it
-  also pauses that account's referral stream. Follow-up, #1872: release
-  from the event itself (triggers on the pooled marker, account close and
-  link delete) and keep the check as the backstop.
+  also pauses that account's referral stream. **Fixed by V148 (#1872):**
+  a pooled mark, an account closing (a legacy account's own carries, or a
+  NEAR AI account's carries in every tenant it linked) and a tenant link
+  deleted rather than revoked each release the carries they invalidate, in
+  their own transaction, under the tenant link's lock, audited as
+  `legacy_tenant_pooled`, `legacy_account_closed`,
+  `legacy_source_account_closed` and `legacy_tenant_link_deleted`. The
+  send-time check stays as the backstop and still holds a live carry while
+  its source account is on a credit hold or its source link is unlinked
+  outside a confirm. A credit hold pauses and does not release (owner
+  decision below).
 - **The hash formulas** (`legacy-invite-link-v1:`, `payout-link-v1:`,
   `payout-account-v1:`) are written inline in V146 and mirrored in Rust;
   the tests catch a drift that breaks a match. Follow-up, #1874: small
@@ -738,7 +809,7 @@ Where the implementation differs from, or adds to, sections 3 to 5:
 
 ### Production-payout gates (owner, 2026-11-03)
 
-Two read-only checks run on the pilot, and the owner reviews their
+Four read-only checks run on the pilot, and the owner reviews their
 results, before the `near_ai` rail goes `live` for production. They sit
 beside F10 and F11 in the settlement runbook's "Before production payouts"
 (`docs/operator/automatic-credit-settlement.md`).
@@ -750,7 +821,16 @@ beside F10 and F11 in the settlement runbook's "Before production payouts"
    revokes payout links that have no recorded NEAR AI login, at deploy;
    the check is re-run after V147 and must then find none on accounts
    with a live tenant link.
-2. **Q5 is run and reviewed.** Q5 (section 8) must be run and its result
+2. **Legacy own links (V147).** Q4 (live payout links in legacy tenants)
+   is re-run before deploy and reported with the source-provenance count.
+   Each such link is revoked by V147, and its account gets a carry at the
+   next carry event only if a signed device proved it. Expected 0 (pilot,
+   2026-11-02).
+3. **Carries on unproven accounts.** A count of live carries whose
+   account no signed device proves (the query is in the settlement
+   runbook). The first carry event after deploy releases each. Expected 0;
+   if not, stop and ask the owner.
+4. **Q5 is run and reviewed.** Q5 (section 8) must be run and its result
    reviewed by the owner. It need not come back zero: credit from
    contributor-label subjects stays unowned and unpaid by design
    (section 3.5).
