@@ -587,7 +587,7 @@ final class InferenceParityTests: XCTestCase {
                        "the inspector summary draws the core's subtitle once")
         // One word and the menu bar's dot, the full sentence as help and
         // hint (2026-10-28).
-        XCTAssertTrue(views.contains("GlassStatusLabel(status.word, status: status.dot)"))
+        XCTAssertTrue(views.contains("GlassChip(status.word, status: status.dot)"))
         XCTAssertTrue(views.contains(".help(status.sentence)"))
         XCTAssertTrue(views.contains(".accessibilityHint(status.sentence)"))
         XCTAssertEqual(views.components(separatedBy: "GlassTabHeading(").count - 1, 1,

@@ -142,7 +142,7 @@ final class DesignRulings20261020Tests: XCTestCase {
     func test_thePrivateAIStateFollowsItsTitle() throws {
         let tab = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(tab.contains(
-            "GlassTabHeading(copy.inspectorStatus) {\n                GlassStatusLabel(status.word,"))
+            "GlassTabHeading(copy.inspectorStatus) {\n                GlassChip(status.word,"))
     }
 
     /// The refresh glyph's ring sits on the circle's centre: its box is
@@ -175,9 +175,11 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertFalse(glass.contains("            InsightsInfo(title, info)\n            Spacer("), "the title's i is at the row's end again")
     }
 
-    /// Every refresh is the round refresh icon button at the trailing end
-    /// of what it re-reads (owner, 2026-10-20): no "Refresh" in words, no
-    /// bare glyph, and the icon card's beside its title no more.
+    /// Every refresh is the refresh control at the trailing end of what it
+    /// re-reads (owner, 2026-10-20), never a bare glyph, and the icon
+    /// card's beside its title no more. Since 2026-11-02 (owner) that
+    /// control is a pill with "Refresh" before its icon, not a round icon
+    /// button, and never a plain worded button.
     func test_everyRefreshIsTheRightAlignedIconButton() throws {
         XCTAssertEqual(GlassRefreshButton.systemImage, "arrow.clockwise")
         let files = ["Views/MissionDraftsView.swift",
@@ -195,7 +197,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         // In the drafts' row it comes after the spacer, on the right.
         let drafts = try Self.text("Views/MissionDraftsView.swift")
         let spacer = try XCTUnwrap(drafts.range(of: "Spacer(minLength: 0)\n            // At the row's trailing end"))
-        let refresh = try XCTUnwrap(drafts.range(of: "GlassRefreshButton(model.text(\"refresh\"))"))
+        let refresh = try XCTUnwrap(drafts.range(of: "GlassRefreshButton(model.text(\"refresh\"), title: SettingsLegacyWords.refresh)"))
         XCTAssertLessThan(spacer.lowerBound, refresh.lowerBound)
         let card = try String(
             contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
@@ -204,7 +206,7 @@ final class DesignRulings20261020Tests: XCTestCase {
         XCTAssertFalse(card.contains("GlassRefreshButton(refresh.label, size: 12"), "the icon card's refresh is beside its title again")
         XCTAssertTrue(card.contains(
             "Spacer(minLength: GlassTokens.Space.s4)\n                // The re-read control at the head's trailing end"))
-        XCTAssertTrue(card.contains("GlassRefreshButton(refresh.label, small: true, isRefreshing: refresh.isRefreshing, action: refresh.action)"))
+        XCTAssertTrue(card.contains("GlassRefreshButton(refresh.label, title: refresh.title, small: true,"))
     }
 
     /// Home's small cards draw their icons as watermarks (owner,

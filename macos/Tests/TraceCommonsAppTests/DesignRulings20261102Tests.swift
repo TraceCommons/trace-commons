@@ -148,4 +148,46 @@ final class DesignRulings20261102Tests: XCTestCase {
         XCTAssertTrue(card.contains(".clipShape(RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous))"))
         XCTAssertTrue(card.contains(".padding(.horizontal, -GlassTokens.Space.cardPaddingHorizontal)"))
     }
+
+    /// The Private AI tab's heading: its state in a pill, as Settings draws
+    /// Watching, and the line under it regular and secondary, below the
+    /// section title in weight.
+    func test_thePrivateAIHeadingPillsItsStateAndQuietsItsLine() throws {
+        let views = try Self.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertTrue(views.contains("GlassTabHeading(copy.inspectorStatus) {\n                GlassChip(status.word, status: status.dot)"))
+        XCTAssertTrue(views.contains(
+            "Text(Self.subtitle(copy, state: store.privateAI?.state))\n"
+                + "                .glassType(GlassTokens.TypeScale.body)\n"
+                + "                .foregroundStyle(GlassColor.textSecondary)"))
+        XCTAssertTrue(try Self.text("Views/Monitor/SettingsModal.swift").contains("GlassChip(chip.word, status: chip.status)"),
+                      "the pill it matches")
+    }
+
+    /// Every refresh control is a pill with the core's "Refresh" before its
+    /// icon (owner, 2026-11-02), as tall as the round button it replaced;
+    /// a control whose accessible name says more draws the word alone, and
+    /// that name still begins with it.
+    func test_everyRefreshIsAPillWithItsWord() throws {
+        let containers = try String(
+            contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
+                .appendingPathComponent("TCDesign/Components/Containers.swift"), encoding: .utf8)
+        let start = try XCTUnwrap(containers.range(of: "struct GlassRefreshPill: View {"))
+        let end = try XCTUnwrap(containers.range(of: "public struct GlassCardRefresh {"))
+        let pill = String(containers[start.lowerBound..<end.lowerBound])
+        let word = try XCTUnwrap(pill.range(of: "Text(title)"))
+        let icon = try XCTUnwrap(pill.range(of: "Image(systemName: GlassRefreshButton.systemImage)"))
+        XCTAssertLessThan(word.lowerBound, icon.lowerBound, "the word is left of the icon")
+        XCTAssertTrue(pill.contains(".glassSurface(.control, radius: height / 2, hover: GlassTokens.Color.controlHover)"))
+        XCTAssertFalse(containers.contains("GlassRoundButton(label, icon: .symbol(Self.systemImage)"), "the round refresh is back")
+
+        let account = try Self.text("Views/Monitor/InferenceAccount.swift")
+        XCTAssertTrue(account.contains("copy.panelBalanceRefreshAccessibility, title: copy.panelBalanceRefresh,"))
+        XCTAssertTrue(account.contains("refresh: copy.panelToolsRefreshAccessibility, refreshWord: copy.panelRefresh,"))
+        XCTAssertTrue(try Self.text("Views/PrivateInferenceView.swift")
+            .contains("refresh: copy.panelConnectionRefreshAccessibility, refreshWord: copy.panelRefresh,"))
+        XCTAssertTrue(try Self.text("Views/ManagedSessionsView.swift")
+            .contains("refresh: .init(model.managedText(\"refresh\"), isDisabled: model.managedBusy) {"))
+        XCTAssertTrue(try Self.text("Views/InsightsUsageCards.swift")
+            .contains("GlassRefreshButton(accessibility, title: SettingsLegacyWords.refresh, small: true,"))
+    }
 }

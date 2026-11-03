@@ -69,3 +69,15 @@ final class PixelFieldTests: XCTestCase {
         XCTAssertTrue(source.contains(".accessibilityHidden(true)"))
     }
 }
+
+/// An icon card that is its title alone centres the title on its icon
+/// (owner, 2026-11-02); one with a subtitle or anything under its head
+/// keeps the icon's top on the title's cap height (owner, 2026-10-10).
+final class IconCardTitleAlignmentTests: XCTestCase {
+    @MainActor
+    func test_aTitleAloneIsCentredOnItsIcon() {
+        XCTAssertTrue(GlassIconCard<EmptyView, EmptyView>.centersTitle(subtitle: [], hasContent: false))
+        XCTAssertFalse(GlassIconCard<EmptyView, EmptyView>.centersTitle(subtitle: ["A line"], hasContent: false))
+        XCTAssertFalse(GlassIconCard<EmptyView, EmptyView>.centersTitle(subtitle: [], hasContent: true))
+    }
+}

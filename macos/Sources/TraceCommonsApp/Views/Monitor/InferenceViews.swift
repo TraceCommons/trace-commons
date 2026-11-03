@@ -448,21 +448,23 @@ struct PrivateAIInspectorView: View {
         // the right: the menu bar's one word and dot, the core's full
         // sentence as the row's help and accessibility hint.
         // The state right after the title (owner, 2026-10-20), not at the
-        // row's far end.
+        // row's far end, in a pill, as Settings draws Watching (owner,
+        // 2026-11-02).
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             GlassTabHeading(copy.inspectorStatus) {
-                GlassStatusLabel(status.word, status: status.dot)
-                    .multilineTextAlignment(.leading)
+                GlassChip(status.word, status: status.dot)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .combine)
             .help(status.sentence)
             .accessibilityHint(status.sentence)
-            // What the destination is for, in the core's words, at the
-            // title size (product owner, 2026-10-28: make it bigger).
+            // What the destination is for, in the core's words, under the
+            // heading and below it in weight (owner, 2026-11-02: not bold,
+            // lower than the section title; it was the title size from
+            // 2026-10-28).
             Text(Self.subtitle(copy, state: store.privateAI?.state))
-                .glassType(GlassTokens.TypeScale.title)
-                .foregroundStyle(GlassColor.textPrimary)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

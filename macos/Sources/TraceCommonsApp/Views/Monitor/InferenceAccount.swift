@@ -74,7 +74,8 @@ struct PrivateAISettingsPanels: View {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
                         PrivateAIPanelHeader(
                             eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,
-                            refresh: copy.panelToolsRefreshAccessibility, onRefresh: { refreshTools() })
+                            refresh: copy.panelToolsRefreshAccessibility, refreshWord: copy.panelRefresh,
+                            onRefresh: { refreshTools() })
                         HarnessListSection(copy: copy, titled: false)
                     }
                 }
@@ -149,6 +150,9 @@ struct PrivateAIPanelHeader: View {
     var title: String?
     /// The refresh icon's accessible name, from the core.
     let refresh: String
+    /// The word in the refresh pill, from the core; the accessible name
+    /// when nil.
+    var refreshWord: String?
     var disabled = false
     let onRefresh: () -> Void
 
@@ -160,7 +164,7 @@ struct PrivateAIPanelHeader: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: GlassTokens.Space.s4)
-            GlassRefreshButton(refresh, action: onRefresh)
+            GlassRefreshButton(refresh, title: refreshWord, action: onRefresh)
                 .disabled(disabled)
         }
     }
@@ -228,7 +232,7 @@ struct PrivateAIBalanceCard: View {
             GlassIconCard(
                 systemImage: "dollarsign.circle", title: copy.balanceTitle,
                 refresh: signIn ? nil : GlassCardRefresh(
-                    copy.panelBalanceRefreshAccessibility,
+                    copy.panelBalanceRefreshAccessibility, title: copy.panelBalanceRefresh,
                     isDisabled: model.credentialBusy, isRefreshing: model.balanceRefreshing,
                     action: { model.refreshNearAiBalanceFromButton() }),
                 accessory: {

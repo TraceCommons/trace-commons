@@ -84,7 +84,8 @@
 //! - `install` "Install"; its accessible name appends the tool's name.
 //! - `tool_unavailable` "{tool} wasn't found on this computer." Shells fill
 //!   `{tool}` with the tool's display name (`claude`, `codex`, `opencode`).
-//! - `refresh` "Refresh": a bare glyph's tooltip and accessible name.
+//! - `refresh` "Refresh": the refresh pill's word, tooltip and accessible
+//!   name (a pill with its word since 2026-11-02; it was a bare glyph).
 //!
 //! A folder is optional in the launch dialog (owner, 2026-10-29): a session
 //! with none runs in the person's home folder, which the daemon resolves.

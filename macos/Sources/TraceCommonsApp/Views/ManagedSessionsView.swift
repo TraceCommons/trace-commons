@@ -223,7 +223,9 @@ struct ManagedSessionsSection: View {
         GlassIconCard(
             systemImage: "terminal", title: model.managedText("title"),
             subtitle: [model.managedText("connecting")],
-            refresh: .init(model.managedText("retry"), isDisabled: model.managedBusy) {
+            // "Refresh", as every refresh pill says (owner, 2026-11-02); it
+            // was named "Retry" while it was a bare icon.
+            refresh: .init(model.managedText("refresh"), isDisabled: model.managedBusy) {
                 model.refreshManagedSessions()
             },
             content: { EmptyView() })
