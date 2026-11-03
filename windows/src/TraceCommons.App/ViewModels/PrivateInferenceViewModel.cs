@@ -427,28 +427,6 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     public string CredentialWhat => _copy?.CredentialWhat ?? string.Empty;
 
-    public NearAiCredentialSurface.ProviderChoice[] CredentialProviders =>
-        _copy is null ? [] : NearAiCredentialSurface.Providers(_copy);
-
-    private string _credentialProvider = NearAiCredentialSurface.ProviderNear;
-    public string CredentialProvider
-    {
-        get => _credentialProvider;
-        set
-        {
-            if (_credentialBusy || !NearAiCredentialSurface.IsProvider(value)) return;
-            _credentialProvider = value;
-            Raise(nameof(CredentialProvider));
-            Raise(nameof(CredentialWalletNotice));
-            Raise(nameof(HasCredentialWalletNotice));
-        }
-    }
-
-    public string CredentialProviderLabel => _copy?.CredentialProviderLabel ?? string.Empty;
-    public bool HasCredentialProvider => _copy is not null && OfferedAction == CredentialAction.Obtain;
-    public bool HasCredentialWalletNotice => HasCredentialProvider && CredentialProvider == NearAiCredentialSurface.ProviderNear;
-    public string CredentialWalletNotice => _copy?.CredentialWalletNotice ?? string.Empty;
-
     /// <summary>The sentence for whatever the daemon last reported.</summary>
     public string CredentialStateText => _copy is null
         ? string.Empty
@@ -613,8 +591,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// which is a second browser tab in front of somebody already looking at
     /// one.
     /// </remarks>
-    /// <param name="provider">The sign-in provider; the page's choice when null.</param>
-    public async Task<NearAiCredentialAttempt?> StartCredentialAsync(string? provider = null)
+    public async Task<NearAiCredentialAttempt?> StartCredentialAsync()
     {
         if (_copy is null || _credentialBusy)
         {
@@ -628,7 +605,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         {
             DaemonResponse response = await _host
                 .CallAsync(DaemonProtocol.Methods.NearAiCredentialStart,
-                    NearAiCredentialSurface.SerializeStart(provider ?? CredentialProvider))
+                    NearAiCredentialSurface.StartRequest)
                 .ConfigureAwait(true);
             if (response.IsError || response.Result is null)
             {
@@ -768,8 +745,6 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     private void RaiseCredential()
     {
-        Raise(nameof(HasCredentialProvider));
-        Raise(nameof(HasCredentialWalletNotice));
         Raise(nameof(HasCloudSession));
         Raise(nameof(CredentialStateText));
         Raise(nameof(CredentialIsNeutral));

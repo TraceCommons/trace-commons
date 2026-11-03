@@ -52,26 +52,20 @@ public class NearAiCredentialTests
         Assert.Equal(string.Empty, NearAiCredentialSurface.ForgetNotice(refused, copy));
     }
 
-    [Theory]
-    [InlineData("github")]
-    [InlineData("google")]
-    [InlineData("near")]
-    public void SignInCarriesOnlyTheSelectedProvider(string provider)
+    /// <summary>
+    /// Sign in names no login: the person picks one on the page the daemon
+    /// opens in the browser (owner, 2026-11-02), so the start request is an
+    /// empty object and this surface keeps no list of logins.
+    /// </summary>
+    [Fact]
+    public void SignInStartsWithNoProvider()
     {
-        using JsonDocument document = JsonDocument.Parse(NearAiCredentialSurface.SerializeStart(provider));
-        Assert.Single(document.RootElement.EnumerateObject());
-        Assert.Equal(provider, document.RootElement.GetProperty("provider").GetString());
-        Assert.Contains(NearAiCredentialSurface.Providers(Copy()), choice => choice.Id == provider);
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("NEAR")]
-    [InlineData("near\"}")]
-    public void UnknownProvidersCannotBecomeStartRequests(string provider)
-    {
-        Assert.False(NearAiCredentialSurface.IsProvider(provider));
-        Assert.Throws<ArgumentException>(() => NearAiCredentialSurface.SerializeStart(provider));
+        using JsonDocument document = JsonDocument.Parse(NearAiCredentialSurface.StartRequest);
+        Assert.Equal(JsonValueKind.Object, document.RootElement.ValueKind);
+        Assert.Empty(document.RootElement.EnumerateObject());
+        Assert.DoesNotContain(
+            typeof(NearAiCredentialSurface).GetMembers(),
+            member => member.Name.Contains("Provider", StringComparison.Ordinal));
     }
 
     [Fact]

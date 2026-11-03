@@ -890,3 +890,79 @@ async fn unenroll_reports_unpersisted_subscription_revocation_and_can_retry() {
     assert!(!persisted.subscription_usage_codex_enabled);
     assert!(!persisted.subscription_usage_claude_enabled);
 }
+
+/// Unenrolling forgets which NEAR AI login the account used, so a next
+/// account is never shown it, and keeps the stored NEAR AI session's login,
+/// because unenrolling keeps that session (until #1843 clears it too).
+#[tokio::test]
+async fn unenroll_forgets_the_accounts_login_and_keeps_the_sessions() {
+    use crate::daemon::nearai_credential::login_record;
+    let s = shared();
+    enroll_fixture(&s);
+    let login = crate::channel::NEAR_AI_SIGN_IN_PROVIDERS[0];
+    login_record::record_stored_login(&s.store, login, "key-1");
+    login_record::accepted_by_commons(&s.store, Some(login));
+    assert_eq!(login_record::commons_login(&s.store), Some(login));
+
+    let r = call(&s).await;
+    assert!(r.error.is_none(), "{:?}", r.error);
+
+    assert!(
+        !record_text(&s).contains("commons_login"),
+        "{}",
+        record_text(&s)
+    );
+    assert_eq!(login_record::stored_login(&s.store, "key-1"), Some(login));
+}
+
+/// A record of the account's login that can be neither rewritten nor
+/// removed never blocks the unenroll: it is only a label, and the person
+/// would have nothing to try in the app.
+#[tokio::test]
+async fn unenroll_goes_ahead_when_the_login_record_cannot_be_cleared() {
+    let s = shared();
+    enroll_fixture(&s);
+    // A directory where the record goes: it can be neither written nor
+    // removed as a file.
+    let record = s
+        .store
+        .daemon_path(crate::config::DAEMON_NEAR_AI_LOGIN_FILE);
+    std::fs::create_dir_all(record.join("blocked")).unwrap();
+
+    let r = call(&s).await;
+    assert!(r.error.is_none(), "{:?}", r.error);
+    assert!(s.store.load_config().unwrap().is_none());
+}
+
+/// A leftover account login -- from an unenroll whose clear failed -- is
+/// cleared by the next unenroll call, enrolled or not.
+#[tokio::test]
+async fn a_later_unenroll_clears_a_leftover_accounts_login() {
+    let s = shared();
+    let login = crate::channel::NEAR_AI_SIGN_IN_PROVIDERS[0];
+    s.store
+        .write_daemon_file(
+            crate::config::DAEMON_NEAR_AI_LOGIN_FILE,
+            format!(r#"{{"commons_login":"{login}"}}"#).as_bytes(),
+        )
+        .unwrap();
+    assert!(record_text(&s).contains("commons_login"));
+
+    let r = call(&s).await;
+    assert!(r.error.is_none(), "{:?}", r.error);
+    assert!(
+        !record_text(&s).contains("commons_login"),
+        "{}",
+        record_text(&s)
+    );
+}
+
+/// The login record as written, read past `commons_login`'s enrolled-only
+/// rule: what is on disk is what a next account could be shown.
+fn record_text(s: &DaemonShared) -> String {
+    std::fs::read_to_string(
+        s.store
+            .daemon_path(crate::config::DAEMON_NEAR_AI_LOGIN_FILE),
+    )
+    .unwrap_or_default()
+}

@@ -635,7 +635,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_account_start` | `ingest_url`, `account_id` | `attempt_id`, `browser_url`, `status` | explicit wallet ceremony; keys and PKCE stay in daemon |
 | `near_account_status` | `attempt_id` | `attempt_id`, `status` | no account token or signing material |
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
-| `near_ai_credential_start` | `provider` (optional; the build's `channel::NEAR_AI_SIGN_IN_PROVIDERS`: production `near`, `github`, `google`, default `near`; a `near-ai-staging` build `google` only, and `near` and `github` are refused) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
+| `near_ai_credential_start` | `provider` (optional; one of the build's `channel::NEAR_AI_SIGN_IN_PROVIDERS`: production `near`, `github`, `google`; a `near-ai-staging` build `google` only, and `near` and `github` are refused). Shells send none | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. With no `provider`, `browser_url` is the daemon's own loopback page listing the build's logins, and the one picked there continues on the same port; a build with one login goes straight to it. When the Commons has accepted a NEAR AI login on this device (first enrollment, or a renewal with the stored login), the page lists that login first and marks it; the tag (`near`, `github` or `google`, nothing else) is kept in the daemon file `near-ai-login.json` and removed by `unenroll`. The browser URL is returned **once** and no poll re-serves it |
 | `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
 | `near_ai_credential_cancel` | `attempt_id` (optional) | `attempt_id`, `status` when named; `status` alone when not | stops this machine waiting on the browser; unnamed, it stops whatever sign-in is in flight and never echoes the id; `near_ai_credential_unknown` if a named id is not the current attempt, or if an unnamed cancel finds no sign-in in flight (none ever started, or the last one finished); a named cancel of the finished current attempt answers its terminal status and changes nothing |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
@@ -9466,6 +9466,112 @@ focusable or stoppable.
   account, `managed-invalid-request` for a sign-in (login) row or a missing
   folder, `managed-not-found` for a removed account, and
   `managed-near-ai-sign-in-required` for a sign-in session while signed out.
+
+`managed_terminal_windows {}` lists the Terminal windows a new session can
+open in (owner, 2026-11-02, #1852): `{"windows": [{"sessions": [id, ...]},
+...]}`. Each window is listed by the running sessions in it, newest first, and
+windows are in the order of their newest session. Window ids stay in the
+daemon. A session is listed only when all of these hold; otherwise the list is
+empty, and a shell shows no choice.
+
+- Terminal is the chosen app. iTerm2 and the other apps list nothing: their
+  launches do not read back a window the daemon can name.
+- The daemon opened the session itself, its tool started (it was redeemed),
+  and it is running as a coding session.
+- Its launch read back the id of the Terminal window holding its tab.
+- Terminal's windows, read just now in one script that first checks Terminal
+  is running (so a listing never starts Terminal), have a window with that id
+  holding a tab on the session's tty. A stored tty outlives its tab and macOS
+  reuses pty numbers, so nothing stored is offered unchecked; while the tool
+  runs it holds its tty, so no other tab has it.
+
+The script reads only window ids and their tabs' ttys. Terminal is read with
+the daemon's managed state unlocked, and only when there is a session to
+check.
+
+`managed_terminal_tab_access {}` asks macOS for the two permissions a tab
+needs (below), when the person picks a window, and answers `{"asked": bool}`
+at once: `false` unless Terminal is the chosen app. The prompts show on a
+thread of their own, one at a time, and nothing waits for them. Once the
+person has answered, macOS does not ask again and this does nothing visible.
+
+`managed_terminal_launch {session_id, ticket, beside?}` opens a prepared
+session. With `beside`, a session id from `managed_terminal_windows`, it opens
+in Terminal on macOS in a new tab of that session's window, when all of these
+hold; otherwise, and always without `beside`, it opens a new window. Start
+again and Resume always open a new window (#1853, decision (b)): the window
+list is the only way a session opens in an existing window. Nothing is ever
+typed into an existing tab, whose prompt may hold input not yet run.
+
+- `beside` names a session the daemon would list now (above). The daemon
+  finds its window and tty from its own row; the shell names no window. The
+  macOS app built from #1839 sent an `in_window_of` field, which is still
+  accepted so that app keeps launching, and ignored.
+- macOS has already granted both permissions, and Secure Keyboard Entry is
+  off, checked just before the launch by a script that cannot prompt or wait
+  (`AEDeterminePermissionToAutomateTarget` asked not to ask,
+  `AXIsProcessTrusted`, `IsSecureEventInputEnabled`). If System Events is not
+  running it is started hidden through LaunchServices, which sends it no
+  Apple Event, and asked again. Anything else opens a new window, and asks
+  for the permissions as `managed_terminal_tab_access` does, so no launch
+  ever sends the first event to System Events or waits on a prompt.
+- Terminal still has a window with that id, and it still holds a tab on that
+  session's tty, read in the launch script itself.
+- The window comes to the front, and Terminal becomes the frontmost app with
+  that window in front, within about a second.
+- Terminal has no scripting command for a new tab, so the daemon presses
+  Command-T through System Events, from the same `osascript` it runs every
+  Terminal launch with. That needs two macOS permissions: Automation of
+  System Events and Accessibility. macOS asks for each with its own prompt,
+  which names the process TCC holds responsible for `osascript`. A process
+  inherits its parent's responsible process unless the parent disclaims it,
+  and nothing here does. In the macOS app the daemon runs inside the app's
+  own process (`tc_daemon_start`), so the prompts, and the entries under
+  System Settings > Privacy & Security > Automation and > Accessibility, name
+  the app as installed: "Near.ai" (its `CFBundleName` and
+  `CFBundleDisplayName`; bundle id `ai.tracecommons.shell`), or "Near.ai
+  Staging" for the staging build. A daemon the app attached to instead
+  (`near-ai daemon run` in a terminal, or one under a service manager) is
+  attributed to whatever started it: Terminal, or that daemon's own binary. A
+  grant is tied to the code signature it was given to, so a differently
+  signed build asks again. The Automation prompt shows the bundle's
+  `NSAppleEventsUsageDescription`, "Near.ai opens new Private AI sessions in
+  the Terminal window you choose." (owner, 2026-11-02; both channels).
+  Refusing either permission opens the launch in a new window; nothing in
+  the app says so (owner, 2026-11-02).
+- The tab used is one Command-T made in that window: the window's tab count
+  goes up by exactly one within 3 seconds, is still one more after a further
+  0.3 seconds with the window still in front, and the window's selected tab
+  then has a tty that was not in the window before the keystroke. A tab in
+  any other window is never used. A tab the person opens in the same window
+  at the same moment makes it two, and none is used. Otherwise the launch
+  opens a new window. If Terminal refuses to run the command in the new tab,
+  that tab is closed (in its own `try`) and the launch opens a new window.
+  The new tab's tty and the window's id become the session's handle.
+
+What remains: if Command-T is swallowed without an error for a reason the
+check above cannot see, and the person presses Command-T in the same window
+within those 3 seconds, their tab is the only new one and receives the
+command. Secure Keyboard Entry, the known cause of a silent swallow, is
+checked first.
+
+A launch that opens a new window reads back its tab's tty and, on the next
+line, the id of Terminal's front window when that window's selected tab is
+the launch's, with no scan of other windows (#1853), and the row keeps both.
+Output that is not a tty, optionally followed by a line of digits only that
+is a window id, names no tab. When another window is in front by then, the
+row has its tab and no window id; that is normal, and such a session is
+simply not offered in the window list. A placed launch reads only the picked
+window's tabs, once.
+
+The terminal opens with the daemon's managed state unlocked and off the async
+worker: the launch is held first (a second `managed_terminal_launch` with the
+same ticket is refused with `managed-conflict`), and recorded after. A launch
+refused before anything ran (`managed-terminal-not-found`,
+`managed-invalid-request`, `managed-unsupported-version`) is released, and its ticket stands until it
+lapses. A launch that may have run (`managed-launch-unknown`: the script
+failed or was stopped after it started) stays held, so its ticket cannot open
+a second terminal.
 
 When `managed_launch_prepare` or `managed_session_start_again` passes the
 checks that come before preparing, other than the tool's version, and would

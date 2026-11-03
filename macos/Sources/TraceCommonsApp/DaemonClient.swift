@@ -609,10 +609,11 @@ final class DaemonClient: Sendable {
     /// The URL is served ONCE, here. Nothing re-serves it, so a caller that
     /// drops the returned attempt has to begin again -- which is why this
     /// returns the whole thing rather than just the id.
-    func nearAiCredentialStart(provider: String? = nil) throws -> CredentialAttempt? {
-        let params: [String: Any] = provider.map { ["provider": $0] } ?? [:]
-        return CredentialAttempt.parse(
-            fromJSON: try rawResultJSON(CredentialSurface.startMethod, params: params))
+    ///
+    /// It names no provider; the daemon's browser page lists the build's
+    /// logins and the person picks one there (owner, 2026-11-02).
+    func nearAiCredentialStart() throws -> CredentialAttempt? {
+        CredentialAttempt.parse(fromJSON: try rawResultJSON(CredentialSurface.startMethod))
     }
 
     /// Stops waiting on the browser. The attempt id is optional: the daemon

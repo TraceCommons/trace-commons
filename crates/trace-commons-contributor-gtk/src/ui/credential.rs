@@ -59,72 +59,6 @@ use crate::copy::CredentialAction;
 /// a sentence that stopped being true the moment the sign-in finished.
 const POLL_SECONDS: u32 = 2;
 
-pub(super) struct ProviderSelector {
-    pub root: gtk::Box,
-    pub selector: gtk::DropDown,
-}
-
-impl ProviderSelector {
-    pub fn new(selected: u32) -> Self {
-        let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
-        let root = gtk::Box::new(gtk::Orientation::Vertical, space::S);
-        style::append_body(&root, copy.credential_provider_label);
-        let titles: Vec<&str> = provider_options().iter().map(|(_, title)| *title).collect();
-        let selector = gtk::DropDown::from_strings(&titles);
-        selector.set_selected(selected);
-        selector.set_size_request(-1, 44);
-        let notice = gtk::Label::builder()
-            .label(copy.credential_wallet_notice)
-            .wrap(true)
-            .xalign(0.0)
-            .visible(shows_wallet_notice(selected))
-            .build();
-        selector.connect_selected_notify({
-            let notice = notice.clone();
-            move |selector| notice.set_visible(shows_wallet_notice(selector.selected()))
-        });
-        root.append(&selector);
-        root.append(&notice);
-        Self { root, selector }
-    }
-
-    pub fn provider(&self) -> Option<&'static str> {
-        provider_id(self.selector.selected())
-    }
-}
-
-/// The sign-in providers this build offers, in the core's order
-/// (`channel::NEAR_AI_SIGN_IN_PROVIDERS`), each with the core's title. A
-/// provider the copy has no title for is not offered. The list is the
-/// core's, never this shell's: a staging build offers Google alone, and a
-/// new login is added there and in the copy, not here.
-fn provider_options() -> Vec<(&'static str, &'static str)> {
-    let copy = trace_commons_contributor::private_inference_copy::private_inference_copy();
-    trace_commons_contributor::channel::NEAR_AI_SIGN_IN_PROVIDERS
-        .iter()
-        .filter_map(|tag| {
-            let title = match *tag {
-                "near" => copy.credential_provider_near,
-                "github" => copy.credential_provider_github,
-                "google" => copy.credential_provider_google,
-                _ => return None,
-            };
-            Some((*tag, title))
-        })
-        .collect()
-}
-
-fn provider_id(selected: u32) -> Option<&'static str> {
-    provider_options()
-        .get(selected as usize)
-        .map(|(tag, _)| *tag)
-}
-
-/// The wallet's key-custody notice accompanies the NEAR wallet alone.
-fn shows_wallet_notice(selected: u32) -> bool {
-    provider_id(selected) == Some("near")
-}
-
 /// The section's widgets. Built once and refilled, like every other screen in
 /// this window.
 pub struct CredentialView {
@@ -150,7 +84,6 @@ pub struct CredentialView {
     /// remove a key, and a second press before the first came back would ask
     /// for a second ceremony.
     pending: Cell<bool>,
-    provider: Cell<u32>,
     /// Set by a forget that removed the key here but did not revoke it at
     /// NEAR AI, and drawn under the state line as status text until the next
     /// action is pressed.
@@ -190,7 +123,6 @@ impl CredentialView {
             attempt: RefCell::new(None),
             polling: Cell::new(false),
             pending: Cell::new(false),
-            provider: Cell::new(0),
             not_revoked: Cell::new(false),
         }
     }
@@ -318,9 +250,6 @@ pub fn render(app: &Rc<App>, state: &str) {
         if !explains.is_empty() {
             style::append_body(&view.action, explains);
         }
-        if action == CredentialAction::Obtain {
-            view.action.append(&shared_provider_selector(app));
-        }
         let button = gtk::Button::with_label(label);
         button.set_halign(gtk::Align::Start);
         if action == CredentialAction::Obtain {
@@ -341,6 +270,10 @@ pub fn render(app: &Rc<App>, state: &str) {
     }
 }
 
+pub(super) fn pending(app: &Rc<App>) -> bool {
+    app.private_inference.credential.pending.get()
+}
+
 /// Perform the one action this state offers.
 ///
 /// A single entry point, on the value the shared table produced, so there is
@@ -353,41 +286,7 @@ pub fn render(app: &Rc<App>, state: &str) {
 /// a sign-in, so the balance's button comes here rather than opening a
 /// second ceremony path with a second in-flight guard. One press at a time,
 /// wherever it was pressed.
-/// The provider selector bound to this section's choice, which every Sign in
-/// on the Private AI screen starts ([`act`]). Drawn beside whichever Sign in
-/// is on screen: this section's, or the balance row's, which shows only
-/// while this section offers no sign-in of its own.
-pub(super) fn shared_provider_selector(app: &Rc<App>) -> gtk::Box {
-    let view = &app.private_inference.credential;
-    let providers = ProviderSelector::new(view.provider.get());
-    providers.root.set_sensitive(!view.pending.get());
-    providers.selector.connect_selected_notify({
-        let app = Rc::clone(app);
-        move |selector| {
-            let view = &app.private_inference.credential;
-            if view.pending.get() {
-                selector.set_selected(view.provider.get());
-            } else {
-                view.provider.set(selector.selected());
-            }
-        }
-    });
-    providers.root
-}
-
 pub(super) fn act(app: &Rc<App>, action: CredentialAction) {
-    act_with_provider(
-        app,
-        action,
-        provider_id(app.private_inference.credential.provider.get()),
-    );
-}
-
-pub(super) fn pending(app: &Rc<App>) -> bool {
-    app.private_inference.credential.pending.get()
-}
-
-pub(super) fn act_with_provider(app: &Rc<App>, action: CredentialAction, provider: Option<&str>) {
     let view = &app.private_inference.credential;
     if view.pending.replace(true) {
         return;
@@ -399,12 +298,8 @@ pub(super) fn act_with_provider(app: &Rc<App>, action: CredentialAction, provide
             view.pending.set(false);
         }
         CredentialAction::Obtain => {
-            if let Some(provider) = provider {
-                crate::ui::funding::credential_pending(app);
-                start(app, provider);
-            } else {
-                view.pending.set(false);
-            }
+            crate::ui::funding::credential_pending(app);
+            start(app);
         }
         CredentialAction::Cancel => {
             crate::ui::funding::credential_pending(app);
@@ -454,10 +349,10 @@ pub(super) fn open_browser(url: &str) -> bool {
 /// happened, which a call whose answer was lost cannot know, and the re-read
 /// beside it draws whatever the daemon actually holds. Before this, the
 /// screen did not change at all and a press read as unheard (#728).
-fn start(app: &Rc<App>, provider: &str) {
+fn start(app: &Rc<App>) {
     app.call(
         "near_ai_credential_start",
-        serde_json::json!({ "provider": provider }),
+        serde_json::json!({}),
         |app, result| {
             let view = &app.private_inference.credential;
             let opened = match result {
@@ -647,9 +542,9 @@ mod tests {
             "if view.not_revoked.get() {\n        style::append_body(&view.status, copy::CREDENTIAL_FORGET_NOT_REVOKED);"
         ));
         let act = production
-            .split("pub(super) fn act_with_provider(")
+            .split("pub(super) fn act(")
             .nth(1)
-            .expect("act_with_provider is in this file");
+            .expect("act is in this file");
         assert!(
             act.split("match action")
                 .next()
@@ -658,39 +553,29 @@ mod tests {
         );
     }
 
-    /// The selector offers the core's logins, in its order, with the core's
-    /// titles (owner, 2026-11-01: GitHub, Google or the NEAR wallet), and
-    /// keeps no list of its own.
+    /// Sign in names no login. The person picks one on the page the daemon
+    /// opens in the browser (owner, 2026-11-02), so this shell keeps no
+    /// selector, no list of logins and no provider field in the start call.
     #[test]
-    fn the_provider_selector_offers_the_cores_logins_in_its_order() {
-        let copy = private_inference_copy();
-        let offered = trace_commons_contributor::channel::NEAR_AI_SIGN_IN_PROVIDERS;
-        let options = provider_options();
-        assert_eq!(
-            options.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
-            offered.to_vec()
-        );
-        for (index, (tag, title)) in options.iter().enumerate() {
-            let expected = match *tag {
-                "near" => copy.credential_provider_near,
-                "github" => copy.credential_provider_github,
-                "google" => copy.credential_provider_google,
-                other => panic!("no title for {other}"),
-            };
-            assert_eq!(*title, expected);
-            assert_eq!(provider_id(index as u32), Some(*tag));
-            assert_eq!(shows_wallet_notice(index as u32), *tag == "near");
-        }
-        assert_eq!(provider_id(options.len() as u32), None);
-        let selector = SOURCE
-            .split("impl ProviderSelector {")
-            .nth(1)
-            .and_then(|rest| rest.split("fn provider_options()").next())
-            .unwrap();
+    fn sign_in_starts_with_no_provider_and_keeps_no_selector() {
+        let code = code();
         assert!(
-            !selector.contains("[\"near\", \"github\", \"google\"]"),
-            "the selector keeps its own provider list"
+            code.contains("\"near_ai_credential_start\",\n        serde_json::json!({}),"),
+            "the start call sends something besides an empty object"
         );
+        for gone in [
+            "ProviderSelector",
+            "provider_options",
+            "provider_id",
+            "shows_wallet_notice",
+            "shared_provider_selector",
+            "act_with_provider",
+            "DropDown",
+            "\"provider\"",
+            "NEAR_AI_SIGN_IN_PROVIDERS",
+        ] {
+            assert!(!code.contains(gone), "the sign-in still carries {gone}");
+        }
     }
 
     /// Every state a daemon can report, plus the two ways of reporting none.

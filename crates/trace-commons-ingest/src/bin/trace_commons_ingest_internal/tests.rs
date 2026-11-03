@@ -103297,3 +103297,239 @@ mod first_run_estimate_tests {
         );
     }
 }
+
+#[test]
+fn read_last_nonempty_line_matches_a_whole_file_scan() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("audit.jsonl");
+    let long_line = format!("{{\"pad\":\"{}\"}}", "x".repeat(50_000));
+    let cases: Vec<(String, Option<&str>)> = vec![
+        (String::new(), None),
+        ("\n\n  \n".to_string(), None),
+        ("only".to_string(), Some("only")),
+        ("first\nsecond\n".to_string(), Some("second")),
+        ("first\r\nsecond\r\n\r\n".to_string(), Some("second")),
+        ("first\n  second  \n \n\t\n".to_string(), Some("second")),
+        (format!("first\n{long_line}\n\n"), Some(long_line.as_str())),
+        (format!("{long_line}\nlast\n"), Some("last")),
+        (long_line.clone(), Some(long_line.as_str())),
+        (format!("first\n{}\n", " ".repeat(20_000)), Some("first")),
+        ("a\n\u{e9}t\u{e9}\n".to_string(), Some("\u{e9}t\u{e9}")),
+    ];
+    for (body, expected) in cases {
+        std::fs::write(&path, &body).expect("write");
+        let scanned = body
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty());
+        assert_eq!(scanned, expected, "whole-file scan disagrees with the case");
+        assert_eq!(
+            read_last_nonempty_line(&path).expect("read").as_deref(),
+            expected,
+            "tail read of a {}-byte body",
+            body.len()
+        );
+    }
+}
+
+#[test]
+fn internal_error_answers_a_pool_timeout_with_503_database_busy() {
+    let timeout = || deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait);
+    let busy: Vec<(&str, (StatusCode, Json<ApiError>))> = vec![
+        ("raw pool error", internal_error(timeout())),
+        (
+            "database error",
+            internal_error(DatabaseError::PoolRuntime(timeout())),
+        ),
+        (
+            "anyhow with context",
+            internal_error(
+                anyhow::Error::new(DatabaseError::PoolRuntime(timeout()))
+                    .context("failed to read the routing row"),
+            ),
+        ),
+        (
+            "create timeout",
+            internal_error(deadpool_postgres::PoolError::Timeout(
+                deadpool_postgres::TimeoutType::Create,
+            )),
+        ),
+        (
+            "closed pool",
+            internal_error(DatabaseError::PoolRuntime(
+                deadpool_postgres::PoolError::Closed,
+            )),
+        ),
+    ];
+    for (case, (status, Json(body))) in busy {
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{case}");
+        assert_eq!(body.error, DATABASE_BUSY_LABEL, "{case}");
+        assert!(
+            body.retry_after_seconds.is_some_and(|seconds| seconds > 0),
+            "{case} carries a retry hint"
+        );
+    }
+
+    let failed: Vec<(&str, (StatusCode, Json<ApiError>))> = vec![
+        (
+            "unconfigured pool",
+            internal_error(DatabaseError::Pool("gate_driver_pool_unconfigured".into())),
+        ),
+        (
+            "query failure",
+            internal_error(DatabaseError::Query("boom".into())),
+        ),
+        ("plain text", internal_error("boom")),
+        ("anyhow", internal_error(anyhow::anyhow!("boom"))),
+    ];
+    for (case, (status, Json(body))) in failed {
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{case}");
+        assert_eq!(body.retry_after_seconds, None, "{case}");
+    }
+}
+
+/// A content read-back that failed on a busy pool answers 503 without
+/// waiting for its failed-read audit: the audit is only spawned. On this
+/// single-threaded runtime the spawned task cannot run until the test
+/// yields, so finding no audit row right after the call shows the answer
+/// did not wait for it. The audit still lands once the task runs, and is
+/// skipped (with the read still refused) when the background budget is
+/// full.
+#[tokio::test]
+async fn a_busy_pool_content_read_answers_before_its_audit_runs() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = test_state_with_options(
+        temp.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let audit_tenant = TenantAuth {
+        tenant_id: "tenant-a".to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: "account-actor".to_string(),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    };
+    let read_failure_rows = |submission_id: Uuid| {
+        read_all_audit_events(temp.path(), "tenant-a")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|event| {
+                event.kind == "trace_content_read"
+                    && event.submission_id == submission_id
+                    && event
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("surface=account_trace_content"))
+            })
+            .count()
+    };
+    let error = anyhow::Error::new(DatabaseError::PoolRuntime(
+        deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait),
+    ))
+    .context("failed to read the envelope object ref");
+    assert!(
+        database_busy_response(&error).is_some(),
+        "the read-back path answers this error with 503"
+    );
+
+    // The background budget is full: the audit is skipped, nothing waits.
+    let held = Arc::clone(&ACCOUNT_CONTENT_BACKGROUND_AUDITS)
+        .try_acquire_many_owned(ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT as u32)
+        .expect("no other test holds the background audit budget");
+    let skipped = Uuid::new_v4();
+    assert!(
+        spawn_account_content_read_failure_audit(
+            Arc::clone(&state),
+            audit_tenant.clone(),
+            skipped,
+        )
+        .is_none()
+    );
+    drop(held);
+
+    let submission_id = Uuid::new_v4();
+    let audit = spawn_account_content_read_failure_audit(
+        Arc::clone(&state),
+        audit_tenant.clone(),
+        submission_id,
+    )
+    .expect("the budget has room");
+    assert_eq!(
+        read_failure_rows(submission_id),
+        0,
+        "the caller has its answer before the audit runs"
+    );
+    audit.await.expect("audit task");
+    assert_eq!(
+        read_failure_rows(submission_id),
+        1,
+        "the failed read is still audited"
+    );
+    assert_eq!(
+        read_failure_rows(skipped),
+        0,
+        "a skipped audit writes nothing"
+    );
+    assert_eq!(
+        ACCOUNT_CONTENT_BACKGROUND_AUDITS.available_permits(),
+        ACCOUNT_CONTENT_BACKGROUND_AUDIT_LIMIT,
+        "a finished audit gives its slot back"
+    );
+}
+
+#[test]
+fn a_database_pool_error_never_uses_up_a_scoring_or_pii_backstop_attempt() {
+    let pool_errors = [
+        anyhow::Error::new(DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait),
+        ))
+        .context("failed to load the gate decision"),
+        anyhow::Error::new(deadpool_postgres::PoolError::Closed),
+        anyhow::Error::new(DatabaseError::PoolRuntime(
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Create),
+        )),
+    ];
+    for error in &pool_errors {
+        assert!(is_transient_gate_scoring_failure(error), "{error:#}");
+        assert!(is_transient_pii_backstop_failure(error), "{error:#}");
+    }
+    let permanent = [
+        anyhow::anyhow!("envelope failed to decode"),
+        anyhow::Error::new(DatabaseError::Query("constraint".into())),
+        anyhow::Error::new(DatabaseError::Pool("pool unconfigured".into())),
+    ];
+    for error in &permanent {
+        assert!(!is_transient_gate_scoring_failure(error), "{error:#}");
+        assert!(!is_transient_pii_backstop_failure(error), "{error:#}");
+    }
+}
+
+#[test]
+fn read_last_nonempty_line_skips_unicode_blank_lines() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("audit.jsonl");
+    for body in [
+        "{\"event\":1}\n\u{a0}\n",
+        "{\"event\":1}\n\u{2028}\n\u{85}\n",
+        "{\"event\":1}\n\u{b}\n",
+    ] {
+        std::fs::write(&path, body).expect("write");
+        assert_eq!(
+            read_last_nonempty_line(&path).expect("read").as_deref(),
+            Some("{\"event\":1}"),
+            "{body:?}"
+        );
+    }
+}

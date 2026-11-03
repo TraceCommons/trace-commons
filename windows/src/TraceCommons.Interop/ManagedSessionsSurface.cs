@@ -155,6 +155,7 @@ public static class ManagedSignIn
         "managed-terminal-not-found" => "terminal_not_found",
         "managed-near-ai-balance-too-low" => "balance_too_low",
         "managed-project-chooses-model" => "project_chooses_model",
+        "managed-project-sets-auto-mode-server" => "project_sets_auto_mode_server",
         _ => "action_failed",
     };
 
