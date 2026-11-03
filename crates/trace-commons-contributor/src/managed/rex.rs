@@ -591,10 +591,16 @@ mod tests {
         }
     }
 
+    /// The launch's folder: absolute on every platform, as `RexTab::new`
+    /// requires (`/tmp/project` is not absolute on Windows).
+    fn folder() -> std::path::PathBuf {
+        std::env::temp_dir().join("project")
+    }
+
     fn rex_tab() -> RexTab {
         let argv: Vec<std::ffi::OsString> =
             vec!["/x/near-ai".into(), "--ticket".into(), "ab12".into()];
-        RexTab::new(&argv, Some(Path::new("/tmp/project"))).unwrap()
+        RexTab::new(&argv, Some(&folder())).unwrap()
     }
 
     fn run(fake: &mut FakeRex) -> Result<Vec<u8>, ManagedError> {
@@ -668,7 +674,7 @@ mod tests {
         assert_eq!(run(&mut fake), Ok(printed(SESSION, WINDOW, BLOCK)));
         assert!(
             fake.commands()
-                .contains(&"new Near.ai --json -c /tmp/project".to_string())
+                .contains(&format!("new Near.ai --json -c {}", folder().display()))
         );
     }
 
