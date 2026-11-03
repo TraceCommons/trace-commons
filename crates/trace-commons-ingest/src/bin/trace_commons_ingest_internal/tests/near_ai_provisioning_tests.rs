@@ -2226,8 +2226,8 @@ async fn pg_a_near_ai_finish_without_the_resolver_pool_answers_503() {
     )
     .await;
     assert_uniform_deny(&resent, "resent after the 503");
-    // The 503 came after introspection, inside provisioning; starting again
-    // must not meet anything that attempt left behind.
+    // The 503 came after introspection, at provisioning's first step (the
+    // resolver pool), so the attempt wrote nothing; starting again signs in.
     signs_in_after_starting_again(&h, &admin, &device, "no resolver pool").await;
     reset_account_rate_limiter_for_db_test().await;
 }
@@ -2265,4 +2265,44 @@ async fn signs_in_after_starting_again(
         .expect("tenant")
         .to_string();
     drop_tenants(admin, &[&tenant]).await;
+}
+
+/// A stored ceremony the finishing process cannot read -- a start on one
+/// build and a finish on another during a rollout, or a row of another
+/// ceremony kind -- is deployment state, not a refusal: `503`, never the
+/// uniform deny the #1840 check reads as "another account". The take still
+/// consumed the row, so the client starts again.
+#[tokio::test]
+async fn pg_an_unreadable_stored_ceremony_answers_503() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    reset_account_rate_limiter_for_db_test().await;
+    let admin = h.admin().await;
+    let device = Device::new();
+    let body = well_formed_unknown_finish(&device);
+    let ceremony_id = body["ceremony_id"].as_str().expect("id").to_string();
+    // A payload no ceremony type reads, as a build that stored another shape
+    // would leave it.
+    admin
+        .execute(
+            "INSERT INTO trace_near_provisioning_ceremonies(ceremony_hash, payload, expires_at)
+             VALUES ($1, $2, now() + interval '5 minutes')",
+            &[
+                &hash_secret(&ceremony_id),
+                &serde_json::json!({"shape": "from another build"}),
+            ],
+        )
+        .await
+        .expect("seed an unreadable ceremony");
+    assert_unavailable(
+        &post(&h.state, PROVISION_FINISH, &body).await,
+        "unreadable ceremony",
+    );
+    // Consumed by the take: the same finish is now an unknown ceremony.
+    assert_uniform_deny(
+        &post(&h.state, PROVISION_FINISH, &body).await,
+        "resent after the unreadable ceremony",
+    );
+    reset_account_rate_limiter_for_db_test().await;
 }
