@@ -42,7 +42,9 @@
 //! #1852). Approved by the owner 2026-11-02. A launch that falls back to a
 //! new window says nothing (owner, same day):
 //! - `open_in_window` "Open in" -- the list's label and accessible name.
-//! - `new_window` "New window" -- the first option, and the default.
+//! - `new_window` "New window" -- the first option. The default is the
+//!   window with the newest running session (owner, 2026-11-03); "New
+//!   window" only when no window is offered.
 //! - `window_option` "{tool} · {folder}" -- each other option: a session
 //!   in that window, named as its row names it (the tool, then the
 //!   folder's label). A window holding several sessions joins them with
