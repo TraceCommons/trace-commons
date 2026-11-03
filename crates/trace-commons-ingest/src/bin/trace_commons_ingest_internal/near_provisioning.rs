@@ -7,6 +7,12 @@ use trace_commons_server::account_onboarding::{
 };
 use trace_commons_server::near_ai_api::NEAR_AI_API_BASE_URL;
 
+/// F10: changing the NEAR AI login an account uses. A child of this module
+/// because it runs the same ceremony machinery (readiness, rate limits,
+/// introspection, the wallet page).
+#[path = "near_ai_rebind.rs"]
+pub(super) mod near_ai_rebind;
+
 /// Operator-published trust data, served only after the admission gate is ready.
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -482,6 +488,10 @@ pub(super) async fn capabilities_v2(
         "wallet_finish_path": "/v1/account/near/provision/finish/v2",
         "near_ai_start_path": "/v1/account/near-ai/provision/start/v2",
         "near_ai_finish_path": "/v1/account/near-ai/provision/finish/v2",
+        // F10: a client offers "Use a different account" only to a commons
+        // that publishes these.
+        "near_ai_rebind_start_path": trace_commons_protocol::account_login_change::REBIND_START_PATH,
+        "near_ai_rebind_finish_path": trace_commons_protocol::account_login_change::REBIND_FINISH_PATH,
         "inference_connection_selection_required": true,
         "inference_connection_offers_path": "/v1/account/inference-connection/offers",
         "inference_connection_selection_path": "/v1/account/inference-connection",
@@ -814,7 +824,10 @@ async fn finish_taken(
     let mut answer = serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
-        "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash
+        "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash,
+        // What the account signs in with (F10 decision 4): a device records
+        // it rather than reading the tenant prefix.
+        "identity":"wallet"
     });
     if let Some(referral) = referral {
         answer["referral"] = serde_json::json!(referral.as_str());
@@ -1714,6 +1727,16 @@ async fn near_ai_finish_taken(
                 DEVICE_KEY_REVOKED,
             )));
         }
+        // F10: a login a change retired. Shown by name: the device just
+        // proved the login, and the fact is about that login alone.
+        Err(error)
+            if trace_commons_server::account_onboarding::is_near_ai_login_retired(&error) =>
+        {
+            return Some(no_store(api_error(
+                StatusCode::CONFLICT,
+                trace_commons_protocol::account_login_change::NEAR_AI_LOGIN_RETIRED,
+            )));
+        }
         // Every decided refusal (the device key held by another account, the
         // device principal bound to another account, the anchor race lost
         // twice) stays the uniform deny; only the database unable to answer
@@ -1725,7 +1748,10 @@ async fn near_ai_finish_taken(
     let mut answer = serde_json::json!({
         "access_token":native_token_value(&provisioned.tenant_id,&secret),"token_type":"Bearer",
         "expires_in_secs":NATIVE_SESSION_TTL_HOURS*3600,"account_id":provisioned.account_id,
-        "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash
+        "tenant_id":provisioned.tenant_id,"device_key_id":provisioned.device_key_id,"anchor_hash":provisioned.anchor_hash,
+        // What the account signs in with (F10 decision 4), and the login's
+        // provider label, the person's own fact, so the app can remember it.
+        "identity":"near_ai_login","auth_provider":login.auth_provider()
     });
     if let Some(referral) = referral {
         answer["referral"] = serde_json::json!(referral.as_str());

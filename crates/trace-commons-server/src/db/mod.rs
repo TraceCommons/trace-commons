@@ -1211,6 +1211,46 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         ))
     }
 
+    /// Store a change ceremony (F10) in the provisioning ceremony table.
+    /// Fail-closed by default.
+    async fn store_near_ai_rebind_ceremony(
+        &self,
+        _ceremony_hash: &str,
+        _pending: &crate::account_login_change::NearAiRebindPending,
+        _expires_at: i64,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
+    }
+
+    /// Consume a change ceremony. Single use.
+    async fn take_near_ai_rebind_ceremony(
+        &self,
+        _ceremony_hash: &str,
+    ) -> Result<Option<crate::account_login_change::NearAiRebindPending>, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
+    }
+
+    /// Whether the session's account can change its login now, and what its
+    /// current identity is (F10 start). Read in the session's tenant only.
+    async fn near_ai_rebind_precheck(
+        &self,
+        _session: &crate::account_login_change::RebindSession,
+    ) -> Result<crate::account_login_change::RebindPrecheck, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
+    }
+
+    /// Move the account from its proven current identity to `new_login`, in
+    /// one transaction in the session's tenant (F10 finish, spec 4.3).
+    async fn near_ai_rebind(
+        &self,
+        _session: &crate::account_login_change::RebindSession,
+        _current: &crate::account_login_change::RebindCurrent,
+        _new_login: &crate::near_ai_login::VerifiedNearAiLogin,
+        _identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_login_change::RebindOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("near_ai_rebind_unconfigured".into()))
+    }
+
     /// Write the NEAR AI sign-up contributor grant for a device NEAR AI
     /// provisioned before sign-up wrote one (owner decision 2026-10-24).
     ///
