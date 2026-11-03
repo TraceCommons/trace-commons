@@ -262,6 +262,9 @@ pub const REDACTION_RULESET_VERSION: &str = "2";
 /// `the_witness_origin_does_not_move_the_fingerprint` holds this. The other
 /// entries keep their order so that no existing fingerprint moves.
 const NON_ENVELOPE_CONFIG_FIELDS: &[&str] = &[
+    // Last in the struct, after `witness_origin`, and present only when
+    // recorded: removed first for the reason above (F10).
+    "account_identity",
     "witness_origin",
     "consent_scopes_chosen",
     "display_handle",
@@ -1507,6 +1510,7 @@ mod tests {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(true),
             witness_origin: None,
+            account_identity: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
             issuer_url: "http://issuer.invalid".into(),
@@ -2681,6 +2685,34 @@ mod tests {
             input_fingerprint_with_env_filter(&unrecorded, None, false, "none"),
             input_fingerprint_with_env_filter(&recorded, None, false, "none")
         );
+    }
+
+    /// F10: recording what the account signs in with, or changing it at a
+    /// change of login, never moves a fingerprint, with or without a
+    /// recorded witness origin beside it.
+    #[test]
+    fn the_account_identity_does_not_move_the_fingerprint() {
+        use trace_commons_protocol::account_login_change::IdentityKind;
+        let (_sd, store) = crate::config::tests_support::temp_store();
+        let witness = crate::config::WitnessSettings {
+            admission_evidence: false,
+            url: "https://witness.invalid".into(),
+            signing_address: "0xab".into(),
+            expected_measurements: vec!["mrtd=aa".into()],
+        };
+        let mut plain = sample_cfg(&store);
+        let mut with_origin = plain.clone();
+        with_origin.set_witness(witness, crate::config::WitnessOrigin::PublishedAtJoin);
+        for base in [&mut plain, &mut with_origin] {
+            let unrecorded = base.clone();
+            for kind in [IdentityKind::Wallet, IdentityKind::NearAiLogin] {
+                base.account_identity = Some(kind);
+                assert_eq!(
+                    input_fingerprint_with_env_filter(&unrecorded, None, false, "none"),
+                    input_fingerprint_with_env_filter(base, None, false, "none")
+                );
+            }
+        }
     }
 
     #[tokio::test]

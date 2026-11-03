@@ -170,6 +170,7 @@ fn fixture_config(device_key_id: &str) -> trace_commons_contributor::config::Con
         inference_receipt_endpoint: None,
         consent_scopes_chosen: Some(true),
         witness_origin: None,
+        account_identity: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
         issuer_url: "http://issuer.invalid".into(),
@@ -353,6 +354,7 @@ async fn arming_autonomy_over_the_socket_is_now_allowed() {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(true),
             witness_origin: None,
+            account_identity: None,
             inference_receipt_check_attestation: false,
             schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION
                 .into(),

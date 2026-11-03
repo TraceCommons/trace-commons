@@ -2243,3 +2243,134 @@ mod settle_tests {
         assert_eq!(stored(&fx), before);
     }
 }
+
+// ---- F10 decision 4: the recorded identity kind, not the tenant prefix ----
+
+fn wallet_tenant() -> String {
+    format!("near-{}", "ab".repeat(32))
+}
+
+/// A wallet-origin account (`near-` tenant) whose config records `kind`,
+/// with the commons answering for that tenant.
+async fn wallet_origin(
+    session: Session,
+    kind: Option<trace_commons_protocol::account_login_change::IdentityKind>,
+) -> Fixture {
+    let fx = Fixture::with_tenant(session, &wallet_tenant()).await;
+    *fx.stub.state.tenant.lock().unwrap() = wallet_tenant();
+    let mut cfg = fx.shared.store.load_config().unwrap().unwrap();
+    cfg.account_identity = kind;
+    fx.shared.store.save_config(&cfg).unwrap();
+    fx
+}
+
+#[tokio::test]
+async fn a_near_tenant_that_changed_to_a_near_ai_login_renews_by_it() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let fx = wallet_origin(Session::Expired, Some(IdentityKind::NearAiLogin)).await;
+
+    let response = fx.payout_status().await;
+
+    assert_eq!(refusal(&response), None, "payout_rails_status refused");
+    assert_eq!(fx.ceremonies(), (1, 1));
+    let loaded = crate::account_auth::try_load_session_with_snapshot(&fx.shared.store)
+        .unwrap()
+        .expect("a usable session is stored");
+    assert_eq!(loaded.session.access_token, renewed_token());
+}
+
+#[tokio::test]
+async fn a_near_tenant_with_no_recorded_kind_is_not_renewed_by_a_near_ai_login() {
+    let fx = wallet_origin(Session::Expired, None).await;
+
+    let response = fx.payout_status().await;
+
+    assert_eq!(refusal(&response), Some("account-session-required"));
+    assert_eq!(fx.ceremonies(), (0, 0), "the prefix decides, as before");
+}
+
+#[tokio::test]
+async fn a_near_tenant_that_records_a_wallet_is_not_renewed_by_a_near_ai_login() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let fx = wallet_origin(Session::Expired, Some(IdentityKind::Wallet)).await;
+
+    assert_eq!(
+        refusal(&fx.payout_status().await),
+        Some("account-session-required")
+    );
+    assert_eq!(fx.ceremonies(), (0, 0));
+    assert_eq!(
+        refusal(&sign_in_again(&fx).await),
+        Some("near_ai_sign_in_not_near_ai_account")
+    );
+}
+
+#[tokio::test]
+async fn sign_in_again_signs_in_a_near_tenant_that_changed_to_a_near_ai_login() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let fx = wallet_origin(Session::Absent, Some(IdentityKind::NearAiLogin)).await;
+    assert_eq!(fx.status().await["sign_in"], "near_ai");
+
+    let response = sign_in_again(&fx).await;
+
+    assert_eq!(refusal(&response), None);
+    assert_eq!(fx.ceremonies(), (1, 1));
+}
+
+#[tokio::test]
+async fn a_fresh_login_is_checked_for_a_near_tenant_that_changed_to_a_near_ai_login() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let changed = wallet_origin(Session::Expired, Some(IdentityKind::NearAiLogin)).await;
+    let cfg = changed.shared.store.load_config().unwrap().unwrap();
+    assert!(checks_near_ai_login(&changed.shared.store, &cfg));
+
+    let unchanged = wallet_origin(Session::Expired, None).await;
+    let cfg = unchanged.shared.store.load_config().unwrap().unwrap();
+    assert!(
+        !checks_near_ai_login(&unchanged.shared.store, &cfg),
+        "a wallet account's NEAR AI sign-in for Private AI is not checked"
+    );
+}
+
+/// A sign-in answer that says how the account signs in is recorded once
+/// the session is stored, for the enrolled tenant only (F10 section 2.5).
+#[test]
+fn the_identity_a_commons_answers_is_recorded_for_the_enrolled_tenant_only() {
+    use trace_commons_protocol::account_login_change::IdentityKind;
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let mut cfg = crate::commands::unenrolled_preview_config();
+    cfg.tenant_id = wallet_tenant();
+    store.save_config(&cfg).unwrap();
+
+    assert!(
+        !super::super::nearai_onboarding::record_account_identity(
+            &store,
+            &tenant(),
+            IdentityKind::NearAiLogin
+        )
+        .unwrap(),
+        "another tenant's answer is not this account's"
+    );
+    assert_eq!(store.load_config().unwrap().unwrap().account_identity, None);
+    assert!(
+        super::super::nearai_onboarding::record_account_identity(
+            &store,
+            &wallet_tenant(),
+            IdentityKind::NearAiLogin
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        store.load_config().unwrap().unwrap().account_identity,
+        Some(IdentityKind::NearAiLogin)
+    );
+    assert!(
+        !super::super::nearai_onboarding::record_account_identity(
+            &store,
+            &wallet_tenant(),
+            IdentityKind::NearAiLogin
+        )
+        .unwrap(),
+        "an unchanged kind writes nothing"
+    );
+}

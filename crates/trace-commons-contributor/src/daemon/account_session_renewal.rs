@@ -230,15 +230,17 @@ pub(super) fn load_account_record(
     })
 }
 
-/// Whether `cfg` is an account whose NEAR AI login the commons checks: a
-/// `nearai-` tenant, a device key the account has not revoked, and a device
+/// Whether `cfg` is an account whose NEAR AI login the commons checks: an
+/// account that signs in with a NEAR AI login (its recorded identity kind,
+/// or a `nearai-` tenant when none is recorded; F10 decision 4), a device
+/// key the account has not revoked, and a device
 /// that did not join by one-time code. [`check_fresh_login`] and the
 /// "needs attention" status (`super::account_attention`) both gate on it.
 pub(super) fn checks_near_ai_login(
     store: &crate::config::ConfigStore,
     cfg: &crate::config::ContributorConfig,
 ) -> bool {
-    super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id)
+    cfg.signs_in_with_near_ai()
         && !key_revoked_for(store, cfg)
         && !super::device_codes::joined_by_code(store)
 }
@@ -442,13 +444,22 @@ fn has_near_ai_login(shared: &DaemonShared) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether this device is enrolled in a `nearai-` tenant: the accounts
-/// [`sign_in`] can sign in.
+/// Whether this device's account signs in with a NEAR AI login (its
+/// recorded identity kind, or a `nearai-` tenant when none is recorded; F10
+/// decision 4): the accounts [`sign_in`] can sign in with NEAR AI.
 pub(crate) fn near_ai_enrolled(shared: &DaemonShared) -> bool {
     matches!(
         shared.store.load_config(),
-        Ok(Some(cfg)) if super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id)
+        Ok(Some(cfg)) if cfg.signs_in_with_near_ai()
     )
+}
+
+/// Whether [`sign_in`] and the automatic renewal may run for `cfg`: an
+/// account that signs in with a NEAR AI login, or a device that joined an
+/// account (in either namespace) by code and renews by its device key.
+fn renews(store: &crate::config::ConfigStore, cfg: &crate::config::ContributorConfig) -> bool {
+    cfg.signs_in_with_near_ai()
+        || (cfg.signs_in_with().is_some() && super::device_codes::joined_by_code(store))
 }
 
 /// The class of the last refused renewal of the stored record and NEAR AI
@@ -484,7 +495,7 @@ pub(super) async fn sign_in(
     let Ok(Some(cfg)) = store.load_config() else {
         return Err("near_ai_sign_in_not_enrolled");
     };
-    if !super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id) {
+    if !renews(store, &cfg) {
         return Err("near_ai_sign_in_not_near_ai_account");
     }
     // Revoked for good: no ceremony can sign this key in again.
@@ -497,8 +508,11 @@ pub(super) async fn sign_in(
     let Ok(Some(identity)) = DeviceIdentity::load(store) else {
         return Err("near_ai_sign_in_not_enrolled");
     };
-    let by_device_key = !has_near_ai_login(shared) && super::device_codes::joined_by_code(store);
-    if !has_near_ai_login(shared) && !by_device_key {
+    // A NEAR AI login is presented only for an account that signs in with
+    // one; a wallet-kind account's code-joined device renews by its key.
+    let near_ai_login = has_near_ai_login(shared) && cfg.signs_in_with_near_ai();
+    let by_device_key = !near_ai_login && super::device_codes::joined_by_code(store);
+    if !near_ai_login && !by_device_key {
         // Nothing to present: the shell signs in to NEAR AI first.
         return Err(FAILURE_NEAR_AI_SIGN_IN_REQUIRED);
     }
@@ -1033,7 +1047,7 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
     let Ok(Some(cfg)) = store.load_config() else {
         return false;
     };
-    if !super::nearai_onboarding::is_near_ai_tenant_id(&cfg.tenant_id) {
+    if !renews(store, &cfg) {
         return false;
     }
     // Absent: signed out, never renewed.
@@ -1053,7 +1067,8 @@ async fn renew(shared: &DaemonShared, via: &RenewVia<'_>) -> bool {
     let Ok(Some(identity)) = DeviceIdentity::load(store) else {
         return false;
     };
-    let renewed = match (has_near_ai_login(shared), via.commons(&cfg)) {
+    let near_ai_login = has_near_ai_login(shared) && cfg.signs_in_with_near_ai();
+    let renewed = match (near_ai_login, via.commons(&cfg)) {
         (true, Ok(commons)) => {
             super::nearai_onboarding::renew_account_session(
                 shared,

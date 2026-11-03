@@ -105,6 +105,11 @@ struct Finished {
     /// the enrollment failed.
     #[serde(default)]
     referral: Option<trace_commons_protocol::referral::ReferralOutcome>,
+    /// What the account signs in with, as the commons answers it (F10
+    /// decision 4). Absent from a commons older than F10 and from a
+    /// device-code sign-in, where the namespace decides as before.
+    #[serde(default)]
+    identity: Option<trace_commons_protocol::account_login_change::IdentityKind>,
 }
 
 /// Shape check for a NEAR AI tenant id: the `nearai-` namespace plus 64
@@ -1020,7 +1025,15 @@ fn validate_finished(result: &Finished, identity: &DeviceIdentity) -> Result<()>
         || !result.anchor_hash[7..]
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        || !is_near_ai_tenant_id(&result.tenant_id)
+        // A `nearai-` tenant, or a `near-` one the commons says signs in
+        // with a NEAR AI login: a wallet-origin account that changed its
+        // login keeps its tenant (F10 decision 4). Which tenant is right is
+        // the caller's check (`check_renewal` pins the enrolled one); this
+        // is shape only.
+        || !(is_near_ai_tenant_id(&result.tenant_id)
+            || (crate::config::is_near_tenant_id(&result.tenant_id)
+                && result.identity
+                    == Some(trace_commons_protocol::account_login_change::IdentityKind::NearAiLogin)))
         || result.account_id.is_empty()
         || result.account_id.len() > 256
     {
@@ -1081,7 +1094,9 @@ pub(super) async fn renew_account_session(
     // NEAR AI login to its account, and an answer for another tenant is
     // refused below.
     let account_id = previous_account_id(previous.as_ref())?;
-    if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
+    // The recorded identity kind, not the tenant prefix (F10 decision 4): a
+    // `near-` account that changed to a NEAR AI login renews by it.
+    if !cfg.signs_in_with_near_ai() || identity.device_key_id != cfg.device_key_id {
         bail!("near_ai_enroll_invalid")
     }
     let (session, login) = {
@@ -1155,6 +1170,10 @@ async fn store_renewed_session(
 pub(super) struct CheckedRenewal {
     payload: serde_json::Value,
     expected: super::commons_credentials::Snapshot,
+    /// The enrolled tenant, and what the commons said the account signs in
+    /// with, recorded once the session is stored (F10 section 2.5).
+    tenant_id: String,
+    identity: Option<trace_commons_protocol::account_login_change::IdentityKind>,
 }
 
 /// The checks [`store_renewed_session`] makes before it writes: the answer
@@ -1187,7 +1206,12 @@ fn check_renewal(
     payload["expires_at"] =
         serde_json::to_value(Utc::now() + chrono::Duration::seconds(finished.expires_in_secs))?;
     payload["account_id"] = serde_json::Value::String(account_id);
-    Ok(CheckedRenewal { payload, expected })
+    Ok(CheckedRenewal {
+        payload,
+        expected,
+        tenant_id: cfg.tenant_id.clone(),
+        identity: finished.identity,
+    })
 }
 
 /// Store a checked renewal in place of the snapshot it was checked against.
@@ -1199,11 +1223,38 @@ pub(super) async fn write_renewed_session(
     let body = serde_json::to_vec(&checked.payload)?;
     let store = store.clone();
     let expected = checked.expected;
+    let (tenant_id, identity) = (checked.tenant_id, checked.identity);
     tokio::task::spawn_blocking(move || {
-        super::commons_credentials::replace(&store, &expected, &body, None)
+        super::commons_credentials::replace(&store, &expected, &body, None)?;
+        // The session is stored: the account signs in the way the commons
+        // just answered. Best effort, and only for the tenant checked.
+        if let Some(identity) = identity {
+            let _ = record_account_identity(&store, &tenant_id, identity);
+        }
+        Ok(())
     })
     .await
     .map_err(|_| anyhow!("commons_credential_worker_unavailable"))?
+}
+
+/// Record what the enrolled account signs in with (F10 decision 4), when the
+/// config is still `tenant_id`'s and says otherwise. `true` when it wrote.
+/// The commons' answer at a sign-in or a change is the authority; nothing
+/// else writes it after enrollment. Blocking: file I/O.
+pub(crate) fn record_account_identity(
+    store: &ConfigStore,
+    tenant_id: &str,
+    identity: trace_commons_protocol::account_login_change::IdentityKind,
+) -> Result<bool> {
+    let Some(mut cfg) = store.load_config()? else {
+        return Ok(false);
+    };
+    if cfg.tenant_id != tenant_id || cfg.account_identity == Some(identity) {
+        return Ok(false);
+    }
+    cfg.account_identity = Some(identity);
+    store.save_config(&cfg)?;
+    Ok(true)
 }
 
 /// Run the NEAR AI ceremony with a sign-in's fresh access token, before
@@ -1239,6 +1290,7 @@ impl From<trace_commons_protocol::account_device_code::DeviceSignInResponse> for
             device_key_id: response.device_key_id,
             anchor_hash: response.anchor_hash,
             referral: None,
+            identity: None,
         }
     }
 }
@@ -1324,7 +1376,9 @@ pub(super) async fn renew_account_session_by_device_key(
         device_session_renew_bytes,
     };
     let account_id = previous_account_id(previous.as_ref())?;
-    if !is_near_ai_tenant_id(&cfg.tenant_id) || identity.device_key_id != cfg.device_key_id {
+    // Any account namespace: a device that joined by code renews by its own
+    // key whatever the account signs in with (F10 decision 4).
+    if cfg.signs_in_with().is_none() || identity.device_key_id != cfg.device_key_id {
         bail!("near_ai_enroll_invalid")
     }
     let device: [u8; 32] = base64::engine::general_purpose::STANDARD
@@ -1429,7 +1483,12 @@ fn persist(
         inference_receipt_endpoint: commons.receipt_endpoint,
         consent_scopes_chosen: Some(false),
         inference_receipt_check_attestation: true,
+        account_identity: result.identity,
     };
+    // A commons older than F10, or a device-code sign-in, answers no kind:
+    // the namespace decides, recorded once.
+    let mut config = config;
+    config.record_identity_from_namespace();
 
     let session = crate::account_auth::AccountSession {
         access_token: result.access_token,
@@ -1703,6 +1762,7 @@ mod tests {
             device_key_id: String::new(),
             anchor_hash: format!("sha256:{}", "ab".repeat(32)),
             referral: None,
+            identity: None,
         }
     }
 
@@ -1818,6 +1878,28 @@ mod tests {
         // And the unmutated fixture is accepted, so the cases above fail for
         // their own reason rather than because the fixture never worked.
         assert!(persist(&shared.store, commons(), &identity, good(), None).is_ok());
+    }
+
+    /// F10 decision 4: a `near-` tenant is a NEAR AI sign-in's answer only
+    /// when the commons says the account signs in with a NEAR AI login (a
+    /// wallet-origin account that changed its login), and the kind is
+    /// recorded with the enrollment.
+    #[test]
+    fn a_near_tenant_answer_is_accepted_only_when_it_signs_in_with_a_near_ai_login() {
+        use trace_commons_protocol::account_login_change::IdentityKind;
+        let near = format!("near-{}", "ab".repeat(32));
+        let (_dir, store) = crate::config::tests_support::temp_store();
+        let identity = DeviceIdentity::load_or_generate(&store).unwrap();
+        let with = |kind: Option<IdentityKind>| {
+            let mut result = finished();
+            result.device_key_id = identity.device_key_id.clone();
+            result.tenant_id = near.clone();
+            result.identity = kind;
+            result
+        };
+        assert!(validate_finished(&with(None), &identity).is_err());
+        assert!(validate_finished(&with(Some(IdentityKind::Wallet)), &identity).is_err());
+        assert!(validate_finished(&with(Some(IdentityKind::NearAiLogin)), &identity).is_ok());
     }
 
     #[test]

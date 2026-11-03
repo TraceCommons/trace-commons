@@ -275,6 +275,19 @@ pub struct ContributorConfig {
     /// as it did before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub witness_origin: Option<WitnessOriginRecord>,
+    /// What this account signs in with: a NEAR wallet or a NEAR AI login
+    /// (F10 decision 4). Read through [`Self::signs_in_with`], never alone.
+    ///
+    /// The tenant namespace used to decide this, and it stops being able to
+    /// when a wallet-origin account (`near-` tenant) changes to a NEAR AI
+    /// login and keeps its tenant. Written from the commons' answer at
+    /// enrollment and at a change. Absent on every config written before it
+    /// existed, which then falls back to the namespace -- right for every
+    /// account that has not changed. Not an input to an envelope
+    /// (`NON_ENVELOPE_CONFIG_FIELDS`), and skipped when absent so an older
+    /// config serializes as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_identity: Option<trace_commons_protocol::account_login_change::IdentityKind>,
 }
 
 /// How a witness came to be configured on this device.
@@ -400,6 +413,52 @@ pub fn consent_hold(cfg: Option<&ContributorConfig>) -> Option<&'static str> {
 }
 
 impl ContributorConfig {
+    /// What this account signs in with (F10 decision 4): the recorded kind
+    /// when the tenant is in one of the two account namespaces, otherwise
+    /// what the namespace says. `None` outside both namespaces (an invite or
+    /// pooled tenant), whatever is recorded: the namespace still decides
+    /// what a tenant id may be, only not how it signs in.
+    #[must_use]
+    pub fn signs_in_with(
+        &self,
+    ) -> Option<trace_commons_protocol::account_login_change::IdentityKind> {
+        use trace_commons_protocol::account_login_change::IdentityKind;
+        let near_ai = crate::daemon::nearai_onboarding::is_near_ai_tenant_id(&self.tenant_id);
+        let wallet = is_near_tenant_id(&self.tenant_id);
+        if !near_ai && !wallet {
+            return None;
+        }
+        Some(self.account_identity.unwrap_or(if near_ai {
+            IdentityKind::NearAiLogin
+        } else {
+            IdentityKind::Wallet
+        }))
+    }
+
+    /// Whether this account signs in, and renews, with a NEAR AI login
+    /// ([`Self::signs_in_with`]).
+    #[must_use]
+    pub fn signs_in_with_near_ai(&self) -> bool {
+        self.signs_in_with()
+            == Some(trace_commons_protocol::account_login_change::IdentityKind::NearAiLogin)
+    }
+
+    /// Record the kind once on a config written before the field existed,
+    /// from the namespace. `true` when it changed the config (the caller
+    /// saves it). A recorded kind is never overwritten here.
+    pub fn record_identity_from_namespace(&mut self) -> bool {
+        if self.account_identity.is_some() {
+            return false;
+        }
+        match self.signs_in_with() {
+            Some(kind) => {
+                self.account_identity = Some(kind);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Configure `witness`, recording how it arrived.
     pub fn set_witness(&mut self, witness: WitnessSettings, origin: WitnessOrigin) {
         self.witness_origin = Some(WitnessOriginRecord::for_witness(&witness, origin));
@@ -2087,6 +2146,7 @@ mod tests {
             inference_receipt_endpoint: None,
             consent_scopes_chosen: Some(false),
             witness_origin: None,
+            account_identity: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
             issuer_url: "https://issuer.example".into(),
@@ -2127,6 +2187,70 @@ mod tests {
 
     /// A config written before this field existed reads as off. The
     /// check must never switch itself on for an existing install.
+    fn identity_cfg(tenant: &str, recorded: Option<&str>) -> ContributorConfig {
+        let mut value = serde_json::json!({
+            "schema_version": "1", "issuer_url": "https://i", "ingest_url": "https://g",
+            "audience": "a", "tenant_id": tenant, "instance_id": "i", "user_subject": "s",
+            "device_key_id": "d", "consent_scopes": []
+        });
+        if let Some(recorded) = recorded {
+            value["account_identity"] = recorded.into();
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// F10 decision 4: the recorded identity kind decides how an account in
+    /// either namespace signs in; with none recorded, the namespace decides
+    /// as it did; outside both namespaces nothing does.
+    #[test]
+    fn the_recorded_identity_kind_decides_how_an_account_signs_in() {
+        use trace_commons_protocol::account_login_change::IdentityKind::{NearAiLogin, Wallet};
+        let near = format!("near-{}", "ab".repeat(32));
+        let near_ai = format!("nearai-{}", "ab".repeat(32));
+        let cases = [
+            (near.as_str(), None, Some(Wallet)),
+            (near.as_str(), Some("wallet"), Some(Wallet)),
+            (near.as_str(), Some("near_ai_login"), Some(NearAiLogin)),
+            (near_ai.as_str(), None, Some(NearAiLogin)),
+            (near_ai.as_str(), Some("near_ai_login"), Some(NearAiLogin)),
+            ("tenant-abc", None, None),
+            ("tenant-abc", Some("near_ai_login"), None),
+            ("near-short", Some("near_ai_login"), None),
+        ];
+        for (tenant, recorded, expected) in cases {
+            let cfg = identity_cfg(tenant, recorded);
+            assert_eq!(cfg.signs_in_with(), expected, "{tenant} {recorded:?}");
+            assert_eq!(
+                cfg.signs_in_with_near_ai(),
+                expected == Some(NearAiLogin),
+                "{tenant} {recorded:?}"
+            );
+        }
+    }
+
+    /// The one-off migration records the namespace's answer on a config
+    /// that has none, never overwrites a recorded kind, and leaves a tenant
+    /// outside both namespaces alone. An absent kind is not written out.
+    #[test]
+    fn the_identity_kind_is_recorded_once_from_the_namespace() {
+        use trace_commons_protocol::account_login_change::IdentityKind::{NearAiLogin, Wallet};
+        let near = format!("near-{}", "ab".repeat(32));
+        let mut unrecorded = identity_cfg(&near, None);
+        let json = serde_json::to_value(&unrecorded).unwrap();
+        assert!(json.get("account_identity").is_none(), "absent stays absent");
+        assert!(unrecorded.record_identity_from_namespace());
+        assert_eq!(unrecorded.account_identity, Some(Wallet));
+        assert!(!unrecorded.record_identity_from_namespace(), "once");
+
+        let mut changed = identity_cfg(&near, Some("near_ai_login"));
+        assert!(!changed.record_identity_from_namespace());
+        assert_eq!(changed.account_identity, Some(NearAiLogin));
+
+        let mut invite = identity_cfg("tenant-abc", None);
+        assert!(!invite.record_identity_from_namespace());
+        assert_eq!(invite.account_identity, None);
+    }
+
     #[test]
     fn the_attestation_check_is_off_for_a_config_that_predates_it() {
         let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":[]}"#;
