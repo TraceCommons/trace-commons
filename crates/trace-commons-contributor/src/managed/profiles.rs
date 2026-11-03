@@ -294,8 +294,8 @@ pub(crate) fn bounded_output_limit(
 
 /// [`bounded_output`] with `input` written to the program's stdin, which is
 /// then closed: how a request reaches a CLI without appearing in its argv
-/// (Rex's `api call -`).
-#[cfg(any(target_os = "macos", test))]
+/// (Rex's `api call -`). Its one test runs on unix.
+#[cfg(any(target_os = "macos", all(test, unix)))]
 pub(crate) fn bounded_output_with_input(
     command: Command,
     input: &[u8],
