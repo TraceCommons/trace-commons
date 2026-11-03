@@ -45,11 +45,28 @@ DO $$ BEGIN
 END $$;
 GRANT USAGE ON SCHEMA public TO trace_legacy_payout_carry_guard;
 
+-- The three hashes V146 matches across tenants, each in one place
+-- (#1874). They mirror the Rust `db::payout_link_id_hash`,
+-- `db::payout_account_id_hash` and `db::payout_legacy_link_hash`;
+-- `legacy_payout_carry_pg` asserts the SQL and Rust spellings agree.
+CREATE FUNCTION public.trace_payout_link_hash(p_link_id UUID) RETURNS TEXT
+LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog AS $$
+    SELECT 'sha256:' || encode(sha256(convert_to('payout-link-v1:' || p_link_id::TEXT, 'UTF8')), 'hex')
+$$;
+CREATE FUNCTION public.trace_payout_account_hash(p_account_id UUID) RETURNS TEXT
+LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog AS $$
+    SELECT 'sha256:' || encode(sha256(convert_to('payout-account-v1:' || p_account_id::TEXT, 'UTF8')), 'hex')
+$$;
+CREATE FUNCTION public.trace_legacy_link_hash(p_link_id UUID) RETURNS TEXT
+LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog AS $$
+    SELECT 'sha256:' || encode(sha256(convert_to('legacy-invite-link-v1:' || p_link_id::TEXT, 'UTF8')), 'hex')
+$$;
+
 -- 1. Carries. The row lives in the legacy tenant beside the link it names.
 -- The source link and the tenant link live in the NEAR AI account's tenant,
--- so they are named by hash only: `source_link_hash` is the payout audit's
--- link hash (sha256 of 'payout-link-v1:<link_id>'), `legacy_link_hash` is
--- sha256 of 'legacy-invite-link-v1:<link_id>'.
+-- so they are named by hash only: `source_link_hash` is
+-- `trace_payout_link_hash` (the payout audit's link hash), and
+-- `legacy_link_hash` is `trace_legacy_link_hash`.
 CREATE TABLE trace_legacy_payout_carries (
     tenant_id TEXT NOT NULL REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE,
     account_id UUID NOT NULL,
@@ -166,8 +183,8 @@ BEGIN
             (tenant_id, audit_id, rail_id, action, actor_ref_hash, account_id_hash,
              link_id_hash, prior_state, new_state, label)
         VALUES (v_tenant, gen_random_uuid(), v_link.rail_id, 'link_closed', p_actor_ref_hash,
-                'sha256:' || encode(sha256(convert_to('payout-account-v1:' || v_link.account_id::TEXT, 'UTF8')), 'hex'),
-                'sha256:' || encode(sha256(convert_to('payout-link-v1:' || p_link_id::TEXT, 'UTF8')), 'hex'),
+                public.trace_payout_account_hash(v_link.account_id),
+                public.trace_payout_link_hash(p_link_id),
                 'waiting', 'closed', p_label);
     ELSIF v_link.state = 'active' AND v_link.unlink_requested_at IS NULL THEN
         UPDATE public.trace_payout_links
@@ -179,8 +196,8 @@ BEGIN
             (tenant_id, audit_id, rail_id, action, actor_ref_hash, account_id_hash,
              link_id_hash, prior_state, new_state, label)
         VALUES (v_tenant, gen_random_uuid(), v_link.rail_id, 'unlink_requested', p_actor_ref_hash,
-                'sha256:' || encode(sha256(convert_to('payout-account-v1:' || v_link.account_id::TEXT, 'UTF8')), 'hex'),
-                'sha256:' || encode(sha256(convert_to('payout-link-v1:' || p_link_id::TEXT, 'UTF8')), 'hex'),
+                public.trace_payout_account_hash(v_link.account_id),
+                public.trace_payout_link_hash(p_link_id),
                 'active', 'active', p_label);
     END IF;
     RETURN v_outcome;
@@ -353,7 +370,7 @@ BEGIN
     IF v_linked > 0 THEN
         INSERT INTO public.trace_account_audit (tenant_id, action, actor_ref, outcome, safe_metadata)
         VALUES (p_legacy_tenant, 'legacy_link_principals_claimed',
-                'sha256:' || encode(sha256(convert_to('payout-account-v1:' || v_account::TEXT, 'UTF8')), 'hex'),
+                public.trace_payout_account_hash(v_account),
                 'success',
                 jsonb_build_object('principals', v_linked, 'device_key_id', p_device_key_id));
     END IF;
@@ -386,8 +403,7 @@ BEGIN
     -- committed first is seen below, and one that waits re-reads
     -- `revoked_at` and carries nothing.
     PERFORM pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || NEW.legacy_tenant_id, 0));
-    v_hash := 'sha256:' || encode(sha256(convert_to(
-        'legacy-invite-link-v1:' || NEW.link_id::TEXT, 'UTF8')), 'hex');
+    v_hash := public.trace_legacy_link_hash(NEW.link_id);
     PERFORM set_config('trace_commons.trace_tenant_id', NEW.legacy_tenant_id, true);
     FOR v_link IN
         SELECT c.link_id FROM public.trace_legacy_payout_carries c
@@ -473,8 +489,7 @@ BEGIN
         SELECT l.tenant_id, l.account_id INTO v_link
           FROM public.trace_legacy_invite_links l
          WHERE l.legacy_tenant_id = p_tenant AND l.revoked_at IS NULL
-           AND 'sha256:' || encode(sha256(convert_to(
-                   'legacy-invite-link-v1:' || l.link_id::TEXT, 'UTF8')), 'hex') = v_carry.legacy_link_hash;
+           AND public.trace_legacy_link_hash(l.link_id) = v_carry.legacy_link_hash;
         IF NOT FOUND THEN
             RETURN TRUE;
         END IF;
@@ -512,8 +527,7 @@ BEGIN
                  WHERE s.tenant_id = v_link.tenant_id AND s.account_id = v_link.account_id
                    AND s.rail_id = v_carry.rail_id
                    AND s.state IN ('waiting', 'active') AND s.unlink_requested_at IS NULL
-                   AND 'sha256:' || encode(sha256(convert_to(
-                           'payout-link-v1:' || s.link_id::TEXT, 'UTF8')), 'hex') = v_carry.source_link_hash);
+                   AND public.trace_payout_link_hash(s.link_id) = v_carry.source_link_hash);
         PERFORM set_config('trace_commons.trace_tenant_id', p_tenant, true);
         IF v_invalid THEN
             RETURN TRUE;
@@ -671,7 +685,7 @@ BEGIN
            SET last_seen_at = clock_timestamp(), attempts = c.attempts + 1;
         INSERT INTO public.trace_account_audit (tenant_id, action, actor_ref, outcome, safe_metadata)
         VALUES (p_account_tenant, 'legacy_instance_link_refused',
-                'sha256:' || encode(sha256(convert_to('payout-account-v1:' || p_account::TEXT, 'UTF8')), 'hex'),
+                public.trace_payout_account_hash(p_account),
                 'tenant_claimed',
                 jsonb_build_object(
                     'legacy_tenant_hash',
@@ -692,7 +706,7 @@ BEGIN
 
     INSERT INTO public.trace_account_audit (tenant_id, action, actor_ref, outcome, safe_metadata)
     VALUES (p_account_tenant, 'legacy_instance_linked',
-            'sha256:' || encode(sha256(convert_to('payout-account-v1:' || p_account::TEXT, 'UTF8')), 'hex'),
+            public.trace_payout_account_hash(p_account),
             'success',
             jsonb_build_object(
                 'legacy_tenant_hash',
