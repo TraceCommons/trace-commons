@@ -82,12 +82,38 @@ final class InsightsGetStartedRenderTests: XCTestCase {
         let copy = try XCTUnwrap(TCInsights.copy())
         for key in ["analytics_start_title", "analytics_start_why", "analytics_start_step_use",
                     "analytics_start_step_use_detail", "analytics_start_step_share",
-                    "analytics_start_step_share_detail", "analytics_start_choose",
-                    "analytics_start_step_fill", "analytics_start_step_fill_detail",
+                    "analytics_start_step_share_detail", "analytics_start_step_share_info",
+                    "analytics_start_choose", "analytics_start_step_fill",
+                    "analytics_start_step_fill_detail", "analytics_start_step_fill_info",
                     "analytics_sample_banner", "analytics_sample_banner_detail"] {
             XCTAssertFalse((copy[key] ?? "").isEmpty, key)
         }
-        XCTAssertTrue(copy["analytics_sample_banner"]?.contains("not yours") == true)
+        XCTAssertTrue(copy["analytics_sample_banner"]?.contains("sample data") == true)
+    }
+
+    /// The owner's 2026-11-02 pass: no icon beside the title, each step one
+    /// short line with its longer explanation behind an "i", the link named
+    /// for what it opens, and a sample card with a test tube and no border.
+    func testTheCardKeepsItsStepsShortAndTheSampleCardPlain() throws {
+        let copy = try XCTUnwrap(TCInsights.copy())
+        for key in ["analytics_start_step_use_detail", "analytics_start_step_share_detail",
+                    "analytics_start_step_fill_detail"] {
+            let line = try XCTUnwrap(copy[key])
+            XCTAssertEqual(line.filter { $0 == "." }.count, 1, "\(key) is one sentence: \(line)")
+        }
+        XCTAssertEqual(copy["analytics_start_choose"], "Open Traces")
+        for key in ["analytics_start_title", "analytics_start_why", "analytics_sample_banner",
+                    "analytics_sample_banner_detail"] {
+            XCTAssertFalse(copy[key]?.contains("\u{2014}") ?? true, "\(key) has no em dash")
+        }
+        let view = try InsightsGlassConventionsTests.text("Views/InsightsGetStarted.swift")
+        XCTAssertFalse(view.contains("chart.bar.xaxis"), "no icon beside the title")
+        XCTAssertTrue(view.contains("info: text(\"analytics_start_step_share_info\")"))
+        XCTAssertTrue(view.contains("info: text(\"analytics_start_step_fill_info\")"))
+        XCTAssertTrue(view.contains("InsightsTextWithInfo(detail,"))
+        XCTAssertTrue(view.contains("Image(systemName: \"testtube.2\")"))
+        XCTAssertFalse(view.contains("dash:"), "the sample card has no dashed border")
+        XCTAssertFalse(view.contains(".strokeBorder("), "the sample card has no border")
     }
 
     /// By project draws a tool's column only while some folder has a trace

@@ -933,45 +933,58 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_bench_compare_later",
         "Best-model picks appear once a second model has {n} traces here.",
     ),
-    // 26. Approved by the product owner in these words (2026-10-29): the
-    // get-started card and the sample data under it, on Overview, Breakdown
-    // and Benchmarks while Insights has no trace of the person's own. The
-    // steps name the app's own screens: Traces' folder list and its rules
-    // (Ask / Automatic, `project_copy`); the one action, "Choose what to
-    // share", is a text link with an arrow to that list. "Sessions" in the
-    // steps is the owner's word for what Claude Code and Codex record on
-    // this Mac. "30 minutes" is the daemon's default quiet time before a
-    // finished trace is sent.
-    (
-        "analytics_start_title",
-        "Your Insights grow with your traces",
-    ),
+    // 26. The get-started card and the sample data under it, on Overview,
+    // Breakdown and Benchmarks while Insights has no trace of the person's
+    // own. First approved by the product owner on 2026-10-29; reworded on
+    // 2026-11-02 at the owner's request ("humanize" it, keep each step to a
+    // short line, and move the extra explanation into an "i"). DRAFT, NEEDS
+    // APPROVAL. The steps name the app's own screens: Traces' folder list
+    // and its rules (Ask / Automatic, `project_copy`); the one action is a
+    // text link with an arrow to that list, named for what the click does.
+    // "Sessions" in step 1 is the owner's word for what Claude Code and
+    // Codex record on this Mac. "30 minutes" is the daemon's default quiet
+    // time before a finished trace is sent. The `_info` lines are the "i"
+    // after a step's line.
+    ("analytics_start_title", "Your Insights will appear here"),
     (
         "analytics_start_why",
-        "Keep using AI as you normally do. As your traces come in, you'll see how much you spend, which models you use most, and which work best for your tasks.",
+        "Once your traces come in, you'll see what you spend and which models work best for each task.",
     ),
-    ("analytics_start_step_use", "Keep using Claude or Codex"),
+    (
+        "analytics_start_step_use",
+        "Use Claude Code or Codex as usual",
+    ),
     (
         "analytics_start_step_use_detail",
-        "Trace Commons automatically detects sessions from Claude Code and Codex on your Mac.",
+        "Trace Commons picks up their sessions on this Mac.",
     ),
     ("analytics_start_step_share", "Choose what to share"),
     (
         "analytics_start_step_share_detail",
-        "Go to Traces to select a folder. Choose Automatic to share eligible traces without reviewing each one, or Ask to approve them first.",
+        "In Traces, set each folder to Automatic or Ask.",
     ),
-    ("analytics_start_choose", "Choose what to share"),
-    ("analytics_start_step_fill", "See your Insights take shape"),
+    (
+        "analytics_start_step_share_info",
+        "Automatic shares eligible traces without asking. Ask waits for you to approve each one.",
+    ),
+    ("analytics_start_choose", "Open Traces"),
+    ("analytics_start_step_fill", "Check back soon"),
     (
         "analytics_start_step_fill_detail",
-        "As traces are collected, your Insights update automatically. In Automatic mode, completed sessions are shared after about 30 minutes of inactivity.",
+        "Insights update on their own as you work.",
+    ),
+    (
+        "analytics_start_step_fill_info",
+        "With Automatic, a finished trace is shared after about 30 minutes of inactivity.",
     ),
     // The API-price note when only one tool was used this week.
     ("analytics_tile_api_prices_claude", "Claude at API prices"),
     ("analytics_tile_api_prices_codex", "Codex at API prices"),
-    ("analytics_sample_banner", "Sample data — not yours"),
+    // The sample data card, reworded 2026-11-02 with the card above it.
+    // DRAFT, NEEDS APPROVAL.
+    ("analytics_sample_banner", "This is sample data"),
     (
         "analytics_sample_banner_detail",
-        "This is what Insights shows once your traces come in.",
+        "Your own numbers will replace it as your traces come in.",
     ),
 ];
