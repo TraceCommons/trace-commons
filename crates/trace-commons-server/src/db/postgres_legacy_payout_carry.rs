@@ -250,13 +250,17 @@ async fn carry_tenant(
         {
             continue;
         }
-        // A link of the account's own (decision 6): never replaced.
+        // A link of the account's own (decision 6): never replaced. One
+        // already ending is not kept: an active link with an unlink request
+        // (V147 revokes a legacy account's own links that way) or a closing
+        // one. The carry then lands as its waiting successor.
         let own: bool = tx
             .query_one(
                 "SELECT EXISTS (
                      SELECT 1 FROM trace_payout_links l
                       WHERE l.tenant_id = $1 AND l.account_id = $2 AND l.rail_id = $3
-                        AND l.state IN ('waiting', 'active', 'closing')
+                        AND (l.state = 'waiting'
+                             OR (l.state = 'active' AND l.unlink_requested_at IS NULL))
                         AND NOT EXISTS (SELECT 1 FROM trace_legacy_payout_carries c
                                          WHERE c.tenant_id = l.tenant_id
                                            AND c.link_id = l.link_id))",

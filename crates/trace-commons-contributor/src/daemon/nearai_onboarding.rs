@@ -856,20 +856,22 @@ pub const ENROLL_DEVICE_KEY_REVOKED: &str = "near_ai_enroll_device_key_revoked";
 /// Whether a finish was not answered: no response, a status
 /// [`commons_busy`] counts as busy (the commons' own `503
 /// near_ai_sign_in_unavailable` and `429 near_ai_sign_in_rate_limited`
-/// among them), a body past the client's cap, or a success whose body does
-/// not parse. The commons' refusals are small JSON bodies, so an oversized
+/// among them), a body past the client's cap, or a success whose body was
+/// cut short. The commons' refusals are small JSON bodies, so an oversized
 /// one is an error page in front of it (a proxy's `502`/`503`/`504`), which
-/// carries no status this error keeps. A `MalformedResponse` follows only a
-/// `2xx`, so the commons answered success and this device may already have
-/// joined; signing in again works (provisioning is idempotent for one
-/// device), which the try-later label leads to and the verification-failed
-/// one would not.
+/// carries no status this error keeps.
+///
+/// A `MalformedResponse` follows only a `2xx`. When the body ended early
+/// (empty, or truncated: `is_eof`), the answer was lost in transit and
+/// starting again works. When it is complete JSON of another shape, that is a
+/// commons on another version: deterministic, so "try later" would loop,
+/// and each pass would write a session this client never holds. That case
+/// keeps the caller's fallback label.
 fn finish_unanswered(error: &trace_commons_operator_client::Error) -> bool {
     use trace_commons_operator_client::Error;
     match error {
-        Error::Transport { .. }
-        | Error::ResponseTooLarge { .. }
-        | Error::MalformedResponse { .. } => true,
+        Error::Transport { .. } | Error::ResponseTooLarge { .. } => true,
+        Error::MalformedResponse { source, .. } => source.is_eof(),
         Error::HttpFailure { status, .. } | Error::ServerLabel { status, .. } => {
             commons_busy(*status)
         }
@@ -1929,7 +1931,8 @@ mod tests {
                 );
             }
         }
-        // A success whose body does not parse: the commons answered `2xx`.
+        // A success whose body was cut short (here, empty): the answer was
+        // lost in transit.
         assert_eq!(
             finish_refusal(
                 &trace_commons_operator_client::Error::MalformedResponse {
@@ -1943,6 +1946,23 @@ mod tests {
             )
             .to_string(),
             "near_ai_enroll_unavailable"
+        );
+        // A complete success body of another shape: a commons on another
+        // version, deterministic, so not "try later".
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::MalformedResponse {
+                    url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+                    body: "{\"renamed\":true}".into(),
+                    source: serde_json::from_str::<Finished>("{\"renamed\":true}")
+                        .err()
+                        .expect("a body of another shape does not parse"),
+                },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_verification_failed"
         );
         // An error page too large to be the commons' own refusal.
         assert_eq!(

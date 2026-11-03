@@ -594,11 +594,14 @@ async fn start(
     body: Result<Json<StartRequest>, JsonRejection>,
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if let Err(control) = ready_or_declined(&state, contract, true) {
-        return not_ready_answer(control, CeremonyHalf::Start);
-    }
+    // The rate limit first: whatever the readiness answer, a flood from one
+    // address (or everywhere) is capped, so an unready or not-offered route
+    // cannot be driven to an unbounded run of `503`s.
     if limited(&headers, "start") {
         return Some(near_ai_sign_in_rate_limited());
+    }
+    if let Err(control) = ready_or_declined(&state, contract, true) {
+        return not_ready_answer(control, CeremonyHalf::Start);
     }
     let Json(body) = body.ok()?;
     if body.code_challenge_method != "S256" || !challenge_is_wellformed(&body.code_challenge) {
@@ -681,11 +684,11 @@ async fn finish(
     body: Result<Json<FinishRequest>, JsonRejection>,
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if let Err(control) = ready_or_declined(&state, contract, true) {
-        return not_ready_answer(control, CeremonyHalf::Finish);
-    }
     if limited(&headers, "finish") {
         return Some(near_ai_sign_in_rate_limited());
+    }
+    if let Err(control) = ready_or_declined(&state, contract, true) {
+        return not_ready_answer(control, CeremonyHalf::Finish);
     }
     let Json(body) = body.ok()?;
     if body.ceremony_id.len() > 64
@@ -1361,11 +1364,11 @@ async fn near_ai_start(
     // The login path's own readiness, not the wallet's: `published_witness`
     // refuses without the NEP-413 sign-in config and the wallet redirect
     // origin, neither of which this ceremony has or needs.
-    if let Err(control) = ready_or_declined(&state, contract, false) {
-        return not_ready_answer(control, CeremonyHalf::Start);
-    }
     if limited(&headers, "near-ai-start") {
         return Some(near_ai_sign_in_rate_limited());
+    }
+    if let Err(control) = ready_or_declined(&state, contract, false) {
+        return not_ready_answer(control, CeremonyHalf::Start);
     }
     let Json(body) = body.ok()?;
     let draw = NearAiCeremonyDraw::draw(body)?;
@@ -1609,11 +1612,11 @@ async fn near_ai_finish(
     body: Result<Json<NearAiFinishRequest>, JsonRejection>,
     contract: ProvisionContract,
 ) -> Option<axum::response::Response> {
-    if let Err(control) = ready_or_declined(&state, contract, false) {
-        return not_ready_answer(control, CeremonyHalf::Finish);
-    }
     if limited(&headers, "near-ai-finish") {
         return Some(near_ai_sign_in_rate_limited());
+    }
+    if let Err(control) = ready_or_declined(&state, contract, false) {
+        return not_ready_answer(control, CeremonyHalf::Finish);
     }
     let Json(body) = body.ok()?;
     // Its per-ceremony attempt cap stays the uniform deny: an honest client
