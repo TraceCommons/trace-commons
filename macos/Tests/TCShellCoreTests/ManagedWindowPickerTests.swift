@@ -37,7 +37,22 @@ final class ManagedWindowPickerTests: XCTestCase {
         XCTAssertEqual(options, [ManagedWindowOption(beside: "b", title: "Claude Code · web")])
     }
 
-    func testNewWindowIsTheDefaultAndOnlyAnOfferedWindowIsSent() {
+    /// Owner, 2026-11-03: new sessions open as tabs in the window already
+    /// in use; "New window" only when there is none.
+    func testTheNewestWindowIsTheDefault() {
+        let options = [ManagedWindowOption(beside: "b", title: "Codex · web"),
+                       ManagedWindowOption(beside: "c", title: "Claude Code · docs")]
+        XCTAssertEqual(ManagedSurface.launchDefault(options: options), "b")
+        XCTAssertNil(ManagedSurface.launchDefault(options: []), "New window")
+    }
+
+    func testStartAgainAndResumeOpenBesideTheNewestSession() {
+        XCTAssertTrue(ManagedSurface.opensBesideNewest("managed_session_start_again"))
+        XCTAssertTrue(ManagedSurface.opensBesideNewest("managed_session_resume"))
+        XCTAssertFalse(ManagedSurface.opensBesideNewest("managed_launch_prepare"), "the dialog sends its own pick")
+    }
+
+    func testOnlyAnOfferedWindowIsSent() {
         let options = [ManagedWindowOption(beside: "b", title: "Claude Code · web")]
         XCTAssertNil(ManagedSurface.launchBeside(nil, options: options), "New window")
         XCTAssertEqual(ManagedSurface.launchBeside("b", options: options), "b")

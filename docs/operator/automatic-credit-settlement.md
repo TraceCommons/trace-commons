@@ -10,24 +10,25 @@ outbox or `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`.
 Do not turn the `near_ai` payout rail to `live` for production until this
 is done:
 
-- **Legacy and pilot accounts need an anchor a payout proof can match.**
-  Since #1841, a payout link is proved only against the account's own NEAR
-  AI login: a `near_ai_login` anchor, or, for a wallet-origin `near-`
-  account, its wallet anchor through the NEAR AI wallet sign-in.
-  Principal-linked legacy and pilot accounts (tenants outside `near-` and
-  `nearai-`) have neither, so they can link nothing. Migrating the
-  non-pooled ones is fix F11 in
-  [the one-connected-account spec](../superpowers/specs/2026-11-02-one-connected-account-design.md),
-  which names the two candidate designs. Pooled Devfolio tenants
-  (`trace_legacy_invite_pooled_tenants`) are excluded from payouts by
-  design; they need no migration.
-- **The migration exists (V146) but must be rolled out first.** Legacy
-  credit is paid through a payout link carried from the holder's NEAR AI
-  account to the legacy accounts its tenant link covers; see
-  [the legacy account payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
-  section 8, for the pilot queries and rollout order, and
-  [legacy-invite-migration.md](./legacy-invite-migration.md) for the
-  tenant link it rides on.
+- **Accounts need a recorded NEAR AI login.** A payout link is proved
+  only against one of the account's recorded NEAR AI login anchors
+  (`near_ai_login`), on staging and production alike (owner, 2026-11-02:
+  "It should just be NEAR AI login on both staging and production"). A
+  NEAR wallet anchor proves nothing. So:
+  - **Wallet-origin accounts** (`near-` tenants) link only once they have
+    recorded a NEAR AI login, which the change-account flow does (F10 in
+    [the one-connected-account spec](../superpowers/specs/2026-11-02-one-connected-account-design.md)).
+    Until then they are refused.
+  - **Principal-linked legacy and pilot accounts** (tenants outside
+    `near-` and `nearai-`) have no NEAR AI login anchor either. They are
+    paid through a payout link carried from the holder's NEAR AI account
+    to the legacy accounts its tenant link covers (fix F11, V146); see
+    [the legacy account payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
+    section 8, for the pilot queries and rollout order, and
+    [legacy-invite-migration.md](./legacy-invite-migration.md) for the
+    tenant link it rides on. Roll it out before going live.
+  - **Pooled Devfolio tenants** (`trace_legacy_invite_pooled_tenants`) are
+    excluded from payouts by design; they need no migration.
 
 ## Scheduling
 

@@ -9,11 +9,11 @@
 //!   or an unlink. Local refusals come first (session kind, rail, body,
 //!   account standing, the "changed since shown" version); only then does a
 //!   `link` go to the rail's recipient-proof verifier. That refuses an
-//!   account with no NEAR AI login anchor and no wallet anchor before the
-//!   token is spent, and otherwise spends it (`/users/me`, then a
-//!   zero-target probe): the login must be one of the account's NEAR AI
-//!   login anchors, or a NEAR AI wallet sign-in whose wallet is one of its
-//!   wallet anchors. The verified org is
+//!   account with no recorded NEAR AI login anchor before the token is
+//!   spent, and otherwise spends it (`/users/me`, then a zero-target probe):
+//!   the login must be one of the account's recorded NEAR AI login anchors,
+//!   on every deployment. A NEAR wallet anchor proves nothing. The verified
+//!   org is
 //!   sealed and stored on a request that changes nothing yet, with a 5
 //!   minute expiry and a handle.
 //! - `POST /v1/account/payout-rails/{rail_id}/link-requests/{handle}/confirm`
@@ -331,10 +331,10 @@ pub(super) async fn start_handler(
                     organization_id, ..
                 } => *organization_id,
             };
-            // What the proving login must match: a NEAR AI login anchor, or
-            // for a NEAR AI wallet sign-in the account's wallet anchor.
+            // What the proving login must match: one of the account's
+            // recorded NEAR AI login anchors, and nothing else.
             let anchors = store
-                .payout_account_anchors(tenant, account)
+                .payout_account_login_anchors(tenant, account)
                 .await
                 .map_err(store_failed)?;
             // The token becomes a secret here and is dropped inside verify.
@@ -344,15 +344,6 @@ pub(super) async fn start_handler(
                 rail.clone(),
                 identity.clone(),
                 NEAR_AI_USERS_ME_TIMEOUT,
-            )
-            // Wallet anchors are keyed under this deployment's NEAR network;
-            // the verifier matches them only when that is the network NEAR
-            // AI verifies wallet sign-ins on.
-            .with_wallet_network(
-                state
-                    .account_near_config
-                    .as_ref()
-                    .map(|config| config.network.as_str()),
             );
             let verified = match verifier.verify(proof, &anchors).await {
                 Ok(verified) => verified,

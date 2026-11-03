@@ -39,12 +39,17 @@ A session the app opened in Terminal can be shown (its tab brought to the
 front) and stopped from its row; a CLI launch cannot, because the app neither
 opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
-Start again and Resume open a new window. The launch dialog, in Terminal on
+Start again and Resume open as a new tab beside the newest running session the
+app opened, or in a new window when there is none; they never type into the
+ended session's tab. The launch dialog, in Terminal on
 macOS, lists the windows holding sessions the app opened that are still
-running, and the person can pick one to open the new session in as a new tab;
-"New window" is the default. Placing a tab presses Command-T, which needs
-macOS's Automation (of System Events) and Accessibility permissions. macOS asks
-for them the first time someone picks a window, never during a launch. In the
+running, and the new session opens in one of them as a new tab: the window
+with the newest running session is the default (owner, 2026-11-03: work stays in
+one Terminal window), and "New window" stays a choice. A tab can still be moved
+out with Terminal's own Window > Move Tab to New Window. Placing a tab presses
+Command-T, which needs macOS's Automation (of System Events) and Accessibility
+permissions. macOS asks for them when the dialog opens on a window, or when
+someone picks one, never during a launch. In the
 app, the daemon runs inside the app, so macOS's own prompts and the System
 Settings > Privacy & Security entries name the app, "Near.ai"; until both are
 granted, or when either is refused, the session opens in a new window, with no

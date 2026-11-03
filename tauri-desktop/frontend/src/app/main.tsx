@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import { ThemeProvider } from "../components/theme-provider";
+import { Toaster } from "../components/ui/toast";
 import { TooltipProvider } from "../components/ui/tooltip";
 import { AppShell } from "./app-shell";
 import "./app.css";
@@ -18,9 +19,11 @@ createRoot(root).render(
     <ThemeProvider>
       <TooltipProvider>
         <QueryClientProvider client={queryClient}>
-          <HashRouter>
-            <AppShell />
-          </HashRouter>
+          <Toaster>
+            <HashRouter>
+              <AppShell />
+            </HashRouter>
+          </Toaster>
         </QueryClientProvider>
       </TooltipProvider>
     </ThemeProvider>

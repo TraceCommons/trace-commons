@@ -1016,4 +1016,18 @@ extension ManagedSurface {
         guard let picked, options.contains(where: { $0.beside == picked }) else { return nil }
         return picked
     }
+
+    /// The window a launch dialog starts on: the one with the newest
+    /// running session, so new sessions open as tabs in the window already
+    /// in use (owner, 2026-11-03). Nil, "New window", when none is offered.
+    public static func launchDefault(options: [ManagedWindowOption]) -> String? {
+        options.first?.beside
+    }
+
+    /// Whether a launch with no dialog opens beside the newest running
+    /// session, as a tab in its window: Start again and Resume (owner,
+    /// 2026-11-03). The daemon opens a new window when there is none.
+    public static func opensBesideNewest(_ method: String) -> Bool {
+        method == "managed_session_start_again" || method == "managed_session_resume"
+    }
 }
