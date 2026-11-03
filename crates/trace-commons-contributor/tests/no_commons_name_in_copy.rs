@@ -86,10 +86,13 @@ fn findings(source: &str) -> Vec<(usize, String)> {
             continue;
         }
         let collapsed = logical.split_whitespace().collect::<Vec<_>>().join(" ");
-        if collapsed.to_lowercase().contains("trace commons")
-            || collapsed.contains("commons_name!")
-            || collapsed.contains("COMMONS_NAME")
-        {
+        let names_it = collapsed.to_lowercase().contains("trace commons");
+        let uses_it = collapsed.contains("commons_name!") || collapsed.contains("COMMONS_NAME");
+        // A test asserting a page does NOT carry the name is this guard's
+        // own job, done closer to the page: `assert!(!x.contains(...COMMONS_NAME))`.
+        let refuses_it = collapsed.contains("assert!(!")
+            && collapsed.contains(".contains(crate::brand::COMMONS_NAME)");
+        if names_it || (uses_it && !refuses_it) {
             found.push((start, collapsed));
         }
     }
@@ -109,6 +112,13 @@ fn the_scanner_finds_the_name_in_every_form_it_claims_to() {
     );
     assert_eq!(findings("concat!(\"a \", crate::commons_name!())").len(), 1);
     assert_eq!(findings("let n = brand::COMMONS_NAME;").len(), 1);
+    assert!(
+        findings("assert!(!page.contains(crate::brand::COMMONS_NAME), \"{page}\");").is_empty()
+    );
+    assert_eq!(
+        findings("assert!(page.contains(crate::brand::COMMONS_NAME));").len(),
+        1
+    );
     assert!(findings("// Trace Commons in a comment").is_empty());
     assert!(findings("/// Trace Commons in a doc comment").is_empty());
     assert!(findings("use trace_commons_contributor::TraceCommons;").is_empty());
