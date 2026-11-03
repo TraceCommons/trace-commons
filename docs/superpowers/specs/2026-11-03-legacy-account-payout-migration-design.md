@@ -162,6 +162,14 @@ account (`trace_legacy_invite_links`, `revoked_at IS NULL`):
    - record the carry in `trace_legacy_payout_carries` (section 4).
 3. The payout pass activates the waiting link as it does any other, once
    the account's previous link is closed (`postgres_payout.rs:660-668`).
+   Nothing on the send side looks at the tenant's namespace or at anchors.
+   The pass finds tenants through `tenants_with_live_payout_links`
+   (`postgres_payout.rs:1785-1803`, under `trace_payout_enumerator`, every
+   tenant with a live link on the rail), and the shared predicate checked
+   before every send is `payout_account_standing`
+   (`postgres_payout.rs:1805-1845`: the account exists, is not closed, and
+   has no open credit hold), applied in `payout_pass.rs:956-963`. A legacy
+   account meets it like any other.
 
 It is called in three places, each in the caller's transaction, so a carry
 never lands half-done:
@@ -179,7 +187,12 @@ It is idempotent: a second call with nothing changed writes nothing.
 (`legacy-invite-migration.md`, "Resolving a conflict"), its carries must
 stop. A trigger on `trace_legacy_invite_links` (`revoked_at` set) marks
 every live carry under it for unlink and sets `released_at` (owner decision
-10 offers a runbook step instead). Credit already paid stays paid, as with
+10 offers a runbook step instead). The operator revokes under the NEAR
+account's tenant context, so the trigger function must be SECURITY DEFINER,
+owned by `trace_legacy_payout_carry_guard`, with the guard's legacy-side
+policies; as an invoker trigger it would match no legacy row under forced
+RLS and silently do nothing. A test revokes as a non-superuser login and
+asserts the carry was released. Credit already paid stays paid, as with
 any unlink.
 
 **No session on the legacy account is ever needed** (C4). The legacy
@@ -226,6 +239,11 @@ attests under the link (V91). The accrual pass then claims their unowned
 accruals the normal way, once, with its own `accrual_claimed` audit row.
 Only proven devices are linked; nothing is inferred for the tenant's other
 principals.
+
+This works only if the principal the link step derives from the device
+key is the same principal the settlement key used for that device's
+uploads. That is not asserted here; it is the implementation's first test,
+and if it fails, decision 5 comes back to the owner.
 
 ### 3.6 Existing credit and attestations
 
@@ -311,10 +329,11 @@ CREATE POLICY trace_corpus_tenant_isolation ON trace_legacy_payout_carries
 - No change to `trace_near_account_anchors`, to readiness, or to any
   existing CHECK. `trace_payout_audit.action` keeps its list: carries use
   `link_created` and `unlink_requested` with new labels (section 5).
-- No backfill: the pilot had 0 live payout links on 2026-11-02 (#1841),
-  so no legacy-linked account has a link to carry yet. If the owner's
-  re-count (Q4) finds any, the implementation adds a one-time carry call
-  per affected account in the rollout, not in SQL.
+- No backfill is planned: #1841's count found 0 live payout links across
+  the 22 tenants it listed on 2026-11-02, but that set may have left out
+  legacy-routed tenants. Q4 re-counts. If it finds a NEAR account with a
+  live link and a live V81 link, the rollout makes one carry call per such
+  account; nothing is done in SQL.
 
 `PayoutStore` (`crates/trace-commons-server/src/db/mod.rs`) gains no new
 read for the gate: `payout_account_login_anchors` on the gate branch stays
@@ -399,13 +418,37 @@ forced, so run them as the migration owner or once per tenant.
 - **Q5.** Unowned accruals in non-pooled legacy tenants, per tenant count
   only: `SELECT count(DISTINCT tenant_id), count(*) FROM trace_payout_accruals WHERE account_id IS NULL AND tenant_id !~ '^(near-|nearai-)';`
   (pooled tenants then subtracted with the marker join).
+- **Q5b.** Whether there is anything to pay at all: finalized settlement
+  batches and owned accruals in non-pooled legacy tenants, counts only:
+  ```sql
+  SELECT count(*) FROM trace_credit_settlement_batches b
+   WHERE b.tenant_id !~ '^(near-|nearai-)'
+     AND NOT EXISTS (SELECT 1 FROM trace_legacy_invite_pooled_tenants p
+                      WHERE p.tenant_id = b.tenant_id);
+  SELECT count(*) FROM trace_payout_accruals a
+   WHERE a.account_id IS NOT NULL AND a.tenant_id !~ '^(near-|nearai-)'
+     AND NOT EXISTS (SELECT 1 FROM trace_legacy_invite_pooled_tenants p
+                      WHERE p.tenant_id = a.tenant_id);
+  ```
+  If both are 0, legacy credit was never settled on the pilot, and the
+  owner may prefer to defer this work.
 - **Q6, a question, not a query.** Whether each pilot legacy holder uses
   the app with the same NEAR AI login. Anchor overlap cannot be computed
   without the index pepper, and this design does not need it; the answer
   only tells us how many people have a NEAR AI account already.
 
+- **Q7, an owner fact.** Whether the pilot has every pooled tenant marked
+  and `TRACE_COMMONS_LEGACY_INVITE_LINK_ENABLED=true`. The V81 runbook
+  requires the marks before linking is enabled
+  (`legacy-invite-migration.md`, "Enabling linking"); this design carries
+  nothing until both hold.
+
 Then:
 
+0. If Q7 says linking is off: review the pooled candidates
+   (`legacy_invite_tenants|review_before_linking` in
+   `legacy-invite-counts.md`), mark them, confirm the attestation key,
+   and enable linking, in the runbook's order.
 1. Land the server half (V146, the carry, the trigger; decision 3's
    sibling if approved) behind the existing switches. Nothing changes until
    a NEAR account confirms a link or a tenant links.
@@ -521,7 +564,7 @@ any shell shows it.
 5. **Credit on a principal with no account.** Link the signing device's
    principal (and later attested devices) to an account at link time so
    its unowned accruals are claimed. **Recommended: yes, proven devices
-   only.**
+   only**, subject to the principal check in section 3.5.
 6. **A legacy account that already has its own live link** (none expected,
    Q4). Skip and audit, or replace with the carry. **Recommended: skip and
    audit; the operator decides.**
