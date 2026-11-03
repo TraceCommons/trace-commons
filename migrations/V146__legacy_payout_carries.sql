@@ -48,19 +48,39 @@ GRANT USAGE ON SCHEMA public TO trace_legacy_payout_carry_guard;
 -- The three hashes V146 matches across tenants, each in one place
 -- (#1874). They mirror the Rust `db::payout_link_id_hash`,
 -- `db::payout_account_id_hash` and `db::payout_legacy_link_hash`;
--- `legacy_payout_carry_pg` asserts the SQL and Rust spellings agree.
+-- `legacy_payout_carry_pg` asserts the SQL and Rust spellings agree, that
+-- no V146 function spells a formula itself, and that these stay STABLE,
+-- inlinable and closed to PUBLIC.
+--
+-- STABLE, not IMMUTABLE: `convert_to` is STABLE. No `SET search_path`, so
+-- the planner can inline them (a `SET` clause forbids it, and costs a GUC
+-- save and restore per call on the send-time check); instead every name in
+-- the body is schema-qualified, operators and casts included, so the
+-- caller's search_path cannot change what they compute. Review of #1878.
 CREATE FUNCTION public.trace_payout_link_hash(p_link_id UUID) RETURNS TEXT
-LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog AS $$
-    SELECT 'sha256:' || encode(sha256(convert_to('payout-link-v1:' || p_link_id::TEXT, 'UTF8')), 'hex')
+LANGUAGE sql STABLE STRICT PARALLEL SAFE AS $$
+    SELECT 'sha256:' OPERATOR(pg_catalog.||) pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+        'payout-link-v1:' OPERATOR(pg_catalog.||) CAST(p_link_id AS pg_catalog.text), 'UTF8')), 'hex')
 $$;
 CREATE FUNCTION public.trace_payout_account_hash(p_account_id UUID) RETURNS TEXT
-LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog AS $$
-    SELECT 'sha256:' || encode(sha256(convert_to('payout-account-v1:' || p_account_id::TEXT, 'UTF8')), 'hex')
+LANGUAGE sql STABLE STRICT PARALLEL SAFE AS $$
+    SELECT 'sha256:' OPERATOR(pg_catalog.||) pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+        'payout-account-v1:' OPERATOR(pg_catalog.||) CAST(p_account_id AS pg_catalog.text), 'UTF8')), 'hex')
 $$;
 CREATE FUNCTION public.trace_legacy_link_hash(p_link_id UUID) RETURNS TEXT
-LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog AS $$
-    SELECT 'sha256:' || encode(sha256(convert_to('legacy-invite-link-v1:' || p_link_id::TEXT, 'UTF8')), 'hex')
+LANGUAGE sql STABLE STRICT PARALLEL SAFE AS $$
+    SELECT 'sha256:' OPERATOR(pg_catalog.||) pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+        'legacy-invite-link-v1:' OPERATOR(pg_catalog.||) CAST(p_link_id AS pg_catalog.text), 'UTF8')), 'hex')
 $$;
+-- Closed to PUBLIC like every other V146 function. Granted to the roles
+-- that run their callers: the payout runtime (the invoker release), the
+-- carry guard (its triggers, claim and send-time check), and the invite
+-- link guard (the instance link's audit row).
+REVOKE ALL ON FUNCTION public.trace_payout_link_hash(UUID), public.trace_payout_account_hash(UUID),
+    public.trace_legacy_link_hash(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.trace_payout_link_hash(UUID), public.trace_payout_account_hash(UUID),
+    public.trace_legacy_link_hash(UUID)
+    TO trace_ingest_runtime, trace_legacy_payout_carry_guard, trace_legacy_invite_link_guard;
 
 -- 1. Carries. The row lives in the legacy tenant beside the link it names.
 -- The source link and the tenant link live in the NEAR AI account's tenant,
