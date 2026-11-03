@@ -16,6 +16,7 @@ use crate::trace_invite_registry::InviteTenantMode;
 
 pub mod postgres;
 pub mod postgres_inference_connection;
+mod postgres_legacy_payout_carry;
 mod postgres_payout;
 mod postgres_referral;
 #[doc(hidden)]
@@ -3265,11 +3266,39 @@ pub struct PayoutLinkRequest {
 /// What a confirm writes beside the request it takes: the new link's id and
 /// program (for a `link`) and the confirming account's actor hash. The
 /// recipient comes from the request row, never from the confirm call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PayoutLinkConfirmWrite {
     pub link_id: Uuid,
     pub program: String,
     pub actor_ref_hash: String,
+    /// The rail's program for a carried link's id, so a confirm on a NEAR
+    /// account carries its link to the legacy accounts it has linked, in
+    /// the same transaction (V146; legacy payout migration spec, section
+    /// 3.3). `None` carries nothing.
+    pub carry_programs: Option<CarryPrograms>,
+}
+
+/// `PayoutRail::program_for_link`, for links the store creates itself (a
+/// carried link gets its own id and so its own program).
+#[derive(Clone)]
+pub struct CarryPrograms(pub std::sync::Arc<dyn Fn(Uuid) -> String + Send + Sync>);
+
+impl std::fmt::Debug for CarryPrograms {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CarryPrograms(..)")
+    }
+}
+
+/// What one carry call did across the account's linked legacy tenants
+/// (V146). Counts only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LegacyCarryReport {
+    /// Carried links written.
+    pub carried: u32,
+    /// Carries released (unlinked, closed at zero, or superseded).
+    pub released: u32,
+    /// Legacy accounts skipped because they hold a link of their own.
+    pub skipped: u32,
 }
 
 /// The outcome of [`PayoutStore::confirm_payout_link_request`]. Every
@@ -3434,12 +3463,19 @@ pub struct PayoutAccountStanding {
     /// An open `trace_credit_holds` row names the account's `account:` key
     /// or a principal actively linked to it.
     pub credit_held: bool,
+    /// The account holds a live carried link that must not be paid (V146,
+    /// `trace_legacy_payout_carry_invalid`): its tenant was marked pooled,
+    /// its tenant link is gone or revoked, or its source account or link
+    /// no longer stands.
+    pub carry_invalid: bool,
 }
 
 /// An account whose row is gone or closed.
 pub const PAYOUT_ACCOUNT_CLOSED: &str = "payout_account_closed";
 /// An open credit hold on the account or a principal linked to it.
 pub const PAYOUT_ACCOUNT_CREDIT_HOLD: &str = "payout_account_credit_hold";
+/// A carried link that no longer has a standing source (V146).
+pub const PAYOUT_LEGACY_CARRY_INVALID: &str = "payout_legacy_carry_invalid";
 
 impl PayoutAccountStanding {
     /// The shared hold label, if any. A missing account row holds like a
@@ -3449,6 +3485,8 @@ impl PayoutAccountStanding {
             Some(PAYOUT_ACCOUNT_CLOSED)
         } else if self.credit_held {
             Some(PAYOUT_ACCOUNT_CREDIT_HOLD)
+        } else if self.carry_invalid {
+            Some(PAYOUT_LEGACY_CARRY_INVALID)
         } else {
             None
         }
@@ -3802,6 +3840,22 @@ pub trait PayoutStore: Send + Sync {
         handle_hash: &str,
         confirm: &PayoutLinkConfirmWrite,
     ) -> Result<PayoutLinkConfirm, DatabaseError>;
+
+    /// Carries the account's live link on `rail` to every open account of
+    /// each legacy tenant it has linked (V81), and releases carries that no
+    /// longer match: an unlinked source, a pooled tenant, a closed account
+    /// (V146; legacy payout migration spec, section 3.3). Idempotent. A
+    /// confirm already does this in its own transaction; this is for the
+    /// tenant-link route, after a new tenant link. Nothing for an account
+    /// outside `near-` / `nearai-` or without a `near_ai_login` anchor.
+    async fn carry_legacy_payout_links(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        programs: &CarryPrograms,
+        actor_ref_hash: &str,
+    ) -> Result<LegacyCarryReport, DatabaseError>;
 
     /// The audit actions on `rail` in this tenant, oldest first.
     async fn payout_audit_actions(

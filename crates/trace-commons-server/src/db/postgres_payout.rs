@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 use super::PayoutAccountStanding;
 use super::postgres::PgBackend;
+use super::{CarryPrograms, LegacyCarryReport};
 use super::{
     PayoutAccountLinkView, PayoutAccrual, PayoutAccrualKind, PayoutAccrualWrite, PayoutAuditAction,
     PayoutControl, PayoutHold, PayoutLine, PayoutLineResolution, PayoutLineResolve,
@@ -129,7 +130,7 @@ async fn account_link_version(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn insert_audit(
+pub(super) async fn insert_audit(
     tx: &deadpool_postgres::Transaction<'_>,
     tenant: &str,
     rail: &str,
@@ -1633,9 +1634,54 @@ impl PayoutStore for PgBackend {
                 .await?;
             }
         }
+        // V146: the link, or the unlink, reaches the legacy accounts this
+        // account has linked in the same transaction, so a carry never
+        // outlives its source and never lands half-done.
+        if let Some(programs) = confirm.carry_programs.as_ref() {
+            super::postgres_legacy_payout_carry::carry_in_tx(
+                &tx,
+                tenant,
+                account,
+                rail.as_str(),
+                programs,
+                &confirm.actor_ref_hash,
+            )
+            .await?;
+        }
         let version = account_link_version(&tx, tenant, account, rail.as_str()).await?;
         tx.commit().await?;
         Ok(PayoutLinkConfirm::Confirmed { action, version })
+    }
+
+    async fn carry_legacy_payout_links(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        rail: &RailId,
+        programs: &CarryPrograms,
+        actor_ref_hash: &str,
+    ) -> Result<LegacyCarryReport, DatabaseError> {
+        let mut client = self.payout_tenant_client().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        // The confirm's lock: a carry never interleaves with a confirm of
+        // the same account and rail.
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(
+                 'payout-link-confirm-v1:' || $1 || ':' || $2::UUID::TEXT || ':' || $3, 0))",
+            &[&tenant, &account, &rail.as_str()],
+        )
+        .await?;
+        let report = super::postgres_legacy_payout_carry::carry_in_tx(
+            &tx,
+            tenant,
+            account,
+            rail.as_str(),
+            programs,
+            actor_ref_hash,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(report)
     }
 
     async fn payout_audit_actions(
@@ -1845,7 +1891,8 @@ impl PayoutStore for PgBackend {
                                             AND accrued.credit_account_hash = 'sha256:' ||
                                                 encode(sha256(convert_to(h.credit_account_ref, 'UTF8')), 'hex')))),
                      ARRAY(SELECT credit_account_ref FROM trace_credit_holds
-                            WHERE tenant_id = $1 AND released_at IS NULL)",
+                            WHERE tenant_id = $1 AND released_at IS NULL),
+                     trace_legacy_payout_carry_invalid($1, $2)",
                 &[&tenant, &account],
             )
             .await?;
@@ -1858,6 +1905,7 @@ impl PayoutStore for PgBackend {
                     .get::<_, Vec<String>>(3)
                     .iter()
                     .any(|reference| super::settlement_key_account_id(reference) == Some(account)),
+            carry_invalid: row.get(4),
         })
     }
 

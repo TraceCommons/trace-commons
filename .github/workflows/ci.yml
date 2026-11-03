@@ -162,6 +162,7 @@ jobs:
         admission_test_referral_stream
         admission_test_walletv2
         admission_test_legacy_invite_link
+        admission_test_legacy_payout_carry
         admission_test_device_invite_subject
         admission_test_pipeline
         admission_test_pipeline_http
@@ -344,6 +345,15 @@ jobs:
         run: cargo test -p trace-commons-server --test legacy_invite_link_pg
         env:
           TRACE_COMMONS_LEGACY_INVITE_LINK_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_legacy_invite_link
+      # V146: the legacy account payout migration. The decision-5 principal
+      # claim through the real tenant link, carrying a confirmed payout link
+      # to linked legacy accounts, release on unlink, change and revocation
+      # (revoked by a non-superuser login), pooled and closed accounts, the
+      # instance-enrolled link, and readiness left alone. Runtime logins only.
+      - name: legacy_payout_carry_pg
+        run: cargo test -p trace-commons-server --test legacy_payout_carry_pg -- --test-threads=1
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_legacy_payout_carry
       # A device reading back its own invite subject hash from the issuer,
       # onboarded through the real /v1/onboard path, with the named refusals
       # against real rows. Feeds the legacy invite link statement.

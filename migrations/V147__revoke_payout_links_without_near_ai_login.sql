@@ -24,8 +24,11 @@
 --
 -- SCOPE. The predicate is "no `near_ai_login` anchor", not "proved by a
 -- wallet": per the owner's instruction it revokes every live link on such
--- an account, including principal-linked legacy and pilot accounts (their
--- path back is F11) and links made before #1841 whatever proved them. It
+-- an account, including a principal-linked legacy or pilot account's own
+-- links and links made before #1841 whatever proved them. It does NOT touch
+-- a link V146 carried to a legacy account from a NEAR AI account (a live
+-- row in `trace_legacy_payout_carries`): that link was proved by the NEAR
+-- AI account's own recorded login, and it is how F11 pays legacy credit. It
 -- cannot see one case: a link proved through #1841's wallet path on an
 -- account that also holds a `near_ai_login` anchor (for example after a V82
 -- merge) is kept, because `subject_index` is a payout-domain label and
@@ -70,6 +73,7 @@ ALTER TABLE trace_near_account_anchors NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_links NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_link_requests NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_audit NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_legacy_payout_carries NO FORCE ROW LEVEL SECURITY;
 
 WITH revoked AS (
     UPDATE trace_payout_links AS l
@@ -85,6 +89,11 @@ WITH revoked AS (
             WHERE a.tenant_id = l.tenant_id
               AND a.account_id = l.account_id
               AND a.identity_source = 'near_ai_login')
+       AND NOT EXISTS (
+           SELECT 1 FROM trace_legacy_payout_carries c
+            WHERE c.tenant_id = l.tenant_id
+              AND c.link_id = l.link_id
+              AND c.released_at IS NULL)
     RETURNING l.tenant_id, l.rail_id, l.account_id, l.link_id, l.state
 )
 INSERT INTO trace_payout_audit (
@@ -115,3 +124,4 @@ ALTER TABLE trace_near_account_anchors FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_links FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_link_requests FORCE ROW LEVEL SECURITY;
 ALTER TABLE trace_payout_audit FORCE ROW LEVEL SECURITY;
+ALTER TABLE trace_legacy_payout_carries FORCE ROW LEVEL SECURITY;

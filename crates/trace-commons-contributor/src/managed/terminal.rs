@@ -31,11 +31,12 @@ pub enum TerminalApp {
     Kitty,
     Wezterm,
     Alacritty,
+    Warp,
 }
 
 impl TerminalApp {
     /// Every app any platform offers.
-    pub const ALL: [TerminalApp; 9] = [
+    pub const ALL: [TerminalApp; 10] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
@@ -45,15 +46,17 @@ impl TerminalApp {
         TerminalApp::Kitty,
         TerminalApp::Wezterm,
         TerminalApp::Alacritty,
+        TerminalApp::Warp,
     ];
     /// macOS, in the order a picker shows them.
-    pub const MACOS: [TerminalApp; 6] = [
+    pub const MACOS: [TerminalApp; 7] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
         TerminalApp::Kitty,
         TerminalApp::Wezterm,
         TerminalApp::Alacritty,
+        TerminalApp::Warp,
     ];
     /// Windows.
     pub const WINDOWS: [TerminalApp; 1] = [TerminalApp::WindowsTerminal];
@@ -93,6 +96,7 @@ impl TerminalApp {
             TerminalApp::Kitty => "kitty",
             TerminalApp::Wezterm => "wezterm",
             TerminalApp::Alacritty => "alacritty",
+            TerminalApp::Warp => "warp",
         }
     }
 
@@ -118,6 +122,7 @@ impl TerminalApp {
             TerminalApp::Kitty => "kitty",
             TerminalApp::Wezterm => "WezTerm",
             TerminalApp::Alacritty => "Alacritty",
+            TerminalApp::Warp => "Warp",
         }
     }
 
@@ -132,6 +137,7 @@ impl TerminalApp {
             TerminalApp::Kitty => Some("net.kovidgoyal.kitty"),
             TerminalApp::Wezterm => Some("com.github.wez.wezterm"),
             TerminalApp::Alacritty => Some("org.alacritty"),
+            TerminalApp::Warp => Some("dev.warp.Warp-Stable"),
             _ => None,
         }
     }
@@ -148,7 +154,7 @@ impl TerminalApp {
             TerminalApp::Kitty => Some("kitty"),
             TerminalApp::Wezterm => Some("wezterm"),
             TerminalApp::Alacritty => Some("alacritty"),
-            TerminalApp::Terminal | TerminalApp::Iterm2 => None,
+            TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp => None,
         }
     }
 
@@ -450,6 +456,7 @@ pub enum TerminalSetting {
     Kitty,
     Wezterm,
     Alacritty,
+    Warp,
     #[serde(other)]
     Unrecognized,
 }
@@ -479,6 +486,7 @@ impl TerminalSetting {
             TerminalSetting::Kitty => TerminalApp::Kitty,
             TerminalSetting::Wezterm => TerminalApp::Wezterm,
             TerminalSetting::Alacritty => TerminalApp::Alacritty,
+            TerminalSetting::Warp => TerminalApp::Warp,
             TerminalSetting::Unrecognized => return None,
         };
         TerminalApp::offered().contains(&app).then_some(app)
@@ -497,6 +505,7 @@ impl From<TerminalApp> for TerminalSetting {
             TerminalApp::Kitty => TerminalSetting::Kitty,
             TerminalApp::Wezterm => TerminalSetting::Wezterm,
             TerminalApp::Alacritty => TerminalSetting::Alacritty,
+            TerminalApp::Warp => TerminalSetting::Warp,
         }
     }
 }
@@ -614,13 +623,114 @@ fn parse_installed(stdout: &str) -> Vec<TerminalApp> {
 }
 
 /// What a macOS launch runs: a scripted app's `osascript -e` lines
-/// (Terminal, Ghostty, iTerm2), or the `open` plan of an app that takes
-/// its command as argv (kitty, WezTerm, Alacritty).
+/// (Terminal, Ghostty, iTerm2), the `open` plan of an app that takes its
+/// command as argv (kitty, WezTerm, Alacritty), or a Warp Tab Config.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MacosLaunch {
     Script(Vec<String>),
     Open(Plan),
+    Warp(WarpTab),
+}
+
+/// A Warp launch: a Tab Config, `<name>.toml` in `~/.warp/tab_configs`,
+/// opened with `warp://tab_config/<name>`. Warp opens it as a new tab in
+/// its active window (a new window when it has none) and runs the command
+/// there. A URL, not an Apple Event, so macOS asks for no permission
+/// (owner, 2026-11-03: sessions as tabs in one window, with no prompts).
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WarpTab {
+    /// `near-ai-` and a fresh uuid: only `[a-z0-9-]`, so it is safe in the
+    /// file name and the URL, and no two launches share a file.
+    name: String,
+    contents: String,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl WarpTab {
+    /// The Tab Config that runs `command` in `cwd`, or in Warp's default
+    /// folder when there is none.
+    fn new(command: &str, cwd: Option<&Path>) -> Result<Self, ManagedError> {
+        let name = format!("near-ai-{}", Uuid::new_v4());
+        let directory = match cwd {
+            Some(cwd) => format!(
+                "directory = {}\n",
+                toml_string(cwd.to_str().ok_or(ManagedError::InvalidRequest)?)
+            ),
+            None => String::new(),
+        };
+        let contents = format!(
+            "name = {name}\ntitle = \"Near.ai\"\n\n[[panes]]\nid = \"main\"\ntype = \"terminal\"\n{directory}commands = [{command}]\n",
+            name = toml_string(&name),
+            command = toml_string(command),
+        );
+        Ok(WarpTab { name, contents })
+    }
+
+    fn url(&self) -> String {
+        format!("warp://tab_config/{}", self.name)
+    }
+}
+
+/// A TOML basic string: `\\` and `\"` escaped, and every control
+/// character as `\uXXXX`, so a folder name never becomes TOML.
+#[cfg(any(target_os = "macos", test))]
+fn toml_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Warp's Tab Config folder, `~/.warp/tab_configs`.
+#[cfg(target_os = "macos")]
+fn warp_tab_configs() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".warp").join("tab_configs"))
+}
+
+/// Write `tab`, owner-only, and open it in Warp. The file holds a
+/// single-use launch ticket, so it is removed a minute later, once Warp
+/// has read it, whether or not the launch went ahead.
+#[cfg(target_os = "macos")]
+fn open_warp_tab(tab: &WarpTab) -> Result<(), ManagedError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let folder = warp_tab_configs().ok_or(ManagedError::LaunchUnknown)?;
+    std::fs::create_dir_all(&folder).map_err(|_| ManagedError::LaunchUnknown)?;
+    let path = folder.join(format!("{}.toml", tab.name));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| file.write_all(tab.contents.as_bytes()));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&path);
+        return Err(ManagedError::LaunchUnknown);
+    }
+    let _ = std::thread::Builder::new()
+        .name("warp-tab-config".into())
+        .spawn({
+            let path = path.clone();
+            move || {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                let _ = std::fs::remove_file(path);
+            }
+        });
+    let mut open = std::process::Command::new("/usr/bin/open");
+    open.arg(tab.url());
+    match super::profiles::bounded_output(open) {
+        Ok(output) if output.status.success() => Ok(()),
+        _ => Err(ManagedError::LaunchUnknown),
+    }
 }
 
 /// The macOS launch with its outside effect passed in. Refuses an
@@ -644,6 +754,7 @@ fn launch_macos(
         return Err(ManagedError::TerminalNotFound);
     }
     let how = match (open_plan(app, cwd, argv), place) {
+        _ if app == TerminalApp::Warp => MacosLaunch::Warp(WarpTab::new(command, cwd)?),
         (Some(plan), _) => MacosLaunch::Open(plan),
         (None, Some(place)) => MacosLaunch::Script(app.script_in(command, place)),
         (None, None) => MacosLaunch::Script(app.script(command)),
@@ -675,6 +786,7 @@ fn run_macos(how: MacosLaunch) -> Result<Vec<u8>, ManagedError> {
             open.args(&plan.args);
             open
         }
+        MacosLaunch::Warp(tab) => return open_warp_tab(&tab).map(|()| Vec::new()),
     };
     let output = super::profiles::bounded_output(command)?;
     if output.status.success() {
@@ -786,7 +898,7 @@ fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::O
             }
             args.extend(["--hold".into(), "-e".into()]);
         }
-        TerminalApp::Terminal | TerminalApp::Iterm2 => return None,
+        TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp => return None,
     }
     Some(args)
 }
@@ -1404,6 +1516,105 @@ fn external_terminal(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Owner, 2026-11-03: in Warp a session opens as a tab in the window
+    /// already open, through a Tab Config and a `warp://` link, with no
+    /// macOS prompt. The config runs the command in the folder, and a
+    /// folder or command holding quotes, backslashes or newlines stays
+    /// one TOML string.
+    #[test]
+    fn a_warp_launch_is_a_tab_config_that_runs_the_command_in_the_folder() {
+        let cwd = Path::new("/Users/a/my \"odd\" folder\\x\n");
+        let command = "'/x/near-ai' --config-dir '/c' redeem-launch --ticket 'ab'";
+        let tab = WarpTab::new(command, Some(cwd)).unwrap();
+        assert!(tab.name.starts_with("near-ai-"));
+        assert!(
+            tab.name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        );
+        assert_eq!(tab.url(), format!("warp://tab_config/{}", tab.name));
+        assert_ne!(
+            tab.name,
+            WarpTab::new(command, Some(cwd)).unwrap().name,
+            "one file per launch"
+        );
+
+        let parsed: toml::Value = toml::from_str(&tab.contents).unwrap();
+        assert_eq!(parsed["name"].as_str(), Some(tab.name.as_str()));
+        let pane = &parsed["panes"][0];
+        assert_eq!(pane["type"].as_str(), Some("terminal"));
+        assert_eq!(pane["directory"].as_str(), cwd.to_str());
+        assert_eq!(pane["commands"][0].as_str(), Some(command));
+        assert_eq!(pane["commands"].as_array().unwrap().len(), 1);
+
+        let home =
+            toml::from_str::<toml::Value>(&WarpTab::new(command, None).unwrap().contents).unwrap();
+        assert!(
+            home["panes"][0].get("directory").is_none(),
+            "Warp's own folder"
+        );
+    }
+
+    /// A Warp launch hands `run` the Tab Config, never a script or `open`
+    /// argv, and opens no handle: Warp's tab cannot be found again.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_warp_launch_runs_its_tab_config() {
+        let cwd = Path::new("/tmp/project");
+        let mut seen = None;
+        let opened = launch_macos(
+            TerminalSetting::Warp,
+            &[TerminalApp::Warp],
+            "'/x/near-ai'",
+            vec!["/x/near-ai".into()],
+            Some(cwd),
+            None,
+            |how| {
+                seen = Some(how);
+                Ok(Vec::new())
+            },
+        );
+        assert_eq!(opened, Ok(None));
+        let Some(MacosLaunch::Warp(tab)) = seen else {
+            panic!("a Tab Config");
+        };
+        let parsed: toml::Value = toml::from_str(&tab.contents).unwrap();
+        assert_eq!(
+            parsed["panes"][0]["directory"].as_str(),
+            Some("/tmp/project")
+        );
+        assert_eq!(
+            parsed["panes"][0]["commands"][0].as_str(),
+            Some("'/x/near-ai'")
+        );
+        assert_eq!(
+            launch_macos(
+                TerminalSetting::Warp,
+                &[TerminalApp::Terminal],
+                "'/x'",
+                vec![],
+                None,
+                None,
+                |_| Ok(vec![])
+            ),
+            Err(ManagedError::TerminalNotFound),
+            "not installed"
+        );
+    }
+
+    #[test]
+    fn warp_is_offered_on_macos_only_and_opened_by_its_bundle() {
+        assert_eq!(TerminalApp::Warp.bundle_id(), Some("dev.warp.Warp-Stable"));
+        assert!(TerminalApp::MACOS.contains(&TerminalApp::Warp));
+        assert!(!TerminalApp::LINUX.contains(&TerminalApp::Warp));
+        assert!(!TerminalApp::WINDOWS.contains(&TerminalApp::Warp));
+        assert!(
+            TerminalApp::Warp.script("'/x/near-ai'").is_empty(),
+            "no Apple Event"
+        );
+        assert_eq!(open_plan(TerminalApp::Warp, None, vec!["/x".into()]), None);
+    }
+
     fn place(window: u32) -> Placement {
         Placement {
             window,
@@ -1911,7 +2122,6 @@ mod tests {
             "iTerm2",
             "Windows Terminal",
             "iterm",
-            "warp",
             "/Applications/Ghostty.app",
             "/usr/bin/konsole",
             "ghostty; rm -rf /",
@@ -1928,7 +2138,8 @@ mod tests {
                 "iTerm2",
                 "kitty",
                 "WezTerm",
-                "Alacritty"
+                "Alacritty",
+                "Warp"
             ]
         );
         assert_eq!(

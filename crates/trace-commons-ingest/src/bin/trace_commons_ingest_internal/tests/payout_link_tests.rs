@@ -1414,3 +1414,63 @@ async fn an_enabled_rail_without_the_recipient_key_refuses_the_start() {
     Arc::get_mut(&mut state).unwrap().near_account_identity = Some(identity());
     super::super::payout_rails::require_payout_recipient_key(&state).unwrap();
 }
+
+/// V146 (legacy payout migration spec, section 3.3): a link confirmed on a
+/// NEAR AI account that has linked a legacy tenant reaches every open
+/// account there, in the confirm's transaction, as a waiting link that
+/// opens to the same org; a legacy account's own start is still refused;
+/// and an unlink releases the carry.
+#[tokio::test]
+async fn a_confirmed_link_reaches_a_linked_legacy_account_and_opens_to_the_same_org() {
+    let Some(h) = harness().await else { return };
+    let near = h
+        .account_in(&format!(
+            "nearai-{}",
+            Uuid::new_v4().simple().to_string().repeat(2)
+        ))
+        .await;
+    let legacy = h
+        .unanchored_account_in(&format!("tenant-carry-{}", Uuid::new_v4().simple()))
+        .await;
+    let admin = h
+        .backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .unwrap();
+    let hex = |label: &str| sha256_prefixed(label);
+    admin
+        .execute(
+            "INSERT INTO trace_legacy_invite_links
+                (link_id, tenant_id, account_id, legacy_tenant_id, device_key_id,
+                 invite_subject_hash, nonce, issued_at, device_signature, linked_at,
+                 server_kid, server_signature)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 1, 'sig', 2, 'kid', 'sig')",
+            &[
+                &Uuid::new_v4(),
+                &near.tenant,
+                &near.id,
+                &legacy.tenant,
+                &hex("device"),
+                &hex("invite"),
+                &hex("nonce")[7..].to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // The legacy account cannot link for itself: it has no login anchor.
+    let (status, body) = h.start(&legacy, link_body(Uuid::new_v4(), org(1), 0)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "subject_mismatch", "{body}");
+
+    h.link(&near, org(1)).await;
+    let carried = h.links(&legacy, &[PayoutLinkState::Waiting]).await;
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].account_id, legacy.id);
+    let opener = SealedRecipientOpener::new(identity());
+    assert_eq!(
+        opener.open(&carried[0]).unwrap().expose(),
+        org(1).to_string()
+    );
+}

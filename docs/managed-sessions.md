@@ -39,21 +39,12 @@ A session the app opened in Terminal can be shown (its tab brought to the
 front) and stopped from its row; a CLI launch cannot, because the app neither
 opened its window nor started its launcher. An ended session can be started
 again in the same folder with the same account while both still exist.
-Start again and Resume open as a new tab beside the newest running session the
-app opened, or in a new window when there is none; they never type into the
-ended session's tab. The launch dialog, in Terminal on
-macOS, lists the windows holding sessions the app opened that are still
-running, and the new session opens in one of them as a new tab: the window
-with the newest running session is the default (owner, 2026-11-03: work stays in
-one Terminal window), and "New window" stays a choice. A tab can still be moved
-out with Terminal's own Window > Move Tab to New Window. Placing a tab presses
-Command-T, which needs macOS's Automation (of System Events) and Accessibility
-permissions. macOS asks for them when the dialog opens on a window, or when
-someone picks one, never during a launch. In the
-app, the daemon runs inside the app, so macOS's own prompts and the System
-Settings > Privacy & Security entries name the app, "Near.ai"; until both are
-granted, or when either is refused, the session opens in a new window, with no
-message in the app. Nothing is typed into an existing tab. See
+Every launch, Start again and Resume included, opens a window of its own; none
+types into an existing tab. The macOS app no longer offers to open a session in
+a window already open: placing a tab in Terminal needed macOS's Automation and
+Accessibility prompts, which the owner does not want (2026-11-03). The daemon's
+`managed_terminal_windows`, `managed_terminal_tab_access` and `beside` remain
+until they are removed, but the app no longer calls or sends them. See
 `docs/contributor-daemon-ipc-v1_1.md` for the checks.
 Stop signals only the tool process the launcher supervises: SIGTERM, then
 SIGKILL after a bounded wait. Processes the tool itself started (a shell
@@ -282,6 +273,7 @@ another in Settings." until another is chosen.
 | macOS | iTerm2 | `iterm2` | AppleScript `create window with default profile command` | iTerm2 AppleScript dictionary |
 | macOS | kitty | `kitty` | `open -n -b net.kovidgoyal.kitty --args --directory <folder> --hold <helper> <args>` | as Linux kitty below; `--detach`: "On macOS use open -a kitty.app -n instead", kitty(1); bundle id from kitty's `setup.py` (`net.kovidgoyal.{appname}`) |
 | macOS | WezTerm | `wezterm` | `open -n -b com.github.wez.wezterm --args --config exit_behavior="Hold" start --always-new-process --cwd <folder> -- <helper> <args>` | as Linux WezTerm below; the bundle's executable is `wezterm-gui`, which takes `--config` and `start` itself (`wezterm-gui/src/main.rs`); bundle id from `assets/macos/WezTerm.app/Contents/Info.plist` |
+| macOS | Warp | `warp` | a Tab Config, `~/.warp/tab_configs/near-ai-<uuid>.toml` (owner-only, removed a minute later), with the folder as the pane's `directory` and the command as its one `commands` entry, opened with `open warp://tab_config/near-ai-<uuid>`: a new tab in Warp's active window, or a new window when it has none. A URL, not an Apple Event, so macOS asks for no permission (owner, 2026-11-03: sessions as tabs in one window, with no prompts). No tab is recorded, so the row cannot bring it forward | "Tab Configs", <https://docs.warp.dev/terminal/windows/tab-configs/>: `warp://tab_config/<name>` "opens as a new tab in the active window"; "URI scheme", <https://docs.warp.dev/features/uri-scheme>; bundle id `dev.warp.Warp-Stable` from `Warp.app/Contents/Info.plist` |
 | macOS | Alacritty | `alacritty` | `open -n -b org.alacritty --args --working-directory <folder> --hold -e <helper> <args>` | as Linux Alacritty below; bundle id from `extra/osx/Alacritty.app/Contents/Info.plist` |
 | Windows | Windows Terminal | `windows_terminal` | `wt.exe new-tab --title "NEAR AI" -d <folder> <helper> <args>` | `new-tab --startingDirectory, -d` and `commandline` ("Executable with optional arguments"), <https://learn.microsoft.com/en-us/windows/terminal/command-line-arguments> |
 | Linux | GNOME Terminal | `gnome_terminal` | `gnome-terminal --working-directory=<folder> -- <helper> <args>` | `--working-directory=DIRNAME` "Set the terminal's working directory"; `--` is what the deprecated `-x, --execute` entry ("interpret all subsequent options as a program and arguments") says to use instead (`-e` is deprecated too), gnome-terminal(1), <https://manpages.debian.org/testing/gnome-terminal/gnome-terminal.1.en.html> |

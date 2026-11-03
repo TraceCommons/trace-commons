@@ -25,16 +25,53 @@ have landed (owner, 2026-11-03):
     current identity: the NEAR AI wallet-placeholder match #1862 removed
     from the payout check is not available to it.
   - **Principal-linked legacy and pilot accounts** (tenants outside
-    `near-` and `nearai-`) have no NEAR AI login anchor either. Migrating
-    the non-pooled ones is **F11** in the same spec, which names the two
-    candidate designs.
+    `near-` and `nearai-`) have no NEAR AI login anchor either. They are
+    paid through a payout link carried from the holder's NEAR AI account
+    to the legacy accounts its tenant link covers (fix F11, V146); see
+    [the legacy account payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
+    section 8, for the pilot queries and rollout order, and
+    [legacy-invite-migration.md](./legacy-invite-migration.md) for the
+    tenant link it rides on. Roll it out before going live.
   - **Pooled Devfolio tenants** (`trace_legacy_invite_pooled_tenants`) are
     excluded from payouts by design; they need no migration.
+- **Run the two legacy rollout checks and have the owner review them**
+  (owner, 2026-11-03; spec section 13, "Production-payout gates"). Both
+  are read-only and return counts only. RLS is forced, so run them as the
+  migration owner or once per tenant.
+  - **Source provenance.** Live payout links that may have been proved by
+    a wallet anchor before #1862, split by whether the account holds a
+    live tenant link (and so would be carried):
+
+    ```sql
+    SELECT EXISTS (SELECT 1 FROM trace_legacy_invite_links t
+                    WHERE t.tenant_id = l.tenant_id AND t.account_id = l.account_id
+                      AND t.revoked_at IS NULL) AS carries,
+           count(*)
+      FROM trace_payout_links l
+     WHERE l.state IN ('waiting', 'active') AND l.unlink_requested_at IS NULL
+       AND (l.created_at < '<#1862 deploy time>'
+            OR EXISTS (SELECT 1 FROM trace_payout_audit a
+                        WHERE a.tenant_id = l.tenant_id
+                          AND a.account_id_hash = 'sha256:' || encode(sha256(convert_to(
+                                  'payout-account-v1:' || l.account_id::TEXT, 'UTF8')), 'hex')
+                          AND a.action = 'link_requested' AND a.label = 'near_wallet'))
+     GROUP BY 1;
+    ```
+
+    Any links it finds are handled by #1868's V147 (payout links without a
+    recorded NEAR AI login are revoked at deploy). Run it again after V147;
+    it must then find none with `carries = true`.
+  - **Q5.** Run Q5 from the
+    [legacy payout migration spec](../superpowers/specs/2026-11-03-legacy-account-payout-migration-design.md),
+    section 8 (unowned accruals in non-pooled legacy tenants), and give the
+    result to the owner to review. It need not be zero: credit from
+    contributor-label subjects stays unowned and unpaid by design.
 
 Links already made on accounts with no recorded NEAR AI login are revoked
 at deploy by migration V147, on the `near_ai` rail. This covers every such
-account, principal-linked legacy and pilot accounts included, which stop
-being paid until F11. Each live link is marked recipient-unavailable and
+account, a legacy or pilot account's own links included, but not a link
+carried to it from a NEAR AI account (V146), which the NEAR AI login
+proved. Each live link is marked recipient-unavailable and
 unlink-requested, so the pass sends nothing more and closes it (one zero
 send per link out of the pass's send window), with a `trace_payout_audit`
 row labelled `near_ai_login_required`. The same migration drops those

@@ -3028,7 +3028,8 @@ async fn v145_cluster_table(seed: &tokio_postgres::Client) -> Vec<(uuid::Uuid, i
 /// - pending link and unlink requests.
 /// After V147 the live `near_ai` links of unanchored accounts carry both
 /// marks with one hash-only audit row each; closing links, another rail's
-/// link and the anchored account's link are untouched; the unanchored
+/// link, a link V146 carried to a legacy account and the anchored account's
+/// link are untouched; the unanchored
 /// accounts' pending requests (link and unlink) are gone; and a second run
 /// changes nothing.
 #[tokio::test]
@@ -3086,7 +3087,8 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
     let wallet_active = account(t1);
     let bare_waiting = account(t2);
     let bare_closing = account(t2);
-    for (tenant, id) in [anchored, wallet_active, bare_waiting, bare_closing] {
+    let carried = account(t1);
+    for (tenant, id) in [anchored, wallet_active, bare_waiting, bare_closing, carried] {
         seed.execute(
             "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
             &[&tenant, &id],
@@ -3133,6 +3135,8 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
         link(bare_closing, "closing"),
         // Another rail's link on an unanchored account: not V147's rule.
         link(bare_waiting, "active"),
+        // A link V146 carried from a NEAR AI account to a legacy account.
+        link(carried, "active"),
     ];
     for (index, (tenant, account, id, state)) in links.into_iter().enumerate() {
         let rail = if index == 4 { "other_rail" } else { "near_ai" };
@@ -3157,6 +3161,20 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
         .await
         .expect("seed link");
     }
+    seed.execute(
+        "INSERT INTO trace_legacy_payout_carries
+            (tenant_id, account_id, rail_id, link_id, legacy_link_hash, source_link_hash)
+         VALUES ($1, $2, 'near_ai', $3, $4, $5)",
+        &[
+            &links[5].0,
+            &links[5].1,
+            &links[5].2,
+            &sha("v147-legacy-link"),
+            &sha("v147-source-link"),
+        ],
+    )
+    .await
+    .expect("seed carry");
     let request = |tenant: &str, account: uuid::Uuid, action: &str| {
         let key = uuid::Uuid::new_v4();
         let link = action == "link";
@@ -3274,6 +3292,7 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
             expected_link(links[2], true),
             expected_link(links[3], false),
             expected_link(links[4], false),
+            expected_link(links[5], false),
         ];
         expected.sort();
         let after = read_links().await;
@@ -3312,7 +3331,8 @@ async fn v147_revokes_links_without_a_near_ai_login_as_a_non_superuser_owner() {
             .query(
                 "SELECT relname::text FROM pg_class
                   WHERE relname IN ('trace_near_account_anchors', 'trace_payout_links',
-                                    'trace_payout_link_requests', 'trace_payout_audit')
+                                    'trace_payout_link_requests', 'trace_payout_audit',
+                                    'trace_legacy_payout_carries')
                     AND NOT relforcerowsecurity",
                 &[],
             )

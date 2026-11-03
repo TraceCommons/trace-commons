@@ -1988,10 +1988,19 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "trace_dedup_cluster_representatives",
         include_str!("../../../../migrations/V145__trace_dedup_cluster_representatives.sql"),
     ),
+    // V146: the legacy account payout migration. Carried payout links in
+    // legacy tenants, the decision-5 principal claim at tenant-link time,
+    // release of carries when a tenant link is revoked, a waiting link that
+    // never sent closing at zero, and the instance-enrolled tenant link.
+    (
+        146,
+        "legacy_payout_carries",
+        include_str!("../../../../migrations/V146__legacy_payout_carries.sql"),
+    ),
     // V147 revokes every live payout link on an account with no recorded
     // NEAR AI login (owner, 2026-11-03, on #1862): marks it unavailable and
     // unlinked for the pass to close, and drops such accounts' pending link
-    // requests. V146 is claimed by #1865.
+    // requests. Carried links (V146) are kept.
     (
         147,
         "revoke_payout_links_without_near_ai_login",
