@@ -1,4 +1,5 @@
 import type { CoreStatus } from "../../../lib/tauri/types";
+import { AccountAttentionStatus } from "./account-attention-status";
 
 type ConnectionPanelProps = {
   status: CoreStatus | null;
@@ -38,6 +39,7 @@ export function ConnectionPanel({ status, settings }: ConnectionPanelProps) {
           {connected ? "Ready" : "Local only"}
         </span>
       </div>
+      <AccountAttentionStatus daemon={status?.daemon} />
       {!connected && (
         <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
           Traces may stay queued locally, but nothing can be sent until this
