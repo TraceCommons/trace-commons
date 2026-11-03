@@ -1671,9 +1671,10 @@ private struct HistoryPeriodCard: View {
     }
 }
 
-/// Home's Account tiles: Credit, the total with its change since the last
-/// day this Mac saw, and the NEAR AI balance beside it (owner, 2026-10-19),
-/// each opening Private AI. Home draws them under Account, and the edge
+/// Home's Account tiles: this Mac's credit earned, with the account's whole
+/// total under it, its credit pending, and the NEAR AI balance beside them
+/// (owner, 2026-10-19; 2026-10-29), each opening Private AI. Home draws
+/// them under Account, and the edge
 /// rail's Private AI peek under the tool buttons (owner, 2026-10-22). A
 /// failed rollup or credit read is a dash, never the store's earlier value.
 struct HomeAccountTiles: View {
@@ -1690,18 +1691,24 @@ struct HomeAccountTiles: View {
     }
 
     var body: some View {
-        let signIn = HomeFormat.creditSignIn(freshCredit, line: HomeFormat.creditSignInLine)
+        // The sign-in line while the commons' points are unknown for want of
+        // a session, the account's whole total while they are known: never
+        // both, since each is drawn only in the other's absence of points.
+        let creditDetail = HomeFormat.creditSignIn(freshCredit, line: HomeFormat.creditSignInLine)
+            ?? HomeFormat.creditAccountTotal(freshCredit, words: MonitorWords.table?.homeHistory)
         Grid(horizontalSpacing: GlassTokens.Space.s3, verticalSpacing: GlassTokens.Space.s3) {
             GridRow {
                 // Received and pending side by side (owner, 2026-10-29), both
                 // History's figures (owner, 2026-10-28: Home said 0 while
                 // History said 50.3): received is its Final, pending its
-                // pending figure under D6.
+                // pending figure under D6. Under received, the account-wide
+                // total (product owner, 2026-10-29, #1753); the change since
+                // yesterday stays out.
                 let tiles = HomeFormat.creditTiles(final: freshRollup?.creditFinal,
                                                    pending: freshRollup?.creditPending,
                                                    credit: freshCredit)
                 HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received,
-                             detail: signIn, systemImage: HomeStatIcons.credit, action: openPrivateAI)
+                             detail: creditDetail, systemImage: HomeStatIcons.credit, action: openPrivateAI)
                 HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending,
                              action: openPrivateAI)
                 if let copy = model.privateInferenceCopy {
@@ -1852,8 +1859,9 @@ struct HomeHeroRing: View {
 private struct HomeStatTile: View {
     let label: String
     let value: String
-    /// A line under the value (the credit's change, the uncontributed
-    /// size and estimate), in `detailInk` when it carries a tone.
+    /// A line under the value (the account's credit total, the
+    /// uncontributed size and estimate), in `detailInk` when it carries a
+    /// tone.
     var detail: String? = nil
     var detailInk: GlassRGBA? = nil
     /// The tile's icon (`HomeStatIcons`); nil draws none.
@@ -1942,7 +1950,7 @@ enum HomeFormat {
     ///
     /// With a figure, the core's line for the change over the last 24 hours
     /// goes under it (owner, 2026-10-23), up in the status green and down in
-    /// the status red as the Credit tile's change is drawn. Missing history
+    /// the status red. Missing history
     /// hides the change line; it is never represented as "$0.00".
     static func balance(
         _ status: BalanceStatus, copy: PrivateInferenceCopy, calls: BalanceCalls
@@ -2001,21 +2009,15 @@ enum HomeFormat {
         return line
     }
 
-    /// Home's Credit tile value: total credit, or a dash when unknown.
-    static func creditTotal(_ value: Double?) -> String {
-        guard let value else { return "—" }
-        return value.formatted(.number.precision(.fractionLength(0...1)))
-    }
-
-    /// The Credit tile's change since the last day this Mac saw: signed, in
-    /// the status green for a gain and red for a loss (owner, 2026-10-12);
-    /// nil while there is no earlier day to compare with, and for no change,
-    /// which the tile does not say (owner, 2026-10-16).
-    static func creditDelta(_ delta: Double?, words: MonitorHomeHistoryCopy?) -> (text: String, ink: GlassRGBA?)? {
-        guard let delta, let words, abs(delta) >= 0.05 else { return nil }
-        let figure = delta.formatted(.number.precision(.fractionLength(0...1)).sign(strategy: .always()))
-        let ink = delta > 0 ? GlassTokens.Color.statusOnText : GlassTokens.Color.statusOutsideText
-        return (FirstRunCopy.fill(words.creditDelta, ["amount": figure]), ink)
+    /// The Credit earned tile's line for the whole account (product owner,
+    /// 2026-10-29, #1753): the commons' lifetime points, in the core's
+    /// words, under this Mac's figure. Only while the commons knows its
+    /// points; unknown is no line, never a zero.
+    static func creditAccountTotal(_ credit: DaemonData.CommonsCreditSummary?,
+                                   words: MonitorHomeHistoryCopy?) -> String? {
+        guard let credit, credit.pointsKnown, let lifetime = credit.commonsPointsLifetimeEarned,
+              let template = words?.creditAccountTotal, !template.isEmpty else { return nil }
+        return FirstRunCopy.fill(template, ["amount": points(Double(lifetime))])
     }
 
     static func points(_ value: Double?) -> String {

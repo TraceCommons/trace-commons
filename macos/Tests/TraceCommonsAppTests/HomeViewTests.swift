@@ -90,7 +90,7 @@ final class HomeViewTests: XCTestCase {
                 + "pending: freshRollup?.creditPending, credit: freshCredit)"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditReceivedWord, value: tiles.received, "
-                + "detail: signIn, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
+                + "detail: creditDetail, systemImage: HomeStatIcons.credit, action: openPrivateAI)"))
         XCTAssertTrue(home.contains(
             "HomeStatTile(label: HomeFormat.creditPendingTitleWord, value: tiles.pending, action: openPrivateAI)"))
         // What is not contributed is an upsell two tiles tall across both
@@ -229,7 +229,7 @@ final class HomeViewTests: XCTestCase {
     func test_creditSignInLineIsThePayoutLinkConstant() throws {
         XCTAssertEqual(HomeFormat.creditSignInLine, "Sign in again")
         let home = try HistoryParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("detail: signIn, systemImage: HomeStatIcons.credit"))
+        XCTAssertTrue(home.contains("detail: creditDetail, systemImage: HomeStatIcons.credit"))
         XCTAssertFalse(home.contains("\"Sign in again\""))
     }
 }

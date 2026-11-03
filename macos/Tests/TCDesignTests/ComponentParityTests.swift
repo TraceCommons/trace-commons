@@ -90,6 +90,17 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertEqual(GlassBarGraph.labelInk(hovered: true), GlassTokens.Color.textPrimary)
     }
 
+    /// Lit dots are shared purple over kept blue, and both the menu bar's
+    /// paused grey while watching is paused (product owner, 2026-10-29,
+    /// #1753: the popover's graph greys while paused again).
+    @MainActor
+    func test_theBarGraphGreysWhilePaused() {
+        XCTAssertEqual(GlassBarGraph.dotInks(paused: false).shared, GlassTokens.Color.dataShared)
+        XCTAssertEqual(GlassBarGraph.dotInks(paused: false).kept, GlassTokens.Color.dataKept)
+        XCTAssertEqual(GlassBarGraph.dotInks(paused: true).shared, GlassTokens.Color.menuBarsPaused)
+        XCTAssertEqual(GlassBarGraph.dotInks(paused: true).kept, GlassTokens.Color.menuBarsPaused)
+    }
+
     /// The tapered matrix: nothing lit for nothing, one dot for a count of
     /// one, a full column at the maximum brightening to the tip, and a
     /// partial last dot that keeps 9 apart from 11.

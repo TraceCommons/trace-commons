@@ -1351,10 +1351,11 @@ pub struct MonitorHomeHistoryCopy {
     pub traces_hero_step_earn_detail: &'static str,
     pub traces_hero_step_use: &'static str,
     pub traces_hero_step_use_detail: &'static str,
-    /// Home's Credit tile: the change in total credit since the last day
-    /// this Mac saw, `{amount}` signed. No change says nothing (owner,
-    /// 2026-10-16). DRAFT, NEEDS APPROVAL.
-    pub credit_delta: &'static str,
+    /// Home's Credit earned tile: the account's whole total under this
+    /// Mac's figure, `{amount}` the commons' lifetime points (product
+    /// owner, 2026-10-29: show the account-wide total, and leave the change
+    /// since yesterday out). DRAFT, NEEDS APPROVAL.
+    pub credit_account_total: &'static str,
     /// Home's Insights promotion: today's routed tokens, and its line while
     /// no figures are read. DRAFT, NEEDS APPROVAL.
     pub insights_today: &'static str,
@@ -1689,7 +1690,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             traces_hero_step_earn_detail: "Each accepted trace earns you credit",
             traces_hero_step_use: "Use Private AI",
             traces_hero_step_use_detail: "Spend your credit on Private AI",
-            credit_delta: "{amount} since yesterday",
+            credit_account_total: "{amount} across your account",
             insights_today: "{total} tokens today",
             insights_teaser: "See where your agents spend their tokens.",
             campaign_eyebrow: "New on NEAR AI",

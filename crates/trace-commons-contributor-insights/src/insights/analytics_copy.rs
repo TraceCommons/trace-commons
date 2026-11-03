@@ -428,7 +428,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // 7b. The breakdown for one day picked on "Tokens by day": Claude Code
     // sessions by their tokens that day. Codex counts intervals, not days.
     ("analytics_drill_title_day", "Breakdown · {day}"),
-    ("analytics_drill_day_week", "Show week"),
     ("analytics_drill_day_none", "No tokens counted on this day."),
     (
         "analytics_drill_day_codex",
@@ -835,7 +834,6 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_setting_context_threshold", "Context threshold"),
     ("analytics_setting_not_set", "Not set"),
     ("analytics_setting_recap_card", "Weekly summary"),
-    ("analytics_setting_lever", "Higher-than-usual card"),
     // The `insights_counter_pass` switch (Ron's #1287 review). Counting is
     // on by default and always on since 2026-10-29 (product owner), so the
     // macOS Settings card no longer draws it.
