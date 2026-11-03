@@ -1521,6 +1521,28 @@ impl PayoutStore for PgBackend {
                     tx.commit().await?;
                     return Ok(PayoutLinkConfirm::ChangePending);
                 }
+                // The start checked the account's NEAR AI login, but a
+                // request can outlive that check: one started by an older
+                // service across a deploy (V147), or before the account
+                // lost its last login. Re-read it here, in the transaction
+                // that writes the link, so no topology lets a link land on
+                // an account with none. This checks for any login, not the
+                // one that proved the request: `subject_index` is a payout
+                // label and cannot be compared with an anchor.
+                let anchored: bool = tx
+                    .query_one(
+                        "SELECT EXISTS (
+                             SELECT 1 FROM trace_near_account_anchors
+                              WHERE tenant_id = $1 AND account_id = $2
+                                AND identity_source = 'near_ai_login')",
+                        &[&tenant, &account],
+                    )
+                    .await?
+                    .get(0);
+                if !anchored {
+                    tx.commit().await?;
+                    return Ok(PayoutLinkConfirm::NoLoginAnchor);
+                }
                 let kind: Option<String> = row.get(2);
                 let kind =
                     parse_recipient_kind(kind.ok_or_else(|| {

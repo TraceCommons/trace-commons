@@ -2047,6 +2047,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "legacy_payout_carries",
         include_str!("../../../../migrations/V146__legacy_payout_carries.sql"),
     ),
+    // V147 revokes every live payout link on an account with no recorded
+    // NEAR AI login (owner, 2026-11-03, on #1862): a waiting one closes at
+    // zero, an active one gets an unlink request for the pass to close.
+    // Carried links (V146) are kept.
+    (
+        147,
+        "revoke_payout_links_without_near_ai_login",
+        include_str!("../../../../migrations/V147__revoke_payout_links_without_near_ai_login.sql"),
+    ),
 ];
 
 /// Shared by verified claim issuance and the explicit historical repair.

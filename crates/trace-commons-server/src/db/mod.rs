@@ -3321,6 +3321,10 @@ pub enum PayoutLinkConfirm {
     ChangePending,
     /// An unlink with no active link.
     NotLinked,
+    /// A link on an account that has no NEAR AI login anchor at confirm:
+    /// only a recorded NEAR AI login proves a link, so it links nothing.
+    /// Unlinks are never refused this way.
+    NoLoginAnchor,
 }
 
 /// One account's link state on one rail, for the link routes.
@@ -4761,7 +4765,7 @@ mod payout_debug_tests {
                 recipient: Some((kind.clone(), sealed())),
                 expires_at: expires,
                 actor_ref_hash: ACCOUNT_HASH.into(),
-                proof_label: Some("near_wallet"),
+                proof_label: Some("near_ai_login"),
             }
         ));
         assert_redacted(format!(
