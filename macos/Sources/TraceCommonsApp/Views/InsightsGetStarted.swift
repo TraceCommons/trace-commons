@@ -54,67 +54,19 @@ struct InsightsGetStartedCard: View {
 
     private func text(_ key: String) -> String { start.copy[key] ?? "" }
 
+    /// The shared getting-started card (`GetStartedCard`), which the
+    /// Private AI tab's guide and Home's Traces walkthrough draw too.
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Text(text("analytics_start_title")).insightsTitle()
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityAddTraits(.isHeader)
-                Text(text("analytics_start_why")).insightsNote()
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s9) {
-                step(1, title: text("analytics_start_step_use"),
-                     detail: text("analytics_start_step_use_detail")) { EmptyView() }
-                step(2, title: text("analytics_start_step_share"),
-                     detail: text("analytics_start_step_share_detail"),
-                     info: text("analytics_start_step_share_info")) {
-                    if let openTraces = start.openTraces {
-                        Button(action: openTraces) {
-                            HStack(spacing: GlassTokens.Space.s2) {
-                                Text(text("analytics_start_choose"))
-                                Image(systemName: "arrow.right").accessibilityHidden(true)
-                            }
-                        }
-                        .buttonStyle(GlassButtonStyle(.link))
-                        .padding(.top, GlassTokens.Space.s3)
-                    }
-                }
-                step(3, title: text("analytics_start_step_fill"),
-                     detail: text("analytics_start_step_fill_detail"),
-                     info: text("analytics_start_step_fill_info")) { EmptyView() }
-            }
-            .insightsCardBody()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .insightsSection()
-    }
-
-    /// One numbered step: its number in a disc, its title and its line,
-    /// with the "i" holding `info` after the line's last word when there is
-    /// more to say, and what the step can open under them.
-    private func step<Action: View>(_ number: Int, title: String, detail: String, info: String = "",
-                                    @ViewBuilder action: () -> Action) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s5) {
-            Text(String(number))
-                .glassType(GlassTokens.TypeScale.micro)
-                .monospacedDigit()
-                .foregroundStyle(GlassTokens.Color.chartSeries1.color)
-                .frame(width: 18, height: 18)
-                .background(Circle().fill(GlassTokens.Color.chartSeries1.color.opacity(0.14)))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                Text(title).glassType(GlassTokens.TypeScale.label.weight(.semibold))
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-                InsightsTextWithInfo(detail, style: GlassTokens.TypeScale.label.weight(.regular),
-                                     infoTitle: title, info: [info])
-                    .foregroundStyle(GlassColor.textSecondary)
-                action()
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .accessibilityElement(children: .contain)
+        GetStartedCard(
+            title: text("analytics_start_title"), lead: text("analytics_start_why"),
+            steps: [
+                .init(title: text("analytics_start_step_use"), detail: text("analytics_start_step_use_detail")),
+                .init(title: text("analytics_start_step_share"), detail: text("analytics_start_step_share_detail"),
+                      info: text("analytics_start_step_share_info"),
+                      link: start.openTraces.map { GetStartedCard.Link(title: text("analytics_start_choose"), action: $0) }),
+                .init(title: text("analytics_start_step_fill"), detail: text("analytics_start_step_fill_detail"),
+                      info: text("analytics_start_step_fill_info")),
+            ])
     }
 }
 

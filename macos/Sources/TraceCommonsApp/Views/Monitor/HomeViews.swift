@@ -402,37 +402,27 @@ private struct HomeOverview: View {
             finishedFirstRunThisLaunch: model.finishedFirstRunThisLaunch)
     }
 
-    /// Home's Traces hero (owner, 2026-10-28): the first card, saying that
-    /// traces earn credit, with the way into Traces, where the person
-    /// shares. Under its title, three steps across the whole card,
-    /// contribute, earn, use Private AI (owner, 2026-10-29, from the
-    /// owner's mock-up). Condensed on 2026-11-02 (owner): no line under the
-    /// title, which runs the card's width, and an X that closes it for good
-    /// on this Mac, as the campaign's and Insights' do for theirs. Drawn
-    /// once the core's words have loaded.
+    /// Home's Traces walkthrough (owner, 2026-10-28): saying that traces
+    /// earn credit, with the way into Traces, where the person shares;
+    /// three steps, contribute, earn, use Private AI (owner, 2026-10-29).
+    /// Condensed on 2026-11-02 (owner): no line under the title, and an X
+    /// that closes it for good on this Mac. Drawn as the Insights empty
+    /// state's card is (owner, 2026-11-02, `GetStartedCard`): a plain card,
+    /// no gradient or pictures, numbered steps, and Start earning as the one
+    /// action, a text link under the step it begins. Drawn once the core's
+    /// words have loaded.
     @ViewBuilder
     private var tracesHero: some View {
         if let words, !tracesHeroClosed {
-            GlassHeroCard(
-                gradient: GlassTokens.Gradient.heroMissions,
+            GetStartedCard(
                 title: words.tracesHeroTitle,
-                actionTitle: words.tracesHeroAction, action: openTraces,
-                closeLabel: MonitorWords.close, onClose: { tracesHeroClosed = true },
-                contentSpansGraphic: true, titleSpansGraphic: true, actionOnPill: true
-            ) {
-                HomeHeroRing()
-            } content: {
-                HomeHeroSteps(steps: [
-                    .init(number: 1, graphic: .tools,
-                          title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail,
-                          action: openTraces),
-                    .init(number: 2, graphic: .traces,
-                          title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),
-                    .init(number: 3, graphic: .privateAI,
-                          title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail,
-                          action: openPrivateAI),
-                ])
-            }
+                steps: [
+                    .init(title: words.tracesHeroStepContribute, detail: words.tracesHeroStepContributeDetail,
+                          link: GetStartedCard.Link(title: words.tracesHeroAction, action: openTraces)),
+                    .init(title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),
+                    .init(title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail),
+                ],
+                close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true })
         }
     }
 
@@ -1812,211 +1802,6 @@ struct HomeAccountTiles: View {
 /// One of Home's and History's three counts (Ron's `StatCard`): a full
 /// card, 10 by 12 inside, its eyebrow word over an 18pt-class bold tabular
 /// figure. The word wraps at a space, never inside a word.
-/// The Traces hero's three steps (owner, 2026-10-29): side by side, a lit
-/// stretch of first run's step thread between each (`HomeHeroThread`), each
-/// its first-run screen in small and still (`HomeHeroStepGraphic`, owner,
-/// 2026-11-02: "match the applicable FTUX dialogue visuals and screens")
-/// over a title and one line, straight on the hero's ground in its ink: no
-/// card behind a step (owner, 2026-11-02: "remove the step card
-/// backgrounds"). Contribute opens Traces and Use
-/// Private AI opens Private AI, each panel a button of its own; Earn credit
-/// stays on Home, a plain panel (owner, 2026-10-29). The hero itself is a
-/// panel, so these clicks are not swallowed by it; its Start earning pill is
-/// its own button.
-struct HomeHeroSteps: View {
-    struct Step: Identifiable {
-        /// The step's place, left to right: its identity, and every step
-        /// after the first has a stretch of thread before it. Not drawn.
-        let number: Int
-        /// Which first-run screen it shows in small.
-        let graphic: Graphic
-        let title: String
-        let detail: String
-        /// Opens the step's tab; nil draws a plain panel.
-        var action: (() -> Void)? = nil
-        var id: Int { number }
-    }
-
-    /// The first-run screen a step shows: Tools' watched tiles, Traces'
-    /// ring round the N, Private AI's route into the N.
-    enum Graphic: Equatable {
-        case tools, traces, privateAI
-    }
-
-    let steps: [Step]
-
-    /// The pictures' height, and the thread's length between two steps.
-    static var graphicHeight: CGFloat { 28 }
-    static var thread: CGFloat { 14 }
-
-    var body: some View {
-        HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
-            ForEach(steps) { step in
-                if step.number > 1 { HomeHeroThread() }
-                HomeHeroStepPanel(step: step)
-            }
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .padding(.top, GlassTokens.Space.s2)
-    }
-}
-
-/// The lit stretch of first run's step thread (`FirstRunStepThread`): a
-/// short beam, glow blue to its bright core, between two steps.
-struct HomeHeroThread: View {
-    var body: some View {
-        let glow = GlassTokens.Color.firstRunGlow
-        Capsule()
-            .fill(LinearGradient(
-                colors: [glow.color, GlassTokens.Color.firstRunBeamCore.color],
-                startPoint: .leading, endPoint: .trailing))
-            .frame(width: HomeHeroSteps.thread, height: 3)
-            .shadow(color: glow.opacity(0.35).color, radius: 4)
-            .accessibilityHidden(true)
-    }
-}
-
-/// A step's first-run screen in small, built from first run's own pieces
-/// and still: Home is on screen for long stretches, and first run's
-/// breathing glow and streaming orbs would run the whole time.
-struct HomeHeroStepGraphic: View {
-    let graphic: HomeHeroSteps.Graphic
-
-    var body: some View {
-        let side = HomeHeroSteps.graphicHeight
-        Group {
-            switch graphic {
-            case .tools:
-                // Tools: the watched tools' tiles, a trace leaving them.
-                HStack(spacing: GlassTokens.Space.s2) {
-                    HStack(spacing: -side * 0.25) {
-                        FirstRunToolFace(tool: .claudeCode).frame(width: side, height: side)
-                        FirstRunToolFace(tool: .codex).frame(width: side, height: side)
-                    }
-                    HomeHeroDash()
-                    FirstRunOrb(diameter: 10)
-                }
-            case .traces:
-                // Traces: traces gathered on the ring round the N.
-                ZStack {
-                    Circle()
-                        .stroke(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 1.5, dash: [2, 3]))
-                    HomeHeroMark(side: side * 0.45)
-                    ForEach([-60.0, 60, 180], id: \.self) { degrees in
-                        FirstRunOrb(diameter: 9)
-                            .offset(x: cos(degrees * .pi / 180) * side / 2, y: sin(degrees * .pi / 180) * side / 2)
-                    }
-                }
-                .frame(width: side, height: side)
-            case .privateAI:
-                // Private AI: a tool's route into the N, dashed until it is
-                // connected.
-                HStack(spacing: GlassTokens.Space.s2) {
-                    FirstRunToolFace(tool: .claudeCode).frame(width: side * 0.86, height: side * 0.86)
-                    HomeHeroDash()
-                    HomeHeroMark(side: side * 0.6)
-                        .frame(width: side, height: side)
-                }
-            }
-        }
-        .frame(height: side, alignment: .leading)
-        .accessibilityHidden(true)
-    }
-}
-
-/// First run's dotted stretch, still to go.
-private struct HomeHeroDash: View {
-    var body: some View {
-        Path { path in
-            path.move(to: CGPoint(x: 0, y: 1))
-            path.addLine(to: CGPoint(x: 12, y: 1))
-        }
-        .stroke(GlassTokens.Color.firstRunRule.color, style: StrokeStyle(lineWidth: 2, lineCap: .butt, dash: [2, 3]))
-        .frame(width: 12, height: 2)
-    }
-}
-
-/// The NEAR mark in first run's blue, over a still glow, as `FirstRunHub`
-/// draws it at rest.
-private struct HomeHeroMark: View {
-    let side: CGFloat
-    @Environment(\.colorScheme) private var scheme
-
-    var body: some View {
-        let glow = GlassTokens.Color.firstRunGlow
-        ZStack {
-            Circle()
-                .fill(RadialGradient(
-                    colors: [glow.opacity(scheme == .dark ? 0.35 : 0.2).color, glow.opacity(0).color],
-                    center: .center, startRadius: 0, endRadius: side))
-                .frame(width: side * 2, height: side * 2)
-            GlassBrandMarkDrawing(fill: glow.color)
-                .frame(width: side, height: side)
-        }
-    }
-}
-
-/// One of the Traces hero's steps, on the hero's ground with no card of its
-/// own: a button, when it opens a tab, that reads its title and line to
-/// VoiceOver as one, its line brightening under the pointer.
-struct HomeHeroStepPanel: View {
-    let step: HomeHeroSteps.Step
-    @State private var hovering = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        if let action = step.action {
-            Button(action: action) { panel }
-                .buttonStyle(GlassPressStyle())
-                .onHover { inside in
-                    withAnimation(GlassMotion.fast(reduceMotion)) { hovering = inside }
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityAddTraits(.isButton)
-        } else {
-            panel.accessibilityElement(children: .combine)
-        }
-    }
-
-    private var panel: some View {
-        let ink = GlassTokens.Color.heroInk.color
-        // The picture sits over the title, so the title and line take the
-        // panel's whole width: beside it they wrapped a word a line in a
-        // narrow window. No inset of its own, so the first step starts
-        // where the hero's title does.
-        return VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            HomeHeroStepGraphic(graphic: step.graphic)
-                .padding(.bottom, GlassTokens.Space.s2)
-            Text(step.title)
-                .glassType(GlassTokens.TypeScale.bodyStrong)
-                .foregroundStyle(ink)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(step.detail)
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(ink.opacity(hovering ? 1 : 0.8))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.vertical, GlassTokens.Space.s2)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .contentShape(Rectangle())
-    }
-}
-
-/// The Traces hero's graphic (owner, 2026-10-29, from the owner's
-/// mock-up): one faint ring past the card's trailing edge, behind the
-/// steps, where a symbol would sit on the third step's words.
-struct HomeHeroRing: View {
-    static var side: CGFloat { 300 }
-    static var stroke: CGFloat { 36 }
-
-    var body: some View {
-        Circle()
-            .strokeBorder(GlassTokens.Color.heroInk.color.opacity(0.14), lineWidth: Self.stroke)
-            .frame(width: Self.side, height: Self.side)
-            .offset(x: 90, y: -30)
-    }
-}
-
 private struct HomeStatTile: View {
     let label: String
     let value: String

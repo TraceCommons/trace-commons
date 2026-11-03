@@ -380,37 +380,30 @@ struct InferenceTabView: View {
 /// there). No title of its own: the tab names it (owner, 2026-10-10).
 /// How Private AI works, step by step (product owner, 2026-10-28): first on
 /// the tab, in the managed copy's words, until it is closed with its X.
-/// Closed, it stays closed on this Mac.
+/// Closed, it stays closed on this Mac. Drawn as the Insights empty state's
+/// card is (product owner, 2026-11-02, `GetStartedCard`): a plain card, no
+/// gradient or graphic, each step a title over one line.
 struct PrivateAIGuideCard: View {
     static let closedKey = "privateAI.guideClosed"
     @AppStorage(Self.closedKey) private var closed = false
     @EnvironmentObject private var model: AppModel
 
-    static let stepKeys = ["guide_step_earn", "guide_step_start", "guide_step_use"]
+    /// Each step's title, then its line.
+    static let steps = [
+        (title: "guide_step_earn_title", line: "guide_step_earn"),
+        (title: "guide_step_start_title", line: "guide_step_start"),
+        (title: "guide_step_use_title", line: "guide_step_use"),
+    ]
 
     var body: some View {
         if !closed {
-            // The card explains; it has no action, so it is not a button.
-            GlassHeroCard(
-                gradient: GlassTokens.Gradient.heroCampaign,
-                title: model.managedText("guide_title"), subtitle: model.managedText("guide_body"),
-                closeLabel: MonitorWords.close, onClose: { closed = true }
-            ) {
-                GlassHeroSymbol("lock.shield")
-            } content: {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    ForEach(Array(Self.stepKeys.enumerated()), id: \.offset) { index, key in
-                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s2) {
-                            Text(verbatim: "\(index + 1).")
-                                .glassType(GlassTokens.TypeScale.bodyStrong)
-                            Text(model.managedText(key))
-                                .glassType(GlassTokens.TypeScale.body)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .foregroundStyle(GlassTokens.Color.heroInk.color)
-                    }
-                }
-            }
+            // The card explains; no step has a link.
+            GetStartedCard(
+                title: model.managedText("guide_title"), lead: model.managedText("guide_body"),
+                steps: Self.steps.map { keys in
+                    GetStartedCard.Step(title: model.managedText(keys.title), detail: model.managedText(keys.line))
+                },
+                close: GetStartedCard.Close(label: MonitorWords.close) { closed = true })
         }
     }
 }

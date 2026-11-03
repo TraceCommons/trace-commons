@@ -2,9 +2,10 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// The owner's 2026-11-02 ask for the Traces tab: the Automatic card over
-/// the tree becomes a toggle button with an eye in the toolbar, left of
-/// History.
+/// The owner's 2026-11-02 asks: the Automatic card over the Traces tree
+/// becomes a toggle button with an eye in the toolbar, left of History;
+/// and the Private AI tab's guide and Home's Traces walkthrough take the
+/// Insights empty state's card design, formatting and layout.
 @MainActor
 final class DesignRulings20261102Tests: XCTestCase {
     private static func text(_ rel: String) throws -> String {
@@ -52,5 +53,21 @@ final class DesignRulings20261102Tests: XCTestCase {
         // The steps behind it are Settings' own, unchanged.
         XCTAssertTrue(card.contains("case .keepAsks(let count): keepAsksCount = count"))
         XCTAssertTrue(card.contains("disclosure = SharingDisclosureFlow()"))
+    }
+
+    /// One card for all three: Insights' empty state, the Private AI guide
+    /// and Home's Traces walkthrough draw the same view, which has no
+    /// gradient, graphic or pill, and an X only when given one.
+    func test_theThreeGettingStartedCardsAreOneDesign() throws {
+        XCTAssertTrue(try Self.text("Views/InsightsGetStarted.swift").contains("GetStartedCard("))
+        XCTAssertTrue(try Self.text("Views/Monitor/InferenceViews.swift").contains("GetStartedCard("))
+        XCTAssertTrue(try Self.text("Views/Monitor/HomeViews.swift").contains("GetStartedCard("))
+        let card = try Self.text("Views/GetStartedCard.swift")
+        for absent in ["Gradient", "GlassHeroCard(", "GlassHeroSymbol(", "heroInk", "actionOnPill"] {
+            XCTAssertFalse(card.contains(absent), absent)
+        }
+        XCTAssertTrue(card.contains("if let close { GetStartedCardClose(close: close) }"))
+        XCTAssertTrue(card.contains(".insightsSection()"), "the Insights card's own section")
+        XCTAssertTrue(card.contains("Image(systemName: \"arrow.right\")"), "a step's action is a text link")
     }
 }

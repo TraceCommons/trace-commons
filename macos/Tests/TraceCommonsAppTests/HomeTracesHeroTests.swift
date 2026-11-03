@@ -7,9 +7,10 @@ import XCTest
 /// Home's Traces hero (owner, 2026-10-28): the macOS MVP is "contribute
 /// traces, earn credit", so Home has one card that says so and opens
 /// Traces. Condensed on 2026-11-02 (owner): shorter words, no line under
-/// the title, an X that closes it, steps drawn as first run's screens, and
-/// in place of the Traces cards only while no folder is watched or on the
-/// launch that finished first run.
+/// the title, an X that closes it, and in place of the Traces cards only
+/// while no folder is watched or on the launch that finished first run.
+/// Later that day it took the Insights empty state's card (owner,
+/// `GetStartedCard`): a plain card, numbered steps, no pictures.
 @MainActor
 final class HomeTracesHeroTests: XCTestCase {
     private static func home() throws -> String {
@@ -45,22 +46,19 @@ final class HomeTracesHeroTests: XCTestCase {
         XCTAssertFalse(copy.contains("traces_hero_body"))
     }
 
-    func test_theHeroOpensTracesAndItsStepsOpenTheirTabs() throws {
+    /// The walkthrough is the shared getting-started card: its title with
+    /// no line under it, the three steps in order, and Start earning as the
+    /// one action, a text link under Contribute that opens Traces.
+    func test_theHeroIsTheGetStartedCardAndStartEarningOpensTraces() throws {
         let body = try Self.hero()
-        XCTAssertTrue(body.contains("GlassHeroCard("))
-        XCTAssertTrue(body.contains("title: words.tracesHeroTitle,\n"), "no subtitle under the title")
-        XCTAssertFalse(body.contains("subtitle:"))
-        XCTAssertTrue(body.contains("actionTitle: words.tracesHeroAction, action: openTraces"))
-        // The steps and the title both run the card's width; only the X
-        // keeps the title off the trailing edge.
-        XCTAssertTrue(body.contains("contentSpansGraphic: true, titleSpansGraphic: true, actionOnPill: true"))
-        XCTAssertTrue(body.contains("HomeHeroSteps(steps: ["))
-        // Contribute opens Traces and Use Private AI opens Private AI, each
-        // its own button, so the hero is a panel and only its pill is the
-        // hero's button; Earn credit opens nothing (owner, 2026-10-29).
-        XCTAssertTrue(body.contains("detail: words.tracesHeroStepContributeDetail,\n                          action: openTraces),"))
-        XCTAssertTrue(body.contains("detail: words.tracesHeroStepEarnDetail),"))
-        XCTAssertTrue(body.contains("detail: words.tracesHeroStepUseDetail,\n                          action: openPrivateAI),"))
+        XCTAssertTrue(body.contains("GetStartedCard(\n                title: words.tracesHeroTitle,\n                steps: ["))
+        XCTAssertFalse(body.contains("lead:"), "no line under the title")
+        XCTAssertTrue(body.contains(
+            "detail: words.tracesHeroStepContributeDetail,\n"
+                + "                          link: GetStartedCard.Link(title: words.tracesHeroAction, action: openTraces)),"))
+        XCTAssertTrue(body.contains(".init(title: words.tracesHeroStepEarn, detail: words.tracesHeroStepEarnDetail),"))
+        XCTAssertTrue(body.contains(".init(title: words.tracesHeroStepUse, detail: words.tracesHeroStepUseDetail),"))
+        XCTAssertEqual(body.components(separatedBy: "link:").count - 1, 1, "one clear action")
     }
 
     /// The X closes the hero for good on this Mac, with the close word the
@@ -71,41 +69,20 @@ final class HomeTracesHeroTests: XCTestCase {
             "@AppStorage(HomeClosedCards.tracesHeroKey) private var tracesHeroClosed = false"))
         let body = try Self.hero()
         XCTAssertTrue(body.contains("if let words, !tracesHeroClosed {"))
-        XCTAssertTrue(body.contains("closeLabel: MonitorWords.close, onClose: { tracesHeroClosed = true },"))
+        XCTAssertTrue(body.contains("close: GetStartedCard.Close(label: MonitorWords.close) { tracesHeroClosed = true })"))
     }
 
-    /// Each step shows its first-run screen in small (owner, 2026-11-02:
-    /// "match the applicable FTUX dialogue visuals and screens"), joined by a
-    /// lit stretch of first run's step thread; no numbered disc, no arrow,
-    /// and no card behind it (owner, 2026-11-02: "remove the step card
-    /// backgrounds"), so its words are the hero's ink. The pictures are
-    /// still: no timeline.
-    func test_theStepsShowFirstRunScreensWithNoCard() throws {
+    /// No gradient, ring or first-run pictures any more: the card is plain
+    /// (owner, 2026-11-02), and the views that drew them are gone.
+    func test_theHeroDrawsNoGradientOrPictures() throws {
+        let body = try Self.hero()
+        XCTAssertFalse(body.contains("GlassHeroCard("))
+        XCTAssertFalse(body.contains("heroMissions"))
         let home = try Self.home()
-        let start = try XCTUnwrap(home.range(of: "struct HomeHeroSteps: View {"))
-        let end = try XCTUnwrap(home.range(of: "struct HomeHeroRing: View {", range: start.upperBound..<home.endIndex))
-        let steps = home[start.upperBound..<end.lowerBound]
-        XCTAssertFalse(steps.contains("Text(\"\\(step.number)\")"))
-        XCTAssertFalse(steps.contains("arrow.right"))
-        XCTAssertTrue(steps.contains("if step.number > 1 { HomeHeroThread() }"))
-        XCTAssertTrue(steps.contains("HomeHeroStepGraphic(graphic: step.graphic)"))
-        let panelStart = try XCTUnwrap(steps.range(of: "struct HomeHeroStepPanel: View {"))
-        let panel = steps[panelStart.upperBound...]
-        XCTAssertFalse(panel.contains("GlassTokens.Color.firstRunCard"), "a card is back behind the step")
-        XCTAssertFalse(panel.contains("strokeBorder"), "a card's edge is back round the step")
-        XCTAssertFalse(panel.contains(".background("), "a background is back behind the step")
-        XCTAssertTrue(panel.contains("let ink = GlassTokens.Color.heroInk.color"), "the hero's ink")
-        XCTAssertFalse(panel.contains("GlassColor.textPrimary"), "a card's ink on the hero's ground")
-        for piece in ["FirstRunToolFace(tool: .claudeCode)", "FirstRunToolFace(tool: .codex)", "FirstRunOrb(",
-                      "GlassBrandMarkDrawing(fill: glow.color)", "GlassTokens.Color.firstRunBeamCore"] {
-            XCTAssertTrue(steps.contains(piece), piece)
+        for gone in ["struct HomeHeroSteps", "struct HomeHeroThread", "struct HomeHeroStepGraphic",
+                     "struct HomeHeroStepPanel", "struct HomeHeroRing"] {
+            XCTAssertFalse(home.contains(gone), gone)
         }
-        XCTAssertFalse(steps.contains("GlassAnimationTimeline"), "a step's picture moves")
-        XCTAssertFalse(steps.contains("FirstRunHub("), "first run's hub breathes")
-        let hero = try Self.hero()
-        XCTAssertTrue(hero.contains(".init(number: 1, graphic: .tools,"))
-        XCTAssertTrue(hero.contains(".init(number: 2, graphic: .traces,"))
-        XCTAssertTrue(hero.contains(".init(number: 3, graphic: .privateAI,"))
     }
 
     /// In place of the Traces cards on the launch that finished first run,

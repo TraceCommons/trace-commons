@@ -84,6 +84,9 @@ final class GlassSurfaceRulesTests: XCTestCase {
         "Views/FirstRun/WelcomeScreen.swift",
         "Views/FirstRun/TracesScreen.swift",
         "Views/FirstRun/PrivateAIScreen.swift",
+        // The getting-started card the Insights, Private AI and Home
+        // walkthrough cards share (owner, 2026-11-02).
+        "Views/GetStartedCard.swift",
     ]
 
     static func text(_ rel: String) throws -> String {
