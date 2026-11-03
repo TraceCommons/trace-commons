@@ -411,10 +411,13 @@ pub fn database_error_label(error: &crate::error::DatabaseError) -> String {
 pub fn is_decided_refusal(error: &crate::error::DatabaseError) -> bool {
     use crate::error::DatabaseError;
     match error {
+        // Not `near_provisioning_refused`: the database layer also returns it
+        // for faults (identity material that cannot seal, a stored ceremony a
+        // replica cannot read), so it logs at `warn` until those get labels
+        // of their own.
         DatabaseError::Pool(label) => matches!(
             label.as_str(),
-            "near_provisioning_refused"
-                | "near_provisioning_wallet_key_registered_elsewhere"
+            "near_provisioning_wallet_key_registered_elsewhere"
                 | "near_provisioning_device_bound_to_other_account"
                 | DEVICE_KEY_REGISTERED_ELSEWHERE
                 | DEVICE_KEY_REVOKED
@@ -755,7 +758,6 @@ mod tests {
     fn only_the_listed_refusals_are_decided() {
         use crate::error::DatabaseError;
         for label in [
-            "near_provisioning_refused",
             "near_provisioning_wallet_key_registered_elsewhere",
             "near_provisioning_device_bound_to_other_account",
             DEVICE_KEY_REGISTERED_ELSEWHERE,
@@ -770,6 +772,8 @@ mod tests {
             "near_provisioning_ambiguous".into()
         )));
         for fault in [
+            // Also returned for faults, so not quiet.
+            DatabaseError::Pool("near_provisioning_refused".into()),
             DatabaseError::Pool("near_provisioning_unconfigured".into()),
             DatabaseError::Pool("near_ai_login_provisioning_unconfigured".into()),
             DatabaseError::Pool("connection reset by peer".into()),

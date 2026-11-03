@@ -856,13 +856,20 @@ pub const ENROLL_DEVICE_KEY_REVOKED: &str = "near_ai_enroll_device_key_revoked";
 /// Whether a finish was not answered: no response, a status
 /// [`commons_busy`] counts as busy (the commons' own `503
 /// near_ai_sign_in_unavailable` and `429 near_ai_sign_in_rate_limited`
-/// among them), or a body past the client's cap. The commons' refusals are
-/// small JSON bodies, so an oversized one is an error page in front of it (a
-/// proxy's `502`/`503`/`504`), which carries no status this error keeps.
+/// among them), a body past the client's cap, or a success whose body does
+/// not parse. The commons' refusals are small JSON bodies, so an oversized
+/// one is an error page in front of it (a proxy's `502`/`503`/`504`), which
+/// carries no status this error keeps. A `MalformedResponse` follows only a
+/// `2xx`, so the commons answered success and this device may already have
+/// joined; signing in again works (provisioning is idempotent for one
+/// device), which the try-later label leads to and the verification-failed
+/// one would not.
 fn finish_unanswered(error: &trace_commons_operator_client::Error) -> bool {
     use trace_commons_operator_client::Error;
     match error {
-        Error::Transport { .. } | Error::ResponseTooLarge { .. } => true,
+        Error::Transport { .. }
+        | Error::ResponseTooLarge { .. }
+        | Error::MalformedResponse { .. } => true,
         Error::HttpFailure { status, .. } | Error::ServerLabel { status, .. } => {
             commons_busy(*status)
         }
@@ -870,15 +877,15 @@ fn finish_unanswered(error: &trace_commons_operator_client::Error) -> bool {
     }
 }
 
-/// A finish the commons did not answer consumed its ceremony anyway (the
-/// commons' wire contract: a `503` or `429` at finish means start again), so
-/// the caller's try-later label leads to a new start, never a resend.
-///
 /// A finish failure as this module's label: the revoked-key refusal by
 /// name; a commons that did not answer (no response, a server error such as
 /// its `503 near_ai_sign_in_unavailable`, or its `429
 /// near_ai_sign_in_rate_limited`) as `unavailable`, the caller's existing
 /// try-later label; anything else as `fallback`. Never the remote body.
+///
+/// The try-later label leads to a new start, never a resend of this finish:
+/// the commons' wire contract is that after a `503` or `429` at finish the
+/// ceremony may or may not still exist, so a client always starts again.
 pub(super) fn finish_refusal(
     error: &trace_commons_operator_client::Error,
     fallback: &'static str,
@@ -1922,6 +1929,21 @@ mod tests {
                 );
             }
         }
+        // A success whose body does not parse: the commons answered `2xx`.
+        assert_eq!(
+            finish_refusal(
+                &trace_commons_operator_client::Error::MalformedResponse {
+                    url: "https://commons.example/v1/account/near-ai/provision/finish".into(),
+                    body: String::new(),
+                    source: serde_json::from_str::<serde_json::Value>("")
+                        .expect_err("empty input is not JSON"),
+                },
+                "near_ai_enroll_verification_failed",
+                "near_ai_enroll_unavailable",
+            )
+            .to_string(),
+            "near_ai_enroll_unavailable"
+        );
         // An error page too large to be the commons' own refusal.
         assert_eq!(
             finish_refusal(

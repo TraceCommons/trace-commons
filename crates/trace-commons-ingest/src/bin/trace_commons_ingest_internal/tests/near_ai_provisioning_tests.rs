@@ -1913,6 +1913,7 @@ async fn pg_a_near_ai_finish_whose_near_ai_does_not_answer_answers_503() {
         )
         .await;
         assert_uniform_deny(&resent, &format!("{cause}, resent after the 503"));
+        signs_in_after_starting_again(&h, &admin, &device, cause).await;
     }
     reset_account_rate_limiter_for_db_test().await;
 }
@@ -2225,5 +2226,43 @@ async fn pg_a_near_ai_finish_without_the_resolver_pool_answers_503() {
     )
     .await;
     assert_uniform_deny(&resent, "resent after the 503");
+    // The 503 came after introspection, inside provisioning; starting again
+    // must not meet anything that attempt left behind.
+    signs_in_after_starting_again(&h, &admin, &device, "no resolver pool").await;
     reset_account_rate_limiter_for_db_test().await;
+}
+
+/// What the client does after a `503` at finish: a new start and finish for
+/// the same device, against a commons that answers again. It must succeed and
+/// leave exactly one device row, whatever the failed finish did first.
+async fn signs_in_after_starting_again(
+    h: &Harness,
+    admin: &deadpool_postgres::Object,
+    device: &Device,
+    cause: &str,
+) {
+    let again = start(&h.state, PROVISION_START, None, device).await;
+    let signature = device.sign(&again.signing_bytes);
+    let answered = finish(&h.state, PROVISION_FINISH, None, &again, device, &signature).await;
+    assert_eq!(
+        answered.status,
+        StatusCode::OK,
+        "{cause}, started again: {:?}",
+        answered.json()
+    );
+    assert_eq!(
+        count(
+            admin,
+            "SELECT count(*)::bigint FROM device_keys WHERE public_key = $1",
+            &[&device.public_b64()],
+        )
+        .await,
+        1,
+        "{cause}: one device row after starting again"
+    );
+    let tenant = answered.json()["tenant_id"]
+        .as_str()
+        .expect("tenant")
+        .to_string();
+    drop_tenants(admin, &[&tenant]).await;
 }

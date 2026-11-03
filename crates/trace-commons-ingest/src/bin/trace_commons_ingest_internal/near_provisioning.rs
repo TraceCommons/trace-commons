@@ -310,10 +310,13 @@ fn not_ready_answer(control: &'static str, half: CeremonyHalf) -> Option<axum::r
             | control::STAGING_WALLET_CLOSED
             | control::WITNESS_JSON_ABSENT
     );
-    if half == CeremonyHalf::Start && not_offered {
-        None
-    } else {
-        Some(near_ai_not_ready())
+    match (half, not_offered) {
+        (CeremonyHalf::Start, true) => None,
+        // `503`, with no line per request: anyone can reach this on a commons
+        // that never offered the path (provisioning off is the default), and
+        // `ready_or_declined` already reported the control once.
+        (CeremonyHalf::Finish, true) => Some(unavailable_response()),
+        (_, false) => Some(near_ai_not_ready()),
     }
 }
 
@@ -1473,8 +1476,8 @@ fn near_ai_verify_device_proof(
 /// Introspect the NEAR AI token and drop it. Always the last check of a
 /// finish, because it is the only one that leaves this machine, and a
 /// request that was going to be refused anyway should not reach NEAR AI.
-/// A finish left undecided (a `503`) keeps its ceremony, so the same token
-/// can be introspected again on the retry; introspection does not consume it.
+/// Introspection does not consume the token, so after a `503` the client can
+/// start a new ceremony and send the same token again.
 async fn near_ai_introspect(
     state: &AppState,
     access_token: String,
@@ -1499,14 +1502,16 @@ pub(super) const NEAR_AI_SIGN_IN_RATE_LIMITED: &str = "near_ai_sign_in_rate_limi
 /// RPC did not answer. One label for every cause, so the body never says
 /// which; the cause is logged.
 ///
-/// **Wire contract: a `503` (or `429`) at finish means start again.** A
-/// finish takes its single-use ceremony before anything that can be
-/// unavailable, and the ceremony is gone whatever the finish answers. A
-/// client retries with a new start, never by resending the same finish.
-/// The ceremony is deliberately not kept for a retry: a finish body is a
-/// complete credential (the device signature, the PKCE verifier, and on the
-/// NEAR AI route the access token), and a kept ceremony would let whoever
-/// holds a copy of that body complete the sign-in after the owner gave up.
+/// **Wire contract: a `503` (or `429`) at finish means start again.** After
+/// one, the ceremony may or may not still exist: an answer given before the
+/// take (the rate limit, readiness, no account registry) leaves it for the
+/// rest of its expiry, and an answer given after the take has consumed it. A
+/// client always starts again, and never resends the same finish. The
+/// commons never puts a taken ceremony back: a finish body is a complete
+/// credential (the device signature, the PKCE verifier, and on the NEAR AI
+/// route the access token), and a ceremony kept after a failed finish would
+/// let whoever holds a copy of that body complete the sign-in after the owner
+/// gave up.
 pub(super) const NEAR_AI_SIGN_IN_UNAVAILABLE: &str = "near_ai_sign_in_unavailable";
 
 /// `429`, with `Retry-After`: a NEAR AI sign-in start or finish over the
@@ -1592,7 +1597,8 @@ fn near_ai_database_failure(
 /// login belongs to another account", and readiness is deployment state, the
 /// same for every request and already published by the capabilities route.
 /// The control that declined is logged once by `ready_or_declined`. A path
-/// that is switched off is not this; see `not_ready_answer`.
+/// that is switched off is not this at start (the uniform deny) and answers
+/// `503` without a log line at finish; see `not_ready_answer`.
 fn near_ai_not_ready() -> axum::response::Response {
     near_ai_sign_in_unavailable("not_ready")
 }
