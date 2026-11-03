@@ -676,12 +676,24 @@ Where the implementation differs from, or adds to, sections 3 to 5:
 - **Instance links require the tenant's earliest live device.** A device
   enrolled into the tenant later, for example by whoever holds the
   instance key, cannot link it. If every earlier device was revoked, a
-  later one becomes earliest; whether instance links should instead need
-  operator approval is an open owner question.
+  later one becomes earliest. No operator approval (owner, 2026-11-03).
 - **The app does not offer the move to instance-enrolled devices yet.**
   The existing offer and notice say "invite", which is untrue for them, and
   showing them needs approved wording (copy guide rule 9). The server
   accepts instance links; the client offer waits for that wording.
+
+### Owner decisions after review (2026-11-03)
+
+1. **Decision 5 confirmed with the corrected premise.** The claim links
+   the bare device key, the app's `user_subject_hash(device_key_id)` and
+   the instance-enrollment subjects. Contributor-label subjects stay
+   unowned, measured by Q5.
+2. **Instance links: the tenant's earliest live device signs, with no
+   operator approval.** An operator is involved only for a lost device key,
+   case by case.
+3. **No wording yet for offering the move to instance devices.** The
+   client offer stays limited to invite devices. Follow-up: wording for
+   instance devices, then widen `offered_for`.
 
 ### Known limits, not fixed here
 
