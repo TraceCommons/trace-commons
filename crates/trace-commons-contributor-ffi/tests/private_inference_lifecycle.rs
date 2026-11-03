@@ -127,17 +127,6 @@ fn exercise_child(root: &Path) {
     assert!(!root.join("ironwire/endpoint.json").exists());
 }
 
-/// `name` as libtest knows it in this test binary. Every tests/*.rs file is a
-/// module of one binary (tests/it.rs), so its tests are named
-/// `<module>::<name>`, and `--exact` with the bare name runs nothing and
-/// still exits 0.
-fn libtest_name(name: &str) -> String {
-    match module_path!().split_once("::") {
-        Some((_, module)) => format!("{module}::{name}"),
-        None => name.to_owned(),
-    }
-}
-
 #[test]
 fn c_api_private_inference_outlives_call_and_cycles() {
     const CHILD: &str = "TC_PRIVATE_INFERENCE_TEST_CHILD";
@@ -158,7 +147,7 @@ fn c_api_private_inference_outlives_call_and_cycles() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            &libtest_name("c_api_private_inference_outlives_call_and_cycles"),
+            &libtest_name!("c_api_private_inference_outlives_call_and_cycles"),
             "--nocapture",
         ])
         .env(CHILD, root.path())

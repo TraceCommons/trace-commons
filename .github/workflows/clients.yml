@@ -100,7 +100,7 @@ jobs:
           cargo test -p trace-commons-contributor-sources --lib
           cargo test -p trace-commons-contributor-insights --lib
           cargo test -p trace-commons-contributor-platform --lib
-          cargo test -p trace-commons-contributor-ffi --test it -- credential_store_self_check::
+          cargo test -p trace-commons-contributor-ffi --test it -- 'credential_store_self_check::'
       # These three tests used to be part of the contributor's lib harness.
       # Keep their macOS coverage without making every client test build the server.
       - name: Native auth client/server contracts on macOS
@@ -261,7 +261,7 @@ jobs:
       # cfg, so it compiles and runs here as part of the normal test binary;
       # nothing filters it out.
       - name: Run the update conformance fixtures
-        run: cargo test -p trace-commons-contributor --test it -- update_conformance::
+        run: cargo test -p trace-commons-contributor --test it -- 'update_conformance::'
       # update_manifest_roundtrip.rs is deliberately NOT run here. It shells
       # out to the real scripts/updates/generate-manifest.sh, and that script
       # (a) has a `#!/usr/bin/env bash` shebang -- Windows CreateProcess does

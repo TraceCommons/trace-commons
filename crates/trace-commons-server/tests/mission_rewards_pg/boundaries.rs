@@ -7,7 +7,7 @@ use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::mission_rewards::{RewardActivityKind, RewardError};
 use uuid::Uuid;
 
-use super::fixture::{
+use crate::fixture::{
     RewardPgFixture, assert_refusal, award_submission, create_program, digest, reserve_and_submit,
     terms,
 };

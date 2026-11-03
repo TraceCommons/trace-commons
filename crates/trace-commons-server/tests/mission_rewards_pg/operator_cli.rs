@@ -5,7 +5,7 @@ use serde_json::json;
 use trace_commons_server::mission_rewards::RewardActivityKind;
 use uuid::Uuid;
 
-use super::fixture::{RewardPgFixture, cli, digest, history_entry, role_url, terms};
+use crate::fixture::{RewardPgFixture, cli, digest, history_entry, role_url, terms};
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_REWARDS_PG_TEST_URL"]

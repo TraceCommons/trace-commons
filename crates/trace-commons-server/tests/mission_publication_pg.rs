@@ -29,7 +29,7 @@ use trace_commons_server::{
 };
 use uuid::Uuid;
 
-use self::fixture::{RewardPgFixture, cli, digest, role_url};
+use crate::fixture::{RewardPgFixture, cli, digest, role_url};
 
 struct MissionFixture {
     rewards: RewardPgFixture,

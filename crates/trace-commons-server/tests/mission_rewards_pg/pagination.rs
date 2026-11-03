@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use trace_commons_server::mission_rewards::{RewardActivityKind, RewardError};
 use uuid::Uuid;
 
-use super::fixture::{RewardPgFixture, assert_refusal, cli, create_program, digest, role_url};
+use crate::fixture::{RewardPgFixture, assert_refusal, cli, create_program, digest, role_url};
 
 fn fixed_uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)

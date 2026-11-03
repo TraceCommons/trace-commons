@@ -193,7 +193,7 @@ Run the real isolated database regression using a disposable local PostgreSQL:
 
 ```sh
 TRACE_COMMONS_NEAR_PG_TEST_DATABASE_URL=postgresql://USER@127.0.0.1:PORT/TEST_DB \
-  cargo test -p trace-commons-server --test it -- account_onboarding_pg::
+  cargo test -p trace-commons-server --test account_onboarding_pg
 cargo test -p trace-commons-server --lib account_onboarding
 cargo test -p trace-commons-contributor --lib daemon::account_onboarding
 cargo test -p trace-commons-ingest --lib ingest::app::near_provisioning::tests

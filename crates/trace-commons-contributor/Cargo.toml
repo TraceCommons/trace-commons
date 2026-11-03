@@ -958,8 +958,9 @@ tokio = { version = "1", features = ["net", "test-util"] }
 name = "compute-package"
 test = true
 
-# Integration tests. `it` holds every tests/*.rs file as a module, so the
-# dependency graph links once rather than once per file; see tests/it.rs.
+# Integration tests. `it` holds every tests/*.rs file not listed below as a
+# module, so the dependency graph links once rather than once per file; see
+# tests/it.rs.
 [[test]]
 name = "it"
 path = "tests/it.rs"
@@ -975,3 +976,31 @@ path = "tests/k2_sample_recorder.rs"
 [[test]]
 name = "managed_launcher_signals"
 path = "tests/managed_launcher_signals.rs"
+
+# Its own binary: the `staging channel tests` CI step builds it with the
+# near-ai-staging feature. As a module of `it`, that step would build every
+# other test file under the feature too.
+[[test]]
+name = "channel_hosts"
+path = "tests/channel_hosts.rs"
+
+# Its own binary: the `staging channel tests` CI step builds it with the
+# near-ai-staging feature. As a module of `it`, that step would build every
+# other test file under the feature too.
+[[test]]
+name = "credential_store_isolation"
+path = "tests/credential_store_isolation.rs"
+
+# Its own binary: the `staging channel tests` CI step builds it with the
+# near-ai-staging feature. As a module of `it`, that step would build every
+# other test file under the feature too.
+[[test]]
+name = "preflight"
+path = "tests/preflight.rs"
+
+# Its own binary: the `staging channel tests` CI step builds it with the
+# near-ai-staging feature. As a module of `it`, that step would build every
+# other test file under the feature too.
+[[test]]
+name = "version_channel"
+path = "tests/version_channel.rs"

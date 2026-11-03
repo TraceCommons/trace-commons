@@ -1225,7 +1225,7 @@ To run the GCS provider integration test against a local emulator, bring up
 docker run --rm -p 4443:4443 fsouza/fake-gcs-server -scheme http -public-host localhost
 GCS_FAKE_ENDPOINT=http://localhost:4443 \
 cargo test -p trace-commons-server --features gcs-client \
-  --test it -- trace_artifact_gcs_integration:: --ignored
+  --test it -- 'trace_artifact_gcs_integration::' --ignored
 ```
 
 The test is marked `#[ignore]` so it does not run on default CI. When

@@ -52,7 +52,7 @@ The private, bounded journal uses atomic replacement and can recover running or 
 Use a fresh disposable loopback PostgreSQL database named `reward_test_*` through `TRACE_COMMONS_REWARDS_PG_TEST_URL`. The selected tests refuse a missing test URL.
 
 ```sh
-cargo test -p trace-commons-server --test it -- mission_publication_pg:: --ignored --test-threads=1
+cargo test -p trace-commons-server --test mission_publication_pg -- --ignored --test-threads=1
 cargo test -p trace-commons-ingest --lib \
   public_mission_catalog_http_is_bounded_anonymous_and_side_effect_free -- --ignored --test-threads=1
 cargo test -p trace-commons-contributor --lib mission_catalog::tests

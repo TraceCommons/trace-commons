@@ -4,17 +4,6 @@ use trace_commons_contributor::{
     daemon::ipc::{DaemonShared, Request, handle_request},
 };
 
-/// `name` as libtest knows it in this test binary. Every tests/*.rs file is a
-/// module of one binary (tests/it.rs), so its tests are named
-/// `<module>::<name>`, and `--exact` with the bare name runs nothing and
-/// still exits 0.
-fn libtest_name(name: &str) -> String {
-    match module_path!().split_once("::") {
-        Some((_, module)) => format!("{module}::{name}"),
-        None => name.to_owned(),
-    }
-}
-
 // Each IPC launch test runs in a child with version-only executable fixtures on PATH.
 // This exercises discovery without requiring installed tools or changing the
 // parent test process environment while other tests are running.
@@ -46,17 +35,27 @@ fn native_fixture_child(test: &str) -> bool {
     }
         bin
     });
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &libtest_name(test), "--nocapture"])
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &libtest_name!(test), "--nocapture"])
         .env("TRACE_MANAGED_TEST_CHILD", test)
         .env(
             "TRACE_MANAGED_FIXTURE_BAD_VERSION",
             (test == "unsupported_version_refuses_ticket_and_preserves_account").to_string(),
         )
         .env("PATH", bin.path())
-        .status()
+        .output()
         .unwrap();
-    assert!(status.success(), "fixture child failed: {test}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "fixture child failed: {test}\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A filter that matches nothing also exits 0.
+    assert!(
+        stdout.contains("1 passed"),
+        "fixture child ran no test: {test}\n{stdout}"
+    );
     true
 }
 

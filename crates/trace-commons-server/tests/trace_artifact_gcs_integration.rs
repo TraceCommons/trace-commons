@@ -16,7 +16,7 @@
 //! docker run --rm -p 4443:4443 fsouza/fake-gcs-server -scheme http -public-host localhost
 //! GCS_FAKE_ENDPOINT=http://localhost:4443 \
 //! cargo test -p trace-commons-server --features gcs-client \
-//!   --test it -- trace_artifact_gcs_integration:: --ignored
+//!   --test it -- 'trace_artifact_gcs_integration::' --ignored
 //! ```
 //!
 //! See `docs/trace-commons-storage.md` for the full emulator setup section.

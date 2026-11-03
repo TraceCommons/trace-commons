@@ -167,7 +167,7 @@ The disposable test cluster needs loopback-only trust authentication for its syn
 
 ```bash
 RUSTFLAGS="-D warnings" cargo +1.96.1 test -p trace-commons-server \
-  --test it -- mission_rewards_pg:: --ignored --test-threads=1
+  --test mission_rewards_pg -- --ignored --test-threads=1
 ```
 
 The test matrix also covers:

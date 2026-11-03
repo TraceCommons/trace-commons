@@ -190,7 +190,7 @@ PostgreSQL integration tests require a live database; export
 `TRACE_COMMONS_PG_TEST_DATABASE_URL` and run:
 
 ```bash
-cargo test -p trace-commons-server --test it -- trace_corpus_pg_store::
+cargo test -p trace-commons-server --test trace_corpus_pg_store
 ```
 
 ### Contributor CLI

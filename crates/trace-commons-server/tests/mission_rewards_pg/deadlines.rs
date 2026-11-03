@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use trace_commons_server::mission_rewards::RewardActivityKind;
 use uuid::Uuid;
 
-use super::fixture::{RewardPgFixture, digest, terms};
+use crate::fixture::{RewardPgFixture, digest, terms};
 
 fn json_timestamp(value: &serde_json::Value, field: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value[field].as_str().expect("timestamp result field"))
