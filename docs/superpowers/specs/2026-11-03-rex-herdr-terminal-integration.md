@@ -1,6 +1,6 @@
 # Opening Private AI sessions in Rex and herdr -- research and design
 
-Date: 2026-11-03. Owner: Zaki. Status: research only; nothing is built.
+Date: 2026-11-03. Owner: Zaki. Status: decided 2026-11-03 (see "Owner decisions"); nothing is built.
 Asked for "on top of #1870" (Warp Tab Configs, merged as 7c6134631).
 Written against `origin/main` at cc4b63022, which contains #1870; its
 terminal-choice model in `managed/terminal.rs` is what this note extends.
@@ -414,33 +414,54 @@ install herdr`, `mise`, or `install.sh` into `~/.local/bin`; Windows by
 - Both are separate programs the daemon talks to; a broken release fails a
   launch with `LaunchUnknown`, never silently elsewhere.
 
-## Open questions for the owner
+## Owner decisions
 
-1. **Build either now?** Recommendation: no; let Warp (#1870) settle first. Rex is a
-   private beta that almost no contributor can install; herdr is real but
-   needs a socket client and a helper change. Revisit herdr when someone
-   asks for it, or when Linux/Windows want "one window".
-2. **Rex ticket: argv (parity) or a ticket file the helper deletes?**
-   Recommendation: argv for parity now; do the helper's `--ticket-file` /
-   env read once, for all argv terminals, as its own change.
-3. **herdr ticket in `env`, with the helper change it needs?**
-   Recommendation: yes; argv is ruled out by herdr's persistence.
-4. **Is herdr a terminal choice, or a layer over one?** It runs inside a
-   terminal, so "Open sessions in: herdr" also needs "which terminal hosts
-   herdr" when no client is attached. Recommendation: a separate switch
-   under the terminal picker, "Group sessions in herdr", which uses the
-   chosen terminal to attach.
-5. **Group name.** Recommendation: one Rex session / herdr workspace named
-   "Near.ai", found by label, recreated if the user closes it.
-6. **May Show raise the app with `open -b`?** It asks for no permission,
-   but it moves focus. Recommendation: yes for Rex (it is the app); for
-   herdr, only switch the tab and do not raise the host terminal.
-7. **Rex's macOS 15 floor.** The contributor app supports macOS 14
-   (#1173). Recommendation: offer Rex only when the bundle is found, which
-   already implies macOS 15; no special case.
-8. **Ask Superlogical for a stable "open a tab with argv" entry point**
-   (or a `rex://` route), since Rex is in beta and the CLI shape may change.
-   Recommendation: yes, before building.
+2026-11-03: the owner accepted the recommendation on all eight questions
+("go with your recommendations on all 8"). Each is recorded as a decision
+(D1-D8), with the question it settled.
+
+1. **(D1) Build either now? No.** Neither is built now; Warp (#1870)
+   settles first. Rex is a private beta that almost no contributor can
+   install; herdr needs a socket client and a helper change. Revisit herdr
+   when someone asks for it, or when Linux/Windows want "one window".
+2. **(D2) Rex ticket: argv**, for parity with kitty, WezTerm and
+   Alacritty. A helper ticket-file or env read, if done, is one change for
+   every argv terminal, not a Rex-specific one.
+3. **(D3) herdr ticket: `env`**, with the helper change it needs (read
+   `NEAR_AI_LAUNCH_TICKET` when `--ticket` is absent, and unset it before
+   starting the tool). argv is ruled out by herdr's persistence.
+4. **(D4) herdr is a layer over a terminal, not a terminal choice:** a
+   separate switch under the terminal picker, "Group sessions in herdr",
+   which uses the chosen terminal to attach when no herdr client is
+   running.
+5. **(D5) Group name: "Near.ai".** One Rex session / herdr workspace,
+   found by label, recreated if the user closes it.
+6. **(D6) Show:** for Rex, raise the app with `open -b` (no permission
+   asked); for herdr, switch the tab only and do not raise the host
+   terminal.
+7. **(D7) Rex's macOS 15 floor:** no special case. Rex is offered only
+   when its bundle is found, which already implies macOS 15.
+8. **(D8) Ask Superlogical first.** Before any Rex work, ask Superlogical
+   for a stable entry point that opens a tab with an argv command (or a
+   `rex://` route), since Rex is in beta and its CLI shape may change. The
+   owner sends it; the draft is below.
+
+### Draft ask to Superlogical (for the owner to send)
+
+> We make the Near.ai contributor app, which opens coding-agent sessions
+> (Claude Code, Codex) in the user's chosen terminal. We'd like to offer
+> Rex, grouping every session as a tab in one Rex session, with no macOS
+> permission prompt. Today we can do this with `rex api call
+> session.new_window -` (a terminal block with `shell: "none"`, an argv
+> `command` and `cwd`), and bring a tab forward with `rex focus` and the
+> app's `session.select` action. Before we build on it: is there, or could
+> there be, a supported and versioned way to open a tab running an argv
+> command in a folder -- a stable CLI command, an API method you commit to,
+> or a `rex://` URL -- and a supported way for a non-Rex process to find
+> the `rex` binary (it currently lives inside the app bundle)? An `env`
+> option on terminal blocks would also let us keep a short-lived launch
+> token out of the process's argv. Is Rex expected to leave private beta,
+> and on which platforms?
 
 ## Not checked
 
