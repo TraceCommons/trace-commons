@@ -104,24 +104,33 @@ CREATE TRIGGER trace_legacy_pooled_tenant_releases_carries
     FOR EACH ROW EXECUTE FUNCTION public.trace_legacy_pooled_tenant_releases_carries();
 
 -- 2b. An account closing. A legacy account's own carries go; a NEAR AI
--- account's carries go in every tenant it linked. A close in a legacy
--- tenant with no live tenant link (merges, the reaper) is one probe of
--- V81's unique live-link index and takes no lock. A tenant with a live link
--- always goes through the locked release, so a carry that holds the lock
--- and read the account as open is released when it commits (review of
--- #1879).
+-- account's carries go in every tenant it linked. A legacy account with no
+-- live carry takes no lock (review of #1879).
 CREATE FUNCTION public.trace_legacy_account_close_releases_carries()
 RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
+    v_prior TEXT := current_setting('trace_commons.trace_tenant_id', true);
+    v_carried BOOLEAN;
     v_tenant_link RECORD;
 BEGIN
     IF OLD.closed_at IS NOT NULL OR NEW.closed_at IS NULL THEN
         RETURN NEW;
     END IF;
     IF NEW.tenant_id !~ '^(near-|nearai-)' THEN
-        IF EXISTS (SELECT 1 FROM public.trace_legacy_invite_links l
-                    WHERE l.legacy_tenant_id = NEW.tenant_id AND l.revoked_at IS NULL) THEN
+        -- Only an account holding a live carry takes the tenant-link lock
+        -- (review of #1879). Every other close (merges, the reaper, a lost
+        -- principal race closing its orphan while holding a V135 lock)
+        -- takes no lock, so it cannot invert the order with a claim. A carry
+        -- that races this close lands on a closed account, which is never
+        -- proven, and the next live payout pass releases it (decision 6).
+        PERFORM set_config('trace_commons.trace_tenant_id', NEW.tenant_id, true);
+        v_carried := EXISTS (
+            SELECT 1 FROM public.trace_legacy_payout_carries c
+             WHERE c.tenant_id = NEW.tenant_id AND c.account_id = NEW.account_id
+               AND c.released_at IS NULL);
+        PERFORM set_config('trace_commons.trace_tenant_id', coalesce(v_prior, ''), true);
+        IF v_carried THEN
             PERFORM public.trace_legacy_payout_release_tenant_carries(
                 NEW.tenant_id, NULL, NEW.account_id, 'legacy_account_closed');
         END IF;
@@ -439,8 +448,12 @@ GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_proven_accounts(TEXT)
 -- Links made before V148 have no record: their claims ran under V146. Record
 -- them once now, for each live tenant link's device and attested devices,
 -- with the subjects enrolled by the link or attestation as nearly as the
--- stored times allow (whole seconds from the app host; one-time only, every
--- later claim records itself). Run as the guard, then dropped.
+-- stored times allow. Those are whole seconds from the app host, compared
+-- with the database's enrollment time, so the bound has five minutes of
+-- slack: in doubt, a subject counts as enrolled before the link, because a
+-- missing record now leads to an automatic release (decision 6) and an
+-- extra one does not (review of #1879). One-time only; every later claim
+-- records itself. Run as the guard, then dropped.
 GRANT SELECT (linked_at) ON trace_legacy_invite_links TO trace_legacy_payout_carry_guard;
 GRANT SELECT (attested_at) ON trace_legacy_invite_link_devices TO trace_legacy_payout_carry_guard;
 CREATE FUNCTION public.trace_legacy_link_claimed_principals_backfill()
@@ -468,7 +481,8 @@ BEGIN
         LOOP
             PERFORM set_config('trace_commons.trace_tenant_id', v_link.legacy_tenant_id, true);
             v_principals := public.trace_legacy_device_upload_principals(
-                v_link.legacy_tenant_id, v_device.device_key_id, to_timestamp(v_device.at + 1));
+                v_link.legacy_tenant_id, v_device.device_key_id,
+                to_timestamp(v_device.at) + interval '5 minutes');
             INSERT INTO public.trace_legacy_link_claimed_principals
                 (tenant_id, legacy_link_hash, device_key_id, principal_ref)
             SELECT v_link.legacy_tenant_id, public.trace_legacy_link_hash(v_link.link_id),
@@ -488,11 +502,11 @@ ALTER FUNCTION public.trace_legacy_link_claimed_principals_backfill()
 SELECT public.trace_legacy_link_claimed_principals_backfill();
 DROP FUNCTION public.trace_legacy_link_claimed_principals_backfill();
 
--- The send-time half of the proof rule (review of #1879): TRUE when the
+-- The send-time backstop of the proof rule (review of #1879): TRUE when the
 -- account holds a live carry but is no longer proven (its proving principal
 -- was unlinked, or its device revoked). The payout store's account standing
 -- reads it beside `trace_legacy_payout_carry_invalid` before every send, so
--- such a carry is held at once and released at the next carry event.
+-- such a carry is held if the pass's release (section 6) has not ended it.
 CREATE FUNCTION public.trace_legacy_payout_carry_unproven(p_tenant TEXT, p_account UUID)
 RETURNS BOOLEAN
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
@@ -517,49 +531,79 @@ REVOKE ALL ON FUNCTION public.trace_legacy_payout_carry_unproven(TEXT, UUID) FRO
 GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_carry_unproven(TEXT, UUID)
     TO trace_ingest_runtime;
 
--- 6. Release at send time (owner, 2026-11-03, V148:444). The payout pass
--- calls this for a legacy tenant before it reads that tenant's links: every
--- live carry on an account that is no longer proven (its proving principal
--- unlinked, its device revoked) is released, an active one with an unlink
+-- 6. Release at send time (owner, 2026-11-03, V148:444). A live payout
+-- pass calls this for a legacy tenant before it reads that tenant's links,
+-- for its own rail only: every live carry on `p_rail` held by an account
+-- that is no longer proven (its proving principal unlinked, its device
+-- revoked, the account closed) is released, an active one with an unlink
 -- request and a waiting one closed at zero, audited hash-only as
--- `legacy_carry_unproven`. The account's standing then no longer holds it,
--- so its other streams resume. This only ends carries; the pass never
--- creates one. Under the tenant-link lock, so it cannot interleave with a
--- carry or a claim. Asked under the tenant's own context; refused under
--- any other. Returns how many carries it released.
-CREATE FUNCTION public.trace_legacy_payout_release_unproven_carries(p_tenant TEXT)
-RETURNS INTEGER
+-- `legacy_carry_unproven` with the pass's actor. The holder's tenant gets a
+-- hash-only `legacy_payout_carry_released` account audit row with the
+-- count. The account's standing then no longer holds it, so its other
+-- streams resume. This only ends carries; the pass never creates one.
+-- Candidates are found without a lock; only when there are any is the
+-- tenant-link lock taken and the set read again under it (review of
+-- #1879). Asked under the tenant's own context; refused under any other.
+-- Returns how many carries it released.
+CREATE FUNCTION public.trace_legacy_payout_release_unproven_carries(
+    p_tenant TEXT, p_rail TEXT, p_actor_ref_hash TEXT
+) RETURNS INTEGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
-    v_account UUID;
+    v_link UUID;
+    v_source RECORD;
     v_released INTEGER := 0;
 BEGIN
     IF p_tenant IS NULL OR p_tenant IS DISTINCT FROM public.trace_current_tenant_id() THEN
         RAISE EXCEPTION 'legacy_payout_release_refused' USING ERRCODE = '42501';
     END IF;
-    IF p_tenant ~ '^(near-|nearai-)' OR NOT EXISTS (
+    IF p_tenant ~ '^(near-|nearai-)' OR p_rail IS NULL
+        OR p_actor_ref_hash IS NULL OR p_actor_ref_hash !~ '^sha256:[0-9a-f]{64}$' THEN
+        RETURN 0;
+    END IF;
+    IF NOT EXISTS (
         SELECT 1 FROM public.trace_legacy_payout_carries c
-         WHERE c.tenant_id = p_tenant AND c.released_at IS NULL) THEN
+         WHERE c.tenant_id = p_tenant AND c.rail_id = p_rail AND c.released_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM public.trace_legacy_payout_proven_accounts(p_tenant)
+                                       AS proven(account_id)
+                            WHERE proven.account_id = c.account_id)) THEN
         RETURN 0;
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || p_tenant, 0));
-    FOR v_account IN
-        SELECT DISTINCT c.account_id FROM public.trace_legacy_payout_carries c
-         WHERE c.tenant_id = p_tenant AND c.released_at IS NULL
+    FOR v_link IN
+        SELECT c.link_id FROM public.trace_legacy_payout_carries c
+         WHERE c.tenant_id = p_tenant AND c.rail_id = p_rail AND c.released_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM public.trace_legacy_payout_proven_accounts(p_tenant)
                                        AS proven(account_id)
                             WHERE proven.account_id = c.account_id)
-         ORDER BY c.account_id
+         ORDER BY c.link_id
     LOOP
-        v_released := v_released + public.trace_legacy_payout_release_tenant_carries(
-            p_tenant, NULL, v_account, 'legacy_carry_unproven');
+        PERFORM public.trace_legacy_payout_release_carry(
+            v_link, p_actor_ref_hash, 'legacy_carry_unproven');
+        v_released := v_released + 1;
     END LOOP;
+    IF v_released > 0 THEN
+        -- The holder's side: a hash-only row in the NEAR AI account's
+        -- tenant, so its record shows why a legacy payout stopped.
+        SELECT l.tenant_id, l.account_id INTO v_source
+          FROM public.trace_legacy_invite_links l
+         WHERE l.legacy_tenant_id = p_tenant AND l.revoked_at IS NULL;
+        IF FOUND THEN
+            PERFORM set_config('trace_commons.trace_tenant_id', v_source.tenant_id, true);
+            INSERT INTO public.trace_account_audit (tenant_id, action, actor_ref, outcome, safe_metadata)
+            VALUES (v_source.tenant_id, 'legacy_payout_carry_released', p_actor_ref_hash,
+                    'legacy_carry_unproven',
+                    jsonb_build_object('released', v_released, 'rail', p_rail));
+            PERFORM set_config('trace_commons.trace_tenant_id', p_tenant, true);
+        END IF;
+    END IF;
     RETURN v_released;
 END $$;
-ALTER FUNCTION public.trace_legacy_payout_release_unproven_carries(TEXT)
+ALTER FUNCTION public.trace_legacy_payout_release_unproven_carries(TEXT, TEXT, TEXT)
     OWNER TO trace_legacy_payout_carry_guard;
-REVOKE ALL ON FUNCTION public.trace_legacy_payout_release_unproven_carries(TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_release_unproven_carries(TEXT)
+REVOKE ALL ON FUNCTION public.trace_legacy_payout_release_unproven_carries(TEXT, TEXT, TEXT)
+    FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.trace_legacy_payout_release_unproven_carries(TEXT, TEXT, TEXT)
     TO trace_ingest_runtime;
 
 REVOKE CREATE ON SCHEMA public FROM trace_legacy_payout_carry_guard;

@@ -248,12 +248,34 @@ pub(super) async fn carry_opened_account_in_tx(
     tx: &deadpool_postgres::Transaction<'_>,
     legacy: &str,
     account: Uuid,
+    opened: bool,
     rails: &[(trace_commons_gate_api::RailId, CarryPrograms)],
     actor_ref_hash: &str,
 ) -> Result<LegacyCarryReport, DatabaseError> {
     let mut report = LegacyCarryReport::default();
     if rails.is_empty() || anchored_tenant(legacy) {
         return Ok(report);
+    }
+    // A returning user's sign-in (the account was reused, not opened) is a
+    // repair event only (review of #1879): it does anything at all only for
+    // a rail with no carry in the tenant, checked here without a lock so
+    // the common sign-in pays one read.
+    if !opened {
+        let mut any_uncarried = false;
+        for (rail, _) in rails {
+            let carried: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM trace_legacy_payout_carries
+                                     WHERE tenant_id = $1 AND rail_id = $2)",
+                    &[&legacy, &rail.as_str()],
+                )
+                .await?
+                .get(0);
+            any_uncarried |= !carried;
+        }
+        if !any_uncarried {
+            return Ok(report);
+        }
     }
     let Some((source_tenant, source_account)) = tx
         .query_opt(
@@ -313,9 +335,10 @@ pub(super) async fn carry_opened_account_in_tx(
     let legacy_hash = legacy_link_hash(tenant_link);
     for ((rail, programs), source) in rails.iter().zip(sources.iter()) {
         // The repair path (review of #1879): a tenant link with no carry at
-        // all on this rail means its best-effort carry after the tenant
-        // link failed, or never ran. This event then carries the whole
-        // tenant, not only the account it opened.
+        // all on this rail, while its source has a live link, means its
+        // best-effort carry after the tenant link failed or never ran. This
+        // event then carries the whole tenant. A returning sign-in does
+        // nothing else; an opening otherwise carries only its account.
         let uncarried: bool = tx
             .query_one(
                 "SELECT NOT EXISTS (SELECT 1 FROM trace_legacy_payout_carries
@@ -325,6 +348,10 @@ pub(super) async fn carry_opened_account_in_tx(
             )
             .await?
             .get(0);
+        let repair = uncarried && source.is_some();
+        if !opened && !repair {
+            continue;
+        }
         carry_tenant(
             tx,
             legacy,
@@ -332,7 +359,7 @@ pub(super) async fn carry_opened_account_in_tx(
             source.as_ref(),
             rail.as_str(),
             programs,
-            (!uncarried).then_some(account),
+            (!repair).then_some(account),
             &mut report,
         )
         .await?;

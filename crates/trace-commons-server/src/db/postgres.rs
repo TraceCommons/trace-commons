@@ -5415,6 +5415,35 @@ impl Database for PgBackend {
         };
         let absorbed_account_id: Uuid = consumed.get("absorbed_account_id");
 
+        // A NEAR AI tenant's absorbed account B may hold V81 tenant links.
+        // Closing B below fires the close trigger, which takes each linked
+        // legacy tenant's tenant-link lock, while this transaction holds B's
+        // row; an attestation under such a link holds that lock and needs a
+        // key-share on B. So take those locks here, sorted, before any row
+        // lock: tenant links first, then rows, on every path (review of
+        // #1879).
+        if trace_commons_protocol::admission::is_anchored_tenant(tenant_id) {
+            let legacy_tenants = tx
+                .query(
+                    "SELECT DISTINCT legacy_tenant_id FROM trace_legacy_invite_links
+                      WHERE tenant_id = trace_current_tenant_id() AND account_id = $1
+                        AND revoked_at IS NULL
+                      ORDER BY legacy_tenant_id",
+                    &[&absorbed_account_id],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            for row in legacy_tenants {
+                let legacy: String = row.get(0);
+                tx.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended('trace_legacy_invite_link:' || $1, 0))",
+                    &[&legacy],
+                )
+                .await
+                .map_err(DatabaseError::Postgres)?;
+            }
+        }
+
         // B's NEAR anchors and provisioned devices follow the identity, so a
         // device provisioned to B is a live device of A and a returning NEAR
         // sign-in resolves to A (V82 states the rule). This runs BEFORE B's

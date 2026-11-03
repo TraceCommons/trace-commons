@@ -1686,7 +1686,12 @@ impl PayoutStore for PgBackend {
         Ok(report)
     }
 
-    async fn release_unproven_legacy_carries(&self, tenant: &str) -> Result<u32, DatabaseError> {
+    async fn release_unproven_legacy_carries(
+        &self,
+        tenant: &str,
+        rail: &RailId,
+        actor_ref_hash: &str,
+    ) -> Result<u32, DatabaseError> {
         if trace_commons_protocol::admission::is_anchored_tenant(tenant) {
             return Ok(0);
         }
@@ -1694,8 +1699,8 @@ impl PayoutStore for PgBackend {
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
         let released: i32 = tx
             .query_one(
-                "SELECT trace_legacy_payout_release_unproven_carries($1)",
-                &[&tenant],
+                "SELECT trace_legacy_payout_release_unproven_carries($1, $2, $3)",
+                &[&tenant, &rail.as_str(), &actor_ref_hash],
             )
             .await?
             .get(0);
@@ -1715,16 +1720,18 @@ impl PayoutStore for PgBackend {
         let mut tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
         let (account, opened) =
             super::postgres::create_or_reuse_account_in_tx_opened(&tx, principal_ref).await?;
-        // Only an account this call opened is the event (a reuse is not),
-        // and only that account is carried. The carry runs in a savepoint:
+        // An account this call opened is the event, and only that account is
+        // carried; a reuse (a returning user) only repairs a tenant with no
+        // carry on a rail (review of #1879). The carry runs in a savepoint:
         // a failure carries nothing, is logged by class, and never fails the
         // sign-in this account is opened for (review of #1879).
-        if opened && !rails.is_empty() {
+        if !rails.is_empty() {
             let savepoint = tx.savepoint("legacy_payout_carry").await?;
             let carried = super::postgres_legacy_payout_carry::carry_opened_account_in_tx(
                 &savepoint,
                 tenant,
                 account,
+                opened,
                 rails,
                 actor_ref_hash,
             )

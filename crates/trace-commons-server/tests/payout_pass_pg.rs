@@ -2767,6 +2767,30 @@ async fn the_pass_releases_a_carry_whose_account_stopped_being_proven() {
         "the carried link is ending"
     );
     assert_eq!(row.get::<_, i64>(1), 1, "audited");
+    // The holder's side records it too (review of #1879), hash-only.
+    let holder: i64 = {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = client.transaction().await.unwrap();
+        tx.execute(
+            "SELECT set_config('trace_commons.trace_tenant_id', $1, true)",
+            &[&near],
+        )
+        .await
+        .unwrap();
+        let n: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM trace_account_audit
+                  WHERE tenant_id = $1 AND action = 'legacy_payout_carry_released'
+                    AND outcome = 'legacy_carry_unproven'",
+                &[&near],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        n
+    };
+    assert_eq!(holder, 1, "the holder's tenant has a row");
     assert!(
         !fixture
             .runtime
@@ -2775,5 +2799,68 @@ async fn the_pass_releases_a_carry_whose_account_stopped_being_proven() {
             .unwrap()
             .carry_invalid,
         "no longer held: its other streams resume"
+    );
+}
+
+/// Review of #1879: a dry-run pass moves no link, so it releases nothing,
+/// even a carry on an account that stopped being proven; and the release is
+/// per rail, so another rail's call leaves this rail's carry alone.
+#[tokio::test]
+async fn a_dry_run_or_another_rail_releases_nothing() {
+    let Some(fixture) = fixture().await else {
+        return;
+    };
+    let mock = Mock::start().await;
+    let rail: Arc<dyn PayoutRail> = Arc::new(mock.rail());
+    let opener = Arc::new(TestOpener::default());
+    let (near, source, legacy) = legacy_pair(&fixture, &rail, &opener).await;
+    let account = open_proven_legacy_account(&fixture, &legacy).await;
+    fixture
+        .runtime
+        .carry_legacy_payout_links(
+            &near,
+            source,
+            &rail.descriptor().rail_id,
+            &carry_programs(&rail),
+            ACTOR,
+        )
+        .await
+        .unwrap();
+    owner_exec(
+        &fixture,
+        &legacy,
+        "UPDATE trace_account_principals SET unlinked_at = now()
+          WHERE tenant_id = $1 AND account_id = $2",
+        &[&legacy, &account],
+    )
+    .await;
+    completed(
+        &pass(
+            &fixture,
+            rail.clone(),
+            &opener,
+            settings(PayoutMode::DryRun),
+        )
+        .run_once()
+        .await,
+    );
+    assert_eq!(
+        live_carries(&fixture, &legacy, account).await,
+        1,
+        "a dry run moves no link"
+    );
+    let other = RailId::new("other_rail").unwrap();
+    assert_eq!(
+        fixture
+            .runtime
+            .release_unproven_legacy_carries(&legacy, &other, ACTOR)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        live_carries(&fixture, &legacy, account).await,
+        1,
+        "another rail's call"
     );
 }

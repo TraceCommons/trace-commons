@@ -2192,3 +2192,47 @@ async fn an_opening_in_an_uncarried_tenant_carries_the_whole_tenant() {
     assert_eq!(fx.live_carries(&legacy, opened).await, 1);
     assert_eq!(fx.live_carries(&legacy, claimed).await, 1, "repaired");
 }
+
+/// Review of #1879: a returning user's sign-in repairs a tenant whose carry
+/// never landed. The mint reuses their account (no account opens), but the
+/// tenant has a live source link and no carry on the rail, so the whole
+/// tenant is carried.
+#[tokio::test]
+async fn a_returning_sign_in_repairs_an_uncarried_tenant() {
+    let Some(fx) = fixture().await else { return };
+    let device = new_device();
+    let (legacy, invite) = fx.legacy_invite_tenant(&device).await;
+    let (near, account) = fx.near_ai_account().await;
+    fx.confirm(&near, account, PayoutLinkAction::Link, "org-y1")
+        .await;
+    fx.link(&near, account, &legacy, &invite, &device)
+        .await
+        .unwrap();
+    let claimed = fx.accounts(&legacy).await[0];
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        0,
+        "the link's carry never ran"
+    );
+    // The returning user's principal: one the claim linked to `claimed`.
+    let principal: String = fx
+        .admin
+        .query_one(
+            "SELECT principal_ref FROM trace_account_principals
+              WHERE tenant_id = $1 AND account_id = $2 LIMIT 1",
+            &[&legacy, &claimed],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        fx.open_account(&legacy, &principal).await,
+        claimed,
+        "reused"
+    );
+    assert_eq!(
+        fx.live_carries(&legacy, claimed).await,
+        1,
+        "repaired at sign-in"
+    );
+}

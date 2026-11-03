@@ -752,15 +752,22 @@ Where the implementation differs from, or adds to, sections 3 to 5:
    logged by class and carries nothing.
 6. **A carry whose account stops being proven is released at send time**
    (owner, 2026-11-03, review of #1879 at V148:444). Before reading a
-   legacy tenant's links, the payout pass calls
-   `trace_legacy_payout_release_unproven_carries`: under the tenant-link
-   lock, every live carry on an account no longer proven (its proving
-   principal unlinked, its device revoked) is released, an active one with
-   an unlink request and a waiting one closed at zero, audited hash-only as
-   `legacy_carry_unproven`. The account's standing then no longer holds it,
-   so its other streams resume. The pass only ends carries; it never
-   creates one. `trace_legacy_payout_carry_unproven` stays in the standing
-   as the backstop if the release fails.
+   legacy tenant's links, a live payout pass (never a dry run) calls
+   `trace_legacy_payout_release_unproven_carries` for its own rail only.
+   Candidates are found without a lock; only when there are any does it
+   take the tenant-link lock and read them again. Every live carry on that
+   rail held by an account no longer proven (its proving principal
+   unlinked, its device revoked, the account closed) is released, an
+   active one with an unlink request and a waiting one closed at zero,
+   audited hash-only as `legacy_carry_unproven` with the pass's actor; the
+   holder's tenant gets a hash-only `legacy_payout_carry_released` account
+   audit row. The account's standing then no longer holds it, so its other
+   streams resume. The pass only ends carries; it never creates one.
+   `trace_legacy_payout_carry_unproven` stays in the standing as the
+   backstop if the release fails. A carry that races an account close lands
+   on a closed account, which is never proven, so the next live pass ends
+   it; that is why a close takes the tenant-link lock only when the account
+   holds a live carry (review of #1879).
 
 ### Known limits, not fixed here
 
