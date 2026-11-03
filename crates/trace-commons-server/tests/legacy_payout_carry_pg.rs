@@ -1223,3 +1223,35 @@ async fn the_send_time_check_reads_every_hold_on_the_source_and_refuses_misuse()
         Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
     );
 }
+
+/// #1874: the SQL hash helpers V146 matches on and the Rust functions the
+/// store writes with agree, so a carry, a release and the send-time check
+/// all name the same rows.
+#[tokio::test]
+async fn the_sql_hash_helpers_match_the_rust_hashes() {
+    let Some(fx) = fixture().await else { return };
+    for _ in 0..8 {
+        let id = Uuid::new_v4();
+        let row = fx
+            .admin
+            .query_one(
+                "SELECT trace_payout_link_hash($1), trace_payout_account_hash($1),
+                        trace_legacy_link_hash($1)",
+                &[&id],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<_, String>(0),
+            trace_commons_server::db::payout_link_id_hash(id)
+        );
+        assert_eq!(
+            row.get::<_, String>(1),
+            trace_commons_server::db::payout_account_id_hash(id)
+        );
+        assert_eq!(
+            row.get::<_, String>(2),
+            trace_commons_server::db::payout_legacy_link_hash(id)
+        );
+    }
+}
