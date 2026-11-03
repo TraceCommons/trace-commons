@@ -1600,7 +1600,8 @@ async fn pg_a_near_ai_sign_in_session_cannot_change_authenticators() {
 }
 
 /// The gate counts a NEAR AI login as a strong authenticator, once however
-/// many anchors a merge left on the account. Removing a NEAR key still
+/// many anchors a merge left on the account; since V150 a merge leaves the
+/// absorbed one retired, and a retired login counts for nothing. Removing a NEAR key still
 /// reports how many NEAR keys remain, so a NEAR AI account that removes its
 /// last one reads `0`, as it did before.
 #[tokio::test]
@@ -1626,14 +1627,16 @@ async fn pg_a_near_ai_account_counts_its_login_once_and_reports_remaining_near_k
         .expect("anchor")
         .to_string();
     // A second login anchor, as a merge that re-keys the absorbed account's
-    // anchors onto the survivor leaves.
+    // anchors onto the survivor leaves: retired, since V150 keeps one live
+    // anchor per account.
     admin
         .execute(
             "INSERT INTO trace_near_account_anchors
                     (tenant_id, anchor_hash, account_id, sealed_account_name,
-                     index_pepper_ref, account_name_key_ref, identity_source, auth_provider)
+                     index_pepper_ref, account_name_key_ref, identity_source, auth_provider,
+                     retired_at)
              SELECT tenant_id, 'sha256:' || repeat('e', 64), account_id, sealed_account_name,
-                    index_pepper_ref, account_name_key_ref, identity_source, auth_provider
+                    index_pepper_ref, account_name_key_ref, identity_source, auth_provider, now()
                FROM trace_near_account_anchors WHERE anchor_hash = $1",
             &[&anchor],
         )
