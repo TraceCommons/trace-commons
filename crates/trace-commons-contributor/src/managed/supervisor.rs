@@ -71,11 +71,15 @@ const PARENT_SESSION_ENV: &[&str] = &[
     "CLAUDE_EFFORT",
 ];
 
-/// Drop every [`PARENT_SESSION_ENV`] marker from the tool's environment.
+/// Drop every [`PARENT_SESSION_ENV`] marker from the tool's environment,
+/// and the launch ticket a herdr pane hands the helper
+/// ([`super::terminal::LAUNCH_TICKET_ENV`]): it is spent by now, and the tool
+/// has no use for it.
 fn clear_parent_session(command: &mut std::process::Command) {
     for key in PARENT_SESSION_ENV {
         command.env_remove(key);
     }
+    command.env_remove(super::terminal::LAUNCH_TICKET_ENV);
 }
 
 pub async fn redeem_and_run(store: &ConfigStore, prepared: PreparedLaunch) -> anyhow::Result<i32> {
@@ -1851,6 +1855,7 @@ mod tests {
         for key in PARENT_SESSION_ENV {
             command.env(key, "1");
         }
+        command.env(crate::managed::terminal::LAUNCH_TICKET_ENV, "abcdef");
         command.env("KEPT", "yes");
         clear_parent_session(&mut command);
         let out = with_open_files_floor(command).output().unwrap();
@@ -1862,6 +1867,10 @@ mod tests {
         for key in PARENT_SESSION_ENV {
             assert!(!names.contains(key), "{key} reached the tool");
         }
+        assert!(
+            !names.contains(&crate::managed::terminal::LAUNCH_TICKET_ENV),
+            "the launch ticket reached the tool"
+        );
         assert!(names.contains(&"KEPT"), "{text}");
     }
 

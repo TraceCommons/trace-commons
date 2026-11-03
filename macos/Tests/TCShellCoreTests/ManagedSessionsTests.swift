@@ -20,6 +20,22 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(snapshot.terminalChoices, [ManagedTerminalChoice(id: "terminal", name: "Terminal"), ManagedTerminalChoice(id: "ghostty", name: "Ghostty")])
     }
 
+    /// "Group sessions in herdr" is offered where the daemon found herdr,
+    /// or while it is on, so it can be turned off after herdr is removed;
+    /// an older daemon that sends neither offers nothing.
+    func testHerdrGroupingIsOfferedWhereHerdrIsFoundOrWhileOn() throws {
+        func snapshot(_ fields: String) throws -> ManagedSnapshot {
+            let json = #"{"revision":2,"accounts":[],"defaults":[],"generations":{},"sessions":[],"capabilities":{"managed_launch":true,"terminal_launch":true,\#(fields)"terminal_choices":[]}}"#
+            return try JSONDecoder().decode(ManagedSnapshot.self, from: Data(json.utf8))
+        }
+        let found = try snapshot(#""herdr_available":true,"herdr_grouping":false,"#)
+        XCTAssertTrue(found.offersHerdrGrouping)
+        XCTAssertEqual(found.capabilities.herdrGrouping, false)
+        XCTAssertTrue(try snapshot(#""herdr_available":false,"herdr_grouping":true,"#).offersHerdrGrouping)
+        XCTAssertFalse(try snapshot(#""herdr_available":false,"herdr_grouping":false,"#).offersHerdrGrouping)
+        XCTAssertFalse(try snapshot("").offersHerdrGrouping)
+    }
+
     /// The launch dialog asks for a terminal until one is chosen, only with
     /// more than one installed, and never for an older daemon that does not
     /// say; it starts on the current app when installed, else the first.

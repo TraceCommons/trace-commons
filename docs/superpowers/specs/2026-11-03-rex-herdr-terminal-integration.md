@@ -1,6 +1,8 @@
 # Opening Private AI sessions in Rex and herdr -- research and design
 
-Date: 2026-11-03. Owner: Zaki. Status: decided 2026-11-03 (see "Owner decisions"); nothing is built.
+Date: 2026-11-03. Owner: Zaki. Status: decided 2026-11-03 (see "Owner decisions"); built
+2026-11-03 at the owner's request, which reverses D1 (see "Built").
+`docs/managed-sessions.md` describes what shipped.
 Asked for "on top of #1870" (Warp Tab Configs, merged as 7c6134631).
 Written against `origin/main` at cc4b63022, which contains #1870; its
 terminal-choice model in `managed/terminal.rs` is what this note extends.
@@ -462,6 +464,29 @@ install herdr`, `mise`, or `install.sh` into `~/.local/bin`; Windows by
 > option on terminal blocks would also let us keep a short-lived launch
 > token out of the process's argv. Is Rex expected to leave private beta,
 > and on which platforms?
+
+## Built
+
+2026-11-03: the owner asked for both to be built ("pick up the rex and herdr
+work"), which overrides D1 and goes ahead of D8's ask to Superlogical. What
+was built follows the recommended shapes above, with these differences:
+
+- herdr: `layout.apply` replies with the new tab's `focused_pane_id`, not its
+  terminal id, so the launch reads the terminal id from one more
+  `session.snapshot`. A workspace the launch creates starts with a shell
+  tab; the session's tab replaces it (`layout.apply` with that `tab_id`),
+  so the group holds no stray shell.
+- Rex: the Rex session is found with `rex ls --json`, read by value (an
+  object holding both "Near.ai" and a `session:` id), because the listing's
+  field names were not recorded. `rex new Near.ai --json -c <folder>` makes
+  it; the session id is read from its output whatever its format. That
+  session starts with one shell tab of Rex's own. The app is raised with
+  `open -b` before anything else, so a Rex that is not running starts with
+  its window; the app's `session.select` action is not used (unverified).
+- Neither was run against the real program in this change. The herdr client
+  is tested against herdr's published schema and source (protocol 22,
+  v0.9.5) with a scripted server; Rex against the replies recorded above.
+  Both need a run on a Mac with Rex and herdr installed before release.
 
 ## Not checked
 

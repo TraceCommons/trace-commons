@@ -32,11 +32,12 @@ pub enum TerminalApp {
     Wezterm,
     Alacritty,
     Warp,
+    Rex,
 }
 
 impl TerminalApp {
     /// Every app any platform offers.
-    pub const ALL: [TerminalApp; 10] = [
+    pub const ALL: [TerminalApp; 11] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
@@ -47,9 +48,10 @@ impl TerminalApp {
         TerminalApp::Wezterm,
         TerminalApp::Alacritty,
         TerminalApp::Warp,
+        TerminalApp::Rex,
     ];
     /// macOS, in the order a picker shows them.
-    pub const MACOS: [TerminalApp; 7] = [
+    pub const MACOS: [TerminalApp; 8] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
@@ -57,6 +59,7 @@ impl TerminalApp {
         TerminalApp::Wezterm,
         TerminalApp::Alacritty,
         TerminalApp::Warp,
+        TerminalApp::Rex,
     ];
     /// Windows.
     pub const WINDOWS: [TerminalApp; 1] = [TerminalApp::WindowsTerminal];
@@ -97,6 +100,7 @@ impl TerminalApp {
             TerminalApp::Wezterm => "wezterm",
             TerminalApp::Alacritty => "alacritty",
             TerminalApp::Warp => "warp",
+            TerminalApp::Rex => "rex",
         }
     }
 
@@ -123,6 +127,7 @@ impl TerminalApp {
             TerminalApp::Wezterm => "WezTerm",
             TerminalApp::Alacritty => "Alacritty",
             TerminalApp::Warp => "Warp",
+            TerminalApp::Rex => "Rex",
         }
     }
 
@@ -138,6 +143,7 @@ impl TerminalApp {
             TerminalApp::Wezterm => Some("com.github.wez.wezterm"),
             TerminalApp::Alacritty => Some("org.alacritty"),
             TerminalApp::Warp => Some("dev.warp.Warp-Stable"),
+            TerminalApp::Rex => Some(super::rex::BUNDLE_ID),
             _ => None,
         }
     }
@@ -154,7 +160,9 @@ impl TerminalApp {
             TerminalApp::Kitty => Some("kitty"),
             TerminalApp::Wezterm => Some("wezterm"),
             TerminalApp::Alacritty => Some("alacritty"),
-            TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp => None,
+            TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp | TerminalApp::Rex => {
+                None
+            }
         }
     }
 
@@ -325,6 +333,7 @@ pub enum TerminalSetting {
     Wezterm,
     Alacritty,
     Warp,
+    Rex,
     #[serde(other)]
     Unrecognized,
 }
@@ -355,6 +364,7 @@ impl TerminalSetting {
             TerminalSetting::Wezterm => TerminalApp::Wezterm,
             TerminalSetting::Alacritty => TerminalApp::Alacritty,
             TerminalSetting::Warp => TerminalApp::Warp,
+            TerminalSetting::Rex => TerminalApp::Rex,
             TerminalSetting::Unrecognized => return None,
         };
         TerminalApp::offered().contains(&app).then_some(app)
@@ -374,6 +384,7 @@ impl From<TerminalApp> for TerminalSetting {
             TerminalApp::Wezterm => TerminalSetting::Wezterm,
             TerminalApp::Alacritty => TerminalSetting::Alacritty,
             TerminalApp::Warp => TerminalSetting::Warp,
+            TerminalApp::Rex => TerminalSetting::Rex,
         }
     }
 }
@@ -499,6 +510,7 @@ enum MacosLaunch {
     Script(Vec<String>),
     Open(Plan),
     Warp(WarpTab),
+    Rex(super::rex::RexTab),
 }
 
 /// A Warp launch: a Tab Config, `<name>.toml` in `~/.warp/tab_configs`,
@@ -620,17 +632,26 @@ fn launch_macos(
     if !installed.contains(&app) {
         return Err(ManagedError::TerminalNotFound);
     }
-    let how = match open_plan(app, cwd, argv) {
-        _ if app == TerminalApp::Warp => MacosLaunch::Warp(WarpTab::new(command, cwd)?),
-        Some(plan) => MacosLaunch::Open(plan),
-        None => MacosLaunch::Script(app.script(command)),
+    let how = match app {
+        TerminalApp::Warp => MacosLaunch::Warp(WarpTab::new(command, cwd)?),
+        TerminalApp::Rex => MacosLaunch::Rex(super::rex::RexTab::new(&argv, cwd)?),
+        _ => match open_plan(app, cwd, argv) {
+            Some(plan) => MacosLaunch::Open(plan),
+            None => MacosLaunch::Script(app.script(command)),
+        },
     };
     // Once the app is asked, anything that goes wrong may follow a typed
     // command, so it reads as `LaunchUnknown`, never as a refusal from
     // before anything ran; only the refusals above release a held launch.
-    let printed = run(how).map_err(|_| ManagedError::LaunchUnknown)?;
+    // The one exception is Rex's CLI not being found, which is known before
+    // Rex is asked anything.
+    let printed = run(how).map_err(|error| match error {
+        ManagedError::TerminalNotFound if app == TerminalApp::Rex => error,
+        _ => ManagedError::LaunchUnknown,
+    })?;
     Ok(match app {
         TerminalApp::Terminal => terminal_tab(&printed),
+        TerminalApp::Rex => super::rex::tab(&printed),
         _ => None,
     })
 }
@@ -653,6 +674,7 @@ fn run_macos(how: MacosLaunch) -> Result<Vec<u8>, ManagedError> {
             open
         }
         MacosLaunch::Warp(tab) => return open_warp_tab(&tab).map(|()| Vec::new()),
+        MacosLaunch::Rex(tab) => return super::rex::open_tab(&tab),
     };
     let output = super::profiles::bounded_output(command)?;
     if output.status.success() {
@@ -675,16 +697,27 @@ struct Plan {
 /// The helper's own arguments, after its path.
 #[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 fn helper_args(config: &Path, session: Uuid, ticket: &str) -> Vec<std::ffi::OsString> {
+    let mut args = helper_args_without_ticket(config, session);
+    args.extend(["--ticket".into(), ticket.into()]);
+    args
+}
+
+/// The helper's arguments with no ticket, for a terminal that hands it the
+/// ticket in [`LAUNCH_TICKET_ENV`] instead (herdr).
+pub(crate) fn helper_args_without_ticket(config: &Path, session: Uuid) -> Vec<std::ffi::OsString> {
     vec![
         "--config-dir".into(),
         config.as_os_str().to_owned(),
         "redeem-launch".into(),
         "--session-id".into(),
         session.to_string().into(),
-        "--ticket".into(),
-        ticket.into(),
     ]
 }
+
+/// The variable a terminal that can set one gives the helper the launch
+/// ticket in, instead of argv (`redeem-launch` reads it when `--ticket` is
+/// absent). The helper removes it before starting the tool.
+pub const LAUNCH_TICKET_ENV: &str = "NEAR_AI_LAUNCH_TICKET";
 
 /// The terminal's own arguments, before the command: `cwd` as its working
 /// directory when given, keeping the window after the command exits (as
@@ -764,7 +797,9 @@ fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::O
             }
             args.extend(["--hold".into(), "-e".into()]);
         }
-        TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp => return None,
+        TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp | TerminalApp::Rex => {
+            return None;
+        }
     }
     Some(args)
 }
@@ -795,9 +830,25 @@ fn plan(
     {
         return Err(ManagedError::InvalidRequest);
     }
+    let mut command = vec![helper.as_os_str().to_owned()];
+    command.extend(helper_args(config, session, ticket));
+    program_plan(app, program, cwd, command)
+}
+
+/// The argv that opens `command` (a program and its arguments, each one
+/// element) in `app` with `cwd` as the terminal's working directory.
+#[cfg(any(windows, target_os = "linux", test))]
+fn program_plan(
+    app: TerminalApp,
+    program: &Path,
+    cwd: &Path,
+    command: Vec<std::ffi::OsString>,
+) -> Result<Plan, ManagedError> {
+    if !program.is_absolute() || !cwd.is_absolute() {
+        return Err(ManagedError::InvalidRequest);
+    }
     let mut args = terminal_args(app, Some(cwd)).ok_or(ManagedError::InvalidRequest)?;
-    args.push(helper.as_os_str().to_owned());
-    args.extend(helper_args(config, session, ticket));
+    args.extend(command);
     if app == TerminalApp::WindowsTerminal
         && args.iter().any(|arg| arg.to_string_lossy().contains(';'))
     {
@@ -810,7 +861,7 @@ fn plan(
 }
 
 /// A launch ticket is hex, and never empty.
-fn valid_ticket(ticket: &str) -> bool {
+pub(crate) fn valid_ticket(ticket: &str) -> bool {
     !ticket.is_empty() && ticket.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -859,6 +910,53 @@ pub enum TerminalHandle {
         #[serde(deserialize_with = "tty_path")]
         tty: String,
     },
+    /// A Rex tab: the "Near.ai" Rex session, the Rex window (a tab) the
+    /// launch opened in it, and its one block. Each id is checked as Rex
+    /// prints it (`session:`, `window:` or `block:` and a UUID) wherever it
+    /// came from.
+    Rex {
+        #[serde(deserialize_with = "rex_session")]
+        session: String,
+        #[serde(deserialize_with = "rex_window")]
+        window: String,
+        #[serde(deserialize_with = "rex_block")]
+        block: String,
+    },
+    /// A herdr pane, by its terminal id (`term_` and hex). herdr's public tab
+    /// and pane ids are positional and move when a pane does; the terminal
+    /// id stays with the process.
+    Herdr {
+        #[serde(deserialize_with = "herdr_terminal")]
+        terminal: String,
+    },
+}
+
+fn checked<'de, D: serde::Deserializer<'de>>(
+    d: D,
+    valid: impl Fn(&str) -> bool,
+) -> Result<String, D::Error> {
+    let text = String::deserialize(d)?;
+    if valid(&text) {
+        Ok(text)
+    } else {
+        Err(serde::de::Error::custom("not an id"))
+    }
+}
+
+fn rex_session<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    checked(d, |t| super::rex::valid_id("session", t))
+}
+
+fn rex_window<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    checked(d, |t| super::rex::valid_id("window", t))
+}
+
+fn rex_block<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    checked(d, |t| super::rex::valid_id("block", t))
+}
+
+fn herdr_terminal<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    checked(d, super::herdr::valid_terminal_id)
 }
 
 /// A bare tty device path, `/dev/tty` and up to 16 letters or digits. Nothing
@@ -943,6 +1041,11 @@ pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
         }
         #[cfg(not(target_os = "macos"))]
         TerminalHandle::AppleTerminal { .. } => Err(ManagedError::UnsupportedVersion),
+        #[cfg(target_os = "macos")]
+        TerminalHandle::Rex { session, block, .. } => super::rex::focus(session, block),
+        #[cfg(not(target_os = "macos"))]
+        TerminalHandle::Rex { .. } => Err(ManagedError::UnsupportedVersion),
+        TerminalHandle::Herdr { terminal } => super::herdr::focus(terminal),
     }
 }
 
@@ -1129,16 +1232,7 @@ pub fn launch(
             .and_then(external_terminal)
             .ok_or(ManagedError::TerminalNotFound)?;
         let plan = plan(app, &program, &helper_path()?, config, cwd, session, ticket)?;
-        let mut process = std::process::Command::new(&plan.program)
-            .args(&plan.args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|_| ManagedError::LaunchUnknown)?;
-        std::thread::spawn(move || {
-            let _ = process.wait();
-        });
+        spawn_plan(&plan)?;
         Ok(None)
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
@@ -1148,8 +1242,77 @@ pub fn launch(
     }
 }
 
+/// Start a Windows or Linux terminal and leave it running.
 #[cfg(any(windows, target_os = "linux"))]
-fn external_terminal(name: &str) -> Option<PathBuf> {
+fn spawn_plan(plan: &Plan) -> Result<(), ManagedError> {
+    let mut process = std::process::Command::new(&plan.program)
+        .args(&plan.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| ManagedError::LaunchUnknown)?;
+    std::thread::spawn(move || {
+        let _ = process.wait();
+    });
+    Ok(())
+}
+
+/// Open `program`, with no arguments and nothing secret, in the chosen
+/// terminal with `cwd` as its folder: how a herdr client is started when
+/// none is running. The same refusals as [`launch`]; nothing is recorded.
+pub(crate) fn open_program(
+    choice: TerminalSetting,
+    installed: &[TerminalApp],
+    program: &Path,
+    cwd: &Path,
+) -> Result<(), ManagedError> {
+    if !program.is_absolute() || !cwd.is_absolute() {
+        return Err(ManagedError::InvalidRequest);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let text = program.to_str().ok_or(ManagedError::InvalidRequest)?;
+        let command = format!("'{}'", text.replace('\'', "'\\''"));
+        launch_macos(
+            choice,
+            installed,
+            &command,
+            vec![program.as_os_str().to_owned()],
+            Some(cwd),
+            run_macos,
+        )
+        .map(|_| ())
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        if !supported() {
+            return Err(ManagedError::UnsupportedVersion);
+        }
+        let app = choice.app().ok_or(ManagedError::InvalidRequest)?;
+        if !installed.contains(&app) {
+            return Err(ManagedError::TerminalNotFound);
+        }
+        let terminal = app
+            .executable()
+            .and_then(external_terminal)
+            .ok_or(ManagedError::TerminalNotFound)?;
+        spawn_plan(&program_plan(
+            app,
+            &terminal,
+            cwd,
+            vec![program.as_os_str().to_owned()],
+        )?)
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    {
+        let _ = (choice, installed);
+        Err(ManagedError::UnsupportedVersion)
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) fn external_terminal(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .filter(|p| p.is_absolute())
         .map(|p| p.join(name))
@@ -1241,6 +1404,110 @@ mod tests {
             ),
             Err(ManagedError::TerminalNotFound),
             "not installed"
+        );
+    }
+
+    /// Rex (owner, 2026-11-03): macOS only, found by its bundle, and never
+    /// scripted or started through `open --args`: its own CLI opens a tab.
+    #[test]
+    fn rex_is_offered_on_macos_only_and_driven_by_its_cli() {
+        assert_eq!(TerminalApp::Rex.bundle_id(), Some("com.superlogical.rex"));
+        assert!(TerminalApp::MACOS.contains(&TerminalApp::Rex));
+        assert!(!TerminalApp::LINUX.contains(&TerminalApp::Rex));
+        assert!(!TerminalApp::WINDOWS.contains(&TerminalApp::Rex));
+        assert!(
+            TerminalApp::Rex.script("'/x/near-ai'").is_empty(),
+            "no Apple Event"
+        );
+        assert_eq!(open_plan(TerminalApp::Rex, None, vec!["/x".into()]), None);
+        assert_eq!(terminal_args(TerminalApp::Rex, None), None);
+        assert_eq!(TerminalApp::Rex.executable(), None);
+    }
+
+    /// A Rex launch hands `run` the tab's request, with the argv as the
+    /// command and the folder, and keeps the tab its output names. Only a
+    /// missing CLI stays a refusal once Rex is asked; anything else is
+    /// `LaunchUnknown`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_rex_launch_runs_its_tab_and_keeps_the_ids_it_printed() {
+        let session = "session:01a1a1cb-0d4e-7c1a-9f00-3b2a1c0d9e8f";
+        let window = "window:01a1a1cb-e32b-7000-8000-000000000001";
+        let block = "block:01a1a1cb-e327-7000-8000-000000000002";
+        let mut seen = None;
+        let opened = launch_macos(
+            TerminalSetting::Rex,
+            &[TerminalApp::Rex],
+            "'/x/near-ai'",
+            vec!["/x/near-ai".into(), "--ticket".into(), "ab".into()],
+            Some(Path::new("/tmp/project")),
+            |how| {
+                seen = Some(how);
+                Ok(format!("{session}\n{window}\n{block}\n").into_bytes())
+            },
+        )
+        .unwrap()
+        .expect("a tab");
+        assert_eq!(
+            opened.handle,
+            TerminalHandle::Rex {
+                session: session.into(),
+                window: window.into(),
+                block: block.into(),
+            }
+        );
+        let Some(MacosLaunch::Rex(tab)) = seen else {
+            panic!("a Rex tab");
+        };
+        let request: serde_json::Value = serde_json::from_slice(&tab.request).unwrap();
+        assert_eq!(
+            request["layout"]["block"]["options"]["command"],
+            serde_json::json!(["/x/near-ai", "--ticket", "ab"])
+        );
+        assert_eq!(request["layout"]["block"]["options"]["cwd"], "/tmp/project");
+        let refused = |error: ManagedError| {
+            launch_macos(
+                TerminalSetting::Rex,
+                &[TerminalApp::Rex],
+                "'/x'",
+                vec!["/x".into()],
+                None,
+                |_| Err(error),
+            )
+        };
+        assert_eq!(
+            refused(ManagedError::TerminalNotFound),
+            Err(ManagedError::TerminalNotFound)
+        );
+        assert_eq!(
+            refused(ManagedError::InvalidRequest),
+            Err(ManagedError::LaunchUnknown)
+        );
+    }
+
+    /// herdr's attach step (D4) opens the herdr program alone in the chosen
+    /// terminal, in the folder: no helper and no ticket.
+    #[test]
+    fn a_program_opens_alone_in_the_terminal() {
+        let cwd = Path::new("/home/a/project");
+        let plan = program_plan(
+            TerminalApp::Kitty,
+            Path::new("/usr/bin/kitty"),
+            cwd,
+            vec!["/usr/bin/herdr".into()],
+        )
+        .unwrap();
+        let mut expected = terminal_args(TerminalApp::Kitty, Some(cwd)).unwrap();
+        expected.push("/usr/bin/herdr".into());
+        assert_eq!(plan.args, expected);
+        assert_eq!(
+            program_plan(
+                TerminalApp::Kitty,
+                Path::new("kitty"),
+                cwd,
+                vec!["/usr/bin/herdr".into()]
+            ),
+            Err(ManagedError::InvalidRequest)
         );
     }
 
@@ -1524,7 +1791,8 @@ mod tests {
                 "kitty",
                 "WezTerm",
                 "Alacritty",
-                "Warp"
+                "Warp",
+                "Rex"
             ]
         );
         assert_eq!(

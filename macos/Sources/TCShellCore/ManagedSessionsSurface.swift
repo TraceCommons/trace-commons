@@ -151,6 +151,12 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
         /// The terminal apps installed on this Mac; absent from an older
         /// daemon.
         public let terminalChoices: [ManagedTerminalChoice]?
+        /// Whether herdr was found here, so "Group sessions in herdr" can
+        /// be offered; absent from an older daemon, which reads as no.
+        public let herdrAvailable: Bool?
+        /// Whether sessions open as tabs of herdr's "Near.ai" workspace;
+        /// absent from an older daemon.
+        public let herdrGrouping: Bool?
         enum CodingKeys: String, CodingKey {
             case managedLaunch = "managed_launch", terminalLaunch = "terminal_launch", terminalDestination = "terminal_destination"
             case toolSetup = "tool_setup"
@@ -160,6 +166,7 @@ public struct ManagedSnapshot: Decodable, Equatable, Sendable {
             case nearAiSignin = "near_ai_signin"
             case terminalCurrent = "terminal_current", terminalChoices = "terminal_choices"
             case terminalChosen = "terminal_chosen"
+            case herdrAvailable = "herdr_available", herdrGrouping = "herdr_grouping"
             case resume
         }
     }
@@ -889,6 +896,13 @@ public extension ManagedSnapshot {
     /// The terminal apps a picker offers: the installed ones, none from an
     /// older daemon.
     var terminalChoices: [ManagedTerminalChoice] { capabilities.terminalChoices ?? [] }
+
+    /// Whether Settings offers "Group sessions in herdr": only where the
+    /// daemon found herdr, or while the switch is on, so it can be turned
+    /// off after herdr is removed.
+    var offersHerdrGrouping: Bool {
+        capabilities.herdrAvailable == true || capabilities.herdrGrouping == true
+    }
 
     /// Whether a launch dialog asks which terminal to open in: until the
     /// person has chosen one, and only when more than one is installed.

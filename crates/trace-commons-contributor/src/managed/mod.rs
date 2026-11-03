@@ -6,6 +6,7 @@ pub mod cli;
 pub mod codex;
 pub mod collection_plan;
 pub mod folder;
+pub mod herdr;
 pub mod models;
 pub mod native_collection;
 pub mod opencode;
@@ -149,5 +150,6 @@ pub const PROJECT_CHOOSES_MODEL_LABEL: &str = "managed-project-chooses-model";
 pub const PROJECT_SETS_AUTO_MODE_SERVER_LABEL: &str = "managed-project-sets-auto-mode-server";
 
 pub mod copy;
+pub mod rex;
 pub mod route;
 pub mod terminal;

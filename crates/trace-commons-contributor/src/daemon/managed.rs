@@ -8,7 +8,7 @@ use crate::{
         AccountId, AccountView, AuthState, ConnectionKind, Generation, ManagedError, Selection,
         ToolId,
         accounts::AccountStore,
-        models,
+        herdr, models,
         profiles::{NativeProfiles, find_native},
         route::{ManagedRoute, near_ai_base_url},
         secrets::{ApiKey, SecretStore},
@@ -50,6 +50,13 @@ pub struct ManagedService {
     /// Opens a session in a terminal ([`terminal::launch`]). A field so
     /// tests record the call rather than open a real terminal.
     launch_terminal: LaunchTerminal,
+    /// Opens a session as a tab of herdr's "Near.ai" workspace
+    /// ([`herdr::launch`]), when "Group sessions in herdr" is on. A field
+    /// for the same reason.
+    launch_herdr: LaunchTerminal,
+    /// Whether herdr is found here ([`herdr::available`]). A field so tests
+    /// answer it.
+    herdr_available: fn() -> bool,
 }
 
 /// [`terminal::launch`]'s shape.
@@ -66,6 +73,8 @@ type LaunchTerminal = fn(
 /// with everything needed to open it while the service is not locked.
 struct TerminalLaunch {
     launch: LaunchTerminal,
+    /// The session opens in herdr, which the chosen terminal hosts.
+    grouped: bool,
     choice: TerminalSetting,
     installed: Vec<TerminalApp>,
     config_dir: std::path::PathBuf,
@@ -119,6 +128,8 @@ impl ManagedService {
             focus: crate::managed::terminal::focus,
             setup_terminal: terminal::launch_tool_setup,
             launch_terminal: terminal::launch,
+            launch_herdr: herdr::launch,
+            herdr_available: herdr::available,
         })
     }
 
@@ -137,6 +148,7 @@ impl ManagedService {
         &mut self,
         request: &Request,
         choice: TerminalSetting,
+        grouped: bool,
     ) -> Result<TerminalLaunch, ManagedError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -162,7 +174,12 @@ impl ManagedService {
             .sessions
             .begin_terminal_launch(p.session_id, &p.ticket)?;
         Ok(TerminalLaunch {
-            launch: self.launch_terminal,
+            launch: if grouped {
+                self.launch_herdr
+            } else {
+                self.launch_terminal
+            },
+            grouped,
             choice,
             installed: self.installed_terminals(choice.app()),
             config_dir: self.config_dir.clone(),
@@ -193,7 +210,12 @@ impl ManagedService {
                 };
                 self.sessions
                     .opened_in_terminal(launch.session_id, handle, window)?;
-                Ok(json!({"opened":true,"destination":terminal::destination(launch.choice)}))
+                let destination = if launch.grouped {
+                    Some(herdr::NAME)
+                } else {
+                    terminal::destination(launch.choice)
+                };
+                Ok(json!({"opened":true,"destination":destination}))
             }
             // Refusals that only come before anything is run.
             Err(
@@ -505,8 +527,11 @@ impl ManagedService {
                 // always has Terminal, so a failed probe never dims it.
                 let terminal_launch = terminal::launch_available()
                     && (cfg!(target_os = "macos") || !choices.is_empty());
+                // "Group sessions in herdr" is offered only where herdr is
+                // found and a terminal can host it.
+                let herdr_available = terminal_launch && (self.herdr_available)();
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":terminal::destination(choice),"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr}}),
                 )
             }
             "managed_tool_setup" => {
@@ -723,6 +748,8 @@ fn sign_in_key(shared: &DaemonShared) -> Option<String> {
 struct TerminalChoice {
     setting: TerminalSetting,
     chosen: bool,
+    /// "Group sessions in herdr" (`managed_herdr`).
+    herdr: bool,
 }
 
 /// The terminal choice, read per request like the sign-in. Unreadable
@@ -734,10 +761,12 @@ fn terminal_choice(shared: &DaemonShared) -> TerminalChoice {
         .map(|s| TerminalChoice {
             setting: s.managed_terminal,
             chosen: s.managed_terminal_chosen,
+            herdr: s.managed_herdr,
         })
         .unwrap_or(TerminalChoice {
             setting: TerminalSetting::Unrecognized,
             chosen: true,
+            herdr: false,
         })
 }
 
@@ -1036,9 +1065,9 @@ where
 /// launch and to record it: the terminal opens in between, unlocked and off
 /// the async workers, since `osascript` can take seconds.
 fn terminal_launch(shared: &DaemonShared, request: &Request) -> Response {
-    let choice = terminal_choice(shared).setting;
+    let choice = terminal_choice(shared);
     let launch = match with_service(shared, |service| {
-        service.begin_terminal_launch(request, choice)
+        service.begin_terminal_launch(request, choice.setting, choice.herdr)
     }) {
         Ok(launch) => launch,
         Err(refusal) => return respond(request, Err(refusal)),
@@ -1998,7 +2027,11 @@ mod tests {
                 params,
             },
             sign_in,
-            TerminalChoice { setting, chosen },
+            TerminalChoice {
+                setting,
+                chosen,
+                herdr: false,
+            },
         )
     }
 
@@ -3088,6 +3121,126 @@ mod tests {
             context.proof
         });
         (id, proof)
+    }
+
+    /// The herdr launches [`record_herdr`] was asked for: the terminal that
+    /// would host herdr, and the session.
+    static GROUPED: std::sync::Mutex<Vec<(TerminalSetting, Uuid)>> = std::sync::Mutex::new(vec![]);
+
+    /// Opens each session as a herdr tab, named by a terminal id.
+    fn record_herdr(
+        choice: TerminalSetting,
+        _: &[TerminalApp],
+        _: &std::path::Path,
+        _: &std::path::Path,
+        session: Uuid,
+        _: &str,
+    ) -> Result<Option<TerminalTab>, ManagedError> {
+        GROUPED.lock().unwrap().push((choice, session));
+        Ok(Some(TerminalTab {
+            handle: TerminalHandle::Herdr {
+                terminal: "term_19af3".into(),
+            },
+            window: None,
+        }))
+    }
+
+    /// D4: with "Group sessions in herdr" on, a launch goes to herdr, with
+    /// the chosen terminal named as its host, and answers that it opened in
+    /// herdr; Show then asks herdr for that tab. Off, a launch never reaches
+    /// herdr.
+    #[test]
+    fn grouping_in_herdr_sends_the_launch_to_herdr() {
+        let (home, shared) = launching(record_opened);
+        locked(&shared, |service| {
+            service.launch_herdr = record_herdr;
+            service.focus = record_focus;
+        });
+        let host = *TerminalApp::offered().last().expect("an offered app");
+        {
+            let mut settings = shared.settings.lock().unwrap();
+            settings.managed_terminal = TerminalSetting::from(host);
+            settings.managed_herdr = true;
+        }
+        let first = prepared(&shared, home.path());
+        let id = first.session_id;
+        let answer = terminal(
+            &shared,
+            json!({"session_id":id,"ticket":first.ticket.clone().unwrap()}),
+        )
+        .unwrap();
+        assert_eq!(answer["destination"], "herdr");
+        assert_eq!(opened(id), 0, "not in a terminal of its own");
+        assert!(
+            GROUPED
+                .lock()
+                .unwrap()
+                .contains(&(TerminalSetting::from(host), id))
+        );
+        let ticket = first.ticket.unwrap();
+        locked(&shared, |service| {
+            let context = service.sessions.redeem(id, &ticket).unwrap();
+            report(service, id, &context.proof, "running", None).unwrap();
+            call(
+                service,
+                "managed_session_focus",
+                json!({"session_id": id}),
+                false,
+            )
+            .unwrap();
+        });
+        assert!(FOCUSED.lock().unwrap().contains(&TerminalHandle::Herdr {
+            terminal: "term_19af3".into()
+        }));
+
+        shared.settings.lock().unwrap().managed_herdr = false;
+        let second = prepared(&shared, home.path());
+        terminal(
+            &shared,
+            json!({"session_id":second.session_id,"ticket":second.ticket.unwrap()}),
+        )
+        .unwrap();
+        assert_eq!(opened(second.session_id), 1);
+        assert!(
+            !GROUPED
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, session)| *session == second.session_id)
+        );
+    }
+
+    /// The snapshot says whether "Group sessions in herdr" is on, and offers
+    /// it only where herdr is found.
+    #[test]
+    fn the_snapshot_says_whether_sessions_group_in_herdr() {
+        let (_home, _store, mut service) = service();
+        let snapshot = |service: &mut ManagedService, herdr: bool| {
+            service
+                .handle(
+                    &Request {
+                        id: 1,
+                        method: "managed_snapshot".into(),
+                        params: json!({}),
+                    },
+                    false,
+                    TerminalChoice {
+                        setting: TerminalSetting::default(),
+                        chosen: true,
+                        herdr,
+                    },
+                )
+                .unwrap()["capabilities"]
+                .clone()
+        };
+        service.herdr_available = || true;
+        for on in [false, true] {
+            assert_eq!(snapshot(&mut service, on)["herdr_grouping"], on);
+        }
+        let found = snapshot(&mut service, false);
+        assert_eq!(found["herdr_available"], found["terminal_launch"]);
+        service.herdr_available = || false;
+        assert_eq!(snapshot(&mut service, true)["herdr_available"], false);
     }
 
     /// Owner, 2026-11-03: every launch opens a window of its own. The

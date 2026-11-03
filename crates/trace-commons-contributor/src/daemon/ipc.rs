@@ -408,6 +408,7 @@ pub const METHODS: &[&str] = &[
     "set_notifications_enabled",
     "set_notify_kind",
     "set_managed_terminal",
+    "set_managed_herdr",
     "enroll",
     "prepare_admission_session",
     "near_account_capabilities",
@@ -605,6 +606,7 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "set_notify_kind",
     // Writes only the settings file, through `set_settings`.
     "set_managed_terminal",
+    "set_managed_herdr",
     // `auto_upload` is refused inside these two; the other modes only stop
     // sends.
     "set_project_mode",
@@ -4022,6 +4024,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "set_notify_kind" => handle_set_notify_kind(shared, req),
         "set_managed_terminal" => handle_set_managed_terminal(shared, req),
+        "set_managed_herdr" => handle_set_managed_herdr(shared, req),
         "set_project_mode" => handle_set_project_mode(shared, req),
         "set_contribution_override" => handle_set_contribution_override(shared, req),
         "clear_contribution_override" => handle_clear_contribution_override(shared, req),
@@ -6565,6 +6568,18 @@ fn handle_set_managed_terminal(shared: &DaemonShared, req: &Request) -> Response
     }
     super::managed::terminal_changed(shared);
     Response::ok(req.id, serde_json::json!({ "managed_terminal": app.id() }))
+}
+
+/// `set_managed_herdr {on}`: "Group sessions in herdr". Written through
+/// `set_settings` as `handle_set_bool_setting` does, then the managed
+/// revision moves so every shell re-reads the snapshot
+/// (`capabilities.herdr_grouping`).
+fn handle_set_managed_herdr(shared: &DaemonShared, req: &Request) -> Response {
+    let response = handle_set_bool_setting(shared, req, "managed_herdr");
+    if response.error.is_none() {
+        super::managed::terminal_changed(shared);
+    }
+    response
 }
 
 fn handle_managed_folder_settings(shared: &DaemonShared, req: &Request) -> Response {
@@ -19381,7 +19396,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 107, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 108, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 81, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -21618,6 +21633,59 @@ mod tests {
                 snapshot(&s)["capabilities"]["terminal_current"],
                 chosen.id()
             );
+        }
+
+        /// "Group sessions in herdr": `set_managed_herdr {on}` persists
+        /// through `set_settings`, shows in `get_settings` and the managed
+        /// snapshot, and is announced as `managed_changed`. A value that is
+        /// not a boolean is refused before a write.
+        #[test]
+        fn grouping_in_herdr_persists_and_moves_the_snapshot() {
+            let saw_managed = |rx: &mut tokio::sync::broadcast::Receiver<Event>| {
+                let mut saw = false;
+                while let Ok(event) = rx.try_recv() {
+                    saw |= event.event == "managed_changed";
+                }
+                saw
+            };
+            let s = live();
+            let grouping = |s: &DaemonShared| {
+                handle_request(s, &req("managed_snapshot", serde_json::json!({})))
+                    .result
+                    .expect("snapshot")["capabilities"]["herdr_grouping"]
+                    .clone()
+            };
+            assert_eq!(grouping(&s), false);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req("set_managed_herdr", serde_json::json!({"on": true})),
+            );
+            assert_eq!(
+                r.result.expect("set answers"),
+                serde_json::json!({"managed_herdr": true})
+            );
+            assert!(saw_managed(&mut rx));
+            assert_eq!(grouping(&s), true);
+            let settings = handle_request(&s, &req("get_settings", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(settings["managed_herdr"], true);
+            assert!(
+                crate::daemon::settings::DaemonSettings::load(&s.store)
+                    .unwrap()
+                    .managed_herdr
+            );
+            for bad in [
+                serde_json::json!({}),
+                serde_json::json!({"on": "true"}),
+                serde_json::json!({"on": null}),
+            ] {
+                let r = handle_request(&s, &req("set_managed_herdr", bad.clone()));
+                assert_eq!(r.error.expect("refused").message, "on-required", "{bad}");
+            }
+            assert!(!saw_managed(&mut rx), "a refusal publishes nothing");
+            assert_eq!(grouping(&s), true);
         }
 
         /// Nudge A2: `set_notify_kind {kind, on}` takes the digest or an
