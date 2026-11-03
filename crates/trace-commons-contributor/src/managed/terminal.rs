@@ -988,11 +988,11 @@ pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
 /// Command-T now. `ready` is asked only then, so no other launch runs the
 /// permission check.
 #[cfg(any(target_os = "macos", test))]
-fn placeable<'a>(
+fn placeable(
     choice: TerminalSetting,
-    place: Option<&'a Placement>,
+    place: Option<&Placement>,
     ready: impl FnOnce() -> bool,
-) -> Option<&'a Placement> {
+) -> Option<&Placement> {
     let place = place.filter(|_| choice.app() == Some(TerminalApp::Terminal))?;
     ready().then_some(place)
 }

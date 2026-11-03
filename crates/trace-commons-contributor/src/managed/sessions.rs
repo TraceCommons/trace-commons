@@ -585,7 +585,7 @@ impl SessionRegistry {
             .iter()
             .filter(|e| e.owned_running() && e.terminal.is_some() && e.terminal_window.is_some())
             .collect();
-        rows.sort_by(|a, b| b.view.started_at.cmp(&a.view.started_at));
+        rows.sort_by_key(|e| std::cmp::Reverse(e.view.started_at));
         rows.into_iter()
             .filter_map(|e| Some((e.view.id, e.terminal.clone()?, e.terminal_window?)))
             .collect()
