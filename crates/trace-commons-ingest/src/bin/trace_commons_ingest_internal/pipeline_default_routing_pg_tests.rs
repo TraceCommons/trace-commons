@@ -956,7 +956,11 @@ async fn the_loop_moves_its_tenants_off_a_bundle_that_awards_nothing() {
             .map(|routing| routing.activation_record_id)
     );
     assert_eq!(
-        fixture.view(&fixture.route.tenant).await.active_bundle_id.as_deref(),
+        fixture
+            .view(&fixture.route.tenant)
+            .await
+            .active_bundle_id
+            .as_deref(),
         Some(fixture.route.a.bundle_id.as_str()),
         "a hand-activated tenant is the operator's to move"
     );
@@ -966,7 +970,10 @@ async fn the_loop_moves_its_tenants_off_a_bundle_that_awards_nothing() {
     let status = fixture
         .config_status(&new_boot, &fixture.newcomer_admin)
         .await;
-    assert_eq!(status["novelty_utility"]["credit_rule"], "graded_perplexity_v1");
+    assert_eq!(
+        status["novelty_utility"]["credit_rule"],
+        "graded_perplexity_v1"
+    );
     assert_eq!(status["pipeline_default_routing_last_pass"]["migrated"], 1);
     assert_eq!(
         fixture

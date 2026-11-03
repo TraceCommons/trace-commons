@@ -3378,7 +3378,8 @@ pub(super) fn production_test_package_awarding(microcredits: u64) -> BundlePacka
             chunk_cap: 16,
             chunk_min_tokens: 64,
             novelty_utility_microcredits: microcredits,
-            credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
+            credit_rule:
+                trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
         },
     )
     .expect("the production test package builds")

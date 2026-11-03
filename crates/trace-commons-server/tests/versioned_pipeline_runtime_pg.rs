@@ -3222,7 +3222,8 @@ async fn production_assembly_is_constructible_from_the_library() {
             chunk_cap: 16,
             chunk_min_tokens: 64,
             novelty_utility_microcredits: 2_500_000,
-            credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
+            credit_rule:
+                trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
         },
         components,
         score_policies: Default::default(),
@@ -19559,8 +19560,7 @@ async fn a_graded_award_is_batched_and_the_payout_rail_prices_it() {
     };
     let dir = tempfile::tempdir().unwrap();
     let service =
-        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
-            .await;
+        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
     let tenant = format!("compat-graded-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:compat-graded";
     service.register_default_bundle(&tenant).await.unwrap();
@@ -19586,13 +19586,14 @@ async fn a_graded_award_is_batched_and_the_payout_rail_prices_it() {
         .iter()
         .map(|adjustment| adjustment.label.as_str())
         .collect();
-    assert_eq!(labels, [GRADED_PERPLEXITY_TERM_LABEL, GRADED_ANOMALY_TERM_LABEL]);
-    let award = evidence
-        .award_adjustments
-        .iter()
-        .fold(u128::from(CHECKED_DELTA_MICROCREDITS), |amount, adjustment| {
-            amount * u128::from(adjustment.factor_micros) / 1_000_000
-        });
+    assert_eq!(
+        labels,
+        [GRADED_PERPLEXITY_TERM_LABEL, GRADED_ANOMALY_TERM_LABEL]
+    );
+    let award = evidence.award_adjustments.iter().fold(
+        u128::from(CHECKED_DELTA_MICROCREDITS),
+        |amount, adjustment| amount * u128::from(adjustment.factor_micros) / 1_000_000,
+    );
     assert!(award > 0 && award <= u128::from(CHECKED_DELTA_MICROCREDITS));
     let evaluation: serde_json::Value = score.evaluation;
     assert_eq!(evaluation["rule_id"], COMPATIBILITY_GRADED_SCORE_RULE);
@@ -19604,15 +19605,22 @@ async fn a_graded_award_is_batched_and_the_payout_rail_prices_it() {
     let event_id = leg.credit_event_id.expect("the leg's ledger event");
     let batch_id = leg.settlement_batch_id.expect("the graded leg is batched");
     assert_eq!(
-        settlement_batch_status(&backend, &tenant, batch_id).await.as_deref(),
+        settlement_batch_status(&backend, &tenant, batch_id)
+            .await
+            .as_deref(),
         Some("finalized")
     );
     assert_eq!(
         finalized_batches_carrying(&backend, &tenant, event_id).await,
-        vec![(batch_id, Some(InstrumentId::trace_credit().as_str().to_string()))]
+        vec![(
+            batch_id,
+            Some(InstrumentId::trace_credit().as_str().to_string())
+        )]
     );
     assert_eq!(
-        credit_event_state(&backend, &tenant, event_id).await.as_deref(),
+        credit_event_state(&backend, &tenant, event_id)
+            .await
+            .as_deref(),
         Some("final")
     );
     assert_eq!(
@@ -19634,7 +19642,10 @@ async fn a_graded_award_is_batched_and_the_payout_rail_prices_it() {
         row.get::<_, String>("reason"),
         "novelty_utility:compatibility_graded_perplexity_v1"
     );
-    assert_eq!(row.get::<_, String>("actor_principal_ref"), TEST_PIPELINE_ISSUER);
+    assert_eq!(
+        row.get::<_, String>("actor_principal_ref"),
+        TEST_PIPELINE_ISSUER
+    );
     let status = PipelineProductStore::new(backend.clone())
         .contributor_statuses(&tenant, principal, &[run.submission_id])
         .await
@@ -19651,8 +19662,7 @@ async fn a_graded_award_is_batched_and_the_payout_rail_prices_it() {
         .unwrap();
     let events = backend.list_trace_credit_events(&tenant).await.unwrap();
     let epochs = [trace_commons_server::db::PayoutRateEpoch {
-        rate: trace_commons_gate_api::RailRate::new("s-test", 250_000 * 1_000, 1_000_000)
-            .unwrap(),
+        rate: trace_commons_gate_api::RailRate::new("s-test", 250_000 * 1_000, 1_000_000).unwrap(),
         pricing_label: None,
         observed_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     }];
@@ -19672,7 +19682,11 @@ async fn a_graded_award_is_batched_and_the_payout_rail_prices_it() {
     let accrual = &plan.writes[0];
     assert_eq!(accrual.settlement_batch_id, batch_id);
     assert_eq!(accrual.award_units.get(), award);
-    assert_eq!(accrual.rail_units.get(), award * 250, "nano-USD at $0.25 per point");
+    assert_eq!(
+        accrual.rail_units.get(),
+        award * 250,
+        "nano-USD at $0.25 per point"
+    );
 
     // `main`'s settlement never selects the event (its `external_ref` is
     // the pipeline's ledger source key): `credit_settlement_enumerator_pg`
@@ -19690,8 +19704,7 @@ async fn a_graded_award_without_model_training_consent_is_withheld_unbatched() {
     };
     let dir = tempfile::tempdir().unwrap();
     let service =
-        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
-            .await;
+        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
     let tenant = format!("compat-graded-consent-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:compat-graded-consent";
     let default_consent = envelope(uuid::Uuid::new_v4()).await;
@@ -19734,8 +19747,7 @@ async fn a_held_principals_graded_award_stays_held() {
     };
     let dir = tempfile::tempdir().unwrap();
     let service =
-        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
-            .await;
+        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
     let tenant = format!("compat-graded-held-{}", uuid::Uuid::new_v4());
     let principal = "principal_sha256:compat-graded-held";
     service.register_default_bundle(&tenant).await.unwrap();
@@ -19760,7 +19772,10 @@ async fn a_held_principals_graded_award_stays_held() {
     )
     .await;
     assert_eq!(run.state, PipelineRunState::Retry, "{run:?}");
-    assert_eq!(run.last_error_label.as_deref(), Some(PIPELINE_CREDIT_HELD_LABEL));
+    assert_eq!(
+        run.last_error_label.as_deref(),
+        Some(PIPELINE_CREDIT_HELD_LABEL)
+    );
     assert_eq!(
         count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
         0
@@ -19792,8 +19807,8 @@ async fn a_tenant_on_a_bundle_that_awards_nothing_passes_its_startup_checks() {
     old.register_default_bundle(&tenant).await.unwrap();
     let old_bundle = old.default_package().bundle_id.clone();
 
-    let raised = graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks())
-        .await;
+    let raised =
+        graded_compatibility_service(&backend, &dir, allow_all_authority(), issuing_checks()).await;
     let raised_gate = {
         let mut config = CompatibilityBundleConfig::local_reference();
         config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
@@ -19820,7 +19835,10 @@ async fn a_tenant_on_a_bundle_that_awards_nothing_passes_its_startup_checks() {
             .await
     );
     let raised_bundle = raised.default_package().bundle_id.clone();
-    raised.register_default_bundle(&format!("{tenant}-new")).await.unwrap();
+    raised
+        .register_default_bundle(&format!("{tenant}-new"))
+        .await
+        .unwrap();
     assert!(
         !raised
             .bundle_awards_nothing_under(&format!("{tenant}-new"), &raised_bundle, &raised_gate)
@@ -32010,7 +32028,8 @@ fn production_compatible_config() -> CompatibilityBundleConfig {
             chunk_cap: 16,
             chunk_min_tokens: 64,
             novelty_utility_microcredits: 0,
-            credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
+            credit_rule:
+                trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
         },
     )
     .expect("production-compatible config validates")

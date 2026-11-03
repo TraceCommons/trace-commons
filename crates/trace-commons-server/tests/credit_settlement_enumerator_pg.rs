@@ -51,11 +51,10 @@ async fn discovers_bounded_pending_tenants_without_content_authority() {
     let d = format!("{prefix}d");
     let now = Utc::now();
     let cutoff = now - Duration::hours(1);
-    let pipeline_key =
-        trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
-            &c,
-            "graded-idempotency-key",
-        );
+    let pipeline_key = trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(
+        &c,
+        "graded-idempotency-key",
+    );
     event(
         &db,
         &a,

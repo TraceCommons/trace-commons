@@ -22,12 +22,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use trace_commons_gate_api::pipeline::{
-    AtomicUnits, AwardAdjustment, BundleManifest, IndexMembershipDecision, InstrumentAward, InstrumentAwards,
-    InstrumentDescriptor, InstrumentId, InstrumentKind, MAX_TRACE_CREDIT_MICROCREDITS, PhaseResult,
-    PolicyError, ReasonCode, ScoreDecision, ScoreEvaluation, ScoreEvidence, ScoreInput,
-    ScoreOutput, ScorePolicy, SealedIndexCommand, SealedIndexEntry, SettleDecision,
-    SettleEvaluation, SettleEvidence, SettleInput, SettlePolicy, TRACE_CREDIT_DECIMALS,
-    TRACE_CREDIT_INSTRUMENT_ID, TenantStorageRef,
+    AtomicUnits, AwardAdjustment, BundleManifest, IndexMembershipDecision, InstrumentAward,
+    InstrumentAwards, InstrumentDescriptor, InstrumentId, InstrumentKind,
+    MAX_TRACE_CREDIT_MICROCREDITS, PhaseResult, PolicyError, ReasonCode, ScoreDecision,
+    ScoreEvaluation, ScoreEvidence, ScoreInput, ScoreOutput, ScorePolicy, SealedIndexCommand,
+    SealedIndexEntry, SettleDecision, SettleEvaluation, SettleEvidence, SettleInput, SettlePolicy,
+    TRACE_CREDIT_DECIMALS, TRACE_CREDIT_INSTRUMENT_ID, TenantStorageRef,
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedPerplexityScorer, IndexSnapshot,
@@ -1649,7 +1649,8 @@ mod tests {
             // An auditor recomputes the award from the delta and the two
             // factors with integer arithmetic alone.
             assert_eq!(
-                u128::from(delta) * u128::from(perplexity.factor_micros)
+                u128::from(delta)
+                    * u128::from(perplexity.factor_micros)
                     * u128::from(anomaly.factor_micros)
                     / 1_000_000_000_000,
                 u128::from(award)
@@ -1657,8 +1658,13 @@ mod tests {
         }
         // The delta is the ceiling: a saturated trace earns exactly it.
         assert_eq!(
-            graded_perplexity_award(2_500_000, 50_000_000, 50_000_000, &CREDIT_QUALITY_CONSTANTS_V3)
-                .microcredits,
+            graded_perplexity_award(
+                2_500_000,
+                50_000_000,
+                50_000_000,
+                &CREDIT_QUALITY_CONSTANTS_V3
+            )
+            .microcredits,
             2_500_000
         );
     }
@@ -1705,7 +1711,10 @@ mod tests {
             AtomicUnits::from_raw(u128::from(expected.microcredits))
         );
         assert_eq!(evidence.award_adjustments, expected.adjustments);
-        assert_eq!(result.evidence.fixed_awards, result.decision.awards().clone());
+        assert_eq!(
+            result.evidence.fixed_awards,
+            result.decision.awards().clone()
+        );
         assert_eq!(result.evaluation.rule_id, COMPATIBILITY_GRADED_SCORE_RULE);
         let product: u128 = evidence
             .award_adjustments
@@ -1764,7 +1773,10 @@ mod tests {
         )
         .await;
         assert!(flat_output.result().evidence.award_adjustments.is_empty());
-        assert_eq!(flat_output.result().evaluation.rule_id, COMPATIBILITY_SCORE_RULE);
+        assert_eq!(
+            flat_output.result().evaluation.rule_id,
+            COMPATIBILITY_SCORE_RULE
+        );
         assert_eq!(
             flat_output
                 .result()
@@ -1777,10 +1789,7 @@ mod tests {
         );
     }
 
-    fn pilot_like_gate(
-        delta: u64,
-        credit_rule: CompatibilityCreditRule,
-    ) -> MainGateConfig {
+    fn pilot_like_gate(delta: u64, credit_rule: CompatibilityCreditRule) -> MainGateConfig {
         MainGateConfig {
             perplexity_floor_micros: Some(1_500_000),
             tail_fraction_floor_micros: Some(0),
@@ -1828,7 +1837,10 @@ mod tests {
         };
 
         let flat = pin_config(&pilot_like_gate(0, CompatibilityCreditRule::Flat));
-        assert_eq!(String::from_utf8(serde_json::to_vec(&flat).unwrap()).unwrap(), PIN_CONFIG);
+        assert_eq!(
+            String::from_utf8(serde_json::to_vec(&flat).unwrap()).unwrap(),
+            PIN_CONFIG
+        );
         let package = build(&flat);
         assert_eq!(package.bundle_id, PIN_BUNDLE);
         assert_eq!(
@@ -1841,7 +1853,10 @@ mod tests {
 
         // The graded rule is pinned in the bytes, so it is a different
         // package; the rule round-trips.
-        let graded = pin_config(&pilot_like_gate(0, CompatibilityCreditRule::GradedPerplexityV1));
+        let graded = pin_config(&pilot_like_gate(
+            0,
+            CompatibilityCreditRule::GradedPerplexityV1,
+        ));
         let graded_bytes = serde_json::to_vec(&graded).unwrap();
         assert!(
             String::from_utf8(graded_bytes.clone())
@@ -1849,7 +1864,10 @@ mod tests {
                 .ends_with(r#","credit_rule":"graded_perplexity_v1"}"#)
         );
         let decoded: CompatibilityBundleConfig = serde_json::from_slice(&graded_bytes).unwrap();
-        assert_eq!(decoded.credit_rule, CompatibilityCreditRule::GradedPerplexityV1);
+        assert_eq!(
+            decoded.credit_rule,
+            CompatibilityCreditRule::GradedPerplexityV1
+        );
         assert_ne!(build(&graded).bundle_id, PIN_BUNDLE);
         // An unknown rule does not decode.
         let unknown = PIN_CONFIG.replace(
@@ -1893,8 +1911,10 @@ mod tests {
         // A bundle that awards anything is never tolerated this way.
         let flat_award = pin_config(&pilot_like_gate(500_000, CompatibilityCreditRule::Flat));
         assert!(!flat_award.matches_main_gate_without_award(&raised));
-        let graded_no_delta =
-            pin_config(&pilot_like_gate(0, CompatibilityCreditRule::GradedPerplexityV1));
+        let graded_no_delta = pin_config(&pilot_like_gate(
+            0,
+            CompatibilityCreditRule::GradedPerplexityV1,
+        ));
         assert!(!graded_no_delta.matches_main_gate_without_award(&raised));
     }
 
@@ -1916,7 +1936,10 @@ mod tests {
             CompatibilityCreditRule::from_env_value(Some(" graded_perplexity_v1 ")),
             Some(CompatibilityCreditRule::GradedPerplexityV1)
         );
-        assert_eq!(CompatibilityCreditRule::from_env_value(Some("graded")), None);
+        assert_eq!(
+            CompatibilityCreditRule::from_env_value(Some("graded")),
+            None
+        );
         assert_eq!(CompatibilityCreditRule::from_env_value(Some("FLAT")), None);
         for rule in [
             CompatibilityCreditRule::Flat,

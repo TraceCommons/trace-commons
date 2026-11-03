@@ -983,12 +983,22 @@ impl PipelineDefaultRouting {
             if *routing_state == RoutingState::Pipeline
                 && view.active_bundle_id.as_deref() != Some(armed.bundle_id.as_str())
                 && self
-                    .awards_nothing_under_main_gate(state, tenant_id, view.active_bundle_id.as_deref())
+                    .awards_nothing_under_main_gate(
+                        state,
+                        tenant_id,
+                        view.active_bundle_id.as_deref(),
+                    )
                     .await
             {
                 if let Some(routing) = view.routing.as_ref() {
-                    self.migrate_tenant(state, armed, tenant_id, routing.activation_record_id, report)
-                        .await;
+                    self.migrate_tenant(
+                        state,
+                        armed,
+                        tenant_id,
+                        routing.activation_record_id,
+                        report,
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -1032,7 +1042,8 @@ impl PipelineDefaultRouting {
         tenant_id: &str,
         bundle_id: Option<&str>,
     ) -> bool {
-        let (Some(service), Some(bundle_id)) = (state.pipeline_service.as_deref(), bundle_id) else {
+        let (Some(service), Some(bundle_id)) = (state.pipeline_service.as_deref(), bundle_id)
+        else {
             return false;
         };
         service
@@ -1060,7 +1071,9 @@ impl PipelineDefaultRouting {
             match qualify_for_tenant(state, &actor, &armed.signed_package, &armed.attestations)
                 .await
             {
-                Err((_, error)) if error.0.error != PIPELINE_CHANGE_COMMITTED_AUDIT_FAILED_LABEL => {
+                Err((_, error))
+                    if error.0.error != PIPELINE_CHANGE_COMMITTED_AUDIT_FAILED_LABEL =>
+                {
                     Err(error.0.error)
                 }
                 _ => {

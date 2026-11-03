@@ -61987,9 +61987,7 @@ fn pipeline_scoring_award_event_of(
 ) -> TraceCommonsCreditLedgerRecord {
     TraceCommonsCreditLedgerRecord {
         reason: Some(
-            trace_commons_server::versioned_pipeline_credit::pipeline_novelty_utility_reason(
-                event,
-            ),
+            trace_commons_server::versioned_pipeline_credit::pipeline_novelty_utility_reason(event),
         ),
         external_ref: Some(
             trace_commons_server::versioned_pipeline_credit::pipeline_ledger_source_key(

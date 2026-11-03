@@ -148,7 +148,8 @@ async fn production_pipeline_for(options: &IngestOptions) -> PipelineService {
             chunk_cap: 16,
             chunk_min_tokens: 64,
             novelty_utility_microcredits: 0,
-            credit_rule: trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
+            credit_rule:
+                trace_commons_server::versioned_pipeline_compat::CompatibilityCreditRule::Flat,
         },
         components,
         score_policies: options.score_policies().clone(),

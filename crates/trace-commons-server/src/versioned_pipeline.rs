@@ -15105,9 +15105,11 @@ impl PipelineService {
                 }
                 // A held Trace Credit account is checked before any external
                 // effect, so a held account never reaches its adapter. Only a
-                // leg that settles into a batch is held: a `NoveltyUtility`
-                // leg never settles, and `main` writes that credit regardless
-                // of holds (owner ruling, Zaki review 1, round 2, finding 13).
+                // leg that settles into a batch is held: a flat-rule
+                // `NoveltyUtility` leg never settles, and `main` writes that
+                // credit regardless of holds (owner ruling, Zaki review 1,
+                // round 2, finding 13); a graded-rule leg settles, so it is
+                // held (owner decision D7, 2026-11-03).
                 let credit_account_ref = if instrument_id == InstrumentId::trace_credit() {
                     let account_ref = self.credit_account_ref(&run).await?;
                     if bundle.trace_credit_event.settles_into_batch()
@@ -15910,12 +15912,11 @@ impl PipelineService {
         // resolved now, before the credit transaction takes a pooled
         // connection: `main` reads the tenant policy, then credits in a
         // separate transaction, and so does this.
-        let novelty_utility_authority =
-            if trace_credit_event.is_novelty_utility() {
-                self.resolve_authority(&run.tenant_id).await?
-            } else {
-                None
-            };
+        let novelty_utility_authority = if trace_credit_event.is_novelty_utility() {
+            self.resolve_authority(&run.tenant_id).await?
+        } else {
+            None
+        };
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         ensure_current_lease(&tx, run, lease_token).await?;
@@ -15929,7 +15930,8 @@ impl PipelineService {
         // settlement batches and payouts, and writes `NoveltyUtility` credit
         // regardless of holds (its hold filter covers only settlement-eligible
         // events). So a hold stops only a leg that settles into a batch
-        // (owner ruling on Zaki review 1, round 2, finding 13).
+        // (owner ruling on Zaki review 1, round 2, finding 13): the minimal
+        // family's, and the graded rule's (owner decision D7, 2026-11-03).
         if trace_credit_event.settles_into_batch()
             && crate::credit_hold_ownership::active_credit_holds_on_tx(&tx, &run.tenant_id)
                 .await?
@@ -16074,10 +16076,12 @@ impl PipelineService {
             .await?
             .ok_or_else(|| anyhow::anyhow!("settlement_operation_mismatch"))?
             .get("settlement_state");
-        // Ruling S10: a `NoveltyUtility` leg is never composed or finalized
-        // into a batch -- it completes with no `settlement_batch_id`, same
-        // as `main` never pays that event. `PipelineScore` keeps PR 2's
-        // batch-or-reuse behavior unchanged.
+        // Ruling S10: a flat-rule `NoveltyUtility` leg is never composed or
+        // finalized into a batch -- it completes with no
+        // `settlement_batch_id`, same as `main` never pays that event.
+        // `PipelineScore` keeps PR 2's batch-or-reuse behavior, and the
+        // graded rule's leg takes it too (owner decision D2, 2026-11-03), so
+        // a payout rail pays it from the batch.
         let batch_id = match trace_credit_event {
             PipelineTraceCreditEvent::NoveltyUtility => None,
             PipelineTraceCreditEvent::PipelineScore
