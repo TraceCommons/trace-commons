@@ -635,7 +635,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `near_account_start` | `ingest_url`, `account_id` | `attempt_id`, `browser_url`, `status` | explicit wallet ceremony; keys and PKCE stay in daemon |
 | `near_account_status` | `attempt_id` | `attempt_id`, `status` | no account token or signing material |
 | `near_account_cancel` | `attempt_id` | cancellation state | cancels the matching local attempt |
-| `near_ai_credential_start` | `provider` (optional; the build's `channel::NEAR_AI_SIGN_IN_PROVIDERS`: production `near`, `github`, `google`, default `near`; a `near-ai-staging` build `google` only, and `near` and `github` are refused) | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. The browser URL is returned **once** and no poll re-serves it |
+| `near_ai_credential_start` | `provider` (optional; one of the build's `channel::NEAR_AI_SIGN_IN_PROVIDERS`: production `near`, `github`, `google`; a `near-ai-staging` build `google` only, and `near` and `github` are refused). Shells send none | `attempt_id`, `browser_url`, `status` | asynchronous only; opens a sign-in whose result is an inference key kept on this machine. With no `provider`, `browser_url` is the daemon's own loopback page listing the build's logins, and the one picked there continues on the same port; a build with one login goes straight to it. When the Commons has accepted a NEAR AI login on this device (first enrollment, or a renewal with the stored login), the page lists that login first and marks it; the tag (`near`, `github` or `google`, nothing else) is kept in the daemon file `near-ai-login.json` and removed by `unenroll`. The browser URL is returned **once** and no poll re-serves it |
 | `near_ai_credential_status` | `attempt_id` (optional) | `state`, plus `attempt_id` and `attempt_status` for a caller that named the current attempt | never errors on a missing or stale `attempt_id`: `state` is a fact about the machine. See "The credential state" below |
 | `near_ai_credential_cancel` | `attempt_id` (optional) | `attempt_id`, `status` when named; `status` alone when not | stops this machine waiting on the browser; unnamed, it stops whatever sign-in is in flight and never echoes the id; `near_ai_credential_unknown` if a named id is not the current attempt, or if an unnamed cancel finds no sign-in in flight (none ever started, or the last one finished); a named cancel of the finished current attempt answers its terminal status and changes nothing |
 | `near_ai_credential_forget` | — | `removed`, `revoked: false` | removes the key from **this machine only**; `revoked` is always false and is not a placeholder. See "The credential state" below |
@@ -9540,8 +9540,11 @@ checked first.
 
 A launch that opens a new window reads back its tab's tty and, on the next
 line, the id of Terminal's front window when that window's selected tab is
-the launch's, with no scan of other windows (#1853); the row keeps both, and a window line that cannot be read leaves
-the row with its tab and no window. A placed launch reads only the picked
+the launch's, with no scan of other windows (#1853), and the row keeps both.
+Output that is not a tty, optionally followed by a line of digits only that
+is a window id, names no tab. When another window is in front by then, the
+row has its tab and no window id; that is normal, and such a session is
+simply not offered in the window list. A placed launch reads only the picked
 window's tabs, once.
 
 The terminal opens with the daemon's managed state unlocked and off the async

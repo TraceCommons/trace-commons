@@ -192,11 +192,17 @@ final class InferenceParityTests: XCTestCase {
         let source = try Self.text("Views/CredentialSection.swift")
         for needle in ["CredentialSurface.tone(", "CredentialSurface.action(", "CredentialSurface.stateLine(",
                        "CredentialSurface.actionExplains(", "CredentialSurface.actionLabel(", "BalanceSurface.actionToDraw(",
-                       "Self.providerOptions(copy)", "copy.credentialWalletNotice", "model.startNearAiCredential(provider:",
+                       "model.startNearAiCredential()",
                        "model.cancelNearAiCredential()", "model.forgetNearAiCredential()", "model.migrateNearAiCredential()",
                        "model.credentialBusy",
                        "actionButton(balanceAction)"] {
             XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
+        }
+        // No provider chooser and no wallet notice: the login is chosen on
+        // the daemon's browser page (owner, 2026-11-02).
+        for gone in ["providerOptions", "credentialWalletNotice", "credentialProviderLabel", "GlassPicker(",
+                     "startNearAiCredential(provider:"] {
+            XCTAssertFalse(source.contains(gone), "CredentialSection.swift still has \(gone)")
         }
         // The balance and funding are their own panels (#1146), never a
         // second copy inside the credential card.
@@ -215,20 +221,14 @@ final class InferenceParityTests: XCTestCase {
         }
     }
 
-    /// The card's state is the core's tone on a worded glass label, the
-    /// provider chooser writes the caller's binding and is named on screen,
-    /// and no control is drawn without words.
-    func test_signInDrawsTheToneWithWordsAndNamesTheChooser() throws {
+    /// The card's state is the core's tone on a worded glass label, it
+    /// draws no provider chooser (the daemon's browser page offers the
+    /// logins), and no control is drawn without words.
+    func test_signInDrawsTheToneWithWordsAndNoChooser() throws {
         let source = try Self.text("Views/CredentialSection.swift")
+        XCTAssertFalse(source.contains("GlassPicker("), "the card draws a provider chooser again")
+        XCTAssertFalse(source.contains("selection.wrappedValue"), "the card holds a provider choice again")
         for needle in ["GlassStatusLabel(\n                CredentialSurface.stateLine(status, copy: copy, calls: model.credentialCalls),\n                status: PrivateInferenceIndicator.status(tone))",
-                       "set: { if let value = $0 { selection.wrappedValue = value } }",
-                       "Text(copy.credentialProviderLabel)",
-                       "GlassPicker(\n                        copy.credentialProviderLabel,",
-                       "placeholder: copy.credentialProviderLabel)",
-                       "Text(copy.credentialProviderLabel)\n"
-                           + "                        .glassType(GlassTokens.TypeScale.label)\n"
-                           + "                        .foregroundStyle(GlassColor.textSecondary)\n"
-                           + "                        .accessibilityHidden(true)",
                        ".buttonStyle(GlassButtonStyle(prominent && action == .obtain ? .primary : .glass))\n"
                            + "                .disabled(model.credentialBusy)",
                        ] {
@@ -263,7 +263,7 @@ final class InferenceParityTests: XCTestCase {
         let funding = try Self.text("Views/FundingRow.swift")
         for needle in ["?? status?.view.message ?? copy.fundingUnavailable",
                        "NearAiSignInOffer.billingOffers(",
-                       "state: status?.state, failed: model.nearAiSignInFailed)", "model.signInToNearAI(provider: provider)", "info: copy.fundingWhat,",
+                       "state: status?.state, failed: model.nearAiSignInFailed)", "Task { await model.signInToNearAI() }", "info: copy.fundingWhat,",
                        "GlassIconCard(\n            systemImage: \"creditcard\", title: copy.fundingTitle,",
                        "Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)",
                        ".disabled(model.credentialBusy || (model.nearAiSigningIn && !model.canRestartNearAiBrowserSignIn)",

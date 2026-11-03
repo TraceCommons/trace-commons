@@ -288,6 +288,10 @@ public enum ManagedSurface {
         // A NEAR AI project that chooses a model: the line that says why.
         let projectChoosesModel = "managed-project-chooses-model"
         if code == projectChoosesModel || message == projectChoosesModel { return "project_chooses_model" }
+        // A NEAR AI project that sets the auto mode server variable: the
+        // line that says what to remove.
+        let projectSetsAutoModeServer = "managed-project-sets-auto-mode-server"
+        if code == projectSetsAutoModeServer || message == projectSetsAutoModeServer { return "project_sets_auto_mode_server" }
         return "action_failed"
     }
 
