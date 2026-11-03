@@ -484,7 +484,7 @@ pub struct DaemonSettings {
     /// different questions: `near_ai` is the privacy-filter credential,
     /// `near_ai_inference` is the key inference calls carry, and this is the
     /// session that management reads need. Forgetting the credential clears
-    /// this too -- see `nearai_credential::ceremony::forget` -- because a
+    /// this too -- see `nearai_credential::disconnect` -- because a
     /// contributor who believes they revoked the daemon's access and left a
     /// session behind has been told something false.
     ///

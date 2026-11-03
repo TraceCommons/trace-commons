@@ -626,12 +626,10 @@ final class DaemonClient: Sendable {
 
     /// Removes the stored key from this machine.
     ///
-    /// The answer's `revoked` is always `false` and is deliberately not
-    /// surfaced as a flag: forgetting is local, the key stays valid at the
-    /// service, and that fact is a SENTENCE beside the button rather than
-    /// something a view could forget to draw.
-    func nearAiCredentialForget() throws {
-        _ = try rawResultJSON(CredentialSurface.forgetMethod)
+    /// Answers the result JSON, so the caller can tell a revoke at NEAR AI
+    /// that did not happen (`CredentialSurface.forgetLeftKeyAtService`).
+    func nearAiCredentialForget() throws -> String {
+        try rawResultJSON(CredentialSurface.forgetMethod)
     }
 
     /// Copies the sign-in an earlier build kept in the login keychain into

@@ -100,8 +100,9 @@ fn the_record_holds_tags_and_a_digest_only() {
     );
 }
 
-/// Unenrolling forgets the account's login and keeps the stored session's,
-/// because it keeps that session (until #1843 clears it too).
+/// Forgetting the account's login (unenroll's step) leaves the stored
+/// session's login alone: that half is cleared with the session itself
+/// (`ceremony::forget_locked`, which unenroll's NEAR AI clear runs).
 #[test]
 fn unenrolling_forgets_the_accounts_login_and_keeps_the_sessions() {
     let (_dir, store) = enrolled();

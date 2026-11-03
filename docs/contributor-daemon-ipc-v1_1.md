@@ -6371,7 +6371,9 @@ state, the harness rows and the credential row:
   `harness_plan_no_config_path`;
 - `credential_title`, `credential_what`, `credential_cost`;
 - `credential_obtain`, `credential_cancel`, `credential_forget`,
-  `credential_forget_explains`, `credential_migrate`,
+  `credential_forget_explains`, `credential_forget_not_revoked`,
+  `near_ai_still_signed_in`,
+  `credential_migrate`,
   `credential_migrate_explains`;
 - `credential_absent`, `credential_obtaining`, `credential_failed`,
   `credential_cancelled`, `credential_present`, `credential_unknown`,
@@ -6908,10 +6910,25 @@ never re-served.
 action, and it is the counterpart of `offer_exposure`: getting a key opens a
 browser, signs the contributor in to a company that is not this app, and
 mints a key this app then keeps. `credential_forget_explains` is its
-counterpart at the other end -- forgetting is LOCAL, the key stays valid at
-the service until the contributor removes it there, and this app cannot do it
-for them, which is why `near_ai_credential_forget` answers `revoked: false`
-rather than leaving "removed" to be read as "revoked".
+counterpart at the other end: forgetting removes the key and saved sign-in
+from this computer and revokes the key at NEAR AI with the sign-in being
+removed, best effort (owner decision 2026-11-02). `near_ai_credential_forget`
+answers `revoked: true` when the key is gone at NEAR AI, `false` when a key
+was stored and the revoke did not happen (including when its secret could not
+be read), and `null` when no key was stored. It also answers
+`cleanup_pending: true` when an OS entry is left to delete; it stays
+journaled, and `near_ai_credential_status` reports `cleanup_required` until a
+later credential operation deletes it. It is async-only: the sync dispatcher
+refuses it with `near-ai-credential-forget-requires-async`. A shell draws
+`credential_forget_not_revoked` only on `removed: true, revoked: false`.
+
+Unenroll and `account_sign_out` clear the same NEAR AI sign-in and revoke the
+same way. Each answers `near_ai_revoked` with the same three values, and
+`near_ai_cleared: false` when the NEAR AI sign-in could not be cleared here
+(the rest of the call has happened). After an unenroll, a shell says so
+with `near_ai_still_signed_in`: Forget in Private AI removes what is left.
+`account_sign_out` also answers `server_revoked`: whether the server accepted
+the account session's revoke, `null` when there was no session.
 
 No sentence on this surface renders a key, a key prefix, an id or an account
 name, and none of them carries a hole a shell could fill with one.

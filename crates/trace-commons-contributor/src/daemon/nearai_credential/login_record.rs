@@ -20,12 +20,12 @@
 //!   AI login -- first enrollment, a renewal with the stored login, or a
 //!   sign-in checked before it was stored ([`accepted_by_commons`]).
 //!
-//! Unenrolling clears the account's login ([`forget_commons_login_or_remove`])
-//! and keeps the stored session's, because it keeps that session. Logging out
-//! removes the file ([`remove`]). Both go through this module's lock, and the
-//! account's login is written only while this device is enrolled, so a write
-//! in flight cannot bring a removed account's login back. Once unenrolling
-//! clears the NEAR AI session too (#1843), the two cases are the same.
+//! Unenrolling clears the account's login ([`forget_commons_login_or_remove`]),
+//! and its NEAR AI clear (#1843, `ceremony::forget_locked`) clears the stored
+//! session's login with the session. Logging out removes the file
+//! ([`remove`]). All of it goes through this module's lock, and the account's
+//! login is written only while this device is enrolled, so a write in flight
+//! cannot bring a removed account's login back.
 //!
 //! It is its own file, not part of the settings document, for `spend_org`'s
 //! reason: preference writers save the in-memory settings snapshot they hold,

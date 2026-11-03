@@ -15,6 +15,11 @@
 //! enrolled or not (owner decision D4, open). The in-process Insights store
 //! of files the contributor analyzed is not the daemon's and stays.
 //!
+//! The NEAR AI sign-in goes too, in the socket handler after the blocking
+//! body: the inference key, its session and the spending-organization
+//! record, with the key revoked at NEAR AI, best effort (owner decision
+//! 2026-11-02, `nearai_credential::disconnect`).
+//!
 //! What stays: receipts, history and the audit log (the local record of what
 //! this device did -- the audit log also records this call), settings, folder
 //! rules, the queue, and the NEAR AI notice marker, which are not an
@@ -130,8 +135,9 @@ fn holds_enrollment(store: &ConfigStore) -> bool {
 /// machine is never shown this one's. Run once the config is gone, so an
 /// acceptance in flight either landed before (and is cleared here) or finds
 /// no enrollment and writes nothing (`login_record::accepted_by_commons`).
-/// The stored NEAR AI session's login stays with the session, which
-/// unenrolling keeps (until #1843 clears it too). It never blocks the
+/// The stored NEAR AI session's login goes with the session, which the
+/// NEAR AI half of `handle_unenroll` clears (`ceremony::forget_locked`
+/// removes it). This never blocks the
 /// unenroll: a record that cannot be rewritten is removed, and if even that
 /// fails, the next unenroll call (enrolled or not) tries again.
 fn forget_accounts_login(shared: &DaemonShared) {
@@ -299,28 +305,66 @@ fn turn_off_insights_readers(shared: &DaemonShared) -> Result<(), (&'static str,
 /// The socket entry point. Async-only: it waits on the pass lock, which a
 /// full scan holds for seconds, and the credential store cleanup can block
 /// on the OS keychain.
+///
+/// The NEAR AI sign-in goes after the enrollment, on every call, enrolled or
+/// not: Private AI does not outlive the account (owner decision 2026-11-02),
+/// and a device that holds only a NEAR AI sign-in is still cleared. Its key
+/// is revoked at NEAR AI, best effort. A NEAR AI half that could not be
+/// cleared is reported in `near_ai_cleared` rather than as a failed
+/// unenroll: the enrollment is gone either way, and calling again clears
+/// what is left.
+///
+/// It also goes when the enrollment's own removal failed
+/// (`unenroll-failed`): a malformed account record fails that every time,
+/// and a later step can fail after the files are gone, and neither may
+/// leave Private AI signed in. Not on `upload-in-flight` or
+/// `audit-write-failed`, which change nothing.
+///
+/// `status_changed` is published once, after both halves, so a shell that
+/// rebuilds on it never reads a status that still shows the NEAR AI key.
 pub(super) async fn handle_unenroll(shared: &DaemonShared, req: &Request) -> Response {
-    match super::run_blocking(|| unenroll(shared)) {
-        Ok(done) => {
-            if done.removed {
-                // The OS entries the references pointed at. Journaled by the
-                // clear above, so a locked keychain only defers this to the
-                // next credential operation.
-                let _ = super::run_blocking(|| commons_credentials::cleanup(&shared.store));
-                shared.publish(EVENT_QUEUE_CHANGED, json!({}));
-                shared.publish(EVENT_STATUS_CHANGED, json!({}));
+    let done = match super::run_blocking(|| unenroll(shared)) {
+        Ok(done) => done,
+        Err((code, label)) => {
+            if label == ERR_UNENROLL_FAILED {
+                if let Ok(near_ai) = super::nearai_credential::disconnect(shared).await {
+                    if near_ai.removed {
+                        shared.publish(EVENT_STATUS_CHANGED, json!({}));
+                    }
+                }
             }
-            Response::ok(
-                req.id,
-                json!({
-                    "unenrolled": true,
-                    "removed": done.removed,
-                    "approvals_returned": done.approvals_returned,
-                }),
-            )
+            return Response::err(req.id, code, label);
         }
-        Err((code, label)) => Response::err(req.id, code, label),
+    };
+    if done.removed {
+        // The OS entries the references pointed at. Journaled by the clear
+        // above, so a locked keychain only defers this to the next credential
+        // operation.
+        let _ = super::run_blocking(|| commons_credentials::cleanup(&shared.store));
+        shared.publish(EVENT_QUEUE_CHANGED, json!({}));
     }
+    let (near_ai_cleared, near_ai_revoked, near_ai_removed) =
+        match super::nearai_credential::disconnect(shared).await {
+            Ok(near_ai) => (true, near_ai.revoked, near_ai.removed),
+            Err(_) => (false, None, false),
+        };
+    if done.removed || near_ai_removed {
+        shared.publish(EVENT_STATUS_CHANGED, json!({}));
+    }
+    Response::ok(
+        req.id,
+        json!({
+            "unenrolled": true,
+            "removed": done.removed,
+            "approvals_returned": done.approvals_returned,
+            // Whether the NEAR AI sign-in could be cleared here.
+            "near_ai_cleared": near_ai_cleared,
+            // Whether the NEAR AI key is gone at NEAR AI; `null` when none
+            // was stored. `false` is when a shell says
+            // `credential_forget_not_revoked`.
+            "near_ai_revoked": near_ai_revoked,
+        }),
+    )
 }
 
 #[cfg(test)]

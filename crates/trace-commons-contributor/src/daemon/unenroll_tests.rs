@@ -892,10 +892,11 @@ async fn unenroll_reports_unpersisted_subscription_revocation_and_can_retry() {
 }
 
 /// Unenrolling forgets which NEAR AI login the account used, so a next
-/// account is never shown it, and keeps the stored NEAR AI session's login,
-/// because unenrolling keeps that session (until #1843 clears it too).
+/// account is never shown it, and the stored NEAR AI session's login with
+/// it: unenroll clears the NEAR AI sign-in too (owner decision 2026-11-02,
+/// Private AI does not outlive the account).
 #[tokio::test]
-async fn unenroll_forgets_the_accounts_login_and_keeps_the_sessions() {
+async fn unenroll_forgets_the_accounts_login_and_the_sessions() {
     use crate::daemon::nearai_credential::login_record;
     let s = shared();
     enroll_fixture(&s);
@@ -912,7 +913,7 @@ async fn unenroll_forgets_the_accounts_login_and_keeps_the_sessions() {
         "{}",
         record_text(&s)
     );
-    assert_eq!(login_record::stored_login(&s.store, "key-1"), Some(login));
+    assert_eq!(login_record::stored_login(&s.store, "key-1"), None);
 }
 
 /// A record of the account's login that can be neither rewritten nor
