@@ -124,6 +124,17 @@ fn clear(root: &gtk::Box) {
     }
 }
 
+/// Where a session opens, for the launch lines and a launch's refusal:
+/// herdr while sessions are grouped there, else the chosen terminal; an
+/// older daemon sends only `terminal_destination` (owner, 2026-11-03). This
+/// shell runs no tool setup, so it never needs the chosen terminal alone.
+fn session_destination(snapshot: &Value) -> Option<&str> {
+    let capabilities = &snapshot["capabilities"];
+    capabilities["launch_destination"]
+        .as_str()
+        .or_else(|| capabilities["terminal_destination"].as_str())
+}
+
 /// The line for a refused terminal launch. A chosen terminal that was not
 /// found has its own, naming it and pointing at Settings; anything else is
 /// the generic launch line.
@@ -237,7 +248,7 @@ pub fn refresh(app: &Rc<App>) {
                 if let Some(install) = install_button(tool) { root.append(&install); }
             }
         }
-        let destination = snapshot["capabilities"]["terminal_destination"].as_str();
+        let destination = session_destination(&snapshot);
         *app.private_inference.managed_destination.borrow_mut() = destination.map(str::to_owned);
         style::append_meta(root, destination.map(|d| text("terminal_scope").replace("{destination}", d)).unwrap_or_else(|| text("terminal_unavailable")));
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
@@ -493,9 +504,7 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         &content,
         text("launch_scope").replace(
             "{destination}",
-            snapshot["capabilities"]["terminal_destination"]
-                .as_str()
-                .unwrap_or_default(),
+            session_destination(snapshot).unwrap_or_default(),
         ),
     );
     let a = Rc::clone(app);
@@ -513,6 +522,22 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
 
 #[cfg(test)]
 mod tests {
+    /// Owner, 2026-11-03: a session grouped in herdr opens there, so the
+    /// launch lines and a launch's refusal name herdr; an older daemon sends
+    /// only `terminal_destination`, which then names where sessions open.
+    #[test]
+    fn a_launch_names_where_the_session_opens() {
+        let grouped = serde_json::json!({"capabilities":{
+            "terminal_destination":"Konsole","launch_destination":"herdr"}});
+        assert_eq!(session_destination(&grouped), Some("herdr"));
+        let older = serde_json::json!({"capabilities":{"terminal_destination":"Konsole"}});
+        assert_eq!(session_destination(&older), Some("Konsole"));
+        assert_eq!(
+            session_destination(&serde_json::json!({"capabilities":{}})),
+            None
+        );
+    }
+
     use super::*;
 
     #[test]

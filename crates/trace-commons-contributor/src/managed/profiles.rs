@@ -286,15 +286,38 @@ fn capture_file() -> Result<std::fs::File, ManagedError> {
 }
 
 pub(crate) fn bounded_output_limit(
+    command: Command,
+    limit: u64,
+) -> Result<std::process::Output, ManagedError> {
+    bounded_output_inner(command, limit, None)
+}
+
+/// [`bounded_output`] with `input` written to the program's stdin, which is
+/// then closed: how a request reaches a CLI without appearing in its argv
+/// (Rex's `api call -`). Its one test runs on unix.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+pub(crate) fn bounded_output_with_input(
+    command: Command,
+    input: &[u8],
+) -> Result<std::process::Output, ManagedError> {
+    bounded_output_inner(command, 65536, Some(input))
+}
+
+fn bounded_output_inner(
     mut command: Command,
     limit: u64,
+    input: Option<&[u8]>,
 ) -> Result<std::process::Output, ManagedError> {
     use std::io::{Read, Seek};
     use std::process::Stdio;
     let mut stdout = capture_file()?;
     let mut stderr = capture_file()?;
     command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(
             stdout
                 .try_clone()
@@ -308,6 +331,12 @@ pub(crate) fn bounded_output_limit(
     let mut child = command
         .spawn()
         .map_err(|_| ManagedError::UnsupportedVersion)?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        use std::io::Write;
+        // Small enough for the pipe's buffer; a program that exits without
+        // reading it fails the write, which its own exit status reports.
+        let _ = stdin.write_all(input);
+    }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let status = loop {
         if stdout.metadata().map(|m| m.len() > limit).unwrap_or(true)

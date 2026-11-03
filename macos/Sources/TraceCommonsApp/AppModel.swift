@@ -126,6 +126,12 @@ final class AppModel: ObservableObject {
         managedAction("set_managed_terminal", params: ["terminal": id])
     }
 
+    /// "Group sessions in herdr" (`set_managed_herdr`); the snapshot is
+    /// re-read after the write.
+    func setManagedHerdrGrouping(_ on: Bool) {
+        managedAction("set_managed_herdr", params: ["on": on])
+    }
+
     /// Only a named tool and setup action cross the RPC boundary. Setup needs
     /// no sign-in, managed account, profile, session, or working directory.
     func setupManagedTool(_ tool: String, action: String) {

@@ -53,6 +53,10 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // `set_managed_terminal`. Whether it was chosen is read the same
             // way (`capabilities.terminal_chosen`).
             "managed_terminal", "managed_terminal_chosen",
+            // "Group sessions in herdr": read from the managed snapshot
+            // (`capabilities.herdr_grouping`) and written with
+            // `set_managed_herdr`.
+            "managed_herdr",
             // Favorite models: the Launch sheet's picker reads them from
             // `managed_model_catalogue`'s `favorites` and writes them with
             // `managed_model_favorite_set`.

@@ -359,3 +359,39 @@ async fn two_managed_accounts_and_a_standard_session_run_together() {
     }
     daemon.close();
 }
+
+/// herdr gives `redeem-launch` its ticket in `NEAR_AI_LAUNCH_TICKET`, never
+/// in argv. Run as a terminal runs it: with the variable set, the helper gets
+/// as far as asking the daemon (none runs here); without it or `--ticket`,
+/// it stops before asking anything.
+#[test]
+fn redeem_launch_takes_its_ticket_from_the_environment() {
+    let config = tempfile::tempdir().unwrap();
+    let run = |ticket: Option<&str>| {
+        let mut command =
+            std::process::Command::new(env!("CARGO_BIN_EXE_trace-commons-contributor"));
+        command
+            .arg("--config-dir")
+            .arg(config.path())
+            .args([
+                "redeem-launch",
+                "--session-id",
+                "8d9b2a4e-5b0a-4f7e-9d43-3c1b8b3b6a11",
+            ])
+            .env_remove("NEAR_AI_LAUNCH_TICKET");
+        if let Some(ticket) = ticket {
+            command.env("NEAR_AI_LAUNCH_TICKET", ticket);
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    let with = run(Some("0123abcd9876fedc"));
+    assert!(with.contains("start the Near.ai daemon"), "{with}");
+    assert!(
+        !with.contains("0123abcd9876fedc"),
+        "the ticket is never printed: {with}"
+    );
+    let without = run(None);
+    assert!(without.contains("launch status unknown"), "{without}");
+}

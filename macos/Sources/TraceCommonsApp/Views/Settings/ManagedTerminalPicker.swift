@@ -31,6 +31,28 @@ struct ManagedTerminalPicker: View {
     }
 }
 
+/// "Group sessions in herdr", under the picker (owner decision D4,
+/// 2026-11-03): sessions open as tabs of herdr's "Near.ai" workspace, and
+/// the terminal above hosts herdr when it is not running. The label is the
+/// core's (`herdr_grouping`). Drawn only while
+/// `ManagedSnapshot.offersHerdrGrouping`; moved only by a write the daemon
+/// accepted.
+struct ManagedHerdrGroupingSwitch: View {
+    let snapshot: ManagedSnapshot
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Toggle(model.managedText("herdr_grouping"), isOn: Binding(
+            get: { snapshot.capabilities.herdrGrouping == true },
+            set: { on in
+                guard on != (snapshot.capabilities.herdrGrouping == true) else { return }
+                model.setManagedHerdrGrouping(on)
+            }))
+            .toggleStyle(GlassToggleStyle(.settings))
+            .disabled(model.managedBusy)
+    }
+}
+
 /// "Open sessions in", asked in a launch dialog on every launch while more
 /// than one terminal is installed (`ManagedSnapshot.asksForTerminal`): the
 /// same label and the same installed apps as Settings, starting on the
